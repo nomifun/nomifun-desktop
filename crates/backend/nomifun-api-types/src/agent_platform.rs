@@ -202,8 +202,6 @@ pub enum CapabilityModuleAuthoringPolicyDto {
 #[serde(deny_unknown_fields)]
 pub struct CapabilityModuleActionDto {
     pub action_id: String,
-    pub input_schema: String,
-    pub output_schema: String,
     pub effect_class: String,
     pub presentation: String,
     /// Exact Action resource requirements. Omission retains the Module gate;

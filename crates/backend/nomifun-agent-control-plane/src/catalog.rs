@@ -423,8 +423,6 @@ fn capability_module_catalog_item(
             .map(|action| {
                 Ok(CapabilityModuleActionDto {
                     action_id: action.action_id.as_ref().to_owned(),
-                    input_schema: action.input_schema.as_ref().to_owned(),
-                    output_schema: action.output_schema.as_ref().to_owned(),
                     effect_class: wire_name(&action.effect_class)?,
                     presentation: wire_name(&action.presentation)?,
                     required_resource_operations: action.required_resource_operations.as_ref()

@@ -3,8 +3,6 @@ import type {
   AgentPresetDraft,
   CapabilityRef,
   CapabilityModuleCatalogItem,
-  ChatRouteCandidate,
-  ChatRouteRecord,
   OfficialPresetKey,
   OfficialPresetTemplate,
 } from '@/common/types/agentPlatform';
@@ -55,28 +53,6 @@ export function agentEditorReturn(state: unknown, search: string): AgentEditorRe
     !params.has('template')
   ) return value;
   return null;
-}
-
-export const isAgentModelConfigurationMissing = (error: unknown): boolean =>
-  errorCode(error) === 'MODEL_ROUTE_NOT_CONFIGURED';
-
-export const chatRouteCandidateKey = (candidate: ChatRouteCandidate): string =>
-  `${candidate.model_route_id}@${candidate.model_route_revision}`;
-
-/** Reorder an exact route record after a friendly model choice; the candidate remains byte-for-byte intact. */
-export function selectChatRouteCandidate(
-  record: ChatRouteRecord | null | undefined,
-  candidateKey: string
-): ChatRouteRecord | null {
-  if (!record) return null;
-  const candidates = [record.primary, ...record.failovers];
-  const selected = candidates.find((candidate) => chatRouteCandidateKey(candidate) === candidateKey);
-  if (!selected) return null;
-  return {
-    ...record,
-    primary: selected,
-    failovers: candidates.filter((candidate) => chatRouteCandidateKey(candidate) !== candidateKey),
-  };
 }
 
 export function templateModuleCount(template: OfficialPresetTemplate): number {

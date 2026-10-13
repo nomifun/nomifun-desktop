@@ -21,7 +21,7 @@ import * as modelProviders from '@/renderer/hooks/agent/useModelProviderList';
 import { setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 const APP_HOSTING_MODULE = 'app.hosting';
 const APP_HOSTING_ACTIONS = ['app.hosting/list', 'app.hosting/get', 'app.hosting/update'];
-import { agentEditorReturn, editingDocument, isAgentModelConfigurationMissing, TEMPLATE_I18N_PATH } from './model';
+import { agentEditorReturn, editingDocument, TEMPLATE_I18N_PATH } from './model';
 import { AgentEditorDrafts } from './agentEditorDrafts';
 import AgentSettingsPage from './AgentSettingsPage';
 import en from '../../services/i18n/locales/en-US/agentSettings.json';
@@ -39,7 +39,7 @@ const capability: CapabilityCatalogItem = { capability: { id: asCapabilityId('bu
 const capabilityModule: CapabilityModuleCatalogItem = {
   module: capability.capability, display_name: capability.display_name, description: capability.description,
   source_package: capability.source_package, authoring_policy: 'direct', summary_kind: 'tool',
-  actions: [{ action_id: 'business.check/run', input_schema: 'input', output_schema: 'output', effect_class: 'pure', presentation: 'function_tool' }],
+  actions: [{ action_id: 'business.check/run', effect_class: 'pure', presentation: 'function_tool' }],
   context_schema_refs: [], event_schema_refs: [], required_resource_kinds: [], required_host_ports: [],
   required_modules: [], conflicting_modules: [], supported_surfaces: ['desktop'],
 };
@@ -232,8 +232,9 @@ test('an official Agent keeps its ID, unsaved name and exact Module grant throug
   fireEvent.input(name, { target: { value: 'My inspection Agent' } });
   fireEvent.keyDown(name, { key: 'Enter' });
   fireEvent.click(v.getByRole('switch', { name: 'Enable Business check' }));
-  expect((v.getByRole('button', { name: common.save }) as HTMLButtonElement).disabled).toBe(true);
-  fireEvent.click(v.getByRole('button', { name: en.workbench.configureChatModel }));
+  expect((v.getByRole('button', { name: common.save }) as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(v.getByRole('tab', { name: en.workbench.settingsTab }));
+  fireEvent.click(v.getByRole('button', { name: en.workbench.manageModels }));
   await v.findByRole('heading', { name: 'Model management' });
   expect(v.create).not.toHaveBeenCalled();
   expect(v.save).not.toHaveBeenCalled();
@@ -271,8 +272,8 @@ test('normal navigation to a different template does not restore the previous un
   const name = v.getByRole('textbox', { name: en.fields.name });
   fireEvent.input(name, { target: { value: 'Do not copy me' } });
   fireEvent.keyDown(name, { key: 'Enter' });
-  await v.findByRole('button', { name: en.workbench.configureChatModel });
-  fireEvent.click(v.getByRole('button', { name: en.workbench.configureChatModel }));
+  fireEvent.click(v.getByRole('tab', { name: en.workbench.settingsTab }));
+  fireEvent.click(v.getByRole('button', { name: en.workbench.manageModels }));
   await v.findByRole('heading', { name: 'Model management' });
   fireEvent.click(v.getByRole('button', { name: 'Other template' }));
   await v.findByRole('heading', { name: en.template.coding.codex.name });
@@ -443,14 +444,13 @@ test('compact editor responses can open the component implementation tab', async
   expect(panel.querySelector('select')?.getAttribute('aria-label')).toBe(capability.display_name);
 });
 
-test('unrelated failures never offer model configuration as the recovery action', async () => {
-  const v = await mount({ code: 'CAPABILITY_UNAVAILABLE', status: 400 });
+test('a capability save failure keeps the edited Agent without requiring a default model', async () => {
+  const v = await mount({ code: 'CAPABILITY_UNAVAILABLE', status: 400 }, undefined, { missingModel: true });
   fireEvent.click(v.getByRole('switch', { name: 'Enable Business check' }));
   fireEvent.click(v.getByRole('button', { name: common.save }));
   await waitFor(() => expect(v.save).toHaveBeenCalledTimes(1));
-  expect(v.queryByRole('button', { name: en.workbench.configureChatModel }) === null).toBe(true);
-  expect(isAgentModelConfigurationMissing({ code: 'MODEL_ROUTE_NOT_CONFIGURED' })).toBe(true);
-  expect(isAgentModelConfigurationMissing({ code: 'CAPABILITY_UNAVAILABLE' })).toBe(false);
+  expect(v.getByRole('switch', { name: 'Disable Business check' })).toBeTruthy();
+  expect(v.save.mock.calls[0][0].request.draft.document.chat_route_records).toEqual({});
 });
 
 test('preset return snapshots exclude model configuration and cannot cross a changed template or preset query', () => {

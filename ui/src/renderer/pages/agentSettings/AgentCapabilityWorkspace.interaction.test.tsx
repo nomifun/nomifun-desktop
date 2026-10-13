@@ -48,8 +48,6 @@ const moduleItem = (
   actions: actions.map(([action_id, effect_class]) => ({
     action_id,
     effect_class,
-    input_schema: `schema://${action_id}/input`,
-    output_schema: `schema://${action_id}/output`,
     presentation: 'function_tool',
   })),
   context_schema_refs: [],

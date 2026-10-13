@@ -142,8 +142,6 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
     locationKey: location.key,
     fixedTemplateKey: productEntry?.templateKey,
   });
-  const modelSelection = useGuidModelSelection('nomi');
-  const collaboration = useCollaborationDraft(modelSelection.current_model);
   const guidInput = useGuidInput({
     locationState: productEntry ? { workspace: productEntry.workspace } : navigationState,
   });
@@ -169,6 +167,17 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
     ? Boolean(agentSelection.selectedTemplate)
       && (Boolean(officialSeedFallback) || (!presetCapabilities.isLoading && !presetCapabilities.error))
     : !presetCapabilities.isLoading && !presetCapabilities.error;
+  const selectedAgentModelKey = selectedCapabilityPreset
+    ? `${selectedCapabilityPreset.preset_id}:${selectedCapabilityRevisionDigest ?? 'draft'}`
+    : agentSelection.selection.kind === 'template'
+      ? `template:${agentSelection.selection.templateKey}`
+      : `preset:${agentSelection.selection.presetId}`;
+  const modelSelection = useGuidModelSelection('nomi', {
+    selectionKey: selectedAgentModelKey,
+    ready: presetResourceResolutionReady,
+    defaultModel: presetCapabilities.defaultModel,
+  });
+  const collaboration = useCollaborationDraft(modelSelection.current_model);
   const presetResourceKinds = officialSeedFallback
     ? new Set(officialSeedFallback.required_resource_kinds)
     : presetCapabilities.requiredResourceKinds;

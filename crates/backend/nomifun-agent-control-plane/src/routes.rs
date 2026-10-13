@@ -81,6 +81,10 @@ fn control_plane_router_with_legacy_skill_route(
             get(get_recommended_capabilities),
         )
         .route(
+            "/api/agent-presets/{preset_id}/chat-model-route",
+            post(get_chat_model_route),
+        )
+        .route(
             "/api/agent-presets/{preset_id}/revisions",
             post(save_revision),
         )
@@ -241,6 +245,17 @@ async fn save_revision(
         control_plane
             .save_revision(&owner, &preset_id, request)
             .await?,
+    )))
+}
+
+async fn get_chat_model_route(
+    State(control_plane): State<Arc<AgentControlPlane>>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path(preset_id): Path<String>,
+    Json(model): Json<nomifun_api_types::AgentChatModelSelectionDto>,
+) -> Result<Json<ApiResponse<nomifun_agent_contracts::ChatRouteRecord>>, ControlPlaneError> {
+    Ok(Json(ApiResponse::ok(
+        control_plane.preset_chat_model_route(&owner, &preset_id, &model).await?,
     )))
 }
 
@@ -408,6 +423,52 @@ mod tests {
         let response = router.layer(Extension(AuthenticatedOwner(UserId::from("0190f5fe-7c00-7a00-8000-000000000002"))))
             .oneshot(request()).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn chat_model_route_resolves_a_configured_selection_without_saving_and_requires_owner() {
+        struct SelectedRoute(nomifun_agent_contracts::ChatRouteRecord);
+        #[async_trait::async_trait]
+        impl crate::DefaultChatRouteResolver for SelectedRoute {
+            async fn resolve_default_chat_route(&self, _: &UserId)
+                -> Result<Option<nomifun_agent_contracts::ChatRouteRecord>, ControlPlaneError> {
+                Ok(Some(self.0.clone()))
+            }
+        }
+        let route: nomifun_agent_contracts::ChatRouteRecord = serde_json::from_value(serde_json::json!({
+            "schema": "nomifun.chat-route-record.v1", "task": "agent_chat",
+            "primary": {
+                "model_route_id": "0190f5fe-7c00-7a00-8000-000000000010", "model_route_revision": 1,
+                "provider_id": "0190f5fe-7c00-7a00-8000-000000000011", "model": "selected-model",
+                "protocol": "openai_chat", "connection_config_ref": "default",
+                "config_revision_digest": "a".repeat(64), "credential_ref": "opaque-alias",
+                "features": ["text_input", "text_output"]
+            }, "failovers": []
+        })).unwrap();
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control_plane = test_control_plane(store.clone());
+        let control_plane = Arc::new(Arc::try_unwrap(control_plane).ok().unwrap()
+            .with_default_chat_route_resolver(Arc::new(SelectedRoute(route.clone()))));
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let library = control_plane.library(&owner).await.unwrap();
+        let id = &library.official_presets[&nomifun_api_types::OfficialPresetKeyDto::ChatMinimal].preset_id;
+        let before = control_plane.editor(&owner, id, None).await.unwrap();
+        let request = |model: &str| Request::builder().method("POST")
+            .uri(format!("/api/agent-presets/{id}/chat-model-route"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({ "provider_id": route.primary.provider_id, "model": model }).to_string())).unwrap();
+        let router = control_plane_router(control_plane.clone());
+        assert!(!router.clone().oneshot(request("selected-model")).await.unwrap().status().is_success());
+        let owned = router.clone().layer(Extension(AuthenticatedOwner(owner.clone())));
+        let response = owned.clone().oneshot(request("selected-model")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"], serde_json::to_value(&route).unwrap());
+        assert_eq!(control_plane.editor(&owner, id, None).await.unwrap(), before);
+        assert_eq!(owned.oneshot(request("missing-model")).await.unwrap().status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let other = router.layer(Extension(AuthenticatedOwner(UserId::from("0190f5fe-7c00-7a00-8000-000000000002"))));
+        assert_eq!(other.oneshot(request("selected-model")).await.unwrap().status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

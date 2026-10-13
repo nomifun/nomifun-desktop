@@ -17,7 +17,6 @@ import {
 import {
   agentUiErrorKey,
   agentUiErrorSubjects,
-  isAgentModelConfigurationMissing,
   TEMPLATE_I18N_PATH,
   type AgentEditorReturn,
 } from './model';
@@ -96,11 +95,9 @@ export function useAgentSettingsController() {
   const [deletingPresetId, setDeletingPresetId] = useState<string | null>(null);
   const [error, setErrorState] = useState<string | null>(null);
   const [errorSubjects, setErrorSubjects] = useState<string[]>([]);
-  const [modelConfigurationMissing, setModelConfigurationMissing] = useState(false);
   const setError = useCallback((value: string | null) => {
     setErrorState(value);
     if (value === null) {
-      setModelConfigurationMissing(false);
       setErrorSubjects([]);
     }
   }, []);
@@ -281,15 +278,12 @@ export function useAgentSettingsController() {
       setSelection({ kind: 'preset', preset: response.preset });
       return response;
     } catch (createError) {
-      const missingModel = isAgentModelConfigurationMissing(createError);
-      if (missingModel) setError(t('agentSettings.workbench.modelNeeded'));
-      else reportError(createError, 'create');
-      setModelConfigurationMissing(missingModel);
+      reportError(createError, 'create');
       return null;
     } finally {
       setBusyAction(null);
     }
-  }, [applyEditor, publishPresetSummary, refreshPresetLibraries, reportError, t]);
+  }, [applyEditor, publishPresetSummary, refreshPresetLibraries, reportError]);
 
   const discardChanges = useCallback(() => {
     setRecommendation(null);
@@ -369,15 +363,12 @@ export function useAgentSettingsController() {
       setSelection({ kind: 'preset', preset: saved.preset });
       return saved;
     } catch (saveError) {
-      const missingModel = isAgentModelConfigurationMissing(saveError);
-      if (missingModel) setError(t('agentSettings.workbench.modelNeeded'));
-      else reportError(saveError, 'save');
-      setModelConfigurationMissing(missingModel);
+      reportError(saveError, 'save');
       return null;
     } finally {
       setBusyAction(null);
     }
-  }, [draft, publishPresetSummary, refreshPresetLibraries, reportError, t, editingDrafts]);
+  }, [draft, publishPresetSummary, refreshPresetLibraries, reportError, editingDrafts]);
 
   const dirty = useMemo(
     () => (draft ? isDraftDirty(savedDraft, draft) : false),
@@ -434,7 +425,6 @@ export function useAgentSettingsController() {
     deletingPresetId,
     error,
     errorSubjects,
-    modelConfigurationMissing,
     dirty,
     recommendation,
     previewRecommendedCapabilities,

@@ -229,11 +229,6 @@ const AgentSettingsPage: React.FC = () => {
                   subjects: controller.errorSubjects.join(', '),
                 })}</span>
               )}
-              {controller.modelConfigurationMissing && <div>
-                <Button size='small' type='primary' disabled={controller.busyAction !== null}
-                  onClick={() => void openKeepingEdits('/models')}>{t('agentSettings.workbench.configureChatModel')}</Button>
-                <p>{t('agentSettings.workbench.configureModelReturn')}</p>
-              </div>}
               <Button
                 type='text'
                 size='mini'

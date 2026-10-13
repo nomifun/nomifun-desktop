@@ -370,6 +370,8 @@ SSH 会话的主机身份直接来自当前 `agent_snapshot.canonical_binding.ty
 
 官方 Agent 为每个 owner 保留稳定可编辑的 Preset 身份，保存通过同一不可变 Revision 链；发布 seed 只初始化尚未保存的配置，不覆盖用户修改。官方产品入口准备会话时读取该 owner 已保存的配置，模型或扩展变体仍由现有 Revision/Snapshot 路径冻结。官方身份由 host 验证的 owner、来源与稳定模板 key 确认，不以当前 seed 或最新可变配置的 payload 相等性判断历史身份。
 
+Agent 工作台的默认模型是可空的预设配置。选择器读取已启用的 Chat 模型目录，以供应商与模型身份向 Host 请求确切路由；解析候选不保存 Revision，也不改变 Session。选择或清空默认值通过原有 SaveRevision 与 CAS 保存，不把安装默认模型自动写入明确提交的空配置。新建会话页从所选 Agent 的同一已保存文档读取默认模型，仅用于当前选择，不写入安装默认值；用户随后明确选择的模型优先。创建会话时，界面中选定的模型由既有 Session 模型派生路径冻结；执行模型要求不因作者配置可空而放宽，已有 Revision、Snapshot 与会话历史不改写。
+
 内置 Agent 的会话名称来自 host 验证的 `official_template_key` 与统一翻译；创作入口统一显示“创作”。隐藏配置保留 host 写入的稳定模板 key，个人副本保持独立身份。浏览器创作草稿只保存媒体输入，不镜像 Agent 身份或名称；名称修正不改写不可变 Revision、Snapshot、Session binding 或事件历史。
 
 已有会话的创作模式、模型选择、参数与素材草稿按会话 ID 保存到持久浏览器存储；完整 key 同时隔离 backend dataset 与 Agent data generation。重启恢复用户最后选择的模式，包括明确选择的“日常对话”，不从最近生成任务反推或覆盖选择。欢迎页草稿及待提交准入状态仍使用会话级临时存储。新建创作会话的状态移交与后续编辑使用同一 writer，权威会话删除通知同时清理其草稿；这些界面编辑偏好不授予 Agent 权限，也不改变 canonical 事实链。
