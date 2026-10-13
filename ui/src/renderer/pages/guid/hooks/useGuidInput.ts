@@ -41,13 +41,14 @@ export const useGuidInput = ({ locationState }: UseGuidInputOptions): GuidInputR
   const [files, setFiles] = useGuidDraftState<string[]>('files', []);
   const [dir, setDir] = useGuidDraftState('workspace', '');
   const [loading, setLoading] = useState(false);
+  const workspace = locationState?.workspace;
 
   // Read workspace from location.state (passed from tabs add button)
   useEffect(() => {
-    if (locationState?.workspace) {
-      setDir(locationState.workspace);
+    if (workspace) {
+      setDir(workspace);
     }
-  }, [locationState]);
+  }, [workspace, setDir]);
 
   // Handle pasted files (append mode to support multiple pastes)
   // Do NOT clear dir here: paste/drag should coexist with a selected workspace,

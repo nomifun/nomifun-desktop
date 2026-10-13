@@ -1286,6 +1286,7 @@ async fn test_fixture_from_pool(
                 owner_ref: owner.clone(),
                 metadata: AgentSessionMetadata {
             purpose: Default::default(),
+                    app_project_id: None,
                     title: Some("fixture".into()),
                     archived: false,
                     pinned: false,

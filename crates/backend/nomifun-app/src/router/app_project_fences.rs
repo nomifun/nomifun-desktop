@@ -1,4 +1,4 @@
-//! Transient coordination for the exact canonical workspace shared by ordinary
+//! Transient coordination for the exact canonical workspace shared by canonical
 //! Sessions. This uses the existing admission lock registry, never a resource,
 //! checkpoint, membership, authorization, or effect ledger.
 use super::*;
@@ -9,6 +9,13 @@ pub(crate) struct AppProjectWorkspaceFence {
     _sessions: Vec<tokio::sync::OwnedRwLockWriteGuard<()>>,
     pub(super) session_ids: Vec<AgentSessionId>,
     _root: std::path::PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct AppProjectDeletionFence {
+    _project: tokio::sync::OwnedRwLockWriteGuard<()>,
+    _workspace: AppProjectWorkspaceFence,
+    app_session_ids: Vec<AgentSessionId>,
 }
 
 #[derive(Debug)]
@@ -111,6 +118,12 @@ fn directory_lock(owner: &NomiCoreSessionOwner, owner_id: &str, root: &std::path
     owner.session_operation_lock(&format!("workspace:{}", digest.as_ref()))
 }
 
+fn project_lock(owner: &NomiCoreSessionOwner, owner_id: &str, app_id: &str) -> Arc<tokio::sync::RwLock<()>> {
+    let identity = json!({"owner":owner_id,"app":app_id});
+    let digest = digest_payload(&identity).expect("plain JSON identity is canonicalizable");
+    owner.session_operation_lock(&format!("app-project:{}", digest.as_ref()))
+}
+
 fn busy() -> NomiCoreApiError {
     NomiCoreApiError::new(StatusCode::CONFLICT, "APP_DEVELOPMENT_BUSY",
         "Wait for the application project's active work and resolve unsettled effects before changing its files")
@@ -154,7 +167,21 @@ pub(crate) fn guard_app_project_directory_read(state: &NomiCoreAgentApiState, ow
     directory_lock(&state.session_owner, owner_id, &root).try_read_owned().map_err(|_| busy())
 }
 
+pub(crate) fn guard_app_project_scope_read(state: &NomiCoreAgentApiState, owner_id: &str, app_id: &str)
+    -> Result<tokio::sync::OwnedRwLockReadGuard<()>, NomiCoreApiError> {
+    if owner_id != state.authoritative_user_id.as_ref() {
+        return Err(AppError::Forbidden("Application project owner mismatch".into()).into());
+    }
+    state.session_owner.guard_app_project_scope_read(owner_id, app_id)
+}
+
 impl NomiCoreSessionOwner {
+    /// Scope admission is independent of a Session's present workspace. This
+    /// also fences current-generation scoped history whose old root changed.
+    pub(super) fn guard_app_project_scope_read(&self, owner_id: &str, app_id: &str)
+        -> Result<tokio::sync::OwnedRwLockReadGuard<()>, NomiCoreApiError> {
+        project_lock(self, owner_id, app_id).try_read_owned().map_err(|_| busy())
+    }
     /// Called while the caller already protects the exact Session binding.
     /// A try-read avoids a directory-write/Session-write waiting cycle.
     pub(super) fn guard_binding_workspace_read(&self, owner_id: &str, binding: &AgentBindingValue)
@@ -218,9 +245,101 @@ pub(super) async fn workspace_change(state: &NomiCoreAgentApiState, owner_id: &s
     Ok(AppProjectWorkspaceFence { _directory: directory, _sessions: sessions, session_ids: ids, _root: root })
 }
 
-/// Release idle caches for Sessions created through this application's ordinary
-/// entry. The opening fact distinguishes them from unrelated forks sharing the
-/// same binding. It grants no tool authority and never cancels an active Turn.
+/// Directory safety still covers every real same-root owner. Session deletion
+/// follows immutable app scope, including app Sessions already fenced for
+/// cleanup, and never infers ownership from the current directory or Agent.
+pub(super) async fn deletion(state: &NomiCoreAgentApiState, owner_id: &str,
+    app: &nomifun_app_hosting::AppRecord) -> Result<AppProjectDeletionFence, NomiCoreApiError> {
+    if owner_id != state.authoritative_user_id.as_ref() {
+        return Err(AppError::Forbidden("Application project owner mismatch".into()).into());
+    }
+    let project = project_lock(&state.session_owner, owner_id, &app.id).try_write_owned().map_err(|_| busy())?;
+    let root = canonical_existing_workspace_directory(&app.directory, WorkspaceDirectoryCheck::Create)?;
+    let directory = directory_lock(&state.session_owner, owner_id, &root).try_write_owned().map_err(|_| busy())?;
+    let principal = authenticated_principal(&AuthenticatedOwner(UserId::from(owner_id.to_owned())));
+    let store = state.session_owner.canonical().store();
+    let workspace = root.to_str().ok_or_else(|| AppError::Conflict("Application project directory is not UTF-8".into()))?;
+    let app_session_ids = store.list_app_project_session_members(&principal, &app.id).await.map_err(agent_session_store_error)?;
+    let mut ids = app_session_ids.clone();
+    let mut cursor = None;
+    loop {
+        let page = store.list_live_sessions_for_workspace(&principal, cursor.as_deref(), 1000, workspace).await.map_err(agent_session_store_error)?;
+        ids.extend(page.items.into_iter().map(|item| item.session.agent_session_id));
+        if !page.has_more { break; }
+        let next = page.next_cursor.ok_or_else(|| AppError::Conflict("Project Session history cursor is missing".into()))?;
+        if cursor.as_ref() == Some(&next) { return Err(busy()); }
+        cursor = Some(next);
+    }
+    for session in store.list_deleting_sessions().await.map_err(agent_session_store_error)? {
+        if session.owner_ref == principal && has_selected_workspace(&session.agent_binding)
+            && session.agent_binding.typed_resource_bindings.iter().any(|binding|
+                binding.resource_kind.as_ref() == "workspace" && binding.owner_id == owner_id
+                    && binding.resource_id.as_ref().starts_with(SELECTED_WORKSPACE_RESOURCE_PREFIX)
+                    && binding.typed_parameters.get("workspace_root").is_some_and(|selected| selected == workspace)) {
+            // An unrelated deleting Session owns its own cleanup and must not
+            // be swept into this application's lifecycle.
+            if !app_session_ids.contains(&session.agent_session_id) { return Err(busy()); }
+            ids.push(session.agent_session_id);
+        }
+    }
+    ids.sort_by(|left, right| left.as_ref().cmp(right.as_ref()));
+    ids.dedup();
+    let mut sessions = Vec::with_capacity(ids.len());
+    for id in &ids {
+        sessions.push(state.session_owner.session_operation_lock(id.as_ref()).try_write_owned().map_err(|_| busy())?);
+        match store.get_live_session(id).await {
+            Ok(_) => {}
+            Err(nomifun_agent_session::SessionStoreError::Deleted(_)) => {
+                let deleting = store.get_deleting_session(id).await.map_err(agent_session_store_error)?;
+                if deleting.owner_ref != principal || deleting.metadata.app_project_id.as_deref() != Some(app.id.as_str()) {
+                    return Err(busy());
+                }
+                let blockers = store.delete_blockers(id).await.map_err(agent_session_store_error)?;
+                if delete_cleanup_requires_reconciliation(&blockers) {
+                    return Err(agent_session_delete_blocked(id.as_ref(), &blockers));
+                }
+                let native = store.inspect_latest_native_execution_for_delete(&principal, id).await.map_err(agent_session_store_error)?;
+                if native.is_some_and(|execution| execution.turn_state == "running" || execution.producer_lease_live
+                    || execution.pending_effects > 0 || execution.unknown_effects > 0) {
+                    return Err(busy());
+                }
+                // The existing delete owner proves quiescence and resumes its
+                // exact cleanup. Live-only history/head reads are invalid here.
+                continue;
+            }
+            Err(error) => return Err(agent_session_store_error(error).into()),
+        }
+        let head = store.head(id).await.map_err(agent_session_store_error)?;
+        let native = store.inspect_latest_native_execution(&principal, id).await.map_err(agent_session_store_error)?;
+        if head.active_turn_id.is_some() || store.has_unsettled_effects(id).await.map_err(agent_session_store_error)?
+            || native.is_some_and(|execution| execution.pending_effects > 0 || execution.unknown_effects > 0 || execution.producer_lease_live) {
+            return Err(busy());
+        }
+    }
+    Ok(AppProjectDeletionFence { _project: project, _workspace: AppProjectWorkspaceFence {
+        _directory: directory, _sessions: sessions, session_ids: ids, _root: root }, app_session_ids })
+}
+
+pub(super) async fn delete_scoped_sessions(state: &NomiCoreAgentApiState, owner_id: &str,
+    app: &nomifun_app_hosting::AppRecord, fence: &AppProjectDeletionFence) -> Result<(), NomiCoreApiError> {
+    let owner = AuthenticatedOwner(UserId::from(owner_id.to_owned()));
+    let principal = authenticated_principal(&owner);
+    let store = state.session_owner.canonical().store();
+    for id in &fence.app_session_ids {
+        if store.app_project_id(&principal, id).await.map_err(agent_session_store_error)?.as_deref() != Some(app.id.as_str()) {
+            return Err(AppError::Conflict("Application project Session scope changed during deletion".into()).into());
+        }
+    }
+    release_scoped_runtime(state, &fence.app_session_ids, &fence._workspace._root).await?;
+    for id in &fence.app_session_ids {
+        execute_nomi_core_agent_session_delete_held(state.clone(), owner.clone(), id.clone(),
+            format!("app-project-delete:{}:{}", app.id, id.as_ref())).await?;
+    }
+    Ok(())
+}
+
+/// Focused tests exercise the production teardown phase before canonical purge.
+#[cfg(test)]
 pub(super) async fn release_workspace_runtime(state: &NomiCoreAgentApiState, app: &nomifun_app_hosting::AppRecord)
     -> Result<(), NomiCoreApiError> {
     let owner = AuthenticatedOwner(UserId::from(state.authoritative_user_id.as_ref().to_owned()));
@@ -228,34 +347,18 @@ pub(super) async fn release_workspace_runtime(state: &NomiCoreAgentApiState, app
     let root = canonical_existing_workspace_directory(&app.directory, WorkspaceDirectoryCheck::Create)?;
     let workspace = root.to_str().ok_or_else(|| AppError::Conflict("Application project directory is not UTF-8".into()))?;
     let store = state.session_owner.canonical().store();
-    let ids = project_sessions(store, &principal, workspace).await?;
-    let mut owned = Vec::new();
-    for id in ids {
-        let current = store.get_live_session(&id).await.map_err(agent_session_store_error)?;
-        if current.remote_binding_provenance.is_some() || current.parent_session_id.is_some()
-            || current.fork_base_payload_id.is_some() { continue; }
-        // Cleanup proves the application's exact current project and opening
-        // provenance, not an Agent template. A legal older User configuration
-        // may release its own idle host without being promoted to Official or
-        // gaining application editing, tool grants, or history conversion.
-        let opening = store.read_events(&id, None, 1).await.map_err(agent_session_store_error)?.events.into_iter().next();
-        let from_app_entry = opening.is_some_and(|event| {
-            let key = event.idempotency_key.as_ref();
-            let prefix = format!("user:{}:open:app-development:{}:", owner.as_ref(), app.id);
-            event.seq == 1 && event.kind.0 == "session/opening" && event.kind_version == 1
-                && event.producer_id.as_ref() == "session_api" && key.starts_with(&prefix) && key.len() > prefix.len()
-                && event.event_id.as_ref() == format!("opening:{key}") && event.correlation_id.as_ref() == format!("open:{key}")
-                && event.causation_event_id.is_none() && current.parent_session_id.is_none() && current.fork_base_payload_id.is_none()
-                && matches!(&event.payload, nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload)
-                    if payload.0.get("operation_id").and_then(Value::as_str) == Some(format!("open:{key}").as_str())
-                        && payload.0.get("parent_session_id").is_some_and(Value::is_null)
-                        && payload.0.get("fork_base_payload_id").is_some_and(Value::is_null))
-        });
-        // Legal current-generation navigation from before multiple sessions
-        // is retained; arbitrary same-root Session references are not swept.
-        if from_app_entry || app.development_session_id.as_deref() == Some(id.as_ref()) { owned.push(id); }
-    }
-    for id in &owned {
+    let owned = store.list_app_project_session_members(&principal, &app.id).await.map_err(agent_session_store_error)?;
+    // Keep the existing directory/effect proof even though teardown selection
+    // now comes from immutable application ownership.
+    project_sessions(store, &principal, workspace).await?;
+    release_scoped_runtime(state, &owned, &root).await
+}
+
+async fn release_scoped_runtime(state: &NomiCoreAgentApiState, owned: &[AgentSessionId], root: &std::path::Path)
+    -> Result<(), NomiCoreApiError> {
+    // Tear down only scoped hosts before releasing the shared workspace. An
+    // ordinary same-root host remains an explicit blocker and is preserved.
+    for id in owned {
         if state.session_owner.runtime_sessions.active_turn_generation(id.as_ref()).is_some() { return Err(busy()); }
     }
     for id in owned {
@@ -263,6 +366,10 @@ pub(super) async fn release_workspace_runtime(state: &NomiCoreAgentApiState, app
             .map_err(|error| NomiCoreApiError::new(StatusCode::CONFLICT, "APP_DEVELOPMENT_RESOURCE_CLEANUP_FAILED",
                 format!("Application project Runtime resources could not be released; files and history are preserved: {error}")))?;
     }
+    release_workspace_host(state, root)
+}
+
+fn release_workspace_host(state: &NomiCoreAgentApiState, root: &std::path::Path) -> Result<(), NomiCoreApiError> {
     let engines = state.session_owner.native_engines.get().and_then(std::sync::Weak::upgrade)
         .ok_or_else(|| NomiCoreApiError::new(StatusCode::CONFLICT, "APP_DEVELOPMENT_RESOURCE_CLEANUP_FAILED",
             "Application workspace resource owner is unavailable"))?;

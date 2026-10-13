@@ -670,7 +670,7 @@ mod tests {
         }
         let session = AgentSessionLiveRecord {
             agent_session_id: AgentSessionId::from(id.clone()), owner_ref: principal,
-            metadata: AgentSessionMetadata { purpose: Default::default(), title: Some("Hosted application receipt".into()),
+            metadata: AgentSessionMetadata { purpose: Default::default(), app_project_id: None, title: Some("Hosted application receipt".into()),
                 archived:false, pinned:false, reasoning_effort:None },
             agent_binding: AgentBindingValue {
                 preset_revision_ref: PresetRevisionRef { preset_id:AgentPresetId::from(uuid::Uuid::now_v7().to_string()),

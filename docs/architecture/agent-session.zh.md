@@ -8,11 +8,14 @@ AgentSession 是 NomiFun 会话、回合、内容、效果和取消的唯一事�
 
 应用开发使用普通 Conversation 与通用 coding 能力，不创建专属创作流水线。不可变 SessionPurpose 保存在已有 `session/opening.metadata`；退役的 PluginAuthoring 仅保留 typed 只读识别，禁止新建、执行、恢复或 fork，允许原 owner 取消及删除。读取与分页只从 typed opening 事实派生用途，合法当前代旧 opening 缺省为 Conversation，缺失或非法事实拒绝读取。普通 metadata 更新不能改变用途，产品 projection 不授予工具权限。
 
-应用页工作区固定官方 `app.developer`（内置应用），模型及推理强度仍由用户选择，使用现役普通 Session 创建和切换合同。当前应用目录就是明确冻结的 workspace_root。AppRecord 中的 `development_session_id` 只提供可验证的导航引用；重开校验 owner、普通用途、固定模板与确切工作区，不从这个引用获得新权限或独占所有权。删除应用保留普通开发 Session、事件、payload 和合法历史；目录已删除时不能凭历史继续执行或补造工作区。
+应用页工作区固定官方 `app.developer`（内置应用），模型及推理强度仍由用户选择，复用现役 Session 与 Runtime。当前应用目录就是明确冻结的 workspace_root。应用入口创建时在 typed `session/opening.metadata.app_project_id` 建立不可变生命周期归属；Agent、模型切换和目录迁移不改变它，新 fork 继承它。普通创建接口不接受应用归属或应用保留命令身份。AppRecord 中的 `development_session_id` 只提供可验证的导航引用；重开校验 owner、应用归属、普通用途、固定模板与确切工作区，不从这个引用获得权限或删除权。
 
-一个应用对应一个独立项目，项目可以包含多个普通 Session；不同应用不共享项目根目录。
-项目历史仅查询确切 owner、普通用途和当前显式 typed workspace binding，
-不把默认工作区安装级占位参数当作项目目录。旧资源定义、最近导航和显示路径偏好均不构成归属或权限。归档状态来自 canonical metadata。
+一个应用对应一个独立项目，项目可以包含多个专属 Session；不同应用不共享项目根目录。
+项目历史只查询确切 owner 与 canonical 应用归属，归档状态来自 canonical metadata。
+当前代已有应用入口会话只从精确 canonical opening 命令、producer、owner、因果及原始显式应用根识别，
+不写回 opening 或导入退役数据。普通会话不因目录或 Agent 相同而被收编，旧同目录普通 fork 保持原归属。
+最近导航、显示路径偏好及 Message 投影均不构成归属或权限。应用会话只在所属应用管理，
+普通侧栏及批量操作排除它们；搜索与旧深链依据 canonical 归属返回应用工作区。
 不同 Session 的内容独立保存，项目目录中不复制 transcript，不为新会话拼接全部历史。
 新建明确工作目录的 Session 优先复用当前同 owner、同 canonical root 的既有 scoped `project_memory`
 resource 身份；首次建立该命名空间时使用 owner 与 canonical root 的摘要。同项目的新会话复用现役记忆状态，
@@ -39,7 +42,12 @@ Host 只从该 canonical 输入及对应启动事实解析操作 ID，复核成�
 结算后才处理同一应用。消息 UUID、输入幂等键和操作 ID 不互换，不从消息投影、当前最新回合
 或模型文字补造关联。配置识别不启动程序，也不作者或重写 Session 内容。
 
-删除应用时，围栏内核验 canonical opening 来源，等待经当前应用入口创建的多个普通 Session 的正常 Runtime 资源 teardown，然后释放闲置的确切工作区 File/Artifact/VCS owner 缓存与原生目录句柄。保留 Session、Turn、Event、Payload、Effect 和资源定义原值；无关同目录 fork、其他 Session 的活动资源、仍被调用持有的 owner 或未确认的 Git 效果拒绝释放，不为物理删除关闭无关 Session 或进程。
+通用删除入口拒绝应用专属 Session。用户从应用入口明确删除应用后，目录与 Session 围栏内核验归属，
+通过现役 canonical 删除流程清理全部专属 Session 的 Runtime、内容及相关资源，再删除应用文件和登记。
+已进入 deleting 的专属 Session 复用原收据继续清理；部分失败保留登记与项目文件供重试，不建立另一份批删除账本。
+活动 Turn、pending/unknown Effect、未结束原生 producer 或未确认清理仍拒绝破坏性操作。
+同目录普通会话和其他应用会话保留，不能为物理删除关闭它们；其活动资源和未知效果仍保护真实目录。
+普通会话的创建、上下文、工作区、切换及删除合同保持原样。
 
 | 数据 | 所有者与用途 |
 | --- | --- |

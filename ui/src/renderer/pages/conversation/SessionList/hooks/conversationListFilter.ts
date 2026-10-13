@@ -7,9 +7,9 @@
 import type { TChatConversation } from '@/common/config/storage';
 import { conversationSshHostId } from '../../utils/conversationSshBinding';
 
-type ConversationListItem = Pick<TChatConversation, 'execution_step_id' | 'extra' | 'agent_snapshot'>;
+type ConversationListItem = Pick<TChatConversation, 'app_project_id' | 'execution_step_id' | 'extra' | 'agent_snapshot'>;
 
-/** Attempt transcripts, companion-owned sessions, SSH-bound sessions have dedicated surfaces; they never re-enter the ordinary
+/** App project sessions, Attempt transcripts, companion-owned sessions, SSH-bound sessions have dedicated surfaces; they never re-enter the ordinary
  * work-conversation list. */
 export const isOrdinaryWorkConversation = (conversation: ConversationListItem): boolean => {
   const extra = conversation.extra;
@@ -22,6 +22,7 @@ export const isOrdinaryWorkConversation = (conversation: ConversationListItem): 
   const isSshHostConversation = conversationSshHostId(conversation) != null;
   const isExecutionAttemptTranscript = Boolean(conversation.execution_step_id);
   return (
+    !conversation.app_project_id &&
     !isCompanionConversation &&
     !isSshHostConversation &&
     !isExecutionAttemptTranscript

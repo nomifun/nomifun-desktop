@@ -16,15 +16,15 @@ type Props = {
   error?: string;
   newSessionDisabled?: boolean;
   onSelect: (id: string) => void;
-  onOpenConversation: (id: string) => void;
+  onViewSession: (id: string) => void;
   onNewSession: () => void;
   onLoadMore: () => void;
   onRefresh: () => void;
 };
 
-/** The selector navigates retained ordinary Sessions; it never copies their messages. */
+/** The selector navigates canonical project Sessions; it never copies their messages. */
 export default function AppProjectHistory({ items, selectedSessionId, selectedName, total, loading, hasMore, error,
-  newSessionDisabled, onSelect, onOpenConversation, onNewSession, onLoadMore, onRefresh }: Props) {
+  newSessionDisabled, onSelect, onViewSession, onNewSession, onLoadMore, onRefresh }: Props) {
   const { t, i18n } = useTranslation();
   const disclosure = useRef<HTMLDetailsElement>(null);
   useEffect(() => {
@@ -41,7 +41,7 @@ export default function AppProjectHistory({ items, selectedSessionId, selectedNa
   const selected = items.find(item => String(item.conversation.id) === selectedSessionId);
   const select = (id: string, editable: boolean) => {
     if (disclosure.current) disclosure.current.open = false;
-    if (editable) onSelect(id); else onOpenConversation(id);
+    if (editable) onSelect(id); else onViewSession(id);
   };
   return <div className={styles.projectHistory}>
     <div className={styles.projectHistoryToolbar}>
@@ -69,7 +69,7 @@ export default function AppProjectHistory({ items, selectedSessionId, selectedNa
                 </span>
                 <span className={styles.projectHistoryMeta}>
                   <time dateTime={new Date(conversation.modified_at).toISOString()}>{new Intl.DateTimeFormat(i18n.language, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(conversation.modified_at)}</time>
-                  {!editable_in_app && <span>{t('appHosting.project.openConversation')}</span>}
+                  {!editable_in_app && <span>{t('appHosting.project.readOnly')}</span>}
                 </span>
               </button>
             </li>)}

@@ -19,9 +19,20 @@ async fn new_session_after_verified_application_relocation_reuses_current_logica
     let old = store.get_live_session(&fixture.session).await.unwrap();
     let old_memory = old.agent_binding.typed_resource_bindings.iter()
         .find(|resource| resource.resource_kind.as_ref() == "project_memory").unwrap().resource_id.clone();
-    store.relocate_managed_workspaces_with_app_workspaces(&fixture.services.data_dir, &fixture.services.work_dir,
+    assert!(old_memory.as_ref().starts_with(PROJECT_WORKSPACE_MEMORY_PREFIX));
+    // The production location coordinator resolves existing source roots before
+    // this Store call. Windows TEMP can be a DOS 8.3 alias; use the same exact
+    // canonical source identity as the frozen project instead of its raw config.
+    std::fs::create_dir_all(&fixture.services.work_dir).unwrap();
+    let source_data = nomifun_common::paths::canonicalize_simplified(&fixture.services.data_dir).unwrap();
+    let source_work = nomifun_common::paths::canonicalize_simplified(&fixture.services.work_dir).unwrap();
+    let relocation = store.relocate_managed_workspaces_with_app_workspaces(&source_data, &source_work,
         &target_root, &OperationId::from(uuid::Uuid::now_v7().to_string()), &BTreeSet::from([fixture.app.id.clone()])).await.unwrap();
+    assert!(relocation.app_workspaces.contains_key(&fixture.session));
     let moved = store.get_live_session(&fixture.session).await.unwrap();
+    assert!(moved.agent_binding.typed_resource_bindings.iter().filter(|resource|
+        matches!(resource.resource_kind.as_ref(), "workspace" | "process_session" | "project_memory"))
+        .all(|resource| resource.typed_parameters.get("workspace_root").is_some_and(|root| root == project.to_str().unwrap())));
     let owner = AuthenticatedOwner(UserId::from(fixture.principal.principal_id.clone()));
     let Json(created) = create_nomi_core_agent_session(State(fixture.state.clone()), Extension(owner), HeaderMap::new(),
         Json(CreateAgentSessionRequestDto { preset_id: old.agent_binding.preset_revision_ref.preset_id.as_ref().to_owned(),

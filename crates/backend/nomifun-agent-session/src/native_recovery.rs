@@ -48,8 +48,26 @@ impl AgentSessionStore {
     /// checkpoint body, credentials, raw tool output or holder ID is exposed.
     pub async fn inspect_latest_native_execution(&self, owner: &PrincipalRef, session_id: &AgentSessionId)
         -> Result<Option<NativeExecutionInspection>, SessionStoreError> {
+        self.inspect_latest_native_execution_inner(owner, session_id, false).await
+    }
+
+    /// Deletion must retain proof of a native producer after admission fencing.
+    /// This read does not authorize execution, recovery, or effect replay.
+    pub async fn inspect_latest_native_execution_for_delete(&self, owner: &PrincipalRef, session_id: &AgentSessionId)
+        -> Result<Option<NativeExecutionInspection>, SessionStoreError> {
+        self.inspect_latest_native_execution_inner(owner, session_id, true).await
+    }
+
+    async fn inspect_latest_native_execution_inner(&self, owner: &PrincipalRef, session_id: &AgentSessionId,
+        allow_deleting: bool) -> Result<Option<NativeExecutionInspection>, SessionStoreError> {
         let mut tx = self.pool.begin().await?;
-        let session = live_session_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        let session = if allow_deleting {
+            let row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
+            if !matches!(row.state.as_str(), "live" | "deleting") {
+                return Err(SessionStoreError::Deleted(row.agent_session_id));
+            }
+            live_from_row(row)?
+        } else { live_session_by_id_tx(&mut tx, session_id.as_ref()).await? };
         if &session.owner_ref != owner { return Err(SessionStoreError::Conflict("execution inspection belongs to another owner".into())); }
         let row = sqlx::query_as::<_, InspectionRow>(
             "SELECT t.operation_id,t.state,t.execution_fence,t.execution_generation,t.execution_lease_until,t.execution_owner, \

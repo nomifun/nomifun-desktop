@@ -35,7 +35,7 @@ beforeEach(() => {
   spyOn(ipcBridge.conversation.turnStarted, 'on').mockImplementation(() => () => {});
   spyOn(ipcBridge.conversation.turnCompleted, 'on').mockImplementation(() => () => {});
   spyOn(ipcBridge.conversation.turnPaused, 'on').mockImplementation(() => () => {});
-  spyOn(appHosting.developmentSessions, 'invoke').mockResolvedValue({ items: [], total: 0, has_more: false, next_cursor: null, project_directory: imported.directory, current_session_id: null });
+  spyOn(appHosting.developmentSessions, 'invoke').mockResolvedValue({ items: [], total: 0, owned_session_count: 0, has_more: false, next_cursor: null, project_directory: imported.directory, current_session_id: null });
   spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue([]);
   spyOn(ipcBridge.fs.listBuiltinAutoSkills, 'invoke').mockResolvedValue([]);
   spyOn(ipcBridge.mcpService.listServers, 'invoke').mockResolvedValue([]);
@@ -50,6 +50,33 @@ function Location() {
   const location = useLocation();
   return <output data-testid='route'>{location.pathname}{location.search}</output>;
 }
+
+test('opening an application without a Session mounts the real composer and retains its draft when App details refresh', async () => {
+  const openSession = spyOn(appHosting.developmentSession, 'invoke');
+  const createApp = spyOn(appHosting.create, 'invoke');
+  const updated = { ...imported, name: 'Refreshed application details', description: 'A metadata refresh preserves the project draft' };
+  const getApp = spyOn(appHosting.get, 'invoke').mockResolvedValue(updated);
+  const view = render(<MemoryRouter initialEntries={[`/apps/${imported.id}`]}>
+    <I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), revalidateOnMount: false, shouldRetryOnError: false, dedupingInterval: 0,
+      fallback: { providers: [], [`app/${imported.id}`]: imported, 'agent-presets.library': { official_templates: [template], user_presets: [], active_bindings: [] } },
+    }}><StrictMode><Location /><Routes>
+      <Route path='/apps/:id' element={<AppWorkspaceRoute />} />
+    </Routes></StrictMode></SWRConfig></I18nextProvider>
+  </MemoryRouter>);
+  await view.findByRole('heading', { name: imported.name });
+  const draft = view.getByTestId('guid-input') as HTMLTextAreaElement;
+  expect(draft.tagName).toBe('TEXTAREA');
+  expect(view.getByTestId('fixed-app-agent').textContent).toBe(locale.workspace.fixedAgent);
+  fireEvent.change(draft, { target: { value: 'Keep developing this application after its details refresh' } });
+  fireEvent.click(view.getByRole('button', { name: locale.actions.refresh }));
+  await waitFor(() => expect(getApp).toHaveBeenCalledWith({ id: imported.id }));
+  await view.findByRole('heading', { name: updated.name });
+  expect(view.getByTestId('guid-input')).toBe(draft);
+  expect(draft.value).toBe('Keep developing this application after its details refresh');
+  expect(view.getByTestId('route').textContent).toBe(`/apps/${imported.id}`);
+  expect(createApp).not.toHaveBeenCalled();
+  expect(openSession).not.toHaveBeenCalled();
+});
 
 test('manual owner admission navigates away from import while the real fixed-Agent Guid unmounts', async () => {
   let complete!: (app: HostedApp) => void;

@@ -22,6 +22,8 @@ export interface AppWorkspaceProps {
   mode: 'create' | 'import' | 'edit';
   conversation: ReactNode;
   projectHistory?: ReactNode;
+  /** Complete owned Session count, including archived history and pending deletion cleanup. */
+  projectSessionCount?: number;
   filePanel?: ReactNode;
   developmentBusy?: boolean;
   configurationBusy?: boolean;
@@ -33,8 +35,8 @@ export interface AppWorkspaceProps {
   onDeleted: () => void;
 }
 
-/** App chrome hosts the ordinary canonical conversation; it does not own a transcript. */
-export default function AppWorkspace({ app, mode, conversation, projectHistory, filePanel, developmentBusy = false, configurationBusy = false, configurationError, previewFileChange, onFileOperationChange, onAppChanged, onRefresh, onDeleted }: AppWorkspaceProps) {
+/** App chrome hosts canonical Sessions; it does not keep a separate transcript. */
+export default function AppWorkspace({ app, mode, conversation, projectHistory, projectSessionCount, filePanel, developmentBusy = false, configurationBusy = false, configurationError, previewFileChange, onFileOperationChange, onAppChanged, onRefresh, onDeleted }: AppWorkspaceProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [overwrite, setOverwrite] = useState(false);
@@ -43,7 +45,8 @@ export default function AppWorkspace({ app, mode, conversation, projectHistory, 
   const runDisabled = working || developmentBusy || configurationBusy;
   const stopping = app ? pending.current.get(app.id)?.operation === 'stop' || app.operation === 'stopping' : false;
   const hasRunConfiguration = Boolean(app?.settings.preview_command || app?.settings.start_command);
-  const remove = () => app && Modal.confirm({ title: t('appHosting.delete.title', { name: app.name }), content: t('appHosting.delete.hint'),
+  const remove = () => app && Modal.confirm({ title: t('appHosting.delete.title', { name: app.name }),
+    content: projectSessionCount === undefined ? t('appHosting.delete.hint') : t('appHosting.delete.hintWithSessions', { count: projectSessionCount }),
     okText: t('appHosting.actions.delete'), cancelText: t('common.cancel'), okButtonProps: { status: 'danger' },
     onOk: async () => { try { await appHosting.delete.invoke({ id: app.id }); onDeleted(); } catch (e) { setError(appErrorMessage(e)); onRefresh(); throw e; } },
   });

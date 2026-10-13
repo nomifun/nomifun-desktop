@@ -48,7 +48,7 @@ import {
   type SidebarDisplayPreferences,
 } from './utils/sidebarDisplayPreferences';
 import type { SessionEntry, SessionKind, WorkpathNode } from './utils/workpathTree';
-import { useAppProjectWorkpathNames } from './hooks/useAppProjectWorkpathNames';
+import { useOrdinaryProjectWorkpaths } from './hooks/useOrdinaryProjectWorkpaths';
 
 export type WorkpathSessionListProps = {
   onSessionClick?: () => void;
@@ -94,6 +94,8 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
   const { sessions: terminals } = useTerminalSessions();
   const ui = useWorkpathUiState();
   const [emptyProjectWorkpaths, setEmptyProjectWorkpaths] = useState<string[]>(() => getProjectWorkpaths());
+  const ordinaryProjectWorkpaths = useOrdinaryProjectWorkpaths(emptyProjectWorkpaths);
+  const selectableConversations = useMemo(() => conversations.filter(conversation => !conversation.app_project_id), [conversations]);
   const workConversations = useMemo(
     () => conversations.filter(isOrdinaryWorkConversation),
     [conversations]
@@ -109,8 +111,8 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
     [conversations]
   );
   const visibleEmptyProjectWorkpaths = useMemo(
-    () => emptyProjectWorkpaths.filter((workpath) => !companionWorkpathKeys.has(workpathKey(workpath))),
-    [companionWorkpathKeys, emptyProjectWorkpaths]
+    () => ordinaryProjectWorkpaths.filter((workpath) => !companionWorkpathKeys.has(workpathKey(workpath))),
+    [companionWorkpathKeys, ordinaryProjectWorkpaths]
   );
 
   useEffect(() => {
@@ -121,7 +123,7 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
     () => buildWorkpathTree(workConversations, terminals, ui.pinnedKeys, visibleEmptyProjectWorkpaths),
     [workConversations, terminals, ui.pinnedKeys, visibleEmptyProjectWorkpaths]
   );
-  const tree = useAppProjectWorkpathNames(workpathTree);
+  const tree = workpathTree;
 
   const projectWorkpathKeys = useMemo(() => new Set(visibleEmptyProjectWorkpaths), [visibleEmptyProjectWorkpaths]);
   const branchWorkpaths = useMemo(
@@ -151,20 +153,19 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
 
   /* ------------------------------- batch selection ------------------------------- */
 
-  // All interactive sessions are selectable (the old "project members excluded"
-  // rule is gone — projects no longer exist as a separate grouping).
+  // App-owned Sessions are managed through Apps, including batch operations.
   const {
     selectedConversationIds,
     setSelectedConversationIds,
     toggleSelectedConversation,
-  } = useBatchSelection(batchMode, conversations);
+  } = useBatchSelection(batchMode, selectableConversations);
 
   const { selectedTerminalIds, setSelectedTerminalIds, toggleSelectedTerminal } = useTerminalBatchSelection(batchMode);
 
   const totalSelected = selectedConversationIds.size + selectedTerminalIds.size;
-  const totalSelectable = conversations.length + terminals.length;
+  const totalSelectable = selectableConversations.length + terminals.length;
   const allSelected = totalSelectable > 0 &&
-    conversations.every((conversation) => selectedConversationIds.has(conversation.id)) &&
+    selectableConversations.every((conversation) => selectedConversationIds.has(conversation.id)) &&
     terminals.every((session) => selectedTerminalIds.has(session.terminal_id));
   const batchSelectionState = useMemo(
     () => ({
@@ -178,10 +179,10 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
       setSelectedConversationIds(new Set());
       setSelectedTerminalIds(new Set());
     } else {
-      setSelectedConversationIds((previous) => new Set([...previous, ...conversations.map((conversation) => conversation.id)]));
+      setSelectedConversationIds((previous) => new Set([...previous, ...selectableConversations.map((conversation) => conversation.id)]));
       setSelectedTerminalIds((previous) => new Set([...previous, ...terminals.map((session) => session.terminal_id)]));
     }
-  }, [allSelected, conversations, terminals, setSelectedConversationIds]);
+  }, [allSelected, selectableConversations, terminals, setSelectedConversationIds]);
   const handleToggleBatchSelectionScope = useCallback(
     (scope: BatchSelectableScope) => {
       const next = toggleBatchSelectionScope(scope, batchSelectionState);
@@ -229,7 +230,7 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
     handleBatchExport,
     handleConfirmExport,
   } = useExport({
-    conversations,
+    conversations: selectableConversations,
     selectedConversationIds,
     setSelectedConversationIds,
     onBatchModeChange,
@@ -609,7 +610,7 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
     );
   }
 
-  const isEmpty = conversations.length === 0 && terminals.length === 0;
+  const isEmpty = selectableConversations.length === 0 && terminals.length === 0;
 
   return (
     <>

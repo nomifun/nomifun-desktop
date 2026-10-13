@@ -7,6 +7,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { SWRConfig } from 'swr';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { useState } from 'react';
+import { Modal } from '@arco-design/web-react';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { agentPlatform } from '@/common/adapter/ipcBridge';
@@ -31,6 +32,22 @@ beforeEach(() => {
     fresh_start: { data_generation: 6, legacy_data_imported: false, user_preset_count: 0, official_template_count: 0 } });
 });
 afterEach(() => { cleanup(); mock.restore(); });
+
+test('application deletion confirms its complete project Session count and preserves the ordinary conversation boundary', async () => {
+  const confirmation = spyOn(Modal, 'confirm').mockReturnValue({ close: mock(() => {}), update: mock(() => {}) });
+  const remove = spyOn(appHosting.delete, 'invoke').mockResolvedValue(undefined);
+  const deleted = mock(() => {});
+  const value = app('counted-app', 'Counted app');
+  const view = render(<AppWorkspace app={value} mode='edit' projectSessionCount={31} conversation={<p>Project history</p>}
+    onAppChanged={() => {}} onRefresh={() => {}} onDeleted={deleted} />, { wrapper });
+  fireEvent.click(view.getByRole('button', { name: locale.actions.delete }));
+  const dialog = confirmation.mock.calls[0][0];
+  expect(dialog.content).toBe(locale.delete.hintWithSessions.replace('{{count}}', '31'));
+  expect(String(dialog.content)).toContain('including archived sessions');
+  expect(String(dialog.content)).toContain('Ordinary conversations');
+  await act(async () => { await dialog.onOk?.(); });
+  expect(remove).toHaveBeenCalledWith({ id: value.id }); expect(deleted).toHaveBeenCalledTimes(1);
+});
 
 // Run controls live in the app inspector. Each real workspace owns its UI
 // operation state while the Host owns the independent application processes.

@@ -61,6 +61,7 @@ async fn seed_session(
         },
         metadata: AgentSessionMetadata {
             purpose: Default::default(),
+            app_project_id: None,
             title: Some("IDMM E2E".to_owned()),
             archived: false,
             pinned: false,

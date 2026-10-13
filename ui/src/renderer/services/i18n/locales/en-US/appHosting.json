@@ -58,12 +58,18 @@
     "newSession": "New session",
     "chooseSession": "Choose a session",
     "untitled": "Untitled session",
-    "historyHint": "This application's sessions use the same project files. Each keeps an independent conversation context.",
+    "historyHint": "Manage this application's project sessions here. They share project files and keep independent conversation contexts. Deleting the app also deletes these sessions and their history.",
     "empty": "No project sessions yet. Describe what to build or change below.",
     "archived": "Archived",
     "processing": "In progress",
     "paused": "Paused",
-    "openConversation": "Open in Conversations",
+    "searchLabel": "App project",
+    "readOnly": "View session",
+    "readOnlyHint": "This session uses another Agent. You can view its history here; its original Agent binding is retained. Create a new project session to continue app development.",
+    "retainedAgent": "Original session Agent",
+    "unavailableTitle": "Application session history",
+    "unavailableHint": "The owning application is currently unavailable. You can view this session's history here in read-only mode.",
+    "retryApp": "Retry opening app",
     "loadMore": "Load more",
     "refreshFailed": "Could not refresh the session list. Your current session is retained; expand Project sessions to retry."
   },
@@ -122,7 +128,8 @@
   },
   "delete": {
     "title": "Delete {{name}}?",
-    "hint": "This stops the app and deletes its hosted source, output and local data. Ordinary development sessions and their history, original import files and external data are kept."
+    "hint": "The app will stop. Its managed source, artifacts, local data and all owned project sessions and history, including archived sessions, will be deleted. Ordinary conversations, original imports and external data are retained.",
+    "hintWithSessions": "The app will stop. Its managed source, artifacts, local data and {{count}} owned project sessions and their history, including archived sessions, will be deleted. Ordinary conversations, original imports and external data are retained."
   },
   "settings": {
     "title": "Run settings",

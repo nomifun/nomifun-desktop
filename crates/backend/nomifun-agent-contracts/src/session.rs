@@ -366,6 +366,10 @@ impl SessionPurpose {
 pub struct AgentSessionMetadata {
     #[serde(default, skip_serializing_if = "SessionPurpose::is_conversation")]
     pub purpose: SessionPurpose,
+    /// Immutable application project affiliation from this canonical opening.
+    /// It does not grant resource access or change the ordinary Runtime contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_project_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub archived: bool,

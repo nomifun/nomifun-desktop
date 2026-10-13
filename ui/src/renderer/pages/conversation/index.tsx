@@ -2,7 +2,7 @@ import { ipcBridge } from '@/common';
 import { Message } from '@arco-design/web-react';
 import React, { useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Navigate, useLocation, useNavigate, useParams } from 'react-router-dom';
 import useSWR from 'swr';
 import ChatConversation from './components/ChatConversation';
 import MessageListSkeleton from './Messages/components/MessageListSkeleton';
@@ -10,6 +10,7 @@ import { useAutoTitle } from '@/renderer/hooks/chat/useAutoTitle';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
 import { parseConversationId } from '@/common/types/ids';
 import { emitter } from '@/renderer/utils/emitter';
+import { conversationDestination } from '@/renderer/utils/routes/conversationDestination';
 
 const ChatConversationIndex: React.FC = () => {
   const { id } = useParams();
@@ -18,6 +19,7 @@ const ChatConversationIndex: React.FC = () => {
   const conversationId = id != null ? parseConversationId(id) : undefined;
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const location = useLocation();
   const { syncTitleFromHistory } = useAutoTitle();
   const notFoundHandledIdRef = useRef<string | undefined>(undefined);
   const deletedHandledIdRef = useRef<string | undefined>(undefined);
@@ -61,7 +63,7 @@ const ChatConversationIndex: React.FC = () => {
   }, [id, conversationId, mutate, navigate]);
 
   useEffect(() => {
-    if (!data || data.name !== defaultConversationTitle) {
+    if (!data || data.app_project_id || data.name !== defaultConversationTitle) {
       return;
     }
 
@@ -81,6 +83,7 @@ const ChatConversationIndex: React.FC = () => {
   }, [id, isLoading, data, navigate, t]);
 
   if (isLoading && !data) return <MessageListSkeleton />;
+  if (data?.app_project_id) return <Navigate replace to={conversationDestination(data)} state={location.state} />;
   return <ChatConversation conversation={data ?? undefined}></ChatConversation>;
 };
 

@@ -228,6 +228,9 @@ pub struct ConversationResponse {
     /// Product presentation comes from the canonical Session opening fact.
     #[serde(default)]
     pub session_purpose: nomifun_agent_contracts::SessionPurpose,
+    /// Immutable app affiliation derived from the canonical opening fact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_project_id: Option<String>,
     pub name: String,
     pub r#type: AgentType,
     #[serde(
@@ -774,6 +777,7 @@ mod tests {
         let resp = ConversationResponse {
             conversation_id: "0190f5fe-7c00-7a00-8abc-012345678901".into(),
             session_purpose: Default::default(),
+            app_project_id: None,
             name: "Test".into(),
             r#type: AgentType::Nomi,
             model: Some(ProviderWithModel {
@@ -840,6 +844,7 @@ mod tests {
         let resp = ConversationResponse {
             conversation_id: "0190f5fe-7c00-7a00-8abc-012345678902".into(),
             session_purpose: Default::default(),
+            app_project_id: None,
             name: "Test".into(),
             r#type: AgentType::Nomi,
             model: None,
@@ -893,6 +898,7 @@ mod tests {
         let resp = ConversationResponse {
             conversation_id: "0190f5fe-7c00-7a00-8abc-012345678903".into(),
             session_purpose: Default::default(),
+            app_project_id: None,
             name: "Round".into(),
             r#type: AgentType::Nomi,
             model: None,
@@ -920,6 +926,12 @@ mod tests {
         let serialized = serde_json::to_string(&resp).unwrap();
         let deserialized: ConversationResponse = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized.conversation_id, resp.conversation_id);
+        assert!(deserialized.app_project_id.is_none());
+        assert!(!serialized.contains("\"app_project_id\""));
+        let mut scoped = resp.clone();
+        scoped.app_project_id = Some("0190f5fe-7c00-7a00-8abc-012345678904".into());
+        let scoped: ConversationResponse = serde_json::from_str(&serde_json::to_string(&scoped).unwrap()).unwrap();
+        assert_eq!(scoped.app_project_id.as_deref(), Some("0190f5fe-7c00-7a00-8abc-012345678904"));
         assert!(deserialized.pinned);
         assert_eq!(deserialized.pinned_at, Some(1712345678000));
         assert_eq!(deserialized.channel_chat_id.as_deref(), Some("group:42"));
@@ -1049,6 +1061,7 @@ mod tests {
             conversation: ConversationResponse {
                 conversation_id: "0190f5fe-7c00-7a00-8abc-012345678901".into(),
                 session_purpose: Default::default(),
+                app_project_id: None,
                 name: "Code Review".into(),
                 r#type: AgentType::Nomi,
                 model: None,
@@ -1101,6 +1114,7 @@ mod tests {
             conversation: ConversationResponse {
                 conversation_id: "0190f5fe-7c00-7a00-8abc-012345678903".into(),
                 session_purpose: Default::default(),
+                app_project_id: None,
                 name: "Search Test".into(),
                 r#type: AgentType::Nomi,
                 model: None,
@@ -1183,6 +1197,7 @@ mod tests {
             items: vec![ConversationResponse {
                 conversation_id: "0190f5fe-7c00-7a00-8abc-012345678901".into(),
                 session_purpose: Default::default(),
+                app_project_id: None,
                 name: "Test".into(),
                 r#type: AgentType::Nomi,
                 model: None,
@@ -1239,6 +1254,7 @@ mod tests {
                 conversation: ConversationResponse {
                     conversation_id: "0190f5fe-7c00-7a00-8abc-012345678903".into(),
                     session_purpose: Default::default(),
+                    app_project_id: None,
                     name: "Conv".into(),
                     r#type: AgentType::Nomi,
                     model: None,

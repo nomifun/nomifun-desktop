@@ -98,6 +98,7 @@ impl CanonicalAgentSessionOwner {
             remote_binding_provenance,
             None,
             SessionPurpose::Conversation,
+            None,
             idempotency_key,
             created_at,
         )
@@ -122,10 +123,29 @@ impl CanonicalAgentSessionOwner {
             None,
             reasoning_effort,
             SessionPurpose::Conversation,
+            None,
             idempotency_key,
             created_at,
         )
         .await
+    }
+
+    /// Application owners call this after proving their real project identity.
+    /// The public ordinary create command never accepts an application ID.
+    pub async fn open_with_app_project(
+        &self,
+        owner: PrincipalRef,
+        binding: AgentBindingValue,
+        title: Option<String>,
+        active_capability_ids: Vec<String>,
+        reasoning_effort: Option<ReasoningEffort>,
+        app_project_id: String,
+        idempotency_key: &str,
+        created_at: i64,
+    ) -> Result<OpenAgentSession, AppError> {
+        self.open_with_options(owner, binding, title, active_capability_ids, None,
+            reasoning_effort, SessionPurpose::Conversation, Some(app_project_id),
+            idempotency_key, created_at).await
     }
 
     async fn open_with_options(
@@ -137,6 +157,7 @@ impl CanonicalAgentSessionOwner {
         remote_binding_provenance: Option<nomifun_agent_contracts::RemoteBindingProvenance>,
         reasoning_effort: Option<ReasoningEffort>,
         purpose: SessionPurpose,
+        app_project_id: Option<String>,
         idempotency_key: &str,
         created_at: i64,
     ) -> Result<OpenAgentSession, AppError> {
@@ -151,6 +172,7 @@ impl CanonicalAgentSessionOwner {
             owner_ref: owner.clone(),
             metadata: AgentSessionMetadata {
                 purpose,
+                app_project_id,
                 title,
                 archived: false,
                 pinned: false,
@@ -524,6 +546,7 @@ impl CanonicalAgentSessionOwner {
             child_owner_ref: owner.clone(),
             child_metadata: AgentSessionMetadata {
                 purpose: parent.metadata.purpose,
+                app_project_id: parent.metadata.app_project_id.clone(),
                 title,
                 archived: false,
                 pinned: false,
@@ -741,17 +764,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn app_project_open_and_fork_preserve_scope_without_changing_the_runtime_purpose() {
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let service = CanonicalAgentSessionOwner::from_pool(database.pool().clone()).await.unwrap();
+        let app = Uuid::now_v7().to_string();
+        let opened = service.open_with_app_project(owner(), binding(), Some("App fixture".into()), Vec::new(),
+            None, app.clone(), &format!("app-development:{app}:initial"), 1).await.unwrap();
+        assert_eq!(opened.session.metadata.purpose, SessionPurpose::Conversation);
+        assert_eq!(opened.session.metadata.app_project_id.as_deref(), Some(app.as_str()));
+        let child = service.fork(&owner(), &opened.session.agent_session_id, opened.cursor.seq,
+            Some("App fork".into()), "app-fork", 2).await.unwrap();
+        assert_eq!(child.child_session.metadata.app_project_id.as_deref(), Some(app.as_str()));
+        assert_eq!(service.store.list_live_app_project_sessions(&owner(), &app, None, 10).await.unwrap().total, 2);
+        assert_eq!(service.store.list_live_ordinary_conversation_sessions(&owner(), None, 10).await.unwrap().total, 0);
+        let ordinary = service.open(owner(), binding(), None, Vec::new(), "ordinary", 3).await.unwrap();
+        assert!(ordinary.session.metadata.app_project_id.is_none());
+        assert_eq!(service.store.list_live_ordinary_conversation_sessions(&owner(), None, 10).await.unwrap().total, 1);
+    }
+
+    #[tokio::test]
     async fn historical_authoring_is_readable_but_cannot_open_execute_or_fork() {
         let database = nomifun_db::init_database_memory().await.unwrap();
         let service = CanonicalAgentSessionOwner::from_pool(database.pool().clone()).await.unwrap();
         let denied = service.open_with_options(owner(), binding(), None, Vec::new(), None, None,
-            SessionPurpose::PluginAuthoring, "retired-new", 1).await.unwrap_err();
+            SessionPurpose::PluginAuthoring, None, "retired-new", 1).await.unwrap_err();
         assert!(denied.to_string().contains("PLUGIN_AUTHORING_RETIRED"));
         // Fixture models an existing canonical record, never a migration reader.
         let session_id = AgentSessionId::from(Uuid::now_v7().to_string());
         let session = AgentSessionLiveRecord {
             agent_session_id: session_id.clone(), owner_ref: owner(),
-            metadata: AgentSessionMetadata { purpose: SessionPurpose::PluginAuthoring, title: Some("Historical app".into()),
+            metadata: AgentSessionMetadata { purpose: SessionPurpose::PluginAuthoring, app_project_id: None, title: Some("Historical app".into()),
                 archived: false, pinned: false, reasoning_effort: None },
             agent_binding: binding(), remote_binding_provenance: None, parent_session_id: None, fork_base_payload_id: None, next_seq: 1,
         };

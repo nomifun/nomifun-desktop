@@ -21,16 +21,23 @@ This is the current development entry point. Rust types, the Session event regis
 Application workspaces use an ordinary Conversation with the fixed official
 `app.developer` Agent and user-selected model/reasoning policy. The application's
 owned directory is the frozen workspace. Its `development_session_id` is a verified
-navigation reference, not authority, exclusive ownership or another binding ledger.
-Reopening verifies the canonical owner, purpose, template and directory. Application
-deletion preserves the ordinary Session and valid history; the removed path cannot
-be reconstructed or executed merely because history remains.
+navigation reference, not authority or another binding ledger. Internal application
+creation establishes immutable lifecycle ownership in typed
+`session/opening.metadata.app_project_id`. Agent/model switches and directory
+relocation keep that identity; new forks inherit it. Ordinary creation cannot supply
+application ownership or its reserved command identity. Reopening verifies the
+canonical owner, application identity, purpose, template and directory.
 
 Each application owns one independent project directory. A project supports multiple
-ordinary Sessions, and different applications do not share project roots. History is queried by
-the exact owner, ordinary purpose and current explicitly selected workspace binding, including
-canonical archive metadata. Past resource definitions and the latest navigation
-reference are not membership or authority. Session content stays independent in
+owned Sessions, and different applications do not share project roots. History is
+queried by exact owner and canonical application identity, including archive metadata.
+Current-generation App-entry Sessions are recognized only from their exact canonical
+opening command, producer, owner, causation and original selected application root,
+without rewriting openings or importing retired data. Same-directory ordinary Sessions
+and previous ordinary forks remain ordinary. Navigation, display preferences and
+Message projections cannot supply ownership. Application Sessions are managed in
+their owning App and excluded from ordinary sidebar/batch operations; search and
+old deep links return to that App. Session content stays independent in
 the canonical store; source directories contain no copied transcript. New Sessions
 with an explicit directory first reuse an existing scoped project-memory identity
 for the same owner and canonical root; the first namespace uses their digest.
@@ -59,12 +66,16 @@ and pending Effect receipt; only that invocation's own pending effect is permitt
 Other active work and unsettled effects remain blockers, and rejections settle through
 the existing pre-dispatch rejection contract.
 
-Within that fence, application deletion waits for normal Runtime teardown of its
-exact development Session and releases only the idle exact-root File/Artifact/VCS
-owner cache and native directory handles. Session, Turn, Event, Payload, Effect and
-resource-definition values remain unchanged. Another Session's active resources,
-retained invocations or unresolved Git outcomes block release; application deletion
-does not close unrelated Sessions or processes.
+Generic deletion rejects application-owned Sessions. Explicit application deletion
+uses directory and Session fences and the existing canonical deletion flow to clean
+its owned Runtime resources and Session content before removing files and registration.
+Owned Sessions already in `deleting` resume their original receipt and cleanup;
+partial failure retains the registration and files for retry without another batch
+deletion ledger. Active Turns, pending/unknown effects, live native producers and
+unconfirmed cleanup remain blockers. Same-directory ordinary Sessions and other
+applications remain untouched; their active resources or unresolved outcomes can
+still protect the physical directory. Ordinary creation, context, workspace, switches
+and deletion retain their contracts.
 
 Official Agents have stable, owner-scoped editable Presets and use the same immutable revision save path as personal Agents. Release seeds initialize unsaved defaults without overwriting saved customizations. Official product launches resolve the owner's saved configuration; model and extension variants continue through the existing Revision/Snapshot path. Historical official identity is validated from host-owned source, owner, and template identity rather than equality with today's seed or mutable configuration.
 

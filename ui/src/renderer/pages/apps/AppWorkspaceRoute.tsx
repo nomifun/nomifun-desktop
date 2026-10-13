@@ -7,7 +7,7 @@ import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import useSWR from 'swr';
 import AppWorkspace from './AppWorkspace';
-import AppDevelopmentConversation, { matchesAppDevelopmentConversation, type AppEditorMode } from './AppDevelopmentConversation';
+import AppDevelopmentConversation, { matchesAppDevelopmentConversation, matchesAppProjectConversation, type AppEditorMode } from './AppDevelopmentConversation';
 import { appErrorMessage, isAppProjectSessionBusy } from './appHostingModel';
 import { isConversationProcessing } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import AppWorkspaceFiles from './AppWorkspaceFiles';
@@ -15,8 +15,8 @@ import { moveGuidInputDraft } from '@/renderer/pages/guid/hooks/useGuidDraftStat
 import { useAppDevelopmentSync } from './useAppDevelopmentSync';
 import { useAppProjectSessions } from './useAppProjectSessions';
 import AppProjectHistory from './AppProjectHistory';
-import { addProjectWorkpath } from '@/renderer/pages/conversation/SessionList/utils/projectWorkpaths';
 import { tryParseEntityId } from '@/common/types/ids';
+import UnavailableAppSessionViewer from './UnavailableAppSessionViewer';
 
 export default function AppWorkspaceRoute() {
   const { id } = useParams();
@@ -49,7 +49,7 @@ export default function AppWorkspaceRoute() {
   const onFileOperationChange = useCallback((busy: boolean) => {
     if (routeIdentity.current === location.pathname) setManualBusy(busy);
   }, [location.pathname]);
-  const { data: app, error, isLoading, mutate } = useSWR(
+  const { data: app, error, isLoading, isValidating, mutate } = useSWR(
     isNew ? `apps.new/${location.key}` : id ? `app/${id}` : null,
     () => isNew ? appHosting.create.invoke({}) : appHosting.get.invoke({ id: id! }),
     { refreshInterval: isNew ? 0 : 2000, revalidateOnFocus: !isNew, revalidateOnReconnect: !isNew, shouldRetryOnError: false },
@@ -63,7 +63,6 @@ export default function AppWorkspaceRoute() {
   const selectedSessionId = requestedSession === 'new' ? null : requestedSession ?? defaultSelection.current?.sessionId;
   const project = useAppProjectSessions(app?.id);
   const { configuring, configurationError, previewFileChange } = useAppDevelopmentSync(app, refreshOwner, acceptConfiguration, selectedSessionId);
-  useEffect(() => { if (app) addProjectWorkpath(app.directory); }, [app?.id, app?.directory]);
   useEffect(() => { setSubmitting(false); setSelectionError(''); setSelecting(false); }, [locationIdentity, id, selectedSessionId]);
   const openSessionRoute = useCallback((sessionId: string) => {
     if (!app) return;
@@ -95,22 +94,28 @@ export default function AppWorkspaceRoute() {
       void navigate(`/apps/${value.id}?intent=${mode}`, { replace: true });
     } else void mutate(value, { revalidate: true });
   }, [id, location.pathname, mode, navigate, mutate]);
-  if (error && !app) return <Alert type='error' content={isNew ? t('appHosting.workspace.createFailed') : appErrorMessage(error)} />;
+  if (error && !app) {
+    const sessionId = requestedSession && requestedSession !== 'new' ? tryParseEntityId('conversation', requestedSession) : null;
+    if (id && sessionId) return <UnavailableAppSessionViewer appId={id} sessionId={sessionId} appError={error}
+      retrying={isValidating} onRetry={() => { void refreshOwner().catch(() => {}); }} />;
+    return <Alert type='error' content={isNew ? t('appHosting.workspace.createFailed') : appErrorMessage(error)} />;
+  }
   if ((isLoading && !app) || isNew) return <Spin tip={t('appHosting.workspace.creating')} />;
-  const currentConversation = app && conversation && matchesAppDevelopmentConversation(app, conversation, selectedSessionId) ? conversation : undefined;
+  const currentConversation = app && conversation && matchesAppProjectConversation(app, conversation, selectedSessionId) ? conversation : undefined;
   const projectBusy = project.items.some(item => isAppProjectSessionBusy(item.conversation));
   const siblingBusy = project.items.some(item => String(item.conversation.id) !== selectedSessionId && isAppProjectSessionBusy(item.conversation));
   const developmentBusy = submitting || projectBusy || Boolean(currentConversation && isConversationProcessing(currentConversation));
   const history = app ? <AppProjectHistory items={project.items} selectedSessionId={selectedSessionId} selectedName={currentConversation?.name}
     total={project.total} loading={project.isLoading || project.isValidating || selecting} error={selectionError || (project.error ? appErrorMessage(project.error) : undefined)} hasMore={project.hasMore}
     newSessionDisabled={manualBusy || configuring || submitting || projectBusy}
-    onSelect={sessionId => { void selectSession(sessionId); }} onOpenConversation={sessionId => { void navigate(`/conversation/${sessionId}`); }}
+    onSelect={sessionId => { void selectSession(sessionId); }} onViewSession={openSessionRoute}
     onNewSession={() => {
       selectionGeneration.current += 1; setSelecting(false); setSelectionError(''); openSessionRoute('new');
     }} onLoadMore={project.loadMore} onRefresh={() => { void project.refresh().catch(() => {}); }} /> : undefined;
   return <AppWorkspace key={id ?? mode} app={app} mode={mode}
     configurationBusy={configuring} configurationError={error ? appErrorMessage(error) : configurationError} previewFileChange={previewFileChange}
     developmentBusy={developmentBusy} projectHistory={history}
+    projectSessionCount={project.loaded ? project.ownedSessionCount : undefined}
     onFileOperationChange={onFileOperationChange}
     conversation={invalidSession ? <Alert type='error' content={t('appHosting.workspace.sessionMismatch')} /> : <AppDevelopmentConversation key={selectedSessionId ?? 'new'} app={app} mode={mode} selectedSessionId={selectedSessionId} onSessionCreated={sessionId => {
       openSessionRoute(sessionId); void project.refresh().catch(() => {});

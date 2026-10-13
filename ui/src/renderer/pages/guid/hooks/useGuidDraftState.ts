@@ -65,7 +65,7 @@ export function useGuidDraftState<T>(field: string, initial: T | (() => T), scop
     try { sessionStorage.setItem(key, JSON.stringify(resolved)); } catch { /* Retain the memory draft. */ }
     // Persist before scheduling React work, including successful send cleanup
     // that may finish after navigation has unmounted this page.
-    if (isCurrent) setState({ key, value: resolved });
+    if (isCurrent && !Object.is(previous, resolved)) setState({ key, value: resolved });
   }, [key]);
   return [value, setDraft];
 }
