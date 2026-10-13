@@ -54,6 +54,111 @@ beforeEach(() => {
 
 afterEach(() => { cleanup(); restoreListeners(); });
 
+test('permission recovery stays outside collapsed process, deduplicates retries, and follows exact accepted roots', async () => {
+  const requestId = messageId(601);
+  const nextRequestId = messageId(602);
+  const nextTurnId = messageId(603);
+  const permission = { schema: 'system-permission-required.v1' as const, capability: 'computer' as const,
+    action_id: 'computer/input', operation: 'left_click', permissions: ['accessibility' as const], execution: 'not_executed' as const };
+  const denied: IMessageToolCall = { id: 'permission-refusal', type: 'tool_call', conversation_id: conversationId,
+    msg_id: messageId(604), turn_id: turnId, created_at: 2, content: { call_id: 'denied-call', name: 'computer_input',
+      action_id: 'computer/input', args: { action: 'left_click' }, status: 'error', error_code: 'SYSTEM_PERMISSION_REQUIRED',
+      result_seq: 10, permission_required: permission } };
+  const initial: TMessage[] = [
+    { id: 'permission-user', type: 'text', position: 'right', conversation_id: conversationId,
+      msg_id: requestId, created_at: 1, content: { content: 'Please use the computer.' } }, denied,
+    { id: 'permission-answer', type: 'text', position: 'left', conversation_id: conversationId, turn_id: turnId,
+      msg_id: messageId(605), created_at: 3, content: { content: 'I need access for this action.' } },
+    { id: 'permission-generic-blocked', type: 'tips', conversation_id: conversationId, turn_id: turnId,
+      created_at: 3, content: { type: 'error', content: '', error: { message: 'The task has blocked work.',
+        detail: 'Blocked criterion: Provide source artwork.',
+        code: 'NOMIFUN_TASK_INCOMPLETE', taskIncompleteReason: 'blocked_work', retryable: false } } },
+    { id: 'successful-blocked-criterion', type: 'tool_call', conversation_id: conversationId, turn_id: turnId, created_at: 3,
+      content: { call_id: 'report_completion', name: 'report_completion', status: 'completed',
+        args: { criteria: [{ id: 'source-artwork', status: 'blocked', reason: 'Need source artwork.' }] } } },
+    { id: 'permission-finished', type: 'agent_status', conversation_id: conversationId, turn_id: turnId,
+      created_at: 4, content: { backend: 'nomi', status: 'prepared', turn_summary: true,
+        turn_state: 'failed', started_at_ms: 1, finished_at_ms: 4 } },
+  ];
+  const permissions = spyOn(ipcBridge.systemPermissions.get, 'invoke').mockResolvedValue({ platform: 'macos', app_label: 'NomiFun',
+    permissions: [{ kind: 'accessibility', state: 'denied', can_request: false, can_open_settings: true,
+      requires_restart_after_grant: false, capabilities: ['computer_use'] }] });
+  const Timeline = () => {
+    const update = useUpdateMessageList();
+    return <><MessageList />
+      <button onClick={() => update(current => [...current, { ...denied, id: 'permission-retry', msg_id: messageId(606),
+        content: { ...denied.content, call_id: 'denied-retry', result_seq: 11 } }])}>Repeat same request</button>
+      <button onClick={() => update(current => [...current, { id: 'ordinary-next-request', type: 'text', position: 'right',
+        conversation_id: conversationId, msg_id: nextRequestId, created_at: 5, content: { content: 'Let us just chat.' } }])}>Continue chatting</button>
+      <button onClick={() => update(current => [...current, { ...denied, id: 'late-old-refusal', msg_id: messageId(607),
+        created_at: 100, content: { ...denied.content, call_id: 'old-late', result_seq: 12 } }])}>Late old refusal</button>
+      <button onClick={() => update(current => [...current, { ...denied, id: 'new-turn-refusal', msg_id: messageId(608),
+        turn_id: nextTurnId, created_at: 6, content: { ...denied.content, call_id: 'new-real-call', result_seq: 20 } }])}>New actual refusal</button>
+    </>;
+  };
+  try {
+    const page = render(<MemoryRouter><I18nextProvider i18n={i18n}>
+      <PreviewProvider persistNamespace='permission-turn-fixture' subscribeGlobalOpen={false}>
+        <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', isProcessing: false, isTurnStateHydrated: true }}>
+          <MessageListProvider initialValue={initial}><Timeline /></MessageListProvider>
+        </ConversationProvider>
+      </PreviewProvider>
+    </I18nextProvider></MemoryRouter>);
+    const notice = await page.findByTestId('system-permission-notice');
+    expect(notice.closest('.turn-process-disclosure')).toBeNull();
+    expect(page.getAllByTestId('system-permission-notice')).toHaveLength(1);
+    const compact = page.container.querySelector('.message-error-note--compact');
+    expect(compact).not.toBeNull();
+    expect(compact!.textContent).toContain(conversationLocale.agentError.incompleteReasons.blocked_work.title);
+    fireEvent.click(page.getByRole('button', { name: conversationLocale.agentError.expandDetails }));
+    expect(page.getByText('Blocked criterion: Provide source artwork.')).toBeTruthy();
+    fireEvent.click(page.getByRole('button', { name: messagesLocale.systemPermission.later }));
+    fireEvent.click(page.getByText('Repeat same request'));
+    expect(page.queryByTestId('system-permission-notice')).toBeNull();
+    expect(permissions).toHaveBeenCalledTimes(1);
+    fireEvent.click(page.getByText('Continue chatting'));
+    fireEvent.click(page.getByText('Late old refusal'));
+    expect(page.queryByTestId('system-permission-notice')).toBeNull();
+    fireEvent.click(page.getByText('New actual refusal'));
+    expect(await page.findByTestId('system-permission-notice')).toBeTruthy();
+    await waitFor(() => expect(permissions).toHaveBeenCalledTimes(2));
+  } finally { permissions.mockRestore(); }
+});
+
+test('active canonical Turn resolves historical request correlation and queued echo cannot steal its prompt', async () => {
+  const requestId = messageId(701);
+  const queuedRequestId = messageId(702);
+  const initial: TMessage[] = [
+    { id: 'history-source-request', type: 'text', position: 'right', conversation_id: conversationId,
+      msg_id: requestId, created_at: 1, content: { content: 'Use the computer.' } },
+    { id: 'history-permission-tool', type: 'tool_call', conversation_id: conversationId,
+      msg_id: messageId(703), turn_id: requestId, created_at: 2,
+      content: { call_id: 'history-call', name: 'computer_input', action_id: 'computer/input', status: 'error',
+        error_code: 'SYSTEM_PERMISSION_REQUIRED', result_seq: 10, permission_required: {
+          schema: 'system-permission-required.v1', capability: 'computer', action_id: 'computer/input',
+          operation: 'left_click', permissions: ['accessibility'], execution: 'not_executed' } } },
+    { id: 'queued-request-echo', type: 'text', position: 'right', status: 'pending', conversation_id: conversationId,
+      msg_id: queuedRequestId, created_at: 3, content: { content: 'A queued follow-up.' } },
+  ];
+  const permissions = spyOn(ipcBridge.systemPermissions.get, 'invoke').mockResolvedValue({ platform: 'macos', app_label: 'NomiFun',
+    permissions: [{ kind: 'accessibility', state: 'denied', can_request: false, can_open_settings: true,
+      requires_restart_after_grant: false, capabilities: ['computer_use'] }] });
+  try {
+    const page = render(<MemoryRouter><I18nextProvider i18n={i18n}>
+      <PreviewProvider persistNamespace='active-permission-history-fixture' subscribeGlobalOpen={false}>
+        <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', isProcessing: true,
+          activeTurnId: turnId, activeRequestMessageId: requestId, isTurnStateHydrated: true }}>
+          <MessageListProvider initialValue={initial}><MessageList /></MessageListProvider>
+        </ConversationProvider>
+      </PreviewProvider>
+    </I18nextProvider></MemoryRouter>);
+    expect(await page.findByTestId('system-permission-notice')).toBeTruthy();
+    expect(page.getAllByTestId('system-permission-notice')).toHaveLength(1);
+    expect(page.getByTestId('system-permission-notice').closest('.turn-process-disclosure')).toBeNull();
+    await waitFor(() => expect(permissions).toHaveBeenCalledTimes(1));
+  } finally { permissions.mockRestore(); }
+});
+
 test('a restored automatic write-back notice sits under its answer and before the shared actions', async () => {
   const kb = parseKnowledgeBaseId('0190f5fe-7c00-7a00-8000-000000000001');
   const load = spyOn(ipcBridge.knowledge.getBase, 'invoke').mockResolvedValue({ name: 'Python basics', knowledge_base_id: kb } as never);

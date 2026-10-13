@@ -31,7 +31,7 @@ import {
   Remind,
   Shield,
 } from '@icon-park/react';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 
@@ -89,7 +89,7 @@ const PermissionRow: React.FC<PermissionRowProps> = ({
     {actionsEnabled && entry?.can_request && state !== 'denied' && state !== 'restricted' && (
       <Button size='small' type='primary' loading={busy} onClick={() => onRequest?.(kind)}>{t('settings.capabilityPermissions.requestAccess')}</Button>
     )}
-    {actionsEnabled && entry?.can_open_settings && !readyState(state) && (
+    {actionsEnabled && entry?.can_open_settings && (kind === 'notifications' || !readyState(state)) && (
       <Button size='small' onClick={() => onOpenSettings?.(kind)}>{t('settings.capabilityPermissions.openSystemSettings')}</Button>
     )}
   </VisualRow>;
@@ -103,7 +103,9 @@ const CapabilityPermissionsContent: React.FC = () => {
   const tab = isCapabilityTab(searchParams.get('tab')) ? searchParams.get('tab') as PermissionCapabilityTab : 'overview';
   const { error, loading, openSettings, refresh, request, status } = useSystemPermissions(true);
   const [notificationState, setNotificationState] = useState<SystemPermissionState>('unknown');
+  const [notificationError, setNotificationError] = useState(false);
   const [notificationBusy, setNotificationBusy] = useState(false);
+  const notificationRevision = useRef(0);
   const [microphoneBusy, setMicrophoneBusy] = useState(false);
 
   const microphone = systemPermissionEntry(status, 'microphone');
@@ -113,27 +115,40 @@ const CapabilityPermissionsContent: React.FC = () => {
   const voiceReady = permissionEntryIsReady(microphone);
 
   const refreshNotification = useCallback(async () => {
+    const revision = ++notificationRevision.current;
     if (!desktopShell) {
       setNotificationState('unknown');
+      setNotificationError(false);
       return;
     }
-    const state = await ipcBridge.notification.permissionState.invoke();
-    setNotificationState(
-      state === 'granted'
-        ? 'granted'
-        : state === 'denied'
-          ? 'denied'
-          : state === 'default'
-            ? 'not_determined'
-            : 'unknown'
-    );
+    try {
+      const state = await ipcBridge.notification.permissionState.invoke();
+      if (revision !== notificationRevision.current) return;
+      setNotificationState(
+        state === 'granted'
+          ? 'granted'
+          : state === 'denied'
+            ? 'denied'
+            : state === 'default'
+              ? 'not_determined'
+              : 'unknown'
+      );
+      setNotificationError(false);
+    } catch {
+      if (revision !== notificationRevision.current) return;
+      setNotificationState('unknown');
+      setNotificationError(true);
+    }
   }, [desktopShell]);
 
   useEffect(() => {
     void refreshNotification();
     const onFocus = () => void refreshNotification();
     window.addEventListener('focus', onFocus);
-    return () => window.removeEventListener('focus', onFocus);
+    return () => {
+      notificationRevision.current += 1;
+      window.removeEventListener('focus', onFocus);
+    };
   }, [refreshNotification]);
 
   const setTab = useCallback((next: PermissionCapabilityTab) => {
@@ -173,9 +188,11 @@ const CapabilityPermissionsContent: React.FC = () => {
   }, [refresh, t]);
 
   const requestNotifications = useCallback(async () => {
+    const revision = ++notificationRevision.current;
     setNotificationBusy(true);
     try {
       const result = await ipcBridge.notification.requestPermission.invoke();
+      if (revision !== notificationRevision.current) return;
       setNotificationState(
         result === 'granted'
           ? 'granted'
@@ -185,6 +202,11 @@ const CapabilityPermissionsContent: React.FC = () => {
               ? 'not_determined'
               : 'unknown'
       );
+      setNotificationError(false);
+    } catch {
+      if (revision !== notificationRevision.current) return;
+      setNotificationState('unknown');
+      setNotificationError(true);
     } finally {
       setNotificationBusy(false);
     }
@@ -372,7 +394,7 @@ const CapabilityPermissionsContent: React.FC = () => {
       <PageHeader title={t('settings.capabilityPermissions.title')}
         actions={<Button size='small' icon={<Refresh theme='outline' size={14} />} loading={loading} onClick={() => void Promise.all([refresh(), refreshNotification()]).catch(() => Message.error(t('settings.capabilityPermissions.loadFailed')))}>{t('settings.capabilityPermissions.refresh')}</Button>} />
       {!desktopShell && <Alert className='mb-16px' type='info' showIcon content={t('settings.capabilityPermissions.desktopOnly')} />}
-      {error && <Alert className='mb-16px' type='error' showIcon content={t('settings.capabilityPermissions.loadFailed')} />}
+      {(error || notificationError) && <Alert className='mb-16px' type='error' showIcon content={t('settings.capabilityPermissions.loadFailed')} />}
       <VisualTabs id='permissions' label={t('settings.capabilityPermissions.title')} items={tabItems} activeKey={tab}
         onChange={(key) => setTab(isCapabilityTab(key) ? key : 'overview')} />
       <div id='permissions-panel' role='tabpanel' aria-labelledby={'permissions-tab-' + tab} aria-busy={loading}>

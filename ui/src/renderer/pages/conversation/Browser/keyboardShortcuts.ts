@@ -1,8 +1,8 @@
 import type { BrowserShortcutAction } from './client';
 
 export function browserShortcut(event: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'altKey' | 'metaKey' | 'shiftKey' | 'isComposing'>): BrowserShortcutAction | null {
-  if (event.isComposing || event.shiftKey || event.metaKey || (event.ctrlKey && event.altKey)) return null;
-  if (event.ctrlKey) {
+  if (event.isComposing || event.shiftKey || ((event.ctrlKey || event.metaKey) && event.altKey)) return null;
+  if (event.ctrlKey || event.metaKey) {
     switch (event.key.toLowerCase()) {
       case 'l': return 'address';
       case 't': return 'new_tab';

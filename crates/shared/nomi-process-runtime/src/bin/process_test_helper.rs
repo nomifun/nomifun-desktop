@@ -60,6 +60,51 @@ fn main() {
             spawn_grandchild(Path::new(&args[1]))
                 .unwrap_or_else(|error| fail_io("spawn grandchild", error));
         }
+        #[cfg(unix)]
+        "spawn-job-control-grandchild" => {
+            require_len(&args, 2);
+            spawn_job_control_grandchild(Path::new(&args[1]))
+                .unwrap_or_else(|error| fail_io("spawn job-control grandchild", error));
+        }
+        #[cfg(unix)]
+        "job-control-grandchild" => {
+            require_len(&args, 2);
+            // A background job may deliberately ignore terminal hangup. Its
+            // lifetime must still be contained by the owned PTY session.
+            if unsafe { libc::signal(libc::SIGHUP, libc::SIG_IGN) } == libc::SIG_ERR {
+                fail_io("ignore terminal hangup", io::Error::last_os_error());
+            }
+            write_pid_atomically(Path::new(&args[1]), process::id())
+                .unwrap_or_else(|error| fail_io("write job-control readiness", error));
+            thread::sleep(LONG_SLEEP);
+        }
+        #[cfg(unix)]
+        "pty-isig-disabled" => {
+            require_len(&args, 2);
+            let mut mode: libc::termios = unsafe { std::mem::zeroed() };
+            if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut mode) } == -1 {
+                fail_io("read terminal mode", io::Error::last_os_error());
+            }
+            mode.c_lflag &= !libc::ISIG;
+            if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &mode) } == -1 {
+                fail_io("disable terminal-generated signals", io::Error::last_os_error());
+            }
+            write_pid_atomically(Path::new(&args[1]), process::id())
+                .unwrap_or_else(|error| fail_io("write terminal-mode readiness", error));
+            thread::sleep(LONG_SLEEP);
+        }
+        #[cfg(unix)]
+        "pty-direct-setsid" => {
+            require_len(&args, 2);
+            if unsafe { libc::setsid() } == -1 {
+                fail_io("move direct payload to its own session", io::Error::last_os_error());
+            }
+            write_pid_atomically(Path::new(&args[1]), process::id())
+                .unwrap_or_else(|error| fail_io("write direct payload readiness", error));
+            // The counterexample expires without numeric-PID fallback if an
+            // earlier implementation loses ownership after cancelling it.
+            thread::sleep(Duration::from_secs(10));
+        }
         "spawn-ignore-group" => {
             require_len(&args, 2);
             spawn_ignore_group(Path::new(&args[1]))
@@ -284,6 +329,34 @@ fn spawn_grandchild(marker: &Path) -> io::Result<()> {
     let executable = env::current_exe()?;
     let mut grandchild = Command::new(executable).args(["sleep", "60000"]).spawn()?;
     if let Err(error) = write_pid_atomically(marker, grandchild.id()) {
+        let _ = grandchild.kill();
+        let _ = grandchild.wait();
+        return Err(error);
+    }
+    thread::sleep(LONG_SLEEP);
+    let _ = grandchild.wait();
+    Ok(())
+}
+
+#[cfg(unix)]
+fn spawn_job_control_grandchild(marker: &Path) -> io::Result<()> {
+    let executable = env::current_exe()?;
+    let mut command = Command::new(executable);
+    command.arg("job-control-grandchild").arg(marker);
+    // Model an ordinary shell background job: keep its original session but
+    // give it a separate process group. This is deliberately not a setsid
+    // escape, which has a different ownership contract.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == -1 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    let mut grandchild = command.spawn()?;
+    if let Err(error) = wait_for_marker(marker, Duration::from_secs(5)) {
         let _ = grandchild.kill();
         let _ = grandchild.wait();
         return Err(error);

@@ -9,7 +9,7 @@
 //! `actor.rs`). Compiled only on Linux.
 
 use crate::engine::{
-    A11yEngine, A11yError, Capabilities, Effect, ElementAction, ObserveOpts, Snapshot,
+    A11yEngine, A11yError, Capabilities, Effect, ElementAction, ObserveOpts, Rect, Snapshot,
     SnapshotGen, Target,
 };
 
@@ -32,6 +32,13 @@ impl A11yEngine for LinuxEngine {
     }
     fn observe(&self, opts: &ObserveOpts) -> Result<Snapshot, A11yError> {
         self.inner.observe(opts.clone())
+    }
+    fn resolve_pixel_target(
+        &self,
+        target: &Target,
+        generation: SnapshotGen,
+    ) -> Result<Rect, A11yError> {
+        self.inner.resolve_pixel_target(target.clone(), generation)
     }
     fn invoke(
         &self,

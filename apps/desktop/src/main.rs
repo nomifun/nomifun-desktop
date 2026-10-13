@@ -33,9 +33,20 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
 
 mod browser_surface;
-mod desktop_startup;
+#[cfg(target_os = "macos")]
+mod macos_development_launch;
+#[cfg(target_os = "macos")]
+mod macos_appkit_termination;
+#[cfg(target_os = "macos")]
+mod macos_appkit_main_loop;
+#[cfg(target_os = "macos")]
+mod macos_process_commands;
+#[cfg(target_os = "macos")]
+mod macos_lifecycle;
+#[cfg(target_os = "macos")]
+mod macos_notifications;
 mod native_api_plugins;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod headless_browser_runtime;
 mod companion_pointer;
 mod relay_pairing;
@@ -58,21 +69,22 @@ pub(crate) fn webui_init_script(port: u16, trust_secret: &str) -> String {
   var origin = "http://127.0.0.1:" + {port};
   if (!secret) return;
   function isBackend(url) {{
-    url = url || "";
-    return url.indexOf(origin) === 0 || url.charAt(0) === "/";
+    if (typeof url !== "string" || !url) return false;
+    try {{ return new URL(url, window.location.href).origin === origin; }}
+    catch (e) {{ return false; }}
   }}
   if (window.fetch && !window.__nomiFetchPatched) {{
     window.__nomiFetchPatched = true;
     var origFetch = window.fetch.bind(window);
     window.fetch = function (input, init) {{
       try {{
-        var url = typeof input === "string" ? input : (input && input.url) || "";
+        var isRequest = typeof Request !== "undefined" && input instanceof Request;
+        var url = typeof input === "string" ? input : isRequest ? input.url : input instanceof URL ? input.href : "";
         if (isBackend(url)) {{
           init = init || {{}};
-          var h = new Headers((init && init.headers) || undefined);
+          var h = new Headers(init.headers || (isRequest ? input.headers : undefined));
           if (!h.has("x-nomi-local-trust")) h.set("x-nomi-local-trust", secret);
           init.headers = h;
-          if (typeof input !== "string") input = url;
         }}
       }} catch (e) {{}}
       return origFetch(input, init);
@@ -950,6 +962,7 @@ async fn download_update(
 /// must never hide a second download behind an install action.
 #[tauri::command]
 async fn install_update(
+    app: tauri::AppHandle,
     downloaded: tauri::State<'_, DownloadedUpdateState>,
     version: String,
 ) -> Result<(), String> {
@@ -969,6 +982,13 @@ async fn install_update(
         Err(error) => return Err(format!("{UPDATE_NOT_RETAINED_ERROR}: {}", error.message())),
     };
 
+    #[cfg(target_os = "macos")]
+    return install_macos_update_retained(app, package, requested_version).await;
+
+    #[cfg(not(target_os = "macos"))]
+    {
+    let _ = app;
+
     // Past this point the installer has been handed the bytes: on Windows this
     // never returns (the plugin spawns the installer and exits), and on macOS a
     // failure can leave the app bundle half replaced. An Err here is NOT
@@ -981,6 +1001,62 @@ async fn install_update(
     }
     downloaded.finish_install(&requested_version);
     Ok(())
+    }
+}
+
+/// macOS's upstream installer does not invoke on_before_exit. Keep native
+/// authorization and the main loop alive while a retained worker performs
+/// the existing bounded desktop preflight and filesystem installation.
+#[cfg(target_os = "macos")]
+async fn install_macos_update_retained(
+    app: tauri::AppHandle,
+    package: DownloadedUpdatePackage,
+    version: String,
+) -> Result<(), String> {
+    let coordinator = app.try_state::<Arc<ExitCoordinator>>().map(|state| state.inner().clone())
+        .ok_or("DESKTOP_INSTALL_SHUTDOWN_OWNER_UNAVAILABLE")?;
+    let server = app.try_state::<Arc<DesktopServer>>().map(|state| state.inner().clone())
+        .or_else(|| coordinator.backend_server()).ok_or("DESKTOP_INSTALL_BACKEND_OWNER_UNAVAILABLE")?;
+    {
+        let mut handoff = coordinator.macos_handoff.lock().map_err(|_| "DESKTOP_INSTALL_OWNER_UNAVAILABLE")?;
+        if handoff.committed.is_some() || handoff.installation_active { return Err("DESKTOP_INSTALL_HANDOFF_CONFLICT".into()); }
+        handoff.installation_active = true;
+    }
+    let (reply, response) = tokio::sync::oneshot::channel();
+    let worker_app = app.clone();
+    let worker_coordinator = coordinator.clone();
+    let spawned = std::thread::Builder::new().name("nomifun-macos-install-preflight".into()).spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
+            let verified = cleanup_until_verified_bounded(
+                || server.shutdown_all_blocking(),
+                |attempt, _| {
+                    worker_coordinator.mark_cleanup_failed();
+                    worker_coordinator.mark_backend_failed_retained(server.clone());
+                    tracing::error!(attempt, "macOS update preflight cleanup is unverified; retaining authority");
+                },
+                || std::thread::sleep(Duration::from_millis(250)),
+                UPDATER_SHUTDOWN_MAX_ATTEMPTS,
+            );
+            if verified {
+                worker_coordinator.mark_cleanup_verified();
+                worker_coordinator.mark_backend_stopped_verified();
+            } else {
+                tracing::error!("bounded macOS installer handoff is permitted without claiming cleanup verification");
+            }
+            package.update.install(&package.bytes).map_err(|_| "DESKTOP_UPDATE_REPLACEMENT_FAILED".to_owned())?;
+            worker_app.state::<DownloadedUpdateState>().finish_install(&version);
+            Ok(())
+        })).unwrap_or_else(|_| Err("DESKTOP_UPDATE_INSTALL_WORKER_FAILED".into()));
+        // The worker owns continuation even if its initiating webview or
+        // response future disappears. Tauri resources stay until final exit.
+        macos_lifecycle::release_installation(worker_app, worker_coordinator, result.clone());
+        let _ = reply.send(result);
+    });
+    if spawned.is_err() {
+        macos_lifecycle::release_installation(app, coordinator, Err("DESKTOP_UPDATE_INSTALL_WORKER_UNAVAILABLE".into()));
+        return Err("DESKTOP_UPDATE_INSTALL_WORKER_UNAVAILABLE".into());
+    }
+    response.await.map_err(|_| "DESKTOP_UPDATE_INSTALL_COMPLETION_LOST".to_owned())?
 }
 
 /// The authoritative answer to "does an installable update package exist right
@@ -1475,13 +1551,27 @@ fn mark_startup_cleanup_server(
         StartupCleanup::Server(server);
 }
 
-/// Cross-thread state machine for Tauri's exit requests.
-///
-/// `ExitRequested` is delivered on the Tauri event loop, while
-/// `DesktopServer::shutdown_all_async` invokes its callback on the backend
-/// runtime. Keeping the state here makes the two paths single-flight and lets
-/// a booting backend service an exit request that arrived before it was
-/// managed by Tauri.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MacosHandoffPurpose { Exit(i32), Restart }
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MacosTerminalAdmission { Held, Normal, Restart }
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct MacosHandoffState {
+    installation_active: bool,
+    deferred: Option<MacosHandoffPurpose>,
+    restart_waiters: Vec<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    committed: Option<MacosHandoffPurpose>,
+    restart_handoff_issued: bool,
+}
+
+/// Cross-thread owner for shell requests and their asynchronous physical
+/// cleanup. macOS installation holds only the handoff continuation; it never
+/// creates another Agent fact chain or releases the retained cleanup owner.
 struct ExitCoordinator {
     phase: AtomicU8,
     restart_requested: AtomicBool,
@@ -1498,6 +1588,8 @@ struct ExitCoordinator {
     retained_backend_runtimes: Mutex<Vec<tokio::runtime::Runtime>>,
     retained_startup_cleanup: Mutex<Option<Arc<RetainedStartupCleanupAuthority>>>,
     backend_changed: Condvar,
+    #[cfg(target_os = "macos")]
+    macos_handoff: Mutex<MacosHandoffState>,
 }
 
 impl Default for ExitCoordinator {
@@ -1515,11 +1607,107 @@ impl Default for ExitCoordinator {
             retained_backend_runtimes: Mutex::new(Vec::new()),
             retained_startup_cleanup: Mutex::new(None),
             backend_changed: Condvar::new(),
+            #[cfg(target_os = "macos")]
+            macos_handoff: Mutex::new(MacosHandoffState::default()),
         }
     }
 }
 
 impl ExitCoordinator {
+    #[cfg(target_os = "macos")]
+    fn defer_macos_handoff(&self, purpose: MacosHandoffPurpose) -> bool {
+        let Ok(mut handoff) = self.macos_handoff.lock() else { return true; };
+        if !handoff.installation_active { return false; }
+        if !matches!(handoff.deferred, Some(MacosHandoffPurpose::Exit(code)) if code != 0) {
+            handoff.deferred = Some(purpose);
+            if let MacosHandoffPurpose::Exit(code) = purpose {
+                if code != 0 && self.original_code() == 0 {
+                    if let Ok(mut original) = self.original_code.lock() { *original = Some(code); }
+                }
+            }
+        }
+        true
+    }
+
+    #[cfg(target_os = "macos")]
+    fn claim_macos_terminal_handoff(&self, purpose: MacosHandoffPurpose) -> MacosTerminalAdmission {
+        let Ok(mut handoff) = self.macos_handoff.lock() else { return MacosTerminalAdmission::Held; };
+        if handoff.committed == Some(MacosHandoffPurpose::Restart) {
+            return match purpose {
+                MacosHandoffPurpose::Exit(0) => MacosTerminalAdmission::Normal,
+                MacosHandoffPurpose::Restart => MacosTerminalAdmission::Restart,
+                MacosHandoffPurpose::Exit(_) => MacosTerminalAdmission::Held,
+            };
+        }
+        let purpose = if self.is_restart_requested() { MacosHandoffPurpose::Restart } else {
+            match purpose { MacosHandoffPurpose::Exit(code) => MacosHandoffPurpose::Exit(self.process_exit_code(code)), other => other }
+        };
+        if handoff.installation_active {
+            if !matches!(handoff.deferred, Some(MacosHandoffPurpose::Exit(code)) if code != 0) {
+                handoff.deferred = Some(purpose);
+            }
+            return MacosTerminalAdmission::Held;
+        }
+        if purpose == MacosHandoffPurpose::Restart { return MacosTerminalAdmission::Restart; }
+        let admission = match handoff.committed {
+            None => { handoff.committed = Some(purpose); MacosTerminalAdmission::Normal }
+            Some(committed) if committed == purpose => MacosTerminalAdmission::Normal,
+            Some(MacosHandoffPurpose::Exit(0)) => {
+                if matches!(purpose, MacosHandoffPurpose::Exit(code) if code != 0) {
+                    // A receipt failure may require a nonzero physical exit.
+                    // This retires a zero-code reservation; it sends no new
+                    // frame and can never turn an existing failure into zero.
+                    handoff.committed = Some(purpose);
+                    MacosTerminalAdmission::Normal
+                } else {
+                    MacosTerminalAdmission::Held
+                }
+            }
+            Some(MacosHandoffPurpose::Restart) => MacosTerminalAdmission::Restart,
+            Some(_) => MacosTerminalAdmission::Held,
+        };
+        if admission == MacosTerminalAdmission::Normal {
+            if let MacosHandoffPurpose::Exit(code) = purpose {
+                if code != 0 && self.original_code() == 0 {
+                    if let Ok(mut original) = self.original_code.lock() { *original = Some(code); }
+                }
+            }
+        }
+        admission
+    }
+
+    #[cfg(target_os = "macos")]
+    fn notify_macos_restart(&self, result: Result<(), String>) {
+        let waiters = self.macos_handoff.lock()
+            .map(|mut handoff| std::mem::take(&mut handoff.restart_waiters)).unwrap_or_default();
+        for waiter in waiters { let _ = waiter.send(result.clone()); }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn finish_macos_installation(&self, result: &Result<(), String>) -> Option<MacosHandoffPurpose> {
+        let Ok(mut handoff) = self.macos_handoff.lock() else { return None; };
+        handoff.installation_active = false;
+        if result.is_err() {
+            self.restart_requested.store(false, Ordering::Release);
+            let code = match handoff.deferred {
+                Some(MacosHandoffPurpose::Exit(code)) if code != 0 => code,
+                _ => 1,
+            };
+            handoff.deferred = None;
+            if self.original_code() == 0 {
+                if let Ok(mut original) = self.original_code.lock() { *original = Some(code); }
+            }
+            if self.cleanup_verified.load(Ordering::Acquire) {
+                self.claim_fatal_exit();
+            } else {
+                self.phase.store(EXIT_PHASE_CLEANUP_FAILED, Ordering::Release);
+            }
+            Some(MacosHandoffPurpose::Exit(code))
+        } else {
+            handoff.deferred.take()
+        }
+    }
+
     fn request_normal_exit(&self, code: Option<i32>) -> bool {
         if self.restart_requested.load(Ordering::Acquire) {
             return false;
@@ -2033,6 +2221,11 @@ fn hold_restart_without_cleanup_authority(coordinator: &ExitCoordinator) {
 /// path's `wait_for_backend` bound).
 const DEFERRED_EXIT_BACKEND_WAIT: Duration = Duration::from_secs(30);
 
+struct DeferredWaitOwner(Arc<ExitCoordinator>);
+impl Drop for DeferredWaitOwner {
+    fn drop(&mut self) { self.0.deferred_exit_wait_started.store(false, Ordering::Release); }
+}
+
 /// F42: complete a normal exit whose backend was unavailable when
 /// `ExitRequested` fired. Runs off the Tauri event loop. If the backend
 /// becomes available the ordinary verified shutdown runs; if it never does
@@ -2048,14 +2241,30 @@ fn spawn_deferred_exit_shutdown(app: tauri::AppHandle, coordinator: Arc<ExitCoor
     {
         return;
     }
-    std::thread::spawn(move || {
+    let waiter_owner = DeferredWaitOwner(coordinator.clone());
+    let failure_owner = coordinator.clone();
+    if std::thread::Builder::new().name("nomifun-deferred-exit".into()).spawn(move || {
+        let _waiter_owner = waiter_owner;
         if let Some(server) = coordinator.wait_for_backend(DEFERRED_EXIT_BACKEND_WAIT) {
             start_shutdown_if_needed(&app, server, coordinator);
             return;
         }
         if coordinator.is_exit_allowed() {
-            app.exit(coordinator.final_exit_code());
+            complete_normal_exit(&app, &coordinator, coordinator.final_exit_code());
             return;
+        }
+        #[cfg(target_os = "macos")]
+        if coordinator.is_restart_requested() {
+            if let Some(authority) = coordinator.retained_startup_cleanup_authority() {
+                if authority.cleanup().is_ok() {
+                    coordinator.release_startup_cleanup_authority(&authority);
+                    coordinator.mark_cleanup_verified();
+                    coordinator.mark_backend_failed_verified();
+                    macos_lifecycle::finish_restart(&app, &coordinator);
+                    return;
+                }
+            }
+            if macos_lifecycle::failed_restart(&coordinator) { return; }
         }
         tracing::error!(
             wait_secs = DEFERRED_EXIT_BACKEND_WAIT.as_secs(),
@@ -2063,8 +2272,12 @@ fn spawn_deferred_exit_shutdown(app: tauri::AppHandle, coordinator: Arc<ExitCoor
              backend cleanup"
         );
         let code = allow_exit_without_backend_cleanup(&coordinator);
-        app.exit(code);
-    });
+        complete_normal_exit(&app, &coordinator, code);
+    }).is_err() {
+        #[cfg(target_os = "macos")]
+        if failure_owner.is_restart_requested() { macos_lifecycle::failed_restart(&failure_owner); }
+        tracing::error!("deferred desktop shutdown worker could not start; cleanup authority is retained");
+    }
 }
 
 /// Mark the exit as allowed even though no backend cleanup could run, and
@@ -2072,6 +2285,29 @@ fn spawn_deferred_exit_shutdown(app: tauri::AppHandle, coordinator: Arc<ExitCoor
 /// and only after positively establishing that no cleanup authority exists.
 fn allow_exit_without_backend_cleanup(coordinator: &ExitCoordinator) -> i32 {
     allow_handoff_without_verified_cleanup(coordinator)
+}
+
+/// A native AppKit request has its own Later reply, while Tauri owns the
+/// controlled event-loop return. Both consume the same coordinator outcome.
+fn complete_normal_exit(app: &tauri::AppHandle, coordinator: &Arc<ExitCoordinator>, code: i32) {
+    #[cfg(target_os = "macos")]
+    {
+        if coordinator.is_restart_requested() {
+            macos_lifecycle::finish_restart(app, coordinator);
+            return;
+        }
+        match coordinator.claim_macos_terminal_handoff(MacosHandoffPurpose::Exit(code)) {
+            MacosTerminalAdmission::Held => return,
+            MacosTerminalAdmission::Restart => { macos_lifecycle::finish_restart(app, coordinator); return; }
+            MacosTerminalAdmission::Normal => {},
+        }
+        macos_appkit_termination::complete_or_exit(app, coordinator, code);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = coordinator;
+        app.exit(code);
+    }
 }
 
 fn start_shutdown_if_needed(
@@ -2095,8 +2331,8 @@ fn start_shutdown_if_needed(
                 let original_code = callback_coordinator.original_code();
                 callback_coordinator.mark_cleanup_verified();
                 callback_coordinator.mark_backend_stopped_verified();
-                if !restart {
-                    app.exit(original_code);
+                if !restart || cfg!(target_os = "macos") {
+                    complete_normal_exit(&app, &callback_coordinator, original_code);
                 }
             }
             Err(error) => {
@@ -2110,8 +2346,8 @@ fn start_shutdown_if_needed(
                             let restart = retry_coordinator.is_restart_requested();
                             retry_coordinator.mark_cleanup_verified();
                             retry_coordinator.mark_backend_stopped_verified();
-                            if !restart {
-                                retry_app.exit(retry_coordinator.original_code());
+                            if !restart || cfg!(target_os = "macos") {
+                                complete_normal_exit(&retry_app, &retry_coordinator, retry_coordinator.original_code());
                             }
                         }
                         Err(retry_error) => {
@@ -2171,8 +2407,8 @@ fn retry_shutdown_until_verified(
             let code = coordinator.original_code();
             coordinator.mark_cleanup_verified();
             coordinator.mark_backend_failed_verified();
-            if !restart {
-                app.exit(code);
+            if !restart || cfg!(target_os = "macos") {
+                complete_normal_exit(&app, &coordinator, code);
             }
             coordinator.release_backend_runtimes();
             return;
@@ -2187,9 +2423,14 @@ fn retry_shutdown_until_verified(
              without verified cleanup"
         );
         let restart = coordinator.is_restart_requested();
+        #[cfg(target_os = "macos")]
+        if restart {
+            if macos_lifecycle::failed_restart(&coordinator) { return; }
+        }
+        let restart = coordinator.is_restart_requested();
         let code = allow_handoff_without_verified_cleanup(&coordinator);
         if !restart {
-            app.exit(code);
+            complete_normal_exit(&app, &coordinator, code);
         }
     });
 }
@@ -2445,6 +2686,13 @@ fn complete_main_thread_setup(
         pairing_manager.restore(restore_server).await;
     });
     if coordinator.has_pending_shutdown() {
+        #[cfg(target_os = "macos")]
+        {
+            start_shutdown_if_needed(&app, server, coordinator);
+            return Ok(());
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
         if coordinator.is_restart_requested() {
             // Tauri deliberately ignores `prevent_exit` for the restart
             // sentinel.  Complete cleanup before allowing the restart event
@@ -2470,18 +2718,13 @@ fn complete_main_thread_setup(
             start_shutdown_if_needed(&app, server, coordinator);
         }
         return Ok(());
+        }
     }
     let win_builder =
         tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::App("index.html".into()))
             .title("NomiFun")
             .inner_size(1280.0, 832.0)
             .min_inner_size(880.0, 600.0)
-            .visible(app.get_webview_window("startup").is_none())
-            .on_page_load(|window, payload| {
-                if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
-                    desktop_startup::main_loaded(window.app_handle());
-                }
-            })
             .initialization_script(&init_script);
     #[cfg(target_os = "macos")]
     let win_builder = match app.state::<MacosWebviewDataStore>().0 {
@@ -2645,8 +2888,18 @@ fn macos_menu_with_verified_quit(
         .ok_or_else(|| anyhow::anyhow!("default macOS Quit item is missing"))?;
     let label = native_quit.text()?;
     app_menu.remove(native_quit)?;
+    app_menu.append(&MenuItem::with_id(app, "nomifun-verified-restart", "重新启动应用", true, None::<&str>)?)?;
     app_menu.append(&MenuItem::with_id(app, "nomifun-verified-quit", label, true, Some("CmdOrCtrl+Q"))?)?;
     Ok(menu)
+}
+
+fn desktop_process_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    #[cfg(target_os = "macos")]
+    {
+        macos_process_commands::init(Arc::new(|app, request| Box::pin(macos_lifecycle::request(app, request))))
+    }
+    #[cfg(not(target_os = "macos"))]
+    tauri_plugin_process::init()
 }
 
 #[cfg(target_os = "macos")]
@@ -2675,7 +2928,7 @@ fn install_macos_exit_observers(app: &tauri::AppHandle) -> anyhow::Result<()> {
         }
     });
 
-    if tauri::is_dev() {
+    if macos_development_launch::development_application_is_eligible() {
         if let Some(socket_path) = std::env::var_os("NOMIFUN_DEV_LIFETIME_SOCKET") {
             let lifetime_app = app.clone();
             tauri::async_runtime::spawn(async move {
@@ -2705,6 +2958,46 @@ fn install_macos_exit_observers(app: &tauri::AppHandle) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn request_normal_shutdown(
+    app: &tauri::AppHandle,
+    coordinator: Arc<ExitCoordinator>,
+    code: Option<i32>,
+) {
+    #[cfg(target_os = "macos")]
+    {
+        macos_lifecycle::cancel_restart_for_exit(&coordinator, code);
+        if coordinator.defer_macos_handoff(MacosHandoffPurpose::Exit(code.unwrap_or(0))) { return; }
+    }
+    app.state::<QuitFlag>().0.store(true, Ordering::SeqCst);
+    coordinator.request_normal_exit(code);
+    #[cfg(target_os = "macos")]
+    if coordinator.cleanup_verified.load(Ordering::Acquire) {
+        coordinator.mark_cleanup_verified();
+        complete_normal_exit(app, &coordinator, coordinator.original_code());
+        return;
+    }
+    if let Some(server) = app
+        .try_state::<Arc<DesktopServer>>()
+        .map(|state| state.inner().clone())
+        .or_else(|| coordinator.backend_server())
+    {
+        start_shutdown_if_needed(app, server, coordinator);
+    } else {
+        spawn_deferred_exit_shutdown(app.clone(), coordinator);
+    }
+}
+
+/// Public NSApplicationDelegate admission reaches the same owner before
+/// AppKit starts its Later wait; it does not depend on a Tauri user event.
+#[cfg(target_os = "macos")]
+fn request_macos_appkit_shutdown(app: &tauri::AppHandle, coordinator: &Arc<ExitCoordinator>) {
+    if coordinator.is_exit_allowed() {
+        complete_normal_exit(app, coordinator, coordinator.final_exit_code());
+        return;
+    }
+    request_normal_shutdown(app, coordinator.clone(), Some(0));
+}
+
 fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     match event {
         tauri::RunEvent::ExitRequested { code, api, .. } => {
@@ -2715,12 +3008,22 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 return;
             };
 
-            if let Some(startup) = app.try_state::<Arc<desktop_startup::StartupState>>() {
-                if startup.starting() {
-                    desktop_startup::begin_quit(app);
-                }
-            }
             if code == Some(tauri::RESTART_EXIT_CODE) {
+                #[cfg(target_os = "macos")]
+                {
+                    // The only macOS SDK sentinel is the already-verified
+                    // release handoff. Development uses the surviving runner.
+                    if !coordinator.is_restart_requested()
+                        || !coordinator.cleanup_verified.load(Ordering::Acquire)
+                        || coordinator.phase.load(Ordering::Acquire) == EXIT_PHASE_FATAL
+                    {
+                        tracing::error!("unverified SDK restart sentinel rejected; no successful handoff is reported");
+                        std::process::exit(1);
+                    }
+                    return;
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
                 // Tauri documents that prevent_exit() is ignored for the
                 // restart sentinel. Mark the window as explicitly quitting
                 // and start cleanup immediately; the Tauri restart machinery
@@ -2758,9 +3061,32 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                     );
                 }
                 return;
+                }
+            }
+
+            #[cfg(target_os = "macos")]
+            macos_lifecycle::cancel_restart_for_exit(&coordinator, code);
+
+            #[cfg(target_os = "macos")]
+            if coordinator.defer_macos_handoff(MacosHandoffPurpose::Exit(code.unwrap_or(0))) {
+                api.prevent_exit();
+                return;
             }
 
             if coordinator.is_exit_allowed() {
+                #[cfg(target_os = "macos")]
+                match coordinator.claim_macos_terminal_handoff(MacosHandoffPurpose::Exit(code.unwrap_or(0))) {
+                    MacosTerminalAdmission::Held => { api.prevent_exit(); return; }
+                    MacosTerminalAdmission::Restart => { api.prevent_exit(); macos_lifecycle::finish_restart(app, &coordinator); return; }
+                    MacosTerminalAdmission::Normal => {},
+                }
+                #[cfg(target_os = "macos")]
+                if macos_appkit_termination::has_pending(app) {
+                    // A completed backend must still deliver its native
+                    // Later reply and one-shot receipt before Tao may stop.
+                    api.prevent_exit();
+                    complete_normal_exit(app, &coordinator, coordinator.final_exit_code());
+                }
                 return;
             }
 
@@ -2768,22 +3094,7 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
             // callback has requested the final exit. This is intentionally
             // never the blocking shutdown_all_blocking path.
             api.prevent_exit();
-            app.state::<QuitFlag>().0.store(true, Ordering::SeqCst);
-            coordinator.request_normal_exit(code);
-            if let Some(server) = app
-                .try_state::<Arc<DesktopServer>>()
-                .map(|state| state.inner().clone())
-                .or_else(|| coordinator.backend_server())
-            {
-                start_shutdown_if_needed(app, server, coordinator);
-            } else {
-                // F42: the backend may be wedged inside DesktopServer::start
-                // (registration stuck at Starting), and prevent_exit above has
-                // already swallowed this quit gesture. Never strand it: wait
-                // for the backend off the event loop, then either run the
-                // normal shutdown or force the exit with a loud error.
-                spawn_deferred_exit_shutdown(app.clone(), coordinator);
-            }
+            request_normal_shutdown(app, coordinator, code);
         }
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen { has_visible_windows, .. } => {
@@ -2962,8 +3273,35 @@ fn main() -> std::process::ExitCode {
         return code;
     }
 
-    // Env mutation + runtime init BEFORE Tauri builds its runtime/threads,
-    // mirroring the nomicore bin's ordering. `default_data_dir` resolves the
+    // LaunchServices development admission finishes before PATH discovery,
+    // storage or worker creation. Ordinary production startup never accepts
+    // the private development descriptor as an injection interface.
+    #[cfg(target_os = "macos")]
+    let development_launch = if macos_development_launch::development_application_is_eligible() {
+        match macos_development_launch::prepare_application(
+            macos_development_launch::ApplicationScope::DesktopDevelopment,
+        ) {
+            Ok(launch) => launch,
+            Err(_) => {
+                eprintln!("macOS development application admission failed");
+                return std::process::ExitCode::FAILURE;
+            }
+        }
+    } else {
+        if std::env::args_os().any(|argument| argument == macos_development_launch::DESCRIPTOR_ARGUMENT) {
+            eprintln!("development launch descriptors are unsupported by the production application");
+            return std::process::ExitCode::FAILURE;
+        }
+        None
+    };
+    #[cfg(target_os = "macos")]
+    let development_exit_reporter = macos_development_launch::ApplicationExitReporter::new(development_launch);
+
+    // Discover and apply PATH before the storage coordinator can create
+    // Tokio/SQLite workers, and before Tauri initializes native UI threads.
+    // SAFETY: this host is still in single-threaded startup.
+    let merged_path = unsafe { nomifun_runtime::enhance_process_path() };
+    // `default_data_dir` resolves the
     // effective root (literal NOMIFUN_DATA_DIR or the channel default) and
     // completes an armed storage relocation before native profiles are opened.
     // Incompatible database startup remains a separate dataset policy.
@@ -2975,8 +3313,6 @@ fn main() -> std::process::ExitCode {
         }
     };
     nomifun_runtime::init(&data_dir);
-    // SAFETY: no worker threads exist yet (Tauri's runtime is built by .run()).
-    let merged_path = unsafe { nomifun_runtime::enhance_process_path() };
 
     // Backend config. The desktop does NOT use `--local`: `DesktopServer::start`
     // selects the explicit Nomi-core composition and runs it under
@@ -3003,9 +3339,19 @@ fn main() -> std::process::ExitCode {
 
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
+    let setup_exit_reporter = development_exit_reporter.clone();
+    #[cfg(target_os = "macos")]
     let builder = builder.menu(macos_menu_with_verified_quit).on_menu_event(|app, event| {
         if event.id().as_ref() == "nomifun-verified-quit" {
             app.exit(0);
+        } else if event.id().as_ref() == "nomifun-verified-restart" {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if macos_lifecycle::request(app.clone(), macos_process_commands::MacosProcessRequest::Restart).await.is_err() {
+                    use tauri_plugin_dialog::DialogExt;
+                    app.dialog().message("重新启动未完成，请稍后重试。").kind(tauri_plugin_dialog::MessageDialogKind::Error).show(|_| {});
+                }
+            });
         }
     });
     let app = builder
@@ -3024,7 +3370,7 @@ fn main() -> std::process::ExitCode {
         .plugin(native_api_plugins::dialog())
         .plugin(native_api_plugins::notification())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
+        .plugin(desktop_process_plugin())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None::<Vec<&str>>,
@@ -3057,11 +3403,11 @@ fn main() -> std::process::ExitCode {
             app.manage(browser_resources.clone());
             let coordinator = app.state::<Arc<ExitCoordinator>>().inner().clone();
             #[cfg(target_os = "macos")]
-            install_macos_exit_observers(&app_handle)?;
-
-            #[cfg(target_os = "macos")]
-            prepare_macos_webview_store(&app_handle, &data_dir)?;
-            desktop_startup::install_window(&app_handle)?;
+            {
+                app.manage(setup_exit_reporter.clone());
+                macos_appkit_termination::install(&app_handle, coordinator.clone(), setup_exit_reporter)?;
+                install_macos_exit_observers(&app_handle)?;
+            }
 
             // In dev, the desktop webview loads the live Vite server; the LAN
             // listener must proxy to the same source instead of stale assets.
@@ -3169,7 +3515,7 @@ fn main() -> std::process::ExitCode {
                                     attached_chrome,
                                     ..Default::default()
                                 };
-                                #[cfg(windows)]
+                                #[cfg(any(windows, target_os = "macos"))]
                                 let host_services = {
                                     let mut host_services = host_services;
                                     headless_browser_runtime::prepare(&mut host_services).await;
@@ -3260,8 +3606,6 @@ fn main() -> std::process::ExitCode {
                                                 "NomiFun could not initialize its desktop window: {error:#}"
                                             ),
                                         );
-                                    } else {
-                                        desktop_startup::backend_ready(&setup_app);
                                     }
                                 }) {
                                     shutdown_then_show_fatal(
@@ -3397,10 +3741,7 @@ fn main() -> std::process::ExitCode {
         .manage(QuitFlag(AtomicBool::new(false)))
         .manage(Arc::new(ExitCoordinator::default()))
         .manage(DownloadedUpdateState::default())
-        .manage(Arc::new(desktop_startup::StartupState::new()))
         .invoke_handler(browser_surface::security::app_commands_only(tauri::generate_handler![
-            desktop_startup::desktop_startup_status,
-            desktop_startup::desktop_startup_quit,
             browser_surface::commands::browser_surface_attach,
             browser_surface::commands::browser_surface_update,
             browser_surface::commands::browser_surface_detach,
@@ -3426,25 +3767,11 @@ fn main() -> std::process::ExitCode {
         // Close-to-tray is now the DEFAULT (and only) close behavior. Closing the
         // main window (titlebar ×, OS close, Alt+F4) hides it to the tray instead
         // of quitting — the agent, scheduled tasks, and companions keep running in
-        // the background. The process exits ONLY via the tray's "退出" item, which
-        // arms QuitFlag and calls app.exit(0); with the flag set we let the close
-        // proceed. Process termination is coordinated exclusively by
-        // `ExitRequested`, so window destruction cannot overwrite a restart
+        // the background. Explicit quit requests arm QuitFlag so window close
+        // can proceed. Tauri ExitRequested and public AppKit admission share
+        // the exit coordinator; window destruction cannot overwrite a restart
         // sentinel or bypass browser/backend cleanup.
         .on_window_event(|window, event| {
-            if window.label() == "startup" {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    let state = window
-                        .app_handle()
-                        .state::<Arc<desktop_startup::StartupState>>();
-                    if state.snapshot().stage != desktop_startup::StartupStage::Ready {
-                        api.prevent_close();
-                        desktop_startup::begin_quit(window.app_handle());
-                        window.app_handle().exit(0);
-                    }
-                }
-                return;
-            }
             if window.label() != "main" {
                 return;
             }
@@ -3471,11 +3798,183 @@ fn main() -> std::process::ExitCode {
     // from the event loop and explicitly preserve the proven owner outcome;
     // process::exit also retains the existing no-destructor exit semantics.
     let runtime_code = app.run_return(handle_run_event);
-    std::process::exit(exit_coordinator.process_exit_code(runtime_code));
+    let exit_code = exit_coordinator.process_exit_code(runtime_code);
+    #[cfg(target_os = "macos")]
+    {
+        let cleanup_verified = exit_coordinator.cleanup_verified.load(Ordering::Acquire);
+        let restart_requested = exit_coordinator.is_restart_requested() && cleanup_verified && exit_code == 0;
+        if development_exit_reporter.report_exit_once_with_restart(exit_code, cleanup_verified, restart_requested).is_err() {
+            std::process::exit(1);
+        }
+    }
+    std::process::exit(exit_code);
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_old_normal_pre_read_cannot_commit_over_accepted_restart() {
+        let coordinator = Arc::new(super::ExitCoordinator::default());
+        assert!(coordinator.request_normal_exit(Some(0)));
+        assert!(!coordinator.is_restart_requested()); // worker's old pre-read
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let worker_owner = coordinator.clone();
+        let worker_gate = gate.clone();
+        let worker = std::thread::spawn(move || {
+            worker_gate.wait();
+            worker_owner.claim_macos_terminal_handoff(super::MacosHandoffPurpose::Exit(0))
+        });
+        {
+            let handoff = coordinator.macos_handoff.lock().unwrap();
+            assert!(handoff.committed.is_none());
+            assert!(!coordinator.request_restart()); // joins the normal flight
+        }
+        coordinator.mark_cleanup_verified();
+        gate.wait();
+        assert_eq!(worker.join().unwrap(), super::MacosTerminalAdmission::Restart);
+        assert!(coordinator.macos_handoff.lock().unwrap().committed.is_none());
+        assert!(coordinator.cleanup_verified.load(Ordering::Acquire));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_install_hold_preserves_failure_exit_and_blocks_physical_commit() {
+        let coordinator = super::ExitCoordinator::default();
+        coordinator.macos_handoff.lock().unwrap().installation_active = true;
+        assert!(coordinator.defer_macos_handoff(super::MacosHandoffPurpose::Exit(17)));
+        assert!(coordinator.defer_macos_handoff(super::MacosHandoffPurpose::Restart));
+        assert!(coordinator.defer_macos_handoff(super::MacosHandoffPurpose::Exit(0)));
+        coordinator.mark_cleanup_verified();
+        assert_eq!(coordinator.original_code(), 17);
+        assert_eq!(coordinator.claim_macos_terminal_handoff(super::MacosHandoffPurpose::Exit(0)), super::MacosTerminalAdmission::Held);
+        let handoff = coordinator.macos_handoff.lock().unwrap();
+        assert_eq!(handoff.deferred, Some(super::MacosHandoffPurpose::Exit(17)));
+        assert!(handoff.committed.is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_terminal_reservation_allows_failure_exit_without_success_upgrade() {
+        let coordinator = super::ExitCoordinator::default();
+        coordinator.mark_cleanup_verified();
+        assert_eq!(coordinator.claim_macos_terminal_handoff(super::MacosHandoffPurpose::Exit(0)), super::MacosTerminalAdmission::Normal);
+        assert_eq!(coordinator.claim_macos_terminal_handoff(super::MacosHandoffPurpose::Exit(1)), super::MacosTerminalAdmission::Normal);
+        assert_eq!(coordinator.claim_macos_terminal_handoff(super::MacosHandoffPurpose::Exit(0)), super::MacosTerminalAdmission::Normal);
+        assert_eq!(coordinator.original_code(), 1);
+        assert_eq!(coordinator.process_exit_code(0), 1);
+        assert_eq!(coordinator.macos_handoff.lock().unwrap().committed, Some(super::MacosHandoffPurpose::Exit(1)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_committed_restart_allows_only_its_physical_zero_exit() {
+        let coordinator = super::ExitCoordinator::default();
+        coordinator.request_restart();
+        coordinator.mark_cleanup_verified();
+        coordinator.macos_handoff.lock().unwrap().committed = Some(super::MacosHandoffPurpose::Restart);
+        assert_eq!(coordinator.claim_macos_terminal_handoff(super::MacosHandoffPurpose::Exit(0)), super::MacosTerminalAdmission::Normal);
+        assert_eq!(coordinator.claim_macos_terminal_handoff(super::MacosHandoffPurpose::Exit(1)), super::MacosTerminalAdmission::Held);
+        assert_eq!(coordinator.macos_handoff.lock().unwrap().committed, Some(super::MacosHandoffPurpose::Restart));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_cancelled_restart_failure_snapshot_keeps_normal_owner() {
+        let coordinator = Arc::new(super::ExitCoordinator::default());
+        assert!(coordinator.request_restart());
+        assert!(coordinator.is_restart_requested()); // stale worker snapshot
+        super::macos_lifecycle::cancel_restart_for_exit(&coordinator, Some(0));
+        assert!(!super::macos_lifecycle::failed_restart(&coordinator));
+        assert_eq!(coordinator.shutdown_mode(), Some(super::ShutdownMode::Normal));
+        assert_eq!(coordinator.original_code(), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_failed_restart_retires_only_unissued_reservation() {
+        let coordinator = Arc::new(super::ExitCoordinator::default());
+        coordinator.request_restart();
+        coordinator.mark_cleanup_verified();
+        coordinator.macos_handoff.lock().unwrap().committed = Some(super::MacosHandoffPurpose::Restart);
+        assert!(super::macos_lifecycle::failed_restart(&coordinator));
+        assert!(coordinator.macos_handoff.lock().unwrap().committed.is_none());
+        assert!(!coordinator.is_restart_requested());
+        assert_eq!(coordinator.claim_macos_terminal_handoff(super::MacosHandoffPurpose::Exit(1)), super::MacosTerminalAdmission::Normal);
+
+        let issued = Arc::new(super::ExitCoordinator::default());
+        issued.request_restart();
+        issued.mark_cleanup_verified();
+        { let mut handoff = issued.macos_handoff.lock().unwrap(); handoff.committed = Some(super::MacosHandoffPurpose::Restart); handoff.restart_handoff_issued = true; }
+        assert!(super::macos_lifecycle::failed_restart(&issued));
+        assert!(issued.is_restart_requested());
+        assert_eq!(issued.claim_macos_terminal_handoff(super::MacosHandoffPurpose::Exit(1)), super::MacosTerminalAdmission::Held);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_post_preflight_nonzero_exit_survives_wry_zero_return() {
+        let coordinator = super::ExitCoordinator::default();
+        coordinator.mark_cleanup_verified();
+        assert_eq!(coordinator.original_code(), 0);
+        assert_eq!(coordinator.claim_macos_terminal_handoff(super::MacosHandoffPurpose::Exit(7)), super::MacosTerminalAdmission::Normal);
+        assert_eq!(coordinator.process_exit_code(0), 7);
+        assert_eq!(coordinator.macos_handoff.lock().unwrap().committed, Some(super::MacosHandoffPurpose::Exit(7)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_installer_failure_rejects_deferred_restart_with_dropped_response() {
+        let coordinator = super::ExitCoordinator::default();
+        coordinator.request_restart();
+        coordinator.mark_cleanup_verified();
+        let (reply, response) = tokio::sync::oneshot::channel();
+        drop(response);
+        {
+            let mut handoff = coordinator.macos_handoff.lock().unwrap();
+            handoff.installation_active = true;
+            handoff.deferred = Some(super::MacosHandoffPurpose::Restart);
+            handoff.restart_waiters.push(reply);
+        }
+        let result = Err("fixture replacement failed".to_owned());
+        assert_eq!(coordinator.finish_macos_installation(&result), Some(super::MacosHandoffPurpose::Exit(1)));
+        coordinator.notify_macos_restart(result);
+        assert!(!coordinator.is_restart_requested());
+        assert_eq!(coordinator.process_exit_code(0), 1);
+        assert!(coordinator.cleanup_verified.load(Ordering::Acquire), "actual preflight cleanup remains a separate fact");
+        let handoff = coordinator.macos_handoff.lock().unwrap();
+        assert!(!handoff.installation_active);
+        assert!(handoff.committed.is_none());
+        assert!(handoff.restart_waiters.is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_successful_installer_continuation_never_manufactures_cleanup_proof() {
+        let coordinator = super::ExitCoordinator::default();
+        coordinator.request_restart();
+        {
+            let mut handoff = coordinator.macos_handoff.lock().unwrap();
+            handoff.installation_active = true;
+            handoff.deferred = Some(super::MacosHandoffPurpose::Restart);
+        }
+        assert_eq!(coordinator.finish_macos_installation(&Ok(())), Some(super::MacosHandoffPurpose::Restart));
+        assert!(!coordinator.cleanup_verified.load(Ordering::Acquire));
+        assert!(!coordinator.is_exit_allowed());
+        assert!(coordinator.macos_handoff.lock().unwrap().committed.is_none());
+    }
+
+    #[test]
+    fn deferred_worker_owner_releases_single_flight_after_alive_failure() {
+        let coordinator = Arc::new(super::ExitCoordinator::default());
+        assert!(!coordinator.deferred_exit_wait_started.swap(true, Ordering::AcqRel));
+        let worker_owner = super::DeferredWaitOwner(coordinator.clone());
+        assert!(coordinator.deferred_exit_wait_started.load(Ordering::Acquire));
+        drop(worker_owner); // finished worker or rejected spawn closure
+        assert!(!coordinator.deferred_exit_wait_started.load(Ordering::Acquire));
+        assert!(!coordinator.deferred_exit_wait_started.swap(true, Ordering::AcqRel), "a fresh attempt is admitted");
+    }
+
     #[test]
     fn desktop_browser_profile_store_initializes_a_fresh_data_root() {
         let root = tempfile::tempdir().unwrap();
@@ -3557,13 +4056,17 @@ mod tests {
         // Move both a default root out and a custom root into the default path.
         for custom_origin in [false, true] {
             let root = tempfile::tempdir().unwrap();
-            let default = root.path().join("default");
-            let origin = if custom_origin { root.path().join("custom") } else { default.clone() };
-            let target = if custom_origin { default.clone() } else { root.path().join("moved") };
-            let control = root.path().join("control");
+            let physical_root = root.path().canonicalize().unwrap();
+            let default = physical_root.join("default");
+            let origin = if custom_origin { physical_root.join("custom") } else { default.clone() };
+            let target = if custom_origin { default.clone() } else { physical_root.join("moved") };
+            let control = physical_root.join("control");
             let generation = "0190f5fe-7c00-7a00-8000-0000000000f0";
             fs::create_dir_all(&origin).unwrap();
             fs::write(origin.join("storage-generation"), generation).unwrap();
+            // The common relocation fixture treats database contents as an
+            // opaque file; this test checks profile identity, not SQL startup.
+            fs::write(origin.join("nomifun-backend.db"), b"WK profile relocation fixture").unwrap();
             factory_reset::write_v3_dataset_receipt_for_work_dir(&origin, &origin, generation).unwrap();
             let before = macos_webview_data_store(&origin, &default, true).unwrap();
             assert_eq!(before.is_some(), custom_origin);

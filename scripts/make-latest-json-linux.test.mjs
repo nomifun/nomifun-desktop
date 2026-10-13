@@ -109,6 +109,21 @@ describe('Linux updater installer routing', () => {
     expect(manifest.platforms['windows-x86_64']).toEqual(windows);
   });
 
+  test.each([
+    ['aarch64-apple-darwin', 'darwin-aarch64', 'NomiFun.app.tar.gz'],
+    ['x86_64-apple-darwin', 'darwin-x86_64', 'NomiFun_0.7.6_x64.app.tar.gz'],
+  ])('native macOS append for %s preserves the other architecture and its published package', (triple, key, name) => {
+    const otherKey = key === 'darwin-aarch64' ? 'darwin-x86_64' : 'darwin-aarch64';
+    const previous = { version: '0.7.6', platforms: {
+      [otherKey]: { url: 'https://example.test/published.app.tar.gz', signature: 'published' },
+      'windows-x86_64': { url: 'https://example.test/win.exe', signature: 'win' },
+    } };
+    const manifest = generate([[triple, name]], previous, ['--target-dir', `target/${triple}`, '--target-triple', triple]);
+    expect(manifest.platforms[key].url).toEndWith(`/${name}`);
+    expect(manifest.platforms[otherKey]).toEqual(previous.platforms[otherKey]);
+    expect(manifest.platforms['windows-x86_64']).toEqual(previous.platforms['windows-x86_64']);
+  });
+
   test('arm64 macOS release rejects a scanned Universal updater rather than relabelling it', () => {
     const result = generate([['universal-apple-darwin', 'stale.app.tar.gz']], undefined, ['--macos-arm64-only'], 1);
     expect(result.stderr).toContain('旧 Intel/Universal');

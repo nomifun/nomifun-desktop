@@ -30,6 +30,10 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+#[cfg(target_os = "macos")]
+#[path = "macos_headless_release.rs"]
+mod macos_release;
+
 const DEADLINE: Duration = Duration::from_secs(30);
 const MAX_BODY: usize = 2 * 1024 * 1024;
 const MAX_TOTAL_BODY: usize = 16 * 1024 * 1024;
@@ -117,6 +121,8 @@ pub fn implementation_digest() -> String {
     digest.update(env!("CARGO_PKG_VERSION"));
     digest.update(std::env::consts::OS);
     digest.update(std::env::consts::ARCH);
+    #[cfg(target_os = "macos")]
+    digest.update(include_bytes!("macos_headless_release.rs"));
     format!("{:x}", digest.finalize())
 }
 
@@ -150,9 +156,15 @@ pub struct RenderedContent {
     pub html_truncated: bool,
 }
 
-/// Fingerprint host-selected browser bytes without executing the file.
+/// Fingerprint host-selected browser bytes without executing the file. On
+/// macOS Chrome bundles this includes the versioned framework/helpers/libraries
+/// loaded by the small application entry executable.
 pub async fn binary_digest(path: PathBuf) -> Result<String, HeadlessPageError> {
     tokio::task::spawn_blocking(move || {
+        #[cfg(target_os = "macos")]
+        if let Some(digest) = macos_release::fingerprint(&path) {
+            return digest;
+        }
         use std::io::Read;
         use sha2::{Digest,Sha256};
         let mut file=std::fs::File::open(path).map_err(|_|HeadlessPageError::Unavailable)?;

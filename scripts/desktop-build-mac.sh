@@ -298,6 +298,8 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 COLLECTED=()
 COLLECTED_LOCKS=()
 BASE_RUSTFLAGS="${RUSTFLAGS:-}"
+BASE_CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS-}"
+BASE_CARGO_ENCODED_RUSTFLAGS_SET="${CARGO_ENCODED_RUSTFLAGS+x}"
 for t in "${TRIPLES[@]}"; do
   echo ""
   echo "▶▶▶ 构建 $t ..."
@@ -307,11 +309,24 @@ for t in "${TRIPLES[@]}"; do
   ONNX_CONFIG=()
   unset ORT_LIB_PATH ORT_LIB_LOCATION ORT_PREFER_DYNAMIC_LINK
   export RUSTFLAGS="$BASE_RUSTFLAGS"
+  if [[ "$BASE_CARGO_ENCODED_RUSTFLAGS_SET" == "x" ]]; then
+    export CARGO_ENCODED_RUSTFLAGS="$BASE_CARGO_ENCODED_RUSTFLAGS"
+  fi
   if [[ "$t" == "x86_64-apple-darwin" ]]; then
     echo "▶ 准备校验过的 Intel ONNX Runtime/API 23"
     export ORT_LIB_PATH="$(bun "$ONNX_RUNTIME_TOOL")"
     export ORT_PREFER_DYNAMIC_LINK=1
-    export RUSTFLAGS="$BASE_RUSTFLAGS -C link-arg=-Wl,-rpath,@executable_path/../Frameworks"
+    # Cargo gives encoded flags precedence over RUSTFLAGS, including an
+    # explicitly empty value. Add ONNX's app-relative runtime path to the
+    # active flag source and restore the caller's flags for every target.
+    onnx_rpath="link-arg=-Wl,-rpath,@executable_path/../Frameworks"
+    if [[ "$BASE_CARGO_ENCODED_RUSTFLAGS_SET" == "x" ]]; then
+      if [[ "$BASE_CARGO_ENCODED_RUSTFLAGS" != *"$onnx_rpath"* ]]; then
+        export CARGO_ENCODED_RUSTFLAGS="${BASE_CARGO_ENCODED_RUSTFLAGS}${BASE_CARGO_ENCODED_RUSTFLAGS:+$'\x1f'}-C"$'\x1f'"$onnx_rpath"
+      fi
+    elif [[ "$BASE_RUSTFLAGS" != *"$onnx_rpath"* ]]; then
+      export RUSTFLAGS="$BASE_RUSTFLAGS -C $onnx_rpath"
+    fi
     ONNX_CONFIG=(--config "$(dirname "$ORT_LIB_PATH")/tauri.conf.json")
   fi
   CI=true env -u APPLE_API_KEY -u APPLE_API_KEY_PATH -u APPLE_API_ISSUER \

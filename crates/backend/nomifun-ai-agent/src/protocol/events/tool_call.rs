@@ -79,13 +79,21 @@ pub struct ToolCallRetryData {
     pub retry_of_call_id: Option<String>,
 }
 
-/// Display projection of an admitted canonical action, never model-supplied authority.
+/// Display projection of an admitted canonical action and its settled result,
+/// never model-supplied authority or an independent permission fact.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolCallIdentity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_required: Option<nomifun_engine_core::SystemPermissionRequired>,
+    /// Exact canonical ToolCompleted (or cleanup settlement) event sequence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_seq: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

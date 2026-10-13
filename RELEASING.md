@@ -296,8 +296,8 @@ Use this order for every desktop release.
 The one-click script auto-detects two scenarios:
 
 - **APPEND** — a Release for this version already exists (Windows may have gone
-  first): add the macOS assets and merge the `darwin-aarch64` entry into
-  `latest.json` (the one-click script builds Apple Silicon).
+  first): add the selected macOS assets and merge their `darwin-aarch64` or
+  `darwin-x86_64` entry into `latest.json` (Apple Silicon is the default).
 - **CREATE** — no Release exists yet (macOS goes first): create the tag and the
   Release (with release notes) and upload the macOS assets; `-Version` can bump
   the version number as part of the same command.
@@ -317,6 +317,7 @@ The one-click script auto-detects two scenarios:
 
    # APPEND (Windows already released; add macOS):
    bun run release:mac
+   bun run release:mac -Architecture intel  # append the independent Intel package
 
    # CREATE (macOS first): -Version bumps; -NotesFile/-Notes are required for a first release
    bun run release:mac -Version 0.1.14 -NotesFile notes.md
@@ -326,11 +327,12 @@ The one-click script auto-detects two scenarios:
    bun run release:mac -DryRun     # read-only preflight + plan (incl. detected mode); no pull/bump/build/upload/push
    bun run release:mac -NoPush     # APPEND: still uploads but no git push; CREATE: local bump/build only, no Release
    bun run release:mac -SkipPull   # skip git pull during real execution
+   bun run release:mac --macos-arm64-only  # explicitly retire an existing Intel updater entry
    ```
 
 **Version** is the single source `Cargo.toml [workspace.package].version`. APPEND
 uses the current version. For CREATE, `-Version X.Y.Z` (when different) first runs
-`bun run bump`, then commits as `nomifun`, tags, and creates the Release.
+`bun run bump`, then commits with the configured Git identity, tags, and creates the Release.
 
 **Release notes are LLM-friendly**: passed on the command line (no CHANGELOG
 coupling), and the **same text is used for both the GitHub Release body and the
@@ -340,11 +342,16 @@ Release; in APPEND mode notes are optional.
 
 The script loads `GH_TOKEN` from `.env.release` when present (or uses existing
 `gh auth login`), loads the updater signing key, detects the mode, builds
-`build:mac --signed --config apps/desktop/tauri.updater.conf.json`, validates
+`build:mac --signed <arm|intel> --config apps/desktop/tauri.updater.conf.json`, validates
 stapling / codesign / Gatekeeper status, merges the darwin entries via
 `make:latest`, uploads (`--clobber` for APPEND, or `gh release create` for
-CREATE), commits `latest.json` (plus the bump for CREATE) as author `nomifun`,
+CREATE), commits `latest.json` (plus the bump for CREATE) with the configured Git identity,
 and verifies the updater endpoint. It aborts with a clear error on any failure.
+
+Same-version append preserves existing updater entries for both Mac architectures
+and other platforms. Only an explicit `--macos-arm64-only` removes the Intel entry;
+it cannot be combined with `-Architecture intel`. Intel runtime acceptance must
+run on an Intel Mac before its package is announced as verified.
 
 For a dual-architecture macOS release, commit the version and source changes
 first so the release locks can attest a clean source commit. Build once per

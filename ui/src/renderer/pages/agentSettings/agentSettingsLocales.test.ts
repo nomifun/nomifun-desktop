@@ -27,7 +27,7 @@ describe('Agent Settings locale contract', () => {
       expect(Object.hasOwn(locale, 'view')).toBe(false);
       expect(Object.hasOwn(locale, 'session')).toBe(false);
       expect(Object.hasOwn(locale.middlewareOrder, 'createBeforeTool')).toBe(false);
-      expect(locale.workbench.configureChatModel.length).toBeGreaterThan(0);
+      expect(locale.fields.defaultModel.length).toBeGreaterThan(0);
     }
   });
   test('keeps English and Chinese keys in parity', () => {

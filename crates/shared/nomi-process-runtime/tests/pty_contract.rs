@@ -355,6 +355,54 @@ async fn quick_pty_exit_wakes_a_far_yield_within_one_second() {
 #[cfg(target_os = "macos")]
 #[tokio::test]
 #[serial_test::serial(unix_pty_contract)]
+async fn macos_force_kill_reaps_known_direct_payload_that_changed_session() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let marker = directory.path().join("direct-setsid.pid");
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let handle = start_pty(&supervisor, &["pty-direct-setsid", marker.to_str().expect("marker path")])
+        .await.expect("direct PTY payload starts");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !marker.is_file() { tokio::time::sleep(Duration::from_millis(5)).await; }
+    }).await.expect("payload changed session before publishing readiness");
+    let payload = fs::read_to_string(&marker).unwrap().trim().parse::<u32>().unwrap();
+    assert_ne!(payload, handle.pid);
+    assert_eq!(unsafe { libc::getsid(payload as libc::pid_t) }, payload as libc::pid_t);
+    let outcome = tokio::time::timeout(Duration::from_secs(3), supervisor.force_kill(&handle.owner, &handle.session_id))
+        .await.expect("known direct payload cancellation stays bounded").expect("forced cancellation completes");
+    let ProcessOutcome::Cancelled { cleanup, .. } = outcome else {
+        panic!("known direct Child lease must include payload cleanup after setsid, got {outcome:?}");
+    };
+    assert!(cleanup.reaped);
+    assert!(cleanup.errors.is_empty(), "native cleanup failed: {cleanup:?}");
+    assert!(nomi_process_runtime::probe_process_identity(payload).unwrap().is_none(), "known payload must be terminal before reporting cleanup");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[serial_test::serial(unix_pty_contract)]
+async fn macos_interrupt_sends_real_sigint_with_isig_disabled_and_stdin_closed() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let marker = directory.path().join("isig-disabled.pid");
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let handle = start_pty(&supervisor, &["pty-isig-disabled", marker.to_str().expect("marker path")])
+        .await.expect("ISIG-disabled PTY helper starts");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !marker.is_file() { tokio::time::sleep(Duration::from_millis(5)).await; }
+    }).await.expect("helper disabled ISIG before publishing readiness");
+    supervisor.close_stdin(&handle.owner, &handle.session_id).await.expect("canonical stdin EOF succeeds");
+    supervisor.interrupt(&handle.owner, &handle.session_id).await.expect("real foreground SIGINT succeeds after stdin EOF");
+    let ProcessOutcome::Exited { code, signal, cleanup, .. } = wait_for_terminal(&supervisor, &handle).await else {
+        panic!("real SIGINT must exit the ISIG-disabled helper");
+    };
+    assert_eq!(code, None);
+    assert_eq!(signal, Some(libc::SIGINT));
+    assert!(cleanup.reaped);
+    assert!(cleanup.errors.is_empty(), "native cleanup failed: {cleanup:?}");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[serial_test::serial(unix_pty_contract)]
 async fn macos_concurrent_pty_sessions_keep_output_and_cleanup_isolated() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let mut sessions = tokio::task::JoinSet::new();

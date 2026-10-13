@@ -4290,6 +4290,8 @@ mod tests {
 
     #[cfg(any(unix, windows))]
     async fn real_start_shutdown_scenario(drop_caller: bool, transport: crate::Transport) {
+        #[cfg(target_os = "macos")]
+        let is_pty = matches!(&transport, crate::Transport::Pty { .. });
         let temporary = tempfile::tempdir().expect("native start fixture should have a work root");
         let scenario = match (&transport, drop_caller) {
             (crate::Transport::Pipe, false) => "retained-caller",
@@ -4314,9 +4316,29 @@ mod tests {
         // Keep the public future unpolled after its first real Pending so the
         // native worker can start independently of caller delivery.
         poll_once_pending(start.as_mut()).await;
-        let pid = wait_native_start_marker(&marker).await;
+        let payload_pid = wait_native_start_marker(&marker).await;
+        #[cfg(target_os = "macos")]
+        let pid = if is_pty {
+            // The public PID is the exact host-owned session launcher. The
+            // user-code marker names its payload, whose waitpid lease survives
+            // inside that launcher. Validate both facts before the shutdown.
+            let launcher = unsafe { libc::getsid(payload_pid as libc::pid_t) };
+            assert!(launcher > 1);
+            assert_ne!(launcher as u32, payload_pid);
+            let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+            let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+            assert_eq!(unsafe { libc::proc_pidinfo(payload_pid as libc::pid_t, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) }, size);
+            assert_eq!(info.pbi_pid, payload_pid);
+            assert_eq!(info.pbi_ppid, launcher as u32);
+            assert_eq!(info.pbi_pgid, launcher as u32);
+            launcher as u32
+        } else { payload_pid };
+        #[cfg(not(target_os = "macos"))]
+        let pid = payload_pid;
         let process = NativeStartProbe::new(pid);
+        let payload = NativeStartProbe::new_read_only(payload_pid);
         assert!(!process.is_gone(), "real owned child should be alive at the barrier");
+        assert!(!payload.is_gone(), "real payload should be alive at the barrier");
         let published_before_shutdown = supervisor.registry.counts().0 == 1;
         let mut shutdown = Box::pin(supervisor.shutdown());
         poll_once_pending(shutdown.as_mut()).await;
@@ -4340,9 +4362,9 @@ mod tests {
         let reported_reaped = matching.is_some_and(|session| matches!(
             &session.outcome, ProcessOutcome::Cancelled { cleanup, .. } if cleanup.reaped
         ));
-        let gone_at_shutdown = process.is_gone();
+        let gone_at_shutdown = process.is_gone() && payload.is_gone();
         let eventual_gone = tokio::time::timeout(Duration::from_secs(6), async {
-            while !process.is_gone() {
+            while !process.is_gone() || !payload.is_gone() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }).await.is_ok();
@@ -4353,7 +4375,7 @@ mod tests {
         let repeated = supervisor.shutdown().await;
         if let Some(root) = &evidence {
             std::fs::write(root.join("assertions.json"), serde_json::json!({
-                "pid": pid,
+                "pid": pid,"payload_pid":payload_pid,
                 "marker_pid": std::fs::read_to_string(&marker).expect("PID marker must survive cleanup").trim().parse::<u32>().unwrap(),
                 "session_id": matching.map(|session| session.session_id.to_string()),
                 "public_start_first_poll_pending": true,
@@ -4375,7 +4397,7 @@ mod tests {
         assert!(reported_reaped, "shutdown must preserve the original owner/session cleanup witness");
         assert!(gone_at_shutdown, "shutdown cannot complete before exact process cleanup");
         assert_eq!(repeated, report);
-        assert_eq!(std::fs::read_to_string(marker.with_extension("starts")).unwrap(), format!("{pid}\n"));
+        assert_eq!(std::fs::read_to_string(marker.with_extension("starts")).unwrap(), format!("{payload_pid}\n"));
     }
 
     #[cfg(any(unix, windows))]

@@ -72,19 +72,36 @@ tracing.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 nomifun-browser-macos = { path = "../../crates/backend/nomifun-browser-macos" }
-objc2 = "0.6"
+plist = "1"
+libc.workspace = true
+objc2 = { version = "0.6", features = ["exception"] }
 block2 = "0.6"
 objc2-foundation = "0.3"
+objc2-core-foundation = { version = "0.3", features = ["block2"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "UNUserNotificationCenter",
+    "UNNotification",
+    "UNNotificationSettings",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationTrigger",
+    "UNNotificationSound",
+] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
+    "block2",
     "NSApplication",
     "NSGraphics",
     "NSOpenPanel",
     "NSPanel",
     "NSResponder",
+    "NSRunningApplication",
     "NSSavePanel",
     "NSView",
     "NSWindow",
+    "NSWorkspace",
 ] }
 
 [target.'cfg(windows)'.dependencies]

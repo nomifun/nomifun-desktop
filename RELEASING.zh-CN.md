@@ -130,7 +130,7 @@ make dist VERSION="$VERSION" COMMIT="$COMMIT"
 必须在 Mac 上执行。一键脚本会自动判定两种场景：
 
 - **追加(APPEND)**：该版本的 GitHub Release 已存在（可能 Windows 侧先发过）——只补 macOS
-  产物、把 `darwin-aarch64` 条目并进 `latest.json`（一键脚本默认构建 Apple Silicon）。
+  所选架构产物、把 `darwin-aarch64` 或 `darwin-x86_64` 条目并进 `latest.json`（默认 Apple Silicon）。
 - **首发(CREATE)**：该版本还没有 Release（macOS 先发）——建 tag、建 Release（带 release
   note）、上传 macOS 产物；可用 `-Version` 顺带打版本号。
 
@@ -151,6 +151,7 @@ git pull
 
 # 追加（Windows 已先发，补 macOS）：
 bun run release:mac
+bun run release:mac -Architecture intel  # 追加独立 Intel 安装包与更新包
 
 # 首发（macOS 先发）：-Version 顺带 bump，-NotesFile/-Notes 提供 release note（首发必填）
 bun run release:mac -Version 0.1.14 -NotesFile notes.md
@@ -160,11 +161,12 @@ bun run release:mac -Version 0.1.14 -Notes "- 修复若干问题"
 bun run release:mac -DryRun     # 只读预检并打印计划（含判定出的模式），不 pull/bump/构建/上传/推送
 bun run release:mac -NoPush     # APPEND：仍上传但不提交推送；CREATE：只本地 bump/构建，不建 Release
 bun run release:mac -SkipPull   # 真实执行时跳过 git pull
+bun run release:mac --macos-arm64-only  # 显式停发 Intel，删除已有 Intel updater 条目
 ```
 
 **版本号**：单一真源是根 `Cargo.toml [workspace.package].version`。追加模式用当前版本；首发
-时若带 `-Version X.Y.Z` 且与当前不同，脚本先跑 `bun run bump` 打版本号，再以 `nomifun`
-署名提交、打 tag、建 Release（不带 `-Version` 则按当前版本走）。
+时若带 `-Version X.Y.Z` 且与当前不同，脚本先跑 `bun run bump` 打版本号，再使用贡献者配置的
+Git 身份提交、打 tag、建 Release（不带 `-Version` 则按当前版本走）。
 
 **Release note（对 LLM 友好）**：走命令行、不与 CHANGELOG 耦合，且 **GitHub Release 正文与
 `latest.json` 的 `notes` 共用同一份**。多行说明建议先写到 `.md` 再用 `-NotesFile` 传入。
@@ -172,10 +174,14 @@ bun run release:mac -SkipPull   # 真实执行时跳过 git pull
 追加模式 note 可选。
 
 脚本自动完成：读 `.env.release` 的 `GH_TOKEN`（若存在）或沿用 `gh auth login`、加载 updater
-私钥、判定模式、执行 `build:mac --signed --config apps/desktop/tauri.updater.conf.json`、校验
+私钥、判定模式、执行 `build:mac --signed <arm|intel> --config apps/desktop/tauri.updater.conf.json`、校验
 staple / codesign / Gatekeeper、`make:latest` 合并 darwin 条目、上传（追加 `--clobber` / 首发
-`gh release create`）、以 `nomifun` 提交 `latest.json`（首发含 bump）回 `main`、拉取 updater
+`gh release create`）、使用配置的 Git 身份提交 `latest.json`（首发含 bump）回 `main`、拉取 updater
 端点校验。任何一步失败都会明确报错并中断。
+
+同版本追加会保留另一种 Mac 架构和其他平台已有的 updater 条目。只有显式传入
+`--macos-arm64-only` 才删除 Intel 条目，该开关不能与 `-Architecture intel` 同用。
+Intel 产物发布前需要 Intel Mac 原生运行验收；Apple Silicon 上的 Rosetta 运行不能替代。
 
 ### 手动分步（等价于一键脚本内部流程）
 

@@ -683,14 +683,6 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
                                   {t(`agentSettings.effects.${action.effect_class}`, { defaultValue: action.effect_class })}
                                 </small>
                               </span>
-                              <details className={styles.actionTechnical}>
-                                <summary>{t('common.technical_details')}</summary>
-                                <dl>
-                                  <dt>{t('agentSettings.workbench.actionId')}</dt><dd><code>{action.action_id}</code></dd>
-                                  <dt>{t('agentSettings.workbench.inputContract')}</dt><dd><code>{action.input_schema}</code></dd>
-                                  <dt>{t('agentSettings.workbench.outputContract')}</dt><dd><code>{action.output_schema}</code></dd>
-                                </dl>
-                              </details>
                             </div>
                           );
                         })}

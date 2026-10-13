@@ -196,10 +196,17 @@ fn capture_screen_inner(display: Option<usize>, max_edge: u32) -> Result<Capture
         image::imageops::resize(&frame, img_w, img_h, image::imageops::FilterType::Triangle)
     };
 
-    let logical_w = monitor.width().unwrap_or(physical_w);
-    let logical_h = monitor.height().unwrap_or(physical_h);
-    let origin_x = monitor.x().unwrap_or(0);
-    let origin_y = monitor.y().unwrap_or(0);
+    // Physical pixels are not a safe fallback for logical points on Retina,
+    // and an invented (0, 0) origin could route input to the wrong monitor.
+    // A capture is usable for actuation only with complete native geometry.
+    let geometry_error = |error| format!("Could not read captured display geometry: {error}. Capture the display again before sending pointer input.");
+    let logical_w = monitor.width().map_err(geometry_error)?;
+    let logical_h = monitor.height().map_err(geometry_error)?;
+    let origin_x = monitor.x().map_err(geometry_error)?;
+    let origin_y = monitor.y().map_err(geometry_error)?;
+    if logical_w == 0 || logical_h == 0 {
+        return Err("Captured display has zero logical dimensions; pointer coordinates cannot be mapped safely.".to_owned());
+    }
 
     Ok(CapturedScreen {
         image: scaled,

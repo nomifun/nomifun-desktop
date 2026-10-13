@@ -15,14 +15,14 @@ const moduleItem = (
 ): CapabilityModuleCatalogItem => ({
   module: { id: asCapabilityId(id) }, display_name: id, description: id,
   source_package: { id: asPackageId('nomifun.test'), version: '1.0.0' }, authoring_policy, summary_kind: 'tool',
-  actions: [{ action_id: `${id}/run`, input_schema: 'input', output_schema: 'output', effect_class: 'pure', presentation: 'function_tool' }],
+  actions: [{ action_id: `${id}/run`, effect_class: 'pure', presentation: 'function_tool' }],
   context_schema_refs: [], event_schema_refs: [], required_resource_kinds: [], required_host_ports: [],
   required_modules: required.map((item) => item.module), conflicting_modules: [], supported_surfaces: ['desktop'],
 });
 const read = moduleItem('workspace.read', [], 'dependency_only');
 const write = moduleItem('workspace.write', [read], 'dependency_only');
 const work = moduleItem('workspace.edit', [write]);
-work.actions.push({ action_id: 'workspace.edit/delete', input_schema: 'input', output_schema: 'output', effect_class: 'destructive', presentation: 'function_tool' });
+work.actions.push({ action_id: 'workspace.edit/delete', effect_class: 'destructive', presentation: 'function_tool' });
 const modules = [read, write, work];
 const catalog = (items = modules): AgentCatalogResponse => ({
   modules: items,

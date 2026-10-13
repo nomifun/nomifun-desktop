@@ -6036,6 +6036,7 @@ mod session_boundary_tests {
                 args: Some(json!({"path": "src/app.ts"})),
                 output: Some("file contents".to_owned()),
                 is_error: Some(false),
+                ..Default::default()
             }),
         ).unwrap().unwrap();
         assert_eq!(tool.r#type, MessageType::ToolCall);
@@ -6064,12 +6065,46 @@ mod session_boundary_tests {
                     projection:json!({"correlation_id":message_id,"state":"recorded",
                         "tool_summary":{"call_id":"call-1","name":"exec_command","capability_id":capability}}),
                     semantic_digest:"digest".into(),
-                }, Some(&HistoricalToolObservation { turn_id:None,args:None,output:Some(output.clone()),is_error:Some(is_error) })
+                }, Some(&HistoricalToolObservation { turn_id:None,args:None,output:Some(output.clone()),is_error:Some(is_error),..Default::default() })
             ).unwrap().unwrap();
             assert_eq!(message.content["status"], expected);
             assert_eq!(message.content["output"], output);
             assert_eq!(message.status, Some(if expected == "canceled" { MessageStatus::Finish } else { MessageStatus::Error }));
         }
+    }
+
+    #[test]
+    fn system_permission_history_transport_uses_only_typed_canonical_observation() {
+        let session_id = AgentSessionId::from(SESSION_ID);
+        let message_id = "0190f5fe-7c00-7a00-8abc-012345678912";
+        let body = json!({"schema":"system-permission-required.v1","capability":"computer",
+            "action_id":"computer/observe","operation":"screenshot","permissions":["screen_recording"],
+            "execution":"not_executed"}).to_string();
+        let carrier = nomifun_engine_core::system_permission_error_carrier("SYSTEM_PERMISSION_REQUIRED", &body).unwrap();
+        let permission = nomifun_engine_core::project_system_permission_required(
+            Some("computer"), Some("computer/observe"), true, &carrier).unwrap();
+        let projection = || MessageProjection {
+            session_id: session_id.clone(), projection_id: format!("tool:{message_id}"),
+            first_seq: 4, last_seq: 6, presentation_intent: "tool".into(), message_type: None, message_status: None,
+            projection: json!({"correlation_id":message_id,"state":"recorded","tool_summary":{
+                "call_id":"permission-call","name":"computer","error_code":"SYSTEM_PERMISSION_REQUIRED",
+                "permission_required":permission,"result_seq":999999
+            }}), semantic_digest: "digest".into(),
+        };
+        let unsupported = canonical_message_response_with_observation(&session_id, 1000, projection(), None).unwrap().unwrap();
+        assert!(unsupported.content.get("permission_required").is_none());
+        assert!(unsupported.content.get("error_code").is_none());
+        assert!(unsupported.content.get("result_seq").is_none());
+        let confirmed = canonical_message_response_with_observation(&session_id, 1000, projection(),
+            Some(&HistoricalToolObservation {
+                capability_id: Some("computer".into()), action_id: Some("computer/observe".into()),
+                is_error: Some(true), output: Some(carrier), result_seq: Some(42),
+                permission_required: Some(permission), ..Default::default()
+            })).unwrap().unwrap();
+        assert_eq!(confirmed.content["status"], "error");
+        assert_eq!(confirmed.content["error_code"], "SYSTEM_PERMISSION_REQUIRED");
+        assert_eq!(confirmed.content["permission_required"]["permissions"], json!(["screen_recording"]));
+        assert_eq!(confirmed.content["result_seq"], 42);
     }
 
     #[test]
@@ -12691,20 +12726,27 @@ mod agent_switch_resource_tests {
     }
 
     #[test]
-    fn computer_and_workspace_still_require_bindings() {
+    fn unbound_computer_does_not_block_switch_but_workspace_still_requires_binding() {
         let required = BTreeSet::from([
             "browser".to_owned(),
             "computer".to_owned(),
             "workspace".to_owned(),
         ]);
         let bound = BTreeSet::from(["workspace".to_owned()]);
-        assert_eq!(
-            missing_agent_switch_resource_kinds(&required, &bound),
-            vec!["computer".to_owned()]
-        );
+        // The frozen Computer Role can remain selected while its optional
+        // device environment is unavailable. Only bound actions are runnable;
+        // omitting the device must not waive the workspace identity contract.
+        assert!(missing_agent_switch_resource_kinds(&required, &bound).is_empty());
         assert_eq!(
             missing_agent_switch_resource_kinds(&required, &BTreeSet::new()),
-            vec!["computer".to_owned(), "workspace".to_owned()]
+            vec!["workspace".to_owned()]
+        );
+        assert_eq!(
+            missing_agent_switch_resource_kinds(
+                &required,
+                &BTreeSet::from(["browser".to_owned(), "computer".to_owned()]),
+            ),
+            vec!["workspace".to_owned()]
         );
     }
 
@@ -14462,6 +14504,9 @@ fn canonical_message_response_with_observation(
                     "args": {},
                 }));
                 if let Some(summary) = summary.as_object_mut() {
+                    summary.remove("error_code");
+                    summary.remove("permission_required");
+                    summary.remove("result_seq");
                     let recorded_error = summary.get("error").and_then(Value::as_str).map(str::to_owned);
                     summary.entry("status".to_owned()).or_insert_with(|| json!(
                         if recorded_error.is_some() { "error" }
@@ -14472,6 +14517,21 @@ fn canonical_message_response_with_observation(
                         summary.entry("output".to_owned()).or_insert_with(|| json!(error));
                     }
                     if let Some(observation) = observation {
+                        // Derived only from the matching canonical Runtime call
+                        // and result, never from a message projection or prose.
+                        if let Some(capability_id) = &observation.capability_id {
+                            summary.insert("capability_id".to_owned(), json!(capability_id));
+                        }
+                        if let Some(action_id) = &observation.action_id {
+                            summary.insert("action_id".to_owned(), json!(action_id));
+                        }
+                        if let Some(result_seq) = observation.result_seq {
+                            summary.insert("result_seq".to_owned(), json!(result_seq));
+                        }
+                        if let Some(permission_required) = &observation.permission_required {
+                            summary.insert("error_code".to_owned(), json!(nomifun_engine_core::SYSTEM_PERMISSION_REQUIRED));
+                            summary.insert("permission_required".to_owned(), json!(permission_required));
+                        }
                         if let Some(turn_id) = &observation.turn_id {
                             summary.insert("turn_id".to_owned(), json!(turn_id));
                         }

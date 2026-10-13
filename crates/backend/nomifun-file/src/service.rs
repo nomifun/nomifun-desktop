@@ -59,7 +59,7 @@ pub const MAX_AGENT_PATCH_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum bytes in one workspace-relative patch path.
 const MAX_AGENT_PATCH_PATH_BYTES: usize = 4 * 1024;
 
-const FILE_WRITE_OUTCOME_UNKNOWN: &str = "workspace file publication outcome is unknown";
+pub(crate) const FILE_WRITE_OUTCOME_UNKNOWN: &str = "workspace file publication outcome is unknown";
 pub(crate) const FILE_DELETE_OUTCOME_UNKNOWN: &str = "workspace entry deletion outcome is unknown";
 
 pub fn file_write_outcome_unknown(error: &AppError) -> bool {
@@ -335,14 +335,31 @@ impl FileService {
         let result = tokio::task::spawn_blocking(move || {
             // Keep the directory handles alive if this future is cancelled;
             // the blocking owner still must finish publication and cleanup.
-            let _parent_guard = prepared_parent;
+            let parent_guard = prepared_parent;
+            #[cfg(unix)]
+            let existed = {
+                parent_guard.verify()?;
+                let name = path_owned.file_name().ok_or_else(|| AppError::BadRequest("write target has no filename".into()))?;
+                match parent_guard.directory().symlink_metadata(name) {
+                    Ok(_) => true,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(error) => return Err(AppError::Internal(format!("cannot inspect workspace write target: {error}")).into()),
+                }
+            };
+            #[cfg(not(unix))]
             let existed = match std::fs::symlink_metadata(&path_owned) {
                 Ok(_) => true,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
                 Err(error) => return Err(AppError::Internal(format!("cannot inspect workspace write target: {error}")).into()),
             };
             let source = if existed { PublicationSource::Existing } else { PublicationSource::Absent };
-            write_file_with_source_sync_atomic(&path_owned, &data_owned, source)?;
+            #[cfg(unix)]
+            crate::unix_publication::publish(&parent_guard, &data_owned, source)?;
+            #[cfg(not(unix))]
+            {
+                let _parent_guard = parent_guard;
+                write_file_with_source_sync_atomic(&path_owned, &data_owned, source)?;
+            }
             Ok(!existed)
         }).await.map_err(|_| AppError::Internal(format!(
             "{FILE_WRITE_OUTCOME_UNKNOWN}; publication task stopped; re-read the target before retry"
@@ -796,6 +813,12 @@ impl FileService {
             (Some(bytes), None) => PublicationSource::Matching(bytes),
             (None, _) => PublicationSource::Absent,
         };
+        #[cfg(unix)]
+        let result = match &prepared_parent {
+            Some(parent) => crate::unix_publication::publish(parent, data, source),
+            None => write_file_with_source_sync_atomic(&canonical, data, source),
+        };
+        #[cfg(not(unix))]
         let result = write_file_with_source_sync_atomic(&canonical, data, source);
         let published_identity = match &result {
             Ok(identity) => identity.as_ref(),
@@ -1723,7 +1746,7 @@ fn current_file_matches_with_hooks(
 }
 
 #[derive(Clone, Copy)]
-enum PublicationSource<'a> {
+pub(crate) enum PublicationSource<'a> {
     Absent,
     Existing,
     Matching(&'a [u8]),
@@ -1731,10 +1754,10 @@ enum PublicationSource<'a> {
 }
 
 impl PublicationSource<'_> {
-    fn expected_bytes(&self) -> Option<&[u8]> {
+    pub(crate) fn expected_bytes(&self) -> Option<&[u8]> {
         match self { Self::Matching(bytes) | Self::Restoring { bytes, .. } => Some(bytes), _ => None }
     }
-    fn expected_identity(&self) -> Option<&PublicationIdentity> {
+    pub(crate) fn expected_identity(&self) -> Option<&PublicationIdentity> {
         match self { Self::Restoring { identity, .. } => Some(identity), _ => None }
     }
 }
@@ -2180,7 +2203,7 @@ fn open_writable_publication_target(
 }
 
 #[cfg(target_os = "macos")]
-fn copy_macos_publication_metadata(
+pub(crate) fn copy_macos_publication_metadata(
     source: &std::fs::File,
     target: &std::fs::File,
 ) -> std::io::Result<()> {
@@ -2550,10 +2573,10 @@ fn split_base_ext(name: &str) -> (&str, &str) {
 fn get_file_metadata_sync(path: &Path) -> Result<FileMetadata, AppError> {
     let metadata = std::fs::metadata(path)
         .map_err(|e| AppError::NotFound(format!("cannot read metadata for '{}': {e}", path.display())))?;
-    Ok(file_metadata_from_observation(path, &metadata))
+    Ok(file_metadata_from_observation(path, &cap_std::fs::Metadata::from_just_metadata(metadata)))
 }
 
-fn file_metadata_from_observation(path: &Path, metadata: &std::fs::Metadata) -> FileMetadata {
+fn file_metadata_from_observation(path: &Path, metadata: &cap_std::fs::Metadata) -> FileMetadata {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -2574,7 +2597,7 @@ fn file_metadata_from_observation(path: &Path, metadata: &std::fs::Metadata) -> 
     let last_modified = metadata
         .modified()
         .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .and_then(|t| t.into_std().duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
@@ -2598,6 +2621,10 @@ fn remove_entry_scoped_sync_with_hooks(
     path: &Path, authority: &PathAuthority,
     before_open: impl FnOnce(), after_open: impl FnOnce(),
 ) -> Result<(), AppError> {
+    #[cfg(unix)]
+    return crate::unix_delete::remove_entry(path, authority, before_open, after_open);
+    #[cfg(not(unix))]
+    {
     #[cfg(windows)]
     let root = crate::windows_read::ReadRoot::for_target(path, authority)?;
     #[cfg(not(windows))]
@@ -2608,8 +2635,10 @@ fn remove_entry_scoped_sync_with_hooks(
         return crate::windows_delete::remove_entry(path, Some(&root), after_open);
     }
     remove_entry_sync_with_hook(path, after_open)
+    }
 }
 
+#[cfg(any(test, not(unix)))]
 fn remove_entry_sync_with_hook(path: &Path, after_open: impl FnOnce()) -> Result<(), AppError> {
     #[cfg(windows)]
     { crate::windows_delete::remove_entry(path, None, after_open) }

@@ -168,6 +168,7 @@ import type {
   AgentSessionCapabilitySelection,
   AgentSessionCapabilitySelectionState,
   CapabilityCatalogItem,
+  ChatRouteRecord,
   CreateAgentPresetFromTemplateRequest,
   CreateAgentPresetRequest,
   CreateAgentSessionRequest,
@@ -649,6 +650,13 @@ export const agentPlatform = {
     const query = params.revision == null ? '' : `?revision=${params.revision}`;
     return `/api/agent-presets/${encodeURIComponent(params.preset_id)}/editor${query}`;
   }),
+  resolveChatModelRoute: httpPost<
+    ChatRouteRecord,
+    { preset_id: string; model: { provider_id: string; model: string } }
+  >(
+    params => `/api/agent-presets/${encodeURIComponent(params.preset_id)}/chat-model-route`,
+    params => params.model
+  ),
   saveRevision: httpPost<
     SaveAgentPresetRevisionResponse,
     { preset_id: string; request: SaveAgentPresetRevisionRequest }

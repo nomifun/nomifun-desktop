@@ -199,7 +199,7 @@ mod tests {
         assert!(scope.resolve_relative_path("./.nomifun/artifacts/receipt").is_err());
         assert!(scope.resolve_relative_path("nested//file.txt").is_err());
         assert!(scope.resolve_relative_path("./nested/file.txt").is_err());
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         assert!(scope.resolve_relative_path(".NOMIFUN/artifacts/receipt").is_err());
     }
 

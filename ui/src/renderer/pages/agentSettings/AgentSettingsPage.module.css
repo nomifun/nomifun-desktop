@@ -95,6 +95,70 @@
 .nativeSelect:disabled { cursor:not-allowed; opacity:.55; }
 .fieldHint { color: var(--agent-muted); font-size: 12px; line-height: 1.6; }
 .modelPicker { min-width: 0; display: grid; gap: 7px; }
+
+.identityBody { padding: 24px 26px 28px; background: var(--color-bg-1); }
+.identityPanel {
+  --identity-card: var(--color-bg-5, var(--bg-base));
+  --identity-control: var(--color-bg-1);
+  --identity-muted: color-mix(in srgb, var(--color-text-2) 55%, var(--color-text-3));
+  display: grid;
+  gap: 18px;
+  width: 100%;
+  max-width: 1000px;
+  margin: 0 auto;
+}
+.identityPanel[hidden] { display: none; }
+.identityCard { min-width: 0; padding: 20px 22px 22px; border: 1px solid var(--color-border-2); border-radius: 14px; background: var(--identity-card); box-shadow: 0 2px 6px color-mix(in srgb, var(--color-text-1) 3%, transparent); }
+.identityHeading { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 18px; }
+.identitySectionIcon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 36px; width: 36px; height: 36px; border: 1px solid var(--color-border-2); border-radius: 10px; background: var(--identity-control); color: var(--color-text-2); }
+.identityHeading h3 { margin: 0; color: var(--color-text-1); font-size: 14px; font-weight: 600; line-height: 1.5; }
+.identityHeading p { margin: 4px 0 0; color: var(--identity-muted); font-size: 12px; line-height: 1.6; }
+.identityFields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 22px; align-items: start; }
+.writingFields { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 22px; align-items: stretch; }
+.identityPanel .field { gap: 8px; }
+.identityPanel .field > span:first-child, .modelFieldHeading > span { color: var(--color-text-2); font-size: 12px; font-weight: 600; line-height: 20px; }
+.modelFieldHeading { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 20px; }
+.modelFieldHeading small { margin-left: 4px; color: var(--identity-muted); font-size: 11px; font-weight: 400; }
+.modelManagement:global(.arco-btn) { height: 20px; padding: 0; color: var(--identity-muted); border-radius: 4px; font-size: 11px; line-height: 20px; }
+.modelManagement:global(.arco-btn):not(:disabled):hover { color: rgb(var(--primary-6)); background: transparent; }
+.identityPanel .field > :global(.arco-input),
+.identityPanel .field > :global(.arco-input-inner-wrapper),
+.identityPanel .field :global(.arco-select-view),
+.identityPanel .field :global(.arco-textarea) {
+  border: 1px solid var(--color-border-3) !important;
+  border-radius: 9px !important;
+  background-color: var(--identity-control) !important;
+  color: var(--color-text-1) !important;
+  font-size: 13px;
+  box-shadow: none;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+.identityPanel .field > :global(.arco-input), .identityPanel .field > :global(.arco-input-inner-wrapper) { min-height: 38px; padding: 8px 12px; line-height: 20px; }
+.identityPanel :global(.arco-input-inner-wrapper) > :global(.arco-input) { background-color: transparent !important; }
+.identityPanel .field :global(.arco-select-view) { min-height: 38px; padding: 0 12px; line-height: 36px; }
+.identityPanel .field :global(.arco-textarea-wrapper) { flex: 1; display: flex; min-width: 0; }
+.identityPanel .field :global(.arco-textarea) { padding: 12px 14px; font-size: 13px; line-height: 1.7; resize: vertical; }
+.identityPanel .field > :global(.arco-input):not(:disabled):hover,
+.identityPanel .field :global(.arco-select):not(:global(.arco-select-disabled)) :global(.arco-select-view):hover,
+.identityPanel .field :global(.arco-textarea):not(:disabled):hover { border-color: color-mix(in srgb, var(--color-text-3) 55%, var(--color-border-3)) !important; }
+.identityPanel .field > :global(.arco-input):focus,
+.identityPanel .field :global(.arco-select-focused) :global(.arco-select-view),
+.identityPanel .field :global(.arco-textarea):focus { border-color: color-mix(in srgb, rgb(var(--primary-6)) 60%, var(--color-border-3)) !important; box-shadow: 0 0 0 3px rgba(var(--primary-6), .07) !important; }
+.identityPanel .field > :global(.arco-input):disabled,
+.identityPanel .field :global(.arco-select-disabled) :global(.arco-select-view),
+.identityPanel .field :global(.arco-textarea):disabled { color: var(--color-text-4) !important; background-color: var(--color-bg-2) !important; cursor: not-allowed; }
+.identityPanel :global(.arco-input)::placeholder, .identityPanel :global(.arco-textarea)::placeholder { color: var(--identity-muted) !important; opacity: 1; }
+.identityPanel .modelPicker { gap: 6px; }
+.identityPanel .modelPicker .fieldHint { color: var(--identity-muted); font-size: 11px; line-height: 1.6; }
+.identityPanel .modelPicker [role='alert'] { color: rgb(var(--danger-6)); }
+
+@container agent-editor (max-width: 740px) {
+  .identityCard { padding: 18px; }
+  .writingFields { grid-template-columns: 1fr; gap: 18px; }
+}
+@container agent-editor (max-width: 600px) {
+  .identityFields { grid-template-columns: 1fr; gap: 16px; }
+}
 .runtimePolicyBoundary { flex-shrink:0; padding:4px 8px; border:1px solid rgba(var(--primary-6),.18); border-radius:999px; background:rgba(var(--primary-6),.06); color:rgb(var(--primary-6)); font-size:10px; font-weight:600; line-height:1.4; }
 .runtimePolicyFlow { list-style:none; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:22px; margin:0 0 18px; padding:0; }
 .runtimePolicyFlowStep { position:relative; display:flex; align-items:flex-start; gap:9px; min-width:0; padding:11px 12px; border:1px solid var(--agent-border); border-radius:10px; background:var(--color-bg-1); }

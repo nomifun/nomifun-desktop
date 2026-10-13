@@ -11,10 +11,14 @@ describe('native release evidence publishing', () => {
     expect(mac.match(/release (?:create|upload)[^\n]+"\$ReleaseLock"/g)).toHaveLength(2);
   });
 
-  test('macOS release uses the supported arm64 packages and scans only its current target', () => {
+  test('macOS release defaults to arm64, selects native Intel artifacts and scans only its current target', () => {
     expect(mac.includes('Triple="aarch64-apple-darwin"')).toBe(true);
-    expect(mac.includes('NomiFun_${TargetVersion}_aarch64.dmg')).toBe(true);
-    expect(mac.includes('--target-dir "target/$Triple" --target-triple "$Triple" --macos-arm64-only')).toBe(true);
+    expect(mac.includes('Triple="x86_64-apple-darwin"')).toBe(true);
+    expect(mac.includes('NomiFun_${TargetVersion}_${PackageSuffix}.dmg')).toBe(true);
+    expect(mac.includes('NomiFun_${TargetVersion}_x64.app.tar.gz')).toBe(true);
+    expect(mac.includes('LatestArgs=(--target-dir "target/$Triple" --target-triple "$Triple")')).toBe(true);
+    expect(mac.includes('MacosArm64Only=0')).toBe(true);
+    expect(mac.includes('LatestArgs+=(--macos-arm64-only)')).toBe(true);
     expect(mac.includes("['darwin-x86_64', 'darwin-aarch64']")).toBe(false);
   });
 

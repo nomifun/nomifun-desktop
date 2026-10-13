@@ -24,16 +24,49 @@ use crate::fallback_backend;
 const MAX_WAIT_SECONDS: f64 = 5.0;
 const DEFAULT_SCROLL_AMOUNT: i64 = 3;
 
+type GestureFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>,
+>;
+
+/// Injection boundary for ref-addressed pointer gestures. The production port
+/// forwards native clicks unchanged; tests substitute a recorder so even a
+/// failed safety counterexample cannot send native input.
+trait GesturePort: Send + Sync {
+    fn click(&self, x: i32, y: i32, button: enigo::Button, count: u32) -> GestureFuture<'_>;
+}
+
+struct NativeGesturePort;
+
+impl GesturePort for NativeGesturePort {
+    fn click(&self, x: i32, y: i32, button: enigo::Button, count: u32) -> GestureFuture<'_> {
+        Box::pin(input::click(x, y, button, count))
+    }
+
+}
+
+const UNSUPPORTED_VALUE_INPUT_REJECTION: &str = "COMPUTER_INPUT_UNSUPPORTED_NO_EFFECT: set_element_value was rejected before native mutation. No pointer or keyboard fallback was admitted.";
+
+/// The exact first-party marker for a whole-value setter rejection before any
+/// native mutation. A backend hint containing this text is not this marker.
+pub fn is_proven_unsupported_input_rejection(result: &ToolResult) -> bool {
+    result.is_error && result.images.is_empty() && result.content == UNSUPPORTED_VALUE_INPUT_REJECTION
+}
+
 /// True only for the exact semantic-ref stale rejection produced before the
 /// Accessibility backend performs an action. The message also proves that the
 /// Computer layer did not use its pixel fallback, so a role owner may settle
 /// the reserved external effect as rejected instead of outcome-unknown.
 pub fn is_proven_stale_input_rejection(result: &ToolResult) -> bool {
-    result.is_error
-        && result.images.is_empty()
-        && result.content.starts_with("Accessibility action on [")
-        && result.content.contains(" failed: stale reference:")
-        && result.content.contains("No pixel fallback was performed;")
+    if !result.is_error || !result.images.is_empty() { return false; }
+    let Some(body) = result.content.strip_prefix("Accessibility action on [") else { return false; };
+    let Some((reference, category)) = body.split_once(']') else { return false; };
+    let Ok(reference_number) = reference.parse::<u32>() else { return false; };
+    if reference != reference_number.to_string() { return false; }
+    let Some(reason) = category.strip_prefix(" failed: stale reference: ") else { return false; };
+    let Some(reason) = reason.strip_suffix(
+        ". No pixel fallback was performed; re-run observe before using element refs.",
+    ) else { return false; };
+    !reason.is_empty()
 }
 
 /// Example key combo for the platform we are compiled for. The accelerator
@@ -58,6 +91,7 @@ pub struct ComputerTool {
     /// The most recent `observe` snapshot, for resolving `[ref]` actions. Element
     /// bounds here are in OS accessibility coordinates (screen logical points).
     last_snapshot: Mutex<Option<SnapshotCache>>,
+    gesture: Arc<dyn GesturePort>,
 }
 
 struct SnapshotCache {
@@ -70,7 +104,6 @@ struct CachedEntry {
     /// What the model sees: display `[ref]`, role/name, accessibility bounds, source.
     display: ElementEntry,
     engine_ref: u32,
-    screen_center: (i32, i32),
 }
 
 impl ComputerTool {
@@ -80,7 +113,16 @@ impl ComputerTool {
             last_capture: Mutex::new(None),
             a11y: Mutex::new(None),
             last_snapshot: Mutex::new(None),
+            gesture: Arc::new(NativeGesturePort),
         }
+    }
+
+    /// Retire cached pixels and element refs without touching any device. Role
+    /// owners use this at observation/settlement boundaries; an admitted input
+    /// keeps its geometry until it has settled.
+    pub fn clear_cached_observation(&self) {
+        *self.last_snapshot.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.last_capture.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
 
     /// Execute one native operation under an exact canonical `computer`
@@ -182,8 +224,7 @@ impl ComputerTool {
     /// Read the accessibility tree without capturing pixels.
     async fn do_observe(&self) -> ToolResult {
         // A failed refresh must not leave old targets actionable.
-        *self.last_snapshot.lock().unwrap_or_else(|p| p.into_inner()) = None;
-        *self.last_capture.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        self.clear_cached_observation();
         let engine = match self.engine() {
             Ok(e) => e,
             Err(msg) => {
@@ -209,11 +250,9 @@ impl ComputerTool {
             ""
         };
         let cached: Vec<_> = snap.entries.iter().map(|entry| {
-            let (cx, cy) = entry.bounds.center();
             CachedEntry {
                 display: entry.clone(),
                 engine_ref: entry.r#ref,
-                screen_center: (cx as i32, cy as i32),
             }
         }).collect();
         let count = cached.len();
@@ -267,7 +306,7 @@ impl ComputerTool {
             Ok(Ok(effect)) => return ToolResult::text(format!(
                 "{}. Run `observe` to verify the result.", effect.message
             )),
-            Ok(Err(e @ (A11yError::Unsupported { .. } | A11yError::Backend(_)))) => {
+            Ok(Err(e @ A11yError::Unsupported { .. })) => {
                 return fallback(e).await;
             }
             Ok(Err(e)) => e.to_string(),
@@ -297,8 +336,13 @@ impl ComputerTool {
             generation,
             ElementAction::LeftClick,
             |e| async move {
-                let (sx, sy) = entry.screen_center;
-                match input::click(sx, sy, enigo::Button::Left, 1).await {
+                let (sx, sy) = match self.validated_ref_screen_center(
+                    r, entry.engine_ref, generation, entry.display.bounds,
+                ).await {
+                    Ok(center) => center,
+                    Err(error) => return ToolResult::error(error),
+                };
+                match self.gesture.click(sx, sy, enigo::Button::Left, 1).await {
                     Ok(()) => ToolResult::text(format!(
                         "The accessibility action on [{r}] did not succeed ({e}); fell \
                          back to a pixel click at the element center. Run `observe` to verify."
@@ -312,8 +356,8 @@ impl ComputerTool {
         ).await
     }
 
-    /// Set the text value of an element by `[ref]`. Accessibility elements use
-    /// AXValue with a gated focus-then-type fallback.
+    /// Set the complete value of an element by `[ref]`. Only native whole-value
+    /// setters implement this operation; typing at a caret is not equivalent.
     async fn do_set_element_value(&self, input: &Value) -> ToolResult {
         let r = match require_u32(input, "ref") {
             Ok(r) => r,
@@ -331,30 +375,61 @@ impl ComputerTool {
         self.act_on_ax(
             entry.engine_ref,
             generation,
-            ElementAction::SetValue(text.clone()),
-            |_| Self::set_value_by_typing(r, entry.screen_center, text),
+            ElementAction::SetValue(text),
+            |_| async {
+                self.clear_cached_observation();
+                ToolResult::error(UNSUPPORTED_VALUE_INPUT_REJECTION)
+            },
         ).await
     }
 
-    async fn set_value_by_typing(r: u32, (sx, sy): (i32, i32), text: String) -> ToolResult {
-        if let Err(pe) = input::click(sx, sy, enigo::Button::Left, 1).await {
-            return ToolResult::error(format!(
-                "Could not focus element [{r}] to type into it: {pe}"
-            ));
-        }
-        match input::type_text(text).await {
-            Ok(()) => ToolResult::text(format!(
-                "Set element [{r}] by clicking the field and typing the text. Run `observe` to verify."
+    /// Revalidate a retained `[ref]` before a pointer gesture. This never
+    /// invokes a semantic action and never falls back to stale coordinates if
+    /// the backend cannot verify the target. The OS scene can still change
+    /// after validation; this is not an atomic scene/input transaction.
+    async fn ref_screen_center(&self, r: u32) -> Result<(i32, i32), String> {
+        let (generation, entry) = self.resolve_ref(r)?;
+        self.validated_ref_screen_center(r, entry.engine_ref, generation, entry.display.bounds).await
+    }
+
+    async fn validated_ref_screen_center(
+        &self,
+        r: u32,
+        engine_ref: u32,
+        generation: SnapshotGen,
+        expected_bounds: nomi_a11y::Rect,
+    ) -> Result<(i32, i32), String> {
+        let engine = match self.engine() {
+            Ok(engine) => engine,
+            Err(error) => return self.reject_gesture_target(r, A11yError::Backend(error)),
+        };
+        let resolved = tokio::task::spawn_blocking(move || {
+            engine.resolve_pixel_target(&Target::Ref(engine_ref), generation)
+        }).await;
+        let bounds = match resolved {
+            Ok(Ok(bounds)) if bounds == expected_bounds => bounds,
+            Ok(Ok(_)) => return self.reject_gesture_target(r, A11yError::Stale(
+                "the live gesture bounds no longer match the observed target; re-run observe".into(),
             )),
-            Err(te) => ToolResult::error(format!("Typing into element [{r}] failed: {te}")),
+            Ok(Err(error)) => return self.reject_gesture_target(r, error),
+            Err(error) => return self.reject_gesture_target(r, A11yError::Backend(
+                format!("target validation task failed: {error}"),
+            )),
+        };
+        match bounds.pixel_center() {
+            Some(center) => Ok(center),
+            None => self.reject_gesture_target(r, A11yError::Stale(
+                "the gesture target has invalid or unrepresentable screen bounds; re-run observe".into(),
+            )),
         }
     }
 
-    /// Resolve a `[ref]` from the latest snapshot to its screen-space center,
-    /// for a pixel gesture (right/double click) that has no semantic equivalent.
-    fn ref_screen_center(&self, r: u32) -> Result<(i32, i32), String> {
-        let (_, entry) = self.resolve_ref(r)?;
-        Ok(entry.screen_center)
+    fn reject_gesture_target<T>(&self, r: u32, error: A11yError) -> Result<T, String> {
+        *self.last_snapshot.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        Err(format!(
+            "Accessibility action on [{r}] failed: {error}. No pixel fallback was \
+             performed; re-run observe before using element refs."
+        ))
     }
 
     /// Perform a pixel mouse gesture (right-click / double-click) on the element
@@ -371,11 +446,11 @@ impl ComputerTool {
             Ok(r) => r,
             Err(e) => return ToolResult::error(e),
         };
-        let (sx, sy) = match self.ref_screen_center(r) {
+        let (sx, sy) = match self.ref_screen_center(r).await {
             Ok(v) => v,
             Err(msg) => return ToolResult::error(msg),
         };
-        match input::click(sx, sy, button, count).await {
+        match self.gesture.click(sx, sy, button, count).await {
             Ok(()) => ToolResult::text(format!(
                 "Performed {verb} on element [{r}] at its center. Run `observe` (or take a \
                  screenshot) to verify the result."
@@ -688,6 +763,565 @@ mod tests {
     use super::*;
     use nomi_a11y::Source;
 
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct GestureLiveState {
+        frontmost_pid: i32,
+        window_id: u32,
+        bounds: nomi_a11y::Rect,
+        dirty: bool,
+        covered: bool,
+    }
+
+    const OBSERVED_GESTURE_STATE: GestureLiveState = GestureLiveState {
+        frontmost_pid: 41,
+        window_id: 11,
+        bounds: nomi_a11y::Rect { x: -1200.0, y: 42.0, w: 80.0, h: 20.0 },
+        dirty: false,
+        covered: false,
+    };
+
+    #[derive(Clone, Copy)]
+    enum SemanticReply {
+        UnsupportedAfterDrift(GestureLiveState),
+        BackendAfterEffect,
+        UncertainAfterEffect,
+        UncertainWithStaleHintAfterEffect,
+        NativeWholeValueSetter,
+    }
+
+    struct FakeTextField {
+        value: String,
+        caret: usize,
+        readonly: bool,
+    }
+
+    struct GestureEngine {
+        live: Mutex<GestureLiveState>,
+        resolver_calls: std::sync::atomic::AtomicUsize,
+        resolver_failure: Mutex<Option<fn() -> A11yError>>,
+        semantic_reply: Mutex<Option<SemanticReply>>,
+        semantic_calls: std::sync::atomic::AtomicUsize,
+        semantic_effects: std::sync::atomic::AtomicUsize,
+        text_field: Mutex<Option<Arc<Mutex<FakeTextField>>>>,
+    }
+
+    impl Default for GestureEngine {
+        fn default() -> Self {
+            Self {
+                live: Mutex::new(OBSERVED_GESTURE_STATE),
+                resolver_calls: std::sync::atomic::AtomicUsize::new(0),
+                resolver_failure: Mutex::new(None),
+                semantic_reply: Mutex::new(None),
+                semantic_calls: std::sync::atomic::AtomicUsize::new(0),
+                semantic_effects: std::sync::atomic::AtomicUsize::new(0),
+                text_field: Mutex::new(None),
+            }
+        }
+    }
+
+    impl A11yEngine for GestureEngine {
+        fn capabilities(&self) -> nomi_a11y::Capabilities {
+            panic!("the gesture test must not probe a native backend")
+        }
+
+        fn observe(&self, _: &ObserveOpts) -> Result<nomi_a11y::Snapshot, A11yError> {
+            assert_eq!(*self.live.lock().unwrap(), OBSERVED_GESTURE_STATE);
+            let value = self.text_field.lock().unwrap().as_ref()
+                .map(|field| field.lock().unwrap().value.clone());
+            Ok(nomi_a11y::Snapshot {
+                generation: SnapshotGen(9),
+                entries: vec![ElementEntry {
+                    r#ref: 7,
+                    role: "textfield".into(),
+                    name: Some("Gesture audit target".into()),
+                    value,
+                    states: vec![],
+                    bounds: OBSERVED_GESTURE_STATE.bounds,
+                    source: Source::A11y,
+                }],
+                text: "[7] textfield \"Gesture audit target\"".into(),
+                truncated: false,
+                pid: Some(OBSERVED_GESTURE_STATE.frontmost_pid),
+                app_name: Some("Fake gesture fixture".into()),
+                window_title: Some("Fake gesture window".into()),
+            })
+        }
+
+        fn resolve_pixel_target(
+            &self,
+            target: &Target,
+            generation: SnapshotGen,
+        ) -> Result<nomi_a11y::Rect, A11yError> {
+            use std::sync::atomic::Ordering;
+            self.resolver_calls.fetch_add(1, Ordering::SeqCst);
+            assert!(matches!(target, Target::Ref(7)));
+            assert_eq!(generation, SnapshotGen(9));
+            if let Some(failure) = *self.resolver_failure.lock().unwrap() {
+                return Err(failure());
+            }
+            let live = *self.live.lock().unwrap();
+            if live != OBSERVED_GESTURE_STATE {
+                return Err(A11yError::Stale(format!(
+                    "the retained gesture target changed after observe: {live:?}"
+                )));
+            }
+            Ok(live.bounds)
+        }
+
+        fn invoke(
+            &self,
+            target: &Target,
+            generation: SnapshotGen,
+            action: ElementAction,
+        ) -> Result<nomi_a11y::Effect, A11yError> {
+            use std::sync::atomic::Ordering;
+            let reply = *self.semantic_reply.lock().unwrap();
+            let Some(reply) = reply else {
+                panic!("pixel target validation must not perform a semantic action")
+            };
+            assert!(matches!(target, Target::Ref(7)));
+            assert_eq!(generation, SnapshotGen(9));
+            assert!(matches!(action, ElementAction::LeftClick | ElementAction::SetValue(_)));
+            self.semantic_calls.fetch_add(1, Ordering::SeqCst);
+            match reply {
+                SemanticReply::UnsupportedAfterDrift(live) => {
+                    *self.live.lock().unwrap() = live;
+                    Err(A11yError::Unsupported {
+                        capability: "semantic action".into(),
+                        hint: "no semantic request was admitted, but the live scene may have changed".into(),
+                    })
+                }
+                SemanticReply::BackendAfterEffect => {
+                    self.semantic_effects.fetch_add(1, Ordering::SeqCst);
+                    Err(A11yError::Backend("the semantic effect occurred before the provider reply failed".into()))
+                }
+                SemanticReply::UncertainAfterEffect => {
+                    self.semantic_effects.fetch_add(1, Ordering::SeqCst);
+                    Err(A11yError::Uncertain("the admitted semantic request has an unknown effect".into()))
+                }
+                SemanticReply::UncertainWithStaleHintAfterEffect => {
+                    self.semantic_effects.fetch_add(1, Ordering::SeqCst);
+                    Err(A11yError::Uncertain(
+                        "provider reply failed: stale reference: this is only a nested hint. No pixel fallback was performed; the original semantic request already had an effect".into(),
+                    ))
+                }
+                SemanticReply::NativeWholeValueSetter => {
+                    let ElementAction::SetValue(value) = action else { panic!("the fake whole-value setter only accepts SetValue"); };
+                    let field = self.text_field.lock().unwrap().clone().expect("a field must exist");
+                    let mut field = field.lock().unwrap();
+                    if field.readonly {
+                        return Err(A11yError::Unsupported {
+                            capability: "native whole-value setter".into(), hint: "the field is read-only before dispatch".into(),
+                        });
+                    }
+                    field.value = value;
+                    field.caret = field.value.len();
+                    self.semantic_effects.fetch_add(1, Ordering::SeqCst);
+                    Ok(nomi_a11y::Effect { changed: true, message: "native whole-value setter acknowledged".into() })
+                }
+            }
+        }
+
+        fn focus_window(&self, _: i32) -> Result<nomi_a11y::Effect, A11yError> {
+            panic!("the gesture test must not activate a window")
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeGesturePort {
+        calls: Mutex<Vec<(i32, i32, enigo::Button, u32)>>,
+    }
+
+    impl GesturePort for FakeGesturePort {
+        fn click(&self, x: i32, y: i32, button: enigo::Button, count: u32) -> GestureFuture<'_> {
+            self.calls.lock().unwrap().push((x, y, button, count));
+            Box::pin(std::future::ready(Ok(())))
+        }
+    }
+
+    async fn gesture_fixture() -> (ComputerTool, Arc<GestureEngine>, Arc<FakeGesturePort>) {
+        gesture_fixture_with_text_field(None).await
+    }
+
+    async fn gesture_fixture_with_text_field(
+        text_field: Option<Arc<Mutex<FakeTextField>>>,
+    ) -> (ComputerTool, Arc<GestureEngine>, Arc<FakeGesturePort>) {
+        let engine = Arc::new(GestureEngine::default());
+        let gesture = Arc::new(FakeGesturePort::default());
+        *engine.text_field.lock().unwrap() = text_field.clone();
+        let mut tool = tool();
+        *tool.a11y.lock().unwrap() = Some(Ok(engine.clone()));
+        tool.gesture = gesture.clone();
+        let observed = tool.execute_authorized(
+            crate::capability::COMPUTER_A11Y_OBSERVE_ACTION_ID,
+            json!({ "action": "observe" }),
+        ).await;
+        assert!(!observed.is_error, "{}", observed.content);
+        assert!(gesture.calls.lock().unwrap().is_empty());
+        (tool, engine, gesture)
+    }
+
+    async fn assert_gesture_rejects_drift(live: GestureLiveState) {
+        use std::sync::atomic::Ordering;
+        let mut failures = Vec::new();
+        for operation in ["right_click_element", "double_click_element"] {
+            let (tool, engine, gesture) = gesture_fixture().await;
+            *engine.live.lock().unwrap() = live;
+            let result = tool.execute_authorized(
+                crate::capability::COMPUTER_INPUT_ACTION_ID,
+                json!({ "action": operation, "ref": 7 }),
+            ).await;
+            let calls = gesture.calls.lock().unwrap().clone();
+            let resolver_calls = engine.resolver_calls.load(Ordering::SeqCst);
+            if !result.is_error || !calls.is_empty() || resolver_calls != 1
+                || !result.content.contains("stale reference")
+            {
+                failures.push(format!(
+                    "{operation}: resolver_calls={resolver_calls}, native_gesture_calls={calls:?}, \
+                     live={live:?}, result={}", result.content,
+                ));
+            }
+        }
+        assert!(failures.is_empty(),
+            "MAC38 gestures must validate the exact observed ref/generation and reject live \
+             drift before native admission:\n{}", failures.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn element_gesture_rejects_frontmost_drift_without_native_admission() {
+        assert_gesture_rejects_drift(GestureLiveState {
+            frontmost_pid: 42,
+            ..OBSERVED_GESTURE_STATE
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn element_gesture_rejects_window_drift_without_native_admission() {
+        assert_gesture_rejects_drift(GestureLiveState {
+            window_id: 12,
+            ..OBSERVED_GESTURE_STATE
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn element_gesture_rejects_bounds_drift_without_native_admission() {
+        assert_gesture_rejects_drift(GestureLiveState {
+            bounds: nomi_a11y::Rect { x: -800.0, ..OBSERVED_GESTURE_STATE.bounds },
+            ..OBSERVED_GESTURE_STATE
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn element_gesture_rejects_dirty_snapshot_without_native_admission() {
+        assert_gesture_rejects_drift(GestureLiveState {
+            dirty: true,
+            ..OBSERVED_GESTURE_STATE
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn element_gesture_preserves_buttons_counts_and_ax_coordinates() {
+        let (tool, _engine, gesture) = gesture_fixture().await;
+        // Ref geometry stays in OS logical coordinates even if a stale image
+        // mapping exists. No screenshot or native device is touched here.
+        *tool.last_capture.lock().unwrap() = Some(CaptureGeometry {
+            img_w: 200,
+            img_h: 100,
+            logical_w: 2000,
+            logical_h: 1000,
+            origin_x: 500,
+            origin_y: 700,
+        });
+        for operation in ["right_click_element", "double_click_element"] {
+            let result = tool.execute_authorized(
+                crate::capability::COMPUTER_INPUT_ACTION_ID,
+                json!({ "action": operation, "ref": 7 }),
+            ).await;
+            assert!(!result.is_error, "{}", result.content);
+        }
+        assert_eq!(*gesture.calls.lock().unwrap(), vec![
+            (-1160, 52, enigo::Button::Right, 1),
+            (-1160, 52, enigo::Button::Left, 2),
+        ]);
+    }
+
+    #[tokio::test]
+    async fn element_gesture_never_uses_cached_pixels_when_validation_fails() {
+        use std::sync::atomic::Ordering;
+        let failures: [fn() -> A11yError; 5] = [
+            || A11yError::NotFound("the live element was destroyed".into()),
+            || A11yError::Permission("permission was revoked".into()),
+            || A11yError::Backend("live geometry could not be read".into()),
+            || A11yError::Unsupported {
+                capability: "pixel gesture target validation".into(), hint: "unavailable".into(),
+            },
+            || panic!("the validation worker failed"),
+        ];
+        for failure in failures {
+            for operation in ["right_click_element", "double_click_element"] {
+                let (tool, engine, gesture) = gesture_fixture().await;
+                *engine.resolver_failure.lock().unwrap() = Some(failure);
+                let result = tool.execute_authorized(
+                    crate::capability::COMPUTER_INPUT_ACTION_ID,
+                    json!({ "action": operation, "ref": 7 }),
+                ).await;
+                assert!(result.is_error, "{}", result.content);
+                assert!(gesture.calls.lock().unwrap().is_empty(),
+                    "a validation error never authorizes cached-coordinate fallback");
+                assert_eq!(engine.resolver_calls.load(Ordering::SeqCst), 1);
+                assert!(tool.last_snapshot.lock().unwrap().is_none());
+            }
+        }
+    }
+
+    async fn assert_element_fallback_rejects_drift(live: GestureLiveState) {
+        use std::sync::atomic::Ordering;
+        let mut failures = Vec::new();
+        for operation in ["click_element", "set_element_value"] {
+            let (tool, engine, gesture) = gesture_fixture().await;
+            *engine.semantic_reply.lock().unwrap() = Some(SemanticReply::UnsupportedAfterDrift(live));
+            let result = tool.execute_authorized(
+                crate::capability::COMPUTER_INPUT_ACTION_ID,
+                json!({ "action": operation, "ref": 7, "text": "AX fallback audit" }),
+            ).await;
+            let pointers = gesture.calls.lock().unwrap().clone();
+            let resolver_calls = engine.resolver_calls.load(Ordering::SeqCst);
+            let semantic_calls = engine.semantic_calls.load(Ordering::SeqCst);
+            let expected_resolution = if operation == "click_element" { 1 } else { 0 };
+            if !result.is_error || !pointers.is_empty()
+                || resolver_calls != expected_resolution || semantic_calls != 1
+            {
+                failures.push(format!(
+                    "{operation}: semantic_calls={semantic_calls}, resolver_calls={resolver_calls}, \
+                     pointer_calls={pointers:?}, live={live:?}, result={}",
+                    result.content,
+                ));
+            }
+        }
+        assert!(failures.is_empty(),
+            "MAC38 ordinary AX fallback must validate the target again after a semantic \
+             Unsupported reply and reject scene drift before pointer/type admission:\n{}",
+            failures.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn element_fallback_rejects_frontmost_drift_before_native_input() {
+        assert_element_fallback_rejects_drift(GestureLiveState {
+            frontmost_pid: 42, ..OBSERVED_GESTURE_STATE
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn element_fallback_rejects_window_drift_before_native_input() {
+        assert_element_fallback_rejects_drift(GestureLiveState {
+            window_id: 12, ..OBSERVED_GESTURE_STATE
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn element_fallback_rejects_bounds_drift_before_native_input() {
+        assert_element_fallback_rejects_drift(GestureLiveState {
+            bounds: nomi_a11y::Rect { x: -800.0, ..OBSERVED_GESTURE_STATE.bounds },
+            ..OBSERVED_GESTURE_STATE
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn element_fallback_rejects_overlay_drift_before_native_input() {
+        assert_element_fallback_rejects_drift(GestureLiveState {
+            covered: true, ..OBSERVED_GESTURE_STATE
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn element_fallback_never_retries_a_backend_error_after_semantic_effect() {
+        use std::sync::atomic::Ordering;
+        let mut failures = Vec::new();
+        for operation in ["click_element", "set_element_value"] {
+            let (tool, engine, gesture) = gesture_fixture().await;
+            *engine.semantic_reply.lock().unwrap() = Some(SemanticReply::BackendAfterEffect);
+            let result = tool.execute_authorized(
+                crate::capability::COMPUTER_INPUT_ACTION_ID,
+                json!({ "action": operation, "ref": 7, "text": "must not be repeated" }),
+            ).await;
+            let pointers = gesture.calls.lock().unwrap().clone();
+            let effects = engine.semantic_effects.load(Ordering::SeqCst);
+            if !result.is_error || !pointers.is_empty() || effects != 1 {
+                failures.push(format!(
+                    "{operation}: semantic_effects={effects}, pointer_calls={pointers:?}, result={}", result.content,
+                ));
+            }
+        }
+        assert!(failures.is_empty(),
+            "MAC38 Backend does not prove zero semantic effect and must not authorize \
+             automatic pixel/type retry:\n{}", failures.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn element_fallback_preserves_uncertain_semantic_result_without_retry() {
+        use std::sync::atomic::Ordering;
+        for operation in ["click_element", "set_element_value"] {
+            let (tool, engine, gesture) = gesture_fixture().await;
+            *engine.semantic_reply.lock().unwrap() = Some(SemanticReply::UncertainAfterEffect);
+            let result = tool.execute_authorized(
+                crate::capability::COMPUTER_INPUT_ACTION_ID,
+                json!({ "action": operation, "ref": 7, "text": "must not be repeated" }),
+            ).await;
+            assert!(result.is_error && result.content.contains("effect is uncertain"));
+            assert!(gesture.calls.lock().unwrap().is_empty());
+            assert_eq!(engine.semantic_effects.load(Ordering::SeqCst), 1);
+            assert_eq!(engine.resolver_calls.load(Ordering::SeqCst), 0);
+            assert!(!is_proven_stale_input_rejection(&result));
+        }
+    }
+
+    #[tokio::test]
+    async fn element_fallback_preserves_stable_click_input() {
+        use std::sync::atomic::Ordering;
+        let (tool, engine, gesture) = gesture_fixture().await;
+        *engine.semantic_reply.lock().unwrap() = Some(SemanticReply::UnsupportedAfterDrift(OBSERVED_GESTURE_STATE));
+        let result = tool.execute_authorized(
+            crate::capability::COMPUTER_INPUT_ACTION_ID,
+            json!({ "action": "click_element", "ref": 7 }),
+        ).await;
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(engine.semantic_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(*gesture.calls.lock().unwrap(), vec![
+            (-1160, 52, enigo::Button::Left, 1),
+        ]);
+    }
+
+    #[tokio::test]
+    async fn clear_cached_observation_retires_refs_and_pixels_without_native_calls() {
+        use std::sync::atomic::Ordering;
+        let (tool, engine, gesture) = gesture_fixture().await;
+        *tool.last_capture.lock().unwrap() = Some(CaptureGeometry {
+            img_w: 100, img_h: 100, logical_w: 200, logical_h: 200,
+            origin_x: -1000, origin_y: 200,
+        });
+        assert!(tool.resolve_ref(7).is_ok());
+        tool.clear_cached_observation();
+        assert!(tool.last_capture.lock().unwrap().is_none());
+        assert!(tool.last_snapshot.lock().unwrap().is_none());
+        assert!(tool.resolve_ref(7).is_err());
+        assert!(gesture.calls.lock().unwrap().is_empty());
+        assert_eq!(engine.semantic_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(engine.resolver_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn element_value_fallback_replaces_nonempty_value_or_rejects_before_pointer() {
+        let original = "existing-field-value";
+        let replacement = "replacement-value";
+        let field = Arc::new(Mutex::new(FakeTextField {
+            value: original.to_string(), caret: original.len(), readonly: false,
+        }));
+        let (tool, engine, gesture) = gesture_fixture_with_text_field(Some(field.clone())).await;
+        assert_eq!(tool.resolve_ref(7).unwrap().1.display.value.as_deref(), Some(original));
+        *engine.semantic_reply.lock().unwrap() = Some(SemanticReply::UnsupportedAfterDrift(OBSERVED_GESTURE_STATE));
+        // Retain the original nonempty value and end caret. Neither can prove
+        // that a whole-value replacement is supported by keyboard insertion.
+        let result = tool.execute_authorized(
+            crate::capability::COMPUTER_INPUT_ACTION_ID,
+            json!({ "action": "set_element_value", "ref": 7, "text": replacement }),
+        ).await;
+        let actual = field.lock().unwrap().value.clone();
+        let pointers = gesture.calls.lock().unwrap().clone();
+        if result.is_error {
+            assert!(pointers.is_empty() && actual == original,
+                "a value replacement that cannot be proven must reject before effect: \
+                 pointer_calls={pointers:?}, actual={actual:?}, result={}", result.content);
+            assert_eq!(field.lock().unwrap().caret, original.len());
+            assert!(is_proven_unsupported_input_rejection(&result));
+        } else {
+            assert_eq!(actual, replacement,
+                "MAC38 set_element_value must replace the whole value, not report successful \
+                 caret insertion: original={original:?}, pointer_calls={pointers:?}, result={}", result.content);
+        }
+    }
+
+    #[tokio::test]
+    async fn uncertain_semantic_effect_hint_cannot_forge_stale_zero_effect_rejection() {
+        use std::sync::atomic::Ordering;
+        let (tool, engine, gesture) = gesture_fixture().await;
+        *engine.semantic_reply.lock().unwrap() = Some(SemanticReply::UncertainWithStaleHintAfterEffect);
+        let result = tool.execute_authorized(
+            crate::capability::COMPUTER_INPUT_ACTION_ID,
+            json!({ "action": "click_element", "ref": 7 }),
+        ).await;
+        assert!(result.is_error && result.content.contains("effect is uncertain"));
+        assert_eq!(engine.semantic_effects.load(Ordering::SeqCst), 1);
+        assert!(gesture.calls.lock().unwrap().is_empty());
+        assert!(!is_proven_stale_input_rejection(&result),
+            "MAC38 an actual admitted semantic effect must not become zero-effect merely \
+             because its Uncertain hint contains stale/no-fallback phrases: {}", result.content);
+    }
+
+    #[tokio::test]
+    async fn native_whole_value_setter_preserves_exact_replacement_without_pointer_fallback() {
+        use std::sync::atomic::Ordering;
+        let field = Arc::new(Mutex::new(FakeTextField {
+            value: "old value with caret".into(), caret: 2, readonly: false,
+        }));
+        let (tool, engine, gesture) = gesture_fixture_with_text_field(Some(field.clone())).await;
+        *engine.semantic_reply.lock().unwrap() = Some(SemanticReply::NativeWholeValueSetter);
+        let result = tool.execute_authorized(
+            crate::capability::COMPUTER_INPUT_ACTION_ID,
+            json!({ "action": "set_element_value", "ref": 7, "text": "  exact replacement\n" }),
+        ).await;
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(field.lock().unwrap().value, "  exact replacement\n");
+        assert_eq!(engine.semantic_effects.load(Ordering::SeqCst), 1);
+        assert_eq!(engine.resolver_calls.load(Ordering::SeqCst), 0);
+        assert!(gesture.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unsupported_value_setter_never_infers_replacement_from_display_value() {
+        use std::sync::atomic::Ordering;
+        for original in [None, Some(""), Some("  \t\n"), Some("nonempty value")] {
+            let field = original.map(|value| Arc::new(Mutex::new(FakeTextField {
+                value: value.to_string(), caret: value.len(), readonly: false,
+            })));
+            let (tool, engine, gesture) = gesture_fixture_with_text_field(field.clone()).await;
+            *engine.semantic_reply.lock().unwrap() = Some(SemanticReply::UnsupportedAfterDrift(OBSERVED_GESTURE_STATE));
+            let result = tool.execute_authorized(
+                crate::capability::COMPUTER_INPUT_ACTION_ID,
+                json!({ "action": "set_element_value", "ref": 7, "text": "replacement" }),
+            ).await;
+            assert!(is_proven_unsupported_input_rejection(&result), "{}", result.content);
+            assert!(gesture.calls.lock().unwrap().is_empty());
+            assert_eq!(engine.semantic_effects.load(Ordering::SeqCst), 0);
+            assert_eq!(engine.resolver_calls.load(Ordering::SeqCst), 0);
+            if let Some(field) = field { assert_eq!(field.lock().unwrap().value.as_str(), original.unwrap()); }
+        }
+        let field = Arc::new(Mutex::new(FakeTextField { value: "read-only".into(), caret: 3, readonly: true }));
+        let (tool, engine, gesture) = gesture_fixture_with_text_field(Some(field.clone())).await;
+        *engine.semantic_reply.lock().unwrap() = Some(SemanticReply::NativeWholeValueSetter);
+        let result = tool.execute_authorized(
+            crate::capability::COMPUTER_INPUT_ACTION_ID,
+            json!({ "action": "set_element_value", "ref": 7, "text": "replacement" }),
+        ).await;
+        assert!(is_proven_unsupported_input_rejection(&result));
+        assert_eq!(field.lock().unwrap().value, "read-only");
+        assert_eq!(engine.semantic_effects.load(Ordering::SeqCst), 0);
+        assert!(gesture.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn unsupported_zero_effect_marker_requires_the_exact_setter_rejection() {
+        assert!(is_proven_unsupported_input_rejection(&ToolResult::error(UNSUPPORTED_VALUE_INPUT_REJECTION)));
+        for result in [
+            ToolResult::text(UNSUPPORTED_VALUE_INPUT_REJECTION),
+            ToolResult::error(format!("accessibility backend error: {UNSUPPORTED_VALUE_INPUT_REJECTION}")),
+            ToolResult::error(format!("accessibility action effect is uncertain: {UNSUPPORTED_VALUE_INPUT_REJECTION}")),
+            ToolResult::error(format!("{UNSUPPORTED_VALUE_INPUT_REJECTION} extra hint")),
+            ToolResult::error("not supported (generic action): no effect"),
+        ] {
+            assert!(!is_proven_unsupported_input_rejection(&result), "{}", result.content);
+        }
+    }
+
     type AxOutcome = fn() -> Result<nomi_a11y::Effect, A11yError>;
 
     struct FakeEngine(AxOutcome);
@@ -827,7 +1461,6 @@ mod tests {
                     source: Source::A11y,
                 },
                 engine_ref: 1,
-                screen_center: (2, 4),
             }],
         });
         t
@@ -840,12 +1473,13 @@ mod tests {
     #[tokio::test]
     async fn semantic_fallback_gate_preserves_target_and_task_errors() {
         // The fallback is injected: even a regression cannot synthesize input.
-        let cases: [(AxOutcome, bool, bool); 7] = [
+        let cases: [(AxOutcome, bool, bool); 8] = [
             (|| Err(A11yError::Stale("stale".into())), false, true),
             (|| Err(A11yError::NotFound("gone".into())), false, true),
             (|| Err(A11yError::Permission("denied".into())), false, true),
+            (|| Err(A11yError::Uncertain("native AX request timed out after admission".into())), false, true),
             (|| panic!("simulated worker failure"), false, true),
-            (|| Err(A11yError::Backend("unsupported pattern".into())), true, false),
+            (|| Err(A11yError::Backend("provider reply failed".into())), false, true),
             (|| Err(A11yError::Unsupported { capability: "action".into(), hint: "".into() }), true, false),
             (|| Ok(nomi_a11y::Effect { changed: true, message: "done".into() }), false, false),
         ];
@@ -864,6 +1498,23 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn uncertain_ax_action_neither_retries_nor_proves_zero_effect() {
+        let t = tool_with_snapshot(|| Err(A11yError::Uncertain(
+            "native AX API admitted the request but its effect is unknown".into(),
+        )));
+        let mut retried = false;
+        let result = t.act_on_ax(1, SnapshotGen(7), ElementAction::LeftClick, |_| {
+            retried = true;
+            std::future::ready(ToolResult::text("unexpected pixel retry"))
+        }).await;
+        assert!(result.is_error);
+        assert!(!retried, "an admitted AX request must not be repeated with pixel input");
+        assert!(result.content.contains("effect is uncertain"), "{}", result.content);
+        assert!(!is_proven_stale_input_rejection(&result), "an unknown effect must not settle as a pre-action rejection");
+        assert!(t.last_snapshot.lock().unwrap().is_none());
+    }
+
     #[test]
     fn only_exact_no_fallback_stale_errors_prove_zero_input_effect() {
         let stale = ToolResult::error(
@@ -877,12 +1528,29 @@ mod tests {
                  No pixel fallback was performed; re-run observe before using element refs.",
             ),
             ToolResult::error("stale reference: focus changed"),
+            ToolResult::error(
+                "Accessibility action on [7] failed: accessibility action effect is uncertain: \
+                 nested failed: stale reference: focus changed. No pixel fallback was performed; \
+                 re-run observe before using element refs.",
+            ),
+            ToolResult::error(
+                "Accessibility action on [7] failed: accessibility backend error: nested failed: \
+                 stale reference: focus changed. No pixel fallback was performed; \
+                 re-run observe before using element refs.",
+            ),
             ToolResult::text(
                 "Accessibility action on [7] failed: stale reference: focus changed. No pixel \
                  fallback was performed; re-run observe before using element refs.",
             ),
         ] {
             assert!(!is_proven_stale_input_rejection(&result));
+        }
+        for reference in ["", "-1", "+7", "07", "4294967296", "wrong"] {
+            let result = ToolResult::error(format!(
+                "Accessibility action on [{reference}] failed: stale reference: focus changed. \
+                 No pixel fallback was performed; re-run observe before using element refs.",
+            ));
+            assert!(!is_proven_stale_input_rejection(&result), "{}", result.content);
         }
     }
 

@@ -8,7 +8,9 @@ import { agentPlatform } from '@/common/adapter/ipcBridge';
 import type {
   AgentPresetDocument,
   AgentCatalogResponse,
+  ChatRouteCandidate,
 } from '@/common/types/agentPlatform';
+import { AGENT_CHAT_MODEL_TASK } from '@/common/types/agentPlatform';
 import type { AgentPresetId } from '@/common/types/ids';
 import type { IIdmmConfig } from '@/common/types/idmm';
 import { createDefaultIdmmConfig } from '@/common/types/idmm';
@@ -20,6 +22,7 @@ export type GuidPresetCapabilityState = {
   actionIds: ReadonlySet<string>;
   requiredResourceKinds: ReadonlySet<string>;
   idmm: IIdmmConfig;
+  defaultModel: Pick<ChatRouteCandidate, 'provider_id' | 'model'> | null;
   isLoading: boolean;
   error: Error | undefined;
 };
@@ -29,6 +32,7 @@ const emptyState = (): GuidPresetCapabilityState => ({
   actionIds: new Set<string>(),
   requiredResourceKinds: new Set<string>(),
   idmm: createDefaultIdmmConfig(),
+  defaultModel: null,
   isLoading: false,
   error: undefined,
 });
@@ -76,6 +80,7 @@ export const useGuidPresetCapabilities = (
         // initialized official configuration has only its baseline draft until
         // its first launch or save; reading it must never prepare a Revision.
         const document = editor.revision?.document ?? editor.draft.document;
+        const defaultModel = document.chat_route_records[AGENT_CHAT_MODEL_TASK]?.primary;
         const capabilityIds = new Set(
           document.enabled_capabilities.map((selection) => selection.capability.id)
         );
@@ -93,6 +98,9 @@ export const useGuidPresetCapabilities = (
             idmm: structuredClone(
               document.runtime_policy?.idmm ?? createDefaultIdmmConfig()
             ),
+            defaultModel: defaultModel
+              ? { provider_id: defaultModel.provider_id, model: defaultModel.model }
+              : null,
             isLoading: false,
             error: undefined,
           },

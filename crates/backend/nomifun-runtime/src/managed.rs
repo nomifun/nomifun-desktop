@@ -318,16 +318,23 @@ fn component_environment(
     if id != ToolId::OfficeCli {
         return Ok(env.clone());
     }
-    const VARIABLE: &str = "OFFICECLI_NO_AUTO_RESIDENT";
-    let matches_variable = |name: &str| {
-        if cfg!(windows) { name.eq_ignore_ascii_case(VARIABLE) } else { name == VARIABLE }
+    // Office execution may not become resident or refresh external Skills and
+    // user configuration. Apply both policies at the actual component launch
+    // boundary; Skill projection no longer supplies execution environment.
+    const VARIABLES: &[&str] = &["OFFICECLI_NO_AUTO_RESIDENT", "OFFICECLI_SKIP_UPDATE"];
+    let matches_variable = |name: &str, variable: &str| {
+        if cfg!(windows) { name.eq_ignore_ascii_case(variable) } else { name == variable }
     };
-    if env.iter().any(|(name, value)| matches_variable(name) && value != "1") {
-        return Err(ToolError::EnvironmentConflict { tool: id.as_str(), variable: VARIABLE });
+    for &variable in VARIABLES {
+        if env.iter().any(|(name, value)| matches_variable(name, variable) && value != "1") {
+            return Err(ToolError::EnvironmentConflict { tool: id.as_str(), variable });
+        }
     }
     let mut environment = env.clone();
-    environment.retain(|name, _| !matches_variable(name));
-    environment.insert(VARIABLE.into(), "1".into());
+    for &variable in VARIABLES {
+        environment.retain(|name, _| !matches_variable(name, variable));
+        environment.insert(variable.into(), "1".into());
+    }
     Ok(environment)
 }
 
@@ -946,6 +953,12 @@ async fn probe(
         .env("OFFICECLI_NO_AUTO_RESIDENT", "1")
         .env_remove("NODE_OPTIONS")
         .env_remove("BUN_OPTIONS");
+    if id == ToolId::OfficeCli {
+        // The pinned CLI's updater also refreshes already-installed external
+        // skills and its user config on ordinary --version/create/view calls.
+        // Component admission must not grant that unrelated update authority.
+        command.env("OFFICECLI_SKIP_UPDATE", "1");
+    }
     let mut child = command.spawn_managed()?;
     let stdout = child
         .child_mut()
@@ -1047,46 +1060,55 @@ mod tests {
             ("USER_FLAG".into(), "keep".into())]);
         for id in [ToolId::Bun, ToolId::Node] {
             assert_eq!(component_environment(id, &env).unwrap(), env);
-            let custom = HashMap::from([("OFFICECLI_NO_AUTO_RESIDENT".into(), "0".into())]);
+            let custom = HashMap::from([("OFFICECLI_NO_AUTO_RESIDENT".into(), "0".into()),
+                ("OFFICECLI_SKIP_UPDATE".into(), "0".into())]);
             assert_eq!(component_environment(id, &custom).unwrap(), custom);
         }
         let merged = component_environment(ToolId::OfficeCli, &env).unwrap();
         assert_eq!(merged["OFFICECLI_NO_AUTO_RESIDENT"], "1");
+        assert_eq!(merged["OFFICECLI_SKIP_UPDATE"], "1");
         assert_eq!(merged["PATH"], env["PATH"]);
         assert_eq!(merged["USER_FLAG"], env["USER_FLAG"]);
         assert_eq!(env.len(), 2, "the caller's environment remains unchanged");
-        let ready = HashMap::from([("OFFICECLI_NO_AUTO_RESIDENT".into(), "1".into())]);
+        let ready = HashMap::from([("OFFICECLI_NO_AUTO_RESIDENT".into(), "1".into()),
+            ("OFFICECLI_SKIP_UPDATE".into(), "1".into())]);
         assert_eq!(component_environment(ToolId::OfficeCli, &ready).unwrap(), ready);
 
-        let different_case = HashMap::from([("officecli_no_auto_resident".into(), "0".into())]);
-        let result = component_environment(ToolId::OfficeCli, &different_case);
-        if cfg!(windows) {
-            assert!(matches!(result, Err(ToolError::EnvironmentConflict { .. })));
-        } else {
-            let merged = result.unwrap();
+        for variable in ["OFFICECLI_NO_AUTO_RESIDENT", "OFFICECLI_SKIP_UPDATE"] {
+            let lower = variable.to_ascii_lowercase();
+            let different_case = HashMap::from([(lower.clone(), "0".into())]);
+            let result = component_environment(ToolId::OfficeCli, &different_case);
+            if cfg!(windows) {
+                assert!(matches!(result, Err(ToolError::EnvironmentConflict { .. })));
+            } else {
+                let merged = result.unwrap();
+                assert_eq!(merged[variable], "1");
+                assert_eq!(merged[&lower], "0");
+            }
+            let equivalent = HashMap::from([(lower, "1".into())]);
+            let merged = component_environment(ToolId::OfficeCli, &equivalent).unwrap();
             assert_eq!(merged["OFFICECLI_NO_AUTO_RESIDENT"], "1");
-            assert_eq!(merged["officecli_no_auto_resident"], "0");
+            assert_eq!(merged["OFFICECLI_SKIP_UPDATE"], "1");
+            assert_eq!(merged.len(), if cfg!(windows) { 2 } else { 3 });
         }
-        let equivalent = HashMap::from([("officecli_no_auto_resident".into(), "1".into())]);
-        let merged = component_environment(ToolId::OfficeCli, &equivalent).unwrap();
-        assert_eq!(merged["OFFICECLI_NO_AUTO_RESIDENT"], "1");
-        assert_eq!(merged.len(), if cfg!(windows) { 1 } else { 2 });
     }
 
     #[tokio::test]
     async fn component_launch_environment_conflict_returns_only_the_policy_identity() {
         let value = "request-private-environment-value";
-        let env = HashMap::from([("OFFICECLI_NO_AUTO_RESIDENT".into(), value.into())]);
-        let error = prepare_component_launch(ToolId::OfficeCli, &env).await.unwrap_err();
-        assert!(matches!(error, ToolError::EnvironmentConflict {
-            tool: "officecli", variable: "OFFICECLI_NO_AUTO_RESIDENT",
-        }));
-        assert!(!error.to_string().contains(value));
-        assert!(!format!("{error:?}").contains(value));
-        let failure = preparation_failure(&error);
-        assert_eq!(failure.code, "COMPONENT_ENVIRONMENT_CONFLICT");
-        assert!(!failure.retryable);
-        assert!(!failure.message.contains(value));
+        for variable in ["OFFICECLI_NO_AUTO_RESIDENT", "OFFICECLI_SKIP_UPDATE"] {
+            let env = HashMap::from([(variable.into(), value.into())]);
+            let error = prepare_component_launch(ToolId::OfficeCli, &env).await.unwrap_err();
+            assert!(matches!(error, ToolError::EnvironmentConflict {
+                tool: "officecli", variable: rejected,
+            } if rejected == variable));
+            assert!(!error.to_string().contains(value));
+            assert!(!format!("{error:?}").contains(value));
+            let failure = preparation_failure(&error);
+            assert_eq!(failure.code, "COMPONENT_ENVIRONMENT_CONFLICT");
+            assert!(!failure.retryable);
+            assert!(!failure.message.contains(value));
+        }
     }
 
     #[tokio::test]
@@ -1099,6 +1121,7 @@ mod tests {
         let expected = prepared_component_fingerprint(ToolId::OfficeCli, &tool).await.unwrap();
         let launch = PreparedComponentLaunch {
             tool, environment: HashMap::from([("OFFICECLI_NO_AUTO_RESIDENT".into(), "1".into()),
+                ("OFFICECLI_SKIP_UPDATE".into(), "1".into()),
                 ("PRIVATE_ENVIRONMENT".into(), "private-environment-value".into())]),
             id: ToolId::OfficeCli, fingerprint: expected,
         };
@@ -1147,11 +1170,13 @@ mod tests {
                     assert!(slot(id).active.lock().unwrap().is_none());
                 }
                 let office_before = tool_preparation_snapshot(ToolId::OfficeCli);
-                let conflict = HashMap::from([("OFFICECLI_NO_AUTO_RESIDENT".into(), "0".into())]);
-                assert!(matches!(prepare_component_launch(ToolId::OfficeCli, &conflict).await,
-                    Err(ToolError::EnvironmentConflict { .. })));
-                assert_eq!(tool_preparation_snapshot(ToolId::OfficeCli), office_before);
-                assert!(slot(ToolId::OfficeCli).active.lock().unwrap().is_none());
+                for variable in ["OFFICECLI_NO_AUTO_RESIDENT", "OFFICECLI_SKIP_UPDATE"] {
+                    let conflict = HashMap::from([(variable.into(), "0".into())]);
+                    assert!(matches!(prepare_component_launch(ToolId::OfficeCli, &conflict).await,
+                        Err(ToolError::EnvironmentConflict { .. })));
+                    assert_eq!(tool_preparation_snapshot(ToolId::OfficeCli), office_before);
+                    assert!(slot(ToolId::OfficeCli).active.lock().unwrap().is_none());
+                }
                 assert!(matches!(crate::prepare_managed_command("bun", &[]).await,
                     Err(ToolError::NotPrepared)));
                 assert!(crate::resolve_cached_managed_command("bunx", &[]).unwrap().is_none());
@@ -1536,6 +1561,56 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn office_probe_disables_upstream_refresh_in_a_private_home() {
+        const CHILD_ROOT: &str = "NOMIFUN_OFFICE_PROBE_PRIVATE_HOME_TEST_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            let home = root.join("private-home");
+            assert_eq!(std::env::var_os("HOME").unwrap(), home.as_os_str().to_owned());
+            // This exercises verify's real --version/create/view subprocesses;
+            // the fixture itself never supplies the opt-out environment.
+            assert_eq!(verify(ToolId::OfficeCli, &root.join("officecli"), None,
+                &CancellationToken::new()).await.unwrap(), "1.0.156");
+            assert_eq!(std::fs::read(home.join(".claude/skills/officecli/SKILL.md")).unwrap(), b"original skill");
+            assert_eq!(std::fs::read(home.join(".officecli/config.json")).unwrap(), b"original config");
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let home = root.join("private-home");
+        std::fs::create_dir_all(home.join(".claude/skills/officecli")).unwrap();
+        std::fs::create_dir_all(home.join(".officecli")).unwrap();
+        std::fs::write(home.join(".claude/skills/officecli/SKILL.md"), b"original skill").unwrap();
+        std::fs::write(home.join(".officecli/config.json"), b"original config").unwrap();
+        let path = root.join("officecli");
+        std::fs::write(&path, r#"#!/bin/sh
+if test "$OFFICECLI_SKIP_UPDATE" != 1; then
+  printf 'unexpected refresh' > "$HOME/.claude/skills/officecli/SKILL.md"
+  printf 'unexpected config save' > "$HOME/.officecli/config.json"
+fi
+test "$OFFICECLI_NO_AUTO_RESIDENT" = 1 || exit 17
+case "$1" in
+  --version) printf '1.0.156\n' ;;
+  create) printf 'capability document' > "$2" ;;
+  view) test "$3" = html || exit 18; printf '<html>capability</html>' > "$5" ;;
+  *) exit 19 ;;
+esac
+"#).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut child = ChildProcessBuilder::clean_cli(std::env::current_exe().unwrap());
+        child.args(["--exact", "managed::tests::office_probe_disables_upstream_refresh_in_a_private_home"])
+            .env(CHILD_ROOT, &root).env("HOME", &home).env("USERPROFILE", &home)
+            // Prove the production child policy overrides an ambient opt-in.
+            .env("OFFICECLI_SKIP_UPDATE", "0");
+        let output = child.output().await.unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert_eq!(std::fs::read(home.join(".claude/skills/officecli/SKILL.md")).unwrap(), b"original skill");
+        assert_eq!(std::fs::read(home.join(".officecli/config.json")).unwrap(), b"original config");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn wrong_same_named_office_tool_fails_required_capability() {

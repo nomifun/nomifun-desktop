@@ -1133,6 +1133,9 @@ pub async fn render_html(
         .arg(source)
         .arg("html")
         .env("OFFICECLI_NO_AUTO_RESIDENT", "1")
+        // Conversion uses the admitted release; upstream's update hook also
+        // rewrites external skill/config files even for ordinary view calls.
+        .env("OFFICECLI_SKIP_UPDATE", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

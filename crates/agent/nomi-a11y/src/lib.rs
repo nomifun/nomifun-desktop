@@ -91,6 +91,18 @@ pub fn create_engine() -> Result<Arc<dyn A11yEngine>, A11yError> {
     }
 }
 
+/// Activate one macOS window identified by its current public window metadata.
+/// Bounds use Quartz global screen points, matching the Accessibility API.
+/// An ambiguous or changed window is rejected before any activation request.
+#[cfg(target_os = "macos")]
+pub fn focus_named_window(
+    pid: i32,
+    expected_bounds: Rect,
+    expected_title: Option<String>,
+) -> Result<Effect, A11yError> {
+    macos::MacEngine::start()?.focus_named_window(pid, expected_bounds, expected_title)
+}
+
 #[cfg(test)]
 mod host_label_tests {
     use super::{host_app_label, set_host_app_label};

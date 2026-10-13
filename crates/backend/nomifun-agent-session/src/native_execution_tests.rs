@@ -8,6 +8,9 @@ mod native_pause_tests;
 #[path = "workspace_file_observation_tests.rs"]
 mod workspace_file_observation_tests;
 
+#[path = "tool_call_causation_tests.rs"]
+mod tool_call_causation_tests;
+
 struct Fixture { session: AgentSessionLiveRecord, root: EventId, started: EventId }
 
 #[tokio::test]

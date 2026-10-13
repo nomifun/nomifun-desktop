@@ -27,12 +27,14 @@ interface ConversationErrorNoteProps {
   recoveryAction?: ReactNode;
   currentModel?: ConversationContextValue['currentModel'];
   feedback?: boolean;
+  /** Task blocker stays visible without competing with an adjacent recovery card. */
+  compact?: boolean;
 }
 
 /** Shared presentation for canonical failures, pauses and rejected requests. */
 const ConversationErrorNote: React.FC<ConversationErrorNoteProps> = ({
   error, rawDetail = error?.detail || error?.message, timestamp, turnId, sessionId,
-  messageId, creationTaskId, recoveryAction, currentModel, feedback = true,
+  messageId, creationTaskId, recoveryAction, currentModel, feedback = true, compact = false,
 }) => {
   const { t } = useTranslation();
   const [detailsExpanded, setDetailsExpanded] = useState(false);
@@ -84,8 +86,16 @@ const ConversationErrorNote: React.FC<ConversationErrorNoteProps> = ({
     diagnosticDetail ? `${t('conversation.agentError.details.rawDetail')}:\n${diagnosticDetail}` : '',
   ].filter(Boolean).join('\n');
 
+  const controls = <div className='message-error-note__controls'>
+    {recoveryAction}
+    <button type='button' className='message-error-note__toggle' aria-expanded={detailsExpanded} aria-controls={detailsId}
+      onClick={() => setDetailsExpanded((expanded) => !expanded)}>
+      {detailsLabel}<Down theme='outline' size='14' fill='currentColor' aria-hidden='true' />
+    </button>
+    {detailsExpanded && <CopyIconButton text={report} tooltip={t('conversation.agentError.copyDetails')} className='message-error-note__copy' />}
+  </div>;
   return (
-    <div className='message-error-note'>
+    <div className={`message-error-note${compact ? ' message-error-note--compact' : ''}`}>
       <div className='message-error-note__summary'>
         <span className='message-error-note__icon' aria-hidden='true'>
           <Attention theme='outline' size='16' fill='currentColor' />
@@ -93,25 +103,13 @@ const ConversationErrorNote: React.FC<ConversationErrorNoteProps> = ({
         <span className='message-error-note__title' role='alert'>
           {title}
         </span>
+        {compact && controls}
       </div>
-      <div className='message-error-note__guidance'>
+      {(!compact || detailsExpanded) && <div className='message-error-note__guidance'>
         <div className='message-error-note__body'>{body}</div>
         {gatewayActionError(code) && <GatewayBillingAction code={code} reason={diagnostic?.reason} providerId={diagnostic?.providerId} model={currentModel} />}
-        <div className='message-error-note__controls'>
-          {recoveryAction}
-          <button
-            type='button'
-            className='message-error-note__toggle'
-            aria-expanded={detailsExpanded}
-            aria-controls={detailsId}
-            onClick={() => setDetailsExpanded((expanded) => !expanded)}
-          >
-            {detailsLabel}
-            <Down theme='outline' size='14' fill='currentColor' aria-hidden='true' />
-          </button>
-          {detailsExpanded && <CopyIconButton text={report} tooltip={t('conversation.agentError.copyDetails')} className='message-error-note__copy' />}
-        </div>
-      </div>
+        {!compact && controls}
+      </div>}
       <div
         id={detailsId}
         className='message-error-note__details'

@@ -8,6 +8,8 @@
 #                 release note）、上传 macOS 产物。可用 -Version 顺带打版本号。
 #
 #   bun run release:mac                          # 用当前 Cargo.toml 版本；自动判定模式
+#   bun run release:mac -Architecture intel      # Intel x86_64 原生包与独立 updater
+#   bun run release:mac --macos-arm64-only        # 显式仅保留 Apple Silicon updater
 #   bun run release:mac -Version 0.1.14          # 先 bump 到 0.1.14，再发（首发常用）
 #   bun run release:mac -NotesFile notes.md      # release note（首发必填；正文与 latest.json 共用）
 #   bun run release:mac -Notes "- 修复若干问题"   # release note（内联，短说明用）
@@ -38,6 +40,10 @@ cd "$ROOT"
 
 Repo="nomifun/nomifun-desktop"
 Triple="aarch64-apple-darwin"
+Architecture="arm"
+UpdaterKey="darwin-aarch64"
+PackageSuffix="aarch64"
+MacosArm64Only=0
 KeyFile="${NOMIFUN_RELEASE_KEY_FILE:-apps/desktop/signing/nomifun-updater.key}"
 EnvRelease="${NOMIFUN_RELEASE_ENV_FILE:-apps/desktop/signing/.env.release}"
 SigningEnv="${NOMIFUN_RELEASE_SIGNING_ENV:-apps/desktop/signing/.env.signing}"
@@ -75,6 +81,16 @@ while [[ "$#" -gt 0 ]]; do
       Version="$1"
       shift
       ;;
+    -Architecture|--architecture|--arch)
+      shift
+      [[ "$#" -gt 0 ]] || fail "缺少 -Architecture 参数值。"
+      Architecture="$1"
+      shift
+      ;;
+    --macos-arm64-only)
+      MacosArm64Only=1
+      shift
+      ;;
     -Notes|--notes)
       shift
       [[ "$#" -gt 0 ]] || fail "缺少 -Notes 参数值。"
@@ -104,6 +120,20 @@ while [[ "$#" -gt 0 ]]; do
       ;;
   esac
 done
+
+case "$Architecture" in
+  arm|aarch64|silicon|aarch64-apple-darwin)
+    Architecture="arm"
+    ;;
+  intel|x64|x86_64|x86_64-apple-darwin)
+    Architecture="intel"
+    Triple="x86_64-apple-darwin"
+    UpdaterKey="darwin-x86_64"
+    PackageSuffix="x64"
+    [[ "$MacosArm64Only" -eq 0 ]] || fail "Intel 发布不能使用 --macos-arm64-only。"
+    ;;
+  *) fail "未知 macOS 架构: ${Architecture}（可选 arm / intel）。" ;;
+esac
 
 read_workspace_version() {
   local in_section=0 line trimmed
@@ -155,15 +185,15 @@ commit_paths() {
 }
 
 validate_manifest() {
-  node - "$LatestJson" "$TargetVersion" <<'NODE'
+  node - "$LatestJson" "$TargetVersion" "$UpdaterKey" <<'NODE'
 const fs = require('node:fs');
-const [path, version] = process.argv.slice(2);
+const [path, version, updaterKey] = process.argv.slice(2);
 const manifest = JSON.parse(fs.readFileSync(path, 'utf8'));
 if (manifest.version !== version) {
   console.error(`latest.json version(${manifest.version}) != ${version}`);
   process.exit(1);
 }
-for (const key of ['darwin-aarch64']) {
+for (const key of [updaterKey]) {
   const entry = manifest.platforms?.[key];
   if (!entry) {
     console.error(`latest.json 缺少 ${key} 条目。`);
@@ -230,8 +260,11 @@ if [[ "$Mode" == "CREATE" && -z "${NotesContent//[[:space:]]/}" ]]; then
 fi
 
 Tar="target/$Triple/release/bundle/macos/NomiFun.app.tar.gz"
+if [[ "$Architecture" == "intel" ]]; then
+  Tar="target/$Triple/release/bundle/macos/NomiFun_${TargetVersion}_x64.app.tar.gz"
+fi
 Sig="$Tar.sig"
-Dmg="dist/desktop/NomiFun_${TargetVersion}_aarch64.dmg"
+Dmg="dist/desktop/NomiFun_${TargetVersion}_${PackageSuffix}.dmg"
 ReleaseLock="${Dmg%.dmg}.release-lock.json"
 App="target/$Triple/release/bundle/macos/NomiFun.app"
 
@@ -246,6 +279,8 @@ else
   echo "  版本变更  : 无（沿用当前 ${CurVer}）"
 fi
 echo "  仓库      : ${Repo}"
+echo "  架构      : ${Triple} (${UpdaterKey})"
+[[ "$MacosArm64Only" -eq 0 ]] || echo "  updater   : 显式仅保留 Apple Silicon，删除旧 Intel 条目"
 echo "  目标产物  : ${Dmg} + ${ReleaseLock} + ${Tar} (+ .sig)"
 if [[ "$Mode" == "CREATE" ]]; then
   if [[ -n "$NotesFile" ]]; then
@@ -261,7 +296,7 @@ fi
 if [[ "$NoPush" -eq 1 ]]; then
   echo "  推送      : -NoPush（见脚本头部语义说明）"
 else
-  echo "  推送      : 开启 (author=nomifun -> origin main)"
+  echo "  推送      : 开启 (使用配置的 Git 身份 -> origin main)"
 fi
 echo "  签名      : Developer ID 签名 + Apple notarization（build:mac --signed）"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -290,7 +325,7 @@ if [[ -n "${NotesContent//[[:space:]]/}" ]]; then
 fi
 
 echo "▶ 构建 macOS 签名/公证产物（Rust release，耗时较长）..."
-bun run build:mac --signed --config "$UpdaterConf" || fail "构建失败。"
+bun run build:mac --signed "$Architecture" --config "$UpdaterConf" || fail "构建失败。"
 [[ -f "$Dmg" ]] || fail "构建后未找到手动安装包: ${Dmg}"
 [[ -f "$ReleaseLock" ]] || fail "构建后未找到 release lock: ${ReleaseLock}"
 [[ -f "$Tar" ]] || fail "构建后未找到 updater 包: ${Tar}"
@@ -303,10 +338,14 @@ codesign --verify --deep --strict --verbose=2 "$App" || fail ".app codesign 校�
 spctl -a -vv -t install "$Dmg" || fail "spctl Gatekeeper 校验失败。"
 
 echo "▶ 合并 latest.json ..."
+LatestArgs=(--target-dir "target/$Triple" --target-triple "$Triple")
+if [[ "$MacosArm64Only" -eq 1 ]]; then
+  LatestArgs+=(--macos-arm64-only)
+fi
 if [[ -n "$NotesTmp" ]]; then
-  bun scripts/make-latest-json.mjs --target-dir "target/$Triple" --target-triple "$Triple" --macos-arm64-only --notes-file "$NotesTmp" || fail "make:latest 失败。"
+  bun scripts/make-latest-json.mjs "${LatestArgs[@]}" --notes-file "$NotesTmp" || fail "make:latest 失败。"
 else
-  bun scripts/make-latest-json.mjs --target-dir "target/$Triple" --target-triple "$Triple" --macos-arm64-only || fail "make:latest 失败。"
+  bun scripts/make-latest-json.mjs "${LatestArgs[@]}" || fail "make:latest 失败。"
 fi
 validate_manifest
 
@@ -315,7 +354,7 @@ if [[ "$Mode" == "CREATE" ]]; then
     echo "  -NoPush（CREATE）：已本地 bump/构建/合并 latest.json，但不提交/建 Release。"
     echo "  待办：git 提交 bump+latest.json、打 tag ${Tag}、push、gh release create。"
   else
-    echo "▶ 提交并打 tag ${Tag}（author=nomifun）..."
+    echo "▶ 使用配置的 Git 身份提交并打 tag ${Tag}..."
     commit_paths "chore(release): $Tag" \
       Cargo.toml Cargo.lock package.json ui/package.json \
       apps/desktop/tauri.conf.json apps/desktop/tauri.macos.conf.json "$LatestJson"
@@ -340,7 +379,7 @@ else
   if [[ "$NoPush" -eq 1 ]]; then
     echo "  -NoPush（APPEND）：跳过提交/推送，latest.json 改动留在本地。"
   else
-    echo "▶ 提交 latest.json 回 main（author=nomifun）..."
+    echo "▶ 使用配置的 Git 身份提交 latest.json 回 main..."
     commit_paths "chore(release): add macOS updater entry to ${Tag} latest.json" "$LatestJson"
     git push origin main || fail "push 失败。"
   fi
@@ -349,8 +388,8 @@ fi
 if [[ ! ( "$Mode" == "CREATE" && "$NoPush" -eq 1 ) ]]; then
   echo "▶ 发布后校验（updater 端点）..."
   endpoint="https://github.com/${Repo}/releases/latest/download/latest.json"
-  node - "$endpoint" "$TargetVersion" <<'NODE'
-const [endpoint, version] = process.argv.slice(2);
+  node - "$endpoint" "$TargetVersion" "$UpdaterKey" <<'NODE'
+const [endpoint, version, updaterKey] = process.argv.slice(2);
 fetch(endpoint, { redirect: 'follow' })
   .then((res) => {
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -360,11 +399,11 @@ fetch(endpoint, { redirect: 'follow' })
     const platforms = Object.keys(manifest.platforms || {});
     console.log(`  version   : ${manifest.version}`);
     console.log(`  platforms : ${platforms.join(', ')}`);
-    console.log(`  macOS     : ${manifest.platforms?.['darwin-aarch64']?.url || '(missing)'}`);
+    console.log(`  macOS     : ${manifest.platforms?.[updaterKey]?.url || '(missing)'}`);
     if (manifest.version !== version) {
       console.warn(`published version(${manifest.version}) != ${version}（CDN 缓存延迟或 latest 非本版本）。`);
     }
-    for (const key of ['darwin-aarch64']) {
+    for (const key of [updaterKey]) {
       if (!manifest.platforms?.[key]) console.warn(`published latest.json 缺少 ${key}。`);
     }
   })

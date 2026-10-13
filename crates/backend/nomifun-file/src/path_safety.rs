@@ -154,12 +154,7 @@ pub(crate) fn patch_targets_overlap(
             let name = name.to_str().ok_or_else(|| {
                 AppError::BadRequest("patch target is not valid UTF-8".to_owned())
             })?;
-            let normalized = name.nfd().collect::<String>();
-            Ok(if case_sensitive == 0 {
-                normalized.to_lowercase()
-            } else {
-                normalized
-            })
+            Ok(name.nfd().collect::<String>())
         };
         let left = relative(left)?;
         let right = relative(right)?;
@@ -167,8 +162,16 @@ pub(crate) fn patch_targets_overlap(
         let mut right = right.components();
         loop {
             match (left.next(), right.next()) {
-                (Some(a), Some(b)) if component_key(a)? == component_key(b)? => continue,
-                (Some(_), Some(_)) => return Ok(false),
+                (Some(a), Some(b)) => {
+                    let a = component_key(a)?;
+                    let b = component_key(b)?;
+                    let equal = if case_sensitive == 0 {
+                        macos_case_fold_equal(&a, &b)?
+                    } else {
+                        a == b
+                    };
+                    if !equal { return Ok(false); }
+                }
                 // Equality or either normalized path being an ancestor is an overlap.
                 (None, _) | (_, None) => return Ok(true),
             }
@@ -215,6 +218,57 @@ pub(crate) fn patch_targets_overlap(
         }
         Ok(true)
     }
+}
+
+/// APFS case-insensitive lookup uses Unicode case folding, which includes
+/// expansions and characters that lowercase alone leaves distinct (ß/SS,
+/// final sigma/sigma, and long s/s). Use the OS Unicode implementation on
+/// canonically decomposed names, without locale, accent or width tailoring.
+#[cfg(target_os = "macos")]
+fn macos_case_fold_equal(left: &str, right: &str) -> Result<bool, AppError> {
+    use std::{ffi::c_void, ptr::NonNull};
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFStringCreateWithBytes(
+            allocator: *const c_void, bytes: *const u8, length: isize,
+            encoding: u32, external_representation: u8,
+        ) -> *const c_void;
+        fn CFStringCompare(left: *const c_void, right: *const c_void, flags: usize) -> isize;
+        fn CFRelease(value: *const c_void);
+    }
+
+    struct NativeString(NonNull<c_void>);
+    impl NativeString {
+        fn new(value: &str) -> Result<Self, AppError> {
+            let length = isize::try_from(value.len()).map_err(|_| {
+                AppError::BadRequest("patch path component is too long".to_owned())
+            })?;
+            // SAFETY: value's UTF-8 bytes remain live for the checked length.
+            // A null allocator selects the default; UTF-8 is 0x08000100.
+            let value = unsafe {
+                CFStringCreateWithBytes(
+                    std::ptr::null(), value.as_ptr(), length, 0x0800_0100, 0,
+                )
+            };
+            NonNull::new(value.cast_mut()).map(Self).ok_or_else(|| {
+                AppError::Internal("cannot compare macOS patch target names".to_owned())
+            })
+        }
+    }
+    impl Drop for NativeString {
+        fn drop(&mut self) {
+            // SAFETY: this wrapper owns one live Create-rule CF reference.
+            unsafe { CFRelease(self.0.as_ptr()) };
+        }
+    }
+
+    if left == right { return Ok(true); }
+    let left = NativeString::new(left)?;
+    let right = NativeString::new(right)?;
+    // SAFETY: both operands are live CFStrings. Flag 1 is case-insensitive
+    // comparison, with no user-locale, diacritic or width-insensitive options.
+    Ok(unsafe { CFStringCompare(left.0.as_ptr(), right.0.as_ptr(), 1) } == 0)
 }
 
 #[cfg(windows)]

@@ -27,6 +27,7 @@ import { normalizeToolGroupStatus } from './toolGroupStatus';
 import { normalizeModelFailureDiagnostic, sanitizeDiagnosticDetail, type ModelFailureDiagnostic } from './providerDiagnostic';
 import { normalizeKnowledgeWritebackDiagnostic, type KnowledgeWritebackDiagnostic } from './knowledgeWritebackDiagnostic';
 import { isAbsoluteLocalPath, isFileUri } from '../utils/localPath';
+import { computerPermissionKindsForOperation } from './computerPermissionContract';
 
 export { joinLocalPath as joinPath } from '../utils/localPath';
 
@@ -232,6 +233,16 @@ export type IMessageTips = IMessage<
   }
 >;
 
+/** An authenticated host refusal before the requested Computer action ran. */
+export type SystemPermissionRequired = {
+  schema: 'system-permission-required.v1';
+  capability: 'computer';
+  action_id: string;
+  operation: string;
+  permissions: Array<'screen_recording' | 'accessibility'>;
+  execution: 'not_executed';
+};
+
 export type IMessageToolCall = IMessage<
   'tool_call',
   {
@@ -249,6 +260,10 @@ export type IMessageToolCall = IMessage<
     capability_id?: string;
     action_id?: string;
     error?: string;
+    error_code?: string;
+    permission_required?: SystemPermissionRequired;
+    /** Exact canonical tool result event order, shared by live and history. */
+    result_seq?: number;
     status?: 'running' | 'completed' | 'error' | 'canceled';
     input?: Record<string, unknown>;
     output?: string;
@@ -306,6 +321,12 @@ export type IMessageToolGroup = IMessage<
     description: string;
     name: string;
     status: 'Executing' | 'Success' | 'Error' | 'Canceled' | 'Pending';
+    action_id?: string;
+    args?: Record<string, unknown> | null;
+    input?: Record<string, unknown>;
+    error_code?: string;
+    permission_required?: SystemPermissionRequired;
+    result_seq?: number;
   }>
 >;
 
@@ -689,6 +710,20 @@ const normalizeThinkingStatus = (value: unknown): IMessageThinking['content']['s
 const finiteNumber = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 
+export const normalizeSystemPermissionRequired = (value: unknown, actionId: unknown): SystemPermissionRequired | undefined => {
+  if (!isObject(value) || value.schema !== 'system-permission-required.v1' || value.capability !== 'computer' ||
+    typeof value.action_id !== 'string' || !value.action_id.startsWith('computer/') ||
+    typeof value.operation !== 'string' || !value.operation.trim() || value.execution !== 'not_executed' ||
+    !Array.isArray(value.permissions) || value.permissions.length === 0 ||
+    value.permissions.some(kind => kind !== 'screen_recording' && kind !== 'accessibility')) return undefined;
+  const required = computerPermissionKindsForOperation(value.action_id, value.operation);
+  const permissions = value.permissions;
+  if (actionId !== value.action_id || required.length === 0 || permissions.length !== required.length ||
+    !required.every(kind => permissions.includes(kind))) return undefined;
+  return { schema: value.schema, capability: value.capability, action_id: value.action_id,
+    operation: value.operation, permissions: [...new Set(value.permissions)].sort(), execution: value.execution };
+};
+
 export const normalizeToolGroupContent = (value: unknown): IMessageToolGroup['content'] => {
   if (!Array.isArray(value)) return [];
 
@@ -703,6 +738,13 @@ export const normalizeToolGroupContent = (value: unknown): IMessageToolGroup['co
         description,
         name: toDisplayText(item.name, 'Tool'),
         status,
+        ...(typeof item.action_id === 'string' ? { action_id: item.action_id } : {}),
+        ...(typeof item.result_seq === 'number' && Number.isSafeInteger(item.result_seq) && item.result_seq >= 0 ? { result_seq: item.result_seq } : {}),
+        ...(isObject(item.args) ? { args: item.args } : {}),
+        ...(isObject(item.input) ? { input: item.input } : {}),
+        ...(typeof item.error_code === 'string' ? { error_code: item.error_code } : {}),
+        ...(item.error_code === 'SYSTEM_PERMISSION_REQUIRED' && status === 'Error'
+          ? { permission_required: normalizeSystemPermissionRequired(item.permission_required, item.action_id) } : {}),
       };
     });
 };
@@ -805,6 +847,9 @@ export const normalizeToolCallContent = (
   return {
     ...data,
     ...(status ? { status } : {}),
+    permission_required: data.error_code === 'SYSTEM_PERMISSION_REQUIRED' && status === 'error'
+      ? normalizeSystemPermissionRequired(data.permission_required, data.action_id) : undefined,
+    result_seq: typeof data.result_seq === 'number' && Number.isSafeInteger(data.result_seq) && data.result_seq >= 0 ? data.result_seq : undefined,
     artifacts: invalidTerminalClaim ? [] : artifacts,
   } as IMessageToolCall['content'];
 };

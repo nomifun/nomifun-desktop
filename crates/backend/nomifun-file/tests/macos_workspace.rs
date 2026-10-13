@@ -219,6 +219,30 @@ async fn apfs_case_aliases_reject_before_any_publication() {
 }
 
 #[tokio::test]
+async fn apfs_unicode_case_folding_aliases_reject_before_any_publication() {
+    for (first, second) in [("Σ.txt", "ς.txt"), ("ß.txt", "SS.txt"), ("S.txt", "ſ.txt")] {
+        assert_alias_batch_rejected_before_publication(first, second).await;
+    }
+}
+
+#[tokio::test]
+async fn apfs_unicode_case_folding_ancestor_aliases_reject_before_parent_creation() {
+    let root = tempfile::tempdir().unwrap();
+    let probe = root.path().join("ß");
+    fs::write(&probe, b"probe").unwrap();
+    if !same_file(&probe, &root.path().join("SS")) { return; }
+    fs::remove_file(&probe).unwrap();
+    let (service, scope, events) = owner(root.path());
+    let failure = service.apply_patch_with_observation_for_agent_session(
+        &scope,
+        AgentSessionPatchRequest { files: vec![creation("ß"), creation("SS/child.txt")] },
+    ).await.expect_err("an APFS alias cannot be both a file and an ancestor");
+    assert!(failure.observation.published.is_empty(), "{:?}", failure.observation);
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    assert!(events.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn apfs_nfc_nfd_aliases_reject_before_any_publication() {
     assert_alias_batch_rejected_before_publication("é.txt", "e\u{301}.txt").await;
 }
@@ -482,7 +506,7 @@ async fn case_sensitive_apfs_preserves_distinct_case_and_unicode_names() {
         .expect("case-sensitive APFS root");
     let root = tempfile::tempdir_in(parent).unwrap();
     let (service, scope, _) = owner(root.path());
-    let paths = ["Report.txt", "REPORT.TXT"];
+    let paths = ["Report.txt", "REPORT.TXT", "Σ.txt", "ς.txt", "ß.txt", "SS.txt", "S.txt", "ſ.txt"];
 
     let result = service
         .apply_patch_for_agent_session(

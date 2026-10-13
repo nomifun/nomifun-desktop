@@ -228,5 +228,17 @@
   "export.unavailable": "当前无法导出对话",
   "unknownMessageType": "未知消息类型：{{type}}",
   "command": "命令：",
-  "processing": "处理中..."
+  "processing": "处理中...",
+  "systemPermission": {
+    "context": "这一步电脑操作尚未执行。你可以先授权，也可以继续对话。",
+    "title": "电脑操作待授权",
+    "missing": "待开启：{{permissions}}",
+    "checkFailedTitle": "暂时无法确认系统权限",
+    "checkFailed": "本次操作尚未执行，请重新检查。",
+    "retryCheck": "重新检查",
+    "grant": "去授权",
+    "later": "稍后",
+    "screenRecording": "屏幕录制",
+    "accessibility": "辅助功能"
+  }
 }

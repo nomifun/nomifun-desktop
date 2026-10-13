@@ -84,6 +84,8 @@ import { useExecutionSafe } from '../execution/ExecutionContext';
 import { delegatedTurnPresentation, resolveConversationDelegation } from './conversationDelegationModel';
 import DelegationProgress from './components/DelegationProgress';
 import { conversationPauseErrorMessage } from '../utils/conversationPauseError';
+import { collectSystemPermissionNotices, shouldCompactPermissionBlockedSummary, type SystemPermissionNotice as PermissionNotice } from './systemPermissionNoticeModel';
+import SystemPermissionNotice from './components/SystemPermissionNotice';
 
 type SourceMessageId = MessageId;
 
@@ -163,6 +165,7 @@ type ITurnCreationTasksVO = {
   sourceMessageIds: SourceMessageId[];
   created_at: number;
 };
+type ITurnPermissionVO = PermissionNotice & { type: 'turn_permission_required' };
 type IProcessedItem =
   | IRenderableItem
   | ITurnProcessDisclosureVO
@@ -170,7 +173,8 @@ type IProcessedItem =
   | ITurnDeliverablesVO
   | ITurnActionsVO
   | ITurnKnowledgeNoticeVO
-  | ITurnCreationTasksVO;
+  | ITurnCreationTasksVO
+  | ITurnPermissionVO;
 
 type ConversationLocationState = {
   targetMessageId?: MessageId;
@@ -185,6 +189,7 @@ const getProcessedItemSourceMessageIds = (item: IProcessedItem): SourceMessageId
       item.type === 'turn_deliverables' ||
       item.type === 'turn_actions' ||
       item.type === 'turn_knowledge_writeback' ||
+      item.type === 'turn_permission_required' ||
       item.type === 'turn_creation_tasks')
   ) {
     return item.sourceMessageIds;
@@ -221,6 +226,7 @@ const getProcessedItemCreatedAt = (item: IProcessedItem): number => {
       'turn_deliverables',
       'turn_actions',
       'turn_knowledge_writeback',
+      'turn_permission_required',
       'turn_creation_tasks',
     ].includes(item.type)
   ) {
@@ -663,7 +669,7 @@ const isPrivateJournalActivity = (item: IRenderableItem): boolean =>
     item.content.turn_summary !== true &&
     (item.content.status === 'preparing' || item.content.status === 'prepared');
 
-const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean; hideActions?: boolean }> = React.memo(
+const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean; hideActions?: boolean; compactError?: boolean }> = React.memo(
   HOC((props) => {
     const { message, highlighted } = props as { message: TMessage; highlighted?: boolean; hideActions?: boolean };
     return (
@@ -689,13 +695,13 @@ const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean; hideActi
         {props.children}
       </div>
     );
-  })(({ message, hideActions }) => {
+  })(({ message, hideActions, compactError }) => {
     const { t } = useTranslation();
     switch (message.type) {
       case 'text':
         return <MessageText message={message} hideActions={hideActions}></MessageText>;
       case 'tips':
-        return <MessageTips message={message}></MessageTips>;
+        return <MessageTips message={message} compactError={compactError}></MessageTips>;
       case 'tool_call':
         return <MessageToolCall message={message}></MessageToolCall>;
       case 'tool_group':
@@ -716,7 +722,8 @@ const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean; hideActi
     prev.message.position === next.message.position &&
     prev.message.type === next.message.type &&
     prev.highlighted === next.highlighted &&
-    prev.hideActions === next.hideActions
+    prev.hideActions === next.hideActions &&
+    prev.compactError === next.compactError
 );
 
 const MessageList: React.FC<{
@@ -1023,6 +1030,25 @@ const MessageList: React.FC<{
     .filter(([, gate]) => !gate.running)
     .map(([turnId]) => turnId as MessageId), [turnPresentation.fileTurnGates]);
   const turnFileSummaries = useTurnFiles(conversationContext?.conversation_id, closedTurnIds);
+  const canonicalPermissionTurnId = useCallback((turnId: MessageId | undefined) =>
+    turnId && turnId === conversationContext?.activeRequestMessageId && conversationContext?.activeTurnId
+      ? conversationContext.activeTurnId : turnId,
+    [conversationContext?.activeRequestMessageId, conversationContext?.activeTurnId]);
+  const permissionMessageSources = useMemo(() => {
+    const associatedTurns = new Map<MessageId, MessageId>();
+    for (const entry of turnPresentation.modelInput) {
+      const turnId = canonicalPermissionTurnId(entry.turnId);
+      if (turnId) for (const sourceId of entry.sourceMessageIds ?? []) associatedTurns.set(sourceId, turnId);
+    }
+    return list.map(message => {
+      const sourceId = getMessageBusinessIdentity(message);
+      const turnId = canonicalPermissionTurnId(message.turn_id) ?? (sourceId ? associatedTurns.get(sourceId) : undefined);
+      return turnId && turnId !== message.turn_id ? { ...message, turn_id: turnId } : message;
+    });
+  }, [list, turnPresentation.modelInput, canonicalPermissionTurnId]);
+  const permissionNotices = useMemo(() => collectSystemPermissionNotices(permissionMessageSources,
+    conversationContext?.activeTurnId ?? canonicalPermissionTurnId(turnPresentation.modelInput.findLast(entry => entry.role === 'user')?.turnId)),
+    [permissionMessageSources, turnPresentation.modelInput, conversationContext?.activeTurnId, canonicalPermissionTurnId]);
 
   const displayList = useMemo<IProcessedItem[]>(() => {
     const { disclosureItems, modelInput, turnGates, fileTurnGates, verifiedImagesByTurn, creationOwnerMessageIdByTurn, finalAssistantTextByTurn, knowledgeNoticesByTurn } = turnPresentation;
@@ -1043,20 +1069,28 @@ const MessageList: React.FC<{
       if ('type' in entry && entry.type === 'turn_actions') return entry.turn_id;
       if ('type' in entry && entry.type === 'turn_knowledge_writeback') return entry.turn_id;
       if ('type' in entry && entry.type === 'turn_creation_tasks') return entry.turn_id;
+      if ('type' in entry && entry.type === 'turn_permission_required') return entry.turn_id;
       return turnIdByAnchorId.get(getProcessedItemAnchorId(entry));
     };
 
     const lastIndexByTurn = new Map<MessageId, number>();
+    const permissionIndexByTurn = new Map<MessageId, number>();
     disclosureItems.forEach((entry, index) => {
       const turnId = getDisplayItemTurnId(entry);
       if (turnId && (deliverablesByTurn.has(turnId) || knowledgeNoticesByTurn.has(turnId))) lastIndexByTurn.set(turnId, index);
+      const permissionTurnId = canonicalPermissionTurnId(turnId ?? (entry.type === 'process_receipt'
+        ? turnIdByAnchorId.get(getProcessedItemAnchorId(entry.item)) : undefined));
+      if (permissionTurnId && permissionNotices.some(notice => notice.turn_id === permissionTurnId)) {
+        permissionIndexByTurn.set(permissionTurnId, index);
+      }
     });
 
     const creationTaskPlacements = creationTaskPlacementAfterIndices(
       disclosureItems.map(getDisplayItemTurnId),
       creationOwnerMessageIdByTurn
     );
-    if (deliverablesByTurn.size === 0 && creationTaskPlacements.size === 0 && knowledgeNoticesByTurn.size === 0) return disclosureItems;
+    if (deliverablesByTurn.size === 0 && creationTaskPlacements.size === 0 && knowledgeNoticesByTurn.size === 0 &&
+      permissionNotices.length === 0) return disclosureItems;
 
     // A turn's products belong inside its response, before the shared copy /
     // time footer. Decorate files and media together so neither can land after
@@ -1064,6 +1098,11 @@ const MessageList: React.FC<{
     const withOutputs: IProcessedItem[] = [];
     disclosureItems.forEach((entry, index) => {
       withOutputs.push(entry);
+      for (const notice of permissionNotices) {
+        if (permissionIndexByTurn.get(notice.turn_id) === index) {
+          withOutputs.push({ ...notice, type: 'turn_permission_required' });
+        }
+      }
       const turnId = getDisplayItemTurnId(entry);
       if (!turnId) return;
       const items = lastIndexByTurn.get(turnId) === index ? deliverablesByTurn.get(turnId) : undefined;
@@ -1115,7 +1154,7 @@ const MessageList: React.FC<{
       }
     });
     return withOutputs;
-  }, [turnPresentation, turnFileSummaries]);
+  }, [turnPresentation, turnFileSummaries, permissionNotices, canonicalPermissionTurnId]);
 
   const lastUserTextIndex = useMemo(
     () =>
@@ -1428,6 +1467,8 @@ const MessageList: React.FC<{
 
   const renderItem = (_index: number, item: (typeof displayList)[0], renderKey = item.id) => {
     const highlighted = matchesTargetMessage(item, highlightedMessageId);
+    const compactError = item.type === 'tips' && shouldCompactPermissionBlockedSummary(
+      permissionMessageSources.find(message => message.id === item.id) ?? item, permissionNotices);
     if ('type' in item && item.type === 'turn_process_disclosure') {
       return (
         <div
@@ -1479,6 +1520,12 @@ const MessageList: React.FC<{
         <KnowledgeWritebackNotice notice={item.notice} />
       </div>;
     }
+    if ('type' in item && item.type === 'turn_permission_required') {
+      return <div key={item.id} id={`message-${item.id}`} className='min-w-0 message-item turn_permission_required'
+        style={highlighted ? highlightStyle : undefined}>
+        <SystemPermissionNotice notice={item} />
+      </div>;
+    }
     if ('type' in item && item.type === 'turn_actions') {
       return (
         <div
@@ -1520,6 +1567,7 @@ const MessageList: React.FC<{
         message={item as TMessage}
         key={renderKey}
         highlighted={highlighted}
+        compactError={compactError}
         hideActions={
           isActiveProcessTextItem(item, _index) ||
           movedActionMessageIds.has((item as TMessage).id)

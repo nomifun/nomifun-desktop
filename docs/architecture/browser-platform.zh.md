@@ -204,7 +204,10 @@ Windows 用户快捷键已接原生 AcceleratorKeyPressed 与既有浏览器栏�
 地址焦点与新标签草稿在浏览器栏处理，刷新/关闭/历史复用已有 user_command，不增加 Agent 能力或第二套导航执行器。
 原生注册跟随 controller 的确认关闭清理。已有编译/纯按键映射与 UI 测试；真实主 GUI 已验证原生页焦点下 Ctrl+L
 聚焦并选中地址，以及 Ctrl+T/Ctrl+W 空标签草稿不丢失原页面。其余物理快捷键仍按既有命令/原生测试覆盖；
-macOS 的 Command 键/AppKit 接线后置，不能从这些 Windows 代码推定已支持。
+macOS 已接入公开 AppKit 本地事件 monitor：WK child 聚焦时将 Cmd+L/T/W/R、F5、Option+左右
+转为同一会话/完整页面目标事件，并在原生与 renderer 复核运行锁、活动标签及文档代际。
+重复、繁忙或过期请求不落回宿主菜单，防止 Cmd+W 误关主窗口；Cmd+A/C/V/X/Z 保持原编辑行为。
+按键映射与 renderer 回归已通过，真实主应用的 WK 焦点至浏览器栏路径单独验收，不能由 Windows 证据替代。
 
 Windows WebView2 已有真实输入和生命周期 smoke 验证。主应用 UserReady 的浏览器展开、网站对话框、中文回显和等待中关闭已有实际视觉验证；真实 StepFun 已完成同页点击复现 +2、Read/Edit 修复代码、重载并点击验证 1/2/3、结束后用户继续到 4。完整前端框架启动/构建、macOS 原生执行及正式发行矩阵仍未完成。
 
@@ -244,6 +247,12 @@ Windows 网页 iframe 坐标使用原生 `DOM.getBoxModel` 内容四边形与投
 网站权限已接入会话内的用户提示和原生 deferral，仅允许 UserReady 的可见活动标签做一次性决策，Agent 不能授权。
 权限超时与隐藏/恢复后的拒绝已通过真实验证。自动取消的请求在当前文档内保持拒绝，刷新后可重新申请，拒绝记录不写入 Profile。
 其他设备权限与真实主应用的完整视觉/交互验收仍待完成。
+
+macOS camera/microphone 请求使用同一用户权限提示，保留公开 WK completion 所有权，不委托不可撤销的
+系统浏览器 Prompt。最多四条请求、30 秒超时；精确 UserReady、可见页面及当前文档才能一次回复。
+隐藏、导航、关闭、Agent 接管或超时先撤下 callback 所有权再拒绝，旧文档的拒绝不写入后继文档。
+自动取消只在当前文档内抑制重弹，不持久化站点权限，也不替代系统 TCC 授权。核心回归与真实 WK delegate
+拒绝/取消验收分别记录，授予设备访问的验收范围不能从拒绝夹具推定。
 
 ## 文件上传边界（实施中）
 
@@ -306,8 +315,12 @@ NomiCore 的 Knowledge 已通过 typed port 接入 Kernel 非 Agent operation �
 
 其 Headless owner 使用匿名临时 context、限定 origin 的请求转发与 exact process/profile 清理，不读取会话标签或登录态。Runtime/adapter 身份冻结在能力元数据中，会话构建和请求执行时再次校验。
 
-Windows 默认桌面启动已接入 Chrome 120+ 的安装版本发现和文件指纹装配，找不到合格安装时保持不可用。
-发现过程只读取已知安装目录的 PE 版本信息和文件，不运行 Chrome、不发送搜索请求、不读取旧浏览器偏好。
+Windows 与 macOS 默认桌面启动已接入 Chrome 120+ 的安装版本发现和文件指纹装配，找不到合格安装时保持不可用。
+Windows 从已知安装目录读取 PE 版本信息；macOS 从 `/Applications/Google Chrome.app` 和用户
+`~/Applications/Google Chrome.app` 读取 XML/binary `Info.plist`，验证 bundle 标识、入口名称、执行权限和四段版本。
+macOS 指纹覆盖入口、元数据、当前版本的 Chrome framework、Helper app、原生 Libraries 和运行 Resources，避免只固定小型 launcher
+而漏掉实际引擎更新；缺失文件、越界 symlink 和无法完成的指纹读取拒绝装配。未扫描 PATH 或任意自定义位置，未自动安装浏览器。
+发现过程只读取安装元数据和文件，不运行 Chrome、不发送搜索请求、不读取旧浏览器偏好；缺少依赖不阻断桌面启动。
 运行版本在真正检索时、创建检索页面之前再次核对；版本变化会拒绝旧绑定。真实公网检索与目录接口已验证。
 本地检索集成测试通过正式 DesktopServer、工作台配置 API 与普通 Chat 模型协议完成会话检索：模型
 没有原生搜索 trait，仍取得精确的 `web.research` 工具及真实公开来源/引用标识。该测试使用确定性模型端点，

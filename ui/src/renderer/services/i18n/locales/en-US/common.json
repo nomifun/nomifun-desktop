@@ -141,11 +141,5 @@
     "downloadTitle": "{{tool}} is required for this command",
     "downloadHint": "No usable {{tool}} was found on this host. You can install it yourself and retry, or let NomiFun download it and continue. The download starts only when you choose it.",
     "downloadAction": "Download {{tool}}"
-  },
-  "startup": {
-    "starting": "Starting NomiFun",
-    "quitting": "Closing NomiFun",
-    "connectionFailed": "The startup status could not be read. Close the app and try again.",
-    "quit": "Quit"
   }
 }

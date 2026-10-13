@@ -21,7 +21,7 @@ const capability = (
   },
   authoring_policy: 'direct',
   summary_kind: 'tool',
-  actions: [{ action_id: `${id}/read`, input_schema: 'input', output_schema: 'output', effect_class: 'read_local', presentation: 'visible' }],
+  actions: [{ action_id: `${id}/read`, effect_class: 'read_local', presentation: 'visible' }],
   context_schema_refs: [],
   event_schema_refs: [],
   required_host_ports: [],
@@ -58,9 +58,9 @@ describe('Agent capability resource projection', () => {
   const workshop: CapabilityModuleCatalogItem = {
     ...capability('creative.workshop', ['asset_library', 'canvas']),
     actions: [
-      { action_id: 'creative.workshop/asset.read', input_schema: 'input', output_schema: 'output', effect_class: 'read_local', presentation: 'visible', required_resource_operations: { asset_library: ['read'] } },
-      { action_id: 'creative.workshop/asset.write', input_schema: 'input', output_schema: 'output', effect_class: 'write_local', presentation: 'visible', required_resource_operations: { asset_library: ['write'] } },
-      { action_id: 'creative.workshop/canvas.read', input_schema: 'input', output_schema: 'output', effect_class: 'read_local', presentation: 'visible', required_resource_operations: { canvas: ['read'] } },
+      { action_id: 'creative.workshop/asset.read', effect_class: 'read_local', presentation: 'visible', required_resource_operations: { asset_library: ['read'] } },
+      { action_id: 'creative.workshop/asset.write', effect_class: 'write_local', presentation: 'visible', required_resource_operations: { asset_library: ['write'] } },
+      { action_id: 'creative.workshop/canvas.read', effect_class: 'read_local', presentation: 'visible', required_resource_operations: { canvas: ['read'] } },
     ],
   };
 

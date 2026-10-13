@@ -297,8 +297,6 @@ export type CapabilityModuleAuthoringPolicy =
 
 export interface CapabilityModuleAction {
   action_id: string;
-  input_schema: string;
-  output_schema: string;
   effect_class: string;
   presentation: string;
   /** Missing/null retains the Module gate; an empty map means no resources. */

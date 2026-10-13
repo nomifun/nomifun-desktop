@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0.0",
   "inventory_kind": "agent-architecture-inventory",
-  "updated_on": "2026-10-04",
+  "updated_on": "2026-10-13",
   "source": {
     "barrier_commit": "2ddf08dbc012e14f29f5555c7b076d1ba78c34cb"
   },
@@ -377,9 +377,15 @@
     {
       "id": "macos.current_agent_session",
       "owner_task": "AGENT-ARCHITECTURE",
-      "state": "implemented_unverified",
+      "state": "verified",
       "required_evidence": [
         "Current source canonical history, channel binding, native reasoning and desktop rendering checks on macOS."
+      ],
+      "verified_evidence": [
+        "2026-10-13, current worktree on arm64 macOS 26.6.2: actual Tauri UI selected High; sole canonical reasoning_effort persisted as high and restored after a normal quit and cold restart.",
+        "Actual desktop input executed a production canonical Turn with localhost mock model; write_file receipt, 73-byte managed-workspace artifact and SHA matched, terminal event persisted, and cold UI restored history, tool details and artifact.",
+        "Two exact nomifun-app Channel owner/binding checks passed on macOS using real SQLite and ChannelManager with RecordingPlugin/controlled SessionPort; external IM delivery and model reasoning wire behavior were not tested.",
+        "Both actual Command-Q exits had cleanup_verified=true, exact kernel exit 0 and controller final_verified=true; detailed commands, limitations and first failures are in docs/reports/2026-10-13-macos-compatibility-todo.zh.md."
       ]
     }
   ]

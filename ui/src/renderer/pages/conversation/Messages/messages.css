@@ -129,6 +129,18 @@
   margin: 4px 0 0 24px;
 }
 
+.message-error-note--compact {
+  width: auto;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.message-error-note--compact .message-error-note__title { font-size: 12px; color: var(--color-text-2); }
+.message-error-note--compact .message-error-note__icon { color: var(--color-text-3); }
+.message-error-note--compact .message-error-note__controls { margin-top: 0; }
+.message-error-note--compact .message-error-note__toggle { min-height: 24px; font-size: 12px; padding: 0 4px; }
+
 .message-error-note__controls {
   display: inline-flex;
   flex-wrap: wrap;

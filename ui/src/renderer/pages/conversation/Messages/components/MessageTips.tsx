@@ -91,7 +91,7 @@ const useErrorRetry = (message: IMessageTips): (() => void) | null => {
   }, [conversationContext, message.content, message.created_at, message.turn_id, messageList]);
 };
 
-const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
+const MessageTips: React.FC<{ message: IMessageTips; compactError?: boolean }> = ({ message, compactError }) => {
   const { t } = useTranslation();
   const conversationContext = useConversationContextSafe();
   const currentAgent = conversationContext?.currentAgent;
@@ -133,6 +133,7 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
   if (type !== 'error' && !content.trim()) return null;
   if (type === 'error') {
     return <ConversationErrorNote
+      compact={compactError}
       error={structuredError}
       rawDetail={structuredError?.detail || structuredError?.message || (json ? JSON.stringify(data, null, 2) : content)}
       timestamp={message.content.finished_at_ms ?? message.created_at}

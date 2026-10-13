@@ -1,13 +1,15 @@
 import '../../../../test/setup-dom.ts';
 import '@arco-design/web-react/lib/_util/react-19-adapter';
 import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
-import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { useEffect, useRef, useState } from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import { SWRConfig } from 'swr';
 import { agentPlatform } from '@/common/adapter/ipcBridge';
+import { appHosting } from '@/common/adapter/appHostingBridge';
+import * as modelProviders from '@/renderer/hooks/agent/useModelProviderList';
 import {
   asAgentPresetId, asCapabilityId, asPackageId, asDigestHex, asResolvedSnapshotId, createEmptyAgentPresetDocument,
   type AgentCatalogResponse, type AgentPresetDocument, type AgentPresetDraft, type CapabilityModuleCatalogItem, type RoleProviderSelection,
@@ -27,7 +29,7 @@ const selection: RoleProviderSelection = { role, provider_mount_id: 'user-search
 const capabilityModule: CapabilityModuleCatalogItem = {
   module: capability, display_name: 'Web search', description: '',
   source_package: { id: asPackageId('platform'), version: '1.0.0' }, authoring_policy: 'direct', summary_kind: 'tool',
-  actions: [{ action_id: 'platform.search/search', input_schema: 'input', output_schema: 'output', effect_class: 'external_transmit', presentation: 'function_tool' }],
+  actions: [{ action_id: 'platform.search/search', effect_class: 'external_transmit', presentation: 'function_tool' }],
   context_schema_refs: [], event_schema_refs: [], required_resource_kinds: [], required_host_ports: [],
   required_modules: [], conflicting_modules: [], supported_surfaces: ['desktop'],
 };
@@ -53,6 +55,12 @@ function mount(document = initial(), currentCatalog = catalog, disabled = false)
   };
   return { ...render(<I18nextProvider i18n={i18n}><Harness /></I18nextProvider>), state: () => current, saved: () => saved };
 }
+beforeEach(() => {
+  spyOn(appHosting.mcpSources, 'invoke').mockResolvedValue([]);
+  spyOn(modelProviders, 'useProvidersQuery').mockReturnValue({
+    data: [], error: undefined, isLoading: false, isValidating: false, mutate: async () => [],
+  });
+});
 afterEach(() => { cleanup(); mock.restore(); });
 
 describe('component implementation selection', () => {
@@ -114,10 +122,10 @@ describe('component implementation selection', () => {
     ];
     const mediaModule: CapabilityModuleCatalogItem = { ...capabilityModule,
       module: original.document.enabled_capabilities[0].capability, display_name: 'Media creation',
-      actions: [{ action_id: 'creation.media/music', input_schema: 'input', output_schema: 'output', effect_class: 'external_transmit', presentation: 'function_tool' }] };
+      actions: [{ action_id: 'creation.media/music', effect_class: 'external_transmit', presentation: 'function_tool' }] };
     const workspaceModule: CapabilityModuleCatalogItem = { ...capabilityModule,
       module: original.document.enabled_capabilities[1].capability, display_name: 'Workspace files',
-      actions: [{ action_id: 'workspace.files/read', input_schema: 'input', output_schema: 'output', effect_class: 'read_local', presentation: 'function_tool' }] };
+      actions: [{ action_id: 'workspace.files/read', effect_class: 'read_local', presentation: 'function_tool' }] };
     const mediaCatalog: AgentCatalogResponse = { ...catalog, modules: [mediaModule, workspaceModule], capabilities: [
       { ...catalog.capabilities[0], capability: mediaModule.module },
       { ...catalog.capabilities[0], capability: workspaceModule.module },

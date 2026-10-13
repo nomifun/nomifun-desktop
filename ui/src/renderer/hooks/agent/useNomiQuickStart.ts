@@ -19,16 +19,7 @@ import { conversationTarget, parseConversationId } from '@/common/types/ids';
 import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { uuidv7 } from '@/common/utils/uuidv7';
 import { prepareOfficialAgent } from '@/renderer/pages/guid/hooks/officialAgentLaunch';
-
-const FIXED_RESOURCE_IDS: Record<string, string> = {
-  workspace: 'default-workspace',
-  process_session: 'managed-process-session',
-  terminal: 'managed-terminal',
-  scheduler: 'installation-scheduler',
-  browser: 'managed-browser',
-  computer: 'local-desktop',
-  project_memory: 'default-project-memory',
-};
+import { resolveAgentResourceSelections, type AgentResourceSelectionValue } from './agentResourceSelection';
 
 /**
  * Additions merged onto the create call's `extra` bag.
@@ -54,6 +45,8 @@ export interface NomiQuickStartOptions {
   model?: TProviderWithModel;
   /** Merged onto `extra`, overriding the workspace defaults below. */
   extra?: NomiQuickStartExtra;
+  /** Explicit targets for this launch; ownership and operations stay server-owned. */
+  resources?: AgentResourceSelectionValue;
 }
 
 /**
@@ -69,7 +62,7 @@ export const useNomiQuickStart = () => {
   const { current_model } = useGuidModelSelection('nomi');
 
   const start = useCallback(
-    async ({ name, prompt, send = true, model, extra }: NomiQuickStartOptions): Promise<boolean> => {
+    async ({ name, prompt, send = true, model, extra, resources = {} }: NomiQuickStartOptions): Promise<boolean> => {
       const effectiveModel = model ?? current_model;
       if (!effectiveModel) {
         Message.warning(t('conversation.noModelConfigured'));
@@ -85,10 +78,9 @@ export const useNomiQuickStart = () => {
         );
         if (!template) throw new Error('AGENT_PRESET_REQUIRED');
         const preset = await prepareOfficialAgent(template, effectiveModel);
-        const resourceSelections = template.seed.required_resource_kinds.flatMap((resource_kind) => {
-          const resource_id = FIXED_RESOURCE_IDS[resource_kind];
-          return resource_id ? [{ resource_kind, resource_id }] : [];
-        });
+        const resourceResolution = resolveAgentResourceSelections(template.seed.required_resource_kinds, resources);
+        if (resourceResolution.missingKinds.length) throw new Error('AGENT_RESOURCE_SELECTION_REQUIRED');
+        const resourceSelections = resourceResolution.selections;
         const session = await ipcBridge.agentPlatform.sessions.create.invoke({
           preset_id: preset.preset_id,
           title: name,

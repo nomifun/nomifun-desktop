@@ -678,3 +678,13 @@ mod tests {
         ).is_err());
     }
 }
+#[test]
+fn system_permission_kernel_failure_preserves_the_typed_host_body() {
+    let body = serde_json::json!({"schema":"system-permission-required.v1","capability":"computer",
+        "action_id":"computer/observe","operation":"screenshot","permissions":["screen_recording"],
+        "execution":"not_executed"}).to_string();
+    let mapped = super::kernel_error(nomifun_agent_kernel::KernelError::capability_execution_failed("SYSTEM_PERMISSION_REQUIRED", body.clone()));
+    let crate::EngineToolError::CapabilityKernel { code, message } = mapped else { panic!("explicit Kernel failure was collapsed") };
+    assert_eq!(code, "SYSTEM_PERMISSION_REQUIRED");
+    assert_eq!(message, body);
+}

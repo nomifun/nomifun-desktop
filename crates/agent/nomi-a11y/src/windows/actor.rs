@@ -32,13 +32,15 @@
 //! cache silently serves stale snapshots — strictly worse than a fast re-walk.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Mutex;
 use std::sync::mpsc::{Sender, channel};
 use std::time::Duration;
 
 use uiautomation::controls::ControlType;
 use uiautomation::core::UICacheRequest;
-use uiautomation::types::{TreeScope, UIProperty};
+use uiautomation::types::{Point, TreeScope, UIProperty};
+use uiautomation::variants::Value;
 use uiautomation::{UIAutomation, UIElement, UITreeWalker, patterns};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM};
@@ -148,10 +150,9 @@ fn fmt_num(v: f64) -> String {
     }
 }
 
-/// Read an Edit/Document/RichEdit control's text via the Text pattern (capped
-/// at the provider), for controls whose Value pattern is read-only/empty.
+/// Read display text through the Text pattern, bounded in provider UTF-16 units.
 fn text_via_text_pattern(elem: &UIElement) -> Option<String> {
-    const MAX: i32 = 2000; // UTF-16 code units; the cap is applied provider-side
+    const MAX: i32 = 2000;
     let pat = elem.get_pattern::<patterns::UITextPattern>().ok()?;
     let range = pat.get_document_range().ok()?;
     let text = range.get_text(MAX).ok()?;
@@ -159,13 +160,12 @@ fn text_via_text_pattern(elem: &UIElement) -> Option<String> {
     if t.is_empty() { None } else { Some(t.to_string()) }
 }
 
-/// Read an element's editable text value (only for edit-like controls). Prefers
-/// the Value pattern, falling back to the Text pattern for RichEdit/Document.
+/// Password protection is checked before either content getter. Unknown
+/// protection also avoids content reads; no password value is projected.
 fn read_value(elem: &UIElement, ct: ControlType) -> Option<String> {
-    if !matches!(
-        ct,
-        ControlType::Edit | ControlType::Document | ControlType::ComboBox
-    ) {
+    if !matches!(ct, ControlType::Edit | ControlType::Document | ControlType::ComboBox)
+        || elem.is_password().unwrap_or(true)
+    {
         return None;
     }
     elem.get_pattern::<patterns::UIValuePattern>()
@@ -398,8 +398,16 @@ fn read_cached(el: &UIElement, handles: &mut Vec<UIElement>) -> RawNode {
         });
     let focusable = el.is_cached_keyboard_focusable().unwrap_or(false);
     let actionable = actionable_from(ct, focusable);
-    let value = read_value(el, ct).or_else(|| read_range_value(el, ct));
+    let protected = el.is_cached_password().ok();
+    let value = if protected == Some(false) {
+        read_value(el, ct).or_else(|| read_range_value(el, ct))
+    } else {
+        None
+    };
     let mut states = Vec::new();
+    if protected == Some(true) {
+        states.push("password".to_string());
+    }
     if !el.is_cached_enabled().unwrap_or(true) {
         states.push("disabled".to_string());
     }
@@ -443,11 +451,16 @@ fn read_live(el: &UIElement, handles: &mut Vec<UIElement>) -> RawNode {
         .get_name()
         .ok()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+        .filter(|s| !s.is_empty())
+        .or_else(|| el.get_help_text().ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
     let focusable = el.is_keyboard_focusable().unwrap_or(false);
     let actionable = actionable_from(ct, focusable);
-    let value = read_value(el, ct);
+    let protected = el.is_password().ok();
+    let value = if protected == Some(false) { read_value(el, ct) } else { None };
     let mut states = Vec::new();
+    if protected == Some(true) {
+        states.push("password".to_string());
+    }
     if !el.is_enabled().unwrap_or(true) {
         states.push("disabled".to_string());
     }
@@ -548,21 +561,30 @@ fn build_raw_live(
 
 // ---- window resolution --------------------------------------------------
 
-/// Map a `uiautomation` error to an `A11yError`, surfacing UIPI (integrity)
-/// access denials as a clear, actionable message instead of a raw HRESULT.
+/// Classify a read/interface-acquisition error before any action dispatch.
+/// Display messages do not reliably contain HRESULTs and are not authority to
+/// reinterpret an unknown failure as permission denial or missing support.
 fn uia_err(op: &str, e: uiautomation::Error) -> A11yError {
-    let msg = e.to_string();
-    let low = msg.to_lowercase();
-    if low.contains("0x80070005") || low.contains("access is denied") || low.contains("denied") {
-        A11yError::Backend(format!(
-            "{op}: access denied. The target window is likely running as administrator \
-             (higher integrity); UI Automation cannot read or act on an elevated process from a \
-             non-elevated one. Restart this app as administrator to interact with it — this is \
-             never done automatically."
-        ))
-    } else {
-        A11yError::Backend(format!("{op}: {msg}"))
+    let code = e.code() as u32;
+    let message = format!("{op}: UIA error 0x{code:08X}: {e}");
+    match code {
+        // E_ACCESSDENIED / RPC_E_ACCESS_DENIED.
+        0x80070005 | 0x8001011B => A11yError::Permission(message),
+        // UIA_E_ELEMENTNOTAVAILABLE / E_HANDLE / invalid window handle.
+        0x80040201 | 0x80070006 | 0x80070578 => A11yError::Stale(message),
+        _ => A11yError::Backend(message),
     }
+}
+
+/// Once a mutating request entered UIA, an error code describes its cause but
+/// does not prove that the provider performed no action. Never retry another
+/// pattern or authorize synthetic input from this outcome.
+fn uia_action_err(op: &str, e: uiautomation::Error) -> A11yError {
+    let code = e.code() as u32;
+    A11yError::Uncertain(format!(
+        "{op}: native UIA request was dispatched but its effect is unknown \
+         (0x{code:08X}: {e}); re-run observe and do not automatically retry"
+    ))
 }
 
 /// Window title via Win32 `GetWindowTextW` (cheap; no UIA round-trip). Empty on
@@ -905,9 +927,11 @@ fn do_observe(opts: &ObserveOpts, state: &mut State) -> Result<Snapshot, A11yErr
         .map_err(|e| uia_err("create_true_condition", e))?;
 
     let mut handles: Vec<UIElement> = Vec::new();
+    let mut window_by_handle: HashMap<usize, Rc<WindowEntry>> = HashMap::new();
     let mut depth_capped = false;
     let mut window_nodes: Vec<RawNode> = Vec::new();
     for t in &targets {
+        let first_handle = handles.len();
         match build_window_node(
             &state.automation,
             &cache,
@@ -918,7 +942,17 @@ fn do_observe(opts: &ObserveOpts, state: &mut State) -> Result<Snapshot, A11yErr
             &mut handles,
             &mut depth_capped,
         ) {
-            Ok(node) => window_nodes.push(node),
+            Ok(node) => {
+                let window = Rc::new(WindowEntry {
+                    el: t.el.clone(),
+                    runtime_id: t.el.get_runtime_id().unwrap_or_default(),
+                    observed_bounds: node.bounds,
+                });
+                for hidx in first_handle..handles.len() {
+                    window_by_handle.insert(hidx, window.clone());
+                }
+                window_nodes.push(node);
+            }
             Err(e) => tracing::warn!("skipping window during observe: {e}"),
         }
     }
@@ -961,6 +995,8 @@ fn do_observe(opts: &ObserveOpts, state: &mut State) -> Result<Snapshot, A11yErr
                 RegEntry {
                     el: h.clone(),
                     runtime_id,
+                    observed_bounds: entry.bounds,
+                    window: window_by_handle.get(&hidx).cloned(),
                 },
             );
         }
@@ -977,75 +1013,157 @@ fn do_observe(opts: &ObserveOpts, state: &mut State) -> Result<Snapshot, A11yErr
     })
 }
 
-/// Try a chain of activation patterns for a generic "press/click". Returns the
-/// name of the pattern that fired (only when BOTH `get_pattern` AND the action
-/// succeed). None → the tool layer falls back to a pixel click.
-fn press_chain(elem: &UIElement) -> Option<&'static str> {
-    if elem
-        .get_pattern::<patterns::UIInvokePattern>()
-        .ok()
-        .and_then(|p| p.invoke().ok())
-        .is_some()
-    {
-        return Some("invoke");
-    }
-    if elem
-        .get_pattern::<patterns::UITogglePattern>()
-        .ok()
-        .and_then(|p| p.toggle().ok())
-        .is_some()
-    {
-        return Some("toggle");
-    }
-    if elem
-        .get_pattern::<patterns::UISelectionItemPattern>()
-        .ok()
-        .and_then(|p| p.select().ok())
-        .is_some()
-    {
-        return Some("select");
-    }
-    if elem
-        .get_pattern::<patterns::UIExpandCollapsePattern>()
-        .ok()
-        .and_then(|p| p.expand().ok())
-        .is_some()
-    {
-        return Some("expand");
-    }
-    if elem
-        .get_pattern::<patterns::UILegacyIAccessiblePattern>()
-        .ok()
-        .and_then(|p| p.do_default_action().ok())
-        .is_some()
-    {
-        return Some("legacy default action");
-    }
-    None
-}
-
-/// True if a `uiautomation` error is `UIA_E_ELEMENTNOTAVAILABLE` (0x80040201).
-fn is_element_unavailable(e: &uiautomation::Error) -> bool {
-    e.to_string().to_lowercase().contains("0x80040201")
-}
-
-/// Within-generation liveness: the ref is from the current snapshot, but the
-/// underlying control may have been destroyed/replaced. Re-read its RuntimeId
-/// and compare to the captured one; a mismatch or an unavailable error means the
-/// element is stale → the model should re-observe.
-fn is_stale(reg: &RegEntry) -> bool {
-    match reg.el.get_runtime_id() {
-        Ok(rid) => !reg.runtime_id.is_empty() && rid != reg.runtime_id,
-        Err(e) => is_element_unavailable(&e),
+fn strict_availability(value: Value) -> Result<bool, A11yError> {
+    match value {
+        Value::BOOL(available) => Ok(available),
+        _ => Err(A11yError::Backend(
+            "UIA pattern availability was not a BOOL; support is unknown and no action was dispatched"
+                .to_string(),
+        )),
     }
 }
 
-fn do_invoke(
+fn pattern_available(elem: &UIElement, property: UIProperty) -> Result<bool, A11yError> {
+    let variant = elem
+        .get_property_value(property)
+        .map_err(|e| uia_err("read live pattern availability", e))?;
+    let value: Value = (&variant)
+        .try_into()
+        .map_err(|e| uia_err("decode live pattern availability", e))?;
+    strict_availability(value)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PressPattern {
+    Invoke,
+    Toggle,
+    SelectionItem,
+    ExpandCollapse,
+    Legacy,
+}
+
+impl PressPattern {
+    fn availability(self) -> UIProperty {
+        match self {
+            Self::Invoke => UIProperty::IsInvokePatternAvailable,
+            Self::Toggle => UIProperty::IsTogglePatternAvailable,
+            Self::SelectionItem => UIProperty::IsSelectionItemPatternAvailable,
+            Self::ExpandCollapse => UIProperty::IsExpandCollapsePatternAvailable,
+            Self::Legacy => UIProperty::IsLegacyIAccessiblePatternAvailable,
+        }
+    }
+}
+
+/// Choose one pattern using only live support reads. A missing/unknown read
+/// stops selection; only an explicit false authorizes trying the next candidate.
+fn select_press_pattern(
+    mut available: impl FnMut(PressPattern) -> Result<bool, A11yError>,
+) -> Result<Option<PressPattern>, A11yError> {
+    for pattern in [
+        PressPattern::Invoke,
+        PressPattern::Toggle,
+        PressPattern::SelectionItem,
+        PressPattern::ExpandCollapse,
+        PressPattern::Legacy,
+    ] {
+        if available(pattern)? {
+            return Ok(Some(pattern));
+        }
+    }
+    Ok(None)
+}
+
+fn require_enabled(elem: &UIElement) -> Result<(), A11yError> {
+    if !elem
+        .is_enabled()
+        .map_err(|e| uia_err("read element enabled state", e))?
+    {
+        return Err(A11yError::Backend(
+            "the element is disabled; no action was dispatched".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_writable(readonly: bool) -> Result<(), A11yError> {
+    if readonly {
+        Err(A11yError::Backend(
+            "the element value is read-only; no action was dispatched".to_string(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn checked_range_value(value: &str, minimum: f64, maximum: f64) -> Result<f64, A11yError> {
+    let number = value.trim().parse::<f64>().map_err(|_| {
+        A11yError::Backend("range value must be a finite number; no action was dispatched".to_string())
+    })?;
+    if !number.is_finite()
+        || !minimum.is_finite()
+        || !maximum.is_finite()
+        || minimum > maximum
+        || number < minimum
+        || number > maximum
+    {
+        return Err(A11yError::Backend(
+            "range value or provider bounds are invalid; no action was dispatched".to_string(),
+        ));
+    }
+    Ok(number)
+}
+
+/// Select before dispatch, then call exactly one mutator. Acquisition errors
+/// are terminal reads; action errors are uncertain and never continue the chain.
+fn press_chain(elem: &UIElement) -> Result<&'static str, A11yError> {
+    require_enabled(elem)?;
+    let pattern = select_press_pattern(|p| pattern_available(elem, p.availability()))?
+        .ok_or_else(|| A11yError::Unsupported {
+            capability: "semantic activation".to_string(),
+            hint: "Live UIA reports no Invoke, Toggle, SelectionItem, ExpandCollapse or Legacy pattern; no action was dispatched."
+                .to_string(),
+        })?;
+    match pattern {
+        PressPattern::Invoke => {
+            let p = elem.get_pattern::<patterns::UIInvokePattern>()
+                .map_err(|e| uia_err("get Invoke pattern", e))?;
+            p.invoke().map_err(|e| uia_action_err("Invoke", e))?;
+            Ok("invoke")
+        }
+        PressPattern::Toggle => {
+            let p = elem.get_pattern::<patterns::UITogglePattern>()
+                .map_err(|e| uia_err("get Toggle pattern", e))?;
+            p.toggle().map_err(|e| uia_action_err("Toggle", e))?;
+            Ok("toggle")
+        }
+        PressPattern::SelectionItem => {
+            let p = elem.get_pattern::<patterns::UISelectionItemPattern>()
+                .map_err(|e| uia_err("get SelectionItem pattern", e))?;
+            p.select().map_err(|e| uia_action_err("SelectionItem.Select", e))?;
+            Ok("select")
+        }
+        PressPattern::ExpandCollapse => {
+            let p = elem.get_pattern::<patterns::UIExpandCollapsePattern>()
+                .map_err(|e| uia_err("get ExpandCollapse pattern", e))?;
+            p.expand().map_err(|e| uia_action_err("ExpandCollapse.Expand", e))?;
+            Ok("expand")
+        }
+        PressPattern::Legacy => {
+            let p = elem.get_pattern::<patterns::UILegacyIAccessiblePattern>()
+                .map_err(|e| uia_err("get LegacyIAccessible pattern", e))?;
+            p.do_default_action().map_err(|e| uia_action_err("LegacyIAccessible.DoDefaultAction", e))?;
+            Ok("legacy default action")
+        }
+    }
+}
+
+/// Shared retained-ref lookup. Both semantic invocation and pixel resolution
+/// validate live identity after this generation/ref check.
+fn registered_ref<'a>(
     target: &Target,
     generation: SnapshotGen,
-    action: &ElementAction,
-    state: &State,
-) -> Result<Effect, A11yError> {
+    state: &'a State,
+) -> Result<(u32, &'a RegEntry), A11yError> {
     let r = match target {
         Target::Ref(r) => *r,
         Target::Pixel { .. } => {
@@ -1067,28 +1185,152 @@ fn do_invoke(
         .registry
         .get(&r)
         .ok_or_else(|| A11yError::NotFound(format!("no element [{r}] in the latest snapshot")))?;
+    Ok((r, reg))
+}
 
-    if is_stale(reg) {
+fn validate_live_identity(
+    el: &UIElement,
+    observed_runtime_id: &[i32],
+    description: &str,
+) -> Result<(), A11yError> {
+    if observed_runtime_id.is_empty() {
         return Err(A11yError::Stale(format!(
-            "element [{r}] no longer exists or was replaced (the UI changed since the last \
-             observe); re-run observe and use a fresh [ref]"
+            "{description} had no readable runtime identity at observe time; re-run observe"
         )));
     }
+    let live = el
+        .get_runtime_id()
+        .map_err(|e| uia_err(&format!("read {description} runtime identity"), e))?;
+    if live != observed_runtime_id {
+        return Err(A11yError::Stale(format!(
+            "{description} no longer exists or was replaced; re-run observe"
+        )));
+    }
+    Ok(())
+}
+
+fn valid_pixel_bounds(bounds: Rect) -> bool {
+    !is_parked(&bounds) && bounds.pixel_center().is_some()
+}
+
+fn validate_live_bounds(
+    el: &UIElement,
+    observed: Rect,
+    description: &str,
+) -> Result<Rect, A11yError> {
+    let live = el
+        .get_bounding_rectangle()
+        .map(|r| rect_of(&r))
+        .map_err(|e| uia_err(&format!("read {description} bounds"), e))?;
+    if !valid_pixel_bounds(observed) || !valid_pixel_bounds(live) || live != observed {
+        return Err(A11yError::Stale(format!(
+            "{description} bounds changed or are not valid for pixel input; re-run observe"
+        )));
+    }
+    let offscreen = el
+        .is_offscreen()
+        .map_err(|e| uia_err(&format!("read {description} visibility"), e))?;
+    if offscreen {
+        return Err(A11yError::Stale(format!(
+            "{description} is no longer on-screen; re-run observe"
+        )));
+    }
+    Ok(live)
+}
+
+/// Walk only live raw-view parents, without focusing or invoking anything.
+/// The cap also rejects broken/cyclic provider trees without unbounded IPC.
+fn is_within_element(
+    automation: &UIAutomation,
+    element: &UIElement,
+    ancestor: &UIElement,
+) -> Result<bool, A11yError> {
+    let walker = automation
+        .get_raw_view_walker()
+        .map_err(|e| uia_err("get raw-view walker for pixel target", e))?;
+    let mut current = element.clone();
+    for _ in 0..256 {
+        if automation
+            .compare_elements(&current, ancestor)
+            .map_err(|e| uia_err("compare pixel target identity", e))?
+        {
+            return Ok(true);
+        }
+        current = match walker.get_parent(&current) {
+            Ok(parent) => parent,
+            Err(e) if is_end_of_walk(&e) => return Ok(false),
+            Err(e) => return Err(uia_err("read pixel target parent", e)),
+        };
+    }
+    Err(A11yError::Stale(
+        "pixel target ancestry could not be validated within the traversal limit; re-run observe"
+            .to_string(),
+    ))
+}
+
+fn do_resolve_pixel_target(
+    target: &Target,
+    generation: SnapshotGen,
+    state: &State,
+) -> Result<Rect, A11yError> {
+    let (r, reg) = registered_ref(target, generation, state)?;
+    let description = format!("element [{r}]");
+    validate_live_identity(&reg.el, &reg.runtime_id, &description)?;
+    let window = reg.window.as_ref().ok_or_else(|| {
+        A11yError::Stale(format!(
+            "element [{r}] has no retained owning window; re-run observe"
+        ))
+    })?;
+    validate_live_identity(&window.el, &window.runtime_id, "owning window")?;
+    validate_live_bounds(&window.el, window.observed_bounds, "owning window")?;
+    let bounds = validate_live_bounds(&reg.el, reg.observed_bounds, &description)?;
+    if !is_within_element(&state.automation, &reg.el, &window.el)? {
+        return Err(A11yError::Stale(format!(
+            "element [{r}] is no longer in its observed window; re-run observe"
+        )));
+    }
+
+    // Windows observe includes visible background windows. A read-only hit
+    // test preserves those targets while rejecting an unchanged element whose
+    // center is now covered by another window/control.
+    let (x, y) = bounds.pixel_center().ok_or_else(|| A11yError::Stale(
+        "target bounds contain no representable pixel center; re-run observe".to_string(),
+    ))?;
+    let hit = state
+        .automation
+        .element_from_point(Point::new(x, y))
+        .map_err(|e| uia_err("hit-test pixel target center", e))?;
+    if !is_within_element(&state.automation, &hit, &reg.el)? {
+        return Err(A11yError::Stale(format!(
+            "element [{r}] no longer owns the pointer target at its observed center; re-run observe"
+        )));
+    }
+    // Parent/hit-test reads may themselves take time. Recheck identity and
+    // geometry at the end before handing coordinates back to the input layer.
+    validate_live_identity(&window.el, &window.runtime_id, "owning window")?;
+    validate_live_identity(&reg.el, &reg.runtime_id, &description)?;
+    validate_live_bounds(&window.el, window.observed_bounds, "owning window")?;
+    validate_live_bounds(&reg.el, reg.observed_bounds, &description)
+}
+
+fn do_invoke(
+    target: &Target,
+    generation: SnapshotGen,
+    action: &ElementAction,
+    state: &State,
+) -> Result<Effect, A11yError> {
+    let (r, reg) = registered_ref(target, generation, state)?;
+
+    validate_live_identity(&reg.el, &reg.runtime_id, &format!("element [{r}]"))?;
     let elem = &reg.el;
 
     match action {
         ElementAction::Press | ElementAction::LeftClick | ElementAction::DoubleClick => {
-            match press_chain(elem) {
-                Some(via) => Ok(Effect {
-                    changed: true,
-                    message: format!("activated element [{r}] via {via}"),
-                }),
-                None => Err(A11yError::Backend(format!(
-                    "element [{r}] exposes no actionable UIA pattern \
-                     (Invoke/Toggle/SelectionItem/ExpandCollapse/LegacyDefaultAction all failed); \
-                     fall back to a pixel click at its center"
-                ))),
-            }
+            let via = press_chain(elem)?;
+            Ok(Effect {
+                changed: true,
+                message: format!("activated element [{r}] via {via}"),
+            })
         }
         ElementAction::RightClick => Err(A11yError::Unsupported {
             capability: "right-click via accessibility".to_string(),
@@ -1098,37 +1340,45 @@ fn do_invoke(
         }),
         ElementAction::Focus => {
             elem.set_focus()
-                .map_err(|e| uia_err(&format!("focus [{r}]"), e))?;
+                .map_err(|e| uia_action_err(&format!("focus [{r}]"), e))?;
             Ok(Effect {
                 changed: true,
                 message: format!("focused element [{r}]"),
             })
         }
         ElementAction::SetValue(v) => {
-            if elem
-                .get_pattern::<patterns::UIValuePattern>()
-                .and_then(|p| p.set_value(v.as_str()))
-                .is_ok()
-            {
+            require_enabled(elem)?;
+            if pattern_available(elem, UIProperty::IsValuePatternAvailable)? {
+                let p = elem
+                    .get_pattern::<patterns::UIValuePattern>()
+                    .map_err(|e| uia_err("get Value pattern", e))?;
+                require_writable(p.is_readonly().map_err(|e| uia_err("read Value writability", e))?)?;
+                p.set_value(v.as_str())
+                    .map_err(|e| uia_action_err(&format!("set value of [{r}]"), e))?;
                 return Ok(Effect {
                     changed: true,
                     message: format!("set value of element [{r}]"),
                 });
             }
-            let as_num = v.trim().parse::<f64>().ok();
-            let range_pat = elem.get_pattern::<patterns::UIRangeValuePattern>().ok();
-            if let (Some(num), Some(rng)) = (as_num, range_pat) {
+            if pattern_available(elem, UIProperty::IsRangeValuePatternAvailable)? {
+                let rng = elem
+                    .get_pattern::<patterns::UIRangeValuePattern>()
+                    .map_err(|e| uia_err("get RangeValue pattern", e))?;
+                require_writable(rng.is_readonly().map_err(|e| uia_err("read RangeValue writability", e))?)?;
+                let minimum = rng.get_minimum().map_err(|e| uia_err("read RangeValue minimum", e))?;
+                let maximum = rng.get_maximum().map_err(|e| uia_err("read RangeValue maximum", e))?;
+                let num = checked_range_value(v, minimum, maximum)?;
                 rng.set_value(num)
-                    .map_err(|e| uia_err(&format!("set range value of [{r}]"), e))?;
+                    .map_err(|e| uia_action_err(&format!("set range value of [{r}]"), e))?;
                 return Ok(Effect {
                     changed: true,
                     message: format!("set element [{r}] to {num}"),
                 });
             }
-            Err(A11yError::Backend(format!(
-                "element [{r}] does not support setting a value (no Value or RangeValue pattern); \
-                 fall back to focusing the field and typing"
-            )))
+            Err(A11yError::Unsupported {
+                capability: "semantic value assignment".to_string(),
+                hint: format!("Live UIA reports no Value or RangeValue pattern for [{r}]; no action was dispatched."),
+            })
         }
     }
 }
@@ -1157,11 +1407,19 @@ fn do_focus(pid: i32) -> Result<Effect, A11yError> {
 
 // ---- actor thread state + command plumbing ------------------------------
 
-/// A registry entry: the live UIA handle for a `[ref]` plus the RuntimeId it had
-/// at capture time (for a robust stale check at invoke).
+/// The captured top-level window retained by each emitted descendant.
+struct WindowEntry {
+    el: UIElement,
+    runtime_id: Vec<i32>,
+    observed_bounds: Rect,
+}
+
+/// A live UIA handle and its observed identity, bounds and owning window.
 struct RegEntry {
     el: UIElement,
     runtime_id: Vec<i32>,
+    observed_bounds: Rect,
+    window: Option<Rc<WindowEntry>>,
 }
 
 struct State {
@@ -1173,6 +1431,7 @@ struct State {
 
 enum Cmd {
     Observe(ObserveOpts, Sender<Result<Snapshot, A11yError>>),
+    ResolvePixelTarget(Target, SnapshotGen, Sender<Result<Rect, A11yError>>),
     Invoke(
         Target,
         SnapshotGen,
@@ -1234,6 +1493,9 @@ impl ActorHandle {
                         Cmd::Observe(opts, reply) => {
                             let _ = reply.send(do_observe(&opts, &mut state));
                         }
+                        Cmd::ResolvePixelTarget(target, generation, reply) => {
+                            let _ = reply.send(do_resolve_pixel_target(&target, generation, &state));
+                        }
                         Cmd::Invoke(target, generation, action, reply) => {
                             let _ = reply.send(do_invoke(&target, generation, &action, &state));
                         }
@@ -1276,6 +1538,17 @@ impl ActorHandle {
         let (tx, rx) = channel();
         self.send(Cmd::Invoke(target, generation, action, tx))?;
         rx.recv()
+            .map_err(|_| lost_mutating_reply("invoke"))?
+    }
+
+    pub fn resolve_pixel_target(
+        &self,
+        target: Target,
+        generation: SnapshotGen,
+    ) -> Result<Rect, A11yError> {
+        let (tx, rx) = channel();
+        self.send(Cmd::ResolvePixelTarget(target, generation, tx))?;
+        rx.recv()
             .map_err(|_| A11yError::Backend("UIA actor dropped the reply".to_string()))?
     }
 
@@ -1283,13 +1556,134 @@ impl ActorHandle {
         let (tx, rx) = channel();
         self.send(Cmd::Focus(pid, tx))?;
         rx.recv()
-            .map_err(|_| A11yError::Backend("UIA actor dropped the reply".to_string()))?
+            .map_err(|_| lost_mutating_reply("focus window"))?
     }
+
+
+}
+
+fn lost_mutating_reply(operation: &str) -> A11yError {
+    A11yError::Uncertain(format!(
+        "UIA actor accepted the mutating {operation} request but its reply was lost; \
+         the effect may have occurred; re-run observe and do not automatically retry"
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lost_actor_mutation_reply_is_uncertain_without_claiming_native_dispatch() {
+        for operation in ["invoke", "focus window"] {
+            let outcome = lost_mutating_reply(operation);
+            assert!(matches!(&outcome, A11yError::Uncertain(_)));
+            let message = outcome.to_string();
+            assert!(message.contains("actor accepted"));
+            assert!(message.contains("may have occurred"));
+            assert!(!message.contains("native UIA request was dispatched"));
+        }
+    }
+
+    #[test]
+    fn semantic_support_requires_bool_instead_of_coerced_metadata() {
+        assert!(strict_availability(Value::BOOL(true)).unwrap());
+        assert!(!strict_availability(Value::BOOL(false)).unwrap());
+        for value in [
+            Value::EMPTY,
+            Value::NULL,
+            Value::I4(0),
+            Value::STRING("false".to_string()),
+        ] {
+            assert!(matches!(strict_availability(value), Err(A11yError::Backend(_))));
+        }
+    }
+
+    #[test]
+    fn semantic_pattern_selection_preserves_priority_and_stops_on_first_support() {
+        let mut queries = Vec::new();
+        let selected = select_press_pattern(|pattern| {
+            queries.push(pattern);
+            Ok(pattern != PressPattern::Invoke)
+        }).unwrap();
+        assert_eq!(selected, Some(PressPattern::Toggle));
+        assert_eq!(queries, [PressPattern::Invoke, PressPattern::Toggle]);
+
+        queries.clear();
+        assert_eq!(select_press_pattern(|pattern| {
+            queries.push(pattern);
+            Ok(false)
+        }).unwrap(), None);
+        assert_eq!(queries, [
+            PressPattern::Invoke,
+            PressPattern::Toggle,
+            PressPattern::SelectionItem,
+            PressPattern::ExpandCollapse,
+            PressPattern::Legacy,
+        ]);
+    }
+
+    #[test]
+    fn semantic_pattern_selection_never_treats_unknown_support_as_absent() {
+        let mut queries = Vec::new();
+        let outcome = select_press_pattern(|pattern| {
+            queries.push(pattern);
+            if pattern == PressPattern::Invoke {
+                Ok(false)
+            } else {
+                Err(A11yError::Backend("availability read failed".to_string()))
+            }
+        });
+        assert!(matches!(outcome, Err(A11yError::Backend(_))));
+        assert_eq!(queries, [PressPattern::Invoke, PressPattern::Toggle]);
+    }
+
+    #[test]
+    fn uia_error_certainty_depends_on_dispatch_phase_not_only_hresult() {
+        for code in [0x80070005u32, 0x8001011B] {
+            assert!(matches!(
+                uia_err("read", uiautomation::Error::new(code as i32, "opaque error")),
+                A11yError::Permission(_)
+            ));
+        }
+        for code in [0x80040201u32, 0x80070006, 0x80070578] {
+            assert!(matches!(
+                uia_err("read", uiautomation::Error::new(code as i32, "opaque error")),
+                A11yError::Stale(_)
+            ));
+        }
+        for code in [0u32, 2, 0x80040204, 0x80004005] {
+            assert!(matches!(
+                uia_err("read", uiautomation::Error::new(code as i32, "denied")),
+                A11yError::Backend(_)
+            ));
+        }
+        for code in [0u32, 2, 0x80070005, 0x80040201, 0x80040204, 0x80131505, 0x80004005] {
+            let outcome = uia_action_err("mutator", uiautomation::Error::new(code as i32, "opaque error"));
+            assert!(matches!(&outcome, A11yError::Uncertain(_)));
+            assert!(outcome.to_string().contains(&format!("0x{code:08X}")));
+        }
+    }
+
+    #[test]
+    fn range_and_readonly_rejections_do_not_authorize_input_fallback() {
+        assert_eq!(checked_range_value("-5.5", -10.0, 10.0).unwrap(), -5.5);
+        assert_eq!(checked_range_value("10", -10.0, 10.0).unwrap(), 10.0);
+        for (value, minimum, maximum) in [
+            ("invalid", 0.0, 10.0),
+            ("NaN", 0.0, 10.0),
+            ("inf", 0.0, 10.0),
+            ("11", 0.0, 10.0),
+            ("-1", 0.0, 10.0),
+            ("1", f64::NAN, 10.0),
+            ("1", 0.0, f64::INFINITY),
+            ("1", 10.0, 0.0),
+        ] {
+            assert!(matches!(checked_range_value(value, minimum, maximum), Err(A11yError::Backend(_))));
+        }
+        assert!(require_writable(false).is_ok());
+        assert!(matches!(require_writable(true), Err(A11yError::Backend(_))));
+    }
 
     #[test]
     fn rectangle_dimensions_do_not_overflow_or_add_a_pixel() {

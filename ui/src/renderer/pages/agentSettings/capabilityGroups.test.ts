@@ -19,7 +19,7 @@ const moduleItem = (id: string): CapabilityModuleCatalogItem => ({
   source_package: { id: asPackageId('nomifun.test'), version: '1.0.0' },
   authoring_policy: 'direct',
   summary_kind: 'tool',
-  actions: [{ action_id: `${id}/read`, input_schema: 'input', output_schema: 'output', effect_class: 'read_local', presentation: 'function_tool' }],
+  actions: [{ action_id: `${id}/read`, effect_class: 'read_local', presentation: 'function_tool' }],
   context_schema_refs: [], event_schema_refs: [], required_resource_kinds: [], required_host_ports: [],
   required_modules: [], conflicting_modules: [], supported_surfaces: ['desktop'],
 });

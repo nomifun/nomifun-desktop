@@ -1,4 +1,4 @@
-//! Input synthesis via enigo.
+//! Input synthesis via Enigo, with a Quartz mouse path on macOS.
 //!
 //! Enigo handles are not `Send`, so each operation constructs a fresh Enigo
 //! inside `tokio::task::spawn_blocking`. A 10s deadline marks the result
@@ -6,20 +6,27 @@
 //! input is released; no native worker is detached after timeout. On macOS,
 //! Enigo's keyboard path queries Carbon
 //! TIS/TSM input-source APIs, so the actual Enigo construction and operation
-//! are synchronously dispatched to the main queue. Coordinates passed in here
+//! are synchronously dispatched to the main queue. macOS pointer events carry
+//! the admitted global point directly; they never read Enigo's asynchronously
+//! updated AppKit cursor position back as the click target. Coordinates passed in here
 //! are already absolute screen coordinates (mapped from screenshot space by
 //! the caller).
 
 use std::time::Duration;
 
-use enigo::{Axis, Button, Direction, Enigo, Keyboard, Mouse, Settings};
-// `Coordinate::Abs` is only used on the non-Windows actuation path; Windows
-// moves the cursor via SendInput over the virtual desktop instead (see
-// `move_abs`).
-#[cfg(not(target_os = "windows"))]
+use enigo::{Button, Direction, Enigo, Keyboard, Settings};
+#[cfg(not(target_os = "macos"))]
+use enigo::{Axis, Mouse};
+// Windows uses SendInput over the virtual desktop; macOS carries explicit
+// Quartz coordinates. Only Linux uses Enigo's Coordinate::Abs.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 use enigo::Coordinate;
 
 use crate::permissions;
+
+#[cfg(target_os = "macos")]
+#[path = "macos_pointer.rs"]
+mod macos_pointer;
 
 const INPUT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -94,15 +101,20 @@ fn normalize_to_virtual_desktop(
 /// On Windows we bypass enigo's `Coordinate::Abs` — it normalizes against the
 /// primary monitor only and omits `MOUSEEVENTF_VIRTUALDESK`, so multi-monitor
 /// and negative/non-zero-origin targets land on the wrong display — and emit a
-/// `SendInput` move across the whole virtual desktop. On macOS / Linux enigo
-/// already actuates global coordinates correctly, so its path is unchanged.
+/// `SendInput` move across the whole virtual desktop. macOS carries the requested
+/// Quartz point through every event; Linux retains Enigo's coordinate path.
 fn move_abs(enigo: &mut Enigo, x: i32, y: i32) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let _ = enigo;
         move_abs_windows(x, y)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = enigo;
+        macos_pointer::move_absolute(x, y)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         enigo.move_mouse(x, y, Coordinate::Abs).map_err(input_err)
     }
@@ -294,6 +306,7 @@ fn release_obligations<T: Copy>(
 
 struct PressedInputGuard<'a> {
     enigo: &'a mut Enigo,
+    #[cfg(not(target_os = "macos"))]
     buttons: Vec<Button>,
     keys: Vec<enigo::Key>,
 }
@@ -302,11 +315,13 @@ impl<'a> PressedInputGuard<'a> {
     fn new(enigo: &'a mut Enigo) -> Self {
         Self {
             enigo,
+            #[cfg(not(target_os = "macos"))]
             buttons: Vec::new(),
             keys: Vec::new(),
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn press_button(&mut self, button: Button) -> Result<(), String> {
         // Record before invoking the OS. A reported press failure can still be
         // partial, so cleanup must issue the matching release.
@@ -329,6 +344,7 @@ impl<'a> PressedInputGuard<'a> {
         Ok(())
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn move_abs(&mut self, x: i32, y: i32) -> Result<(), String> {
         move_abs(self.enigo, x, y)
     }
@@ -339,18 +355,24 @@ impl<'a> PressedInputGuard<'a> {
                 .key(key, Direction::Release)
                 .map_err(input_err)
         });
+        #[cfg(not(target_os = "macos"))]
         let button_report = release_obligations(&mut self.buttons, |button| {
             self.enigo
                 .button(button, Direction::Release)
                 .map_err(input_err)
         });
+        #[cfg(target_os = "macos")]
+        let button_report = ReleaseReport::Clean;
         release_reports_result(key_report, button_report)
     }
 }
 
 impl Drop for PressedInputGuard<'_> {
     fn drop(&mut self) {
-        if !self.keys.is_empty() || !self.buttons.is_empty() {
+        let pressed = !self.keys.is_empty();
+        #[cfg(not(target_os = "macos"))]
+        let pressed = pressed || !self.buttons.is_empty();
+        if pressed {
             let _ = self.release_all();
         }
     }
@@ -404,13 +426,26 @@ pub async fn mouse_move(x: i32, y: i32) -> Result<(), String> {
 
 /// Click `button` `count` times at absolute screen coordinates.
 pub async fn click(x: i32, y: i32, button: Button, count: u32) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        // Constructing Enigo still establishes the existing non-interactive
+        // Accessibility prerequisite before the Quartz pointer layer starts.
+        return with_enigo(move |_enigo| macos_pointer::click(x, y, button, count)).await;
+    }
+    #[cfg(not(target_os = "macos"))]
     with_enigo(move |enigo| {
         move_abs(enigo, x, y)?;
         for i in 0..count {
             if i > 0 {
                 std::thread::sleep(CLICK_PAUSE);
             }
-            enigo.button(button, Direction::Click).map_err(input_err)?;
+            // A native click can emit its press before reporting a release
+            // failure. Keep the same release obligation as drag/key input so
+            // a partially completed click cannot leave a button held down.
+            let mut pressed = PressedInputGuard::new(enigo);
+            pressed.press_button(button)?;
+            std::thread::sleep(CLICK_PAUSE);
+            pressed.release_all()?;
         }
         Ok(())
     })
@@ -424,6 +459,11 @@ fn drag_axis(start: i32, end: i32, step: i64) -> i32 {
 /// Press at (start), drag to (end), release. Includes intermediate moves so
 /// apps that track motion register the drag.
 pub async fn drag(start_x: i32, start_y: i32, end_x: i32, end_y: i32) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        return with_enigo(move |_enigo| macos_pointer::drag(start_x, start_y, end_x, end_y)).await;
+    }
+    #[cfg(not(target_os = "macos"))]
     with_enigo(move |enigo| {
         move_abs(enigo, start_x, start_y)?;
         let mut pressed = PressedInputGuard::new(enigo);
@@ -475,6 +515,11 @@ pub async fn scroll(
     direction: ScrollDirection,
     amount: i32,
 ) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        return with_enigo(move |_enigo| macos_pointer::scroll(at, direction, amount)).await;
+    }
+    #[cfg(not(target_os = "macos"))]
     with_enigo(move |enigo| {
         if let Some((x, y)) = at {
             move_abs(enigo, x, y)?;
@@ -492,7 +537,51 @@ pub async fn scroll(
 
 /// Current cursor location in absolute screen coordinates.
 pub async fn cursor_position() -> Result<(i32, i32), String> {
-    with_enigo(|enigo| enigo.location().map_err(input_err)).await
+    #[cfg(target_os = "macos")]
+    {
+        // Observation must not construct Enigo: its constructor requires
+        // Accessibility, which is an input prerequisite and is unrelated to
+        // this read-only `computer/observe` operation. Quartz already reports
+        // the same global display coordinate space as captured geometry.
+        let handle = tokio::task::spawn_blocking(macos_cursor::position);
+        join_input_task(handle, INPUT_TIMEOUT).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        with_enigo(|enigo| enigo.location().map_err(input_err)).await
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos_cursor {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    struct Point {
+        x: f64,
+        y: f64,
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventCreate(source: *const c_void) -> *const c_void;
+        fn CGEventGetLocation(event: *const c_void) -> Point;
+    }
+
+    pub(super) fn position() -> Result<(i32, i32), String> {
+        // A null source asks Quartz for a read-only current-state event and
+        // does not post synthetic input or request an Accessibility grant.
+        let event = unsafe { CGEventCreate(std::ptr::null()) };
+        if event.is_null() {
+            return Err("macOS could not read the current cursor position".to_owned());
+        }
+        let point = unsafe { CGEventGetLocation(event) };
+        unsafe { core_foundation::base::CFRelease(event) };
+        if !point.x.is_finite() || !point.y.is_finite() {
+            return Err("macOS returned an invalid cursor position".to_owned());
+        }
+        Ok((point.x.round() as i32, point.y.round() as i32))
+    }
 }
 
 #[cfg(test)]
@@ -658,7 +747,7 @@ mod tests {
         assert_eq!(normalize_to_virtual_desktop(-99999, 0, 0, 0, 1920, 1080).0, 0);
     }
 
-    // Requires a real input device and (on macOS) Accessibility permission.
+    // Reads a real device. macOS uses read-only Quartz without requiring AX.
     #[tokio::test]
     #[ignore]
     async fn cursor_position_real() {
@@ -667,6 +756,7 @@ mod tests {
         assert!(y >= -20_000 && y <= 20_000);
     }
 
+    // Mutating input requires native input authorization on macOS.
     #[tokio::test]
     #[ignore]
     async fn mouse_move_real() {

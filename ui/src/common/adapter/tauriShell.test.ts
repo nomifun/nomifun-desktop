@@ -10,6 +10,9 @@ import {
   parseDeepLink,
   tauriDownloadUpdate,
   tauriInstallUpdate,
+  tauriNotificationPermissionState,
+  tauriRequestNotificationPermission,
+  tauriSendNotification,
   tauriRelayPairingBootstrap,
   tauriRelayPairingRestart,
   type TauriDownloadUpdateProgress,
@@ -178,4 +181,135 @@ describe('native update commands', () => {
 
     expect(errorMessage).toBe('native updater failed');
   });
+});
+
+describe('native notification commands', () => {
+  test('queries the native permission on every call despite a cached granted Web API shim', async () => {
+    const answers = [null, false, true];
+    const calls: string[] = [];
+    await withTauriInternals(async (command) => {
+      calls.push(command);
+      return answers.shift();
+    }, async () => {
+      Object.defineProperty(window, 'Notification', { configurable: true, value: { permission: 'granted' } });
+      expect(await tauriNotificationPermissionState()).toBe('default');
+      expect(await tauriNotificationPermissionState()).toBe('denied');
+      expect(await tauriNotificationPermissionState()).toBe('granted');
+    });
+    expect(calls).toEqual(Array(3).fill('plugin:notification|is_permission_granted'));
+  });
+
+  test('queries native permission even without the Web API shim', async () => {
+    await withTauriInternals(async (command) => {
+      expect(command).toBe('plugin:notification|is_permission_granted');
+      return true;
+    }, async () => {
+      expect(await tauriNotificationPermissionState()).toBe('granted');
+    });
+  });
+
+  test('maps request results from the native PermissionState rather than the cached shim', async () => {
+    const answers = ['prompt', 'prompt-with-rationale', 'denied', 'granted'];
+    const calls: string[] = [];
+    await withTauriInternals(async (command) => {
+      calls.push(command);
+      return answers.shift();
+    }, async () => {
+      Object.defineProperty(window, 'Notification', {
+        configurable: true,
+        value: { permission: 'granted', requestPermission: async () => 'granted' },
+      });
+      expect(await tauriRequestNotificationPermission()).toBe('default');
+      expect(await tauriRequestNotificationPermission()).toBe('default');
+      expect(await tauriRequestNotificationPermission()).toBe('denied');
+      expect(await tauriRequestNotificationPermission()).toBe('granted');
+    });
+    expect(calls).toEqual(Array(4).fill('plugin:notification|request_permission'));
+  });
+
+  test('waits for the native notification callback and retains the current payload fields', async () => {
+    const calls: Array<{ command: string; args: unknown }> = [];
+    let finish: (() => void) | undefined;
+    let settled = false;
+    let onInvoked: (() => void) | undefined;
+    const invoked = new Promise<void>((resolve) => { onInvoked = resolve; });
+    const options = { title: 'Native test 非空', body: 'Body α😀', icon: '/private/audit/icon.png' };
+    await withTauriInternals(async (command, args) => {
+      calls.push({ command, args });
+      return new Promise<void>((resolve) => {
+        finish = resolve;
+        onInvoked?.();
+      });
+    }, async () => {
+      class CachedNotification { static permission = 'granted'; }
+      Object.defineProperty(window, 'Notification', { configurable: true, value: CachedNotification });
+      const delivery = tauriSendNotification(options).then(() => { settled = true; });
+      await Promise.race([invoked, delivery]);
+      const settledBeforeCallback = settled;
+      finish?.();
+      await delivery;
+      expect(settledBeforeCallback).toBe(false);
+    });
+    expect(calls).toEqual([{ command: 'plugin:notification|notify', args: { options } }]);
+  });
+
+  test('propagates the native notification callback failure', async () => {
+    await withTauriInternals(async (command) => {
+      expect(command).toBe('plugin:notification|notify');
+      throw new Error('UN notification callback failed');
+    }, async () => {
+      class CachedNotification { static permission = 'granted'; }
+      Object.defineProperty(window, 'Notification', { configurable: true, value: CachedNotification });
+      await expect(tauriSendNotification({ title: 'Test', body: 'Test body' })).rejects.toThrow('UN notification callback failed');
+    });
+  });
+
+  test('propagates native permission query errors', async () => {
+    await withTauriInternals(async () => {
+      throw new Error('UN permission query failed');
+    }, async () => {
+      Object.defineProperty(window, 'Notification', { configurable: true, value: { permission: 'granted' } });
+      await expect(tauriNotificationPermissionState()).rejects.toThrow('UN permission query failed');
+    });
+  });
+
+  test('propagates native permission request errors', async () => {
+    await withTauriInternals(async (command) => {
+      expect(command).toBe('plugin:notification|request_permission');
+      throw new Error('UN permission request failed');
+    }, async () => {
+      await expect(tauriRequestNotificationPermission()).rejects.toThrow('UN permission request failed');
+    });
+  });
+});
+
+test('ordinary browser notifications keep the Web API permission and send behavior', async () => {
+  const sent: Array<{ title: string; options: unknown }> = [];
+  let requested = 0;
+  class BrowserNotification {
+    static permission = 'denied';
+    static async requestPermission(): Promise<string> {
+      requested += 1;
+      BrowserNotification.permission = 'granted';
+      return BrowserNotification.permission;
+    }
+    constructor(title: string, options: unknown) {
+      sent.push({ title, options });
+    }
+  }
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: { Notification: BrowserNotification },
+  });
+  try {
+    expect(await tauriNotificationPermissionState()).toBe('denied');
+    expect(await tauriRequestNotificationPermission()).toBe('granted');
+    await tauriSendNotification({ title: 'Browser test', body: 'Browser body', icon: '/browser.png' });
+    expect(requested).toBe(1);
+    expect(sent).toEqual([
+      { title: 'Browser test', options: { title: 'Browser test', body: 'Browser body', icon: '/browser.png' } },
+    ]);
+  } finally {
+    restoreWindow();
+  }
 });

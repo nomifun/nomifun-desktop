@@ -2,9 +2,9 @@
 //! separate from creation so an invalid multi-file patch has no side effects.
 use std::path::{Component, Path, PathBuf};
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(unix)))]
 use cap_fs_ext::DirExt as _;
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(unix)))]
 use cap_std::ambient_authority;
 use cap_std::fs::Dir;
 use nomifun_common::AppError;
@@ -63,6 +63,12 @@ pub(crate) fn validate_target(path: &Path, root: &Path) -> Result<PathBuf, AppEr
 /// Keep the parent namespace stable until publication and cleanup finish.
 pub(crate) struct PreparedParent {
     path: PathBuf,
+    #[cfg(unix)]
+    directory: Dir,
+    #[cfg(unix)]
+    root_directory: Dir,
+    #[cfg(unix)]
+    root_path: PathBuf,
     // This empty, delete-on-close file keeps the directory nonempty, so it
     // cannot acquire a name-surrogate reparse point during publication.
     #[cfg(windows)]
@@ -73,6 +79,17 @@ pub(crate) struct PreparedParent {
 
 impl PreparedParent {
     pub(crate) fn as_path(&self) -> &Path { &self.path }
+
+    #[cfg(unix)]
+    pub(crate) fn directory(&self) -> &Dir { &self.directory }
+
+    #[cfg(unix)]
+    pub(crate) fn verify(&self) -> Result<(), AppError> {
+        let parent = self.path.parent().ok_or_else(|| AppError::BadRequest("write path has no parent".into()))?;
+        crate::unix_directory::verify_named(&self.root_directory, &self.root_path)
+            .and_then(|()| crate::unix_directory::verify_named(&self.directory, parent))
+            .map_err(|_| AppError::Conflict("workspace write parent changed identity".into()))
+    }
 }
 
 /// Create only within the bound workspace, relative to pinned directories.
@@ -83,9 +100,17 @@ pub(crate) fn prepare_parent(path: &Path, root: &Path) -> Result<PreparedParent,
     let parent = target.parent().ok_or_else(|| AppError::BadRequest("write path has no parent".into()))?;
     let relative = parent.strip_prefix(&root)
         .map_err(|_| AppError::Forbidden("workspace write parent is outside the bound resource".into()))?;
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(unix)))]
     let mut dir = Dir::open_ambient_dir(&root, ambient_authority())
         .map_err(|error| AppError::BadRequest(format!("cannot open workspace root: {error}")))?;
+    #[cfg(unix)]
+    let mut dir = crate::unix_directory::open_search(None, &root)
+        .map_err(|error| AppError::BadRequest(format!("cannot open workspace root: {error}")))?;
+    #[cfg(unix)]
+    let root_directory = dir.try_clone().map_err(|error| AppError::BadRequest(format!("cannot retain workspace root: {error}")))?;
+    #[cfg(unix)]
+    crate::unix_directory::verify_named(&root_directory, &root)
+        .map_err(|_| AppError::Conflict("workspace root changed identity during write preparation".into()))?;
     #[cfg(windows)]
     let mut dir = open_windows_root(&root)?;
     #[cfg(windows)]
@@ -96,8 +121,10 @@ pub(crate) fn prepare_parent(path: &Path, root: &Path) -> Result<PreparedParent,
         let Component::Normal(name) = component else {
             return Err(AppError::BadRequest("invalid workspace write parent".into()));
         };
-        #[cfg(not(windows))]
+        #[cfg(all(not(windows), not(unix)))]
         let open_child = |directory: &Dir| directory.open_dir_nofollow(name);
+        #[cfg(unix)]
+        let open_child = |directory: &Dir| crate::unix_directory::open_search(Some(directory), Path::new(name));
         #[cfg(windows)]
         let open_child = |directory: &Dir| open_windows_child(directory,name);
         dir = match open_child(&dir) {
@@ -141,16 +168,21 @@ pub(crate) fn prepare_parent(path: &Path, root: &Path) -> Result<PreparedParent,
         guard
     };
     let canonical = validate_path_for_write_authority(
-        &target.to_string_lossy(), &PathAuthority::Workspace(root),
+        &target.to_string_lossy(), &PathAuthority::Workspace(root.clone()),
     )?;
     if canonical != target {
         return Err(AppError::Conflict("workspace write target changed identity before publication".into()));
     }
-    Ok(PreparedParent {
+    let prepared = PreparedParent {
         path: canonical,
+        #[cfg(unix)] directory: dir,
+        #[cfg(unix)] root_directory,
+        #[cfg(unix)] root_path: root,
         #[cfg(windows)] _guard: guard,
         #[cfg(windows)] _directories: directories,
-    })
+    };
+    #[cfg(unix)] prepared.verify()?;
+    Ok(prepared)
 }
 
 #[cfg(windows)]

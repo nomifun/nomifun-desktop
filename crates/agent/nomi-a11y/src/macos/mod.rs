@@ -13,7 +13,7 @@
 
 use crate::engine::{
     A11yEngine, A11yError, Capabilities, Effect, ElementAction, InputKind, ObserveOpts, Snapshot,
-    SnapshotGen, Target,
+    Rect, SnapshotGen, Target,
 };
 
 pub struct MacEngine {
@@ -24,6 +24,15 @@ impl MacEngine {
     pub fn start() -> Result<Self, A11yError> {
         let inner = actor::ActorHandle::spawn()?;
         Ok(Self { inner })
+    }
+
+    pub fn focus_named_window(
+        &self,
+        pid: i32,
+        expected_bounds: Rect,
+        expected_title: Option<String>,
+    ) -> Result<Effect, A11yError> {
+        self.inner.focus_named_window(pid, expected_bounds, expected_title)
     }
 }
 
@@ -41,6 +50,14 @@ impl A11yEngine for MacEngine {
 
     fn observe(&self, opts: &ObserveOpts) -> Result<Snapshot, A11yError> {
         self.inner.observe(opts.clone())
+    }
+
+    fn resolve_pixel_target(
+        &self,
+        target: &Target,
+        generation: SnapshotGen,
+    ) -> Result<Rect, A11yError> {
+        self.inner.resolve_pixel_target(target.clone(), generation)
     }
 
     fn invoke(

@@ -20,6 +20,14 @@ fn main() -> Result<ExitCode> {
     // as the server; component suppliers never fall back to a same-named PATH
     // executable. Only explicit verification begins preparation.
     //
+    // SAFETY: discover/apply PATH before storage relocation can create
+    // Tokio/SQLite workers, as well as before this host's server runtime.
+    let merged_path = if matches!(cli.command, Some(Command::ToolDoctor { .. })) {
+        String::new()
+    } else {
+        unsafe { nomifun_runtime::enhance_process_path() }
+    };
+
     // Server-shaped commands resolve the one canonical data root.
     let owns_data_root = matches!(
         cli.command,
@@ -34,15 +42,6 @@ fn main() -> Result<ExitCode> {
     if needs_runtime {
         nomifun_runtime::init(&cli.data_dir);
     }
-
-    // SAFETY: called before any worker thread exists (including the tokio
-    // runtime constructed below). Rust 2024 requires `unsafe` for
-    // `std::env::set_var` invoked inside `enhance_process_path`.
-    let merged_path = if matches!(cli.command, Some(Command::ToolDoctor { .. })) {
-        String::new()
-    } else {
-        unsafe { nomifun_runtime::enhance_process_path() }
-    };
 
     let runtime = if commands::is_mcp_stdio_cli_command(cli.command.as_ref()) {
         commands::build_mcp_stdio_runtime()?

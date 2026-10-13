@@ -289,19 +289,14 @@
 
 .actionList { min-width: 0; margin: 10px 0 0; padding: 0; border: 0; }
 .actionList legend { padding: 0 0 6px; color: var(--color-text-2); font-size: 12px; font-weight: 600; }
-.actionRow { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 7px; min-height: 38px; padding: 5px 0; border-top: 1px solid var(--capability-divider); }
+.actionRow { display: grid; grid-template-columns: 20px minmax(0, 1fr); align-items: center; gap: 7px; min-height: 38px; padding: 5px 0; border-top: 1px solid var(--capability-divider); }
 .actionCopy { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .actionCopy strong { color: var(--color-text-1); font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
 .actionCopy small { color: var(--capability-muted-text); font-size: 11px; }
 .actionCopy .effect_normal { color: var(--capability-muted-text); }
 .actionCopy .effect_caution { color:rgb(var(--orange-6)); }
 .actionCopy .effect_critical { color:rgb(var(--red-6)); font-weight:600; }
-.actionTechnical { max-width: 160px; color: var(--capability-muted-text); font-size: 11px; text-align: right; }
-.actionTechnical summary { cursor: pointer; }
-.actionTechnical dl { display:grid; grid-template-columns:auto minmax(0,1fr); gap:3px 6px; margin:5px 0 0; text-align:left; }
-.actionTechnical dd { margin:0; min-width:0; }
-.actionTechnical code { display:block; overflow-wrap:anywhere; user-select:text; }
-.actionMissing { color: rgb(var(--orange-6)); }
+.actionMissing { grid-template-columns: 20px minmax(0, 1fr) auto; color: rgb(var(--orange-6)); }
 .actionMissing > code { max-width: 120px; font-size: 9px; overflow-wrap: anywhere; }
 .noActions { margin: 0; padding: 9px; border-radius: 7px; color: var(--capability-muted-text); background: var(--capability-canvas-surface); font-size: 12px; line-height: 1.5; }
 .technicalDetail { margin-top: 8px; color: var(--capability-muted-text); font-size: 11px; }
@@ -332,5 +327,4 @@
   .toolbar { flex-direction: column; }
   .statusFilters { align-self: flex-start; }
   .moduleMeta { padding-left: 12px; }
-  .actionTechnical { display: none; }
 }

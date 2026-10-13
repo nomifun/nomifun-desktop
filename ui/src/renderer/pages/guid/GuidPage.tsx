@@ -142,8 +142,6 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
     locationKey: location.key,
     fixedTemplateKey: productEntry?.templateKey,
   });
-  const modelSelection = useGuidModelSelection('nomi');
-  const collaboration = useCollaborationDraft(modelSelection.current_model);
   const guidInput = useGuidInput({
     locationState: productEntry ? { workspace: productEntry.workspace } : navigationState,
   });
@@ -169,6 +167,17 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
     ? Boolean(agentSelection.selectedTemplate)
       && (Boolean(officialSeedFallback) || (!presetCapabilities.isLoading && !presetCapabilities.error))
     : !presetCapabilities.isLoading && !presetCapabilities.error;
+  const selectedAgentModelKey = selectedCapabilityPreset
+    ? `${selectedCapabilityPreset.preset_id}:${selectedCapabilityRevisionDigest ?? 'draft'}`
+    : agentSelection.selection.kind === 'template'
+      ? `template:${agentSelection.selection.templateKey}`
+      : `preset:${agentSelection.selection.presetId}`;
+  const modelSelection = useGuidModelSelection('nomi', {
+    selectionKey: selectedAgentModelKey,
+    ready: presetResourceResolutionReady,
+    defaultModel: presetCapabilities.defaultModel,
+  });
+  const collaboration = useCollaborationDraft(modelSelection.current_model);
   const presetResourceKinds = officialSeedFallback
     ? new Set(officialSeedFallback.required_resource_kinds)
     : presetCapabilities.requiredResourceKinds;
@@ -794,6 +803,16 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
                     isLoading={agentSelection.isLoading}
                     loadError={agentSelection.loadError}
                     onRetry={agentSelection.refreshPresets}
+                    resourceConfiguration={resourcePickerKinds.has('browser') && (resourceSelectionValue.browser === undefined || resourceSelectionValue.browser === 'managed-browser') ? (
+                      <AgentResourcePicker
+                        requiredKinds={['browser']}
+                        capabilityIds={presetCapabilityIds}
+                        value={resourceSelectionValue}
+                        onChange={setResourceSelectionValue}
+                        presentation='embedded'
+                        disabled={guidInput.loading || !presetResourceResolutionReady}
+                      />
+                    ) : undefined}
                     onSelectPreset={(presetId) =>
                       handleSelectAgent({ kind: 'preset', presetId })
                     }
@@ -849,6 +868,7 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
               value={resourceSelectionValue}
               onChange={setResourceSelectionValue}
               onAdmissionReadinessChange={setResourcePickerReady}
+              hideAutomaticBrowser
               disabled={guidInput.loading || !presetResourceResolutionReady}
             />}
 

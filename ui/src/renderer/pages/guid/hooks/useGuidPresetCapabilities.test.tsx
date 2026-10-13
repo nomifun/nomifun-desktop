@@ -8,6 +8,7 @@ import { agentPlatform } from '@/common/adapter/ipcBridge';
 import { configService } from '@/common/config/configService';
 import {
   asCapabilityId, asDigestHex, asPackageId, createEmptyAgentPresetDocument,
+  AGENT_CHAT_MODEL_TASK, CHAT_ROUTE_RECORD_SCHEMA,
   type AgentPresetDocument, type AgentPresetEditorResponse, type AgentPresetLibraryResponse,
   type AgentPresetSummary, type CapabilityModuleCatalogItem, type OfficialPresetTemplate,
 } from '@/common/types/agentPlatform';
@@ -31,7 +32,7 @@ const catalog: CapabilityModuleCatalogItem[] = [{
   module: capability, summary_kind: 'tool', display_name: 'Remote reviewer', description: '',
   source_package: { id: asPackageId('platform'), version: '1.0.0' },
   authoring_policy: 'direct', supported_surfaces: ['desktop'],
-  actions: [{ action_id: 'platform.remote-review/read', input_schema: 'input', output_schema: 'output', effect_class: 'read_local', presentation: 'visible' }],
+  actions: [{ action_id: 'platform.remote-review/read', effect_class: 'read_local', presentation: 'visible' }],
   context_schema_refs: [], event_schema_refs: [], required_host_ports: [],
   required_resource_kinds: ['customer'], required_modules: [], conflicting_modules: [],
 }];
@@ -58,6 +59,18 @@ const extendedDocument = (): AgentPresetDocument => ({
   enabled_capabilities: [{ capability, action_allowlist: ['platform.remote-review/read'] }],
   runtime_policy: { idmm: { ...createDefaultIdmmConfig(), mode: 'rule_only' } },
 });
+const setDefaultModel = (document: AgentPresetDocument, model: string): AgentPresetDocument => {
+  document.model_route_refs[AGENT_CHAT_MODEL_TASK] = `host-route-${model}`;
+  document.chat_route_records[AGENT_CHAT_MODEL_TASK] = {
+    schema: CHAT_ROUTE_RECORD_SCHEMA, task: AGENT_CHAT_MODEL_TASK,
+    primary: { model_route_id: `host-route-${model}`, model_route_revision: 1,
+      provider_id: '0190f5fe-7c00-7a00-8000-000000000201', model, protocol: 'openai_chat',
+      connection_config_ref: 'default', config_revision_digest: asDigestHex('a'.repeat(64)),
+      credential_ref: 'host-credential', features: ['text_input', 'text_output'] },
+    failovers: [],
+  };
+  return document;
+};
 
 beforeEach(() => {
   configService.reset();
@@ -93,6 +106,7 @@ test('official selection reads its baseline draft without preparing or saving a 
   expect([...hook.result.current.capabilities.actionIds]).toEqual(['platform.remote-review/read']);
   expect([...hook.result.current.capabilities.requiredResourceKinds]).toEqual(['customer']);
   expect(hook.result.current.capabilities.idmm.mode).toBe('rule_only');
+  expect(hook.result.current.capabilities.defaultModel).toBeNull();
   expect(getEditor).toHaveBeenCalledWith({ preset_id: officialId });
   expect(prepare).not.toHaveBeenCalled();
   expect(save).not.toHaveBeenCalled();
@@ -159,14 +173,37 @@ test('a saved personal Revision remains authoritative over transient editor draf
   const preset = { ...initial, preset_id: personalId, source: 'user' as const,
     current_stable_revision: { ...initial.current_stable_revision!, preset_id: personalId },
   };
-  const response = editor(preset, createEmptyAgentPresetDocument());
-  response.draft.document = extendedDocument();
+  const response = editor(preset, setDefaultModel(createEmptyAgentPresetDocument(), 'saved-model'));
+  response.draft.document = setDefaultModel(extendedDocument(), 'unsaved-model');
   spyOn(agentPlatform.getEditor, 'invoke').mockResolvedValue(response);
   const hook = renderHook(() => useGuidPresetCapabilities(personalId, preset.current_stable_revision?.revision_digest));
   await waitFor(() => expect(hook.result.current.isLoading).toBe(false));
   expect(hook.result.current.actionIds.size).toBe(0);
   expect(hook.result.current.requiredResourceKinds.size).toBe(0);
   expect(hook.result.current.idmm).toEqual(createDefaultIdmmConfig());
+  expect(hook.result.current.defaultModel).toEqual({
+    provider_id: '0190f5fe-7c00-7a00-8000-000000000201', model: 'saved-model',
+  });
+});
+
+test('late model defaults from another Agent or Revision cannot replace the currently selected document', async () => {
+  const pending: ((response: AgentPresetEditorResponse) => void)[] = [];
+  spyOn(agentPlatform.getEditor, 'invoke').mockImplementation(() => new Promise(resolve => { pending.push(resolve); }));
+  const initial = summary(1);
+  const hook = renderHook(({ id, digest }) => useGuidPresetCapabilities(id, digest), {
+    initialProps: { id: officialId, digest: initial.current_stable_revision!.revision_digest },
+  });
+  const next = { ...summary(2), preset_id: personalId };
+  hook.rerender({ id: personalId, digest: next.current_stable_revision!.revision_digest });
+  expect(hook.result.current.defaultModel).toBeNull();
+  expect(hook.result.current.isLoading).toBe(true);
+  await act(async () => { pending[1](editor(next, setDefaultModel(createEmptyAgentPresetDocument(), 'new-model'))); });
+  await waitFor(() => expect(hook.result.current.defaultModel?.model).toBe('new-model'));
+  await act(async () => { pending[0](editor(initial, setDefaultModel(createEmptyAgentPresetDocument(), 'old-model'))); });
+  expect(hook.result.current.defaultModel?.model).toBe('new-model');
+  hook.rerender({ id: personalId, digest: asDigestHex('3'.repeat(64)) });
+  expect(hook.result.current.defaultModel).toBeNull();
+  expect(hook.result.current.isLoading).toBe(true);
 });
 
 test('an official editor read failure exposes an error and cannot use its immutable template as launch authority', async () => {

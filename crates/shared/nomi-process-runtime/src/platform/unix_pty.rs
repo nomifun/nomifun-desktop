@@ -163,6 +163,11 @@ struct PtyInputState {
 }
 
 impl AsyncPtyMaster {
+    #[cfg(target_os = "macos")]
+    pub(super) fn raw_master_fd(&self) -> RawFd {
+        self.fd.get_ref().as_raw_fd()
+    }
+
     pub(super) fn release_startup_slave(&self) -> io::Result<()> {
         self.startup_slave
             .lock()

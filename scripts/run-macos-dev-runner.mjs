@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { constants, createReadStream } from 'node:fs';
 import { cp, mkdir, mkdtemp, readFile, writeFile, rename } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { createInterface } from 'node:readline';
+import { StringDecoder } from 'node:string_decoder';
 import { dirname, join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inspectMacosAppBundle, signMacosAppBundle } from './lib/macos-app-bundle.mjs';
@@ -56,20 +56,29 @@ export function macosDevelopmentApplicationArguments(args) {
   return [...args, '-ApplePersistenceIgnoreState', 'YES'];
 }
 
-export function runCommand(program, args, { cwd = ROOT, environment = process.env, capture = false } = {}) {
+export function runCommand(program, args, { cwd = ROOT, environment = process.env, capture = false, spawnCommand = spawn } = {}) {
   return new Promise((accept, reject) => {
-    const child = spawn(program, args, { cwd, env: environment, stdio: capture ? ['ignore', 'pipe', 'inherit'] : 'inherit' });
+    const child = spawnCommand(program, args, { cwd, env: environment, stdio: capture ? ['ignore', 'pipe', 'inherit'] : 'inherit' });
     let output = '';
-    if (capture) child.stdout.on('data', data => { output += data; });
+    if (capture) {
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', data => { output += data; });
+    }
     child.once('error', reject);
-    child.once('exit', (code, signal) => code === 0
+    // close follows the process exit and the closing of its stdio. Metadata
+    // JSON must include bytes retained by inherited writer descriptors.
+    child.once('close', (code, signal) => code === 0
       ? accept(output.trim())
       : reject(new Error(`${program} exited ${code ?? signal}`)));
   });
 }
 
-export async function runCargoArtifact(args, binary, { cwd = ROOT, environment = process.env } = {}) {
-  const child = spawn('cargo', args, { cwd, env: environment, stdio: ['inherit', 'pipe', 'inherit'] });
+export async function runCargoArtifact(args, binary, options = {}) {
+  return (await runCargoArtifacts(args, [binary], options))[binary];
+}
+
+export async function runCargoArtifacts(args, binaries, { cwd = ROOT, environment = process.env, spawnCargo = spawn } = {}) {
+  const child = spawnCargo('cargo', args, { cwd, env: environment, stdio: ['inherit', 'pipe', 'inherit'] });
   const completion = new Promise((accept, reject) => {
     child.once('error', reject);
     child.once('exit', (code, signal) => code === 0 ? accept() : reject(Object.assign(
@@ -78,31 +87,56 @@ export async function runCargoArtifact(args, binary, { cwd = ROOT, environment =
   });
   // Subscribe before reading: an early cargo spawn error must stay observed.
   completion.catch(() => {});
-  let executable;
-  const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+  const executables = {};
+  const decoder = new StringDecoder('utf8');
   const readReports = async () => {
-    for await (const line of lines) {
+    const report = line => {
       let result;
       try { result = JSON.parse(line); }
-      catch { process.stdout.write(`${line}\n`); continue; }
-      if (result.reason === 'compiler-message' && result.message?.rendered) process.stderr.write(result.message.rendered);
-      if (result.reason === 'compiler-artifact' && result.target?.name === binary && result.executable) executable = result.executable;
+      catch { process.stdout.write(`${line}\n`); return; }
+      if (result?.reason === 'compiler-message' && result.message?.rendered) process.stderr.write(result.message.rendered);
+      if (result?.reason === 'compiler-artifact' && binaries.includes(result.target?.name) && result.executable) {
+        executables[result.target.name] = resolve(cwd, result.executable);
+      }
+    };
+    let buffered = '';
+    for await (const bytes of child.stdout) {
+      buffered += decoder.write(bytes);
+      let end;
+      while ((end = buffered.indexOf('\n')) >= 0) {
+        report(buffered.slice(0, end));
+        buffered = buffered.slice(end + 1);
+      }
     }
+    buffered += decoder.end();
+    if (buffered) report(buffered);
   };
   try {
     await Promise.all([readReports(), completion]);
   } finally {
-    lines.close();
     child.stdout.destroy();
   }
-  if (!executable) throw new Error(`Cargo did not report the ${binary} executable`);
-  return resolve(cwd, executable);
+  for (const binary of binaries) if (!executables[binary]) throw new Error(`Cargo did not report the ${binary} executable`);
+  return executables;
 }
 
 async function digestFile(path) {
   const digest = createHash('sha256');
   for await (const chunk of createReadStream(path)) digest.update(chunk);
   return digest.digest('hex');
+}
+
+export async function freezeMacosDevelopmentController(controllerPath, root = ROOT) {
+  const digest = await digestFile(controllerPath);
+  const cache = join(root, 'target', 'macos-dev-app');
+  await mkdir(cache, { recursive: true });
+  const generation = await mkdtemp(join(cache, 'controller-'));
+  const program = join(generation, 'macos_application_controller');
+  await cp(controllerPath, program);
+  if (await digestFile(program) !== digest || await digestFile(controllerPath) !== digest) {
+    throw new Error('LaunchServices controller changed while freezing its exact build');
+  }
+  return program;
 }
 
 export async function developmentInfoPlist(root = ROOT, environment = process.env) {
@@ -137,6 +171,7 @@ export async function ensureMacosDevelopmentBundle({
 }, { sign = signMacosAppBundle, inspect = inspectMacosAppBundle, run = runCommand } = {}) {
   const plist = await developmentInfoPlist(root, environment);
   const signingIdentity = macosDevelopmentSigningIdentity(environment);
+  const entitlementsPath = join(root, 'apps/desktop/entitlements.plist');
   // Separate test identifiers/datasets can run beside an existing dev app.
   const identity = createHash('sha256').update(plist)
     .update(environment.NOMIFUN_DATA_DIR ?? '').update(target).update(JSON.stringify(signingIdentity)).digest('hex').slice(0, 16);
@@ -149,6 +184,8 @@ export async function ensureMacosDevelopmentBundle({
     .update(JSON.stringify(signingIdentity))
     .update(JSON.stringify(files))
     .update(await readFile(join(root, 'scripts/lib/macos-app-bundle.mjs')))
+    .update(await readFile(join(root, 'scripts/lib/macos-signing.mjs')))
+    .update(await readFile(entitlementsPath))
     .digest('hex');
   const host = createHash('sha256').update(hostDigest).update(plist).digest('hex');
   let cached;
@@ -191,7 +228,7 @@ export async function ensureMacosDevelopmentBundle({
     // The resource fingerprint is unchanged. Reuse signed native libraries
     // and refresh the app seal in this new immutable generation.
     await run('/usr/bin/plutil', ['-convert', 'xml1', join(contents, 'Info.plist')]);
-    await run('codesign', macosDevelopmentSealArguments(appPath, signingIdentity));
+    await run('codesign', macosDevelopmentSealArguments(appPath, signingIdentity, entitlementsPath));
     await run('codesign', ['--verify', '--deep', '--strict', appPath]);
   } else {
     for (const file of files) {
@@ -202,7 +239,7 @@ export async function ensureMacosDevelopmentBundle({
       await cp(file.source, destination);
       if (await digestFile(destination) !== file.digest) throw new Error('native resource changed while freezing the development app');
     }
-    await sign({ appPath, target, identity: signingIdentity });
+    await sign({ appPath, target, identity: signingIdentity, entitlementsPath });
   }
   const publication = join(generation, 'complete.json');
   await writeFile(publication, `${JSON.stringify({ components, host, appPath })}\n`);
@@ -218,10 +255,13 @@ export async function main(args = process.argv.slice(2)) {
     generation = await acquireMacosDevGeneration(process.env.NOMIFUN_DEV_SUPERVISOR_SOCKET);
     const cwd = process.cwd();
     const compiler = await prepareMacosBuildEnvironment({ target: plan.target });
-    const hostPath = await runCargoArtifact(plan.build, 'nomifun-desktop', { cwd, environment: compiler.environment });
+    const artifacts = await runCargoArtifacts([...plan.build, '--example', 'macos_application_controller'],
+      ['nomifun-desktop', 'macos_application_controller'], { cwd, environment: compiler.environment });
+    const hostPath = artifacts['nomifun-desktop'];
     const program = await ensureMacosDevelopmentBundle({ hostPath, target: compiler.target, bundleFiles: compiler.bundleFiles });
+    const controllerProgram = await freezeMacosDevelopmentController(artifacts.macos_application_controller);
     console.error(`[dev] native app: ${dirname(dirname(dirname(program)))}`);
-    const result = await generation.launch({ program, args: macosDevelopmentApplicationArguments(plan.application), environment: process.env, cwd });
+    const result = await generation.launch({ program, controllerProgram, args: macosDevelopmentApplicationArguments(plan.application), environment: process.env, cwd });
     process.exitCode = result.code ?? (result.signal ? 1 : 0);
   } catch (error) {
     // Tauri 2.11 recognizes a Cargo compilation failure by exit 101 and the

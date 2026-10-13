@@ -67,11 +67,13 @@ pub trait UnifiedRuntimeHost: Send + Sync {
 
     /// Record engine semantics in the existing owner's event/history chain
     /// before broadcasting a UI projection. No separate engine rollout store.
+    /// Return this exact canonical event's acknowledgement sequence when the
+    /// host has one. Hosts without such a receipt return None, never a head.
     async fn record_event(
         &self,
         message: &SendMessageData,
         event: &AgentEngineEvent,
-    ) -> Result<(), AppError>;
+    ) -> Result<Option<u64>, AppError>;
 
     /// Hosts accepting concurrent steering must override this and atomically
     /// check the inbox and persist admission. False must record no ToolStarted.
@@ -185,7 +187,7 @@ impl AgentEventSink for TurnProjection {
             *self.terminal.lock().unwrap_or_else(|e| e.into_inner()) = Some(event);
             return Ok(());
         }
-        self.host
+        let event_seq = self.host
             .record_event(&self.message, &event)
             .await
             .map_err(|error| AgentEngineError::InvalidContract(error.to_string()))?;
@@ -194,13 +196,13 @@ impl AgentEventSink for TurnProjection {
             AgentEngineEvent::ExecutionResumed { model_steps, .. } => { self.output.record_model_steps(*model_steps); }
             _ => {}
         }
-        self.project(event)
+        self.project(event, event_seq)
     }
 
     async fn admit_tool(&self, event: AgentEngineEvent) -> Result<bool, AgentEngineError> {
         let admitted = self.host.admit_tool(&self.message, &event).await
             .map_err(|error| AgentEngineError::InvalidContract(error.to_string()))?;
-        if admitted { self.project(event)?; }
+        if admitted { self.project(event, None)?; }
         Ok(admitted)
     }
 }
@@ -219,7 +221,7 @@ impl TurnProjection {
         }
     }
 
-    fn project(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+    fn project(&self, event: AgentEngineEvent, event_seq: Option<u64>) -> Result<(), AgentEngineError> {
         // This runs only after the typed transition is recorded by the host.
         // Closing one reasoning phase does not complete the enclosing Turn;
         // its terminal remains owned by the cleanup and receipt path.
@@ -308,6 +310,13 @@ impl TurnProjection {
                 } else {
                     ToolCallStatus::Completed
                 };
+                call.identity.result_seq = event_seq;
+                call.identity.permission_required = nomifun_engine_core::project_system_permission_required(
+                    call.identity.capability_id.as_deref(), call.identity.action_id.as_deref(),
+                    result.is_error, &result.output_text(),
+                );
+                call.identity.error_code = call.identity.permission_required.as_ref()
+                    .map(|_| nomifun_engine_core::SYSTEM_PERMISSION_REQUIRED.to_owned());
                 let instruction_read = call.call_id.starts_with("agent-instructions:")
                     || (call.name == "read_file" && call.args.get("path").and_then(|v| v.as_str())
                         .is_some_and(|path| path.rsplit(['/', '\\']).next().is_some_and(|name|
@@ -414,7 +423,7 @@ impl EngineSessionDriver for UnifiedSessionDriver {
         self.host.suspend_after_cleanup_failure(message).await
     }
     async fn record_terminal(&self, message: &SendMessageData, outcome: &EngineTurnOutcome) -> Result<(), AppError> {
-        self.host.record_event(message, &runtime_terminal(outcome)).await
+        self.host.record_event(message, &runtime_terminal(outcome)).await.map(|_| ())
     }
     async fn cleanup_session(&self) -> Result<(), AppError> { self.host.cleanup_session().await }
 }
@@ -718,7 +727,7 @@ mod tests {
             &self,
             _message: &SendMessageData,
             event: &AgentEngineEvent,
-        ) -> Result<(), AppError> {
+        ) -> Result<Option<u64>, AppError> {
             if self.fail_record.load(Ordering::Acquire) {
                 return Err(AppError::Conflict("canonical journal unavailable".into()));
             }
@@ -733,8 +742,9 @@ mod tests {
                     "terminal must follow cleanup proof"
                 );
             }
-            self.events.lock().unwrap().push(event.clone());
-            Ok(())
+            let mut events = self.events.lock().unwrap();
+            events.push(event.clone());
+            Ok(Some(events.len() as u64))
         }
         async fn cleanup_turn(&self, _message: &SendMessageData) -> Result<(), AppError> {
             if self.block_cleanup.load(Ordering::Acquire) {
@@ -1177,6 +1187,48 @@ mod tests {
         assert!(events.try_recv().is_err());
         assert_eq!(host.events.lock().unwrap().len(), 3);
         runtime.kill_and_wait(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn system_permission_live_projection_requires_a_failed_admitted_computer_call() {
+        use nomifun_agent_contracts::{ActionId, CapabilityId, StrictJsonValue};
+        use nomifun_chat_model_broker::{ChatToolCall, ToolCallId};
+        let host = Host::new();
+        let state = AgentRuntimeState::new(SESSION, "permission-projection", 32);
+        let turn = state.reset_for_new_turn(ConversationStatus::Running);
+        let projection = TurnProjection {
+            host: host.clone(), message: message(), output: EngineTurnOutput::new(state.clone(), turn),
+            calls: Mutex::new(BTreeMap::new()), thinking_step: Mutex::new(None), terminal: Mutex::new(None),
+            last_model_step: std::sync::atomic::AtomicU16::new(0),
+        };
+        let body = serde_json::json!({"schema":"system-permission-required.v1","capability":"computer",
+            "action_id":"computer/observe","operation":"screenshot","permissions":["screen_recording"],
+            "execution":"not_executed"}).to_string();
+        let carrier = nomifun_engine_core::system_permission_error_carrier("SYSTEM_PERMISSION_REQUIRED", &body).unwrap();
+        let mut events = state.subscribe();
+        for (index, (capability, is_error, output)) in [
+            ("computer", true, carrier.as_str()), ("computer", false, carrier.as_str()),
+            ("browser", true, carrier.as_str()), ("computer", true, body.as_str()),
+        ].into_iter().enumerate() {
+            let call_id = ToolCallId::from(format!("permission-{index}"));
+            projection.emit(AgentEngineEvent::ToolCallCompleted { step: 1, call: ChatToolCall {
+                call_id: call_id.clone(), name: "computer".into(), arguments: StrictJsonValue(serde_json::json!({"action":"screenshot"})),
+                provider_metadata: None,
+            }}).await.unwrap();
+            projection.emit(AgentEngineEvent::ToolStarted { step: 1, call_id: call_id.clone(),
+                capability_id: CapabilityId::from(capability), action_id: ActionId::from("computer/observe"),
+            }).await.unwrap();
+            let AgentStreamEvent::ToolCall(started) = events.recv().await.unwrap() else { panic!("start") };
+            assert!(started.identity.permission_required.is_none());
+            assert!(started.identity.result_seq.is_none());
+            projection.emit(AgentEngineEvent::ToolCompleted { step: 1,
+                result: AgentToolResult::text(call_id, output, is_error),
+            }).await.unwrap();
+            let AgentStreamEvent::ToolCall(completed) = events.recv().await.unwrap() else { panic!("result") };
+            assert_eq!(completed.identity.result_seq, Some((index as u64 + 1) * 3));
+            assert_eq!(completed.identity.permission_required.is_some(), index == 0);
+            assert_eq!(completed.identity.error_code.as_deref(), (index == 0).then_some("SYSTEM_PERMISSION_REQUIRED"));
+        }
     }
 
     #[tokio::test]

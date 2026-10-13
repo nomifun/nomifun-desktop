@@ -1,5 +1,5 @@
 use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, sync::{Arc, Mutex as StdMutex, RwLock, atomic::{AtomicBool, Ordering}}, time::Duration};
-use nomi_process_runtime::{ChildProcessBuilder, ManagedChildProcess, ExactProcessIdentity, capture_child_identity, terminate_verified_orphan, merge_process_path};
+use nomi_process_runtime::{ChildProcessBuilder, ManagedChildProcess, ExactProcessIdentity, OrphanTerminationOutcome, capture_child_identity, terminate_verified_orphan, merge_process_path};
 use serde::{Deserialize, Serialize};
 use tokio::{io::{AsyncRead, AsyncReadExt}, sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -91,7 +91,10 @@ impl HostingOwner {
             if let Some(identity) = &stored.identity {
                 let identity = identity.clone();
                 match tokio::task::spawn_blocking(move || terminate_verified_orphan(&identity, CLEANUP_TIMEOUT)).await {
-                    Ok(Ok(_)) => { stored.identity = None; stored.record.pid = None; }
+                    Ok(Ok(OrphanTerminationOutcome::AlreadyDead | OrphanTerminationOutcome::KilledAndProven)) => { stored.identity = None; stored.record.pid = None; }
+                    Ok(Ok(OrphanTerminationOutcome::RootGoneCleanupUnproven)) => {
+                        stored.record.last_error = Some("Host restarted; previous root exited but its process-group cleanup could not be confirmed".into());
+                    }
                     Ok(Err(error)) => stored.record.last_error = Some(format!("Host restarted; previous process cleanup could not be confirmed: {error}")),
                     Err(error) => stored.record.last_error = Some(format!("Host restarted; process reconciliation failed: {error}")),
                 }
@@ -893,9 +896,12 @@ impl HostingOwner {
             shutdown_running(&running).await?;
             self.clear_process(slot, &running).await?;
         } else if let Some(identity) = identity {
-            tokio::task::spawn_blocking(move || terminate_verified_orphan(&identity, CLEANUP_TIMEOUT)).await
+            let outcome = tokio::task::spawn_blocking(move || terminate_verified_orphan(&identity, CLEANUP_TIMEOUT)).await
                 .map_err(|error| AppError::OutcomeUnknown(format!("process cleanup worker failed: {error}")))?
                 .map_err(|error| AppError::OutcomeUnknown(format!("previous process cleanup could not be confirmed: {error}")))?;
+            if outcome == OrphanTerminationOutcome::RootGoneCleanupUnproven {
+                return Err(AppError::OutcomeUnknown("previous process root exited but its contained group cleanup remains unproven".into()));
+            }
         }
         let mut data = slot.data.lock().await;
         data.identity = None;

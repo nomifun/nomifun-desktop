@@ -262,28 +262,12 @@ define_class!(
         fn media_permission(
             &self,
             _view: &WKWebView,
-            _origin: &WKSecurityOrigin,
+            origin: &WKSecurityOrigin,
             _frame: &WKFrameInfo,
-            _kind: WKMediaCaptureType,
+            kind: WKMediaCaptureType,
             decision: &DynBlock<dyn Fn(WKPermissionDecision)>,
         ) {
-            let allowed = self
-                .page()
-                .is_some_and(|p| !p.input_locked() && p.is_visible());
-            if !allowed {
-                if let Some(page) = self.page() {
-                    page.changed(|s| {
-                        if !s.blocked_permissions.iter().any(|p| p == "media_capture") {
-                            s.blocked_permissions.push("media_capture".into());
-                        }
-                    });
-                }
-            }
-            decision.call((if allowed {
-                WKPermissionDecision::Prompt
-            } else {
-                WKPermissionDecision::Deny
-            },));
+            self.ivars().interactions.permissions.offer(origin, kind, decision);
         }
     }
 );

@@ -5,14 +5,17 @@
 //! supplies the persisted half of that proof — an [`ExactProcessIdentity`]
 //! captured while the spawner still owns the live child — and the boot-time
 //! half: re-proving that whatever runs under the recorded PID *is* the
-//! recorded instance before touching it, then killing its tree and proving
-//! absence.
+//! recorded instance before touching it, then terminating its contained
+//! group/tree and proving absence within that ownership boundary.
+//! On macOS the durable root record authorizes only its original process
+//! group. It cannot reconstruct descendants that previously left that group.
 //!
 //! Proof obligations:
 //! - [`capture_child_identity`] must be called while the child handle is
 //!   owned and unreaped, so the PID cannot have been recycled.
-//! - [`probe_process_identity`] returning `Ok(None)` is positive proof that
-//!   no process runs under the PID at probe time. Errors are *not* proof.
+//! - [`probe_process_identity`] returning `Ok(None)` proves that no executing
+//!   process runs under the PID at probe time (a terminal zombie may still
+//!   occupy it). Errors are *not* proof.
 //! - [`terminate_verified_orphan`] never signals a process whose live
 //!   identity does not match the recorded one; a mismatch is itself proof
 //!   that the recorded instance already exited.
@@ -45,10 +48,18 @@ pub struct ExactProcessIdentity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OrphanTerminationOutcome {
     /// The recorded instance no longer runs (nothing under the PID, or the
-    /// PID is owned by a different instance). Nothing was signalled.
+    /// PID is owned by a different instance). Nothing was signalled. On macOS
+    /// a complete read-only observation also proved no live original-group
+    /// members; this does not cover unrecorded escaped descendants.
     AlreadyDead,
-    /// The recorded instance was re-verified live, its tree was killed, and
-    /// absence was proven before returning.
+    /// The recorded root is absent or no longer matches, but the original
+    /// contained group still has live members. No new signal authority can
+    /// be obtained from its cached PGID. Callers must retain the recovery
+    /// record and report an unknown cleanup outcome, not clear it as stopped.
+    RootGoneCleanupUnproven,
+    /// The recorded instance was re-verified live, its contained group/tree
+    /// was terminated, and absence was proven before returning. On macOS this
+    /// covers the original process group, not unrecorded escaped descendants.
     KilledAndProven,
 }
 
@@ -114,8 +125,8 @@ pub fn capture_child_identity(
     }
 }
 
-/// Inspect one PID. `Ok(None)` is positive proof that no process currently
-/// runs under it; `Ok(Some)` is the live process's current identity; errors
+/// Inspect one PID. `Ok(None)` proves no executing process currently runs
+/// under it, including a terminal zombie; `Ok(Some)` is the live identity; errors
 /// mean the platform could not answer and prove nothing.
 pub fn probe_process_identity(pid: u32) -> io::Result<Option<ExactProcessIdentity>> {
     if pid == 0 {
@@ -149,7 +160,7 @@ pub fn probe_process_identity(pid: u32) -> io::Result<Option<ExactProcessIdentit
     }
 }
 
-/// Kill the recorded process instance's group/tree, but only after re-proving
+/// Kill the recorded process instance's contained group/tree, after re-proving
 /// that whatever runs under the recorded PID *is* the recorded instance, and
 /// only returning success once absence is proven. Blocking; bounded by
 /// `timeout`. Callers on an async runtime should wrap it in `spawn_blocking`.
@@ -157,45 +168,51 @@ pub fn terminate_verified_orphan(
     identity: &ExactProcessIdentity,
     timeout: Duration,
 ) -> io::Result<OrphanTerminationOutcome> {
-    let Some(live) = probe_process_identity(identity.pid)
-        .map_err(|e| io::Error::new(e.kind(), format!("pre-termination probe: {e}")))?
-    else {
-        return Ok(OrphanTerminationOutcome::AlreadyDead);
-    };
-    if !same_recorded_process(identity, &live) {
-        // The PID was recycled: the recorded instance provably exited. Never
-        // signal the unrelated current owner.
-        return Ok(OrphanTerminationOutcome::AlreadyDead);
-    }
-
-    #[cfg(windows)]
-    {
-        windows_impl::terminate(identity, timeout)
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        linux_impl::terminate(identity, timeout)
-    }
-
     #[cfg(target_os = "macos")]
     {
+        // Even an absent/mismatched root cannot by itself prove that its
+        // original group is terminal. Darwin recovery handles those cases
+        // with observation only, without granting numeric-PGID signals.
         macos_impl::terminate(identity, timeout)
     }
 
-    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    #[cfg(not(target_os = "macos"))]
     {
-        let _ = timeout;
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "verified orphan termination is unavailable on this platform",
-        ))
+        let Some(live) = probe_process_identity(identity.pid)
+            .map_err(|e| io::Error::new(e.kind(), format!("pre-termination probe: {e}")))?
+        else {
+            return Ok(OrphanTerminationOutcome::AlreadyDead);
+        };
+        if !same_recorded_process(identity, &live) {
+            // The PID was recycled: the recorded instance provably exited.
+            // Never signal the unrelated current owner.
+            return Ok(OrphanTerminationOutcome::AlreadyDead);
+        }
+
+        #[cfg(windows)]
+        {
+            windows_impl::terminate(identity, timeout)
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            linux_impl::terminate(identity, timeout)
+        }
+
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+        {
+            let _ = timeout;
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "verified orphan termination is unavailable on this platform",
+            ))
+        }
     }
 }
 
 /// Poll `probe_process_identity` until the recorded instance is gone.
 /// "Gone" means nothing runs under the PID, or a different instance owns it.
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn confirm_recorded_instance_absent(
     identity: &ExactProcessIdentity,
     deadline: Instant,
@@ -369,122 +386,8 @@ mod linux_impl {
 }
 
 #[cfg(target_os = "macos")]
-mod macos_impl {
-    use super::*;
-
-    pub(super) fn probe(pid: u32) -> io::Result<Option<ExactProcessIdentity>> {
-        let pid_t = pid as libc::pid_t;
-        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-        // SAFETY: info is a writable proc_bsdinfo of the advertised size.
-        let written = unsafe {
-            libc::proc_pidinfo(
-                pid_t,
-                libc::PROC_PIDTBSDINFO,
-                0,
-                (&raw mut info).cast(),
-                size,
-            )
-        };
-        if written <= 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::ESRCH) {
-                return Ok(None);
-            }
-            return Err(error);
-        }
-        if written != size || info.pbi_pid != pid {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "proc_pidinfo returned an inconsistent bsdinfo record",
-            ));
-        }
-        let platform_start_key = u64::from(info.pbi_start_tvsec)
-            .checked_mul(1_000_000)
-            .and_then(|micros| micros.checked_add(u64::from(info.pbi_start_tvusec)))
-            .filter(|key| *key != 0)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "process start time is not representable",
-                )
-            })?;
-        Ok(Some(ExactProcessIdentity {
-            pid,
-            start_time_epoch_seconds: u64::from(info.pbi_start_tvsec),
-            platform_start_key,
-            executable: executable_path(pid_t),
-        }))
-    }
-
-    fn executable_path(pid: libc::pid_t) -> Option<PathBuf> {
-        let mut buffer = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
-        // SAFETY: buffer is writable for its advertised length.
-        let written = unsafe {
-            libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32)
-        };
-        if written <= 0 {
-            return None;
-        }
-        buffer.truncate(written as usize);
-        Some(PathBuf::from(String::from_utf8_lossy(&buffer).into_owned()))
-    }
-
-    pub(super) fn terminate(
-        identity: &ExactProcessIdentity,
-        timeout: Duration,
-    ) -> io::Result<OrphanTerminationOutcome> {
-        let deadline = Instant::now()
-            .checked_add(timeout)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "timeout is too large"))?;
-        let pid = identity.pid as libc::pid_t;
-
-        // Group-leadership proof: our contained spawns are made their own
-        // process-group leaders, so the negative-PID signal below addresses
-        // exactly the recorded instance's descendants. A non-leader cannot be
-        // safely group-killed and fails closed.
-        // SAFETY: getpgid is a read-only query.
-        let pgid = unsafe { libc::getpgid(pid) };
-        if pgid < 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::ESRCH) {
-                return Ok(OrphanTerminationOutcome::AlreadyDead);
-            }
-            return Err(error);
-        }
-        if pgid != pid {
-            return Err(io::Error::other(
-                "recorded process is not its own process-group leader; refusing group kill",
-            ));
-        }
-        // SAFETY: getpgrp is a read-only query for the current process.
-        if unsafe { libc::getpgrp() } == pid {
-            return Err(io::Error::other(
-                "refusing to terminate the current application process group",
-            ));
-        }
-        // Final identity re-check immediately before the signal narrows the
-        // recycle window to the syscall gap, mirroring the browser-profile
-        // recovery precedent (macOS has no pidfd equivalent to close it).
-        match probe_process_identity(identity.pid)? {
-            None => return Ok(OrphanTerminationOutcome::AlreadyDead),
-            Some(live) if !same_recorded_process(identity, &live) => {
-                return Ok(OrphanTerminationOutcome::AlreadyDead);
-            }
-            Some(_) => {}
-        }
-        // SAFETY: pid was proven a live group leader distinct from our own
-        // group; killpg addresses only that verified group.
-        if unsafe { libc::killpg(pid, libc::SIGKILL) } != 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::ESRCH) {
-                return Ok(OrphanTerminationOutcome::AlreadyDead);
-            }
-            return Err(error);
-        }
-        confirm_recorded_instance_absent(identity, deadline)
-    }
-}
+#[path = "recovery/macos.rs"]
+mod macos_impl;
 
 #[cfg(test)]
 mod tests {
@@ -745,7 +648,11 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(outcome, OrphanTerminationOutcome::AlreadyDead);
+        assert_eq!(outcome, if cfg!(target_os = "macos") {
+            OrphanTerminationOutcome::RootGoneCleanupUnproven
+        } else {
+            OrphanTerminationOutcome::AlreadyDead
+        });
         assert!(
             child.try_wait().unwrap().is_none(),
             "a mismatched identity must never kill the live pid owner"

@@ -1,6 +1,6 @@
 import '../../../../../test/setup-dom.ts';
 
-import { act, cleanup, fireEvent, render, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { useState } from 'react';
@@ -11,6 +11,7 @@ import guid from '@/renderer/services/i18n/locales/en-US/guid.json';
 import agentSettings from '@/renderer/services/i18n/locales/en-US/agentSettings.json';
 import type { ExecutableAgentPreset, GuidAgentSelection } from '../types';
 import GuidAgentSelector, { type GuidAgentSelectorProps } from './GuidAgentSelector';
+import BrowserResourceField from '@/renderer/components/agent/BrowserResourceField';
 
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({
@@ -90,6 +91,43 @@ describe('Guid Agent selector', () => {
     expect(page.getByRole('dialog', { name: guid.agentEntries.choose })).not.toBeNull();
     expect(page.getByRole('group', { name: agentSettings.library.mine })).not.toBeNull();
     expect(page.getByRole('group', { name: guid.agentEntries.fromTemplate })).not.toBeNull();
+  });
+
+  test('keeps Browser configuration inside the existing Agent menu and opens Chrome setup only on request', async () => {
+    let reads = 0;
+    const choices: string[] = [];
+    const connection = { incarnation: 'chrome-menu', state: 'connected' as const, chromium_major: 144 };
+    const { page, open, selections } = renderSelector({
+      resourceConfiguration: <BrowserResourceField value='managed-browser'
+        client={{ snapshot: async () => { reads += 1; return null; }, connect: async () => connection, disconnect: async () => {} }}
+        onChange={(choice) => choices.push(choice)} onReadinessChange={() => {}} />,
+    });
+    expect(page.queryByText(agentSettings.resources.pickerTitle)).toBeNull();
+    expect(reads).toBe(0);
+    await open();
+    const configuration = page.getByRole('button', { name: agentSettings.resources.pickerTitle });
+    expect(configuration.getAttribute('aria-expanded')).toBe('false');
+    expect(page.queryByRole('combobox')).toBeNull();
+    fireEvent.click(configuration);
+    expect(page.getByRole('combobox')).toBeTruthy();
+    expect(reads).toBe(0);
+    expect(page.queryByText(agentSettings.resources.browser.setup)).toBeNull();
+    fireEvent.click(page.getByRole('combobox'));
+    await waitFor(() => expect(reads).toBe(1));
+    expect(page.getByText(agentSettings.resources.browser.setup)).toBeTruthy();
+    await waitFor(() => expect(page.getByText(agentSettings.resources.browser.connect).closest('button')?.disabled).toBe(false));
+    fireEvent.click(page.getByText(agentSettings.resources.browser.connect));
+    await page.findByText(agentSettings.resources.browser.states.connected);
+    const option = await page.findByRole('option', { name: agentSettings.resources.browser.attached });
+    // Floating UI dismisses on pointerdown. The nested combobox's portal must
+    // remain owned by the menu through both pointerdown and its option click.
+    fireEvent.pointerDown(option);
+    fireEvent.click(option);
+    expect(choices).toEqual(['attached-chrome']);
+    expect(page.getByRole('dialog', { name: guid.agentEntries.choose })).toBeTruthy();
+    expect(selections).toEqual([]);
+    fireEvent.click(configuration);
+    expect(page.queryByRole('combobox')).toBeNull();
   });
 
   test('switches saved Agents, updates the trigger, and closes the menu', async () => {

@@ -2024,6 +2024,10 @@ enum LifecycleCompletion {
 
 struct LifecycleHandle {
     pgid: libc::pid_t,
+    #[cfg(target_os = "macos")]
+    nonce: Nonce,
+    #[cfg(target_os = "macos")]
+    pty_launcher: bool,
     signal_gate: Arc<Mutex<SignalGate>>,
     completion: watch::Receiver<LifecycleCompletion>,
     #[cfg(test)]
@@ -2040,7 +2044,11 @@ impl LifecycleHandle {
             return;
         }
         gate.phase = SignalPhase::Closing;
-        if !gate.final_kill_sent {
+        #[cfg(target_os = "macos")]
+        let direct_group_kill = !self.pty_launcher;
+        #[cfg(not(target_os = "macos"))]
+        let direct_group_kill = true;
+        if direct_group_kill && !gate.final_kill_sent {
             // SAFETY: the worker still owns an unreaped leader/watchdog identity.
             let result = unsafe { libc::kill(-self.pgid, libc::SIGKILL) };
             if result == 0
@@ -2056,7 +2064,14 @@ impl LifecycleHandle {
         if let Some(control_fd) = gate.control_fd {
             // SAFETY: the worker cannot drop/reuse this descriptor while the shared
             // signal gate is locked.
-            let _ = unsafe { libc::shutdown(control_fd, libc::SHUT_RDWR) };
+            // A macOS PTY launcher must retain its live SID anchor until its
+            // session is sealed. Request watchdog cleanup while keeping the
+            // read side available for its authenticated terminal receipt.
+            #[cfg(target_os = "macos")]
+            let how = if self.pty_launcher { libc::SHUT_WR } else { libc::SHUT_RDWR };
+            #[cfg(not(target_os = "macos"))]
+            let how = libc::SHUT_RDWR;
+            let _ = unsafe { libc::shutdown(control_fd, how) };
         }
     }
 }
@@ -2276,6 +2291,10 @@ impl SpawnTransaction {
             pid, io: CommittedIo::Unavailable, startup_failure: self.startup_failure.take(),
             lifecycle: LifecycleHandle {
                 pgid, signal_gate, completion,
+                #[cfg(target_os = "macos")]
+                nonce: self.nonce,
+                #[cfg(target_os = "macos")]
+                pty_launcher: !self.watchdog_anchors_group,
                 #[cfg(test)] audit: self.audit.clone(),
             },
         })
@@ -2367,6 +2386,7 @@ impl SpawnTransaction {
             leader_starttime,
             group_sealed: false,
             group_quiesced: false,
+            quiescing_seen: false,
             nonce: self.nonce,
             signal_gate: Arc::clone(&signal_gate),
             completion: Some(completion_sender),
@@ -2439,6 +2459,10 @@ impl SpawnTransaction {
             io,
             lifecycle: LifecycleHandle {
                 pgid,
+                #[cfg(target_os = "macos")]
+                nonce: self.nonce,
+                #[cfg(target_os = "macos")]
+                pty_launcher: !self.watchdog_anchors_group,
                 signal_gate,
                 completion,
                 #[cfg(test)]
@@ -2532,7 +2556,12 @@ impl LifecyclePollJob for UnixLifecyclePollerJob {
                                 .transpose();
                             match frame {
                                 Ok(Some(FrameKind::Quiescing)) => {
+                                    // This authenticated receipt has already
+                                    // been consumed from the socket. Carry it
+                                    // through the poller-to-worker handoff.
+                                    job.quiescing_seen = true;
                                     let _ = job.close_signal_gate(false);
+                                    return LifecyclePoll::Blocking;
                                 }
                                 Ok(Some(FrameKind::Failure)) => {
                                     job.pre_lifecycle_error = Some((
@@ -3566,6 +3595,14 @@ fn child_bootstrap(
     if ack.pid() != pid || ack.pgid() != pid || ack.nonce() != nonce {
         return Err(io::Error::from_raw_os_error(libc::EPROTO));
     }
+    #[cfg(target_os = "macos")]
+    if pty_slave_fd.is_some() {
+        // The host owns the session launcher, and that surviving launcher
+        // retains the actual payload's unreaped Child lease across host death.
+        // Only the payload fork returns to Rust's exec path.
+        unsafe { super::macos_watchdog::fork_pty_payload(registration_fd, nonce, deadline) }
+            .map_err(io::Error::from_raw_os_error)?;
+    }
     unsafe { libc::close(registration_fd) };
     Ok(())
 }
@@ -4091,6 +4128,7 @@ struct LifecycleJob {
     leader_starttime: Option<u64>,
     group_sealed: bool,
     group_quiesced: bool,
+    quiescing_seen: bool,
     nonce: Nonce,
     signal_gate: Arc<Mutex<SignalGate>>,
     completion: Option<watch::Sender<LifecycleCompletion>>,
@@ -4161,7 +4199,7 @@ impl LifecycleJob {
             .ok_or_else(|| io::Error::other("lifecycle control is missing"))?
             .as_raw_fd();
         let mut lifecycle_error: Option<io::Error> = None;
-        let mut quiescing_seen = false;
+        let mut quiescing_seen = self.quiescing_seen;
         let mut host_kill_attempted = false;
 
         loop {
@@ -4727,6 +4765,33 @@ impl UnixOwner {
                 io::ErrorKind::NotFound,
                 "process group is already quiescing",
             ));
+        }
+        #[cfg(target_os = "macos")]
+        if self.lifecycle.pty_launcher && signal == libc::SIGKILL {
+            let control_fd = gate.control_fd.ok_or_else(|| io::Error::other("PTY cleanup control is missing"))?;
+            if unsafe { libc::shutdown(control_fd, libc::SHUT_WR) } == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            gate.phase = SignalPhase::Closing;
+            return Ok(());
+        }
+        #[cfg(target_os = "macos")]
+        if self.lifecycle.pty_launcher && signal == libc::SIGINT {
+            let UnixIo::Pty(master) = &self.io else {
+                return Err(io::Error::other("PTY foreground signal handle is missing"));
+            };
+            // The gate keeps the lifecycle worker's exact unreaped launcher
+            // lease alive through this syscall sequence. Return the actual
+            // native error; writing a Ctrl+C byte is a different operation.
+            return unsafe { super::macos_session::signal_owned_foreground(self.lifecycle.pgid, master.raw_master_fd(), signal) }
+                .map_err(io::Error::from_raw_os_error);
+        }
+        #[cfg(target_os = "macos")]
+        if self.lifecycle.pty_launcher && signal == libc::SIGTERM {
+            let control_fd = gate.control_fd.ok_or_else(|| io::Error::other("PTY signal control is missing"))?;
+            let request = Frame::new(FrameKind::PtyTerminate, self.lifecycle.nonce, self.lifecycle.pgid, self.lifecycle.pgid);
+            let deadline = Deadline::after(WATCHDOG_QUIESCING_WAIT).map_err(protocol_io_error)?;
+            return send_frame(control_fd, &request, deadline).map_err(protocol_io_error);
         }
         // SAFETY: the gate stays locked across validation and the negative-PGID syscall.
         let result = unsafe { libc::kill(-self.lifecycle.pgid, signal) };
@@ -6121,6 +6186,7 @@ mod tests {
     }
 
     async fn supervised_stdio_wrap_failure_scenario(shutdown_first: bool, transport: Transport) {
+        let is_pty = matches!(&transport, Transport::Pty { .. });
         let temporary = tempfile::tempdir().unwrap();
         let scenario = match (&transport, shutdown_first) {
             (Transport::Pipe, true) => "pipe-shutdown",
@@ -6156,7 +6222,7 @@ mod tests {
         let starter = supervisor.clone();
         let start = tokio::spawn(async move { starter.start(request).await });
         tokio::time::timeout(Duration::from_secs(2), pause.entered.notified()).await.unwrap();
-        let pid = tokio::time::timeout(Duration::from_secs(2), async {
+        let payload_pid = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if let Ok(value) = std::fs::read_to_string(&marker) {
                     // Creation/truncation can precede printf's complete PID
@@ -6168,7 +6234,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         }).await.unwrap();
-        assert_eq!(audit.leader_pid.load(Ordering::SeqCst), pid as libc::pid_t);
+        let pid = assert_execution_payload_identity(&audit, payload_pid as libc::pid_t, is_pty) as u32;
         let mut shutdown = Box::pin(supervisor.shutdown());
         if shutdown_first {
             std::future::poll_fn(|context| {
@@ -6190,7 +6256,8 @@ mod tests {
                 else { panic!("IO failure after native commit must remain StartLost") };
             assert_eq!(failure.code, "async_process_wrap_failed");
             assert_eq!(last_known.as_ref().unwrap().pid, pid);
-            assert!(cleanup.reaped && !process_exists(pid as libc::pid_t),
+            assert!(cleanup.reaped && !process_exists(pid as libc::pid_t)
+                && !process_exists(payload_pid as libc::pid_t),
                 "start error cannot precede exact native cleanup");
             let report = supervisor.quiesce().await;
             let reported = report.is_exact() && report.sessions.iter().any(|entry| entry.owner == owner
@@ -6198,9 +6265,10 @@ mod tests {
             (start, report.sessions.len(), reported)
         };
         let start_failed = start.is_err();
-        let gone_at_report = !process_exists(pid as libc::pid_t);
+        let gone_at_report = !process_exists(pid as libc::pid_t) && !process_exists(payload_pid as libc::pid_t);
         let exact_cleanup = tokio::time::timeout(Duration::from_secs(2), async {
             while process_exists(pid as libc::pid_t)
+                || process_exists(payload_pid as libc::pid_t)
                 || audit.leader_reaps.load(Ordering::SeqCst) != 1
                 || audit.watchdog_reaps.load(Ordering::SeqCst) != 1
             {
@@ -6208,7 +6276,7 @@ mod tests {
             }
         }).await.is_ok();
         std::fs::write(root.join("assertions.json"), serde_json::json!({
-            "pid":pid,"start_failed":start_failed,"report_sessions":report_sessions,
+            "pid":pid,"payload_pid":payload_pid,"start_failed":start_failed,"report_sessions":report_sessions,
             "exact_owner_cleanup_reported":reported,"process_gone_at_report":gone_at_report,
             "exact_cleanup_finished":exact_cleanup
         }).to_string()).unwrap();
@@ -6244,6 +6312,7 @@ mod tests {
     }
 
     async fn supervised_commit_failure_scenario(transport: Transport, shutdown_first: bool) {
+        let is_pty = matches!(&transport, Transport::Pty { .. });
         let temporary = tempfile::tempdir().unwrap();
         let scenario = match (&transport, shutdown_first) {
             (Transport::Pipe, true) => "commit-pipe-shutdown",
@@ -6280,7 +6349,7 @@ mod tests {
         let starter = supervisor.clone();
         let mut start = tokio::spawn(async move { starter.start(request).await });
         tokio::time::timeout(Duration::from_secs(2), pause.wait_until_entered()).await.unwrap();
-        let leader = tokio::time::timeout(Duration::from_secs(2), async {
+        let payload = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if let Ok(contents) = fs::read_to_string(&marker) {
                     if contents.ends_with('\n') { break contents.trim().parse::<libc::pid_t>().unwrap(); }
@@ -6288,7 +6357,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         }).await.unwrap();
-        assert_eq!(audit.leader_pid.load(Ordering::SeqCst), leader);
+        let leader = assert_execution_payload_identity(&audit, payload, is_pty);
         let watchdog = audit.watchdog_pid.load(Ordering::SeqCst);
         let mut shutdown = Box::pin(supervisor.shutdown());
         if shutdown_first {
@@ -6339,13 +6408,13 @@ mod tests {
             (reported, report.sessions.iter().map(|entry| format!("{:?}", entry.outcome)).collect::<Vec<_>>())
         } else { (false, Vec::new()) };
         let gone = tokio::time::timeout(Duration::from_secs(2), async {
-            while process_exists(leader) || process_exists(watchdog)
+            while process_exists(leader) || process_exists(payload) || process_exists(watchdog)
                 || audit.leader_reaps.load(Ordering::SeqCst) != 1 || audit.watchdog_reaps.load(Ordering::SeqCst) != 1 {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         }).await.is_ok();
         fs::write(root.join("assertions.json"), serde_json::json!({
-            "leader":leader,"watchdog":watchdog,"start_early":start_early,"shutdown_early":shutdown_early,
+            "leader":leader,"payload":payload,"watchdog":watchdog,"start_early":start_early,"shutdown_early":shutdown_early,
             "alive_while_cleanup_held":alive_while_held,"start_failed":start_failed,
             "exact_error":exact_error,"reported":reported,"exact_cleanup":gone,
             "leader_reaps":audit.leader_reaps.load(Ordering::SeqCst),
@@ -6387,6 +6456,7 @@ mod tests {
     }
 
     async fn dropped_commit_failure_scenario(transport: Transport, use_fence: bool) {
+        let is_pty = matches!(&transport, Transport::Pty { .. });
         let temporary = tempfile::tempdir().unwrap();
         let scenario = match (&transport, use_fence) {
             (Transport::Pipe, false) => "drop-pipe-alone",
@@ -6430,9 +6500,9 @@ mod tests {
         let starter = supervisor.clone();
         let start = tokio::spawn(async move { starter.start(request).await });
         tokio::time::timeout(Duration::from_secs(2), pause.wait_until_entered()).await.unwrap();
-        let leader = wait_for_complete_pid_marker(&marker).await;
+        let payload = wait_for_complete_pid_marker(&marker).await;
+        let leader = assert_execution_payload_identity(&audit, payload, is_pty);
         let watchdog = audit.watchdog_pid.load(Ordering::SeqCst);
-        assert_eq!(audit.leader_pid.load(Ordering::SeqCst), leader);
         start.abort();
         let caller_cancelled = tokio::time::timeout(Duration::from_secs(1), start)
             .await.unwrap().unwrap_err().is_cancelled();
@@ -6460,7 +6530,7 @@ mod tests {
             && audit.leader_reaps.load(Ordering::SeqCst) == 0;
         held_cleanup.release();
         let cleaned_without_boundary = tokio::time::timeout(Duration::from_secs(6), async {
-            while process_exists(leader) || process_exists(watchdog)
+            while process_exists(leader) || process_exists(payload) || process_exists(watchdog)
                 || audit.leader_reaps.load(Ordering::SeqCst) != 1 || audit.watchdog_reaps.load(Ordering::SeqCst) != 1 {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -6482,13 +6552,14 @@ mod tests {
         super::TEST_SUPERVISED_SPAWNS.get_or_init(Default::default).lock().unwrap()
             .insert(followup_owner.call_id, SpawnOptions { audit: followup_audit.clone(), ..SpawnOptions::default() });
         let followup = supervisor.start(followup_request).await.expect("exact cleanup must release capacity and admission");
-        let followup_pid = wait_for_complete_pid_marker(&followup_marker).await;
+        let followup_payload = wait_for_complete_pid_marker(&followup_marker).await;
+        let followup_pid = assert_execution_payload_identity(&followup_audit, followup_payload, is_pty);
         let followup_watchdog = followup_audit.watchdog_pid.load(Ordering::SeqCst);
         let followup_outcome = supervisor.cancel(&followup.owner, &followup.session_id).await.unwrap();
         let followup_reaped = matches!(followup_outcome, crate::ProcessOutcome::Cancelled { cleanup, .. } if cleanup.reaped)
-            && !process_exists(followup_pid) && !process_exists(followup_watchdog);
+            && !process_exists(followup_pid) && !process_exists(followup_payload) && !process_exists(followup_watchdog);
         fs::write(root.join("assertions.json"), serde_json::json!({
-            "leader":leader,"watchdog":watchdog,"caller_cancelled":caller_cancelled,
+            "leader":leader,"payload":payload,"watchdog":watchdog,"caller_cancelled":caller_cancelled,
             "capacity_held":capacity_held,"probe_not_executed":probe_not_executed,
             "use_fence":use_fence,"fence_pending":fence_pending,"still_owned_while_held":still_owned_while_held,
             "exact_cleanup_before_boundary_result":cleaned_without_boundary,"reported":reported,
@@ -6497,18 +6568,40 @@ mod tests {
             "report_outcomes":report.sessions.iter().map(|entry| format!("{:?}", entry.outcome)).collect::<Vec<_>>(),
             "leader_reaps":audit.leader_reaps.load(Ordering::SeqCst),"watchdog_reaps":audit.watchdog_reaps.load(Ordering::SeqCst),
             "watchdog_status":audit.watchdog_status.load(Ordering::SeqCst),
-            "followup_pid":followup_pid,"followup_watchdog":followup_watchdog,"followup_reaped":followup_reaped,
+            "followup_pid":followup_pid,"followup_payload":followup_payload,"followup_watchdog":followup_watchdog,"followup_reaped":followup_reaped,
             "followup_leader_reaps":followup_audit.leader_reaps.load(Ordering::SeqCst),
             "followup_watchdog_reaps":followup_audit.watchdog_reaps.load(Ordering::SeqCst),
             "followup_invocation":followup_owner.invocation_id.to_string(),"followup_call":followup_owner.call_id.to_string(),
         }).to_string()).unwrap();
         assert!(caller_cancelled && capacity_held && probe_not_executed && fence_pending && still_owned_while_held);
         assert!(cleaned_without_boundary && reported && followup_reaped);
-        assert_eq!(fs::read_to_string(marker.with_extension("starts")).unwrap(), format!("{leader}\n"));
-        assert_eq!(fs::read_to_string(followup_marker.with_extension("starts")).unwrap(), format!("{followup_pid}\n"));
+        assert_eq!(fs::read_to_string(marker.with_extension("starts")).unwrap(), format!("{payload}\n"));
+        assert_eq!(fs::read_to_string(followup_marker.with_extension("starts")).unwrap(), format!("{followup_payload}\n"));
         assert_eq!(audit.watchdog_status.load(Ordering::SeqCst), super::EXIT_FAULT_AFTER_COMMIT_BEFORE_COMMITTED << 8);
         assert_eq!(followup_audit.leader_reaps.load(Ordering::SeqCst), 1);
         assert_eq!(followup_audit.watchdog_reaps.load(Ordering::SeqCst), 1);
+    }
+
+    fn assert_execution_payload_identity(audit: &TestSpawnAudit, payload: libc::pid_t, is_pty: bool) -> libc::pid_t {
+        let launcher = audit.leader_pid.load(Ordering::SeqCst);
+        assert!(launcher > 1 && payload > 1);
+        #[cfg(target_os = "macos")]
+        if is_pty {
+            assert_ne!(launcher, payload, "the exact host Child is the surviving PTY launcher");
+            assert_eq!(unsafe { libc::getsid(launcher) }, launcher);
+            assert_eq!(unsafe { libc::getsid(payload) }, launcher, "payload must remain in the owned session");
+            let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+            let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+            assert_eq!(unsafe { libc::proc_pidinfo(payload, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) }, size);
+            assert_eq!(info.pbi_pid, payload as u32);
+            assert_eq!(info.pbi_ppid, launcher as u32, "launcher must hold the payload's real waitpid lease");
+            assert_eq!(info.pbi_pgid, launcher as u32);
+            return launcher;
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = is_pty;
+        assert_eq!(launcher, payload, "pipe/non-Darwin payload stays the host's exact child");
+        launcher
     }
 
     async fn wait_for_complete_pid_marker(marker: &std::path::Path) -> libc::pid_t {

@@ -89,14 +89,13 @@ fn ensure_chat_route_supports(
     ))
 }
 
-/// Host-owned source for the initial Chat route shown by the product editor.
+/// Host-owned source for selected and initial execution Chat routes.
 ///
 /// The control-plane contract deliberately does not know how a host stores
 /// provider credentials or model capabilities.  A host may inject this
-/// resolver to materialize a complete, opaque [`ChatRouteRecord`] when a new
-/// preset is created.  Returning `None` is an honest "no usable Chat route is
-/// configured" result; save then fails validation rather than fabricating a
-/// route or exposing a raw JSON escape hatch.
+/// resolver to materialize a complete, opaque [`ChatRouteRecord`] when a
+/// model is selected. An authored default may stay empty; actual execution
+/// still requires a usable Chat route.
 #[async_trait::async_trait]
 pub trait DefaultChatRouteResolver: Send + Sync {
     async fn resolve_default_chat_route(
@@ -420,17 +419,8 @@ impl AgentControlPlane {
                 .await;
         }
         let has_configuration = request.document.is_some();
-        let document = self
-            .materialize_default_chat_route(owner, request.document.unwrap_or_else(empty_document))
-            .await?;
-        if document.model_route_refs.is_empty() {
-            if has_configuration {
-                return Err(ControlPlaneError::canonical(
-                    "MODEL_ROUTE_NOT_CONFIGURED",
-                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                    "configure an available chat model before saving this Agent",
-                ));
-            }
+        let document = request.document.unwrap_or_else(empty_document);
+        if !has_configuration {
             let stored = StoredPreset {
                 session_only: false,
                 preset: AgentPreset {
@@ -445,10 +435,8 @@ impl AgentControlPlane {
             self.store.insert_preset(stored.clone()).await?;
             return editor_response(stored, None, document, None);
         }
-        // A host-provided default route is a real immutable initial Revision,
-        // not editor-only metadata.  This makes a newly-created product
-        // preset immediately selectable without asking the user to type route
-        // IDs or JSON.
+        // An authored configuration may leave its default model empty. The
+        // execution entry point owns the eventual explicit model selection.
         self.create_with_initial_revision(
             owner,
             preset_id,
@@ -679,6 +667,19 @@ impl AgentControlPlane {
         }
         ensure_chat_route_supports(&route, required)?;
         Ok(route)
+    }
+
+    /// Resolve one friendly model selection into the host-owned route record
+    /// for editing. Inspecting a choice never saves a Revision or changes a
+    /// Session; the caller submits the selected route through normal authoring.
+    pub async fn preset_chat_model_route(
+        &self,
+        owner: &UserId,
+        preset_id: &str,
+        model: &nomifun_api_types::AgentChatModelSelectionDto,
+    ) -> Result<nomifun_agent_contracts::ChatRouteRecord, ControlPlaneError> {
+        self.owned_preset(owner, preset_id).await?;
+        self.resolve_selected_chat_route(owner, model, &BTreeSet::new()).await
     }
 
     /// Freeze the chosen model for this new session without updating the user's
@@ -2995,16 +2996,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configured_creation_without_a_model_does_not_leave_an_empty_preset() {
+    async fn configured_creation_without_a_model_saves_an_immutable_preset() {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let control_plane = test_control_plane(store.clone());
         let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
-        let error = control_plane.create_preset(&owner, CreateAgentPresetRequest {
+        let created = control_plane.create_preset(&owner, CreateAgentPresetRequest {
             display_name: "Edited official preset".into(), description: None,
             fork_from_revision: None, document: Some(empty_document()),
-        }).await.unwrap_err();
-        assert_eq!(error.code().as_ref(), "MODEL_ROUTE_NOT_CONFIGURED");
-        assert!(store.list_presets(&owner).await.unwrap().is_empty());
+        }).await.unwrap();
+        assert!(created.preset.current_stable_revision.is_some());
+        assert!(created.draft.document.model_route_refs.is_empty());
+        assert!(created.draft.document.chat_route_records.is_empty());
+        assert_eq!(store.list_presets(&owner).await.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -3332,6 +3335,75 @@ mod tests {
         route.primary.provider_id = "0190f5fe-7c00-7a00-8000-000000000011".into();
         route.primary.model = model.into();
         route
+    }
+
+    #[tokio::test]
+    async fn authored_default_model_can_be_selected_cleared_and_overridden_at_session_creation() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let route = media_chat_route("selected-model");
+        let control = test_control_plane(store.clone())
+            .with_default_chat_route_resolver(Arc::new(MediaChatRoutes(vec![route.clone()])));
+        let created = control.create_preset(&owner, CreateAgentPresetRequest {
+            display_name: "Optional default".into(), description: None,
+            document: Some(empty_document()), fork_from_revision: None,
+        }).await.unwrap();
+        assert!(created.draft.document.chat_route_records.is_empty(), "authoring must not save the installation default implicitly");
+        let selection = nomifun_api_types::AgentChatModelSelectionDto {
+            provider_id: route.primary.provider_id.clone(), model: route.primary.model.clone(),
+        };
+        let resolved = control.preset_chat_model_route(&owner, &created.preset.preset_id, &selection).await.unwrap();
+        assert_eq!(resolved, route);
+        assert_eq!(control.editor(&owner, &created.preset.preset_id, None).await.unwrap(), created,
+            "resolving a draft choice must be read-only");
+        let mut draft = created.draft;
+        draft.document.model_route_refs.insert(CHAT_MODEL_TASK.into(), route.primary.model_route_id.as_ref().into());
+        draft.document.chat_route_records.insert(CHAT_MODEL_TASK.into(), serde_json::to_value(&route).unwrap());
+        let selected = control.save_revision(&owner, &draft.preset_id.clone(), SaveAgentPresetRevisionRequest {
+            expected_current_revision: draft.current_revision.clone(), draft, reason: None,
+        }).await.unwrap();
+        let mut draft = control.editor(&owner, &created.preset.preset_id, None).await.unwrap().draft;
+        draft.document.model_route_refs.remove(CHAT_MODEL_TASK);
+        draft.document.chat_route_records.remove(CHAT_MODEL_TASK);
+        let cleared = control.save_revision(&owner, &draft.preset_id.clone(), SaveAgentPresetRevisionRequest {
+            expected_current_revision: Some(selected.revision.reference), draft, reason: None,
+        }).await.unwrap();
+        let reopened = control.editor(&owner, &created.preset.preset_id, None).await.unwrap();
+        assert!(reopened.draft.document.chat_route_records.is_empty());
+        assert!(reopened.draft.document.model_route_refs.is_empty());
+        let binding = control.resolve_agent_session_binding_with_model(&owner, &created.preset.preset_id, Some(&selection)).await.unwrap();
+        let (_, revision, _) = control.saved_binding_artifacts(&owner, &binding).await.unwrap();
+        assert_eq!(revision.payload.chat_route_records[CHAT_MODEL_TASK], route);
+        let unchanged = control.editor(&owner, &created.preset.preset_id, None).await.unwrap();
+        assert_eq!(unchanged.preset.current_stable_revision, Some(cleared.revision.reference));
+        assert!(unchanged.draft.document.chat_route_records.is_empty(), "session selection must preserve the cleared default");
+    }
+
+    #[tokio::test]
+    async fn saved_empty_official_default_is_preserved_when_preparing_a_session() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let route = media_chat_route("installation-model");
+        let control = test_control_plane(store)
+            .with_default_chat_route_resolver(Arc::new(MediaChatRoutes(vec![route.clone()])));
+        let library = control.library(&owner).await.unwrap();
+        let id = &library.official_presets[&nomifun_api_types::OfficialPresetKeyDto::ChatMinimal].preset_id;
+        let draft = control.editor(&owner, id, None).await.unwrap().draft;
+        let saved = control.save_revision(&owner, id, SaveAgentPresetRevisionRequest {
+            expected_current_revision: None, draft, reason: None,
+        }).await.unwrap();
+        let prepared = control.create_from_template(&owner, "chat.minimal", official_launch_request(true)).await.unwrap();
+        assert_eq!(prepared.preset.current_stable_revision, Some(saved.revision.reference.clone()));
+        assert!(prepared.draft.document.chat_route_records.is_empty(), "an installation default must not overwrite an authored empty default");
+        let selection = nomifun_api_types::AgentChatModelSelectionDto {
+            provider_id: route.primary.provider_id.clone(), model: route.primary.model.clone(),
+        };
+        let binding = control.resolve_agent_session_binding_with_model(&owner, id, Some(&selection)).await.unwrap();
+        let (_, revision, _) = control.saved_binding_artifacts(&owner, &binding).await.unwrap();
+        assert_eq!(revision.payload.chat_route_records[CHAT_MODEL_TASK], route);
+        let preserved = control.editor(&owner, id, None).await.unwrap();
+        assert_eq!(preserved.preset.current_stable_revision, Some(saved.revision.reference));
+        assert!(preserved.draft.document.chat_route_records.is_empty());
     }
 
     fn image_only_document(control: &AgentControlPlane) -> nomifun_api_types::AgentPresetDocumentDto {

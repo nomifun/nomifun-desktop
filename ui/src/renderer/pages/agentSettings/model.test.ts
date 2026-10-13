@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import type {
   AgentPresetDraft,
   CapabilityModuleCatalogItem,
-  ChatRouteRecord,
 } from '@/common/types/agentPlatform';
 import { asCapabilityId, asPackageId } from '@/common/types/agentPlatform';
 import { createDefaultIdmmConfig } from '@/common/types/idmm';
@@ -15,7 +14,6 @@ import {
   moduleI18nKey,
   moduleMatchesSearch,
   placeCapability,
-  selectChatRouteCandidate,
 } from './model';
 
 const draft = (): AgentPresetDraft => ({
@@ -43,7 +41,7 @@ const moduleItem = (id: string): CapabilityModuleCatalogItem => ({
   authoring_policy: 'direct',
   summary_kind: 'tool',
   actions: [{
-    action_id: `${id}/write`, input_schema: 'input', output_schema: 'output',
+    action_id: `${id}/write`,
     effect_class: 'write_durable', presentation: 'function_tool',
   }],
   context_schema_refs: [], event_schema_refs: [], required_resource_kinds: ['workspace'],
@@ -72,25 +70,6 @@ describe('Agent Settings Module authoring model', () => {
     expect(capabilityPlacement(enabled, target)).toBe('enabled');
     expect(placeCapability(enabled, target, 'enabled').enabled_capabilities).toHaveLength(1);
     expect(placeCapability(enabled, target, 'none').enabled_capabilities).toEqual([]);
-  });
-
-  test('reorders an exact model route candidate without changing its contract', () => {
-    const record = {
-      schema: 'nomifun.chat-route-record.v1', task: 'agent_chat',
-      primary: {
-        model_route_id: 'route-primary', model_route_revision: 1, provider_id: 'provider-primary',
-        model: 'model-primary', protocol: 'openai_chat', connection_config_ref: 'connection-primary',
-        config_revision_digest: 'a'.repeat(64), credential_ref: 'credential-primary', features: ['text_input', 'text_output'],
-      },
-      failovers: [{
-        model_route_id: 'route-fallback', model_route_revision: 2, provider_id: 'provider-fallback',
-        model: 'model-fallback', protocol: 'openai_responses', connection_config_ref: 'connection-fallback',
-        config_revision_digest: 'b'.repeat(64), credential_ref: 'credential-fallback', features: ['text_input', 'text_output'],
-      }],
-    } as ChatRouteRecord;
-    const selected = selectChatRouteCandidate(record, 'route-fallback@2');
-    expect(selected?.primary).toEqual(record.failovers[0]);
-    expect(selected?.failovers).toEqual([record.primary]);
   });
 
   test('distinguishes a preset that is already absent', () => {

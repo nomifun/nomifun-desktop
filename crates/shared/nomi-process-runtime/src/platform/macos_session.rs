@@ -6,6 +6,8 @@
 //! never authorize signals. Every additional process is signaled by Darwin's
 //! kernel-checked PID generation, rather than by a racy PID/PGID kill.
 
+use std::os::fd::RawFd;
+
 use super::unix_protocol::Deadline;
 
 const PID_CAPACITY: usize = 16_384;
@@ -73,6 +75,7 @@ pub(super) fn prepare_session_cleanup() -> std::io::Result<()> {
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct Identity {
     pid: libc::pid_t,
+    pgid: libc::pid_t,
     version: u32,
     unique: u64,
     stopped: bool,
@@ -119,6 +122,53 @@ pub(super) unsafe fn seal_owned_session(
     leader: libc::pid_t,
     watchdog_parent: Option<libc::pid_t>,
 ) -> Result<(), libc::c_int> {
+    unsafe { seal_session(leader, watchdog_parent, false) }
+}
+
+/// Seal the calling launcher's session without signalling the launcher.
+/// Its live PID is the SID's exact anchor even after its host has died. The
+/// caller retains its unreaped payload until this proof finishes.
+pub(super) unsafe fn seal_current_session() -> Result<(), libc::c_int> {
+    let leader = unsafe { libc::getpid() };
+    if leader <= 1 || unsafe { libc::getsid(0) } != leader {
+        return Err(libc::EPERM);
+    }
+    unsafe { seal_session(leader, None, true) }
+}
+
+/// Deliver a real signal to an owned foreground job, including raw-mode
+/// terminals with ISIG disabled. Each recipient is kernel-generation bound.
+///
+/// # Safety
+/// The host retains this exact unreaped session leader and its signal gate
+/// throughout the call. A cached numeric SID alone never authorizes it.
+pub(super) unsafe fn signal_owned_foreground(leader: libc::pid_t, tty: RawFd, signal: libc::c_int) -> Result<(), libc::c_int> {
+    if leader <= 1 || unsafe { libc::getsid(leader) } != leader { return Err(libc::ESRCH); }
+    let foreground = unsafe { libc::tcgetpgrp(tty) };
+    if foreground == -1 { return Err(unsafe { *libc::__error() }); }
+    if foreground <= 1 { return Err(libc::EPROTO); }
+    let storage = BaselineStorage::new()?;
+    let baselines = unsafe { &mut *storage.0 };
+    let mut members = [Identity::default(); SESSION_CAPACITY];
+    let mut count = 0;
+    let (used, _) = unsafe {
+        session_snapshot(leader, None, &mut members, &[], &mut baselines[0], &mut count, true)
+    }?;
+    if unsafe { libc::tcgetpgrp(tty) } != foreground { return Err(libc::EAGAIN); }
+    let mut signalled = false;
+    for member in &members[..used] {
+        if member.pgid == foreground {
+            signalled |= unsafe { signal_generation(*member, signal) }?;
+        }
+    }
+    if signalled { Ok(()) } else { Err(libc::ESRCH) }
+}
+
+unsafe fn seal_session(
+    leader: libc::pid_t,
+    watchdog_parent: Option<libc::pid_t>,
+    exclude_leader: bool,
+) -> Result<(), libc::c_int> {
     if leader <= 1 {
         return Err(libc::EINVAL);
     }
@@ -140,7 +190,7 @@ pub(super) unsafe fn seal_owned_session(
             (&second[0][..baseline_count], &mut first[0][..])
         };
         let (count, complete) = unsafe {
-            session_snapshot(leader, watchdog_parent, &mut members, baseline, next_baseline, &mut baseline_count)
+            session_snapshot(leader, watchdog_parent, &mut members, baseline, next_baseline, &mut baseline_count, exclude_leader)
         }?;
         first_is_baseline = !first_is_baseline;
         if count == 0 && complete {
@@ -169,6 +219,7 @@ unsafe fn session_snapshot(
     baseline: &[Identity],
     next_baseline: &mut [Identity],
     next_count: &mut usize,
+    exclude_leader: bool,
 ) -> Result<(usize, bool), libc::c_int> {
     check_parent_lease(watchdog_parent)?;
     let mut pids = [0 as libc::pid_t; PID_CAPACITY];
@@ -220,7 +271,7 @@ unsafe fn session_snapshot(
         }
         next_baseline[*next_count] = after;
         *next_count += 1;
-        if sid != leader {
+        if sid != leader || exclude_leader && pid == leader {
             continue;
         }
         if used == members.len() {
@@ -260,6 +311,7 @@ unsafe fn process_identity(pid: libc::pid_t) -> Result<Option<Identity>, libc::c
     }
     Ok(Some(Identity {
         pid,
+        pgid: bsd.pgid as libc::pid_t,
         version: after.pid_version as u32,
         unique: after.unique_id,
         stopped: bsd.status == libc::SSTOP,
@@ -280,13 +332,18 @@ unsafe fn read_info<T>(pid: libc::pid_t, flavor: libc::c_int) -> Result<Option<T
 }
 
 unsafe fn signal_identity(identity: Identity, signal: libc::c_int) -> Result<(), libc::c_int> {
+    unsafe { signal_generation(identity, signal) }.map(|_| ())
+}
+
+unsafe fn signal_generation(identity: Identity, signal: libc::c_int) -> Result<bool, libc::c_int> {
     let mut token = AuditToken { values: [0; 8] };
     token.values[5] = identity.pid as u32;
     token.values[7] = identity.version;
     let function = SIGNAL_WITH_AUDIT_TOKEN.get().and_then(|function| *function).ok_or(libc::ENOTSUP)?;
     // libproc returns an errno value directly, unlike kill(2).
     match unsafe { function(&mut token, signal) } {
-        0 | libc::ESRCH => Ok(()),
+        0 => Ok(true),
+        libc::ESRCH => Ok(false),
         errno => Err(errno),
     }
 }
@@ -317,7 +374,7 @@ mod tests {
         let mut baseline = [Identity::default(); PID_CAPACITY];
         let mut count = 0;
         let first = unsafe {
-            session_snapshot(i32::MAX, None, &mut members, &[], &mut baseline, &mut count)
+            session_snapshot(i32::MAX, None, &mut members, &[], &mut baseline, &mut count, false)
         }.unwrap();
         assert_eq!(first, (0, false), "no identity baseline cannot prove emptiness");
 
@@ -327,7 +384,7 @@ mod tests {
         let mut next = [Identity::default(); PID_CAPACITY];
         let mut next_count = 0;
         let reused = unsafe {
-            session_snapshot(i32::MAX, None, &mut members, &baseline[..count], &mut next, &mut next_count)
+            session_snapshot(i32::MAX, None, &mut members, &baseline[..count], &mut next, &mut next_count, false)
         }.unwrap();
         assert_eq!(reused, (0, false), "numeric PID equality cannot accept a new generation");
 
@@ -335,7 +392,7 @@ mod tests {
         // Keep its exact StdChild lease and reap it even if the assertion fails.
         let mut child = std::process::Command::new("/bin/sleep").arg("30").spawn().unwrap();
         let created = unsafe {
-            session_snapshot(i32::MAX, None, &mut members, &next[..next_count], &mut baseline, &mut count)
+            session_snapshot(i32::MAX, None, &mut members, &next[..next_count], &mut baseline, &mut count, false)
         };
         let _ = child.kill();
         child.wait().unwrap();

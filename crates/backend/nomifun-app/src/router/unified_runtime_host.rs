@@ -677,7 +677,7 @@ impl ConversationRuntimeHost {
         payload: String,
         model_operation: Option<&str>,
         terminal: bool,
-    ) -> Result<(), AppError> {
+    ) -> Result<Option<u64>, AppError> {
         let mut active = self.active.lock().await;
         let turn = active
             .as_mut()
@@ -685,7 +685,7 @@ impl ConversationRuntimeHost {
         if root != turn.root {
             return Err(error("event root mismatch"));
         }
-        self.append_locked_record(turn, payload, model_operation, terminal).await?;
+        let event_seq = self.append_locked_record(turn, payload, model_operation, terminal).await?;
         if terminal {
             self.model_configuration.clear(&turn.operation)
                 .map_err(|_| error("terminal model configuration belongs to another Turn"))?;
@@ -696,15 +696,15 @@ impl ConversationRuntimeHost {
             // A failed native release retains Browser owner state for retry.
             self.resources.finish_browser_turn(root).await?;
         }
-        Ok(())
+        Ok(event_seq)
     }
 
-    async fn append_locked_record(&self, turn: &mut ActiveTurn, payload: String, model_operation: Option<&str>, terminal: bool) -> Result<(), AppError> {
+    async fn append_locked_record(&self, turn: &mut ActiveTurn, payload: String, model_operation: Option<&str>, terminal: bool) -> Result<Option<u64>, AppError> {
         use super::engine_journal::EngineJournalWrite;
         let kind = if terminal { EngineJournalWrite::Terminal }
             else if turn.cleanup_started { EngineJournalWrite::Cleanup }
             else { EngineJournalWrite::Progress };
-        turn.journal.append(payload, model_operation.map(str::to_owned), kind).await
+        turn.journal.append_with_receipt(payload, model_operation.map(str::to_owned), kind).await
     }
 
     async fn flush_cleanup_records(&self, turn: &mut ActiveTurn) -> Result<(), AppError> {
@@ -1093,7 +1093,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         &self,
         message: &SendMessageData,
         event: &AgentEngineEvent,
-    ) -> Result<(), AppError> {
+    ) -> Result<Option<u64>, AppError> {
         if let AgentEngineEvent::VoiceModelStepSuperseded {step,model_operation_id,cleanup,..}=event {
             let port={let active=self.active.lock().await;let turn=active.as_ref().ok_or_else(||error("voice supersede has no active Turn"))?;
                 if model_operation_id.as_ref()!=format!("{}:model:{step}",turn.operation)||cleanup.operation_id!=*model_operation_id||turn.steering.has_admitted_model_tools(*step){return Err(error("voice supersede has a different model operation or an admitted effect"));}
@@ -1112,7 +1112,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 && self.confirm_unstarted_cancellation(message).await? {
                 self.supervision.note_progress(&self.options.conversation_id, None,
                     nomifun_idmm::IdmmProgressPhase::Terminal);
-                return Ok(());
+                return Ok(None);
             }
 
             if self.terminal_already_recorded(self.root(message))? {
@@ -1128,7 +1128,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 self.release_pending_knowledge_writeback(self.root(message))?;
                 self.supervision.note_progress(&self.options.conversation_id, None,
                     nomifun_idmm::IdmmProgressPhase::Terminal);
-                return Ok(());
+                return Ok(None);
             }
 
             return Err(error("terminal has no admitted Turn or exact unstarted cancellation witness"));
@@ -1200,6 +1200,11 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             if let AgentEngineEvent::VoiceModelStepSuperseded {step,..}=event {turn.assistant_text_by_step.remove(step);}
             turn.event_buffer.project(event)
         };
+        let completed_call_id = match event {
+            AgentEngineEvent::ToolCompleted { result, .. } => Some(result.call_id.as_ref()),
+            _ => None,
+        };
+        let mut result_seq = None;
         for event in &records {
         if let AgentEngineEvent::ContextCompacted { retained_context: Some(items), .. } = event {
             // The host projection can change descriptor lengths. Reject an
@@ -1233,13 +1238,21 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             terminal,
         )
         .await;
-        if let Err(record_error) = recorded {
-            if terminal && self.terminal_already_recorded(self.root(message))?
-                && let Some(release) = writeback_release.take() {
-                *self.pending_writeback_release.lock().map_err(|_| error("Knowledge release ownership poisoned"))? =
-                    Some((self.root(message).to_owned(), release));
+        let event_seq = match recorded {
+            Ok(event_seq) => event_seq,
+            Err(record_error) => {
+                if terminal && self.terminal_already_recorded(self.root(message))?
+                    && let Some(release) = writeback_release.take() {
+                    *self.pending_writeback_release.lock().map_err(|_| error("Knowledge release ownership poisoned"))? =
+                        Some((self.root(message).to_owned(), release));
+                }
+                return Err(record_error);
             }
-            return Err(record_error);
+        };
+        if let AgentEngineEvent::ToolCompleted { result, .. } = event
+            && completed_call_id == Some(result.call_id.as_ref())
+        {
+            result_seq = event_seq;
         }
         if matches!(event, AgentEngineEvent::TurnStarted { .. }) {
             self.open_steering().await?;
@@ -1276,7 +1289,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             operation.as_deref(),
             phase,
         );
-        Ok(())
+        Ok(result_seq)
     }
 
     async fn cleanup_turn(&self, message: &SendMessageData) -> Result<(), AppError> {

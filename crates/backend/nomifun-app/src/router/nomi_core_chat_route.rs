@@ -1,8 +1,9 @@
 //! Host-owned materialization of the initial Nomi-core Chat route.
 //!
 //! Agent Settings stores a complete opaque route record in the immutable
-//! preset revision.  The renderer may choose among the candidates returned by
-//! this materializer, but it must not derive route ids, credential references,
+//! preset revision when the user selects a default model. The renderer sends
+//! the configured provider/model identity to this materializer and must not
+//! derive route ids, credential references,
 //! or provider configuration digests itself.
 
 use std::collections::{BTreeMap, BTreeSet};

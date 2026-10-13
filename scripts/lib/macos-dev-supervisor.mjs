@@ -1,10 +1,10 @@
 // Tauri kills its cargo runner on a Rust watch restart. Keep the native app a
-// direct child of the surviving development launcher, so every generation can
-// finish ExitCoordinator cleanup before the next one starts.
+// LaunchServices App supervised by the surviving development launcher. Each
+// generation needs authenticated cleanup and the actual App's kernel exit.
 import { createServer, connect } from 'node:net';
 import { mkdtemp, chmod, rm } from 'node:fs/promises';
-import { join, resolve, relative, isAbsolute } from 'node:path';
-import { spawn } from 'node:child_process';
+import { basename, join, resolve, relative, isAbsolute } from 'node:path';
+import { launchMacosApplication, MacosApplicationLaunchCancelled } from './macos-application-launch.mjs';
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 
@@ -28,7 +28,7 @@ function readFrames(socket, receive) {
 }
 
 const send = (socket, value) => {
-  if (!socket.destroyed) socket.write(`${JSON.stringify(value)}\n`);
+  if (!socket.destroyed && !socket.writableEnded) socket.write(`${JSON.stringify(value)}\n`);
 };
 
 export function validateDevelopmentLaunch(request, root) {
@@ -49,33 +49,50 @@ export function validateDevelopmentLaunch(request, root) {
   if (local.startsWith('..') || isAbsolute(local)) {
     throw new Error('macOS development launch directory must be in this workspace');
   }
-  return { program, args: request.args, environment: request.environment, cwd };
+  const controllerProgram = resolve(request.controllerProgram ?? '');
+  const controllerWithin = relative(cache, controllerProgram);
+  if (!controllerWithin || controllerWithin.startsWith('..') || isAbsolute(controllerWithin)
+    || basename(controllerProgram) !== 'macos_application_controller') {
+    throw new Error('macOS development launch requires its owned compiled LaunchServices controller');
+  }
+  return { program, controllerProgram, args: request.args, environment: request.environment, cwd };
 }
 
 export async function createMacosDevSupervisor({
-  root, createLifetime, spawnProgram = spawn,
+  root, createLifetime, launchApplication = launchMacosApplication,
   validateLaunch = request => validateDevelopmentLaunch(request, root),
-  shutdownTimeoutMs = 120_000,
+  shutdownTimeoutMs = 120_000, createControlServer = createServer,
 }) {
   const directory = await mkdtemp('/tmp/nomifun-dev-host-');
   await chmod(directory, 0o700);
   const socketPath = join(directory, 'control.sock');
-  const connections = new Set();
+  const connections = new Map();
   let stopping = false;
   let queue = Promise.resolve();
   let failure;
 
-  const server = createServer(socket => {
-    connections.add(socket);
+  const server = createControlServer(socket => {
     let acquired = false;
+    let applicationStarted = false;
+    let leaseStopping = false;
     let resolveLaunch;
-    let resolveClosed;
+    let resolveStop;
     const launched = new Promise(accept => { resolveLaunch = accept; });
-    const closed = new Promise(accept => { resolveClosed = accept; });
+    const stopRequested = new Promise(accept => { resolveStop = accept; });
+    const halted = () => stopping || leaseStopping || socket.destroyed || socket.readableEnded;
+    const requestStop = () => {
+      leaseStopping = true;
+      resolveStop();
+      // Before App launch there is no native exit proof to await. Once launch
+      // can have started, retain this lease until the independent App result.
+      if (!applicationStarted) socket.destroy();
+    };
+    connections.set(socket, requestStop);
     socket.on('error', () => socket.destroy());
+    socket.once('end', requestStop);
     socket.once('close', () => {
       connections.delete(socket);
-      resolveClosed();
+      requestStop();
     });
     readFrames(socket, request => {
       if (!acquired && request.command === 'acquire') {
@@ -84,44 +101,88 @@ export async function createMacosDevSupervisor({
         queue = (async () => {
           await previous;
           if (failure) throw failure;
-          if (stopping || socket.destroyed) return;
-          const lifetime = await createLifetime();
+          if (halted()) return;
+          const ownLifetime = async () => {
+            const lifetime = await createLifetime();
+            let shutdown;
+            const owner = {
+              socketPath: lifetime.socketPath,
+              stop() {
+                if (!shutdown) {
+                  shutdown = Promise.resolve().then(() => lifetime.stop()).catch(error => {
+                    failure ??= error;
+                    throw error;
+                  });
+                  shutdown.catch(() => {});
+                }
+                return shutdown;
+              },
+            };
+            // Bind this trigger to its own generation before any adapter
+            // await. A late EOF must never stop a later generation instead.
+            stopRequested.then(() => owner.stop()).catch(() => {});
+            return owner;
+          };
+          let owner = await ownLifetime();
+          let result;
           try {
-            send(socket, { event: 'ready' });
-            const request = await Promise.race([launched, closed.then(() => null)]);
-            if (!request || stopping || socket.destroyed) return;
-            const launch = validateLaunch(request);
-            const child = spawnProgram(launch.program, launch.args, {
-              cwd: launch.cwd,
-              env: { ...launch.environment, NOMIFUN_DEV_LIFETIME_SOCKET: lifetime.socketPath },
-              stdio: 'inherit',
-              // Keep terminal Ctrl-C on run-dev so native cleanup runs through
-              // the app's ExitCoordinator before the next generation starts.
-              detached: true,
-            });
-            const exited = new Promise((accept, reject) => {
-              child.once('exit', (code, signal) => accept({ code, signal }));
-              child.once('error', reject);
-            });
-            // Disconnect means the cargo runner was killed by Tauri's watcher.
-            // Request ordinary native shutdown, then wait our own direct child.
-            const result = await Promise.race([
-              exited,
-              closed.then(async () => { await lifetime.stop(); return exited; }),
-            ]);
-            if (result.code !== 0 || result.signal) {
-              failure = new Error('macOS development app exited abnormally; native cleanup is unconfirmed and new launches are blocked');
+            if (!halted()) {
+              send(socket, { event: 'ready' });
+              const request = await Promise.race([
+                launched, stopRequested.then(() => null),
+              ]);
+              if (request && !halted()) {
+                const launch = validateLaunch(request);
+                while (!halted()) {
+                  if (failure) throw failure;
+                  const current = owner;
+                  applicationStarted = true;
+                  let application;
+                  try {
+                    application = await launchApplication({ ...launch,
+                      environment: { ...launch.environment, NOMIFUN_DEV_LIFETIME_SOCKET: current.socketPath },
+                      applicationScope: 'desktop_development',
+                    }, { isLaunchAllowed: () => !halted() && !failure });
+                  } catch (error) {
+                    if (error instanceof MacosApplicationLaunchCancelled && halted()) break;
+                    throw error;
+                  }
+                  if (application.evidenceDirectory) {
+                    console.error(`[dev] native application logs: ${application.evidenceDirectory}`);
+                  }
+                  // A stop failure is observed immediately by the lifetime
+                  // owner but never abandons a late handle or actual App exit.
+                  result = await application.exit;
+                  if (result?.code !== 0 || result.signal !== null || result.cleanupVerified !== true
+                    || typeof result.restartRequested !== 'boolean') {
+                    failure ??= new Error('macOS development app exited abnormally; native cleanup is unconfirmed and new launches are blocked');
+                  }
+                  await current.stop();
+                  if (failure) throw failure;
+                  // Intermediate authenticated restart is not a terminal
+                  // runner event. The same control lease keeps the queue until
+                  // its final App exits, or an observed stop suppresses restart.
+                  if (!result.restartRequested || halted()) break;
+                  owner = null;
+                  owner = await ownLifetime();
+                }
+              }
             }
-            send(socket, { event: 'exit', ...result });
-            socket.end();
+          } catch (error) {
+            // Preserve a launch/exit failure before a later teardown failure
+            // can replace it while unwinding this generation.
+            failure ??= error;
+            throw error;
           } finally {
-            await lifetime.stop();
+            await owner?.stop();
           }
+          if (result) send(socket, { event: 'exit', ...result });
+          socket.end();
         })().catch(error => {
           // Cleanup failure closes admission for this launcher. Keep the app's
           // authority; never replace a timeout with forced termination.
-          failure = error;
-          send(socket, { event: 'error', message: error.message });
+          failure ??= error;
+          send(socket, { event: 'error', message: failure.message });
           socket.end();
         });
       } else if (acquired && request.command === 'launch') {
@@ -132,7 +193,7 @@ export async function createMacosDevSupervisor({
         throw new Error('invalid macOS development control request');
       }
     });
-    if (stopping) socket.destroy();
+    if (stopping) requestStop();
   });
   try {
     await new Promise((accept, reject) => {
@@ -150,7 +211,7 @@ export async function createMacosDevSupervisor({
       if (shutdown) return shutdown;
       stopping = true;
       const closed = new Promise(accept => server.close(accept));
-      for (const socket of connections) socket.destroy();
+      for (const requestStop of connections.values()) requestStop();
       shutdown = new Promise((accept, reject) => {
         const timeout = setTimeout(() => reject(new Error(
           'macOS development app did not finish verified shutdown within 120 seconds',

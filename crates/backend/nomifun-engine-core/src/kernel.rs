@@ -391,6 +391,11 @@ impl EngineToolInvoker for KernelEngineToolInvoker {
 
 fn kernel_error(error: KernelError) -> EngineToolError {
     let code = error.canonical_code().0;
+    if code == crate::SYSTEM_PERMISSION_REQUIRED
+        && let Some(failure) = error.capability_execution_failure()
+    {
+        return EngineToolError::CapabilityKernel { code, message: failure.message.clone() };
+    }
     let message = match code.as_str() {
         "AGENT_EXECUTION_ALREADY_ACTIVE" => "This conversation already has an active AgentExecution. Do not start sibling collaboration calls; put all independent tasks in one agent/delegate request with strategy=parallel and use synthesize=true when a downstream Agent must combine them.".to_owned(),
         _ => error.to_string(),

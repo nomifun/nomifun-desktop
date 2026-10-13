@@ -4,6 +4,7 @@ import type {
   SystemPermissionState,
   SystemPermissionStatus,
 } from '@/common/adapter/ipcBridge';
+export { computerPermissionKindsForOperation } from '@/common/chat/computerPermissionContract';
 
 export type PermissionCapabilityTab =
   | 'overview'

@@ -7,7 +7,7 @@ import {
 } from './agentResourceSelection';
 
 describe('Agent resource selection contract', () => {
-  test('resolves host-owned Browser, Computer and Scheduler identities without a picker', () => {
+  test('defaults to the managed Browser and resolves host-owned Computer and Scheduler identities', () => {
     expect(resolveAgentResourceSelections(['browser', 'computer', 'scheduler'], {})).toEqual({
       selections: [
         { resource_kind: 'browser', resource_id: 'managed-browser' },
@@ -16,6 +16,19 @@ describe('Agent resource selection contract', () => {
       ],
       missingKinds: [],
     });
+  });
+
+  test('freezes an explicit Attached Chrome choice without accepting connection details or extra kinds', () => {
+    expect(requiredAgentResourcePickerKinds(['browser'])).toEqual(['browser']);
+    expect(resolveAgentResourceSelections(['browser', 'computer'], { browser: 'attached-chrome' })).toEqual({
+      selections: [
+        { resource_kind: 'browser', resource_id: 'attached-chrome' },
+        { resource_kind: 'computer', resource_id: 'local-desktop' },
+      ],
+      missingKinds: [],
+    });
+    expect(resolveAgentResourceSelections(['computer'], { browser: 'attached-chrome' }).selections)
+      .toEqual([{ resource_kind: 'computer', resource_id: 'local-desktop' }]);
   });
 
   test('uses the enabled capability model for frozen multi-server MCP resources', () => {
@@ -112,7 +125,7 @@ describe('Agent resource selection contract', () => {
 
     expect(requiredAgentResourcePickerKinds(officialKinds)).toEqual([
       'companion', 'customer', 'knowledge_base', 'channel', 'robot',
-      'mcp_server', 'canvas',
+      'mcp_server', 'canvas', 'browser',
     ]);
     const resolution = resolveAgentResourceSelections(officialKinds, value);
     expect(resolution.missingKinds).toEqual([]);

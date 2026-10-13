@@ -8,10 +8,12 @@ use std::sync::OnceLock;
 /// instead of the OS-default cache location.
 ///
 /// Lifecycle: written once by `nomifun-app`'s `main()` before
-/// [`crate::enhance_process_path`] / [`crate::resolve_bun`] run, read
+/// [`crate::resolve_bun`] runs, read
 /// every time [`runtime_root`] is queried thereafter. Callers that miss
 /// the init window (e.g. the `mcp-*` subcommands, unit tests,
 /// `build.rs`) transparently fall back to `dirs::cache_dir()`.
+/// Startup PATH enhancement runs earlier, before storage coordination can
+/// create runtime/SQLx threads; its cache-only fallback never admits a tool.
 static RUNTIME_ROOT_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 
 /// Anchor the runtime root to a caller-supplied data directory — typically

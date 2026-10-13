@@ -3,13 +3,13 @@ use super::{fixture::Fixture, macos::host::DesktopBrowserHost};
 use nomifun_browser_platform::runtime::*;
 use objc2::msg_send;
 use serde_json::{Value, json};
-use std::{sync::Arc, time::{Duration, Instant}};
+use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 use tauri::Manager;
 use tokio_util::sync::CancellationToken;
 
 fn error(value: impl std::fmt::Display) -> String { value.to_string() }
 
-pub(crate) async fn verify(app: &tauri::AppHandle, fixture: &Fixture, hold_ui: bool, live_sites: bool) -> Result<Value, String> {
+pub(crate) async fn verify(app: &tauri::AppHandle, fixture: &Fixture, hold_ui: bool, live_sites: bool, media_permissions: bool, media_user_ready: bool, cleanup_verified: &AtomicBool) -> Result<Value, String> {
     let factory = DesktopBrowserHost::new(app.clone());
     let created = tokio::time::timeout(Duration::from_secs(10), factory.create(CreateBrowserRuntime {
         key: BrowserResourceKey { principal_id: "compatibility-fixture".into(),
@@ -21,11 +21,13 @@ pub(crate) async fn verify(app: &tauri::AppHandle, fixture: &Fixture, hold_ui: b
         result => {
             let shutdown = factory.shutdown().await.map_err(error);
             let failure = match result { Ok(Err(value)) => error(value), _ => "Native fixture creation timed out".into() };
-            return match shutdown { Ok(()) => Err(failure), Err(cleanup) => Err(format!("{failure}; cleanup: {cleanup}")) };
+            return match shutdown { Ok(()) => { cleanup_verified.store(true, Ordering::SeqCst); Err(failure) }, Err(cleanup) => Err(format!("{failure}; cleanup: {cleanup}")) };
         }
     };
-    let result = tokio::time::timeout(Duration::from_secs(if hold_ui && live_sites { 210 } else { 120 }), async {
+    let base = if media_user_ready { 420 } else if hold_ui && live_sites { 210 } else { 120 };
+    let result = tokio::time::timeout(Duration::from_secs(base + if media_permissions { 120 } else { 0 }), async {
         let mut report = scenarios(app, fixture, &runtime, hold_ui).await?;
+        if media_permissions { report["media_permissions"] = super::permissions::verify(app, &runtime, fixture, media_user_ready).await?; }
         report["core_checks_passed"] = json!(true);
         if live_sites {
             report["live_sites"] = match super::live::verify(&runtime).await {
@@ -51,9 +53,10 @@ pub(crate) async fn verify(app: &tauri::AppHandle, fixture: &Fixture, hold_ui: b
     match (result, closed.and(shutdown)) {
         (Ok(mut report), Ok(())) => {
             report["attachment_picker"] = super::downloads::verify(app, fixture).await?;
+            cleanup_verified.store(true, Ordering::SeqCst);
             Ok(report)
         },
-        (Err(failure), Ok(())) => Err(failure),
+        (Err(failure), Ok(())) => { cleanup_verified.store(true, Ordering::SeqCst); Err(failure) },
         (Ok(_), Err(cleanup)) => Err(format!("Native fixture cleanup failed: {cleanup}")),
         (Err(failure), Err(cleanup)) => Err(format!("{failure}; cleanup: {cleanup}")),
     }

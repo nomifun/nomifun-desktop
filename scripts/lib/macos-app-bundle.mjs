@@ -19,6 +19,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
+import { MACOS_APPLICATION_ENTITLEMENTS, macosCodeSigningArguments } from './macos-signing.mjs';
 
 const isOwned = (root, path) => {
   const owned = relative(root, path);
@@ -244,7 +245,7 @@ async function signMachO(directory, sign) {
 
 // Sign only application-owned native code. WebKit and its WebContent processes
 // remain system components, so this application needs no browser JIT entitlement.
-export async function signMacosAppBundle({ appPath, identity = '-', target = process.arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin' }) {
+export async function signMacosAppBundle({ appPath, identity = '-', target = process.arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin', entitlementsPath = MACOS_APPLICATION_ENTITLEMENTS }) {
   if (process.platform !== 'darwin') throw new Error('macOS application signing requires a macOS host');
   const architecture = { 'aarch64-apple-darwin': 'arm64', 'x86_64-apple-darwin': 'x86_64' }[target];
   if (!architecture) throw new Error(`unsupported macOS application target: ${target}`);
@@ -255,12 +256,13 @@ export async function signMacosAppBundle({ appPath, identity = '-', target = pro
   const host = join(app, 'Contents/MacOS/nomifun-desktop');
   const actual = await run('lipo', ['-archs', host], true);
   if (actual !== architecture) throw new Error(`expected ${architecture} application, received ${actual}`);
-  const sign = path => run('codesign', ['--force',
-    ...(identity === '-' ? [] : ['--options', 'runtime', '--timestamp']), '--sign', identity, path]);
+  await requireFile(entitlementsPath, 'macOS application entitlements');
+  const sign = (path, application = false) => run('codesign',
+    macosCodeSigningArguments(path, identity, { application, entitlementsPath }));
   const frameworks = join(app, 'Contents/Frameworks');
   if (await stat(frameworks).catch(error => { if (error.code === 'ENOENT') return null; throw error; })) await signMachO(frameworks, sign);
   await run('/usr/bin/plutil', ['-convert', 'xml1', join(app, 'Contents/Info.plist')]);
-  await sign(app);
+  await sign(app, true);
   await run('codesign', ['--verify', '--deep', '--strict', app]);
   return { status: 'pass', app, identity: identity === '-' ? 'adhoc' : 'provided', architecture, browser: 'system-wkwebview' };
 }

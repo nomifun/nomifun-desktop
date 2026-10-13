@@ -84,6 +84,9 @@ export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 
 bun run build:mac --config apps/desktop/tauri.updater.conf.json
 bun run make:latest
+# Intel 独立更新包：
+bun run build:mac intel --config apps/desktop/tauri.updater.conf.json
+bun run make:latest
 ```
 
 Windows 无 Authenticode 签名：
@@ -127,6 +130,11 @@ Linux 会同时产出 `.AppImage`、`.deb`、`.rpm` 时，`latest.json` 的 upda
 ```text
 apps/desktop/updater/latest.json
 ```
+
+Intel 使用 `dist/desktop/NomiFun_<version>_x64.dmg` 和
+`target/x86_64-apple-darwin/release/bundle/macos/NomiFun_<version>_x64.app.tar.gz`
+及其 `.sig`。`release:mac -Architecture intel` 会选择这一组产物；同版本追加默认保留
+另一 Mac 架构的 updater 条目，只有显式 `--macos-arm64-only` 才删除 Intel 条目。
 
 同一个版本如果分多台机器构建，需要把最新的 `latest.json` 带到下一台机器继续合并。最终上传到 GitHub Release 的 `latest.json` 必须包含所有已发布平台。CrabNebula 上传辅助脚本也会读取这份清单，并要求本地 `.sig` 内容与清单完全一致后才允许上传。
 

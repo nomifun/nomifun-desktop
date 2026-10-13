@@ -6,6 +6,7 @@
 
 import type { IProvider, ModelTrait, TProviderWithModel } from '@/common/config/storage';
 import type { ConfigKeyMap } from '@/common/config/configKeys';
+import type { ChatRouteCandidate } from '@/common/types/agentPlatform';
 import { configService } from '@/common/config/configService';
 import { capabilityOf } from '@/common/utils/providerModels';
 import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
@@ -48,11 +49,20 @@ export type GuidModelSelectionResult = {
   setCurrentModel: (model_info: TProviderWithModel) => Promise<void>;
 };
 
+export type GuidAgentModelDefaults = {
+  selectionKey: string;
+  ready: boolean;
+  defaultModel: Pick<ChatRouteCandidate, 'provider_id' | 'model'> | null;
+};
+
 /**
  * Hook that manages the model list and selection state for the Guid page.
  * @param agentKey - current provider-based agent (currently only 'nomi')
  */
-export const useGuidModelSelection = (agentKey: ProviderAgentKey = 'nomi'): GuidModelSelectionResult => {
+export const useGuidModelSelection = (
+  agentKey: ProviderAgentKey = 'nomi',
+  agentDefaults?: GuidAgentModelDefaults,
+): GuidModelSelectionResult => {
   // Exact enabled Chat capabilities replace the deleted duplicate
   // guid/utils/modelUtils model-name heuristic.
   const { groups } = useModelsForTask('chat');
@@ -85,7 +95,33 @@ export const useGuidModelSelection = (agentKey: ProviderAgentKey = 'nomi'): Guid
     return modelName;
   }, []);
 
-  const [current_model, _setCurrentModel] = useState<TProviderWithModel>();
+  const [installationModel, setInstallationModel] = useState<TProviderWithModel>();
+  const [manualChoice, setManualChoice] = useState<{
+    selectionKey: string | undefined;
+    model: TProviderWithModel;
+  }>();
+  const availableSelection = useCallback((selection: { provider_id: string; model: string } | null | undefined): TProviderWithModel | undefined => {
+    if (!selection) return undefined;
+    const provider = modelList.find(candidate => candidate.id === selection.provider_id);
+    return provider && availableModelsFor(provider).includes(selection.model)
+      ? { ...provider, use_model: selection.model }
+      : undefined;
+  }, [modelList, availableModelsFor]);
+  // The selected Agent's saved default is derived during render. A late
+  // document response cannot overwrite a model the user already chose for
+  // this Agent, and another Agent/Revision cannot inherit that override.
+  const current_model = useMemo(() => {
+    const scopedManualChoice = manualChoice && manualChoice.selectionKey === agentDefaults?.selectionKey
+      ? availableSelection({ provider_id: manualChoice.model.id, model: manualChoice.model.use_model })
+      : undefined;
+    return scopedManualChoice ?? (agentDefaults && !agentDefaults.ready
+      ? undefined
+      : availableSelection(agentDefaults?.defaultModel)
+        ?? availableSelection(installationModel && {
+          provider_id: installationModel.id, model: installationModel.use_model,
+        }));
+  }, [agentDefaults?.selectionKey, agentDefaults?.ready, agentDefaults?.defaultModel?.provider_id,
+    agentDefaults?.defaultModel?.model, manualChoice, installationModel, availableSelection]);
   const currentModelTraits = useMemo(() => {
     if (!current_model?.id || !current_model.use_model) return [];
     const provider = modelList.find((candidate) => candidate.id === current_model.id);
@@ -96,9 +132,10 @@ export const useGuidModelSelection = (agentKey: ProviderAgentKey = 'nomi'): Guid
 
   const storageKey = MODEL_STORAGE_KEY[agentKey];
 
-  const setCurrentModel = useCallback(
+  const updateInstallationModel = useCallback(
     async (model_info: TProviderWithModel, persist = true) => {
       selectedModelKeyRef.current = buildModelKey(model_info.id, model_info.use_model);
+      setInstallationModel(model_info);
       if (persist) {
         await configService.set(storageKey, {
           provider_id: model_info.id,
@@ -107,10 +144,13 @@ export const useGuidModelSelection = (agentKey: ProviderAgentKey = 'nomi'): Guid
           console.error('Failed to save default model:', error);
         });
       }
-      _setCurrentModel(model_info);
     },
     [storageKey]
   );
+  const setCurrentModel = useCallback(async (model: TProviderWithModel) => {
+    setManualChoice({ selectionKey: agentDefaults?.selectionKey, model });
+    await updateInstallationModel(model);
+  }, [agentDefaults?.selectionKey, updateInstallationModel]);
 
   // Set default model when modelList or agent changes
   useEffect(() => {
@@ -125,7 +165,7 @@ export const useGuidModelSelection = (agentKey: ProviderAgentKey = 'nomi'): Guid
         selectedModelKeyRef.current = null;
       }
 
-      const currentKey = selectedModelKeyRef.current || buildModelKey(current_model?.id, current_model?.use_model);
+      const currentKey = selectedModelKeyRef.current || buildModelKey(installationModel?.id, installationModel?.use_model);
       if (!agentChanged && isModelKeyAvailable(currentKey)) {
         if (!selectedModelKeyRef.current && currentKey) {
           selectedModelKeyRef.current = currentKey;
@@ -171,10 +211,10 @@ export const useGuidModelSelection = (agentKey: ProviderAgentKey = 'nomi'): Guid
 
       if (!defaultModel || !resolvedUseModel) return;
 
-      await setCurrentModel({
+      await updateInstallationModel({
         ...defaultModel,
         use_model: resolvedUseModel,
-      }, canPersistFallback);
+      }, canPersistFallback && !agentDefaults);
     };
 
     setDefaultModel().catch((error) => {

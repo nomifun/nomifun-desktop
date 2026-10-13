@@ -46,7 +46,7 @@ async fn run() -> io::Result<()> {
     if !(args.len() == 3 || args.len() == 4 || args.len() == 6 || args.len() == 7) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "expected helper, leader marker, grandchild marker, optional 'pty', and optional start/ready/exit gates",
+            "expected helper, leader marker, grandchild marker, optional 'pty'/'pty-job-control', and optional start/ready/exit gates",
         ));
     }
     let helper = args[0].clone();
@@ -58,11 +58,11 @@ async fn run() -> io::Result<()> {
     };
     let transport = match transport_arg {
         None => Transport::Pipe,
-        Some("pty") => Transport::Pty { cols: 80, rows: 24 },
+        Some("pty" | "pty-job-control") => Transport::Pty { cols: 80, rows: 24 },
         Some(_) => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "optional Unix transport must be 'pty'",
+                "optional Unix transport must be 'pty' or 'pty-job-control'",
             ));
         }
     };
@@ -83,7 +83,11 @@ async fn run() -> io::Result<()> {
         command: CommandSpec::Program {
             program: helper,
             args: vec![
-                OsString::from("spawn-grandchild"),
+                OsString::from(if transport_arg == Some("pty-job-control") {
+                    "spawn-job-control-grandchild"
+                } else {
+                    "spawn-grandchild"
+                }),
                 grandchild_marker.as_os_str().to_owned(),
             ],
         },

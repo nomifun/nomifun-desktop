@@ -3,19 +3,26 @@
 //! After an unclean shutdown the durable registry
 //! (`agent-process-registry.json`) may still list agent processes from the
 //! previous run. This module walks that file exactly once at boot and, for
-//! every entry, either **proves** the recorded process instance is gone (and
-//! removes the entry) or retains the entry fail-closed. The resulting
-//! [`AgentProcessReapReport`] is the only authority conversation healing may
-//! use to conclude "no orphan of this conversation can still be running".
+//! every entry, either proves its recorded contained group terminal (and
+//! removes the entry) or retains the entry fail-closed.
+//! Current Agent execution does not write this old registry. This is cleanup
+//! of existing records only; it does not import or restore retired Agent data.
+//! [`AgentProcessReapReport`] covers the records' contained process groups,
+//! never descendants that left those groups or current canonical executions.
 //!
 //! Proof rules per entry:
 //! - v2 entry with an [`ExactProcessIdentity`]: probe the pid. A proven-absent
 //!   pid, or a live process whose identity does not match the recorded one
-//!   (pid + platform start key), proves the recorded instance dead. A matching
-//!   live process is an orphan survivor: it is terminated via
+//!   (pid + platform start key), proves the recorded root instance dead. On
+//!   macOS that alone does not prove its contained group empty: read-only group
+//!   inspection must also find no live members and the stored group must be
+//!   the root's own PID. Without a live root, missing stored group facts remain
+//!   unknown; an explicitly different group never grants root-group authority.
+//!   A matching live process is an orphan survivor: it is terminated via
 //!   [`terminate_verified_orphan`] and its entry removed only when
 //!   termination is proven.
-//! - v1 legacy entry without an identity token: a proven-absent pid is proof;
+//! - v1 legacy entry without an identity token: on macOS it remains unknown;
+//!   other existing platform paths accept a proven-absent pid as proof;
 //!   a live pid cannot be attributed to the recorded instance (PID reuse), so
 //!   the entry is retained and the process is never killed.
 //! - Any probe or termination failure retains the entry: absence of proof is
@@ -26,10 +33,14 @@ use std::io;
 use std::path::Path;
 use std::time::Duration;
 
-use nomi_process_runtime::{
-    probe_process_identity, same_recorded_process, terminate_verified_orphan,
-};
-use tracing::{error, info, warn};
+use nomi_process_runtime::{OrphanTerminationOutcome, terminate_verified_orphan};
+#[cfg(any(test, not(target_os = "macos")))]
+use nomi_process_runtime::probe_process_identity;
+#[cfg(not(target_os = "macos"))]
+use nomi_process_runtime::same_recorded_process;
+use tracing::{error, warn};
+#[cfg(not(target_os = "macos"))]
+use tracing::info;
 
 use crate::process_registry::{
     ProcessRegistry, RegisteredAgentProcess, agent_process_registry_path, read_registry_file,
@@ -64,8 +75,8 @@ pub struct AgentProcessReapReport {
 }
 
 impl AgentProcessReapReport {
-    /// No surviving durable entry for this conversation (none existed, or
-    /// every one was proven dead and removed).
+    /// No surviving recorded contained group for this conversation (none was
+    /// registered, or every registered one was proven terminal and removed).
     ///
     /// Only meaningful proof when the registry was fully processed: a parse
     /// failure yields `false` for every conversation, fail-closed.
@@ -201,6 +212,17 @@ fn reap_parsed_registry(path: &Path, registry: ProcessRegistry) -> AgentProcessR
 /// `false` (retain the entry, never kill).
 fn entry_proven_dead(entry: &RegisteredAgentProcess) -> bool {
     let Some(recorded) = &entry.identity else {
+        #[cfg(target_os = "macos")]
+        {
+            // This is cleanup of an old registry, not a producer for current
+            // Agent facts. A bare historical PID's absence does not prove its
+            // contained group empty. Preserve unknown evidence without signals.
+            warn!(pid = entry.pid, conversation_id = %entry.conversation_id,
+                "Legacy registry lacks exact identity/group proof; retaining cleanup as unknown");
+            return false;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
         // Legacy v1 entry: a bare pid cannot be attributed to the recorded
         // instance once something is running under it.
         return match probe_process_identity(entry.pid) {
@@ -223,8 +245,46 @@ fn entry_proven_dead(entry: &RegisteredAgentProcess) -> bool {
                 false
             }
         };
+        }
     };
 
+    if recorded.pid != entry.pid || recorded.platform_start_key == 0 {
+        warn!(pid = entry.pid, conversation_id = %entry.conversation_id,
+            "Registry PID/identity is inconsistent; retaining cleanup as unknown");
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if entry.process_group_id.is_some_and(|group| group != entry.pid) {
+            warn!(pid = entry.pid, conversation_id = %entry.conversation_id,
+                "Old registry records a different original process group; retaining cleanup as unknown");
+            return false;
+        }
+        // Darwin distinguishes a gone root from proof of its original group.
+        // Do not clear the registry through the early root-only probe below.
+        return match terminate_verified_orphan(recorded, ORPHAN_TERMINATION_TIMEOUT) {
+            Ok(OrphanTerminationOutcome::KilledAndProven) => true,
+            Ok(OrphanTerminationOutcome::AlreadyDead) if entry.process_group_id == Some(entry.pid) => true,
+            Ok(OrphanTerminationOutcome::AlreadyDead) => {
+                warn!(pid = entry.pid, conversation_id = %entry.conversation_id,
+                    "Old registry root is gone without a stored original group fact; retaining cleanup as unknown");
+                false
+            }
+            Ok(OrphanTerminationOutcome::RootGoneCleanupUnproven) => {
+                warn!(pid = entry.pid, conversation_id = %entry.conversation_id,
+                    "Registry root is gone but contained group cleanup remains unproven; retaining entry");
+                false
+            }
+            Err(error) => {
+                warn!(pid = entry.pid, conversation_id = %entry.conversation_id, %error,
+                    "Could not prove registry contained group cleanup; retaining entry");
+                false
+            }
+        };
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
     match probe_process_identity(entry.pid) {
         // Proven absent: nothing runs under this pid at all.
         Ok(None) => true,
@@ -242,7 +302,7 @@ fn entry_proven_dead(entry: &RegisteredAgentProcess) -> bool {
             }
             // Exact orphan survivor: terminate it and require proof.
             match terminate_verified_orphan(recorded, ORPHAN_TERMINATION_TIMEOUT) {
-                Ok(outcome) => {
+                Ok(outcome @ (OrphanTerminationOutcome::AlreadyDead | OrphanTerminationOutcome::KilledAndProven)) => {
                     info!(
                         pid = entry.pid,
                         conversation_id = %entry.conversation_id,
@@ -251,6 +311,7 @@ fn entry_proven_dead(entry: &RegisteredAgentProcess) -> bool {
                     );
                     true
                 }
+                Ok(OrphanTerminationOutcome::RootGoneCleanupUnproven) => false,
                 Err(e) => {
                     warn!(
                         pid = entry.pid,
@@ -272,6 +333,7 @@ fn entry_proven_dead(entry: &RegisteredAgentProcess) -> bool {
             false
         }
     }
+    }
 }
 
 #[cfg(test)]
@@ -290,7 +352,7 @@ mod tests {
     ) -> RegisteredAgentProcess {
         RegisteredAgentProcess {
             pid,
-            process_group_id: None,
+            process_group_id: Some(pid),
             conversation_id: conversation_id.into(),
             agent_type: AgentType::Nomi.serde_name().into(),
             backend: Some("nomi".into()),
@@ -357,7 +419,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_pid_with_wrong_start_key_is_removed_without_killing() {
+    async fn live_pid_with_wrong_start_key_is_never_killed_or_mistaken_for_a_group_proof() {
         let dir = tempfile::tempdir().unwrap();
         let (mut child, real_identity) = spawn_sleeper();
         let fabricated = ExactProcessIdentity {
@@ -371,8 +433,16 @@ mod tests {
 
         let report = reap_orphan_agent_processes(dir.path()).await;
 
-        assert!(report.conversation_tree_proven_empty("conv-reused"));
-        assert!(read_registry(dir.path()).processes.is_empty());
+        #[cfg(target_os = "macos")]
+        {
+            assert!(!report.conversation_tree_proven_empty("conv-reused"));
+            assert_eq!(read_registry(dir.path()).processes.len(), 1);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(report.conversation_tree_proven_empty("conv-reused"));
+            assert!(read_registry(dir.path()).processes.is_empty());
+        }
         // The current pid owner is a different instance and must survive.
         assert!(
             child.try_wait().unwrap().is_none(),
@@ -427,6 +497,83 @@ mod tests {
             .await
             .expect("orphan child should exit after reaping")
             .unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn gone_root_with_live_contained_child_retains_old_registry_as_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("child.pid");
+        let exit_gate = dir.path().join("root.exit");
+        // This represents an old persisted root, outside today's watchdog.
+        // Its descendant has a bounded natural lifetime, so a failed test
+        // never needs to signal an orphan through a cached numeric PID.
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "/bin/sleep 10 & printf '%s\\n' \"$!\" > \"$1\"; while [ ! -f \"$2\" ]; do /bin/sleep 0.01; done", "registry-root"])
+            .arg(&marker).arg(&exit_gate).process_group(0)
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true);
+        let mut root = command.spawn().unwrap();
+        let identity = capture_child_identity(&root).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !marker.is_file() { tokio::time::sleep(Duration::from_millis(5)).await; }
+        }).await.unwrap();
+        let descendant = std::fs::read_to_string(&marker).unwrap().trim().parse::<u32>().unwrap();
+        write_registry(dir.path(), vec![test_entry(identity.pid, "conv-root-only", Some(identity.clone()))]);
+        std::fs::write(&exit_gate, b"exit").unwrap();
+        root.wait().await.unwrap();
+        assert!(probe_process_identity(descendant).unwrap().is_some(), "fixture child must outlive its root");
+
+        let report = reap_orphan_agent_processes(dir.path()).await;
+        assert!(report.registry_fully_processed());
+        assert!(!report.conversation_tree_proven_empty("conv-root-only"));
+        let retained = read_registry(dir.path()).processes;
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].identity.as_ref(), Some(&identity));
+        assert!(probe_process_identity(descendant).unwrap().is_some(), "an absent root grants no numeric-group signal authority");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn legacy_gone_pid_does_not_become_a_contained_group_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut child, identity) = spawn_sleeper();
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+        write_registry(dir.path(), vec![test_entry(identity.pid, "conv-legacy-gone", None)]);
+        let report = reap_orphan_agent_processes(dir.path()).await;
+        assert!(!report.conversation_tree_proven_empty("conv-legacy-gone"));
+        assert_eq!(read_registry(dir.path()).processes.len(), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn gone_identity_without_original_group_fact_remains_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut child, identity) = spawn_sleeper();
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+        let mut entry = test_entry(identity.pid, "conv-no-group", Some(identity));
+        entry.process_group_id = None;
+        write_registry(dir.path(), vec![entry]);
+        let report = reap_orphan_agent_processes(dir.path()).await;
+        assert!(!report.conversation_tree_proven_empty("conv-no-group"));
+        assert_eq!(read_registry(dir.path()).processes.len(), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn different_original_group_fact_never_authorizes_current_root_signals() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut child, identity) = spawn_sleeper();
+        let mut entry = test_entry(identity.pid, "conv-other-group", Some(identity.clone()));
+        entry.process_group_id = Some(identity.pid + 1);
+        write_registry(dir.path(), vec![entry]);
+        let report = reap_orphan_agent_processes(dir.path()).await;
+        assert!(!report.conversation_tree_proven_empty("conv-other-group"));
+        assert_eq!(read_registry(dir.path()).processes.len(), 1);
+        assert!(child.try_wait().unwrap().is_none(), "different historical group facts cannot authorize current root cleanup");
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
     }
 
     #[tokio::test]
