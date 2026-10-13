@@ -369,6 +369,203 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_knowledge_write_waiter_retains_publication_and_its_real_receipt() {
+        use nomifun_knowledge::{
+            AgentKnowledgeAuthority, AgentKnowledgeResource, AgentKnowledgeWriteRequest,
+            AuthorizedKnowledgeService, KnowledgeEventEmitter, KnowledgeResourceOperation,
+            KnowledgeService, WriteTargetSpec,
+        };
+
+        struct KnowledgeWrite {
+            knowledge: AuthorizedKnowledgeService,
+            base: nomifun_common::KnowledgeBaseId,
+            started: CancellationToken,
+            release: CancellationToken,
+            invocations: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait]
+        impl EngineToolInvoker for KnowledgeWrite {
+            async fn invoke(
+                &self,
+                invocation: EngineToolInvocation,
+                _: CancellationToken,
+            ) -> Result<EngineToolResult, EngineToolError> {
+                self.invocations.fetch_add(1, Ordering::AcqRel);
+                self.started.cancel();
+                // Delay the admitted owner, not the model waiter. The real
+                // Knowledge adapter does not yet receive end-to-end cancellation.
+                self.release.cancelled().await;
+                let written = self
+                    .knowledge
+                    .write(AgentKnowledgeWriteRequest {
+                        target: WriteTargetSpec::Path {
+                            kb_id: self.base.clone(),
+                            rel_path: "README.md".into(),
+                        },
+                        content: "## Added fact\n\nA durable fact from this tool.".into(),
+                    })
+                    .await
+                    .map_err(tool_error)?;
+                Ok(EngineToolResult::text(
+                    invocation.call.call_id,
+                    serde_json::to_string(&written).map_err(tool_error)?,
+                    false,
+                ))
+            }
+        }
+
+        let (journal, pool) = super::super::engine_journal::test_fixture().await;
+        let directory = tempfile::tempdir().unwrap();
+        let repository = Arc::new(nomifun_db::SqliteKnowledgeRepository::new(pool.clone()));
+        let service = Arc::new(KnowledgeService::new(
+            repository.clone(),
+            directory.path(),
+            KnowledgeEventEmitter::new(
+                Arc::new(nomifun_realtime::BroadcastEventBus::new(16)),
+                Arc::from("0190f5fe-7c00-7a00-8000-000000000001"),
+            ),
+        ));
+        service.set_entry_repository(repository);
+        let base = service
+            .create_base("Knowledge fixture", "", None, None)
+            .await
+            .unwrap();
+        service
+            .write_file(
+                base.knowledge_base_id.as_str(),
+                "README.md",
+                "# Existing knowledge\n\nKeep this curated text.",
+            )
+            .await
+            .unwrap();
+        service
+            .read_file(base.knowledge_base_id.as_str(), "README.md")
+            .await
+            .unwrap();
+        // A completed create dirties the stable-entry projection immediately
+        // before updating an existing document, matching the reported hang.
+        service
+            .write_file(
+                base.knowledge_base_id.as_str(),
+                "new-fact.md",
+                "# New fact\n",
+            )
+            .await
+            .unwrap();
+        let resource = AgentKnowledgeResource::new(
+            "knowledge-binding",
+            "0190f5fe-7c00-7a00-8000-000000000001",
+            base.knowledge_base_id.clone(),
+            "Knowledge fixture",
+            std::path::PathBuf::from(&base.root_path),
+            [KnowledgeResourceOperation::Write],
+        )
+        .unwrap();
+        let started = CancellationToken::new();
+        let release = CancellationToken::new();
+        let invocations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let owner = Arc::new(tools(Arc::new(KnowledgeWrite {
+            knowledge: AuthorizedKnowledgeService::new(
+                service.clone(),
+                AgentKnowledgeAuthority::new("0190f5fe-7c00-7a00-8000-000000000001", [resource])
+                    .unwrap(),
+            ),
+            base: base.knowledge_base_id.clone(),
+            started: started.clone(),
+            release: release.clone(),
+            invocations: invocations.clone(),
+        })));
+        owner.bind_turn("turn".into(), journal).unwrap();
+        let invocation = EngineToolInvocation {
+            agent_session_id: "0190f5fe-7c00-7a00-8000-000000000002".into(),
+            principal: PrincipalRef { principal_kind: "user".into(), principal_id: "0190f5fe-7c00-7a00-8000-000000000001".into() },
+            resolved_snapshot_ref: ResolvedSnapshotRef { snapshot_id: "snapshot".into(), snapshot_digest: "b".repeat(64).into() },
+            active_set_generation: 1, turn_operation_id: "turn".into(),
+            operation_id: "knowledge-write-operation".into(), idempotency_key: "knowledge-write-key".into(), correlation_id: "knowledge-write-correlation".into(),
+            call: ChatToolCall { call_id: "knowledge-write-call".into(), name: "knowledge_write".into(), arguments: StrictJsonValue(serde_json::json!({})), provider_metadata: Default::default() },
+            binding: serde_json::from_value(serde_json::json!({
+                "model_name":"knowledge_write", "definition":{"name":"knowledge_write","description":"fixture","input_schema":{}},
+                "schema_digest":"a".repeat(64), "canonical_input_schema_ref":"fixture", "capability_contract_digest":"b".repeat(64),
+                "capability_id":"knowledge", "action_id":"knowledge/write", "resource_binding_ids":[], "effect_class":"managed_effect", "parallel_safe":false
+            })).unwrap(),
+        };
+        let cancellation = CancellationToken::new();
+        let caller_owner = owner.clone();
+        let token = cancellation.clone();
+        let caller = tokio::spawn(async move { caller_owner.invoke(invocation, token).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.cancelled())
+            .await
+            .unwrap();
+        cancellation.cancel();
+        assert!(matches!(
+            caller.await.unwrap(),
+            Err(EngineToolError::Cancelled)
+        ));
+        owner.close_turn().unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), owner.join())
+                .await
+                .is_err()
+        );
+        assert_eq!(owner.tasks.pending_tasks().unwrap(), 1);
+        let readme_path = std::path::PathBuf::from(&base.root_path).join("README.md");
+        assert_eq!(
+            std::fs::read_to_string(&readme_path).unwrap(),
+            "# Existing knowledge\n\nKeep this curated text."
+        );
+
+        release.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), owner.join())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner.tasks.pending_tasks().unwrap(), 0);
+        let content = std::fs::read_to_string(&readme_path).unwrap();
+        assert!(content.contains("Keep this curated text."));
+        assert_eq!(content.matches("A durable fact from this tool.").count(), 1);
+        let progress: Vec<(String,)> = sqlx::query_as(
+            "SELECT inline_json FROM agent_events WHERE kind = 'runtime/progress-recorded' ORDER BY seq",
+        ).fetch_all(&pool).await.unwrap();
+        assert_eq!(progress.len(), 2);
+        let settled: Value = serde_json::from_str(&progress[1].0).unwrap();
+        let settled = &settled["event"];
+        assert_eq!(settled["event"], "host_tool_settled");
+        assert_eq!(settled["operation_id"], "knowledge-write-operation");
+        assert_eq!(settled["call_id"], "knowledge-write-call");
+        assert!(settled["error"].is_null());
+        let result: EngineToolResult = serde_json::from_value(settled["result"].clone()).unwrap();
+        assert!(!result.is_error);
+        let written: Value = serde_json::from_str(&result.output_text()).unwrap();
+        assert_eq!(written["resource_id"], base.knowledge_base_id.as_str());
+        assert_eq!(written["relative_path"], "README.md");
+        assert_eq!(written["created"], false);
+        assert_eq!(invocations.load(Ordering::Acquire), 1);
+
+        // A later owner write must survive repeated cleanup. The retained task
+        // has actually exited, so no cancelled waiter can cause a late publish.
+        service
+            .write_file(
+                base.knowledge_base_id.as_str(),
+                "README.md",
+                "# Later manual edit\n",
+            )
+            .await
+            .unwrap();
+        owner.join().await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&readme_path).unwrap(),
+            "# Later manual edit\n"
+        );
+        assert_eq!(invocations.load(Ordering::Acquire), 1);
+        let results: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE kind = 'tool/result-recorded'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(results, 1);
+    }
+
+    #[tokio::test]
     async fn settlement_loss_persists_one_error_projection_for_cold_reads() {
         struct SettlementLoss;
         #[async_trait]
