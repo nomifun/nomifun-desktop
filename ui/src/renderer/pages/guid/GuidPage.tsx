@@ -795,6 +795,7 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
                   </SessionCapabilityPicker>
                 }
                 isFileDragging={guidInput.isFileDragging}
+                surfaceRef={guidInput.surfaceRef}
                 dragHandlers={guidInput.dragHandlers}
                 overlayOpen={mention.mentionOpen}
                 header={<ComposerSceneHeader sceneSelectionEnabled={!productEntry} agent={

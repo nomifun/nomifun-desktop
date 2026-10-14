@@ -8,10 +8,34 @@
 }
 
 .scroller {
+  /* Keep reading padding inside the viewport so the scrollbar hugs the pane edge. */
+  padding-inline: var(--conversation-inline-padding, 20px);
   /* Keep the reading axis centered when desktop scrollbars occupy space. */
   scrollbar-gutter: stable both-edges;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-3) transparent;
+}
+
+/* Conversation scrollbars remain discoverable before hover in every surface. */
+.scroller::-webkit-scrollbar-thumb {
+  background: var(--color-border-3);
+}
+
+.scroller:hover {
+  scrollbar-color: var(--color-text-3) transparent;
+}
+
+.scroller:hover::-webkit-scrollbar-thumb,
+.scroller::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-3);
+}
+
+.emptyState {
+  box-sizing: border-box;
+  padding-inline: var(--conversation-inline-padding, 20px);
 }
 
 .composer {
+  width: calc(100% - 2 * var(--conversation-inline-padding, 20px));
   max-width: min(800px, var(--conversation-content-width, 100%));
 }

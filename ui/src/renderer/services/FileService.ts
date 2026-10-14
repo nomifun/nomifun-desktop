@@ -5,6 +5,7 @@
  */
 
 import { buildBackendAuthHeaders, getBaseUrl } from '@/common/adapter/httpBridge';
+import { ipcBridge } from '@/common';
 import { trackUpload, type UploadSource } from '@/renderer/hooks/file/useUploadState';
 import type { ConversationId } from '@/common/types/ids';
 
@@ -206,6 +207,28 @@ export function getCleanFileNames(file_paths: string[]): string[] {
 }
 
 class FileServiceClass {
+  /** Native drops keep the same host paths as the desktop file picker. */
+  async processNativePaths(paths: readonly string[]): Promise<FileMetadata[]> {
+    const files: FileMetadata[] = [];
+    for (const path of new Set(paths)) {
+      try {
+        // The native event is an explicit file selection, just like the picker.
+        // Scope this inspection to its parent so files on other drives work too.
+        const parentEnd = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+        const metadata = await ipcBridge.fs.getFileMetadata.invoke({ path,
+          ...(parentEnd >= 0 ? { workspace: path.slice(0, parentEnd + 1) } : {}) });
+        // The '+' picker accepts files, so dropping a folder must not attach it.
+        if (!metadata.isDirectory) {
+          files.push({ name: metadata.name, path, size: metadata.size,
+            type: metadata.type, lastModified: metadata.lastModified });
+        }
+      } catch (error) {
+        console.warn('Failed to inspect dropped file:', path, error);
+      }
+    }
+    return files;
+  }
+
   /**
    * Process files from drag and drop events, uploading any file that lacks a
    * native disk path via HTTP multipart.

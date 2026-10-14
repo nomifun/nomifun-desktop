@@ -41,6 +41,7 @@ export default function Composer({ inputProps, surfaceRef, singleLine = false, i
   dragHandlers, overlayOpen = false, overlays, header, beforeInput, inputOverlay, highlightInput = false,
   attachments, tools, creationTools, rightTools, actions, sideTools, topRightTools, footer, compactStacked = false,
 }: ComposerProps) {
+  const { t } = useTranslation();
   const [focused, setFocused] = useState(false);
   const { activeBorderColor, inactiveBorderColor, activeShadow } = useInputFocusRing();
   const { compositionHandlers, isImeActive } = useCompositionInput();
@@ -50,16 +51,18 @@ export default function Composer({ inputProps, surfaceRef, singleLine = false, i
   const resolvedSingleLine = compactStacked ? false : singleLine;
   return <>
     <div ref={surfaceRef} data-composer-surface data-composer-layout={compactStacked ? 'compact-stacked' : 'adaptive'}
-      className={`sendbox-panel relative p-16px border-3 b bg-dialog-fill-0 b-solid rd-20px flex flex-col ${compactStacked ? 'sendbox-panel--compact-stacked' : ''} ${sideTools ? 'sendbox-panel--side-tools' : ''} ${overlayOpen ? 'overflow-visible' : 'overflow-hidden'} ${isFileDragging ? 'b-dashed sendbox-panel--dragging' : ''}`}
+      className={`sendbox-panel relative p-16px border-3 b bg-dialog-fill-0 b-solid rd-20px flex flex-col ${compactStacked ? 'sendbox-panel--compact-stacked' : ''} ${sideTools ? 'sendbox-panel--side-tools' : ''} ${overlayOpen ? 'overflow-visible' : 'overflow-hidden'} ${isFileDragging ? 'sendbox-panel--dragging' : ''}`}
       style={{
         transition: 'box-shadow 0.25s ease, border-color 0.25s ease',
         padding: sideTools ? 0 : undefined,
         borderRadius: sideTools ? 22 : undefined,
         borderWidth: '1px',
-        borderColor: isFileDragging ? 'rgb(var(--primary-3))' : focused ? activeBorderColor : inactiveBorderColor,
+        borderColor: focused ? activeBorderColor : inactiveBorderColor,
         boxShadow: focused ? activeShadow : 'none',
-        ...(isFileDragging ? { backgroundColor: 'var(--color-primary-light-1)' } : {}),
       }} {...dragHandlers}>
+      {isFileDragging && <div className='sendbox-drop-overlay' role='status'>
+        <span className='sendbox-drop-hint'>{t('conversation.sendbox.dropToAttach')}</span>
+      </div>}
       <SessionCapabilityComposerLayout picker={sideTools}>
         {overlays}
         {compactStacked && attachments}

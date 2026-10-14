@@ -157,7 +157,7 @@ const NomiChat: React.FC<{
   return (
     <ConversationProvider value={conversationValue}>
       <ConversationCreationTasksProvider conversationId={conversation_id} enabled={creationTasksEnabled}>
-        <div data-conversation-layout className='flex-1 flex flex-col px-20px min-h-0'>
+        <div data-conversation-layout className='flex-1 flex flex-col min-h-0'>
           <FlexFullContainer>
             <MessageList
               className='flex-1'

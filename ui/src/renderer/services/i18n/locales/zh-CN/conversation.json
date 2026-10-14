@@ -943,7 +943,9 @@
     "manageMcp": "管理 MCP"
   },
   "sendbox": {
-    "hint": "输入 / 唤起命令，@ 引用文件"
+    "hint": "输入 / 唤起命令，@ 引用文件",
+    "dropToAttach": "释放文件以添加附件",
+    "dropNoFiles": "未检测到可添加的文件，请拖入文件而非文件夹。"
   },
   "hoverCard": {
     "id": "会话 ID",

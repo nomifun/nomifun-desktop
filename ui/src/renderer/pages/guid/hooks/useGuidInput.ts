@@ -8,7 +8,7 @@ import { useDragUpload } from '@/renderer/hooks/file/useDragUpload';
 import { usePasteService } from '@/renderer/hooks/file/usePasteService';
 import { allSupportedExts, type FileMetadata } from '@/renderer/services/FileService';
 import { measureCaretTop, scrollCaretToLastLine } from '../utils/caretUtils';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import { useGuidDraftState } from './useGuidDraftState';
 
 export type GuidInputResult = {
@@ -26,6 +26,7 @@ export type GuidInputResult = {
   handleTextareaFocus: () => void;
   onPaste: ReturnType<typeof usePasteService>['onPaste'];
   isFileDragging: boolean;
+  surfaceRef: RefObject<HTMLDivElement | null>;
   dragHandlers: ReturnType<typeof useDragUpload>['dragHandlers'];
 };
 
@@ -37,6 +38,7 @@ type UseGuidInputOptions = {
  * Hook that manages input state, file handling, and drag/paste for the Guid page.
  */
 export const useGuidInput = ({ locationState }: UseGuidInputOptions): GuidInputResult => {
+  const surfaceRef = useRef<HTMLDivElement>(null);
   const [input, setInput] = useGuidDraftState('input', '');
   const [files, setFiles] = useGuidDraftState<string[]>('files', []);
   const [dir, setDir] = useGuidDraftState('workspace', '');
@@ -69,6 +71,7 @@ export const useGuidInput = ({ locationState }: UseGuidInputOptions): GuidInputR
 
   // Use drag upload hook (drag treated like paste, appends to existing files)
   const { isFileDragging, dragHandlers } = useDragUpload({
+    targetRef: surfaceRef,
     onFilesAdded: handleFilesPasted,
   });
 
@@ -116,6 +119,7 @@ export const useGuidInput = ({ locationState }: UseGuidInputOptions): GuidInputR
     handleTextareaFocus,
     onPaste,
     isFileDragging,
+    surfaceRef,
     dragHandlers,
   };
 };

@@ -945,7 +945,9 @@
     "manageMcp": "Manage MCP"
   },
   "sendbox": {
-    "hint": "Type / for commands, @ to reference files"
+    "hint": "Type / for commands, @ to reference files",
+    "dropToAttach": "Drop files to add attachments",
+    "dropNoFiles": "No files could be added. Please drop files rather than folders."
   },
   "hoverCard": {
     "id": "Session ID",
