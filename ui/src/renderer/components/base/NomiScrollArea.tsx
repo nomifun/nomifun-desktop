@@ -31,7 +31,7 @@ import React from 'react';
  * </NomiScrollArea>
  * ```
  */
-interface NomiScrollAreaProps extends React.HTMLAttributes<HTMLDivElement> {
+interface NomiScrollAreaProps extends React.ComponentPropsWithRef<'div'> {
   /** 滚动方向：y-垂直，x-水平，both-双向 / Scroll direction: y-vertical, x-horizontal, both-bidirectional */
   direction?: 'y' | 'x' | 'both';
   /** 是否禁用滚动（用于嵌入式页面展示） */

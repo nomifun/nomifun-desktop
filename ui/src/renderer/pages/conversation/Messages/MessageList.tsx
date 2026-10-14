@@ -28,6 +28,7 @@ import { useTranslation } from 'react-i18next';
 import { useLocation } from 'react-router-dom';
 import { uuid } from '@renderer/utils/common';
 import './messages.css';
+import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
 import contentStyles from '../components/ConversationContentColumn.module.css';
 import { useConversationColumnRef } from '../components/useConversationColumnRef';
 import HOC from '@renderer/utils/ui/HOC';
@@ -1631,7 +1632,7 @@ const MessageList: React.FC<{
   }
 
   if (displayList.length === 0 && !showPendingMessage && !showPreparation && !pauseError && emptySlot && conversationContext?.isProcessing !== true) {
-    return <div className='relative flex-1 h-full flex items-center justify-center'>{emptySlot}</div>;
+    return <div className={`relative flex-1 h-full flex items-center justify-center ${contentStyles.emptyState}`}>{emptySlot}</div>;
   }
 
   return (
@@ -1644,10 +1645,10 @@ const MessageList: React.FC<{
         actionsLayout={['zoomIn', 'zoomOut', 'originalSize', 'rotateLeft', 'rotateRight']}
       >
         <ImagePreviewContext.Provider value={{ inPreviewGroup: true }}>
-          <div
+          <NomiScrollArea
             ref={handleScrollerRef}
             data-testid='message-list-scroller'
-            className={`flex-1 h-full overflow-y-auto pb-10px box-border ${contentStyles.scroller}`}
+            className={`flex-1 h-full pb-10px box-border ${contentStyles.scroller}`}
             style={{ overflowAnchor: 'none' }}
             onPointerDown={handlePointerDown}
             onKeyDown={handleKeyDown}
@@ -1660,7 +1661,7 @@ const MessageList: React.FC<{
               {pauseError && <div className='mt-6px' data-testid='conversation-pause-error'><MessageTips message={pauseError} /></div>}
               <div className='h-20px' />
             </div>
-          </div>
+          </NomiScrollArea>
         </ImagePreviewContext.Provider>
       </Image.PreviewGroup>
 
@@ -1669,16 +1670,16 @@ const MessageList: React.FC<{
           {/* Gradient mask */}
           <div className='absolute bottom-0 left-0 right-0 h-100px pointer-events-none' />
           {/* Scroll button */}
-          <div className='absolute bottom-20px right-16px z-100'>
+          <div className='absolute bottom-20px left-1/2 -translate-x-1/2 z-100'>
             <button
               type='button'
-              className='flex items-center justify-center w-40px h-40px rd-full bg-base shadow-lg cursor-pointer hover:bg-1 transition-all hover:scale-110 border-1px border-solid border-3'
+              className='flex items-center justify-center w-32px h-32px p-0 rd-full bg-base shadow-lg cursor-pointer hover:bg-1 transition-colors border-1px border-solid border-3'
               onClick={handleScrollButtonClick}
               title={t('messages.scrollToBottom')}
               aria-label={t('messages.scrollToBottom')}
               style={{ lineHeight: 0 }}
             >
-              <Down theme='filled' size='20' fill={iconColors.secondary} style={{ display: 'block' }} />
+              <Down theme='filled' size='14' fill={iconColors.primary} strokeWidth={5} style={{ display: 'block' }} />
             </button>
           </div>
         </>

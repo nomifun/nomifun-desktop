@@ -6,6 +6,7 @@
 
 import classNames from 'classnames';
 import React from 'react';
+import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
 import contentStyles from '../../components/ConversationContentColumn.module.css';
 import { useConversationColumnRef } from '../../components/useConversationColumnRef';
 
@@ -34,8 +35,8 @@ const MessageListSkeleton: React.FC = () => {
   ] as const;
 
   return (
-    <div
-      className={`flex-1 h-full overflow-y-auto pb-10px box-border ${contentStyles.scroller}`}
+    <NomiScrollArea
+      className={`flex-1 h-full pb-10px box-border ${contentStyles.scroller}`}
       data-testid='message-list-skeleton'
       style={{ minHeight: '100%' }}
     >
@@ -85,7 +86,7 @@ const MessageListSkeleton: React.FC = () => {
           100% { background-position: -200% 0; }
         }
       `}</style>
-    </div>
+    </NomiScrollArea>
   );
 };
 

@@ -22,7 +22,7 @@
 }
 
 .chatBody :global([data-conversation-layout]) {
-  padding-inline: 4px;
+  --conversation-inline-padding: 4px;
 }
 
 .chatState {
@@ -42,7 +42,7 @@
 .info {
   min-width: 0;
   overflow-y: auto;
-  padding: 14px 12px 20px;
+  padding: 8px 4px;
   border-left: 1px solid var(--color-border-2);
   background: var(--color-fill-1);
 }
@@ -73,7 +73,7 @@
   flex-direction: column;
   gap: 4px;
   margin-top: 8px;
-  padding: 11px;
+  padding: 8px;
   border: 1px solid var(--color-border-2);
   border-radius: 12px;
   background: var(--color-bg-1);
