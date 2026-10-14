@@ -5,6 +5,15 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.8 - 2026-10-14
+
+- Recover agent capability loading: capability lists recover correctly
+  after load failures, and guided-page preset capabilities and agent
+  binding selection no longer stall on errors.
+- Make session binding evolution safe: the binding evolution path gains
+  safety checks and recovery logic, and session configuration errors
+  surface readable diagnostics to the frontend.
+
 ## v0.8.7 - 2026-10-14
 
 - Request system permissions on demand instead of at startup; make default
