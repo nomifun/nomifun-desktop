@@ -5,13 +5,38 @@ import { OFFICIAL_PRESET_KEYS, type OfficialPresetKey } from '@/common/types/age
 
 export type ConversationRuntimeAuthority = 'idle' | 'processing' | 'unknown';
 
+type ActivitySnapshot = Pick<TChatConversation, 'runtime' | 'status'> & Partial<Pick<TChatConversation, 'extra'>>;
+export type ConversationActivity = 'idle' | 'running' | 'paused';
+
+/** Presentation derived from the existing canonical projection, never a second
+ * lifecycle. Undefined means the snapshot has not established activity. */
+export const getConversationActivity = (conversation?: ActivitySnapshot | null): ConversationActivity | undefined => {
+  if (!conversation) return undefined;
+  if (conversation.status === 'finished') return 'idle';
+  const runtime = conversation.runtime;
+  if (conversation.status === 'running') {
+    if (conversation.extra?.execution_phase === 'paused') {
+      return runtime?.state === 'idle' && runtime.is_processing === false
+        && runtime.can_send_message === false && runtime.active_turn_id ? 'paused' : undefined;
+    }
+    if (runtime?.is_processing === true && runtime.active_turn_id) return 'running';
+    return undefined;
+  }
+  if (conversation.status === 'pending' && runtime?.is_processing !== true && runtime?.active_turn_id == null) return 'idle';
+  return undefined;
+};
+
+/** Paused and unverified ownership blocks configuration as well as execution. */
+export const isConversationBindingBlocked = (
+  conversation?: ActivitySnapshot & Partial<Pick<TChatConversation, 'execution_attempt_id'>> | null
+): boolean => getConversationActivity(conversation) !== 'idle'
+  || Boolean(conversation?.runtime?.active_turn_id || conversation?.execution_attempt_id);
+
 export const getConversationPauseNotice = (
   conversation?: Pick<TChatConversation, 'runtime' | 'status' | 'extra' | 'agent_snapshot'> | null
 ) => {
   const runtime = conversation?.runtime;
-  if (conversation?.status !== 'running' || conversation.extra?.execution_phase !== 'paused'
-    || runtime?.state !== 'idle' || runtime.is_processing !== false
-    || runtime.can_send_message !== false || !runtime.active_turn_id) return null;
+  if (getConversationActivity(conversation) !== 'paused' || !conversation || !runtime?.active_turn_id) return null;
   const pause = conversation.extra.execution_pause;
   // This snapshot still belongs to the active paused Turn: the canonical owner
   // blocks Agent/model/resource transitions until that Turn relinquishes it.
@@ -52,26 +77,9 @@ export const getConversationRuntimeAuthority = (
 ): ConversationRuntimeAuthority => {
   if (!conversation) return 'idle';
 
-  // The durable aggregate terminal status dominates stale process projections:
-  // a Finished conversation can never be raised back to Running by UI state.
-  if (conversation.status === 'finished') return 'idle';
-
-  if (conversation.status === 'running') {
-    return conversation.runtime?.is_processing === true &&
-      conversation.runtime.active_turn_id != null
-      ? 'processing'
-      : 'unknown';
-  }
-
-  if (conversation.status === 'pending') {
-    return conversation.runtime?.is_processing === true ||
-      conversation.runtime?.active_turn_id != null
-      ? 'unknown'
-      : 'idle';
-  }
-
-  // Legacy/malformed snapshots are never authority to start or settle a turn.
-  return 'unknown';
+  const activity = getConversationActivity(conversation);
+  // The queue's existing authority contract deliberately excludes suspension.
+  return activity === 'running' ? 'processing' : activity === 'idle' ? 'idle' : 'unknown';
 };
 
 export const isConversationProcessing = (conversation?: Pick<TChatConversation, 'runtime' | 'status'> | null) => {

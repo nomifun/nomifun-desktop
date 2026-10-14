@@ -11,6 +11,8 @@ pub mod chat_model;
 pub mod chat_provider_reasoning;
 pub mod digest;
 pub mod event;
+pub mod user_input;
+pub use user_input::*;
 pub mod turn_files;
 pub use turn_files::*;
 pub mod knowledge_writeback_notice;

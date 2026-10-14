@@ -97,7 +97,7 @@ pub use repository::{
     NewAgentExecutionTemplateParticipant, UpdateAgentExecutionTemplateParams,
     LoopRepeatResetParams,
     RecoveredAgentExecutionAttemptOutput,
-    RetryAgentExecutionStep, AgentExecutionActiveTurnGuard, SettleAgentExecutionAttemptParams, UpdateAgentExecutionParams,
+    RetryAgentExecutionStep, AgentExecutionActiveTurnGuard, AgentExecutionUserInputTurnGuard, SettleAgentExecutionAttemptParams, UpdateAgentExecutionParams,
     CreateTerminalParams,
     IAgentMetadataRepository, IAttachmentRepository, ChannelInboundClaim,
     IChannelRepository, PENDING_PROMPT_EXPIRY_MS, PENDING_PROMPT_QUEUE_LIMIT,

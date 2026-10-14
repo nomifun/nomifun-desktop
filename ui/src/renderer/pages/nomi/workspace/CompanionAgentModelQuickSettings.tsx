@@ -13,7 +13,7 @@ import ProductAgentBindingSelect, { productAgentErrorReason } from '@/renderer/c
 import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 import { modelDisplayLabel } from '@/common/utils/modelPresentation';
-import { getConversationRuntimeAuthority } from '@/renderer/pages/conversation/utils/conversationRuntime';
+import { isConversationBindingBlocked } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import { saveCompanionChatModel, type CompanionChatModel } from '../companion/saveCompanionChatModel';
 import type { CompanionHandle } from './types';
 import styles from './CompanionAgentModelQuickSettings.module.css';
@@ -55,10 +55,7 @@ const CompanionAgentModelQuickSettings: React.FC<Props> = ({ companion, conversa
   useEffect(() => { setSaveError(''); setRetryModel(null); }, [requestKey]);
   const current = () => mounted.current && activeRequest.current === requestKey;
   const busy = modelSaving || agentSaving;
-  const sessionBlocked = Boolean(conversation && (
-    getConversationRuntimeAuthority(conversation) !== 'idle' || conversation.runtime?.active_turn_id ||
-    conversation.extra.execution_phase === 'paused' || conversation.execution_attempt_id
-  ));
+  const sessionBlocked = Boolean(conversation && isConversationBindingBlocked(conversation));
   const controlsDisabled = disabled || busy || sessionBlocked || Boolean(profile?.model && !conversation);
   const model = committedModel ?? (conversation ? { provider_id: conversation.model.id, model: conversation.model.use_model } : profile?.model);
   const eligibleGroups = groups.filter(({ provider }) => !provider.platform.toLowerCase().includes('gemini-with-google-auth'));

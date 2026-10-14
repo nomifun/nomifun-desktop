@@ -38,8 +38,9 @@ export function useAppDevelopmentSync(app: HostedApp | undefined, refresh: () =>
       readOwner();
       // The wire notification only addresses this request. The Host checks the
       // exact canonical completed Turn and current admission fence before any
-      // configuration write. Mounting, polling, failures and pauses never do it.
-      if (!event.turn_id || event.state !== 'ai_waiting_input' || event.runtime.is_processing !== false
+      // configuration write. Input handoffs refresh the owner without claiming
+      // the application is complete enough to discover its settings.
+      if (event.stop_reason === 'input_required' || !event.turn_id || event.state !== 'ai_waiting_input' || event.runtime.is_processing !== false
         || event.runtime.can_send_message !== true || lastRequestedTurn === String(event.turn_id)) return;
       lastRequestedTurn = String(event.turn_id);
       const baseline = turnBaseline?.turnId === String(event.turn_id) ? turnBaseline : undefined;

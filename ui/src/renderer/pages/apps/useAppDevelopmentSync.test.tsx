@@ -62,6 +62,26 @@ test('mounts, owner polling, unrelated Turns, failures, pauses and notifications
   expect(view.result.current.configuring).toBe(false);
 });
 
+test('an input handoff only refreshes the owner and the next ordinary Turn can still discover settings', async () => {
+  const update = spyOn(appHosting.update, 'invoke').mockResolvedValue(app);
+  const refresh = mock(async () => {}), accept = mock(async (_value: HostedApp) => {});
+  const view = renderHook(() => useAppDevelopmentSync(app, refresh, accept));
+  act(() => emitComplete(completed({ stop_reason: 'input_required' })));
+  expect(refresh).toHaveBeenCalledTimes(1);
+  expect(update).not.toHaveBeenCalled();
+  expect(accept).not.toHaveBeenCalled();
+  expect(view.result.current.configuring).toBe(false);
+  expect(view.result.current.configurationError).toBe('');
+  expect(view.result.current.previewFileChange).toBeUndefined();
+
+  const nextTurn = '0190f5fe-7c00-7a00-8000-000000000614';
+  act(() => emitComplete(completed({ turn_id: nextTurn, stop_reason: 'end_turn' })));
+  await waitFor(() => expect(view.result.current.configuring).toBe(false));
+  expect(update.mock.calls).toEqual([[{ id: app.id, detect_settings: true, completion: { session_id: session, turn_id: nextTurn } }]]);
+  expect(accept).toHaveBeenCalledWith(app);
+  expect(view.result.current.configurationError).toBe('');
+});
+
 test('canonical owner rejection remains an explicit configuration error without retry or invented success', async () => {
   const update = spyOn(appHosting.update, 'invoke').mockRejectedValue(new Error('The completed Turn is no longer current'));
   const refresh = mock(async () => {}), accept = mock(async (_value: HostedApp) => {});

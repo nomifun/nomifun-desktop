@@ -128,6 +128,14 @@ impl AdmittedEngineSession {
 }
 
 impl EngineSessionHost {
+    pub(super) async fn check_user_input_handoff(
+        &self, principal: &PrincipalRef, causality: &nomifun_chat_model_broker::ChatCausality,
+    ) -> Result<(), AppError> {
+        nomifun_agent_execution::validate_user_input_handoff_policy(
+            &self.pool, principal, &causality.agent_session_id, &causality.turn_operation_id,
+        ).await
+    }
+
     pub(super) fn canonical_store(
         &self,
     ) -> Result<nomifun_agent_session::AgentSessionStore, AppError> {
@@ -842,7 +850,8 @@ impl EngineSessionHost {
         let receipt = store.read_turn_receipt(&session_id, &operation_id).await
             .map_err(|error| conflict(&error.to_string()))?;
         let expected_kind = match expected_event {
-            nomifun_agent_runtime::AgentEngineEvent::TurnCompleted { .. } => "turn/completed",
+            nomifun_agent_runtime::AgentEngineEvent::TurnCompleted { .. }
+                | nomifun_agent_runtime::AgentEngineEvent::TurnInputRequired { .. } => "turn/completed",
             nomifun_agent_runtime::AgentEngineEvent::TurnCancelled { .. } => "turn/cancelled",
             nomifun_agent_runtime::AgentEngineEvent::TurnPaused { .. } => "turn/paused",
             nomifun_agent_runtime::AgentEngineEvent::TurnFailed { .. } => "turn/failed",

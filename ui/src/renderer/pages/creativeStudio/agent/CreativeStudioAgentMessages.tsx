@@ -7,6 +7,7 @@
 import ThinkingProcessDisplay from '@renderer/components/chat/ThinkingProcessDisplay';
 import ConversationErrorNote from '@/renderer/pages/conversation/Messages/components/ConversationErrorNote';
 import { conversationPauseError } from '@/renderer/pages/conversation/utils/conversationPauseError';
+import { agentUserInputRequestText } from '@/common/chat/chatLib';
 import { CheckOne, MagicWand, Refresh, Robot } from '@icon-park/react';
 import { Button } from '@arco-design/web-react';
 import React from 'react';
@@ -115,6 +116,12 @@ const CreativeStudioAgentMessages: React.FC<CreativeStudioAgentMessagesProps> = 
                 {t('creativeStudio.agent.stopped', { defaultValue: 'Stopped' })}
               </div>
             )}
+
+            {message.status === 'input_required' && <div className={styles.messageBubble}>
+              <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+                {agentUserInputRequestText(message.userInputRequest)}
+              </ReactMarkdown>
+            </div>}
 
             {proposal ? (
               <section

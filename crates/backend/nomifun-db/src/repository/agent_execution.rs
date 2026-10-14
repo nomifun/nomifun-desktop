@@ -149,6 +149,8 @@ pub enum AgentExecutionAttemptRecoveryDisposition {
     QueuedRescheduled,
     /// The exact initial-turn receipt was already terminal and was adopted.
     CompletedReceiptAdopted,
+    /// A normally closed Turn retained unfinished work and requested input.
+    UserInputRequested,
     /// The effect boundary could not be proven untouched. The attempt is
     /// parked in a non-dispatchable review state and must never auto-retry.
     ReviewBlocked,
@@ -168,6 +170,7 @@ pub struct RecoveredAgentExecutionAttemptOutput {
     pub conversation_id: String,
     pub canonical_operation_id: String,
     pub terminal_event_id: String,
+    pub user_input_request: Option<nomifun_agent_contracts::AgentUserInputRequest>,
     pub ok: bool,
     pub text: Option<String>,
     pub output_files: Vec<String>,
@@ -361,8 +364,17 @@ pub struct AgentExecutionActiveTurnGuard {
 }
 
 #[derive(Debug, Clone)]
+pub struct AgentExecutionUserInputTurnGuard {
+    pub conversation_id: String,
+    pub canonical_operation_id: String,
+    pub terminal_event_id: String,
+    pub user_input_request: nomifun_agent_contracts::AgentUserInputRequest,
+}
+
+#[derive(Debug, Clone)]
 pub struct SettleAgentExecutionAttemptParams {
     pub expected_active_session_turn: Option<AgentExecutionActiveTurnGuard>,
+    pub expected_user_input_turn: Option<AgentExecutionUserInputTurnGuard>,
     pub attempt_status: ExecutionAttemptStatus,
     pub step_status: ExecutionStepStatus,
     pub execution_status: Option<AgentExecutionStatus>,

@@ -99,6 +99,38 @@ async fn exact_completion_waits_for_the_published_terminal_admission_fence_relea
 }
 
 #[tokio::test]
+async fn a_closed_input_handoff_cannot_authorize_application_configuration_completion() {
+    let fixture = Fixture::new().await;
+    let (source, operation, started) = fixture.turn("input-handoff-not-app-delivery", false).await;
+    let identity = Uuid::now_v7().to_string();
+    fixture.state.session_owner.canonical().store().append_event(&SessionEventAppend {
+        agent_session_id:fixture.session.clone(), event_id:identity.clone().into(),
+        producer_id:"runtime_supervisor".into(), idempotency_key:identity.into(),
+        semantic_event:SemanticSessionEventDraft { kind:SessionEventKind("turn/completed".into()),
+            kind_version:1, correlation_id:operation.as_ref().into(), causation_event_id:Some(started),
+            payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                "user_input_request":{"request_id":"project-name", "question":"请提供项目名称。",
+                    "remaining_work":"收到名称后创建应用。"}
+            }))) },
+    }).await.unwrap();
+    let error = match guard_app_development_completed_config(&fixture.state, &fixture.principal.principal_id,
+        &fixture.app, fixture.session.as_ref(), &source).await {
+        Err(error) => error,
+        Ok(_) => panic!("input handoff must not authorize application completion"),
+    };
+    assert_eq!(error.code, "APP_DEVELOPMENT_INPUT_REQUIRED");
+    let history = canonical_creative_studio_history(&fixture.state,
+        &AuthenticatedOwner(nomifun_agent_contracts::UserId::from(fixture.principal.principal_id.clone())),
+        &fixture.session).await.unwrap();
+    let question = history.iter().find(|message| message.status == CreativeStudioAgentHistoryStatus::InputRequired)
+        .expect("a pure control handoff must survive canonical Canvas history");
+    assert_eq!(question.role, CreativeStudioAgentHistoryRole::Assistant);
+    assert_eq!(question.user_input_request.as_ref().unwrap().request_id.as_ref(), "project-name");
+    assert!(question.text.is_empty(), "the structured question is not fabricated assistant prose");
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn completion_wait_rechecks_successor_active_turn_and_closed_unknown_effects() {
     for unknown in [false, true] {
         let fixture = Fixture::new().await;

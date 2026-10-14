@@ -427,16 +427,16 @@ const CreativeCanvasAgentPanel = React.forwardRef<
             },
             { onEvent }
           );
-          if (outcome.state === 'completed') {
+          if (outcome.state === 'completed' || outcome.state === 'input_required') {
             if (!reconciledHistory) {
-              throw new Error('Creative Studio Agent completed without authoritative history');
+              throw new Error('Creative Studio Agent settled without authoritative history');
             }
-            const completed = creativeCanvasAgentSessionWithAuthoritativeHistory(
+            const settled = creativeCanvasAgentSessionWithAuthoritativeHistory(
               session,
               reconciledHistory,
               now()
             );
-            await persistSession(completed);
+            await persistSession(settled);
             durableHistoryRef.current = reconciledHistory;
             if (mountedRef.current) {
               setMessages(copyHistory(reconciledHistory));

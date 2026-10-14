@@ -239,13 +239,20 @@ fn first_native_generation(facts:&ChatCausalityFacts,operation:&OperationId)->Re
 }
 
 #[derive(Clone,Debug)]
-struct PublicMessage {id:String,event_id:String,seq:u64,last_seq:u64,text:String,speaker:VoiceSpeaker,root:Option<String>}
+struct PublicMessage {id:String,event_id:String,seq:u64,last_seq:u64,text:String,speaker:VoiceSpeaker,root:Option<String>,input_request_id:Option<String>}
 #[derive(Deserialize)]
 struct AcceptedText {content:String,#[serde(default)]hidden:bool}
 #[derive(Deserialize)]
 struct Part {content:String,turn_id:String}
 #[derive(Deserialize)]
 struct Completed {part_count:u64,content_digest:String}
+
+const INPUT_HANDOFF_SUMMARY:&str="The exact canonical turn returned input to the user; task completion was not claimed.";
+fn terminal_summary(delivery:&nomifun_agent_execution::AgentExecutionDelivery)->&'static str {
+    if delivery.user_input_request.is_some() {INPUT_HANDOFF_SUMMARY}
+    else if delivery.completed&&delivery.result_ok==Some(true) {"The exact canonical task completed."}
+    else {"The exact canonical task closed; no further execution is claimed."}
+}
 
 /// Only a typed, owned model-step supersede can withdraw its one public
 /// assistant identity. Neither a Turn status nor an unrelated correction
@@ -281,25 +288,46 @@ fn public_messages(facts:&ChatCausalityFacts)->Result<Vec<PublicMessage>,VoiceEr
     let floor=facts.events.iter().filter(|event|event.kind.0=="context/cleared").map(|event|event.seq).max().unwrap_or(0);
     let mut hidden=BTreeSet::new();let mut hidden_messages=voice_superseded_message_ids(facts)?;let mut parts=BTreeMap::<String,(PublicMessage,u64)>::new();let mut output=Vec::new();
     let mut ordered=facts.events.iter().filter(|event|event.seq>floor).collect::<Vec<_>>();ordered.sort_by_key(|event|event.seq);
+    let mut starts=BTreeMap::new();
     for event in ordered {
-        if !matches!(event.kind.0.as_str(),"message/user-accepted"|"turn/steer-accepted"|"message/assistant-projected"|"message/content-part"|"message/completed"){continue;}
+        if !matches!(event.kind.0.as_str(),"message/user-accepted"|"turn/steer-accepted"|"message/assistant-projected"|"message/content-part"|"message/completed"|"turn/started"|"turn/completed"|"turn/failed"|"turn/cancelled"){continue;}
         if event.kind_version!=1{return Err(work_error("unsupported public message event"));}
         let value=facts.event_payloads.get(event.event_id.as_ref()).ok_or_else(||work_error("missing canonical public payload"))?;
         match event.kind.0.as_str() {
+            "turn/started"=>{
+                if starts.insert(event.correlation_id.as_ref().to_owned(),event).is_some(){return Err(work_error("duplicate canonical Turn source for voice"));}
+            }
+            "turn/completed"|"turn/failed"|"turn/cancelled"=>{
+                if !value.get("user_input_request").is_some_and(|request|!request.is_null()){continue;}
+                let start=starts.get(event.correlation_id.as_ref()).ok_or_else(||work_error("input handoff has no exact canonical Turn source"))?;
+                let receipt=nomifun_agent_session::TurnReceipt {agent_session_id:facts.session.agent_session_id.clone(),operation_id:event.correlation_id.as_ref().into(),
+                    status:match event.kind.0.as_str(){"turn/completed"=>TurnReceiptStatus::Completed,"turn/failed"=>TurnReceiptStatus::Failed,_=>TurnReceiptStatus::Cancelled},
+                    started_event:Some((*start).clone()),terminal_event:Some(event.clone())};
+                let delivery=nomifun_agent_execution::canonical_turn_delivery(facts,&receipt,true).map_err(work_error)?;
+                let request=delivery.user_input_request.as_ref().ok_or_else(||work_error("canonical input handoff lost its typed question"))?;
+                let root=delivery.message_id;
+                if hidden.contains(&root){continue;}
+                if !facts.events.iter().any(|source|source.seq>floor&&source.seq<start.seq&&source.event_id.as_ref()==root&&source.kind.0=="message/user-accepted"){
+                    return Err(work_error("input handoff has no original accepted canonical input"));
+                }
+                let text=nomifun_channel::message_service::channel_reply_text(None,Some(request)).ok_or_else(||work_error("input handoff has no public question"))?;
+                output.push(PublicMessage {id:event.event_id.as_ref().into(),event_id:event.event_id.as_ref().into(),seq:event.seq,last_seq:event.seq,
+                    text,speaker:VoiceSpeaker::Assistant,root:Some(root),input_request_id:Some(request.request_id.as_ref().into())});
+            }
             "message/user-accepted"|"turn/steer-accepted"=>{
                 let value=if event.kind.0=="turn/steer-accepted" {value.get("input").ok_or_else(||work_error("steering has no input"))?}else{value};
                 let input:AcceptedText=serde_json::from_value(value.clone()).map_err(work_error)?;
                 if input.hidden {hidden.insert(event.event_id.as_ref().to_owned());continue;}
-                if !input.content.trim().is_empty(){output.push(PublicMessage {id:event.event_id.as_ref().into(),event_id:event.event_id.as_ref().into(),seq:event.seq,last_seq:event.seq,text:input.content,speaker:VoiceSpeaker::User,root:None});}
+                if !input.content.trim().is_empty(){output.push(PublicMessage {id:event.event_id.as_ref().into(),event_id:event.event_id.as_ref().into(),seq:event.seq,last_seq:event.seq,text:input.content,speaker:VoiceSpeaker::User,root:None,input_request_id:None});}
             }
             "message/assistant-projected"=>{
                 let input:AcceptedText=serde_json::from_value(value.clone()).map_err(work_error)?;
                 if input.hidden{hidden_messages.insert(event.correlation_id.as_ref().to_owned());continue;}
-                if !input.hidden&&!input.content.trim().is_empty(){output.push(PublicMessage {id:event.correlation_id.as_ref().into(),event_id:event.event_id.as_ref().into(),seq:event.seq,last_seq:event.seq,text:input.content,speaker:VoiceSpeaker::Assistant,root:None});}
+                if !input.hidden&&!input.content.trim().is_empty(){output.push(PublicMessage {id:event.correlation_id.as_ref().into(),event_id:event.event_id.as_ref().into(),seq:event.seq,last_seq:event.seq,text:input.content,speaker:VoiceSpeaker::Assistant,root:None,input_request_id:None});}
             }
             "message/content-part"=>{
                 let part:Part=serde_json::from_value(value.clone()).map_err(work_error)?;if hidden.contains(&part.turn_id){hidden_messages.insert(event.correlation_id.as_ref().to_owned());continue;}
-                let current=parts.entry(event.correlation_id.as_ref().into()).or_insert_with(||(PublicMessage {id:event.correlation_id.as_ref().into(),event_id:event.event_id.as_ref().into(),seq:event.seq,last_seq:event.seq,text:String::new(),speaker:VoiceSpeaker::Assistant,root:Some(part.turn_id.clone())},0));
+                let current=parts.entry(event.correlation_id.as_ref().into()).or_insert_with(||(PublicMessage {id:event.correlation_id.as_ref().into(),event_id:event.event_id.as_ref().into(),seq:event.seq,last_seq:event.seq,text:String::new(),speaker:VoiceSpeaker::Assistant,root:Some(part.turn_id.clone()),input_request_id:None},0));
                 if current.0.root.as_deref()!=Some(part.turn_id.as_str())||current.0.text.len().saturating_add(part.content.len())>8*1024*1024{return Err(work_error("invalid public message part identity or budget"));}
                 current.0.text.push_str(&part.content);current.0.last_seq=event.seq;current.0.event_id=event.event_id.as_ref().into();current.1+=1;
             }
@@ -322,11 +350,17 @@ fn public_messages(facts:&ChatCausalityFacts)->Result<Vec<PublicMessage>,VoiceEr
 fn public_message_fact(facts:&ChatCausalityFacts,message:PublicMessage)->VerifiedVoiceFact{
         let speech_source=(message.speaker==VoiceSpeaker::Assistant).then(||VoiceSpeechSourceRef {message_id:message.id.clone(),revision:message.last_seq,through_seq:message.last_seq});
         let excerpt=bounded(&message.text,2048);
+        let mut content=json!({"kind":"canonical_public_message","speaker":message.speaker,"source_event_id":message.event_id,"message_id":message.id,"through_seq":message.last_seq,
+            "agent_session_id":facts.session.agent_session_id,"binding_version":facts.session.agent_binding.binding_version,"context_floor":context_floor(facts),"content":excerpt,
+            "truncated":message.text.len()>2048,"original_bytes":message.text.len(),"excerpt_not_complete_when_truncated":true,"data_only":true});
+        if let Some(request_id)=message.input_request_id {
+            content["kind"]=json!("canonical_user_input_request");
+            content["user_input_request_id"]=json!(request_id);
+            content["task_completion_claimed"]=json!(false);
+        }
         VerifiedVoiceFact {
         correlation_id:format!("initial:{}",message.event_id),upstream_trigger_id:None,canonical_receipt_id:message.event_id.clone(),
-        content:json!({"kind":"canonical_public_message","speaker":message.speaker,"source_event_id":message.event_id,"message_id":message.id,"through_seq":message.last_seq,
-            "agent_session_id":facts.session.agent_session_id,"binding_version":facts.session.agent_binding.binding_version,"context_floor":context_floor(facts),"content":excerpt,
-            "truncated":message.text.len()>2048,"original_bytes":message.text.len(),"excerpt_not_complete_when_truncated":true,"data_only":true}).to_string(),
+        content:content.to_string(),
         speak:false,output_generation:None,work_context:None,speech_source,
     }
 }
@@ -384,7 +418,7 @@ impl VoiceWorkPort for AppVoiceWorkHost {
                 let delivery=nomifun_agent_execution::canonical_turn_delivery(&actual,&turn,true).map_err(work_error)?;
                 let historical=match receipt.status {
                     VoiceWorkStatus::Accepted=>turn.started_event.is_some()&&receipt.summary==if target.execution_generation==0 {"The canonical task is accepted and has not claimed a native model generation."}else{"The canonical task remains active."},
-                    VoiceWorkStatus::Terminal=>turn.terminal_event.is_some()&&receipt.summary==if delivery.completed&&delivery.result_ok==Some(true) {"The exact canonical task completed."}else{"The exact canonical task closed; no further execution is claimed."},
+                    VoiceWorkStatus::Terminal=>turn.terminal_event.is_some()&&receipt.summary==terminal_summary(&delivery),
                     VoiceWorkStatus::PendingBoundary=>(turn.terminal_event.is_some()||actual.events.iter().any(|event|event.kind.0=="turn/paused"&&event.correlation_id.as_ref()==target.turn_operation_id.as_ref()))
                         &&matches!(receipt.summary.as_str(),"The exact task is paused at its canonical boundary."|"The exact canonical task closed; no further execution is claimed."),
                     _=>false,
@@ -477,7 +511,7 @@ impl VoiceWorkPort for AppVoiceWorkHost {
         let speech=public_messages(&public)?.into_iter().rev().find(|message|root.is_some()&&message.speaker==VoiceSpeaker::Assistant&&message.root.as_deref()==root)
             .map(|message|VoiceSpeechProjection {message_id:message.id,revision:message.last_seq,through_seq:message.last_seq,text:bounded(&message.text,4096)});
         Ok(VoiceWorkReceipt {receipt_id:target.turn_operation_id.as_ref().into(),operation_key:target.turn_operation_id.as_ref().into(),target:Some(target.clone()),pending_input_id:None,status:state,
-            summary:if delivery.completed {match delivery.result_ok {Some(true)=>"The exact canonical task completed.",_=>"The exact canonical task closed; no further execution is claimed."}}
+            summary:if delivery.completed {terminal_summary(&delivery)}
                 else if target.execution_generation==0 {"The canonical task is accepted and has not claimed a native model generation."}else if facts.head.status=="paused" {"The exact task is paused at its canonical boundary."}else{"The canonical task remains active."}.into(),
             duplicate:true,speech,pending_input_revision:None,first_claim_generation:first_native_generation(&facts,&target.turn_operation_id)?})
     }
@@ -625,6 +659,60 @@ mod tests {
         let mut data=facts();event(&mut data,"message/completed","orphan","assistant",json!({"part_count":1,"content_digest":digest_bytes(b"missing")}));assert!(public_messages(&data).is_err());
         let mut data=facts();event(&mut data,"message/content-part","part","assistant",json!({"content":"actual bytes","turn_id":"root"}));
         event(&mut data,"message/completed","completed","assistant",json!({"part_count":1,"content_digest":"f".repeat(64)}));assert!(public_messages(&data).is_err());
+    }
+    fn handoff_question()->nomifun_agent_contracts::AgentUserInputRequest {
+        nomifun_agent_contracts::AgentUserInputRequest {request_id:"question-control".into(),question:"Which name and interests should the PPT use?".into(),remaining_work:"Create and verify the PPT after the user's answer.".into()}
+    }
+    fn handoff_facts(hidden:bool)->ChatCausalityFacts {
+        let mut data=facts();
+        event(&mut data,"message/user-accepted","original-input","original-input",json!({"content":"Create a self-introduction PPT.","hidden":hidden}));
+        event(&mut data,"turn/started","turn-start","original-turn",json!({"source_message_id":"original-input"}));
+        data
+    }
+    fn handoff_delivery(data:&ChatCausalityFacts)->nomifun_agent_execution::AgentExecutionDelivery {
+        let terminal=data.events.iter().find(|event|event.kind.0=="turn/completed").unwrap().clone();
+        let receipt=nomifun_agent_session::TurnReceipt {agent_session_id:data.session.agent_session_id.clone(),operation_id:"original-turn".into(),status:TurnReceiptStatus::Completed,
+            started_event:Some(data.events[1].clone()),terminal_event:Some(terminal)};
+        nomifun_agent_execution::canonical_turn_delivery(data,&receipt,true).unwrap()
+    }
+    #[test]
+    fn voice_input_handoff_requires_durable_terminal_then_preserves_exact_public_source_without_task_success() {
+        let mut data=handoff_facts(false);let request=handoff_question();
+        event(&mut data,"runtime/progress-recorded","native-question","original-turn",json!({"event":nomifun_agent_runtime::AgentEngineEvent::UserInputRequested{step:1,request:request.clone()}}));
+        event(&mut data,"message/tips-updated","projected-tip","tip-message",json!({"user_input_request":request}));
+        assert_eq!(initial_facts(&data).unwrap().len(),1,"an unresolved declaration or Tips projection cannot become a delivered question");
+        event(&mut data,"turn/completed","input-handoff","original-turn",json!({"user_input_request":request}));
+        let visible=initial_facts(&data).unwrap();assert_eq!(visible.len(),2);
+        let fact=&visible[1];let content:Value=serde_json::from_str(&fact.content).unwrap();
+        assert_eq!(content["kind"],"canonical_user_input_request");assert_eq!(content["task_completion_claimed"],false);
+        assert_eq!(content["user_input_request_id"],request.request_id.as_ref());assert_eq!(fact.canonical_receipt_id,"input-handoff");
+        assert!(content["content"].as_str().unwrap().contains(&request.question));assert!(content["content"].as_str().unwrap().contains(&request.remaining_work));
+        let source=fact.speech_source.as_ref().unwrap().clone();assert_eq!(source.message_id,"input-handoff");assert_eq!(source.revision,5);assert_eq!(source.through_seq,5);
+        assert_eq!(terminal_summary(&handoff_delivery(&data)),INPUT_HANDOFF_SUMMARY);
+        assert_ne!(terminal_summary(&handoff_delivery(&data)),"The exact canonical task completed.");
+        for index in 0..14 {let id=format!("later-{index}");event(&mut data,"message/user-accepted",&id,&id,json!({"content":"Later ordinary input"}));}
+        assert!(!initial_facts(&data).unwrap().contains(fact),"bounded display can omit a still-valid immutable source");
+        assert!(source_message(&public_messages(&data).unwrap(),&source).is_some());
+        assert!(public_messages(&data).unwrap().into_iter().map(|message|public_message_fact(&data,message)).any(|historical|historical==*fact));
+        event(&mut data,"context/cleared","clear","session",json!({}));assert!(initial_facts(&data).unwrap().is_empty());
+        assert!(source_message(&public_messages(&data).unwrap(),&source).is_none());
+    }
+    #[test]
+    fn voice_input_handoff_never_publishes_hidden_failed_cancelled_or_unbound_questions() {
+        let request=handoff_question();
+        let mut hidden=handoff_facts(true);event(&mut hidden,"turn/completed","closed","original-turn",json!({"user_input_request":request}));
+        assert!(initial_facts(&hidden).unwrap().is_empty());
+        for kind in ["turn/failed","turn/cancelled"] {
+            let mut data=handoff_facts(false);event(&mut data,kind,"closed","original-turn",json!({"user_input_request":request}));
+            assert!(public_messages(&data).is_err(),"{kind} cannot publish a normal input handoff");
+        }
+        let mut wrong=handoff_facts(false);event(&mut wrong,"turn/completed","closed","different-turn",json!({"user_input_request":request}));
+        assert!(public_messages(&wrong).is_err(),"another Turn cannot borrow the old source input");
+        let mut invalid=handoff_facts(false);event(&mut invalid,"turn/completed","closed","original-turn",json!({"user_input_request":{"request_id":"question-control","question":" ","remaining_work":"Create PPT."}}));
+        assert!(public_messages(&invalid).is_err());
+        let mut normal=handoff_facts(false);event(&mut normal,"turn/completed","closed","original-turn",json!({}));
+        assert_eq!(terminal_summary(&handoff_delivery(&normal)),"The exact canonical task completed.","ordinary successful completion retains its existing meaning");
+        assert_eq!(initial_facts(&normal).unwrap().len(),1,"a normal terminal is not a fabricated public question");
     }
     #[test]
     fn voice_source_validation_uses_immutable_canonical_history_instead_of_the_latest_display_window(){

@@ -15,16 +15,20 @@ import type { TMessage } from '@/common/chat/chatLib';
 import type { IConversationTurnCompletedEvent, IConversationTurnStartedEvent, IResponseMessage, IUserMessageCreatedEvent } from '@/common/adapter/ipcBridge';
 import { parseCompanionId, parseConversationId, parseMessageId } from '@/common/types/ids';
 import nomi from '@/renderer/services/i18n/locales/en-US/nomi.json';
+import conversation from '@/renderer/services/i18n/locales/en-US/conversation.json';
 import { useCompanionSessionBubble } from './useCompanionSessionBubble';
 
 const i18n = createInstance();
-await i18n.init({ lng: 'en-US', resources: { 'en-US': { translation: { nomi } } }, interpolation: { escapeValue: false } });
+await i18n.init({ lng: 'en-US', resources: { 'en-US': { translation: { nomi, conversation } } }, interpolation: { escapeValue: false } });
 const wrapper = ({ children }: PropsWithChildren) => <I18nextProvider i18n={i18n}>{children}</I18nextProvider>;
 const companionId = parseCompanionId('019f0000-0000-7000-8000-000000000911');
 const conversationId = parseConversationId('019f0000-0000-7000-8000-000000000912');
 const root = parseMessageId('019f0000-0000-7000-8000-000000000913');
 const successor = parseMessageId('019f0000-0000-7000-8000-000000000914');
 const segment = parseMessageId('019f0000-0000-7000-8000-000000000915');
+const noteId = parseMessageId('019f0000-0000-7000-8000-000000000917');
+const request = { request_id: 'ask:choose-path', question: 'Which directory should I use?', remaining_work: 'Write and verify the report.' };
+const questionText = `${request.question}\n\n${request.remaining_work}`;
 const idle = { id: conversationId, status: 'finished', runtime: { state: 'idle', can_send_message: true,
   is_processing: false, has_runtime: false } } as TChatConversation;
 const busy = (turn = root) => ({ ...idle, status: 'running', runtime: { state: 'running', can_send_message: false,
@@ -42,6 +46,11 @@ const completed = (turn = root): IConversationTurnCompletedEvent => ({
 });
 const stored = (text: string): TMessage => ({ id: 'saved', message_id: segment, msg_id: segment, turn_id: root,
   conversation_id: conversationId, position: 'left', type: 'text', content: { content: text }, created_at: 100 });
+const inputNote = (): IResponseMessage => content('', { msg_id: noteId, type: 'tips', stream_complete: true,
+  data: { type: 'warning', content: '', user_input_request: request } });
+const storedInputNote = (): TMessage => ({ ...stored(''), id: String(noteId), message_id: noteId, msg_id: noteId,
+  position: 'center', type: 'tips', content: { content: '', type: 'warning', user_input_request: request } });
+const inputCompleted = (): IConversationTurnCompletedEvent => ({ ...completed(), stop_reason: 'input_required' });
 afterEach(() => { cleanup(); jest.useRealTimers(); mock.restore(); });
 
 function transport(initial: TChatConversation = idle) {
@@ -142,6 +151,58 @@ describe('companion bubble observes canonical cross-window lifecycle', () => {
     await act(async () => { resolveRuntime?.(idle); });
     expect(view.result.current.bubble).toBe('Completed during hydration');
     expect(view.result.current.phase).toBe('settled');
+  });
+
+  test('the typed question is an ordinary reply and only canonical idle authority ends activity', async () => {
+    const wire = transport(busy());
+    const view = renderHook(() => useCompanionSessionBubble(companionId), { wrapper });
+    await flush();
+    await act(async () => { wire.stream(inputNote()); });
+    expect(view.result.current.bubble).toBe(questionText);
+    expect(view.result.current.running).toBe(true);
+    wire.setAuthority(idle);
+    wire.setSaved([storedInputNote()]);
+    await act(async () => { wire.finish(inputCompleted()); });
+    expect(view.result.current.bubble).toBe(questionText);
+    expect(view.result.current.phase).toBe('settled');
+    expect(view.result.current.running).toBe(false);
+    expect(wire.stop).not.toHaveBeenCalled();
+  });
+
+  test('a terminal before the question shows waiting and reconnect restores the typed historical reply', async () => {
+    const wire = transport(busy());
+    const view = renderHook(() => useCompanionSessionBubble(companionId), { wrapper });
+    await flush();
+    await act(async () => { wire.stream(content('', { type: 'tool_call' })); });
+    wire.setAuthority(idle);
+    await act(async () => { wire.finish(inputCompleted()); });
+    expect(view.result.current.bubble).toBe(i18n.t('conversation.userInputRequest.title'));
+    expect(view.result.current.phase).toBe('settled');
+    wire.setSaved([storedInputNote()]);
+    await act(async () => { wire.reconnect(); });
+    expect(view.result.current.bubble).toBe(questionText);
+    expect(view.result.current.running).toBe(false);
+  });
+
+  test('an early terminal question survives binding, keeps ordinary expiry and cannot replace a successor', async () => {
+    jest.useFakeTimers();
+    const wire = transport();
+    wire.deferBinding();
+    const view = renderHook(() => useCompanionSessionBubble(companionId), { wrapper });
+    await act(async () => { wire.stream(inputNote()); wire.finish(inputCompleted()); });
+    await act(async () => { wire.resolveBinding(); });
+    expect(view.result.current.bubble).toBe(questionText);
+    expect(view.result.current.phase).toBe('settled');
+    act(() => { jest.advanceTimersByTime(24_000); });
+    expect(view.result.current.bubble).toBe('');
+    await act(async () => { wire.stream(inputNote()); });
+    expect(view.result.current.bubble).toBe('');
+    wire.setAuthority(busy(successor));
+    await act(async () => { wire.user(accepted(successor)); wire.start(successor); });
+    await act(async () => { wire.stream(inputNote()); wire.finish(inputCompleted()); });
+    expect(view.result.current.turnId).toBe(successor);
+    expect(view.result.current.running).toBe(true);
+    expect(view.result.current.bubble).toBe('…');
   });
   test('dismissal is per Turn, cancellation names that Turn, and a new remote input uses the same session', async () => {
     const wire = transport(busy());

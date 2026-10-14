@@ -6,7 +6,7 @@
 
 import type { IResponseMessage } from '@/common/adapter/ipcBridge';
 import { extractResponseTextChunk } from '@/common/chat/displayText';
-import type { TMessage } from '@/common/chat/chatLib';
+import { agentUserInputRequestText, isUserInputRequestPresentation, type TMessage } from '@/common/chat/chatLib';
 import type { ConversationId, MessageId } from '@/common/types/ids';
 
 export type CompanionBubblePhase = 'idle' | 'accepted' | 'running' | 'paused' | 'settled';
@@ -53,12 +53,16 @@ export const hydrateCompanionSessionBubble = (
   observed: Pick<CompanionSessionBubbleState, 'segments' | 'segmentRevisions'>
 ): CompanionSessionBubbleState => {
   if (!state.turnId || state.dismissed || state.interrupted) return state;
-  const owned = messages.filter(message => message.conversation_id === state.conversationId
-    && message.turn_id === state.turnId && message.type === 'text' && message.position === 'left')
-    .sort((left, right) => (left.created_at ?? 0) - (right.created_at ?? 0));
+  const owned = messages.flatMap(message => {
+    if (message.conversation_id !== state.conversationId || message.turn_id !== state.turnId) return [];
+    const text = message.type === 'text' && message.position === 'left' ? extractResponseTextChunk(message.content)
+      : message.type === 'tips' && message.content.type !== 'error'
+        ? agentUserInputRequestText(message.content.user_input_request) : undefined;
+    return text === undefined ? [] : [{ message, text }];
+  }).sort((left, right) => (left.message.created_at ?? 0) - (right.message.created_at ?? 0));
   const segments = new Map(state.segments);
   const historyOrder: MessageId[] = [];
-  for (const message of owned) {
+  for (const { message, text: saved } of owned) {
     const id = message.msg_id ?? message.message_id;
     if (!id) continue;
     if (state.segmentRevisions.get(id) !== observed.segmentRevisions.get(id)) continue;
@@ -68,7 +72,6 @@ export const hydrateCompanionSessionBubble = (
     }
     historyOrder.push(id);
     const live = segments.get(id);
-    const saved = extractResponseTextChunk(message.content);
     if (live !== observed.segments.get(id) || (state.phase !== 'settled' && live && live.length > saved.length)) continue;
     segments.set(id, saved);
   }
@@ -92,8 +95,9 @@ export const streamCompanionSessionBubble = (
   toolHint: string,
   errorHint: string
 ): CompanionSessionBubbleState => {
+  const inputRequest = isUserInputRequestPresentation(message) ? agentUserInputRequestText(message.data.user_input_request) : undefined;
   if (message.conversation_id !== state.conversationId || !message.turn_id || message.turn_id !== state.turnId
-    || message.stream_complete || state.dismissed || state.interrupted) return state;
+    || (message.stream_complete && !inputRequest) || state.dismissed || state.interrupted) return state;
   if (message.hidden) {
     const segments = new Map(state.segments);
     segments.delete(message.msg_id);
@@ -103,14 +107,14 @@ export const streamCompanionSessionBubble = (
     const text = joinedText(next);
     return { ...next, bubble: text || state.hint || (state.phase === 'settled' ? '' : '…'), loading: !text && !state.hint };
   }
-  if (message.type === 'content' || message.type === 'text') {
-    const chunk = extractResponseTextChunk(message.data);
+  if (message.type === 'content' || message.type === 'text' || inputRequest) {
+    const chunk = inputRequest ?? extractResponseTextChunk(message.data);
     if ((!chunk && !message.replace) || !message.msg_id) return state;
     const segments = new Map(state.segments);
     const segmentRevisions = new Map(state.segmentRevisions);
     segmentRevisions.set(message.msg_id, (segmentRevisions.get(message.msg_id) ?? 0) + 1);
     const order = segments.has(message.msg_id) ? state.order : [...state.order, message.msg_id];
-    segments.set(message.msg_id, message.replace ? chunk : (segments.get(message.msg_id) ?? '') + chunk);
+    segments.set(message.msg_id, message.replace || inputRequest ? chunk : (segments.get(message.msg_id) ?? '') + chunk);
     const next = { ...state, segments, segmentRevisions, order };
     const text = joinedText(next);
     return { ...next, bubble: text || (state.phase === 'settled' ? '' : '…'), loading: !text && state.phase !== 'settled' };

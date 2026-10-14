@@ -8,6 +8,7 @@ import type { CreativeModelSelectionRef } from '../models';
 import type { ReactNode } from 'react';
 import type { ConversationPauseNotice } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import type { AgentStreamErrorInfo } from '@/common/chat/chatLib';
+import type { AgentUserInputRequest } from '@/common/protocolBindings/AgentUserInputRequest';
 
 export type CreativeStudioAgentView = 'chat' | 'history';
 export type CreativeStudioAgentPanelLoadState = 'loading' | 'ready' | 'failed';
@@ -39,6 +40,12 @@ interface CreativeStudioAgentRunningMessage extends CreativeStudioAgentMessageBa
   activityLabel?: string;
 }
 
+interface CreativeStudioAgentInputRequiredMessage extends CreativeStudioAgentMessageBase {
+  role: 'assistant';
+  status: 'input_required';
+  userInputRequest: AgentUserInputRequest;
+}
+
 interface CreativeStudioAgentFailedMessage extends CreativeStudioAgentMessageBase {
   role: 'assistant';
   status: 'failed';
@@ -63,6 +70,7 @@ interface CreativeStudioAgentPausedMessage extends CreativeStudioAgentMessageBas
 export type CreativeStudioAgentMessage =
   | CreativeStudioAgentUserMessage
   | CreativeStudioAgentCompleteMessage
+  | CreativeStudioAgentInputRequiredMessage
   | CreativeStudioAgentRunningMessage
   | CreativeStudioAgentFailedMessage
   | CreativeStudioAgentPausedMessage

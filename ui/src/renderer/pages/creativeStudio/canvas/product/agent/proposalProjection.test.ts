@@ -24,6 +24,13 @@ ${JSON.stringify({
 \`\`\``;
 
 describe('Creative Canvas proposal projection', () => {
+  test('an input handoff with an existing design never authorizes a Canvas proposal', () => {
+    const projected = projectCreativeCanvasAgentProposals([{id:READY_ID,role:'assistant',status:'input_required',
+      text:artifact('已有设计'),userInputRequest:{request_id:'question-1',question:'请输入姓名',remaining_work:'完成介绍页'}}],{},[]);
+    expect(projected.proposals).toEqual([]);
+    expect(projected.artifacts.size).toBe(0);
+  });
+
   test('durable receipt authority wins over a stale in-memory failure after remount', () => {
     const messages: CreativeStudioAgentMessage[] = [
       { id: READY_ID, role: 'assistant', status: 'complete', text: artifact('待应用') },

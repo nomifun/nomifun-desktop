@@ -87,6 +87,51 @@ Creation prompts, Cron notices and Execution summaries enter context through for
 
 Current-generation history, immutable Snapshots, model changes and explicit Agent transitions remain supported product semantics. They are verified against identity, sequence, binding and content integrity. Executable recovery requires the native checkpoint's exact build and binding. Closed read-only event history may cross an explicitly validated transition without gaining authority.
 
+### User-input handoff
+
+The Runtime's `request_user_input` control declares a question and remaining work for an ordinary
+conversation. Its identity comes from the exact tool call; the host verifies the owner, Session and
+active Turn. This is a normal handoff, never an answer, permission or completion evidence.
+`report_completion` retains the actual delivery evidence gate. Both intents share the original
+terminal input fence, resource cleanup and one canonical terminal commit; no waiting state or
+question ledger is added.
+
+When task accounting is active and a response has no explicit end intent, the existing bounded
+review allows either completion or input handoff. Questions cannot escape actual report review,
+failure-stop or unknown-effect fences. The original typed Runtime Event and native checkpoint
+retain a committed request. Recovery only settles that handoff; it never re-asks, replays tools or
+restores live process handles. Already-admitted replies use steering; replies after closure start
+a new Turn in the same Session. Context reads canonical questions and unfinished requirements;
+the remaining-work description is neither wider authority nor effect evidence.
+
+After cleanup proof and terminal acknowledgement, `turn/completed` carries `user_input_request`
+to indicate normal return of this turn's input control. Realtime and history share an ordinary
+question notice; rendering never guesses from prose, manufactures idle or rewrites old failures.
+Canonical AgentExecution output, recovery, adoption and scheduling consume that typed handoff;
+a closed turn with public text cannot complete a Step. AskUser still validates the exact active
+Link, Attempt, policy and original Turn receipt. Automatic decisions and Cron gain no human
+authority from a question. No reply means no model polling or effect replay.
+
+### Execution windows and suspension
+
+Model and journal windows renew the same Turn only after an acknowledged quiescent checkpoint.
+Cumulative allowances, process deadlines, cancellation and Effect fences remain in force.
+When a soft window expires with original processes still running, the Runtime exposes only
+their exact stdin, EOF, poll and cancellation controls, authorized file reads needed for input,
+and plan updates. It admits no new process or unrelated work and never unlocks report-only review.
+Live handles are not checkpointed. Actual terminal and cleanup observations permit a new
+checkpoint at the consumed model step; renewal requires its durable acknowledgement. Empty
+polls, poll argument changes and instruction reads do not extend stall protection. Real budget
+exhaustion, unknown outcomes, cancellation and missing checkpoint acknowledgement keep the
+existing fail-closed behavior.
+
+The renderer shares an idle/running/paused interpretation of the existing canonical projection
+without another persistent lifecycle. Suspension retains the original Turn and input fence;
+an explicit end-turn action replaces the execution animation and cancels that exact Turn.
+Input reopens only after release is confirmed. Public pause notices preserve known execution,
+recovery and cleanup codes at the exact Operation and observed cursor. Private prose stays
+private, and a reason code never substitutes for cleanup evidence.
+
 ### Model derivation and bundled contract evolution
 
 A model change derives a new immutable Revision/Snapshot from the Session's saved artifacts. It changes only the

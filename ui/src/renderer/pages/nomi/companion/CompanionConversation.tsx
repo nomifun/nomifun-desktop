@@ -16,7 +16,7 @@ import type { useCompanion } from '../useNomi';
 import ProductAgentBindingSelect, { productAgentErrorReason } from '@/renderer/components/agent/ProductAgentBindingSelect';
 import CompanionAvatar from '@/renderer/pages/companion/CompanionAvatar';
 import { customFigureMetaOf } from '@/renderer/pages/companion/characters/customMeta';
-import { getConversationRuntimeAuthority } from '@/renderer/pages/conversation/utils/conversationRuntime';
+import { isConversationBindingBlocked } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import { saveCompanionChatModel, type CompanionChatModel } from './saveCompanionChatModel';
 
 type NomiConversation = Extract<TChatConversation, { type: 'nomi' }>;
@@ -49,8 +49,7 @@ const CompanionConversation: React.FC<Props> = ({ conversation, companion, compa
     const provider = groups.find(({ provider }) => provider.id === conversation.model.id)?.provider;
     return provider ? { ...provider, use_model: conversation.model.use_model } : conversation.model;
   }, [groups, conversation.model]);
-  const sessionBlocked = getConversationRuntimeAuthority(conversation) !== 'idle' || Boolean(conversation.runtime?.active_turn_id)
-    || conversation.extra.execution_phase === 'paused' || Boolean(conversation.execution_attempt_id);
+  const sessionBlocked = isConversationBindingBlocked(conversation);
   const refreshSession = useCallback(() => {
     void refreshConversationCache(conversation.id).catch(() => {
       Message.error(t('agentSettings.productBinding.loadFailed'));

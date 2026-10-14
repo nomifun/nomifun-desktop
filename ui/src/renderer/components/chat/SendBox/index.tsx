@@ -182,6 +182,8 @@ const SendBox: React.FC<{
   /** Block submission during background refreshes without interrupting typing or IME. */
   submitDisabled?: boolean;
   loading?: boolean;
+  /** A suspended Turn retains cancellation without implying active execution. */
+  paused?: boolean;
   className?: string;
   tools?: React.ReactNode;
   rightTools?: React.ReactNode;
@@ -222,6 +224,7 @@ const SendBox: React.FC<{
   renderAttachments,
   className,
   loading,
+  paused = false,
   tools,
   rightTools,
   creationTools,
@@ -1337,6 +1340,10 @@ const SendBox: React.FC<{
 
   const renderActionButtons = () => {
     if (isStopping) return stopButton;
+    if (paused) return <Button type='secondary' onClick={stopHandler}
+      data-testid='sendbox-paused-cancel-btn' aria-label={t('conversation.stop.endPausedTurn')}>
+      {t('conversation.stop.endPausedTurn')}
+    </Button>;
     if (allowSendWhileLoading && (isLoading || loading)) {
       // Stop is an independent safety action. A non-empty draft must never
       // replace or hide it: users may need to cancel the current turn even

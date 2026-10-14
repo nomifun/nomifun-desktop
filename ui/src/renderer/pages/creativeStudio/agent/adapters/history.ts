@@ -5,11 +5,14 @@
  */
 
 import type { CreativeStudioAgentMessage } from '../types';
+import { normalizeAgentUserInputRequest } from '@/common/chat/chatLib';
 
 export function isDurableCreativeStudioAgentMessage(message: CreativeStudioAgentMessage): boolean {
+  if ('userInputRequest' in message && message.status !== 'input_required') return false;
   return (message.role === 'user' && message.status === 'complete') ||
     (message.role === 'assistant' && (
       message.status === 'complete' || message.status === 'stopped' ||
+      (message.status === 'input_required' && !!normalizeAgentUserInputRequest(message.userInputRequest)) ||
       (message.status === 'failed' && typeof message.errorMessage === 'string' &&
         message.errorMessage.trim().length > 0)
     ));
@@ -35,6 +38,7 @@ export function serializeCreativeStudioAgentHistory(
         : {}),
       ...(message.status === 'failed' ? { errorMessage: message.errorMessage } : {}),
       ...(message.status === 'paused' ? { pause: message.pause } : {}),
+      ...(message.status === 'input_required' ? { userInputRequest: message.userInputRequest } : {}),
     }))
   );
 }

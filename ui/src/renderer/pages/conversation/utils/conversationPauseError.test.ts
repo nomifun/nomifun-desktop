@@ -22,6 +22,10 @@ describe('canonical pause error presentation', () => {
     ['EXECUTION_MODEL_ROUTE_REVISION_MISMATCH', 'NOMIFUN_SESSION_CONFIGURATION_CHANGED'],
     ['EXECUTION_MODEL_STREAM_INTERRUPTED', 'EXECUTION_MODEL_STREAM_INTERRUPTED'],
     ['EXECUTION_SESSION_PAYLOAD_BUDGET', 'EXECUTION_SESSION_PAYLOAD_BUDGET'],
+    ...['EXECUTION_DISPATCH_WINDOW', 'EXECUTION_TOTAL_MODEL_BUDGET', 'EXECUTION_SEGMENT_BUDGET',
+      'EXECUTION_NO_PROGRESS', 'EXECUTION_PROGRESS_LEDGER_FULL', 'EXECUTION_CHECKPOINT_UNAVAILABLE',
+      'EXECUTION_NON_QUIESCENT_BOUNDARY', 'EXECUTION_TURN_JOURNAL_BUDGET',
+      'NATIVE_RECOVERY_RECONCILIATION_REQUIRED', 'EXECUTION_CLEANUP_UNPROVEN'].map(reason => [reason, reason]),
   ])('maps only the exact cause %s', (reason, code) => {
     const error = conversationPauseError({ ...pause, reason });
     expect(error.code).toBe(code);
@@ -35,6 +39,16 @@ describe('canonical pause error presentation', () => {
     expect(error.detail).toBe('EXECUTION_MODEL_PROVIDER_UNAVAILABLE');
     expect(error.retryable).toBe(false);
     expect(error.resolution).toBeUndefined();
+  });
+
+  test('a non-quiescent execution boundary does not itself imply unconfirmed resource cleanup', () => {
+    const reason = 'EXECUTION_NON_QUIESCENT_BOUNDARY';
+    expect(conversationPauseError({ ...pause, reason, cleanupProven: true })).toMatchObject({
+      code: reason, detail: reason, retryable: false,
+    });
+    expect(conversationPauseError({ ...pause, reason, cleanupProven: false })).toMatchObject({
+      code: 'EXECUTION_CLEANUP_UNCONFIRMED', detail: reason, retryable: false,
+    });
   });
 
   test('missing or unknown causes cannot expose private prose or claim a precise failure', () => {

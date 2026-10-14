@@ -34,6 +34,7 @@ import {
   normalizeTruncatedTurnRecovery,
   preferTextMessageVersion,
   normalizeTextContinuation,
+  normalizeAgentUserInputRequest,
 } from '@/common/chat/chatLib';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createContext } from '@renderer/utils/ui/createContext';
@@ -599,6 +600,7 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
       : undefined;
   const recovery = normalizeTruncatedTurnRecovery(parsed.recovery);
   const notice = normalizeIdmmDecisionNotice(parsed.idmm_notice);
+  const userInputRequest = tipType !== 'error' ? normalizeAgentUserInputRequest(parsed.user_input_request) : undefined;
   const agentTransition = tipType === 'success' ? normalizeAgentTransition(parsed.agent_transition) : undefined;
   const startedAtMs =
     typeof parsed.started_at_ms === 'number' && Number.isFinite(parsed.started_at_ms) && parsed.started_at_ms > 0
@@ -618,6 +620,7 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
       ...(structuredError ? { error: structuredError } : {}),
       ...(recovery ? { recovery } : {}),
       ...(notice ? { idmm_notice: notice } : {}),
+      ...(userInputRequest && turnId && (msg.message_id || msg.msg_id) ? { user_input_request: userInputRequest } : {}),
       ...(agentTransition ? { agent_transition: agentTransition } : {}),
       ...(startedAtMs !== undefined ? { started_at_ms: startedAtMs } : {}),
       ...(finishedAtMs !== undefined ? { finished_at_ms: finishedAtMs } : {}),

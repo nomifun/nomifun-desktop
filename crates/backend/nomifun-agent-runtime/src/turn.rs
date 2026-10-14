@@ -23,6 +23,9 @@ use crate::tool::{
     AgentToolInvoker, AgentToolPlan, AgentToolResult, ToolBatchDisposition,
 };
 
+#[path = "process_settlement.rs"]
+mod process_settlement;
+
 const DEFAULT_MAX_MODEL_STEPS: u16 = 32;
 const CODING_MAX_MODEL_STEPS: u16 = 64;
 const MAX_CALLS_PER_STEP: usize = 64;
@@ -49,6 +52,7 @@ pub struct AgentTurnRequest {
     /// declared action. Such calls cannot preserve unrelated file evidence.
     pub unscoped_tool_hooks: bool,
     pub input_port: Option<Arc<dyn crate::AgentInputPort>>,
+    pub user_input_request_port: Option<Arc<dyn crate::AgentUserInputRequestPort>>,
     /// Strict opt-in, supplied only for an explicitly voice-started Turn.
     pub voice_immediate: Option<Arc<dyn crate::AgentImmediateCorrectionPort>>,
     pub live_context_port: Option<Arc<dyn crate::AgentLiveContextPort>>,
@@ -94,6 +98,7 @@ impl AgentTurnRequest {
             context_image_input: false,
             unscoped_tool_hooks: false,
             input_port: None,
+            user_input_request_port: None,
             voice_immediate: None,
             live_context_port: None,
             resource_port: None,
@@ -132,6 +137,11 @@ impl AgentTurnRequest {
 
     pub fn with_input_port(mut self, port: Arc<dyn crate::AgentInputPort>) -> Self {
         self.input_port = Some(port);
+        self
+    }
+
+    pub fn with_user_input_request_port(mut self, port: Arc<dyn crate::AgentUserInputRequestPort>) -> Self {
+        self.user_input_request_port = Some(port);
         self
     }
 
@@ -251,6 +261,7 @@ pub enum AgentTurnTerminal {
     Cancelled,
     Paused { reason: String },
     Failed { message: String },
+    InputRequired { request: nomifun_agent_contracts::AgentUserInputRequest },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -338,19 +349,41 @@ pub(crate) async fn run_turn(
             binding: binding.clone(), turn_operation_id: request.model_request.causality.turn_operation_id.clone(),
         }).await?;
     }
+    let mut recovered_handoff_inputs = Vec::new();
+    if let Some(pending) = recovery.as_ref().and_then(|state| state.checkpoint.pending_user_input.clone()) {
+        let recovered = recovery.as_ref().expect("pending handoff has recovery");
+        let candidate = AgentTurnResult {
+            agent_session_id: request.model_request.causality.agent_session_id.clone(),
+            turn_operation_id: request.model_request.causality.turn_operation_id.clone(),
+            model_steps: recovered.last_model_step, output_text: String::new(), reasoning_text: String::new(),
+            tool_call_count: recovered.checkpoint.tool_call_count, provider_round_id: None,
+            terminal: AgentTurnTerminal::InputRequired { request: pending.clone() },
+        };
+        match settle_user_input_handoff(&event_sink, request.input_port.as_ref(), request.completion_check_port.as_ref(),
+            &request.model_request.causality, &cancellation, candidate, pending).await? {
+            HostDeliverySettlement::Terminal(result) => return Ok(result),
+            HostDeliverySettlement::Inputs(inputs) => recovered_handoff_inputs = inputs,
+            HostDeliverySettlement::Unsettled => unreachable!("input handoff has a terminal fence"),
+        }
+    }
     // Establish an empty/recovered boundary before preparation can issue
     // instruction reads or compaction. A claim followed by a setup crash
     // must not depend on eventually reaching the first model request.
-    if event_sink.supports_checkpoints() && !cancellation.is_cancelled() {
+    if event_sink.supports_checkpoints() && !cancellation.is_cancelled() && recovered_handoff_inputs.is_empty() {
         let mut initial = recovery.as_ref().map(|state| state.checkpoint.clone()).unwrap_or_else(|| crate::AgentExecutionCheckpoint {
             version: 1, binding: binding.clone(), turn_operation_id: request.model_request.causality.turn_operation_id.clone(),
             active_set_generation: request.active_set_generation, model_steps: 0, tool_call_count: 0,
             accepted_input_count: 1, applied_steering_receipts: Vec::new(), plan: Default::default(), work: Default::default(),
-            patch_recovery: request.patch_recovery.clone(), segments: segments.clone(), control_rejections: Default::default(), completion_review: Default::default(),
+            patch_recovery: request.patch_recovery.clone(), segments: segments.clone(), control_rejections: Default::default(), completion_review: Default::default(), pending_user_input: None,
         });
         if let Some(recovery) = &recovery { initial.model_steps = recovery.last_model_step; }
-        initial.validate()?;
-        event_sink.save_checkpoint(initial).await?;
+        // A committed model-only recovery tail can extend past the old soft
+        // window. Keep its existing exact checkpoint until the normal loop
+        // renews at the consumed step; never save an invalid old-window state.
+        if initial.segments.as_ref().is_none_or(|state| initial.model_steps <= state.window_end()) {
+            initial.validate()?;
+            event_sink.save_checkpoint(initial).await?;
+        }
     }
     event_sink.emit(AgentEngineEvent::ExecutionBudgetPrepared {
         context_window_tokens: request.model_budget.context_window_tokens.unwrap_or(0),
@@ -505,7 +538,10 @@ pub(crate) async fn run_turn(
         .flat_map(|recovery| recovery.prefix.iter().chain(&recovery.tail))
         .any(|event| matches!(event, AgentEngineEvent::ToolStarted { step, capability_id, .. }
             if *step > 0 && crate::execution_policy::requires_task_ledger_capability(capability_id.as_ref())));
-    let mut adaptive_slots = AdaptiveContextSlots::default();
+    let mut adaptive_slots = AdaptiveContextSlots {
+        user_input_enabled: crate::user_input_request::enabled(request.user_input_request_port.as_ref()),
+        ..Default::default()
+    };
     let live_context_slot = if let Some(port) = &request.live_context_port {
         let slot = model_request.input.instructions.len();
         model_request.input.instructions.push(crate::live_context::read(port.as_ref(),
@@ -568,14 +604,31 @@ pub(crate) async fn run_turn(
     let mut tool_call_count = recovery.as_ref().map_or(0, |state| state.checkpoint.tool_call_count);
     let mut provider_round_id = None;
     let mut completion_review_used = recovery.as_ref().is_some_and(|state| state.checkpoint.completion_review.is_report_only());
+    let mut pending_user_input: Option<nomifun_agent_contracts::AgentUserInputRequest> = None;
+    let had_recovered_handoff_input = !recovered_handoff_inputs.is_empty();
+    if had_recovered_handoff_input {
+        crate::steering::incorporate(recovered_handoff_inputs, &mut model_request, &mut retained_inputs,
+            &mut steering_receipts, &mut steering_receipt_order)?;
+        if let Some(state) = long_horizon.as_mut() {
+            state.execution_plan.needs_replan = true;
+            state.completion.invalidate();
+            state.completion.review.align_inputs(retained_inputs.len());
+        }
+        completion_review_used = false;
+    } else if recovery.as_ref().is_some_and(|state| state.checkpoint.completion_review.phase == AgentExecutionPhase::EndIntentReview) {
+        completion_review_used = true;
+    }
     let mut control_rejections: ControlRejections = recovery.as_ref().map(|state| state.checkpoint.control_rejections.clone()).unwrap_or_default();
+    if had_recovered_handoff_input { control_rejections.reset(); }
     let mut admitted_call_ids = recovery.as_ref().map(|state| state.reserved_call_ids.clone()).unwrap_or_default();
+    let mut process_settlement = process_settlement::ProcessSettlement::default();
     let mut stream_budget = crate::stream_limits::StreamBudget::default();
     let mut output_limit_recovery = crate::output_limit::OutputLimitRecovery::default();
     let mut protocol_recovery = crate::protocol_recovery::ProtocolRecovery::default();
     if let Some(recovery) = &recovery {
         output_limit_recovery.restore(recovery.prefix.iter().chain(&recovery.tail));
         protocol_recovery.restore(recovery.prefix.iter().chain(&recovery.tail))?;
+        if had_recovered_handoff_input { protocol_recovery.observe_new_input(); }
         // Prefix feedback is already replayed by typed history. A rejection
         // after the checkpoint survives even when its generated carrier is
         // discarded; rebuild its exact committed feedback once from the tail.
@@ -670,20 +723,25 @@ pub(crate) async fn run_turn(
 
         if let Some(current) = segments.as_ref() {
             let pressure = event_sink.execution_pressure().await?;
-            let due = model_steps >= current.window_end() || pressure.renew_window;
+            let due = model_steps >= current.window_end() || pressure.renew_window || process_settlement.is_active();
             let mut stop = pressure.stop;
             let mut next = None;
             if stop.is_none() && due {
-                if long_horizon.as_ref().is_some_and(|state| !state.work_status.running_processes.is_empty()) {
-                    stop = Some(crate::AgentExecutionStopReason::NonQuiescentBoundary);
-                } else {
-                    match current.renewed(model_steps) { Ok(state) => next = Some(state), Err(reason) => stop = Some(reason) }
+                // Real cumulative/stall/capacity limits still dominate. Only
+                // the soft boundary may wait for its original owned processes.
+                match current.renewed(model_steps) {
+                    Err(reason) => stop = Some(reason),
+                    Ok(candidate) => {
+                        if let Some(state) = long_horizon.as_ref().filter(|state| !state.work_status.running_processes.is_empty()) {
+                            stop = process_settlement.at_boundary(model_steps, current, &state.work_status.running_processes, &request.tool_plan);
+                        } else { next = Some(candidate); }
+                    }
                 }
             }
-            if due || stop.is_some() {
+            if next.is_some() || stop.is_some() {
                 let receipt = persist_execution_checkpoint(event_sink.as_ref(), &binding, &turn_operation_id,
                     request.active_set_generation, model_steps, tool_call_count, retained_inputs.len(),
-                    &steering_receipt_order, long_horizon.as_ref(), &patch_recovery, next.as_ref().or(Some(current)), &control_rejections).await?;
+                    &steering_receipt_order, long_horizon.as_ref(), &patch_recovery, next.as_ref().or(Some(current)), &control_rejections, pending_user_input.as_ref()).await?;
                 if stop.is_none() && receipt.is_none() { stop = Some(crate::AgentExecutionStopReason::CheckpointUnavailable); }
                 if let Some(reason) = stop {
                     event_sink.emit(AgentEngineEvent::ExecutionBudgetExhausted {
@@ -703,6 +761,7 @@ pub(crate) async fn run_turn(
                 stream_budget = Default::default();
                 model_request.input.provider_round_parent = None;
                 segments = Some(next);
+                process_settlement.clear_boundary();
             }
         }
         if model_steps >= total_model_limit {
@@ -710,6 +769,10 @@ pub(crate) async fn run_turn(
         }
         if let (Some(slot), Some(state)) = (segment_context_slot, segments.as_ref()) {
             model_request.input.instructions[slot] = state.context(model_steps);
+            if let Some(context) = process_settlement.context() {
+                model_request.input.instructions[slot].push('\n');
+                model_request.input.instructions[slot].push_str(&context);
+            }
         }
 
         // This boundary is reached only after the previous batch has settled.
@@ -766,6 +829,7 @@ pub(crate) async fn run_turn(
         if let Some(state) = long_horizon.as_mut() {
             state.completion.review.align_inputs(retained_inputs.len());
         }
+        process_settlement.activate_controls(&request.tool_plan, &mut discovered_tools)?;
         synchronize_adaptive_context(
             &mut model_request,
             &request.tool_plan,
@@ -812,12 +876,18 @@ pub(crate) async fn run_turn(
                 && !(state.completion.settled_failure_gate()
                     && state.execution_plan.revision == 0
                     && state.execution_plan.steps.is_empty()));
+        let delivery_review_step = long_horizon.as_ref().is_some_and(|state| state.completion.review.delivery_pending);
+        if report_only_locked || account_repair || delivery_review_step {
+            model_request.input.tools.retain(|tool| tool.name != crate::user_input_request::TOOL_NAME);
+        }
         let phase = synchronize_completion_review(&mut model_request, &mut adaptive_slots,
             completion_review_used || account_repair || report_only_locked, review_can_report,
             plan_blocks_report, review_has_running_processes, continuing_planned_task);
-        let delivery_review_step = long_horizon.as_ref().is_some_and(|state| state.completion.review.delivery_pending);
         let phase = synchronize_delivery_review(&mut model_request, &mut adaptive_slots, delivery_review_step, phase);
         if let Some(state) = long_horizon.as_mut() { state.completion.review.phase = phase; }
+        if phase == AgentExecutionPhase::Execution {
+            process_settlement.constrain_tools(&mut model_request.input.tools, &mut model_request.input.tool_choice, &request.tool_plan);
+        }
         protocol_recovery.constrain_tool_choice(
             &mut model_request.input.tool_choice, !model_request.input.tools.is_empty(),
         );
@@ -842,7 +912,7 @@ pub(crate) async fn run_turn(
         // further model request; no model or tool step is replayed here.
         if segments.is_some() {
             let pressure = event_sink.execution_pressure().await?;
-            if pressure.renew_window || pressure.stop.is_some() { continue 'model_steps; }
+            if pressure.stop.is_some() || (pressure.renew_window && !process_settlement.is_active()) { continue 'model_steps; }
         }
         // The preceding batch and context updates have settled. Persist only
         // quiescent progress; live process handles are never checkpointed as
@@ -852,7 +922,7 @@ pub(crate) async fn run_turn(
         }
         persist_execution_checkpoint(event_sink.as_ref(), &binding, &turn_operation_id,
             request.active_set_generation, model_steps, tool_call_count, retained_inputs.len(),
-            &steering_receipt_order, long_horizon.as_ref(), &patch_recovery, segments.as_ref(), &control_rejections).await?;
+            &steering_receipt_order, long_horizon.as_ref(), &patch_recovery, segments.as_ref(), &control_rejections, pending_user_input.as_ref()).await?;
         if cancellation.is_cancelled() {
             return cancelled_turn(&event_sink, &agent_session_id, &turn_operation_id,
                 model_steps, &output_text, &reasoning_text, tool_call_count, provider_round_id.clone()).await;
@@ -1525,6 +1595,14 @@ pub(crate) async fn run_turn(
             // account with fresh-ID proposals that never reached the owner.
             let exposure_refusal = crate::tool::reject_tool_surface_batch(
                 &completed, &model_request.input.tools, &execution_surface, phase);
+            let exposure_refusal = exposure_refusal.or_else(|| {
+                (phase == AgentExecutionPhase::Execution && !process_settlement.allows_batch(&completed, &request.tool_plan))
+                    .then(|| crate::tool::ToolBatchRefusal {
+                        disposition: ToolBatchDisposition::WorkAccounting,
+                        results: completed.iter().map(|call| (call.call_id.clone(), Ok(AgentToolResult::text(call.call_id.clone(),
+                            "Not executed: this entire batch was held before dispatch at the pending execution-window boundary. Continue only authorized controls for its original owned process IDs, read_file for their input, or update_plan for accepted steering. No new work or process launch was admitted; original effects and cumulative budgets remain unchanged.", true)))).collect(),
+                    })
+            });
             let disposition = exposure_refusal.as_ref().map_or(ToolBatchDisposition::WorkAccounting, |refusal| refusal.disposition);
 
             if disposition == ToolBatchDisposition::WorkAccounting {
@@ -1640,6 +1718,9 @@ pub(crate) async fn run_turn(
                 &request.context_resources,
                 &request.context_image_input,
                 request.input_port.as_deref(),
+                request.user_input_request_port.as_deref(),
+                phase,
+                &mut pending_user_input,
                 request.voice_immediate.as_deref(),
                 request.prior_task.as_ref(),
                 request.resource_port.as_deref(),
@@ -1729,6 +1810,7 @@ pub(crate) async fn run_turn(
                                 && crate::execution_policy::completes_turn_on_success(binding);
                             if attempted {
                                 if let Some(segments) = segments.as_mut() { segments.observe(call, &result)?; }
+                                process_settlement.observe(binding, call, &result);
                                 state.work_status.observe(
                                     binding,
                                     call,
@@ -1834,6 +1916,10 @@ pub(crate) async fn run_turn(
                                 state.completion.invalidate();
                                 completion_review_used = false;
                             }
+                        } else if call.name == crate::user_input_request::TOOL_NAME {
+                            // A refused ending declaration neither reopens its
+                            // bounded phase nor clears the real failure gate.
+                            state.completion.invalidate_report();
                         } else if call.name != crate::completion::TOOL_NAME {
                             // Planning/resource control can change the
                             // model's account even though it supplies no evidence.
@@ -1886,6 +1972,34 @@ pub(crate) async fn run_turn(
                 event_sink.emit(AgentEngineEvent::PlanUpdated {
                     plan: state.execution_plan.clone(),
                 }).await?;
+            }
+            if let Some(input_request) = pending_user_input.clone() {
+                let receipt = persist_execution_checkpoint(event_sink.as_ref(), &binding, &turn_operation_id,
+                    request.active_set_generation, model_steps, tool_call_count, retained_inputs.len(),
+                    &steering_receipt_order, Some(state), &patch_recovery, segments.as_ref(), &control_rejections,
+                    Some(&input_request)).await?;
+                if event_sink.supports_checkpoints() && receipt.is_none() {
+                    return Err(AgentEngineError::EventSink("input handoff checkpoint was not durably acknowledged".into()));
+                }
+                let candidate = AgentTurnResult { agent_session_id:agent_session_id.clone(), turn_operation_id:turn_operation_id.clone(),
+                    model_steps, output_text:output_text.clone(), reasoning_text:reasoning_text.clone(), tool_call_count,
+                    provider_round_id:provider_round_id.clone(), terminal:AgentTurnTerminal::InputRequired { request:input_request.clone() } };
+                match settle_user_input_handoff(&event_sink, request.input_port.as_ref(), request.completion_check_port.as_ref(),
+                    &model_request.causality, &cancellation, candidate, input_request).await? {
+                    HostDeliverySettlement::Terminal(result) => return Ok(result),
+                    HostDeliverySettlement::Inputs(inputs) => {
+                        pending_user_input = None;
+                        crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs,
+                            &mut steering_receipts, &mut steering_receipt_order)?;
+                        control_rejections.reset();
+                        protocol_recovery.observe_new_input();
+                        completion_review_used = false;
+                        state.execution_plan.needs_replan = true;
+                        state.completion.invalidate();
+                        continue 'model_steps;
+                    }
+                    HostDeliverySettlement::Unsettled => unreachable!("input handoff has a terminal fence"),
+                }
             }
             let terminal_report = terminal_completion_requested.then(|| state.completion.current(
                 &state.execution_plan,&state.work_status,retained_inputs.len()).cloned()).flatten();
@@ -2124,10 +2238,15 @@ pub(crate) async fn run_turn(
             {
                 completion_review_used = true;
                 if !continuing_planned_task {
-                    event_sink.emit(AgentEngineEvent::CompletionReview {
-                        status: state.work_status.clone(),
-                    }).await?;
-                    model_request.input.messages.push(state.work_status.completion_review_message()?);
+                    if adaptive_slots.user_input_enabled && !state.completion.review.is_report_only()
+                        && !state.completion.settled_failure_gate() && !patch_recovery.pending() && !patch_recovery.unresolved() {
+                        event_sink.emit(AgentEngineEvent::EndIntentReview { status: state.work_status.clone() }).await?;
+                        model_request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::User,
+                            "Declare the reply's ending intent once: request_user_input for required information, or report_completion for the real completion account. This stopped reply alone is not proof that the task is complete; preserve all accepted requirements and original receipts.".into()));
+                    } else {
+                        event_sink.emit(AgentEngineEvent::CompletionReview { status: state.work_status.clone() }).await?;
+                        model_request.input.messages.push(state.work_status.completion_review_message()?);
+                    }
                 }
                 model_request.input.provider_round_parent = None;
                 continue;
@@ -2248,10 +2367,15 @@ async fn persist_execution_checkpoint(
     patch_recovery: &crate::patch_recovery::PatchRecovery,
     segments: Option<&crate::AgentExecutionSegmentState>,
     control_rejections: &AgentControlRejectionState,
+    pending_user_input: Option<&nomifun_agent_contracts::AgentUserInputRequest>,
 ) -> Result<Option<crate::AgentCheckpointReceipt>, AgentEngineError> {
     if !sink.supports_checkpoints() { return Ok(None); }
     let work = state.map(|state| state.work_status.clone()).unwrap_or_default();
     if !work.running_processes.is_empty() { return Ok(None); }
+    // A real stop can arrive after a deferred soft boundary. Keep the last
+    // durable checkpoint and its canonical tail rather than labeling consumed
+    // steps as belonging to the old window or manufacturing a renewed budget.
+    if segments.is_some_and(|state| model_steps > state.window_end()) { return Ok(None); }
     let checkpoint = crate::AgentExecutionCheckpoint {
         version: 1, binding: binding.clone(), turn_operation_id: operation.clone(),
         active_set_generation: generation, model_steps, tool_call_count, accepted_input_count: input_count,
@@ -2260,6 +2384,7 @@ async fn persist_execution_checkpoint(
         work, patch_recovery: patch_recovery.snapshot(), segments: segments.cloned(),
         control_rejections: control_rejections.clone(),
         completion_review: state.map(|state| state.completion.review.clone()).unwrap_or_default(),
+        pending_user_input: pending_user_input.cloned(),
     };
     checkpoint.validate()?;
     sink.save_checkpoint(checkpoint).await
@@ -2291,7 +2416,7 @@ type ControlRejections = AgentControlRejectionState;
 
 impl AgentControlRejectionState {
     pub(crate) fn validate(&self) -> Result<(), AgentEngineError> {
-        if !matches!(self.name.as_str(), "" | crate::planning::TOOL_NAME | crate::completion::TOOL_NAME)
+        if !matches!(self.name.as_str(), "" | crate::planning::TOOL_NAME | crate::completion::TOOL_NAME | crate::user_input_request::TOOL_NAME)
             || self.consecutive > 4 || self.total > 8 || self.no_progress > 4 || self.phase_corrections > 4 {
             return Err(AgentEngineError::InvalidContract("invalid persisted control correction budget".into()));
         }
@@ -2313,7 +2438,7 @@ impl AgentControlRejectionState {
     }
 
     pub(crate) fn observe(&mut self, name: &str, result: &AgentToolResult, made_progress: bool) -> Option<String> {
-        if result.is_error && matches!(name, crate::planning::TOOL_NAME | crate::completion::TOOL_NAME) {
+        if result.is_error && matches!(name, crate::planning::TOOL_NAME | crate::completion::TOOL_NAME | crate::user_input_request::TOOL_NAME) {
             self.consecutive = if self.name == name { self.consecutive.saturating_add(1) } else { 1 };
             self.total = self.total.saturating_add(1);
             self.name = name.to_owned();
@@ -2321,7 +2446,7 @@ impl AgentControlRejectionState {
                 return Some(format!("{name} failed four consecutive times"));
             }
             if self.total >= 8 {
-                return Some("update_plan/report_completion failed eight times without a successful intervening tool; stop the control loop and surface the last rejection".into());
+                return Some("ending/plan controls failed eight times without a successful intervening tool; stop the control loop and surface the last rejection".into());
             }
             return None;
         }
@@ -2330,7 +2455,7 @@ impl AgentControlRejectionState {
             self.consecutive = 0;
             return None;
         }
-        if !made_progress && matches!(name, crate::planning::TOOL_NAME | crate::completion::TOOL_NAME) {
+        if !made_progress && matches!(name, crate::planning::TOOL_NAME | crate::completion::TOOL_NAME | crate::user_input_request::TOOL_NAME) {
             self.name.clear();
             self.consecutive = 0;
             self.no_progress = self.no_progress.saturating_add(1);
@@ -2346,6 +2471,7 @@ impl AgentControlRejectionState {
 
 #[derive(Default)]
 struct AdaptiveContextSlots {
+    user_input_enabled: bool,
     long_horizon_policy: Option<usize>,
     scoped_instructions: Option<usize>,
     patch_recovery: Option<usize>,
@@ -2384,6 +2510,13 @@ fn synchronize_completion_review(
             upsert_instruction(&mut request.input.instructions,&mut slots.completion_review,
                 "A per-response stop can be a brief public progress update, not completion of this planned task. Remaining authorized work may still be unfinished. Continue only those unfinished parts through the frozen tools, or submit report_completion when the actual work settles. Do not restart, repeat settled observations or effects, or invent a missing-capability blocker merely because a prior response contained no tool calls. Existing plan, recovery, error-stop, cancellation and budget gates still apply; unresolved work must be disclosed rather than claimed complete. This notice grants no new authority.".into());
             return AgentExecutionPhase::Execution;
+        }
+        if request.input.tools.iter().any(|tool| tool.name == crate::user_input_request::TOOL_NAME) && !plan_blocks_report {
+            upsert_instruction(&mut request.input.instructions, &mut slots.completion_review,
+                "The reply stopped without an explicit task-ending intent. This is one bounded declaration opportunity within the same budget, not proof of task completion. Submit request_user_input alone if necessary user information is missing: preserve unfinished work and known failures, and ask without fabricating an answer. Otherwise submit report_completion alone using the original evidence and exact counts. Do not perform new actions, reread or repeat settled effects to repair this declaration. A question is a normal input handoff, not a completed task; actual completion still requires its original account.".into());
+            request.input.tools.retain(|tool| tool.name == crate::user_input_request::TOOL_NAME || tool.name == crate::completion::TOOL_NAME);
+            request.input.tool_choice = ChatToolChoice::Required;
+            return AgentExecutionPhase::EndIntentReview;
         }
         // The transcript review can be summarized with an oversized tool
         // suffix. Keep this host-owned phase in mandatory instructions; the
@@ -2466,6 +2599,7 @@ fn synchronize_adaptive_context(
         adaptive.task_ledger(),
         adaptive.tool_history(),
         tool_discovery,
+        slots.user_input_enabled,
         discovered_tools,
     )?;
     let workspace_mutation_forbidden =
@@ -2787,11 +2921,12 @@ fn configure_tools(
     task_ledger: bool,
     tool_history: bool,
     tool_discovery: bool,
+    user_input_enabled: bool,
     discovered_tools: &std::collections::BTreeSet<String>,
 ) -> Result<(), AgentEngineError> {
     // Retired capability-control names remain reserved so a host cannot
     // accidentally restore the old dynamic authority surface as ordinary tools.
-    if [crate::planning::TOOL_NAME, crate::completion::TOOL_NAME, crate::context_resources::TOOL_NAME, crate::tool_discovery::TOOL_NAME, "search_capabilities", "activate_capability", crate::task_continuation::TOOL_NAME, crate::remote_resources::LIST, crate::remote_resources::READ, crate::remote_resources::TEMPLATES, crate::tool_archive::SEARCH, crate::tool_archive::READ, crate::tool_archive::LOAD]
+    if [crate::planning::TOOL_NAME, crate::completion::TOOL_NAME, crate::user_input_request::TOOL_NAME, crate::context_resources::TOOL_NAME, crate::tool_discovery::TOOL_NAME, "search_capabilities", "activate_capability", crate::task_continuation::TOOL_NAME, crate::remote_resources::LIST, crate::remote_resources::READ, crate::remote_resources::TEMPLATES, crate::tool_archive::SEARCH, crate::tool_archive::READ, crate::tool_archive::LOAD]
         .iter().any(|name| plan.binding(name).is_some()) {
         return Err(AgentEngineError::InvalidContract("engine control tool names cannot be shadowed".into()));
     }
@@ -2820,6 +2955,7 @@ fn configure_tools(
     if prior_task { request.input.tools.push(crate::task_continuation::definition()); }
     if resources { request.input.tools.push(crate::context_resources::definition()); }
     if remote_resources { request.input.tools.extend(crate::remote_resources::definitions()); }
+    if user_input_enabled { request.input.tools.push(crate::user_input_request::definition()); }
     if request.input.tools.len() > crate::tool_discovery::MAX_VISIBLE_TOOL_DEFINITIONS {
         return Err(AgentEngineError::InvalidContract(
             "model-visible tools exceed the reserved Runtime control window".into(),
@@ -2832,6 +2968,28 @@ enum HostDeliverySettlement {
     Unsettled,
     Inputs(Vec<crate::AgentSteeringInput>),
     Terminal(AgentTurnResult),
+}
+
+/// The same receipt-backed terminal input fence used by completion. The
+/// caller's host still owns cleanup and final canonical receipt publication.
+async fn settle_user_input_handoff(
+    event_sink: &Arc<dyn AgentEventSink>, input_port: Option<&Arc<dyn crate::AgentInputPort>>,
+    completion_port: Option<&Arc<dyn crate::AgentCompletionCheckPort>>, causality: &ChatCausality,
+    cancellation: &CancellationToken, mut candidate: AgentTurnResult,
+    request: nomifun_agent_contracts::AgentUserInputRequest,
+) -> Result<HostDeliverySettlement, AgentEngineError> {
+    request.validate().map_err(AgentEngineError::InvalidContract)?;
+    let inputs = match input_port { Some(port) => port.take(causality, true).await?, None => Vec::new() };
+    crate::completion_check::observe_inputs(completion_port, &inputs)?;
+    if !inputs.is_empty() { return Ok(HostDeliverySettlement::Inputs(inputs)); }
+    if cancellation.is_cancelled() {
+        return Ok(HostDeliverySettlement::Terminal(cancelled_turn(event_sink, &candidate.agent_session_id,
+            &candidate.turn_operation_id, candidate.model_steps, &candidate.output_text, &candidate.reasoning_text,
+            candidate.tool_call_count, candidate.provider_round_id).await?));
+    }
+    event_sink.emit(AgentEngineEvent::TurnInputRequired { model_steps: candidate.model_steps, request: request.clone() }).await?;
+    candidate.terminal = AgentTurnTerminal::InputRequired { request };
+    Ok(HostDeliverySettlement::Terminal(candidate))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2939,6 +3097,9 @@ async fn invoke_tool_calls(
     context_resources: &BTreeMap<String, crate::AgentContextResource>,
     context_image_input: &bool,
     input_port: Option<&dyn crate::AgentInputPort>,
+    user_input_request_port: Option<&dyn crate::AgentUserInputRequestPort>,
+    phase: AgentExecutionPhase,
+    pending_user_input: &mut Option<nomifun_agent_contracts::AgentUserInputRequest>,
     voice_immediate: Option<&dyn crate::AgentImmediateCorrectionPort>,
     prior_task: Option<&crate::AgentPriorTask>,
     resource_port: Option<&dyn nomifun_engine_core::EngineResourcePort>,
@@ -2971,6 +3132,54 @@ async fn invoke_tool_calls(
                 }
             }
         }
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    if completed.iter().any(|call| call.name == crate::user_input_request::TOOL_NAME) {
+        let refusal = if completed.len() != 1 {
+            Some("Not executed: request_user_input must be submitted alone; no action in this batch ran.".to_owned())
+        } else if !matches!(phase, AgentExecutionPhase::Execution | AgentExecutionPhase::EndIntentReview) {
+            Some("Not executed: an input handoff cannot escape a locked completion or delivery review.".to_owned())
+        } else if completion.settled_failure_gate() {
+            Some("Not executed: settled failure-stop accounting must finish through the original completion review; an input question cannot bypass that gate.".to_owned())
+        } else if !work_status.running_processes.is_empty() || patch_recovery.pending() || patch_recovery.unresolved() {
+            Some("Not executed: settle the original owned processes and patch obligations before handing back input; this request cannot cancel work, declare completion or erase unknown results.".to_owned())
+        } else { None };
+        let result = if let Some(reason) = refusal { AgentToolResult::text(completed[0].call_id.clone(), reason, true) }
+        else {
+            let call = &completed[0];
+            match crate::user_input_request::from_call(call) {
+                Err(reason) => AgentToolResult::text(call.call_id.clone(), reason, true),
+                Ok(request) => {
+                    let refusal = match user_input_request_port.filter(|port| port.enabled()) {
+                        Some(port) => tokio::select! { biased;
+                            _ = cancellation.cancelled() => return Err(AgentEngineError::Cancelled),
+                            result = port.check(&model_request.causality, &request) => result?,
+                        },
+                        None => Some("User-input handoff is unavailable under this turn's host policy.".into()),
+                    };
+                    if let Some(reason) = refusal {
+                        AgentToolResult::text(call.call_id.clone(), crate::user_input_request::bounded_rejection(&reason), true)
+                    } else {
+                        if cancellation.is_cancelled() { return Err(AgentEngineError::Cancelled); }
+                        let requirements = crate::requirements::merge(&execution_plan.requirements, &[], accepted_inputs)
+                            .map_err(AgentEngineError::InvalidContract)?;
+                        if execution_plan.requirements != requirements {
+                            let mut retained = execution_plan.clone();
+                            retained.requirements = requirements;
+                            retained.revision = retained.revision.checked_add(1)
+                                .ok_or_else(|| AgentEngineError::InvalidContract("plan revision exhausted".into()))?;
+                            if retained.explanation.is_empty() { retained.explanation = "Accepted requirements retained for a user-input handoff; no task completion was claimed.".into(); }
+                            event_sink.emit(AgentEngineEvent::PlanUpdated { plan: retained.clone() }).await?;
+                            *execution_plan = retained;
+                        }
+                        event_sink.emit(AgentEngineEvent::UserInputRequested { step: model_step, request: request.clone() }).await?;
+                        *pending_user_input = Some(request);
+                        AgentToolResult::text(call.call_id.clone(), crate::user_input_request::ACK, false)
+                    }
+                }
+            }
+        };
+        let results = completed.iter().map(|call| (call.call_id.clone(), Ok(AgentToolResult::text(call.call_id.clone(), result.output_text(), result.is_error)))).collect();
         return finish_tool_results(results, event_sink, model_step, cancellation).await;
     }
     let protected=|call:&ChatToolCall|plan.binding(&call.name).is_some_and(|binding|
@@ -4131,10 +4340,10 @@ mod tests {
     #[test]
     fn history_loader_bootstraps_only_when_the_authenticated_port_exists() {
         let mut sample=request();
-        configure_tools(&mut sample,&tool_plan(),false,false,false,true,false,false,false,&Default::default()).unwrap();
+        configure_tools(&mut sample,&tool_plan(),false,false,false,true,false,false,false,false,&Default::default()).unwrap();
         assert!(sample.input.tools.iter().any(|tool|tool.name==crate::tool_archive::LOAD));
         assert!(!sample.input.tools.iter().any(|tool|matches!(tool.name.as_str(),crate::tool_archive::SEARCH|crate::tool_archive::READ|crate::planning::TOOL_NAME)));
-        configure_tools(&mut sample,&tool_plan(),false,false,false,false,false,false,false,&Default::default()).unwrap();
+        configure_tools(&mut sample,&tool_plan(),false,false,false,false,false,false,false,false,&Default::default()).unwrap();
         assert!(!sample.input.tools.iter().any(|tool|tool.name==crate::tool_archive::LOAD));
     }
 
@@ -4433,16 +4642,16 @@ mod tests {
     fn frozen_tool_surface_never_advertises_capability_activation() {
         let mut request = request();
         let plan = tool_plan();
-        configure_tools(&mut request, &plan, true, true, true, true, false, false, false, &Default::default()).unwrap();
+        configure_tools(&mut request, &plan, true, true, true, true, false, false, false, false, &Default::default()).unwrap();
         assert!(request.input.tools.iter().any(|tool| tool.name == "read_file"));
         assert!(request.input.tools.iter().any(|tool| tool.name == crate::task_continuation::TOOL_NAME));
         assert!(!request.input.tools.iter().any(|tool| tool.name == crate::planning::TOOL_NAME));
         assert!(!request.input.tools.iter().any(|tool| tool.name == crate::tool_archive::SEARCH));
-        configure_tools(&mut request, &plan, true, true, true, true, true, true, false, &Default::default()).unwrap();
+        configure_tools(&mut request, &plan, true, true, true, true, true, true, false, false, &Default::default()).unwrap();
         assert!(request.input.tools.iter().any(|tool| tool.name == crate::planning::TOOL_NAME));
         assert!(request.input.tools.iter().any(|tool| tool.name == crate::completion::TOOL_NAME));
         assert!(request.input.tools.iter().any(|tool| tool.name == crate::tool_archive::SEARCH));
-        configure_tools(&mut request, &plan, true, false, true, true, true, true, false, &Default::default()).unwrap();
+        configure_tools(&mut request, &plan, true, false, true, true, true, true, false, false, &Default::default()).unwrap();
         assert!(!request.input.tools.iter().any(|tool| tool.name == crate::task_continuation::TOOL_NAME));
         assert!(!request.input.tools.iter().any(|tool|
             matches!(tool.name.as_str(), "activate_capability" | "search_capabilities")));
@@ -4459,14 +4668,14 @@ mod tests {
             let shadow = AgentToolPlan::new([tool_binding(
                 name, "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true,
             )]).unwrap();
-            assert!(configure_tools(&mut request, &shadow, false, false, false, false, false, false, false, &Default::default()).is_err());
+            assert!(configure_tools(&mut request, &shadow, false, false, false, false, false, false, false, false, &Default::default()).is_err());
         }
     }
 
     #[test]
     fn advertised_history_tools_distinguish_archive_ids_from_call_ids() {
         let mut request = request();
-        configure_tools(&mut request, &tool_plan(), true, true, true, true, true, true, false, &Default::default()).unwrap();
+        configure_tools(&mut request, &tool_plan(), true, true, true, true, true, true, false, false, &Default::default()).unwrap();
         let read = request.input.tools.iter().find(|tool| tool.name == crate::tool_archive::READ).unwrap();
         let id = &read.input_schema.0["properties"]["id"];
         assert!(id["description"].as_str().unwrap_or_default().contains("hits[].id"));
@@ -7655,16 +7864,16 @@ mod tests {
         crate::tool_discovery::activate_deferred_tools(&plan, &mut activated,
             &(0..5).map(|index| format!("deferred_{index:03}")).collect::<Vec<_>>()).unwrap();
         let mut request = request();
-        configure_tools(&mut request, &plan, true, true, true, true, true, true, true, &activated).unwrap();
+        configure_tools(&mut request, &plan, true, true, true, true, true, true, true, true, &activated).unwrap();
         assert_eq!(request.input.tools.len(), crate::tool_discovery::MAX_VISIBLE_TOOL_DEFINITIONS,
             "the reserved control count must match the actual full Runtime surface");
 
         let direct = AgentToolPlan::new((0..120).map(|index| tool_binding(&format!("direct_{index:03}"),
             "fixture.tools", &format!("fixture.tools/direct_{index:03}"), AgentEffectClass::ReadOnly, true))).unwrap();
-        configure_tools(&mut request, &direct, false, false, false, true, true, true, false, &BTreeSet::new()).unwrap();
+        configure_tools(&mut request, &direct, false, false, false, true, true, true, false, false, &BTreeSet::new()).unwrap();
         assert_eq!(request.input.tools.len(), 125,
             "without ToolSearch, enforce the actual assembled wire limit instead of its reserved 112-tool base");
-        let over_limit = configure_tools(&mut request, &direct, true, true, true, true, true, true, false, &BTreeSet::new());
+        let over_limit = configure_tools(&mut request, &direct, true, true, true, true, true, true, false, true, &BTreeSet::new());
         assert!(matches!(over_limit, Err(AgentEngineError::InvalidContract(message))
             if message.contains("model-visible tools exceed")));
     }
@@ -10379,4 +10588,7 @@ mod tests {
 
     include!("turn_voice_tests.rs");
     include!("turn_proposal_recovery_tests.rs");
+    include!("turn_process_settlement_tests.rs");
+    include!("turn_user_input_tests.rs");
+    include!("turn_user_input_continuation_tests.rs");
 }

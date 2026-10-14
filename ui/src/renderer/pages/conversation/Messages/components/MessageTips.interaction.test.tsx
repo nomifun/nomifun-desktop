@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { act, cleanup, fireEvent, render, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
+import { MemoryRouter } from 'react-router-dom';
 import type { IMessageText, IMessageTips } from '@/common/chat/chatLib';
 import { parseConversationId, parseMessageId, parseProviderId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
@@ -63,7 +64,7 @@ const transition: IMessageTips = {
 
 function mount(message = error, context: Partial<ConversationContextValue> = {}) {
   const result = render(
-    <I18nextProvider i18n={testI18n}>
+    <MemoryRouter><I18nextProvider i18n={testI18n}>
       <ThemeProvider>
         <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', ...context }}>
           <MessageListProvider initialValue={[request, message]}>
@@ -71,7 +72,7 @@ function mount(message = error, context: Partial<ConversationContextValue> = {})
           </MessageListProvider>
         </ConversationProvider>
       </ThemeProvider>
-    </I18nextProvider>
+    </I18nextProvider></MemoryRouter>
   );
   return { ...result, page: within(result.container) };
 }
@@ -79,6 +80,37 @@ function mount(message = error, context: Partial<ConversationContextValue> = {})
 afterEach(() => { cleanup(); mock.restore(); });
 
 describe('compact message errors', () => {
+  test.each(['en-US', 'zh-CN'])('a typed input handoff is a normal note with a focus-only action in %s', async language => {
+    await act(async () => { await testI18n.changeLanguage(language); });
+    try {
+      const copy = language === 'zh-CN' ? zhConversation.userInputRequest : conversation.userInputRequest;
+      const inputRequest: IMessageTips = { ...error, turn_id: sourceId, content: { type: 'warning', content: '',
+        user_input_request: { request_id: 'ask:path', question: 'Which directory should I use?', remaining_work: 'Write the remaining report.' },
+      } };
+      const { page } = mount(inputRequest, { isProcessing: false });
+      const note = page.getByRole('note', { name: copy.title });
+      expect(page.queryByRole('alert')).toBeNull();
+      await waitFor(() => {
+        const body = Array.from(note.querySelectorAll('.markdown-shadow'), node => node.shadowRoot?.textContent ?? '').join('\n');
+        expect(body).toContain('Which directory should I use?');
+        expect(body).toContain('Write the remaining report.');
+      });
+      const emit = spyOn(emitter, 'emit');
+      fireEvent.click(page.getByRole('button', { name: copy.addInput }));
+      expect(emit).toHaveBeenCalledWith('sendbox.focus', conversationId);
+      expect(page.queryByTestId('message-error-retry')).toBeNull();
+    } finally { await act(async () => { await testI18n.changeLanguage('en-US'); }); }
+  });
+
+  test('an old handoff displayed during a newer Turn offers no interrupting action', () => {
+    const inputRequest: IMessageTips = { ...error, turn_id: sourceId, content: { type: 'warning', content: '',
+      user_input_request: { request_id: 'ask:path', question: 'Which directory?', remaining_work: 'Write the report.' },
+    } };
+    const { page } = mount(inputRequest, { isProcessing: true, activeTurnId: parseMessageId('0190f5fe-7c00-7a00-8000-000000000055') });
+    expect(page.getByTestId('user-input-request-note')).toBeTruthy();
+    expect(page.queryByRole('button')).toBeNull();
+  });
+
   test.each(['en-US', 'zh-CN'])('shows the typed blocked-work reason and guidance separately from diagnostics in %s', async (language) => {
     await act(async () => { await testI18n.changeLanguage(language); });
     try {

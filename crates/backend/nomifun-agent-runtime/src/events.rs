@@ -303,6 +303,17 @@ pub enum AgentEngineEvent {
         model_steps: u16,
         finish_reason: ChatFinishReason,
     },
+    UserInputRequested {
+        step: u16,
+        request: nomifun_agent_contracts::AgentUserInputRequest,
+    },
+    EndIntentReview {
+        status: crate::AgentWorkStatus,
+    },
+    TurnInputRequired {
+        model_steps: u16,
+        request: nomifun_agent_contracts::AgentUserInputRequest,
+    },
     TurnCancelled {
         model_steps: u16,
     },
@@ -337,6 +348,8 @@ impl AgentEngineEvent {
             | Self::DeliveryReviewSuperseded { .. }
             | Self::VoiceModelStepSuperseded { .. }
             | Self::TurnCompleted { .. }
+            | Self::UserInputRequested { .. }
+            | Self::TurnInputRequired { .. }
             | Self::TurnCancelled { .. }
             | Self::TurnPaused { .. }
             | Self::TurnFailed { .. } => Some(None),

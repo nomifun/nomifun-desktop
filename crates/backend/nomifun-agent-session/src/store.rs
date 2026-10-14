@@ -7650,6 +7650,14 @@ fn turn_history_projection_from_row(
         "finished_at_ms": finished_at_ms,
         "error": error,
     });
+    if let Some(value) = terminal_payload.as_ref().and_then(|payload| payload.get("user_input_request")) {
+        if row.state != "completed" {
+            return Err(SessionStoreError::InvalidPayload("User input handoff is not a completed Turn".into()));
+        }
+        let request: nomifun_agent_contracts::AgentUserInputRequest = serde_json::from_value(value.clone())?;
+        request.validate().map_err(SessionStoreError::InvalidPayload)?;
+        projection["user_input_request"] = serde_json::to_value(request)?;
+    }
     if let Some(notice) = knowledge_writeback {
         projection["knowledge_writeback"] = serde_json::to_value(notice)?;
     }
@@ -7660,7 +7668,7 @@ fn turn_history_projection_from_row(
         first_seq,
         last_seq,
         presentation_intent: "turn_summary".to_owned(),
-        message_type: Some(if is_failed { "tips" } else { "agent_status" }.to_owned()),
+        message_type: Some(if is_failed || projection.get("user_input_request").is_some() { "tips" } else { "agent_status" }.to_owned()),
         message_status: Some(
             if row.state == "running" {
                 "work"

@@ -19,13 +19,13 @@ use nomifun_api_types::{
 };
 use nomifun_common::{
     AdaptationPolicy, AgentExecutionEventKind, AgentExecutionStatus, AgentStepMode,
-    AgentToolPolicy, AppError, ExecutionAttemptStatus, ExecutionStepKind, ExecutionStepStatus,
+    AgentToolPolicy, AppError, DecisionPolicy, ExecutionAttemptStatus, ExecutionStepKind, ExecutionStepStatus,
     StepFailurePolicy, apply_agent_role_context, generate_id, now_ms,
 };
 use nomifun_db::{
     AgentExecutionAttemptRecoveryDisposition, AgentExecutionAttemptSessionKind,
     AgentExecutionLeaseToken,
-    AgentExecutionTurnAuthority, AttemptConversationEffectParams,
+    AgentExecutionTurnAuthority, AgentExecutionUserInputTurnGuard, AttemptConversationEffectParams,
     CreateAgentExecutionAttemptParams, IAgentExecutionRepository, LoopRepeatResetParams,
     NewAgentExecutionEvent, RetryAgentExecutionStep,
     RecoveredAgentExecutionAttemptOutput,
@@ -35,7 +35,7 @@ use serde_json::json;
 use tokio::sync::{Notify, watch};
 
 use crate::attempt_runner::{
-    AttemptOutcome, AttemptRunner, AttemptSessionTarget, MISSING_DELIVERY_RECEIPT_CODE,
+    AttemptOutcome, AttemptRunner, AttemptSessionTarget, RecoveredAttemptOutcome, MISSING_DELIVERY_RECEIPT_CODE,
 };
 use crate::control_steps::{self, ControlResolution};
 use crate::conversation_effect::{AttemptConversationEffects, PendingConversationEffect};
@@ -1454,6 +1454,7 @@ impl ExecutionScheduler {
                         "adopted completed initial-turn receipt during recovery"
                     );
                 }
+                AgentExecutionAttemptRecoveryDisposition::UserInputRequested => {}
                 AgentExecutionAttemptRecoveryDisposition::ReviewBlocked => {
                     tracing::warn!(
                         %execution_id,
@@ -1491,25 +1492,7 @@ impl ExecutionScheduler {
         ).await? else {
             return Ok(None);
         };
-        let outcome = recovered.outcome;
-        let ok = agent_outcome_can_complete(&outcome);
-        let error = if ok { None } else {
-            let reason = outcome.error.clone().unwrap_or_else(|| {
-                "Canonical Agent Turn ended without a successful public delivery".to_owned()
-            });
-            Some(durable_attempt_failure_reason(&outcome, reason))
-        };
-        Ok(Some(RecoveredAgentExecutionAttemptOutput {
-            attempt_id: attempt.attempt_id.clone(),
-            conversation_id: outcome.conversation_id,
-            canonical_operation_id: recovered.canonical_operation_id,
-            terminal_event_id: recovered.terminal_event_id,
-            ok,
-            text: outcome.text,
-            output_files: outcome.output_files,
-            error,
-            tokens: outcome.tokens,
-        }))
+        Ok(Some(recovered_delivery_output(&attempt.attempt_id, recovered)))
     }
 
     /// Resolve and provision the execution workspace before the first Attempt
@@ -1965,7 +1948,7 @@ impl ExecutionScheduler {
         execution_id: &str,
         step_id: &str,
         attempt_id: &str,
-        outcome: Result<AttemptOutcome, AppError>,
+        mut outcome: Result<AttemptOutcome, AppError>,
         attempt_no: i64,
         settlement_fence: AttemptSettlementFence,
         lease: Option<&AgentExecutionLeaseToken>,
@@ -2011,6 +1994,50 @@ impl ExecutionScheduler {
             return Err(AppError::Conflict("a canonical steering intent is still pending acknowledgement".to_owned()));
         }
         let expected_attempt_version = attempt.version;
+
+        if let Ok(delivery) = &mut outcome && let Some(request) = delivery.user_input_request.as_ref() {
+            request.validate().map_err(AppError::Conflict)?;
+            if detail.execution.decision_policy == DecisionPolicy::AskUser && delivery.ok {
+                let (canonical_operation_id, terminal_event_id) = delivery.user_input_turn.as_ref()
+                    .ok_or_else(|| AppError::Conflict("user input handoff has no exact canonical terminal".into()))?;
+                self.inner.deps.repository.settle_attempt(
+                    owner_id, execution_id, step_id, settlement_fence.step_version,
+                    attempt_id, expected_attempt_version, lease,
+                    &SettleAgentExecutionAttemptParams {
+                        expected_active_session_turn: None,
+                        expected_user_input_turn: Some(AgentExecutionUserInputTurnGuard {
+                            conversation_id: delivery.conversation_id.clone(),
+                            canonical_operation_id: canonical_operation_id.clone(),
+                            terminal_event_id: terminal_event_id.clone(),
+                            user_input_request: request.clone(),
+                        }),
+                        attempt_status: ExecutionAttemptStatus::WaitingInput,
+                        step_status: ExecutionStepStatus::WaitingInput,
+                        execution_status: Some(AgentExecutionStatus::WaitingInput),
+                        question: Some(Some(request.question.clone())), error: Some(None),
+                        output_summary: Some(delivery.text.clone()),
+                        output_files: Some(serde_json::to_string(&delivery.output_files)
+                            .map_err(|error| AppError::Internal(error.to_string()))?),
+                        tokens: Some(delivery.tokens), retry_after: Some(None),
+                        runtime_state: Some(None), started_at: None, finished_at: None,
+                        loop_repeat_reset: None,
+                    },
+                    &system_event(AgentExecutionEventKind::DecisionRequested,
+                        Some(step_id), Some(attempt_id), json!({
+                            "canonical_operation_id":canonical_operation_id,
+                            "terminal_event_id":terminal_event_id,"question":request.question,"user_input_request":request,
+                        })),
+                ).await?;
+                self.publish().await;
+                return Ok(());
+            }
+            if detail.execution.decision_policy != DecisionPolicy::AskUser {
+                delivery.ok = false;
+                delivery.error = Some("This execution requires automatic decisions; a user-input handoff cannot complete its step".into());
+                delivery.error_code = Some("agent_user_input_policy_rejected".into());
+                delivery.error_retryable = Some(false);
+            }
+        }
 
         let (attempt_status, step_status, error, output, output_files, tokens, retry_after) = match outcome {
             Ok(outcome) if agent_outcome_can_complete(&outcome) => (
@@ -2114,6 +2141,7 @@ impl ExecutionScheduler {
                 expected_attempt_version,
                 lease,
                 &SettleAgentExecutionAttemptParams {
+                    expected_user_input_turn: None,
                     expected_active_session_turn: None,
                     attempt_status,
                     step_status,
@@ -2256,6 +2284,7 @@ impl ExecutionScheduler {
                 current.attempt.version,
                 Some(lease),
                 &SettleAgentExecutionAttemptParams {
+                    expected_user_input_turn: None,
                     expected_active_session_turn: None,
                     attempt_status,
                     step_status,
@@ -2688,7 +2717,7 @@ fn is_transient_agent_error_code_name(code: &str) -> bool {
 }
 
 pub(crate) fn agent_outcome_can_complete(outcome: &AttemptOutcome) -> bool {
-    if !outcome.ok {
+    if !outcome.ok || outcome.user_input_request.is_some() {
         return false;
     }
     let has_text = outcome
@@ -2698,6 +2727,20 @@ pub(crate) fn agent_outcome_can_complete(outcome: &AttemptOutcome) -> bool {
     // The canonical Runtime owns accepted requirements and delivery review.
     // A prose spec is task data, never a second inferred completion contract.
     has_text || !outcome.output_files.is_empty()
+}
+
+fn recovered_delivery_output(attempt_id: &str, recovered: RecoveredAttemptOutcome) -> RecoveredAgentExecutionAttemptOutput {
+    let outcome = recovered.outcome;
+    // A normal input handoff is a successful Turn close, not Step completion.
+    // The repository consumes its typed request before deciding the domain state.
+    let ok = agent_outcome_can_complete(&outcome) || (outcome.ok && outcome.user_input_request.is_some());
+    let error = if ok { None } else { Some(durable_attempt_failure_reason(&outcome,
+        outcome.error.clone().unwrap_or_else(|| "Canonical Agent Turn ended without a successful public delivery".into()))) };
+    RecoveredAgentExecutionAttemptOutput {
+        attempt_id:attempt_id.into(), conversation_id:outcome.conversation_id,
+        canonical_operation_id:recovered.canonical_operation_id,terminal_event_id:recovered.terminal_event_id,
+        user_input_request:outcome.user_input_request,ok,text:outcome.text,output_files:outcome.output_files,error,tokens:outcome.tokens,
+    }
 }
 
 fn ready_steps(detail: &AgentExecutionDetail, now: i64) -> Vec<&ExecutionStep> {
@@ -3565,6 +3608,7 @@ mod tests {
     #[test]
     fn only_explicit_transient_provider_outcomes_are_retryable() {
         let transient = |error_code: &str| AttemptOutcome {
+            user_input_request: None, user_input_turn: None,
             conversation_id: "0190f5fe-7c00-7a00-8000-000000000202".to_owned(),
             text: None,
             output_files: Vec::new(),
@@ -3634,6 +3678,7 @@ mod tests {
     #[test]
     fn missing_canonical_receipt_is_persisted_as_outcome_unknown() {
         let outcome = AttemptOutcome {
+            user_input_request: None, user_input_turn: None,
             conversation_id: "0190f5fe-7c00-7a00-8000-000000000203".to_owned(),
             text: None,
             output_files: Vec::new(),
@@ -3657,6 +3702,7 @@ mod tests {
     #[test]
     fn canonical_failure_and_empty_delivery_cannot_complete() {
         let mut outcome = AttemptOutcome {
+            user_input_request: None, user_input_turn: None,
             conversation_id: "0190f5fe-7c00-7a00-8000-000000000201".to_owned(),
             text: Some("authoritative public answer".to_owned()),
             output_files: Vec::new(),
@@ -3680,11 +3726,34 @@ mod tests {
     }
 
     #[test]
+    fn normal_input_handoff_cannot_complete_or_be_adopted_as_success() {
+        let mut outcome = AttemptOutcome {
+            conversation_id: "0190f5fe-7c00-7a00-8000-000000000201".into(),
+            user_input_request: Some(nomifun_agent_contracts::AgentUserInputRequest {
+                request_id:"ask-name".into(), question:"姓名？".into(), remaining_work:"生成 PPT。".into(),
+            }),
+            user_input_turn: Some(("operation".into(),"terminal".into())),
+            text: Some("请补充姓名后继续。".into()), output_files: vec!["/workspace/draft.pptx".into()],
+            ok:true, tokens:None, error:None, error_code:None, error_retryable:Some(false),
+        };
+        assert!(!agent_outcome_can_complete(&outcome));
+        let recovered = recovered_delivery_output("attempt",RecoveredAttemptOutcome {
+            outcome:outcome.clone(),canonical_operation_id:"operation".into(),terminal_event_id:"terminal".into(),
+        });
+        assert!(recovered.ok,"recovery must preserve the successful Turn close so AskUser can keep waiting");
+        assert!(recovered.error.is_none());
+        assert_eq!(recovered.user_input_request,outcome.user_input_request);
+        outcome.user_input_request = None;
+        assert!(agent_outcome_can_complete(&outcome), "ordinary completed receipts retain their current semantics");
+    }
+
+    #[test]
     fn canonical_delivery_is_not_reinterpreted_from_task_prose() {
         // The reported game task referred to snake-game-design.md and
         // snake-game-ui.md as inputs while delivering index.html. Settlement
         // must not manufacture a competing Markdown-output requirement.
         let outcome = AttemptOutcome {
+            user_input_request: None, user_input_turn: None,
             conversation_id: "0190f5fe-7c00-7a00-8000-000000000201".to_owned(),
             text: Some("已完成 index.html，参考设计文档 snake-game-design.md 和 snake-game-ui.md".to_owned()),
             output_files: vec!["/workspace/index.html".to_owned()],
@@ -3886,6 +3955,7 @@ mod tests {
             release: Arc<Notify>,
         },
         SteeredTurn { started: Arc<AtomicBool>, release: Arc<Notify> },
+        UserInputHandoff,
     }
 
     #[derive(Clone)]
@@ -4069,7 +4139,7 @@ mod tests {
             _delegation_policy: DelegationPolicy,
             _delegation_depth: i64,
             _decision_policy: DecisionPolicy,
-            _attempt_creation_key: &str,
+            attempt_creation_key: &str,
             brief: &str,
             _step_spec: &str,
             _timeout: Duration,
@@ -4141,7 +4211,8 @@ mod tests {
                     .compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok(),
                 HarnessRunnerMode::ParallelRoots { .. } | HarnessRunnerMode::OverlapProbe
-                    | HarnessRunnerMode::DecisionContinuation { .. } | HarnessRunnerMode::SteeredTurn { .. } => false,
+                    | HarnessRunnerMode::DecisionContinuation { .. } | HarnessRunnerMode::SteeredTurn { .. }
+                    | HarnessRunnerMode::UserInputHandoff => false,
             };
             if failure {
                 let (error, error_code, retryable) = match &self.mode {
@@ -4158,6 +4229,7 @@ mod tests {
                 };
                 finish(self);
                 return Ok(AttemptOutcome {
+                    user_input_request: None, user_input_turn: None,
                     conversation_id: format!("harness-{step_title}"),
                     text: None,
                     output_files: Vec::new(),
@@ -4166,6 +4238,32 @@ mod tests {
                     error: Some(error.to_owned()),
                     error_code: Some(error_code.to_owned()),
                     error_retryable: Some(retryable),
+                });
+            }
+
+            if matches!(&self.mode, HarnessRunnerMode::UserInputHandoff) {
+                let request = nomifun_agent_contracts::AgentUserInputRequest {
+                    request_id:"ask-name".into(), question:"请提供姓名。".into(), remaining_work:"生成 PPT。".into(),
+                };
+                let operation = format!("turn:user:{owner_id}:{conversation_id}:{attempt_creation_key}:initial-turn");
+                let started = generate_id();
+                let terminal = generate_id();
+                for (seq, id, kind, value) in [(1,&started,"turn/started",json!({})),
+                    (2,&terminal,"turn/completed",json!({"user_input_request":request}))] {
+                    sqlx::query("INSERT INTO agent_events(session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,inline_json) VALUES(?,?,?,'handoff-fixture',?,?,1,?,?)")
+                        .bind(&conversation_id).bind(seq).bind(id).bind(id).bind(kind).bind(&operation).bind(value.to_string())
+                        .execute(&pool).await.map_err(|error|AppError::Internal(error.to_string()))?;
+                }
+                sqlx::query("INSERT INTO agent_turns(session_id,turn_id,operation_id,idempotency_key,state,started_event_id,terminal_event_id,accepted_at,started_at,finished_at) VALUES(?,?,?,?,'completed',?,?,1,1,2)")
+                    .bind(&conversation_id).bind(&operation).bind(&operation).bind(&operation).bind(started).bind(&terminal)
+                    .execute(&pool).await.map_err(|error|AppError::Internal(error.to_string()))?;
+                sqlx::query("INSERT INTO agent_session_heads(session_id,status,active_set_generation,last_seq,unread_count) VALUES(?,'ready',0,2,0)")
+                    .bind(&conversation_id).execute(&pool).await.map_err(|error|AppError::Internal(error.to_string()))?;
+                finish(self);
+                return Ok(AttemptOutcome {
+                    conversation_id, user_input_request:Some(request), user_input_turn:Some((operation,terminal)),
+                    text:Some("请提供姓名后继续。".into()),output_files:Vec::new(),ok:true,tokens:Some(1),
+                    error:None,error_code:None,error_retryable:Some(false),
                 });
             }
 
@@ -4193,6 +4291,7 @@ mod tests {
             self.completed_successes.fetch_add(1, Ordering::SeqCst);
             finish(self);
             Ok(AttemptOutcome {
+                user_input_request: None, user_input_turn: None,
                 conversation_id: format!("harness-{step_title}"),
                 text: Some(format!("completed {step_title}")),
                 output_files: Vec::new(),
@@ -4208,11 +4307,43 @@ mod tests {
             &self,
             _owner_id: &str,
             conversation_id: &str,
-            _operation_id: &str,
+            operation_id: &str,
             _authority: AgentExecutionTurnAuthority,
             _input: &str,
             _timeout: Duration,
         ) -> Result<AttemptOutcome, AppError> {
+            if matches!(&self.mode,HarnessRunnerMode::UserInputHandoff) {
+                let answer_no = {
+                    let mut calls=self.calls.lock().unwrap();
+                    calls.push(format!("answer:{operation_id}"));
+                    calls.iter().filter(|call|call.starts_with("answer:")).count()
+                };
+                let request=(answer_no==1).then(||nomifun_agent_contracts::AgentUserInputRequest {
+                    request_id:"ask-class".into(),question:"请提供班级。".into(),remaining_work:"完成介绍。".into(),
+                });
+                let pool=self.pool.lock().unwrap().clone().unwrap();
+                let owner=self.owner_id.lock().unwrap().clone().unwrap();
+                let operation=format!("turn:user:{owner}:{conversation_id}:{operation_id}");
+                let base:i64=sqlx::query_scalar("SELECT COALESCE(MAX(seq),0) FROM agent_events WHERE session_id=?")
+                    .bind(conversation_id).fetch_one(&pool).await.unwrap();
+                let started=generate_id();let terminal=generate_id();
+                for (seq,id,kind,value) in [(base+1,&started,"turn/started",json!({})),
+                    (base+2,&terminal,"turn/completed",json!({"user_input_request":request}))] {
+                    sqlx::query("INSERT INTO agent_events(session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,inline_json) VALUES(?,?,?,'answer-fixture',?,?,1,?,?)")
+                        .bind(conversation_id).bind(seq).bind(id).bind(id).bind(kind).bind(&operation).bind(value.to_string())
+                        .execute(&pool).await.unwrap();
+                }
+                sqlx::query("INSERT INTO agent_turns(session_id,turn_id,operation_id,idempotency_key,state,started_event_id,terminal_event_id,accepted_at,started_at,finished_at) VALUES(?,?,?,?,'completed',?,?,?, ?,?)")
+                    .bind(conversation_id).bind(&operation).bind(&operation).bind(&operation).bind(started).bind(&terminal)
+                    .bind(base+1).bind(base+1).bind(base+2).execute(&pool).await.unwrap();
+                sqlx::query("UPDATE agent_session_heads SET last_seq=? WHERE session_id=?")
+                    .bind(base+2).bind(conversation_id).execute(&pool).await.unwrap();
+                return Ok(AttemptOutcome {
+                    conversation_id:conversation_id.into(),user_input_turn:request.as_ref().map(|_|(operation,terminal)),
+                    user_input_request:request,text:Some("本轮已结束。".into()),output_files:Vec::new(),ok:true,tokens:Some(1),
+                    error:None,error_code:None,error_retryable:Some(false),
+                });
+            }
             let HarnessRunnerMode::DecisionContinuation { started, calls, release } = &self.mode else {
                 return Err(AppError::BadRequest("not a continuation fixture".into()));
             };
@@ -4220,6 +4351,7 @@ mod tests {
             started.store(true, Ordering::SeqCst);
             release.notified().await;
             Ok(AttemptOutcome {
+                user_input_request: None, user_input_turn: None,
                 conversation_id: conversation_id.to_owned(),
                 text: Some("completed decision continuation".to_owned()),
                 output_files: Vec::new(),
@@ -4711,6 +4843,76 @@ mod tests {
                 panic!("harness execution should settle");
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn scheduler_handoff_waits_only_under_the_existing_ask_user_policy() {
+        for ask_user in [true,false] {
+            let mut mode = HarnessAttemptRunner::overlap_probe();
+            mode.mode = HarnessRunnerMode::UserInputHandoff;
+            let runner = Arc::new(mode);
+            let (mut scheduler,repository,execution_id,_dir,owner) = make_scheduler_harness(
+                runner.clone(),&["introduction"],&[],1,AdaptationPolicy::Adaptive,None,
+            ).await;
+            let effects=Arc::new(NoopConversationEffects::default());
+            Arc::get_mut(&mut scheduler.inner).unwrap().deps.conversation_effects=effects.clone();
+            let pool=runner.pool.lock().unwrap().clone().unwrap();
+            if ask_user {
+                sqlx::query("UPDATE agent_executions SET decision_policy='ask_user' WHERE execution_id=?")
+                    .bind(&execution_id).execute(&pool).await.unwrap();
+            }
+            scheduler.start(owner.clone(),execution_id.clone());
+            let detail=tokio::time::timeout(Duration::from_secs(5),async {
+                loop {
+                    let detail=repository.get_execution_detail(&owner,&execution_id).await.unwrap().unwrap();
+                    if detail.execution.status==if ask_user {"waiting_input"} else {"failed"} { break detail; }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.unwrap();
+            assert_eq!(detail.steps[0].status,if ask_user {"waiting_input"} else {"failed"});
+            assert_eq!(detail.attempts.len(),1,"a normal handoff never authorizes an automatic task replay");
+            let attempt=&detail.attempts[0].attempt;
+            assert_eq!(attempt.status,if ask_user {"waiting_input"} else {"failed"});
+            if ask_user {
+                assert_eq!(attempt.question.as_deref(),Some("请提供姓名。"));
+                assert!(attempt.finished_at.is_none());
+                let mut waiting=detail;
+                for (index,answer) in ["小明","一年级"].into_iter().enumerate() {
+                    let step=waiting.steps[0].clone();let attempt=waiting.attempts[0].attempt.clone();
+                    let conversation_id=waiting.attempts[0].conversation_id.clone();
+                    assert!(attempt.runtime_state.is_none(),"a proved closed handoff must retire the delivered DecisionInput");
+                    let operation=generate_id();
+                    let mut pending=AttemptConversationEffects::default();
+                    pending.push_decision(operation.clone(),answer.into()).unwrap();
+                    assert_eq!(pending.current_turn_operation_key(&attempt.attempt_id).unwrap(),operation);
+                    assert!(matches!(pending.pending_conversation_effects.as_slice(),[PendingConversationEffect::DecisionInput{..}]));
+                    // This is the existing answer_decision write-ahead CAS;
+                    // the scheduler dispatches continue_with_input on the same Session.
+                    repository.resume_waiting_attempt(&owner,&execution_id,waiting.execution.version,
+                        &step.step_id,step.version,&attempt.attempt_id,attempt.version,
+                        &AttemptConversationEffectParams {runtime_state:Some(pending.encode().unwrap())},
+                        &system_event(AgentExecutionEventKind::DecisionAnswered,Some(&step.step_id),Some(&attempt.attempt_id),json!({})),
+                    ).await.unwrap();
+                    scheduler.start(owner.clone(),execution_id.clone());
+                    waiting=tokio::time::timeout(Duration::from_secs(5),async {
+                        loop {
+                            let current=repository.get_execution_detail(&owner,&execution_id).await.unwrap().unwrap();
+                            let answered=if index==0 { current.execution.status=="waiting_input"
+                                && current.attempts[0].attempt.question.as_deref()==Some("请提供班级。") }
+                                else { current.execution.status=="completed" };
+                            if answered { break current; }
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    }).await.unwrap();
+                    assert_eq!(waiting.attempts[0].attempt.attempt_id,attempt.attempt_id);
+                    assert_eq!(waiting.attempts[0].conversation_id,conversation_id);
+                }
+                assert_eq!(runner.calls.lock().unwrap().iter().filter(|call|call.starts_with("answer:")).count(),2);
+                assert!(effects.conversation_operations.lock().unwrap().is_empty(),"a closed source Turn is never stopped or steered");
+            } else { assert!(attempt.error.as_deref().unwrap().contains("automatic decisions")); }
+            assert_eq!(runner.call_count("introduction"),1);
+            scheduler.shutdown().await.unwrap();
         }
     }
 

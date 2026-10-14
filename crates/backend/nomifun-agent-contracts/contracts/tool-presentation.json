@@ -106,6 +106,7 @@
   {"action_id":"session.management/execution_cancel","capability_id":"session.management","name":"cancel_agent_execution","titles":{"zh-CN":"取消协作任务","en-US":"Cancel agent execution"},"target_fields":["execution_id"]},
   {"name":"update_plan","titles":{"zh-CN":"更新计划","en-US":"Update plan"},"target_fields":[]},
   {"name":"report_completion","titles":{"zh-CN":"提交完成结果","en-US":"Report completion"},"target_fields":[]},
+  {"name":"request_user_input","titles":{"zh-CN":"询问用户","en-US":"Ask the user"},"target_fields":[]},
   {"name":"search_tool_history","titles":{"zh-CN":"搜索调用记录","en-US":"Search tool history"},"target_fields":["query"]},
   {"name":"read_tool_history","titles":{"zh-CN":"读取调用记录","en-US":"Read tool history"},"target_fields":["call_id"]},
   {"name":"load_tool_history","titles":{"zh-CN":"加载调用记录","en-US":"Load tool history"},"target_fields":["call_id"]},

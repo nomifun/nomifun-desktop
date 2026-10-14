@@ -220,12 +220,11 @@ async fn list(
     ok(json!({ "total": resp.total, "conversations": items }))
 }
 
-/// Restart-isolation ("stuck") assessment for one conversation (spec D3).
+/// Assess a nonterminal conversation without a live Runtime.
 ///
-/// A conversation is stuck when its durable status is still `running` but no
-/// live runtime exists in this process: after a backend restart the running
-/// authority is fail-closed quarantined and nothing will finish it without an
-/// explicit stop. Returns the flag plus the unlock hint.
+/// Durable `running` also represents paused work. Without a canonical pause
+/// cause, absence of a local Runtime cannot establish why execution stopped.
+/// Keep the existing diagnostic flag and offer the exact-turn stop path.
 fn stuck_assessment(
     is_persisted_running: bool,
     has_runtime: bool,
@@ -234,7 +233,7 @@ fn stuck_assessment(
     (
         stuck,
         stuck.then_some(
-            "该会话因后端重启被保护性挂起，可用 nomi_stop_conversation 解除后重试",
+            "会话尚未结束，当前没有可确认的活动执行；请检查会话状态和已有结果，可用 nomi_stop_conversation 请求结束本回合",
         ),
     )
 }
@@ -633,7 +632,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_stop_conversation",
             "conversation",
-            "Stop a conversation's current turn — including one left protectively suspended (stuck) by a backend restart. Same safe path as the desktop stop button.",
+            "Stop a conversation's current turn, including a paused turn or one without a live Runtime. Same safe path as the desktop stop button.",
             EffectClass::Destructive,
         ),
         adapt(stop),
@@ -802,15 +801,21 @@ mod tests {
             "an idle conversation reports stopped=false with its previous status"
         );
         assert_eq!(stop_outcome("pending"), (false, "pending"));
+
+        let mut caps = Vec::new();
+        register(&mut caps);
+        let cap = caps.iter().find(|cap| cap.meta.name == "nomi_stop_conversation").unwrap();
+        assert!(cap.meta.summary.contains("paused turn"));
+        assert!(!cap.meta.summary.contains("restart"));
     }
 
     #[test]
     fn stuck_assessment_flags_only_durable_running_without_runtime() {
         let (stuck, hint) = stuck_assessment(true, false);
-        assert!(stuck, "durable running with no live runtime is the restart-isolated state");
+        assert!(stuck, "nonterminal work without a local Runtime needs status confirmation");
         assert_eq!(
             hint,
-            Some("该会话因后端重启被保护性挂起，可用 nomi_stop_conversation 解除后重试"),
+            Some("会话尚未结束，当前没有可确认的活动执行；请检查会话状态和已有结果，可用 nomi_stop_conversation 请求结束本回合"),
         );
 
         for (is_persisted_running, has_runtime) in [(true, true), (false, false), (false, true)] {

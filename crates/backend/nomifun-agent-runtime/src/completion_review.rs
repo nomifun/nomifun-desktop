@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub enum AgentExecutionPhase {
     #[default]
     Execution,
+    EndIntentReview,
     CompletionReview,
     DeliveryReview,
 }
@@ -39,13 +40,13 @@ impl AgentCompletionReviewState {
     }
 
     pub(crate) fn is_report_only(&self) -> bool {
-        self.phase != AgentExecutionPhase::Execution
+        matches!(self.phase, AgentExecutionPhase::CompletionReview | AgentExecutionPhase::DeliveryReview)
     }
 
     pub(crate) fn valid_for(&self, inputs: usize) -> bool {
         (!self.delivery_pending || self.delivery_used) && !(self.delivery_pending && self.account_repair)
             && self.input_revision <= inputs
-            && (!(self.delivery_used || self.account_repair || self.is_report_only()) || self.input_revision > 0)
+            && (!(self.delivery_used || self.account_repair || self.phase != AgentExecutionPhase::Execution) || self.input_revision > 0)
     }
 }
 

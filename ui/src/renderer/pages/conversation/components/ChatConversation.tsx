@@ -15,7 +15,7 @@ import { useTranslation } from 'react-i18next';
 import { Navigate, useNavigate } from 'react-router-dom';
 import ChatLayout, { type ChatLayoutProps } from './ChatLayout';
 import ChatSlider from './ChatSlider.tsx';
-import { isConversationProcessing } from '@/renderer/pages/conversation/utils/conversationRuntime';
+import { isConversationProcessing, isConversationBindingBlocked } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import NomiChat from '../platforms/nomi/NomiChat';
 import { useNomiModelSelection } from '../platforms/nomi/useNomiModelSelection';
 import { ExecutionProvider } from '../execution/ExecutionContext';
@@ -192,6 +192,7 @@ const NomiConversationPanel: React.FC<{
   const modelSwitchingRef = useRef(false);
   const agentSwitchingRef = useRef(false);
   const onSelectModel = useCallback(async (provider: IProvider, modelName: string) => {
+    if (isConversationBindingBlocked(conversation)) return false;
     if (modelSwitchingRef.current || agentSwitchingRef.current || reasoningEffortUpdatingRef.current) return false;
     modelSwitchingRef.current = true;
     setModelSwitching(true);
@@ -223,7 +224,7 @@ const NomiConversationPanel: React.FC<{
       modelSwitchingRef.current = false;
       setModelSwitching(false);
     }
-  }, [conversation.id, reasoningEffort, t]);
+  }, [conversation, reasoningEffort, t]);
 
   const modelSelection = useNomiModelSelection({
     initialModel: conversation.model,
@@ -234,7 +235,7 @@ const NomiConversationPanel: React.FC<{
     next: SessionReasoningEffort | undefined
   ) => {
     if (reasoningEffortUpdatingRef.current || agentSwitchingRef.current || modelSwitchingRef.current) return;
-    if (isConversationProcessing(conversation)) {
+    if (isConversationBindingBlocked(conversation)) {
       Message.warning(t('conversation.chat.modelSwitchAfterTurn'));
       return;
     }
@@ -263,7 +264,7 @@ const NomiConversationPanel: React.FC<{
   const { switching: agentSwitching, switchAgent: switchCurrentConversationAgent } = useConversationAgentSwitch({
     sessionId: conversation.id,
     currentSelection: frozenAgentSelection,
-    processing: isConversationProcessing(conversation),
+    processing: isConversationBindingBlocked(conversation),
     switchingRef: agentSwitchingRef,
     configurationChangingRef: modelSwitchingRef,
     reasoningUpdatingRef: reasoningEffortUpdatingRef,
@@ -301,7 +302,7 @@ const NomiConversationPanel: React.FC<{
       isLoading={agentsLoading}
       loadError={agentsError}
       onRetry={refreshAgents}
-      disabled={isConversationProcessing(conversation) || modelSwitching || reasoningEffortUpdating}
+      disabled={isConversationBindingBlocked(conversation) || modelSwitching || reasoningEffortUpdating}
       disabledReason={t('conversation.chat.agentSwitch.waitForTurn')}
       switching={agentSwitching}
       switchingLabel={t('conversation.chat.agentSwitch.loading')}

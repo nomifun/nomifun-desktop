@@ -233,11 +233,11 @@ impl AgentSessionStore {
             if !matches!(kind, Some(
                 "host_tool_settled" | "host_resource_settled" | "host_process_quiescent" | "host_cleanup_proven"
                 | "turn_started" | "turn_input_scope" | "steering_deferred" | "steering_inputs"
-                | "turn_completed" | "turn_failed" | "turn_cancelled" | "turn_paused" | "output_text_delta" | "reasoning_delta"
+                | "turn_completed" | "turn_input_required" | "user_input_requested" | "turn_failed" | "turn_cancelled" | "turn_paused" | "output_text_delta" | "reasoning_delta"
                 | "tool_completed" | "work_status" | "plan_updated" | "patch_recovery_updated"
                 | "model_response_rejected" | "model_response_validated" | "model_output_truncated" | "context_compacted" | "compaction_usage" | "compaction_summary_rejected"
                 | "completion_observation" | "completion_reported" | "completion_delivered" | "instructions_updated" | "context_prepared"
-                | "runtime_modules_activated" | "completion_review" | "completion_check_rejected" | "execution_budget_prepared" | "tool_results_ordered" | "usage"
+                | "runtime_modules_activated" | "completion_review" | "end_intent_review" | "completion_check_rejected" | "execution_budget_prepared" | "tool_results_ordered" | "usage"
             )) { return Err(SessionStoreError::ExecutionFenced); }
         }
         let mut tx = self.begin_write_transaction().await?;

@@ -21,6 +21,7 @@ import { MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT } from '../typography'
 import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
 import { IdmmDecisionNotice } from './IdmmDecisionNotice';
 import ConversationErrorNote from './ConversationErrorNote';
+import { UserInputRequestNote } from './UserInputRequestNote';
 
 const icon = {
   success: <CheckOne theme='filled' size='16' fill={theme.Color.FunctionalColor.success} className='m-t-2px' />,
@@ -120,6 +121,7 @@ const MessageTips: React.FC<{ message: IMessageTips; compactError?: boolean }> =
   ) : null;
 
   const displayContent = json ? '' : content;
+  if (type !== 'error' && message.content.user_input_request) return <UserInputRequestNote message={message} />;
   if (message.content.idmm_notice) return <IdmmDecisionNotice message={message} />;
   if (transition) {
     return (

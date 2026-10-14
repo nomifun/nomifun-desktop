@@ -86,6 +86,8 @@ pub struct TipsEventData {
     pub content: String,
     #[serde(rename = "type")]
     pub tip_type: TipType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_input_request: Option<nomifun_agent_contracts::AgentUserInputRequest>,
 }
 
 /// Severity level for a tip event.
@@ -145,6 +147,8 @@ pub struct TurnCompletedEventData {
 pub enum TurnStopReason {
     /// Turn completed normally.
     EndTurn,
+    /// This reply hands input back to the user; the accepted task is unfinished.
+    InputRequired,
     /// Output token limit reached (turn truncated).
     MaxTokens,
     /// Per-turn request cap reached (turn truncated).
@@ -197,6 +201,7 @@ mod tests {
 
     #[test]
     fn export_protocol_bindings() {
+        export_binding_if_changed::<nomifun_agent_contracts::AgentUserInputRequest>("AgentUserInputRequest.ts");
         export_binding_if_changed::<StartEventData>("StartEventData.ts");
         export_binding_if_changed::<OutputDiscardedEventData>("OutputDiscardedEventData.ts");
         export_binding_if_changed::<SessionAssignedEventData>("SessionAssignedEventData.ts");
@@ -235,6 +240,7 @@ mod tests {
         let event = AgentStreamEvent::Tips(TipsEventData {
             content: "Something went wrong".into(),
             tip_type: TipType::Error,
+            user_input_request: None,
         });
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "tips");
@@ -494,7 +500,7 @@ mod tests {
             ),
             (AgentStreamEvent::Text(TextEventData { step: None, content: "x".into() }), "content"),
             (
-                AgentStreamEvent::Tips(TipsEventData { content: "x".into(), tip_type: TipType::Warning }),
+                AgentStreamEvent::Tips(TipsEventData { content: "x".into(), tip_type: TipType::Warning, user_input_request: None }),
                 "tips",
             ),
             (AgentStreamEvent::TurnCompleted(TurnCompletedEventData::default()), "turn_completed"),

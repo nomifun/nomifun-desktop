@@ -169,6 +169,40 @@ voice 产品回执的可选 `request_kind` 仅来自应用实际解析、执行�
 
 Creation prompt、Cron notice、AgentExecution summary 使用正式消息事件成为数据上下文。Agent 切换前的文本和工具结果只从已提交的 canonical event/payload 读取。工具结果保持原文，以明确的不可信历史数据包装进入下一 Agent；不重放旧工具角色，不继承旧 Agent 系统指令、权限、可用进程句柄或完成门槛。历史图片和音频不作为新观察传输；MCP resource journal 仅记录 owner settlement 时不能补造资源正文。上下文清空事件和当前 accepted root cursor 限定读取窗口。
 
+### 用户输入交接
+
+普通会话使用 Runtime 的 `request_user_input` 控制声明问题与剩余工作，问题身份来自确切
+工具调用，宿主校验同一 owner、Session 和活动 Turn。问题是需要用户参与的正常交接，
+不构成答案、授权或任务完成证明。`report_completion` 继续负责真实任务交付的证据审核；
+两种意图共享原终态输入围栏、资源清理和一次 canonical 终态提交，不新增等待状态或问答表。
+
+已启用任务记账而结束意图不明确时，现役有界审核允许声明完成或交接用户输入；正式报告审核、
+失败停止与未知效果围栏不能通过提问逃逸。已提交问题保存在原 typed Runtime Event 和现役
+checkpoint；恢复只继续原交接结算，不重问、重跑工具或携带旧进程句柄。已准入回复先走原
+steering；回合关闭后的回复在同 Session 开启新 Turn。上下文只从原 canonical 事实读取问题
+及尚未交付的要求，剩余工作说明不能扩大用户授权或充当效果证据。
+
+清理证明和终态提交后，交接以带 `user_input_request` 的普通 `turn/completed` 保存；这只表示
+本轮正常交还输入。实时与历史共用正常问题提示，界面不从正文猜测、制造空闲或重写旧失败。
+AgentExecution 的 canonical 输出、恢复、采纳与调度消费同一 typed 交接，不能把有正文的
+闭合回合当作 Step 完成。AskUser 仍须校验精确活动 Link、Attempt、策略和原 Turn 回执；
+自动决策及 Cron 不因普通提问获得人工授权。没有真实回复时不轮询模型，也不自动重放效果。
+
+### 执行窗口与暂停
+
+模型步骤窗口和日志窗口通过已确认的静止 checkpoint 续接同一个 Turn，原累计预算、
+进程期限、取消和效果围栏继续生效。软窗口届满而原进程仍在运行时，Runtime 只开放
+这些确切原进程的输入、关闭输入、读取结果和取消，以及准备输入所需的已授权文件读取
+与计划更新；不准入新进程或其他新工作，也不解除完成审核的工具限制。
+结算等待不保存 live handle。实际退出和清理确认后，按已消耗的模型步骤提交新的
+checkpoint，只有收到提交回执才续段。空轮询、轮询参数变化和规则读取不延长无进展保护；
+真实预算不足、未知效果、取消或无法取得 checkpoint 回执仍沿原安全路径停止。
+
+界面从现有 canonical 投影共用派生空闲、执行中和已暂停的判断，不新增持久状态。
+暂停保留原 Turn 和输入阻断，以无执行动画的“结束本回合”操作提交确切 Turn 取消，
+取得释放回执后才恢复输入。公开暂停原因保留已知的执行、恢复及清理机器码，并受
+原 Operation 和观察 cursor 限定；私有描述仍不公开，也不从原因码补造清理证明。
+
 ### 当前会话内的历史
 
 同代会话的前序 Turn、不可变 Snapshot、显式 Agent transition 和模型切换是当前产品语义。它们需要验证身份、binding、sequence 和内容完整性。它们不授权读取退役的 Conversation 表、私有 transcript 或旧格式投影。

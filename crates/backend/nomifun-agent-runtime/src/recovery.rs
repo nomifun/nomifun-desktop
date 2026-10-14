@@ -57,6 +57,16 @@ impl AgentTurnRecovery {
         }
         crate::stream_limits::serialized_size(&prefix, nomifun_agent_contracts::MAX_NATIVE_APPROVED_JOURNAL_BYTES as usize)?;
         crate::stream_limits::serialized_size(&tail, 8 * 1024 * 1024)?;
+        if crate::user_input_request::recorded_pending(&prefix)? != checkpoint.pending_user_input
+            || (checkpoint.pending_user_input.is_some() && tail.iter().any(|event|
+                matches!(event, AgentEngineEvent::ModelStepStarted { .. }))) {
+            return Err(fail());
+        }
+        if let Some(request) = &checkpoint.pending_user_input {
+            if !prefix.iter().any(|event| matches!(event,
+                AgentEngineEvent::ToolCompleted { result, .. } | AgentEngineEvent::ToolOutcomeReconciled { result, .. }
+                    if result.call_id == request.request_id && !result.is_error)) { return Err(fail()); }
+        }
         let mut protocol_recovery = crate::protocol_recovery::ProtocolRecovery::default();
         protocol_recovery.restore(prefix.iter().chain(&tail))?;
         let mut reserved = BTreeSet::new();
@@ -152,6 +162,9 @@ impl AgentTurnRecovery {
             }
         }
         if discarded.iter().any(|id| reserved.contains(id)) { return Err(fail()); }
+        if checkpoint.segments.as_ref().is_some_and(|state| last_model_step > state.total_model_limit()) {
+            return Err(fail());
+        }
         reserved.extend(discarded.iter().cloned());
         let next_instruction_sequence = prefix.iter().chain(&tail).filter_map(|event| match event {
             AgentEngineEvent::ToolCallCompleted { step: 0, call } => call.call_id.as_ref().strip_prefix("agent-instructions:")?.parse::<u32>().ok(),
@@ -187,7 +200,7 @@ mod tests {
                 nomifun_agent_contracts::ResolvedSnapshotRef { snapshot_id: "snapshot".into(), snapshot_digest: "b".repeat(64).into() }).unwrap(),
             turn_operation_id: "turn".into(), active_set_generation: 0, model_steps: 0, tool_call_count: 0,
             accepted_input_count: 1, applied_steering_receipts: vec![], plan: Default::default(), work: Default::default(),
-            patch_recovery: Default::default(), segments: None, control_rejections: Default::default(), completion_review: Default::default(),
+            patch_recovery: Default::default(), segments: None, control_rejections: Default::default(), completion_review: Default::default(), pending_user_input: None,
         }
     }
 

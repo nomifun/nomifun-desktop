@@ -6,7 +6,7 @@
 
 import type { ConversationId, MessageId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
-import { isKnowledgeWritebackPresentation, transformMessage, transformUserCreatedEvent } from '@/common/chat/chatLib';
+import { isKnowledgeWritebackPresentation, isUserInputRequestPresentation, transformMessage, transformUserCreatedEvent } from '@/common/chat/chatLib';
 import { isToolGroupStatusActive, normalizeToolGroupStatus } from '@/common/chat/toolGroupStatus';
 import { optionalDisplayText, toDisplayText } from '@/common/chat/displayText';
 import type { IResponseMessage } from '@/common/adapter/ipcBridge';
@@ -404,6 +404,16 @@ export const useNomiMessage = (
       // They must not reconcile or re-raise the current Turn's busy state.
       if (isKnowledgeWritebackPresentation(message)) {
         addOrUpdateMessage(transformMessage(message));
+        return;
+      }
+
+      // Input handoff is a completed Turn's presentation, not fresh activity.
+      // Only its exact current root may trigger the existing authority read.
+      if (isUserInputRequestPresentation(message)) {
+        addOrUpdateMessage(transformMessage(message));
+        if (message.turn_id === rootTurnIdRef.current && !awaitingBackendTurnRef.current && !turnClosedRef.current) {
+          reconcileAfterStreamTerminal();
+        }
         return;
       }
 
@@ -812,20 +822,6 @@ export const useNomiMessage = (
     dispatchTurn({ type: 'setWaiting', value });
   }, [setRootTurnId]);
 
-  const restoreRunningAfterStopFailure = useCallback(() => {
-    turnLifecycleGenerationRef.current += 1;
-    setStopNotice(null);
-    const rootTurnId = rootTurnIdRef.current;
-    if (rootTurnId) cancelledTurnIdsRef.current.delete(rootTurnId);
-    awaitingBackendTurnRef.current = false;
-    turnClosedRef.current = false;
-    rejectUnannouncedStartRef.current = false;
-    verifyUnannouncedStartRuntimeRef.current = false;
-    turnSettledRef.current = false;
-    dispatchTurn({ type: 'hydrate', isRunning: true });
-    startAuthoritativeRuntimeReconciliation();
-  }, [startAuthoritativeRuntimeReconciliation]);
-
   const confirmStopped = useCallback(() => {
     setPauseNotice(null);
     turnLifecycleGenerationRef.current += 1;
@@ -858,7 +854,6 @@ export const useNomiMessage = (
     setWaitingResponse,
     resetState,
     confirmStopped,
-    restoreRunningAfterStopFailure,
     getTurnStartGeneration,
     getTurnCompletionGeneration,
   };

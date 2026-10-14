@@ -82,7 +82,8 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); mock.restore(); configService.reset(); sessionStorage.clear(); });
 
-function mount(options: { compact?: boolean; busy?: boolean; linkedBusy?: boolean } = {}) {
+function mount(options: { compact?: boolean; busy?: boolean; linkedBusy?: boolean; paused?: boolean } = {}) {
+  const pausedTurnId = parseMessageId(uuidv7());
   const conversation = { id: parseConversationId(uuidv7()), name: 'General', type: 'nomi', session_purpose: 'conversation', status: 'finished',
     created_at: 1, modified_at: 1, model, extra: { workspace: '/project' } } as TChatConversation;
   spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue(conversation);
@@ -99,7 +100,9 @@ function mount(options: { compact?: boolean; busy?: boolean; linkedBusy?: boolea
   const view = render(<MemoryRouter><I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), fallback: { providers: [] }, shouldRetryOnError: false }}>
     <PreviewProvider persistNamespace={browserStorageKey('collaboration-test', 'conversation', conversation.id)} subscribeGlobalOpen={false}>
       <MessageListProvider><NomiSendBox conversation_id={conversation.id} modelSelection={modelSelection}
-        turnActivity={{ ...activity, running: options.busy ?? false }} creationEnabled={false} collaborationEnabled compactProductComposer={options.compact} /></MessageListProvider>
+        turnActivity={{ ...activity, running: options.busy ?? false, pauseNotice: options.paused
+          ? { turnId: pausedTurnId, reason: 'EXECUTION_TOTAL_MODEL_BUDGET', cleanupProven: true, pausedAt: 123 } : null }}
+        creationEnabled={false} collaborationEnabled compactProductComposer={options.compact} /></MessageListProvider>
     </PreviewProvider></SWRConfig></I18nextProvider></MemoryRouter>);
   const input = view.getByTestId('sendbox-input') as HTMLTextAreaElement;
   const submit = async (text = 'Review this work') => {
@@ -108,7 +111,7 @@ function mount(options: { compact?: boolean; busy?: boolean; linkedBusy?: boolea
     await waitFor(() => expect(input.value).toBe(text));
     await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }); });
   };
-  return { view, input, submit, conversation, send, create, fromTemplate };
+  return { view, input, submit, conversation, send, create, fromTemplate, pausedTurnId };
 }
 
 test('an existing conversation keeps the shared icon and submits its chosen pool and policies through the original Execution API', async () => {
@@ -208,6 +211,22 @@ test('repeated send input while admission is awaiting its receipt creates one Ex
   await act(async () => complete({ execution_id: parseExecutionId(uuidv7()) } as never));
   await waitFor(() => expect(composer.input.value).toBe(''));
   expect(composer.send).not.toHaveBeenCalled();
+});
+
+test('a paused turn keeps a quiet cancellation action and blocks new admissions', async () => {
+  const composer = mount({ paused: true });
+  const cancel = composer.view.getByTestId('sendbox-paused-cancel-btn');
+  expect(cancel.classList.contains('bg-animate')).toBe(false);
+  expect(composer.view.queryByTestId('sendbox-stop-btn')).toBeNull();
+  expect(composer.input.disabled).toBe(true);
+  fireEvent.change(composer.input, { target: { value: 'Continue the unfinished work' } });
+  fireEvent.keyDown(composer.input, { key: 'Enter' });
+  expect(composer.send).not.toHaveBeenCalled();
+  expect(composer.create).not.toHaveBeenCalled();
+  const stop = spyOn(ipcBridge.conversation.stop, 'invoke').mockResolvedValue(undefined);
+  fireEvent.click(cancel);
+  await waitFor(() => expect(stop).toHaveBeenCalledTimes(1));
+  expect(stop).toHaveBeenCalledWith({ conversation_id: composer.conversation.id, expected_turn_id: composer.pausedTurnId });
 });
 
 test('a linked active collaboration cannot be replaced by a new admission from an idle chat', async () => {

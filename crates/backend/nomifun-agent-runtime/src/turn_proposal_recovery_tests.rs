@@ -73,7 +73,7 @@ mod proposal_recovery_tests {
             active_set_generation: 0, model_steps: 0, tool_call_count: 0, accepted_input_count: 1,
             applied_steering_receipts: vec![], plan: Default::default(), work: Default::default(),
             patch_recovery: Default::default(), segments: None, control_rejections: Default::default(),
-            completion_review: Default::default(),
+            completion_review: Default::default(), pending_user_input: None,
         }
     }
 

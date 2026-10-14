@@ -27,6 +27,7 @@ pub struct AgentExecutionCheckpoint {
     #[serde(default)]
     pub control_rejections: crate::AgentControlRejectionState,
     pub completion_review: crate::AgentCompletionReviewState,
+    pub pending_user_input: Option<nomifun_agent_contracts::AgentUserInputRequest>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +43,14 @@ impl AgentExecutionCheckpoint {
         self.patch_recovery.validate().map_err(AgentEngineError::InvalidContract)?;
         if let Some(segments) = &self.segments { segments.validate(self.model_steps)?; }
         self.control_rejections.validate()?;
+        if let Some(request) = &self.pending_user_input {
+            request.validate().map_err(AgentEngineError::InvalidContract)?;
+            if self.completion_review.is_report_only() || self.completion_review.account_repair
+                || self.completion_review.delivery_pending || !self.patch_recovery.targets.is_empty()
+                || !self.patch_recovery.unresolved_targets.is_empty() || self.patch_recovery.target_budget_exceeded {
+                return Err(AgentEngineError::InvalidContract("unsettled patch or locked completion review cannot carry an input handoff".into()));
+            }
+        }
         if !self.completion_review.valid_for(self.accepted_input_count) {
             return Err(AgentEngineError::InvalidContract("checkpoint completion review state is invalid".into()));
         }
@@ -100,7 +109,7 @@ mod tests {
             turn_operation_id: "turn".into(), active_set_generation: 0, model_steps: 1, tool_call_count: 1,
             accepted_input_count: 1, applied_steering_receipts: vec![], plan: AgentPlan::default(),
             work: AgentWorkStatus { running_processes: std::collections::BTreeSet::from(["live-process".into()]), ..Default::default() },
-            patch_recovery: Default::default(), segments: None, control_rejections: Default::default(), completion_review: Default::default(),
+            patch_recovery: Default::default(), segments: None, control_rejections: Default::default(), completion_review: Default::default(), pending_user_input: None,
         };
         assert!(checkpoint.validate().is_err());
     }

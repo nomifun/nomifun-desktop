@@ -7,7 +7,8 @@
 import type { CreativeModelSelectionRef } from '../models';
 import type { CreativeStudioAgentMessage } from './types';
 import type { ConversationPauseNotice } from '@/renderer/pages/conversation/utils/conversationRuntime';
-import type { AgentStreamErrorInfo } from '@/common/chat/chatLib';
+import { normalizeAgentUserInputRequest, type AgentStreamErrorInfo } from '@/common/chat/chatLib';
+import type { AgentUserInputRequest } from '@/common/protocolBindings/AgentUserInputRequest';
 
 export interface CreativeStudioAgentTurnRequest {
   canvasId: string;
@@ -30,6 +31,7 @@ export type CreativeStudioAgentTurnEvent =
   | { type: 'history-reconciled'; history: readonly CreativeStudioAgentMessage[] }
   | { type: 'paused'; pause: ConversationPauseNotice }
   | { type: 'completed'; assistantMessageId?: string }
+  | { type: 'input-required'; request: AgentUserInputRequest; assistantMessageId?: string }
   | { type: 'stopped' }
   | { type: 'failed'; message: string; code?: string; retryable?: boolean; error?: AgentStreamErrorInfo; turnId?: string; timestamp?: number };
 
@@ -48,6 +50,7 @@ export interface CreativeStudioAgentChatPort {
 type CreativeStudioAgentTurnStatus =
   | { state: 'running' }
   | { state: 'completed' }
+  | { state: 'input_required'; request: AgentUserInputRequest }
   | { state: 'stopped' }
   | { state: 'failed'; error: Error };
 
@@ -133,6 +136,13 @@ export class CreativeStudioAgentChatController {
           return outcome;
         }
         if (event.type === 'completed') completed = true;
+        if (event.type === 'input-required') {
+          const request = normalizeAgentUserInputRequest(event.request);
+          if (!request) throw new CreativeStudioAgentProtocolError('Input-required turn has no valid structured question');
+          const outcome = { state: 'input_required', request } as const;
+          observer.onStatusChange?.(outcome);
+          return outcome;
+        }
       }
 
       if (!completed) {

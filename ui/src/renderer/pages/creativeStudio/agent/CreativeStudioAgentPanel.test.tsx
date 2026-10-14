@@ -88,6 +88,19 @@ const panelCss = readFileSync(
 );
 
 describe('CreativeStudioAgentPanel source-parity states', () => {
+  test('renders the structured question beside an existing design without a running or completed state', () => {
+    for (const text of ['', '已有设计方案']) {
+      const html = renderPanel({messages:[{id:'ask-1',role:'assistant',status:'input_required',text,
+        userInputRequest:{request_id:'question-1',question:'请输入姓名',remaining_work:'完成介绍页'}}]});
+      expect(html.includes('请输入姓名')).toBe(true);
+      expect(html.includes('完成介绍页')).toBe(true);
+      expect(html.includes(text)).toBe(true);
+      expect(html.includes('data-agent-message-status="input_required"')).toBe(true);
+      expect(html.includes('data-agent-message-status="complete"')).toBe(false);
+      expect(html.includes('data-agent-message-status="running"')).toBe(false);
+    }
+  });
+
   test('fills the canvas chrome column so a resized panel stays flush right', () => {
     expect(panelCss.includes('width: 100%;')).toBe(true);
     expect(panelCss.includes('min-width: 0;')).toBe(true);
@@ -336,6 +349,22 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
 });
 
 describe('Creative Studio Agent model and chat boundaries', () => {
+  test('input handoff releases the local controller without claiming completion and permits the next answer', async () => {
+    const userInputRequest = {request_id:'question-1',question:'请输入姓名',remaining_work:'完成介绍页'};
+    let turn = 0;
+    const controller = new CreativeStudioAgentChatController({async *runTurn(){
+      if (turn++===0) yield {type:'input-required',request:userInputRequest};
+      else yield {type:'completed'};
+    }});
+    const input = {canvasId:'canvas-1',sessionId:'session-1',idempotencyKey:'0190f5fe-7c00-7a00-8000-000000000301',
+      prompt:'介绍页',modelInput:'介绍页',skillIds:[],model,history:[]};
+    expect(await controller.runTurn(input)).toEqual({state:'input_required',request:userInputRequest});
+    expect(controller.isRunning).toBe(false);
+    expect(await controller.runTurn({...input,prompt:'Alice',modelInput:'Alice',
+      idempotencyKey:'0190f5fe-7c00-7a00-8000-000000000302'})).toEqual({state:'completed'});
+    expect(controller.isRunning).toBe(false);
+  });
+
   test('reuses the one NomiFun model catalog with the exact chat task', () => {
     const composer = readFileSync(new URL('./CreativeStudioAgentComposer.tsx', import.meta.url), 'utf8');
     const canvasPanel = readFileSync(

@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::path::{Component, Path};
 
-use nomifun_agent_contracts::{SessionEventRecord, digest_bytes, digest_payload};
+use nomifun_agent_contracts::{AgentUserInputRequest, SessionEventRecord, digest_bytes, digest_payload};
 use nomifun_agent_runtime::{AgentEngineEvent, AgentReconciliationSource};
 use nomifun_agent_session::{ChatCausalityFacts, TurnReceipt, TurnReceiptStatus};
 use nomifun_common::AppError;
@@ -41,7 +41,10 @@ struct TurnStart { source_message_id: String }
 #[derive(Default, Deserialize)]
 struct TerminalError { code: Option<String>, message: Option<String>, retryable: Option<bool> }
 #[derive(Default, Deserialize)]
-struct TerminalPayload { message: Option<String>, code: Option<String>, error: Option<TerminalError> }
+struct TerminalPayload {
+    message: Option<String>, code: Option<String>, error: Option<TerminalError>,
+    user_input_request: Option<AgentUserInputRequest>,
+}
 #[derive(Deserialize)]
 struct AssistantPart { content: String, turn_id: String }
 #[derive(Deserialize)]
@@ -86,11 +89,19 @@ pub fn canonical_turn_delivery(
     let start_payload: TurnStart = decode(payload(facts, start)?)?;
     let mut delivery = AgentExecutionDelivery {
         message_id: start_payload.source_message_id.clone(), replayed,
-        completed: terminal.is_some(), paused_reason: None,
+        completed: terminal.is_some(), user_input_request: None, paused_reason: None,
         result_ok: None, result_text: None, result_error: None,
         result_error_code: None, result_error_retryable: None,
     };
     let Some(terminal) = terminal else { return Ok(delivery); };
+    let terminal_payload: TerminalPayload = decode(payload(facts, terminal)?)?;
+    if let Some(request) = terminal_payload.user_input_request {
+        request.validate().map_err(invalid)?;
+        if receipt.status != TurnReceiptStatus::Completed {
+            return Err(invalid("user input request requires a normally completed Turn"));
+        }
+        delivery.user_input_request = Some(request);
+    }
     let mut parts: HashMap<String, (String, u64)> = HashMap::new();
     let mut latest_completed: Option<(u64, String)> = None;
     for event in facts.events.iter().filter(|event| event.seq > start.seq && event.seq < terminal.seq) {
@@ -130,11 +141,10 @@ pub fn canonical_turn_delivery(
     match receipt.status {
         TurnReceiptStatus::Completed => delivery.result_ok = Some(true),
         TurnReceiptStatus::Failed => {
-            let terminal: TerminalPayload = decode(payload(facts, terminal)?)?;
-            let error = terminal.error.unwrap_or_default();
+            let error = terminal_payload.error.unwrap_or_default();
             delivery.result_ok = Some(false);
-            delivery.result_error = error.message.or(terminal.message);
-            delivery.result_error_code = error.code.or(terminal.code).or_else(|| Some("turn_failed".into()));
+            delivery.result_error = error.message.or(terminal_payload.message);
+            delivery.result_error_code = error.code.or(terminal_payload.code).or_else(|| Some("turn_failed".into()));
             // Unknown failures never grant permission to replay effects.
             delivery.result_error_retryable = Some(error.retryable.unwrap_or(false));
         }
@@ -588,6 +598,41 @@ mod tests {
         let mut reasoning = Fixture::new();
         reasoning.push("thinking/content-part", "thinking", None, json!({"turn_id":ROOT,"content":"reasoning only"}));
         assert!(canonical_turn_delivery(&reasoning.facts, &reasoning.receipt, true).unwrap().result_text.is_none());
+    }
+
+    #[test]
+    fn user_input_handoff_is_typed_and_does_not_reinterpret_ordinary_completed_text() {
+        let mut fixture = Fixture::new();
+        fixture.assistant(ROOT, "请提供姓名，收到后继续生成 PPT。");
+        let ordinary = canonical_turn_delivery(&fixture.facts, &fixture.receipt, false).unwrap();
+        assert!(ordinary.user_input_request.is_none());
+        let terminal = fixture.receipt.terminal_event.as_ref().unwrap().event_id.as_ref().to_owned();
+        let request = AgentUserInputRequest { request_id:"ask-name".into(),
+            question:"请提供姓名。".into(), remaining_work:"收到资料后生成 PPT。".into() };
+        fixture.facts.event_payloads.get_mut(&terminal).unwrap()["user_input_request"] = serde_json::to_value(&request).unwrap();
+        let handoff = canonical_turn_delivery(&fixture.facts, &fixture.receipt, true).unwrap();
+        assert!(handoff.completed);
+        assert_eq!(handoff.result_ok, Some(true));
+        assert_eq!(handoff.user_input_request, Some(request));
+        assert_eq!(handoff.result_text, ordinary.result_text);
+        fixture.facts.event_payloads.get_mut(&terminal).unwrap()["user_input_request"]["question"] = json!(" ");
+        assert!(canonical_turn_delivery(&fixture.facts, &fixture.receipt, true).is_err());
+        fixture.facts.event_payloads.get_mut(&terminal).unwrap()["user_input_request"] = json!({
+            "request_id":"ask-name","question":"姓名？","remaining_work":"PPT","answer":"invented"
+        });
+        assert!(canonical_turn_delivery(&fixture.facts, &fixture.receipt, true).is_err());
+    }
+
+    #[test]
+    fn failed_turn_cannot_carry_a_normal_user_input_handoff() {
+        let mut fixture = Fixture::new();
+        fixture.receipt.status = TurnReceiptStatus::Failed;
+        let terminal = fixture.receipt.terminal_event.as_mut().unwrap();
+        terminal.kind = SessionEventKind("turn/failed".into());
+        fixture.facts.event_payloads.get_mut(terminal.event_id.as_ref()).unwrap()["user_input_request"] = json!({
+            "request_id":"ask-name","question":"姓名？","remaining_work":"生成 PPT"
+        });
+        assert!(canonical_turn_delivery(&fixture.facts, &fixture.receipt, false).is_err());
     }
 
     #[test]

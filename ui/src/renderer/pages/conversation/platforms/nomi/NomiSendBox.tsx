@@ -41,6 +41,7 @@ import {
 } from '@/renderer/pages/conversation/platforms/initialMessageDelivery';
 import { classifyPublicMessageDelivery } from '@/renderer/pages/conversation/platforms/publicMessageDelivery';
 import {
+  requestConversationStop,
   stopConversationAndConfirmRelease,
   waitForConversationTurnReleaseUntilSettled,
 } from '@/renderer/pages/conversation/platforms/requestConversationStop';
@@ -928,7 +929,11 @@ const NomiSendBox: React.FC<{
     pause();
     resetActiveExecution('stop');
 
-    const result = await stopConversationAndConfirmRelease(conversation_id);
+    const pausedTurnId = pauseNotice?.turnId;
+    const result = await stopConversationAndConfirmRelease(conversation_id, pausedTurnId ? {
+      requestStop: id => requestConversationStop(id, undefined, params =>
+        ipcBridge.conversation.stop.invoke({ ...params, expected_turn_id: pausedTurnId })),
+    } : undefined);
     const stopAttemptStatus = getStopAttemptStatus(stopAttempt);
     if (stopAttemptStatus !== 'current') {
       if (shouldReleaseStopInteraction(stopAttemptStatus)) setIsStopping(false);
@@ -1051,7 +1056,8 @@ const NomiSendBox: React.FC<{
           emitter.emit('nomi.selected.file', items);
           setAtPath(items);
         }}
-        loading={isCreating ? creationSubmitting : isBusy || Boolean(pauseNotice)}
+        loading={isCreating ? creationSubmitting : isBusy}
+        paused={Boolean(pauseNotice)}
         disabled={submissionDisabled || preparingSubmission || collaborationSubmitting || initialSubmissionPending || Boolean(pauseNotice) || (isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing || !sessionCapabilities.state || sessionCapabilities.saving)}
         submitDisabled={!isCreating && (sessionCapabilities.loading || composerCollaborationEnabled && !collaboration.ready)}
         preserveDraftUntilAccepted

@@ -28,6 +28,7 @@ import { normalizeModelFailureDiagnostic, sanitizeDiagnosticDetail, type ModelFa
 import { normalizeKnowledgeWritebackDiagnostic, type KnowledgeWritebackDiagnostic } from './knowledgeWritebackDiagnostic';
 import { isAbsoluteLocalPath, isFileUri } from '../utils/localPath';
 import { computerPermissionKindsForOperation } from './computerPermissionContract';
+import type { AgentUserInputRequest } from '../protocolBindings/AgentUserInputRequest';
 
 export { joinLocalPath as joinPath } from '../utils/localPath';
 
@@ -215,6 +216,8 @@ export type IMessageTips = IMessage<
     execution_pause?: { reason?: string; cleanupProven: boolean };
     recovery?: TruncatedTurnRecovery;
     idmm_notice?: IdmmDecisionNotice;
+    /** Host-authored input handoff from the exact completed Turn. */
+    user_input_request?: AgentUserInputRequest;
     agent_transition?: {
       transition_id: string;
       previous_agent_label: string;
@@ -483,6 +486,31 @@ export const isKnowledgeWritebackPresentation = (message: IResponseMessage): boo
   return message.data.turn_summary === true && message.data.turn_state === 'completed'
     && normalizeKnowledgeWritebackState(message.data.knowledge_writeback)?.event_seq !== undefined;
 };
+
+/** Validate structured handoff metadata at the stream/history JSON boundary. */
+export const normalizeAgentUserInputRequest = (value: unknown): AgentUserInputRequest | undefined => {
+  if (!isObject(value) || Object.keys(value).some(key => !['request_id', 'question', 'remaining_work'].includes(key))) return undefined;
+  const validText = (text: unknown, maxBytes: number, controls: RegExp): text is string =>
+    typeof text === 'string' && text.trim().length > 0
+      && new TextEncoder().encode(text).length <= maxBytes && !controls.test(text);
+  if (!validText(value.request_id, 256, /[\u0000-\u001f\u007f-\u009f]/u)
+    || !validText(value.question, 16384, /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u)
+    || !validText(value.remaining_work, 16384, /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u)) return undefined;
+  return { request_id: value.request_id, question: value.question, remaining_work: value.remaining_work };
+};
+
+/** Plain reply presentation for consumers without a structured note renderer. */
+export const agentUserInputRequestText = (value: unknown): string | undefined => {
+  const request = normalizeAgentUserInputRequest(value);
+  return request ? `${request.question}\n\n${request.remaining_work}` : undefined;
+};
+
+/** A handoff note presents a committed result; it never owns live activity. */
+export const isUserInputRequestPresentation = (message: IResponseMessage): message is IResponseMessage & {
+  type: 'tips'; data: Record<string, unknown> & { user_input_request: AgentUserInputRequest };
+} =>
+  message.type === 'tips' && !!message.turn_id && !!message.msg_id && isObject(message.data)
+  && message.data.type !== 'error' && normalizeAgentUserInputRequest(message.data.user_input_request) !== undefined;
 
 const isResponseTextData = (data: unknown): data is ResponseTextData =>
   typeof data === 'object' &&
@@ -937,6 +965,9 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
           : undefined;
       const recovery = normalizeTruncatedTurnRecovery(data.recovery);
       const notice = normalizeIdmmDecisionNotice(data.idmm_notice);
+      const userInputRequest = tipType !== 'error' ? normalizeAgentUserInputRequest(data.user_input_request) : undefined;
+      const startedAtMs = finiteNumber(data.started_at_ms);
+      const finishedAtMs = finiteNumber(data.finished_at_ms);
       return {
         id: uuid(),
         type: 'tips',
@@ -951,6 +982,9 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
           ...(structuredError ? { error: structuredError } : {}),
           ...(recovery ? { recovery } : {}),
           ...(notice ? { idmm_notice: notice } : {}),
+          ...(userInputRequest && message.turn_id && message.msg_id ? { user_input_request: userInputRequest } : {}),
+          ...(startedAtMs !== undefined && startedAtMs > 0 ? { started_at_ms: startedAtMs } : {}),
+          ...(finishedAtMs !== undefined && finishedAtMs > 0 ? { finished_at_ms: finishedAtMs } : {}),
         },
       };
     }

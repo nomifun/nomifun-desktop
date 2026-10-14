@@ -12,6 +12,8 @@ pub struct AgentExecutionDelivery {
     /// are absorbing replays and must not be awaited as newly-started work.
     pub replayed: bool,
     pub completed: bool,
+    /// A normal handoff on a completed Turn; it does not complete the task.
+    pub user_input_request: Option<nomifun_agent_contracts::AgentUserInputRequest>,
     /// Exact operation's canonical nonterminal pause. A pause is not a
     /// delivery receipt or permission to retry the task in a new Session.
     pub paused_reason: Option<String>,

@@ -65,6 +65,9 @@ mod standard_tools;
 mod stream_limits;
 mod steering;
 pub use steering::{AgentInputPort, AgentSteeringInput};
+#[path = "user_input.rs"]
+mod user_input_request;
+pub use user_input_request::AgentUserInputRequestPort;
 mod tool;
 mod tool_dispatch;
 mod tool_validation;

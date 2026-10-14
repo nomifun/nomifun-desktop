@@ -15,6 +15,7 @@ import {
 
 import { serializeCreativeStudioAgentHistory } from "../adapters";
 import type { CreativeStudioAgentMessage } from "../types";
+import { normalizeAgentUserInputRequest } from '@/common/chat/chatLib';
 import {
   CreativeStudioAgentSessionResolutionError,
   type CreativeStudioAgentSessionPersistencePort,
@@ -91,7 +92,9 @@ const parseHistory = (
   }
   return value.map((item, index) => {
     const source = record(item, `history[${index}]`);
-    exactKeys(source, source.status === 'failed'
+    exactKeys(source, source.status === 'input_required'
+      ? ["id", "role", "status", "text", "userInputRequest"]
+      : source.status === 'failed'
       ? ["id", "role", "status", "text", "errorMessage"]
       : ["id", "role", "status", "text"], `history[${index}]`);
     const id = string(source.id, `history[${index}].id`);
@@ -104,6 +107,13 @@ const parseHistory = (
     const role = string(source.role, `history[${index}].role`);
     const status = string(source.status, `history[${index}].status`);
     const text = string(source.text, `history[${index}].text`);
+    if (role === 'assistant' && status === 'input_required') {
+      const userInputRequest = normalizeAgentUserInputRequest(source.userInputRequest);
+      if (!userInputRequest) throw new CreativeStudioAgentSessionResolutionError(
+        'PORT_CONTRACT_VIOLATION', 'Input-required history must include its complete structured question',
+      );
+      return { id, role, status, text, userInputRequest };
+    }
     if (role === 'assistant' && status === 'failed') {
       const errorMessage = string(source.errorMessage, `history[${index}].errorMessage`);
       if (!errorMessage.trim()) {

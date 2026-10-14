@@ -10,6 +10,7 @@ pub struct IdempotentMessageDelivery {
     pub result_error: Option<String>,
     pub result_error_code: Option<String>,
     pub result_error_retryable: Option<bool>,
+    pub user_input_request: Option<nomifun_agent_contracts::AgentUserInputRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

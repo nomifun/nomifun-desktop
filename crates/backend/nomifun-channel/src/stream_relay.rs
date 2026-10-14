@@ -9,7 +9,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::error::ChannelError;
 use crate::formatter::format_text_for_platform;
-use crate::message_service::{ChannelMessageService, StreamAction};
+use crate::message_service::{ChannelMessageService, StreamAction, channel_reply_text};
 use crate::pending_decision::{ChannelStopConfirmation, ChannelStopConfirmationStore};
 use crate::think_filter::{Stage, strip_reasoning};
 use crate::types::{OutgoingMessageType, ParseMode, PluginType, UnifiedOutgoingMessage};
@@ -93,6 +93,17 @@ impl TerminalToolCallGate {
             },
             _ => true,
         }
+    }
+}
+
+fn remember_input_request(
+    pending: &mut Option<nomifun_agent_contracts::AgentUserInputRequest>,
+    request: nomifun_agent_contracts::AgentUserInputRequest,
+) -> Result<(), &'static str> {
+    match pending {
+        Some(recorded) if recorded != &request => Err("The response stream contains conflicting input handoffs; no question was delivered."),
+        Some(_) => Ok(()),
+        None => { *pending = Some(request); Ok(()) }
     }
 }
 
@@ -400,7 +411,7 @@ impl ChannelStreamRelay {
         let mut text_buffer = String::new();
         let mut accepted_turn_text_checkpoint: Option<usize> = None;
         let mut attempt_text_checkpoint: Option<usize> = None;
-        let mut has_content = false;
+        let mut input_request = None;
         let mut media_ids: Vec<String> = Vec::new();
         let mut media_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut artifacts = Vec::new();
@@ -464,12 +475,17 @@ impl ChannelStreamRelay {
                             break;
                         }
                         text_buffer.truncate(checkpoint);
-                        has_content = !text_buffer.is_empty();
                         attempt_text_checkpoint = Some(text_buffer.len());
                     }
                     Some(StreamAction::AppendText(chunk)) => {
                         text_buffer.push_str(&chunk);
-                        has_content = true;
+                    }
+                    Some(StreamAction::UserInputRequest(request)) => {
+                        if let Err(reason) = remember_input_request(&mut input_request, request) {
+                            let _ = self.sender.send_message(&self.config.plugin_id, &self.config.chat_id,
+                                self.terminal_failure_message(&text_buffer, reason)).await;
+                            break;
+                        }
                     }
                     Some(StreamAction::Thinking(_)) => {}
                     // Produced Workshop asset ids: accumulate and verify at
@@ -488,7 +504,12 @@ impl ChannelStreamRelay {
                     Some(StreamAction::StopDenied { target_conversation_id }) => {
                         self.record_and_send_stop_confirmation(target_conversation_id).await;
                     }
-                    Some(StreamAction::Finish) => {
+                    Some(action @ (StreamAction::Finish | StreamAction::FinishInputRequired)) => {
+                        if matches!(action, StreamAction::FinishInputRequired) != input_request.is_some() {
+                            let _ = self.sender.send_message(&self.config.plugin_id, &self.config.chat_id,
+                                self.terminal_failure_message(&text_buffer, "The response terminal does not match its structured input handoff; no question was delivered.")).await;
+                            break;
+                        }
                         let visible = strip_reasoning(&text_buffer, Stage::Final);
                         if !self.flush_artifacts(&artifacts, &mut artifact_seen).await {
                             let error_msg = self.terminal_failure_message(
@@ -524,7 +545,8 @@ impl ChannelStreamRelay {
                                 .await;
                             break;
                         }
-                        if has_content && !visible.trim().is_empty() {
+                        let visible = channel_reply_text(Some(&visible), input_request.as_ref()).unwrap_or_default();
+                        if !visible.trim().is_empty() {
                             let formatted = format_text_for_platform(&visible, self.config.platform);
                             let final_msg = ChannelMessageService::build_final_message(&formatted);
                             let _ = self
@@ -639,6 +661,7 @@ impl ChannelStreamRelay {
         };
 
         let mut text_buffer = String::new();
+        let mut input_request = None;
         let mut accepted_turn_text_checkpoint: Option<usize> = None;
         let mut attempt_text_checkpoint: Option<usize> = None;
         let mut last_edit = Instant::now() - throttle;
@@ -741,6 +764,13 @@ impl ChannelStreamRelay {
                             last_edit = Instant::now();
                         }
                     }
+                    Some(StreamAction::UserInputRequest(request)) => {
+                        if let Err(reason) = remember_input_request(&mut input_request, request) {
+                            let _ = self.sender.edit_message(&self.config.plugin_id, &self.config.chat_id, &thinking_msg_id,
+                                self.terminal_failure_message(&text_buffer, reason)).await;
+                            break;
+                        }
+                    }
                     Some(StreamAction::Thinking(_)) => {}
                     // Produced Workshop asset ids: accumulate and verify at
                     // the authoritative Finish boundary (deduped per turn).
@@ -764,7 +794,12 @@ impl ChannelStreamRelay {
                         stop_confirmation_forwarded = true;
                         self.record_and_send_stop_confirmation(target_conversation_id).await;
                     }
-                    Some(StreamAction::Finish) => {
+                    Some(action @ (StreamAction::Finish | StreamAction::FinishInputRequired)) => {
+                        if matches!(action, StreamAction::FinishInputRequired) != input_request.is_some() {
+                            let _ = self.sender.edit_message(&self.config.plugin_id, &self.config.chat_id, &thinking_msg_id,
+                                self.terminal_failure_message(&text_buffer, "The response terminal does not match its structured input handoff; no question was delivered.")).await;
+                            break;
+                        }
                         if !self.flush_artifacts(&artifacts, &mut artifact_seen).await {
                             let error_msg = self.terminal_failure_message(
                                 &text_buffer,
@@ -801,6 +836,7 @@ impl ChannelStreamRelay {
                         }
                         self.send_final_edit(
                             &text_buffer,
+                            input_request.as_ref(),
                             stop_confirmation_forwarded,
                             &thinking_msg_id,
                         )
@@ -902,10 +938,11 @@ impl ChannelStreamRelay {
     async fn send_final_edit(
         &self,
         text_buffer: &str,
+        input_request: Option<&nomifun_agent_contracts::AgentUserInputRequest>,
         stop_confirmation_forwarded: bool,
         msg_id: &str,
     ) {
-        let visible = strip_reasoning(text_buffer, Stage::Final);
+        let visible = channel_reply_text(Some(&strip_reasoning(text_buffer, Stage::Final)), input_request).unwrap_or_default();
         if !visible.trim().is_empty() {
             let formatted = format_text_for_platform(&visible, self.config.platform);
             let mut final_msg = ChannelMessageService::build_final_message(&formatted);
@@ -1056,6 +1093,101 @@ impl ChannelSender for MessageRecorder {
     ) -> Result<String, ChannelError> {
         self.media.lock().unwrap().push(media);
         Ok("media-1".into())
+    }
+}
+
+#[cfg(test)]
+mod input_handoff_tests {
+    use super::*;
+    use nomifun_ai_agent::protocol::events::{FinishEventData, TextEventData, TipsEventData, TipType, TurnStopReason};
+    use nomifun_agent_contracts::AgentUserInputRequest;
+
+    fn input_note(request: AgentUserInputRequest) -> AgentStreamEvent {
+        AgentStreamEvent::Tips(TipsEventData {
+            content: String::new(), tip_type: TipType::Warning, user_input_request: Some(request),
+        })
+    }
+
+    fn request() -> AgentUserInputRequest {
+        AgentUserInputRequest { request_id: "question-1".into(), question: "What name should appear?".into(),
+            remaining_work: "Finish the personal introduction slides.".into() }
+    }
+
+    #[tokio::test]
+    async fn input_handoff_reaches_both_channel_paths_with_existing_text_and_no_duplicate_question() {
+        for platform in [PluginType::Weixin, PluginType::Telegram] {
+            for body in ["", "Design already prepared."] {
+                let recorder = Arc::new(MessageRecorder::new());
+                let relay = ChannelStreamRelay::new(RelayConfig { platform, plugin_id:"plugin".into(),
+                    chat_id:"chat".into(),throttle_ms:0,conversation_id:"session".into() },recorder.clone(),
+                    ChannelStopConfirmationStore::new(),None);
+                let (tx,rx) = broadcast::channel(8);
+                if !body.is_empty() { tx.send(AgentStreamEvent::Text(TextEventData { step:None,content:body.into() })).unwrap(); }
+                tx.send(input_note(request())).unwrap();
+                tx.send(input_note(request())).unwrap();
+                tx.send(AgentStreamEvent::Finish(FinishEventData { session_id:None,stop_reason:Some(TurnStopReason::InputRequired) })).unwrap();
+                drop(tx);
+                relay.run(rx).await;
+                let messages = if platform == PluginType::Weixin {recorder.take_sends()} else {recorder.take_edits()};
+                let final_message = messages.last().expect("input handoff must produce a visible final card");
+                let text = final_message.text.as_deref().unwrap();
+                assert!(text.contains(body));
+                assert_eq!(text.matches("What name should appear?").count(),1);
+                assert!(text.contains("Finish the personal introduction slides."));
+                assert!(!text.contains("无文本输出"));
+                assert!(!text.contains("Thinking"));
+                assert!(final_message.buttons.is_none());
+                assert!(recorder.take_media().is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn input_handoff_needs_a_normal_finish_and_conflicting_questions_fail_closed() {
+        for platform in [PluginType::Weixin,PluginType::Telegram] {
+            for conflict in [false,true] {
+                let recorder = Arc::new(MessageRecorder::new());
+                let relay = ChannelStreamRelay::new(RelayConfig { platform,plugin_id:"plugin".into(),chat_id:"chat".into(),
+                    throttle_ms:0,conversation_id:"session".into() },recorder.clone(),ChannelStopConfirmationStore::new(),None);
+                let (tx,rx) = broadcast::channel(8);
+                tx.send(input_note(request())).unwrap();
+                if conflict {
+                    let mut another = request(); another.remaining_work = "Contradicting unfinished work".into();
+                    tx.send(input_note(another)).unwrap();
+                }
+                tx.send(AgentStreamEvent::Finish(FinishEventData {session_id:None,stop_reason:Some(
+                    if conflict {TurnStopReason::InputRequired} else {TurnStopReason::Paused})})).unwrap();
+                drop(tx);
+                relay.run(rx).await;
+                let messages = if platform == PluginType::Weixin {recorder.take_sends()} else {recorder.take_edits()};
+                let text = messages.last().unwrap().text.as_deref().unwrap();
+                assert!(text.contains(if conflict {"conflicting input handoffs"} else {"execution is paused"}));
+                assert!(!text.contains("What name should appear?"));
+                assert!(recorder.take_media().is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn input_handoff_terminal_and_structured_note_must_agree() {
+        for platform in [PluginType::Weixin,PluginType::Telegram] {
+            for missing_note in [false,true] {
+                let recorder = Arc::new(MessageRecorder::new());
+                let relay = ChannelStreamRelay::new(RelayConfig { platform,plugin_id:"plugin".into(),chat_id:"chat".into(),
+                    throttle_ms:0,conversation_id:"session".into() },recorder.clone(),ChannelStopConfirmationStore::new(),None);
+                let (tx,rx) = broadcast::channel(8);
+                if !missing_note {tx.send(input_note(request())).unwrap();}
+                tx.send(AgentStreamEvent::Finish(FinishEventData {session_id:None,stop_reason:Some(
+                    if missing_note {TurnStopReason::InputRequired} else {TurnStopReason::EndTurn})})).unwrap();
+                drop(tx);
+                relay.run(rx).await;
+                let messages = if platform == PluginType::Weixin {recorder.take_sends()} else {recorder.take_edits()};
+                let text = messages.last().unwrap().text.as_deref().unwrap();
+                assert!(text.contains("terminal does not match its structured input handoff"));
+                assert!(!text.contains("What name should appear?"));
+                assert!(recorder.take_media().is_empty());
+            }
+        }
     }
 }
 

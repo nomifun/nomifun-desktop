@@ -2462,6 +2462,7 @@ impl AgentExecutionEngine {
                 attempt.version,
                 Some(&lease),
                 &SettleAgentExecutionAttemptParams {
+                    expected_user_input_turn: None,
                     expected_active_session_turn: Some(AgentExecutionActiveTurnGuard {
                         conversation_id: conversation_id.to_owned(),
                         canonical_operation_id: target_operation_id.clone(),

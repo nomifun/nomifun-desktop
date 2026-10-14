@@ -34,6 +34,8 @@ pub use automation::{
     resolve_frozen_session_workspace,
 };
 pub use delivery::{AgentExecutionDelivery, AgentExecutionTurnOutput};
+mod user_input;
+pub use user_input::validate_user_input_handoff_policy;
 pub use engine::AgentExecutionEngine;
 pub use lifecycle::AgentExecutionLifecycle;
 pub use production::AgentExecutionEngineConfig;

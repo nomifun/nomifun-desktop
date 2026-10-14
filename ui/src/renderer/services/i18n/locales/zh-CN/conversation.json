@@ -488,6 +488,46 @@
       "USER_LLM_PROVIDER_STREAM_INTERRUPTED": {
         "title": "模型回复流中断",
         "body": "模型回复流在任务完成前中断，本次请求失败。请先检查已有文件和过程记录，再重试或更换模型后重新发送剩余任务。"
+      },
+      "EXECUTION_DISPATCH_WINDOW": {
+        "title": "本阶段达到执行额度",
+        "body": "本回合已暂停，已完成的操作会保留。请核对已有结果和技术细节；结束本回合后再发送剩余任务。"
+      },
+      "EXECUTION_TOTAL_MODEL_BUDGET": {
+        "title": "本回合达到执行额度",
+        "body": "本回合已暂停，已完成的操作会保留。请核对已有结果和技术细节；结束本回合后再发送剩余任务。"
+      },
+      "EXECUTION_SEGMENT_BUDGET": {
+        "title": "执行阶段额度已用完",
+        "body": "本回合已暂停，已完成的操作会保留。请核对已有结果和技术细节；结束本回合后再发送剩余任务。"
+      },
+      "EXECUTION_NO_PROGRESS": {
+        "title": "任务连续执行未取得进展",
+        "body": "本回合已暂停，已完成的操作会保留。请核对已有结果和技术细节；结束本回合后再发送剩余任务。"
+      },
+      "EXECUTION_PROGRESS_LEDGER_FULL": {
+        "title": "任务进度记录达到容量限制",
+        "body": "本回合已暂停，已完成的操作会保留。请核对已有结果和技术细节；结束本回合后再发送剩余任务。"
+      },
+      "EXECUTION_CHECKPOINT_UNAVAILABLE": {
+        "title": "任务恢复记录不可用",
+        "body": "本回合已暂停，已完成的操作会保留。请核对已有结果和技术细节；结束本回合后再发送剩余任务。"
+      },
+      "EXECUTION_NON_QUIESCENT_BOUNDARY": {
+        "title": "任务尚未达到安全暂停边界",
+        "body": "当前操作尚未完成，未能建立可续接的进度边界；回合已暂停，已完成操作会保留。请核对已有结果，结束本回合后再发送剩余任务。"
+      },
+      "EXECUTION_TURN_JOURNAL_BUDGET": {
+        "title": "本回合执行记录达到容量限制",
+        "body": "本回合已暂停，已完成的操作会保留。请核对已有结果和技术细节；结束本回合后再发送剩余任务。"
+      },
+      "NATIVE_RECOVERY_RECONCILIATION_REQUIRED": {
+        "title": "任务恢复需要核对已有结果",
+        "body": "应用无法安全恢复原任务，任务已暂停。请核对已有结果和技术细节；尚未确认的操作不能自动重放。"
+      },
+      "EXECUTION_CLEANUP_UNPROVEN": {
+        "title": "任务资源清理尚未确认",
+        "body": "本回合的资源清理尚未确认，当前无法继续执行或发送新消息。请等待应用确认清理；如持续受阻，请查看技术细节并提交反馈。"
       }
     },
     "adjustAndRetry": "调整后重试",
@@ -930,7 +970,8 @@
   "stop": {
     "button": "停止 Agent",
     "stopping": "正在停止 Agent…",
-    "failed": "停止当前任务失败，请重试。"
+    "failed": "停止当前任务失败，请重试。",
+    "endPausedTurn": "结束本回合"
   },
   "editMessage": {
     "action": "编辑",
@@ -946,5 +987,10 @@
     "success": "上下文已清空",
     "failed": "清空上下文失败",
     "button": "清空上下文"
+  },
+  "userInputRequest": {
+    "title": "等待你补充信息",
+    "remainingWork": "尚需完成",
+    "addInput": "补充信息"
   }
 }

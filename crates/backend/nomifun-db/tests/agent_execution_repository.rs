@@ -711,9 +711,137 @@ async fn recovery_fixture(
         .bind(&terminal_event_id).execute(db.pool()).await.unwrap();
     (created.execution_id, running, RecoveredAgentExecutionAttemptOutput {
         attempt_id: attempt.attempt_id, conversation_id, canonical_operation_id: operation_id,
-        terminal_event_id, ok: true, text: Some("已完成游戏实现".to_owned()),
+        terminal_event_id, user_input_request: None, ok: true, text: Some("已完成游戏实现".to_owned()),
         output_files: vec!["/workspace/index.html".to_owned()], error: None, tokens: Some(12),
     })
+}
+
+#[tokio::test]
+async fn recovered_input_handoff_waits_on_the_same_attempt_without_marking_work_complete() {
+    let db = database().await;
+    let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
+    let (execution_id, running, output) = user_input_fixture(&db, &repository, "ask_user").await;
+    let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
+    let lease = AgentExecutionLeaseToken::new("handoff-recovery".into());
+    repository.try_acquire_lease(&execution_id, execution.version, lease.owner(), nomifun_common::now_ms()+30_000).await.unwrap().unwrap();
+    let recovered = repository.reconcile_recovered_attempt(
+        OWNER_ID, &execution_id, &running.step.step_id, running.step.version, &output.attempt_id,
+        running.current_attempt.as_ref().unwrap().attempt.version, &lease, Some(&output),
+        &event(AgentExecutionEventKind::AttemptChanged),
+    ).await.unwrap();
+    assert_eq!(recovered.disposition, AgentExecutionAttemptRecoveryDisposition::UserInputRequested);
+    assert_eq!(recovered.detail.step.status, "waiting_input");
+    let attempt = recovered.detail.current_attempt.unwrap().attempt;
+    assert_eq!(attempt.status, "waiting_input");
+    assert_eq!(attempt.question.as_deref(), Some("请提供姓名。"));
+    assert!(attempt.finished_at.is_none());
+    assert_eq!(repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap().status, "waiting_input");
+    assert_eq!(repository.resolve_conversation_link(OWNER_ID, &output.conversation_id).await.unwrap().iter().filter(|link|link.active && link.relation=="attempt").count(),1);
+    let events = repository.list_events(OWNER_ID,&execution_id,0,50).await.unwrap();
+    let requested = events.last().unwrap();
+    assert_eq!(requested.event_type,"decision_requested");
+    let payload:serde_json::Value = serde_json::from_str(&requested.payload).unwrap();
+    assert_eq!(payload["question"],"请提供姓名。");
+    assert_eq!(payload["user_input_request"]["request_id"],"ask-name");
+    let answer = nomifun_common::generate_id();
+    let mut effects = nomifun_db::AttemptConversationEffects::default();
+    effects.push_decision(answer.clone(),"小明".into()).unwrap();
+    let execution=repository.get_execution(OWNER_ID,&execution_id).await.unwrap().unwrap();
+    let resumed=repository.resume_waiting_attempt(OWNER_ID,&execution_id,execution.version,
+        &recovered.detail.step.step_id,recovered.detail.step.version,&output.attempt_id,attempt.version,
+        &nomifun_db::AttemptConversationEffectParams {runtime_state:Some(effects.encode().unwrap())},
+        &event(AgentExecutionEventKind::DecisionAnswered)).await.unwrap();
+    let request=nomifun_agent_contracts::AgentUserInputRequest {
+        request_id:"ask-class".into(),question:"请提供班级。".into(),remaining_work:"完成介绍。".into(),
+    };
+    let operation=format!("turn:user:{OWNER_ID}:{}:{answer}",output.conversation_id);
+    let started=nomifun_common::generate_id();let terminal=nomifun_common::generate_id();
+    for (seq,id,kind,value) in [(3,&started,"turn/started",serde_json::json!({})),
+        (4,&terminal,"turn/completed",serde_json::json!({"user_input_request":request}))] {
+        nomifun_db::sqlx::query("INSERT INTO agent_events(session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,inline_json) VALUES(?,?,?,'answer-fixture',?,?,1,?,?)")
+            .bind(&output.conversation_id).bind(seq).bind(id).bind(id).bind(kind).bind(&operation).bind(value.to_string()).execute(db.pool()).await.unwrap();
+    }
+    nomifun_db::sqlx::query("INSERT INTO agent_turns(session_id,turn_id,operation_id,idempotency_key,state,started_event_id,terminal_event_id,accepted_at,started_at,finished_at) VALUES(?,?,?,?,'completed',?,?,3,3,4)")
+        .bind(&output.conversation_id).bind(&operation).bind(&operation).bind(&operation).bind(started).bind(&terminal).execute(db.pool()).await.unwrap();
+    nomifun_db::sqlx::query("UPDATE agent_session_heads SET last_seq=4 WHERE session_id=?")
+        .bind(&output.conversation_id).execute(db.pool()).await.unwrap();
+    let second=RecoveredAgentExecutionAttemptOutput {
+        canonical_operation_id:operation,terminal_event_id:terminal,user_input_request:Some(request),..output
+    };
+    let waiting=repository.reconcile_recovered_attempt(OWNER_ID,&execution_id,&resumed.detail.step.step_id,resumed.detail.step.version,
+        &second.attempt_id,resumed.detail.current_attempt.as_ref().unwrap().attempt.version,&lease,Some(&second),
+        &event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();
+    let attempt=waiting.detail.current_attempt.unwrap().attempt;
+    assert_eq!(attempt.question.as_deref(),Some("请提供班级。"));
+    assert!(attempt.runtime_state.is_none(),"recovery retires the already-delivered answer instead of replaying its closed Turn");
+    let mut pending=nomifun_db::AttemptConversationEffects::decode(attempt.runtime_state.as_deref()).unwrap();
+    let next=nomifun_common::generate_id();pending.push_decision(next.clone(),"一年级".into()).unwrap();
+    assert_eq!(pending.current_turn_operation_key(&attempt.attempt_id).unwrap(),next);
+    let execution=repository.get_execution(OWNER_ID,&execution_id).await.unwrap().unwrap();
+    let resumed=repository.resume_waiting_attempt(OWNER_ID,&execution_id,execution.version,
+        &waiting.detail.step.step_id,waiting.detail.step.version,&attempt.attempt_id,attempt.version,
+        &nomifun_db::AttemptConversationEffectParams {runtime_state:Some(pending.encode().unwrap())},
+        &event(AgentExecutionEventKind::DecisionAnswered)).await.unwrap();
+    assert_eq!(resumed.detail.step.status,"running");
+}
+
+async fn user_input_fixture(
+    db: &nomifun_db::Database, repository: &SqliteAgentExecutionRepository, policy: &str,
+) -> (String, nomifun_db::AgentExecutionStepDetailRow, RecoveredAgentExecutionAttemptOutput) {
+    let (execution_id, running, mut output) = recovery_fixture(db, repository).await;
+    let request = nomifun_agent_contracts::AgentUserInputRequest {
+        request_id:"ask-name".into(),question:"请提供姓名。".into(),remaining_work:"收到资料后生成 PPT。".into(),
+    };
+    let started = nomifun_common::generate_id();
+    nomifun_db::sqlx::query("UPDATE agent_events SET seq=2 WHERE event_id=?").bind(&output.terminal_event_id).execute(db.pool()).await.unwrap();
+    nomifun_db::sqlx::query("INSERT INTO agent_events(session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,inline_json) VALUES(?,1,?,'handoff-fixture',?,'turn/started',1,?,'{}')")
+        .bind(&output.conversation_id).bind(&started).bind(&started).bind(&output.canonical_operation_id).execute(db.pool()).await.unwrap();
+    let terminal = serde_json::json!({"user_input_request":request}).to_string();
+    nomifun_db::sqlx::query("UPDATE agent_events SET causation_event_id=?,inline_json=? WHERE event_id=?")
+        .bind(&started).bind(&terminal).bind(&output.terminal_event_id).execute(db.pool()).await.unwrap();
+    nomifun_db::sqlx::query("UPDATE agent_turns SET started_event_id=?,result_json=? WHERE session_id=? AND operation_id=?")
+        .bind(started).bind(terminal).bind(&output.conversation_id).bind(&output.canonical_operation_id).execute(db.pool()).await.unwrap();
+    nomifun_db::sqlx::query("INSERT INTO agent_session_heads(session_id,status,last_seq,active_set_generation,unread_count) VALUES(?,'ready',2,0,0)")
+        .bind(&output.conversation_id).execute(db.pool()).await.unwrap();
+    nomifun_db::sqlx::query("UPDATE agent_executions SET decision_policy=? WHERE execution_id=?")
+        .bind(policy).bind(&execution_id).execute(db.pool()).await.unwrap();
+    output.user_input_request = Some(request);
+    output.text = Some("请提供姓名后继续。".into());
+    (execution_id, running, output)
+}
+
+#[tokio::test]
+async fn completed_input_source_guard_rejects_policy_identity_content_and_successor_drift() {
+    for mutation in ["automatic", "content", "terminal", "successor", "link"] {
+        let db = database().await;
+        let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
+        let (execution_id, running, output) = user_input_fixture(&db,&repository,if mutation=="automatic" {"automatic"} else {"ask_user"}).await;
+        let mut source = nomifun_db::AgentExecutionUserInputTurnGuard {
+            conversation_id:output.conversation_id.clone(),canonical_operation_id:output.canonical_operation_id.clone(),
+            terminal_event_id:output.terminal_event_id.clone(),user_input_request:output.user_input_request.clone().unwrap(),
+        };
+        if mutation=="content" { source.user_input_request.remaining_work="changed scope".into(); }
+        if mutation=="terminal" { source.terminal_event_id=nomifun_common::generate_id(); }
+        if mutation=="successor" {
+            nomifun_db::sqlx::query("UPDATE agent_session_heads SET active_turn_id='successor',status='running' WHERE session_id=?")
+                .bind(&output.conversation_id).execute(db.pool()).await.unwrap();
+        }
+        if mutation=="link" {
+            nomifun_db::sqlx::query("UPDATE conversation_execution_links SET active=0 WHERE conversation_id=?")
+                .bind(&output.conversation_id).execute(db.pool()).await.unwrap();
+        }
+        let result=repository.settle_attempt(OWNER_ID,&execution_id,&running.step.step_id,running.step.version,
+            &output.attempt_id,running.current_attempt.as_ref().unwrap().attempt.version,None,
+            &nomifun_db::SettleAgentExecutionAttemptParams {
+                expected_active_session_turn:None,expected_user_input_turn:Some(source),
+                attempt_status:nomifun_common::ExecutionAttemptStatus::WaitingInput,
+                step_status:ExecutionStepStatus::WaitingInput,execution_status:Some(AgentExecutionStatus::WaitingInput),
+                question:Some(Some("请提供姓名。".into())),error:None,output_summary:None,output_files:None,
+                tokens:None,retry_after:None,runtime_state:None,started_at:None,finished_at:None,loop_repeat_reset:None,
+            },&event(AgentExecutionEventKind::DecisionRequested)).await;
+        assert!(result.is_err(),"{mutation} must not confer waiting-input authority");
+        assert_eq!(repository.get_step_detail(OWNER_ID,&execution_id,&running.step.step_id).await.unwrap().unwrap().step.status,"running");
+    }
 }
 
 #[tokio::test]
@@ -813,6 +941,7 @@ async fn recovery_pause_uses_the_current_decision_turn_instead_of_the_closed_ini
         OWNER_ID, &execution_id, &running.step.step_id, running.step.version,
         &attempt.attempt_id, attempt.version, None,
         &nomifun_db::SettleAgentExecutionAttemptParams {
+            expected_user_input_turn: None,
             expected_active_session_turn: None,
             attempt_status: nomifun_common::ExecutionAttemptStatus::WaitingInput,
             step_status: ExecutionStepStatus::WaitingInput,
@@ -877,6 +1006,7 @@ async fn native_decision_request_is_atomically_bound_to_the_calling_turn() {
          VALUES (?,'running',?,1,2,0)",
     ).bind(&original.conversation_id).bind(&successor).execute(db.pool()).await.unwrap();
     let mut params = nomifun_db::SettleAgentExecutionAttemptParams {
+        expected_user_input_turn: None,
         expected_active_session_turn: Some(nomifun_db::AgentExecutionActiveTurnGuard {
             conversation_id: original.conversation_id.clone(),
             canonical_operation_id: original.canonical_operation_id.clone(),

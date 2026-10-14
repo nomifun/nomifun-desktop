@@ -155,4 +155,14 @@ describe('ipc bridge wire ID contracts', () => {
     expect(mapped.turn_id).toBe(MESSAGE_ID);
     expect(isAuthoritativeCompletionRuntimeIdle(mapped.runtime)).toBe(true);
   });
+
+  test('preserves the typed input handoff reason without changing terminal runtime authority', () => {
+    const wire = { conversation_id: CONVERSATION_ID, turn_id: MESSAGE_ID, status: 'finished', state: 'ai_waiting_input',
+      runtime: { state: 'idle', can_send_message: true, is_processing: false } };
+    const mapped = fromApiTurnCompletedEvent({ ...wire, stop_reason: 'input_required' });
+    expect(mapped.stop_reason).toBe('input_required');
+    expect(mapped.state).toBe('ai_waiting_input');
+    expect(isAuthoritativeCompletionRuntimeIdle(mapped.runtime)).toBe(true);
+    expect(fromApiTurnCompletedEvent(wire).stop_reason).toBeUndefined();
+  });
 });

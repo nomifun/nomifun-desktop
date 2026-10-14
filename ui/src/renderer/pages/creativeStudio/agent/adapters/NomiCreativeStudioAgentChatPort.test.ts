@@ -271,6 +271,75 @@ const collect = async <T>(
 };
 
 describe('NomiCreativeStudioAgentChatPort', () => {
+  test('preserves typed input handoff through live, reconnect and closed-history recovery without task success', async () => {
+    const userInputRequest = { request_id: 'question-1', question: '请输入姓名', remaining_work: '完成介绍页' };
+    const askedHistory: CreativeStudioAgentMessage[] = [...history,
+      { id: userMessageId, role: 'user', status: 'complete', text: displayPrompt },
+      { id: assistantMessageId, role: 'assistant', status: 'input_required', text: '', userInputRequest }];
+    for (const path of ['live', 'reconnect', 'closed'] as const) {
+      const transport = new FakeTransport();
+      transport.snapshots = [idleSnapshot(),idleSnapshot({ authority: 'processing', activeTurnId: turnId }),idleSnapshot()];
+      transport.onSend = () => queueMicrotask(() => {
+        transport.emitStarted(turnStarted());
+        if (path === 'reconnect') { for (const listener of transport.reconnectListeners) listener(); return; }
+        transport.emitResponse({ type:'tips',data:{ type:'warning',user_input_request:userInputRequest },
+          msg_id:assistantMessageId,turn_id:turnId,conversation_id:conversationId });
+        transport.emitResponse({type:'finish',data:{stop_reason:'input_required'},msg_id:assistantMessageId,
+          turn_id:turnId,conversation_id:conversationId});
+        transport.emitCompleted(turnCompleted({stop_reason:'input_required',last_message:{
+          message_id:assistantMessageId,type:'text',content:'',status:'finish',created_at:1 }}));
+      });
+      const port = createNomiCreativeStudioAgentChatPort({transport,turnStartTimeoutMs:100,
+        resolveSession:matchingResolver({history:(call)=>path==='closed'||call>0?askedHistory:history})});
+      const events = await collect(port.runTurn(request(new AbortController().signal)));
+      expect(events.at(-1)).toEqual({type:'input-required',request:userInputRequest,assistantMessageId});
+      expect(events.some(event=>event.type==='completed')).toBe(false);
+      expect(events.some(event=>event.type==='activity'&&event.label==='Agent is completing this task')).toBe(false);
+      expect(events).toContainEqual({type:'history-reconciled',history:askedHistory});
+      expect(transport.sendCalls.length).toBe(path==='closed'?0:1);
+      expect(transport.stopCalls).toEqual([]);
+    }
+  });
+
+  test('rejects a task-completed terminal that contradicts the canonical input handoff', async () => {
+    const transport = new FakeTransport();
+    transport.snapshots=[idleSnapshot(),idleSnapshot({authority:'processing',activeTurnId:turnId})];
+    const asked: CreativeStudioAgentMessage[]=[...recoveredHistory.slice(0,-1),{id:assistantMessageId,role:'assistant',
+      status:'input_required',text:'',userInputRequest:{request_id:'question-1',question:'请输入姓名',remaining_work:'完成介绍页'}}];
+    transport.onSend=()=>queueMicrotask(()=>{transport.emitStarted(turnStarted());transport.emitCompleted(turnCompleted({stop_reason:'end_turn'}));});
+    const port=createNomiCreativeStudioAgentChatPort({transport,resolveSession:matchingResolver({history:call=>call===0?history:asked})});
+    await expect(collect(port.runTurn(request(new AbortController().signal)))).rejects.toThrow('canonical Nomi terminal differs');
+  });
+
+  test('accepts the human answer in the same exclusive Session as a new Turn', async () => {
+    const userInputRequest = {request_id:'question-1',question:'请输入姓名',remaining_work:'完成介绍页'};
+    const asked: CreativeStudioAgentMessage[] = [...history,
+      {id:userMessageId,role:'user',status:'complete',text:displayPrompt},
+      {id:assistantMessageId,role:'assistant',status:'input_required',text:'已有设计方案',userInputRequest}];
+    const nextTurn = parseMessageId('0190f5fe-7c00-7a00-8000-000000000121');
+    const nextAssistant = parseMessageId('0190f5fe-7c00-7a00-8000-000000000122');
+    const answered: CreativeStudioAgentMessage[] = [...asked,
+      {id:nextTurn,role:'user',status:'complete',text:'姓名是Alice'},
+      {id:nextAssistant,role:'assistant',status:'complete',text:'介绍页已完成'}];
+    const transport = new FakeTransport();
+    transport.receipt = acceptedReceipt({msg_id:nextTurn});
+    transport.snapshots = [idleSnapshot(),idleSnapshot({authority:'processing',activeTurnId:nextTurn})];
+    transport.onSend = () => queueMicrotask(()=>{
+      const started = turnStarted(); started.turn_id=nextTurn; started.runtime.active_turn_id=nextTurn;
+      transport.emitStarted(started);
+      transport.emitCompleted(turnCompleted({turn_id:nextTurn,stop_reason:'end_turn',last_message:{
+        message_id:nextAssistant,type:'text',content:'介绍页已完成',status:'finish',created_at:2}}));
+    });
+    const port = createNomiCreativeStudioAgentChatPort({transport,turnStartTimeoutMs:100,
+      resolveSession:matchingResolver({history:(call)=>call===0?asked:answered})});
+    const events = await collect(port.runTurn(request(new AbortController().signal,{history:asked,prompt:'姓名是Alice',
+      modelInput:'姓名是Alice',idempotencyKey:'0190f5fe-7c00-7a00-8000-000000000123'})));
+    expect(events.at(-1)).toEqual({type:'completed',assistantMessageId:nextAssistant});
+    expect(transport.sendCalls[0]?.conversationId).toBe(conversationId);
+    expect(transport.sendCalls[0]?.modelInput).toBe('姓名是Alice');
+    expect(transport.stopCalls).toEqual([]);
+  });
+
   test('keeps a canonical pause without resubmission or implicit cancellation until user Stop', async () => {
     const transport = new FakeTransport();
     const pause = { turnId, reason: 'EXECUTION_MODEL_INVALID_REQUEST', cleanupProven: true, pausedAt: undefined };

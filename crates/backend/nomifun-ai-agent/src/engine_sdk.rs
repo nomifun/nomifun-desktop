@@ -119,6 +119,7 @@ pub struct EngineTurnOutcome {
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EngineTurnTerminal {
     Completed { finish_reason: ChatFinishReason },
+    InputRequired { request: nomifun_agent_contracts::AgentUserInputRequest },
     Cancelled,
     Paused { reason: String },
     Failed {
@@ -404,6 +405,13 @@ impl AgentRuntimeControl for HostedAgentRuntime {
             }
             *shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()) = None;
             let reason = match outcome.terminal {
+                EngineTurnTerminal::InputRequired { request } => {
+                    shared.state.emit_for_turn(turn, AgentStreamEvent::Tips(crate::protocol::events::TipsEventData {
+                        content: String::new(), tip_type: crate::protocol::events::TipType::Warning,
+                        user_input_request: Some(request),
+                    }));
+                    TurnStopReason::InputRequired
+                }
                 EngineTurnTerminal::Completed { finish_reason } => match finish_reason {
                     ChatFinishReason::Completed => TurnStopReason::EndTurn,
                     ChatFinishReason::MaxOutputTokens => TurnStopReason::MaxTokens,

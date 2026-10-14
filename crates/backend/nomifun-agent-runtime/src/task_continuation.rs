@@ -60,6 +60,10 @@ impl AgentPriorTask {
         }
         let terminal = match events.last() {
             Some(AgentEngineEvent::TurnCompleted { .. }) => "completed",
+            Some(AgentEngineEvent::TurnInputRequired { .. }) => {
+                crate::user_input_request::recorded_pending(events)?;
+                "input_required"
+            }
             Some(AgentEngineEvent::TurnCancelled { .. }) => "cancelled",
             Some(AgentEngineEvent::TurnFailed { .. }) => "failed",
             _ => return Err(fail("task continuation needs a durable closed turn")),
@@ -69,6 +73,7 @@ impl AgentPriorTask {
             reconciled.is_none_or(|boundary| index > boundary) && matches!(
                 event,
                 AgentEngineEvent::TurnCompleted { .. }
+                    | AgentEngineEvent::TurnInputRequired { .. }
                     | AgentEngineEvent::TurnCancelled { .. }
                     | AgentEngineEvent::TurnFailed { .. }
             )

@@ -488,6 +488,46 @@
       "USER_LLM_PROVIDER_STREAM_INTERRUPTED": {
         "title": "The model response stream was interrupted",
         "body": "The model response stream was interrupted before the task finished, so this request failed. Review the existing files and process record, then retry or switch models and resend the remaining task."
+      },
+      "EXECUTION_DISPATCH_WINDOW": {
+        "title": "The execution stage reached its allowance",
+        "body": "This turn is paused and completed operations are retained. Check existing results and technical details; end this turn before sending the remaining work."
+      },
+      "EXECUTION_TOTAL_MODEL_BUDGET": {
+        "title": "The turn reached its execution allowance",
+        "body": "This turn is paused and completed operations are retained. Check existing results and technical details; end this turn before sending the remaining work."
+      },
+      "EXECUTION_SEGMENT_BUDGET": {
+        "title": "The execution stage allowance is exhausted",
+        "body": "This turn is paused and completed operations are retained. Check existing results and technical details; end this turn before sending the remaining work."
+      },
+      "EXECUTION_NO_PROGRESS": {
+        "title": "Execution stopped making progress",
+        "body": "This turn is paused and completed operations are retained. Check existing results and technical details; end this turn before sending the remaining work."
+      },
+      "EXECUTION_PROGRESS_LEDGER_FULL": {
+        "title": "Task progress records reached their limit",
+        "body": "This turn is paused and completed operations are retained. Check existing results and technical details; end this turn before sending the remaining work."
+      },
+      "EXECUTION_CHECKPOINT_UNAVAILABLE": {
+        "title": "Task recovery records are unavailable",
+        "body": "This turn is paused and completed operations are retained. Check existing results and technical details; end this turn before sending the remaining work."
+      },
+      "EXECUTION_NON_QUIESCENT_BOUNDARY": {
+        "title": "Execution has not reached a safe pause boundary",
+        "body": "The current operation did not finish at a resumable progress boundary. The turn is paused and completed operations are retained. Check existing results, then end this turn before sending the remaining work."
+      },
+      "EXECUTION_TURN_JOURNAL_BUDGET": {
+        "title": "Turn execution records reached their limit",
+        "body": "This turn is paused and completed operations are retained. Check existing results and technical details; end this turn before sending the remaining work."
+      },
+      "NATIVE_RECOVERY_RECONCILIATION_REQUIRED": {
+        "title": "Task recovery requires checking existing results",
+        "body": "The app could not safely recover the original task, so it is paused. Check existing results and technical details. Unconfirmed operations cannot be replayed automatically."
+      },
+      "EXECUTION_CLEANUP_UNPROVEN": {
+        "title": "Task resource cleanup has not been confirmed",
+        "body": "Resource cleanup has not been confirmed. Execution and new messages remain blocked. Wait for cleanup confirmation; if the blockage persists, check technical details and submit feedback."
       }
     },
     "adjustAndRetry": "Adjust and retry",
@@ -932,7 +972,8 @@
   "stop": {
     "button": "Stop Agent",
     "stopping": "Stopping Agent…",
-    "failed": "Failed to stop the current task. Please try again."
+    "failed": "Failed to stop the current task. Please try again.",
+    "endPausedTurn": "End this turn"
   },
   "editMessage": {
     "action": "Edit",
@@ -948,5 +989,10 @@
     "success": "Context cleared",
     "failed": "Failed to clear context",
     "button": "Clear context"
+  },
+  "userInputRequest": {
+    "title": "Waiting for your input",
+    "remainingWork": "Remaining work",
+    "addInput": "Add information"
   }
 }

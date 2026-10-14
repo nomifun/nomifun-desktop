@@ -19,6 +19,8 @@ const root = parseMessageId('019f0000-0000-7000-8000-000000000903');
 const nextRoot = parseMessageId('019f0000-0000-7000-8000-000000000904');
 const segment = parseMessageId('019f0000-0000-7000-8000-000000000905');
 const secondSegment = parseMessageId('019f0000-0000-7000-8000-000000000906');
+const request = { request_id: 'ask:choose-path', question: 'Which directory should I use?', remaining_work: 'Write and verify the report.' };
+const questionText = `${request.question}\n\n${request.remaining_work}`;
 const frame = (content: string, extra: Partial<IResponseMessage> = {}): IResponseMessage => ({
   conversation_id: conversationId, turn_id: root, msg_id: segment, type: 'content', data: { content }, ...extra,
 });
@@ -125,5 +127,47 @@ describe('canonical companion Turn bubble presentation', () => {
       turn_id: root, position: 'left', type: 'text', content: { content: '' }, created_at: 100 } as TMessage;
     expect(hydrateCompanionSessionBubble(state, [{ ...row, hidden: true }], state).bubble).toBe('');
     expect(hydrateCompanionSessionBubble(state, [row], state).bubble).toBe('');
+  });
+
+  test('a typed terminal note appends an ordinary reply once without taking activity authority', () => {
+    const note = frame('', { msg_id: secondSegment, type: 'tips', stream_complete: true,
+      data: { type: 'warning', content: '', user_input_request: request } });
+    let state = stream(stream(running(), frame('I checked the report.')), note);
+    expect(state.bubble).toBe(`I checked the report.\n\n${questionText}`);
+    expect(state.phase).toBe('running');
+    state = stream(state, note);
+    expect(state.bubble).toBe(`I checked the report.\n\n${questionText}`);
+    expect(settleCompanionSessionBubble(state, root, 'Done').bubble).toBe(state.bubble);
+    const successor = beginCompanionSessionBubble(state, nextRoot, 'running');
+    expect(stream(successor, note)).toBe(successor);
+  });
+
+  test('reopened history retains the same typed reply while suppressing errors and unrelated identities', () => {
+    const state = settleCompanionSessionBubble(running(), root, 'Done');
+    const row = { id: String(secondSegment), message_id: secondSegment, msg_id: secondSegment,
+      conversation_id: conversationId, turn_id: root, position: 'center', type: 'tips', created_at: 100,
+      content: { content: '', type: 'warning', user_input_request: request } } as TMessage;
+    const hydrated = hydrateCompanionSessionBubble(state, [row], state);
+    expect(hydrated.bubble).toBe(questionText);
+    expect(hydrated.phase).toBe('settled');
+    expect(hydrated.loading).toBe(false);
+    for (const suppressed of [{ ...row, turn_id: nextRoot }, { ...row, conversation_id: otherConversation },
+      { ...row, turn_id: undefined }, { ...row, content: { ...row.content, type: 'error' } }]) {
+      expect(hydrateCompanionSessionBubble(state, [suppressed as TMessage], state)).toBe(state);
+    }
+  });
+
+  test('plain tips, invalid metadata, dismissed and interrupted presentations do not become questions', () => {
+    const state = running();
+    const data = { type: 'warning', content: '', user_input_request: request };
+    const note = frame('', { type: 'tips', stream_complete: true, data });
+    for (const suppressed of [{ ...note, turn_id: undefined }, { ...note, data: { type: 'warning', content: request.question } },
+      { ...note, data: { ...data, type: 'error' } },
+      { ...note, data: { ...data, user_input_request: { ...request, remaining_work: '' } } }]) {
+      expect(stream(state, suppressed)).toBe(state);
+    }
+    for (const presentation of [{ ...state, dismissed: true }, { ...state, interrupted: true }]) {
+      expect(stream(presentation, note)).toBe(presentation);
+    }
   });
 });

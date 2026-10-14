@@ -50,6 +50,7 @@ use nomifun_ai_agent::{
     AgentRuntimeSessions, AgentSendError, AgentStreamEvent,
 };
 use nomifun_agent_contracts::{
+    AgentUserInputRequest,
     IdmmDecisionExplanation, IdmmDecisionNotice,
     AgentBindingValue, AgentHandoffBindingRefV1, AgentHandoffCompletionAccountV1,
     AgentHandoffCompletionCriterionV1, AgentHandoffEnvelopeV1, AgentHandoffInputCitationV1,
@@ -1595,6 +1596,7 @@ impl NomiCoreSessionOwner {
             result_error: delivery.result_error,
             result_error_code: delivery.result_error_code,
             result_error_retryable: delivery.result_error_retryable,
+            user_input_request: delivery.user_input_request,
         }))
     }
 
@@ -1834,6 +1836,10 @@ impl NomiCoreSessionOwner {
             AgentStreamEvent::Error(error) => ("error", error.message.as_str()),
             _ => ("ai_waiting_input", ""),
         };
+        let stop_reason = match terminal {
+            AgentStreamEvent::Finish(data) => data.stop_reason,
+            _ => None,
+        };
         WebSocketMessage::new(
             "turn.completed",
             json!({
@@ -1842,6 +1848,7 @@ impl NomiCoreSessionOwner {
                 "status": "finished",
                 "state": state,
                 "detail": detail,
+                "stop_reason": stop_reason,
                 "can_send_message": true,
                 "runtime": {
                     "state": "idle",
@@ -2101,6 +2108,7 @@ impl NomiCoreSessionOwner {
                     result_error: None,
                     result_error_code: None,
                     result_error_retryable: None,
+                    user_input_request: None,
                 }),
                 PublicTurnDeliveryState::Completed(delivery) => Ok(delivery),
                 PublicTurnDeliveryState::Missing => Err(AppError::Conflict(
@@ -2251,6 +2259,7 @@ impl NomiCoreSessionOwner {
             result_error: None,
             result_error_code: None,
             result_error_retryable: None,
+                    user_input_request: None,
         })
     }
 
@@ -3505,6 +3514,7 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
                     result_error: None,
                     result_error_code: None,
                     result_error_retryable: None,
+                    user_input_request: None,
                 }))
             }
             PublicTurnDeliveryState::Completed(delivery) => {
@@ -4197,6 +4207,7 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
                     result_error: None,
                     result_error_code: None,
                     result_error_retryable: None,
+                    user_input_request: None,
                 });
                 // Authorization and exact operation lookup above must precede
                 // reading suspension. Runtime idleness is not a receipt.
@@ -4458,18 +4469,21 @@ fn agent_execution_delivery_from_conversation(
         result_error: delivery.result_error,
         result_error_code: delivery.result_error_code,
         result_error_retryable: delivery.result_error_retryable,
+        user_input_request: delivery.user_input_request,
     }
 }
 
 fn channel_delivery_from_conversation(
     delivery: IdempotentMessageDelivery,
 ) -> nomifun_channel::ChannelTurnDeliveryReceipt {
+    let text = nomifun_channel::message_service::channel_reply_text(
+        delivery.result_text.as_deref(), delivery.user_input_request.as_ref());
     nomifun_channel::ChannelTurnDeliveryReceipt {
         message_id: delivery.message_id,
         replayed: delivery.replayed,
         completed: delivery.completed,
         result_ok: delivery.result_ok,
-        result_text: delivery.result_text,
+        result_text: text,
         result_error: delivery.result_error,
         result_error_code: delivery.result_error_code,
         result_error_retryable: delivery.result_error_retryable,
@@ -5037,19 +5051,29 @@ fn visible_conversation_execution(
     )
 }
 
-fn canonical_pause_notice(status: &str, operation: Option<&str>, events: &[nomifun_agent_contracts::SessionEventRecord]) -> Option<Value> {
+fn canonical_pause_notice(status: &str, operation: Option<&str>, through_seq: u64, events: &[nomifun_agent_contracts::SessionEventRecord]) -> Option<Value> {
     if status != "paused" { return None; }
     let operation = operation?;
-    let event = events.iter().rev().find(|event| event.kind.0 == "turn/paused" && event.correlation_id.as_ref() == operation)?;
+    let event = events.iter().filter(|event| event.kind.0 == "turn/paused"
+        && event.correlation_id.as_ref() == operation && event.seq <= through_seq)
+        .max_by_key(|event| event.seq)?;
     let nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload) = &event.payload else { return None; };
     let pause: nomifun_agent_session::NativePauseState = serde_json::from_value(payload.0.get("pause")?.clone()).ok()?;
     // Only bounded public reason codes belong in the conversation projection.
     // Arbitrary owner/provider prose remains in its original private record.
+    use nomifun_agent_runtime::AgentExecutionStopReason;
     let public_reason = pause.reason.len() <= 128 && (
         pause.reason.strip_prefix("EXECUTION_MODEL_").is_some_and(|code|
             serde_json::from_value::<nomifun_chat_model_broker::ChatModelErrorCode>(json!(code)).is_ok())
-        || matches!(pause.reason.as_str(), "EXECUTION_USER_REQUESTED" | "EXECUTION_ATTACH_FAILED"
-            | "EXECUTION_PREPARATION_BLOCKED" | "EXECUTION_SESSION_PAYLOAD_BUDGET"
+        || [AgentExecutionStopReason::UserRequested, AgentExecutionStopReason::DispatchWindow,
+            AgentExecutionStopReason::TotalModelBudget, AgentExecutionStopReason::SegmentBudget,
+            AgentExecutionStopReason::NoProgress, AgentExecutionStopReason::ProgressLedgerFull,
+            AgentExecutionStopReason::CheckpointUnavailable, AgentExecutionStopReason::NonQuiescentBoundary,
+            AgentExecutionStopReason::TurnJournalBudget, AgentExecutionStopReason::SessionPayloadBudget]
+            .into_iter().any(|reason| pause.reason == reason.code())
+        || pause.reason == nomifun_agent_session::NATIVE_RECOVERY_BLOCKED
+        || matches!(pause.reason.as_str(), "EXECUTION_ATTACH_FAILED"
+            | "EXECUTION_PREPARATION_BLOCKED" | "EXECUTION_CLEANUP_UNPROVEN"
             | "EXECUTION_MODEL_STREAM_ENDED_WITHOUT_TERMINAL" | "EXECUTION_MODEL_INVALID_EVENT")
     );
     let reason = if public_reason { pause.reason.as_str() } else { "EXECUTION_PAUSED" };
@@ -5076,20 +5100,68 @@ mod paused_projection_tests {
     #[test]
     fn pause_notice_keeps_the_exact_active_turn_and_public_reason() {
         let events=vec![paused_event("active","EXECUTION_MODEL_PROVIDER_UNAVAILABLE"),paused_event("foreign","OWNER_REQUESTED")];
-        let notice=canonical_pause_notice("paused",Some("active"),&events).unwrap();
+        let notice=canonical_pause_notice("paused",Some("active"),10,&events).unwrap();
         assert_eq!(notice,json!({"reason":"EXECUTION_MODEL_PROVIDER_UNAVAILABLE","cleanup_proven":true,"paused_at_ms":123}));
-        assert!(canonical_pause_notice("running",Some("active"),&events).is_none());
-        assert!(canonical_pause_notice("paused",Some("missing"),&events).is_none());
-        assert!(canonical_pause_notice("paused",None,&events).is_none());
+        assert!(canonical_pause_notice("running",Some("active"),10,&events).is_none());
+        assert!(canonical_pause_notice("paused",Some("missing"),10,&events).is_none());
+        assert!(canonical_pause_notice("paused",None,10,&events).is_none());
+    }
+
+    #[test]
+    fn pause_notice_preserves_execution_and_recovery_guard_codes() {
+        for reason in ["EXECUTION_USER_REQUESTED", "EXECUTION_DISPATCH_WINDOW",
+            "EXECUTION_TOTAL_MODEL_BUDGET", "EXECUTION_SEGMENT_BUDGET", "EXECUTION_NO_PROGRESS",
+            "EXECUTION_PROGRESS_LEDGER_FULL", "EXECUTION_CHECKPOINT_UNAVAILABLE",
+            "EXECUTION_NON_QUIESCENT_BOUNDARY", "EXECUTION_TURN_JOURNAL_BUDGET",
+            "EXECUTION_SESSION_PAYLOAD_BUDGET", "NATIVE_RECOVERY_RECONCILIATION_REQUIRED",
+            "EXECUTION_ATTACH_FAILED", "EXECUTION_PREPARATION_BLOCKED", "EXECUTION_CLEANUP_UNPROVEN",
+            "EXECUTION_MODEL_STREAM_ENDED_WITHOUT_TERMINAL", "EXECUTION_MODEL_INVALID_EVENT"] {
+            let event=paused_event("active",reason);
+            let notice=canonical_pause_notice("paused",Some("active"),10,&[event]).unwrap();
+            assert_eq!(notice,json!({"reason":reason,"cleanup_proven":true,"paused_at_ms":123}));
+        }
+    }
+
+    #[test]
+    fn pause_notice_keeps_the_observed_cursor_when_pause_records_are_unordered() {
+        let first=paused_event("active","EXECUTION_NON_QUIESCENT_BOUNDARY");
+        let mut later=paused_event("active","EXECUTION_DISPATCH_WINDOW");
+        later.seq=20;
+        let mut foreign=paused_event("foreign","EXECUTION_TOTAL_MODEL_BUDGET");
+        foreign.seq=25;
+        let events=[foreign,later,first];
+        assert!(canonical_pause_notice("paused",Some("active"),9,&events).is_none());
+        for cursor in [10,19] {
+            assert_eq!(canonical_pause_notice("paused",Some("active"),cursor,&events).unwrap()["reason"],
+                "EXECUTION_NON_QUIESCENT_BOUNDARY");
+        }
+        for cursor in [20,25] {
+            assert_eq!(canonical_pause_notice("paused",Some("active"),cursor,&events).unwrap()["reason"],
+                "EXECUTION_DISPATCH_WINDOW");
+        }
+    }
+
+    #[test]
+    fn pause_notice_keeps_known_causes_without_claiming_resource_cleanup() {
+        for reason in ["EXECUTION_NON_QUIESCENT_BOUNDARY", "EXECUTION_CLEANUP_UNPROVEN",
+            nomifun_agent_session::NATIVE_RECOVERY_BLOCKED] {
+            let mut event=paused_event("active",reason);
+            let nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload)=&mut event.payload else { unreachable!() };
+            payload.0["pause"]["cleanup_proven"]=json!(false);
+            let notice=canonical_pause_notice("paused",Some("active"),10,&[event]).unwrap();
+            assert_eq!(notice,json!({"reason":reason,"cleanup_proven":false,"paused_at_ms":123}));
+        }
     }
 
     #[test]
     fn pause_notice_does_not_publish_arbitrary_prose_or_invent_cleanup() {
-        for reason in ["sensitive provider or owner prose","FIXTURE_PROVIDER_SECRET","EXECUTION_MODEL_FIXTURE_SECRET"] {
+        for reason in ["sensitive provider or owner prose","FIXTURE_PROVIDER_SECRET","EXECUTION_MODEL_FIXTURE_SECRET",
+            "EXECUTION_PRIVATE_SECRET", "NATIVE_RECOVERY_PRIVATE_SECRET",
+            "EXECUTION_DISPATCH_WINDOW private owner prose", "EXECUTION_MODEL_PROVIDER_UNAVAILABLE private provider prose"] {
             let mut event=paused_event("active",reason);
             let nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload)=&mut event.payload else { unreachable!() };
             payload.0["pause"]["cleanup_proven"]=json!(false);
-            let notice=canonical_pause_notice("paused",Some("active"),&[event]).unwrap();
+            let notice=canonical_pause_notice("paused",Some("active"),10,&[event]).unwrap();
             assert_eq!(notice,json!({"reason":"EXECUTION_PAUSED","cleanup_proven":false,"paused_at_ms":123}));
         }
     }
@@ -5130,7 +5202,7 @@ fn canonical_conversation_response(
     extra.remove("temp_workspace_id");
     extra.insert("execution_phase".to_owned(),Value::String(head.status.clone()));
     extra.remove("execution_pause");
-    if let Some(pause) = canonical_pause_notice(&head.status,head.active_turn_id.as_deref(),&events) {
+    if let Some(pause) = canonical_pause_notice(&head.status,head.active_turn_id.as_deref(),head.last_seq,&events) {
         extra.insert("execution_pause".to_owned(),pause);
     }
     if is_temporary_workspace {
@@ -10135,6 +10207,7 @@ async fn execute_initial_remote_turn(
                             result_error: None,
                             result_error_code: None,
                             result_error_retryable: None,
+                    user_input_request: None,
                         },
                     )
                     .await?;
@@ -10807,14 +10880,19 @@ async fn canonical_creative_studio_history(
         let source = summary.projection["source_message_id"].as_str().unwrap().to_owned();
         let turn_state = summary.projection["state"].as_str().unwrap().to_owned();
         let error_message = if matches!(turn_state.as_str(), "failed" | "interrupted") {
-            canonical_message_response(session_id, created_at, summary)?
+            canonical_message_response(session_id, created_at, summary.clone())?
                 .and_then(|message| message.content.get("content").and_then(Value::as_str).map(str::to_owned))
         } else { None };
-        outcomes.insert(source, (turn_state, error_message));
+        let request: Option<AgentUserInputRequest> = summary.projection.get("user_input_request")
+            .cloned().map(serde_json::from_value).transpose()?;
+        if let Some(request) = &request { request.validate().map_err(AppError::Conflict)?; }
+        let finished_seq = summary.last_seq;
+        outcomes.insert(source, (turn_state, error_message, request, finished_seq));
     }
     let mut history = Vec::new();
     let mut last_assistants = HashMap::new();
     for projection in projections {
+        let seq = projection.first_seq;
         let Some(message) = canonical_message_response(session_id, created_at, projection)? else {
             continue;
         };
@@ -10825,7 +10903,7 @@ async fn canonical_creative_studio_history(
         let outcome = source.and_then(|source| outcomes.get(source));
         // Only terminal Turns belong to durable Canvas history. In particular,
         // assistant-complete can be journaled before the Turn itself settles.
-        if outcome.is_some_and(|(state, _)| state == "running")
+        if outcome.is_some_and(|(state, _, _, _)| state == "running")
             || (outcome.is_none() && message.status != Some(MessageStatus::Finish)) {
             continue;
         }
@@ -10851,27 +10929,44 @@ async fn canonical_creative_studio_history(
                 last_assistants.insert(source.clone(), history.len());
             }
         }
-        history.push(CreativeStudioAgentHistoryMessage {
+        history.push((seq, CreativeStudioAgentHistoryMessage {
+            user_input_request: None,
             id: message.message_id,
             role,
             status: CreativeStudioAgentHistoryStatus::Complete,
             text,
             activity_label: None,
             error_message: None,
-        });
+        }));
     }
-    for (source, index) in last_assistants {
-        let Some((state, error)) = outcomes.get(&source) else { continue; };
+    for (source, index) in &last_assistants {
+        let Some((state, error, request, _)) = outcomes.get(source) else { continue; };
+        let message = &mut history[*index].1;
+        if let Some(request) = request {
+            message.status = CreativeStudioAgentHistoryStatus::InputRequired;
+            message.user_input_request = Some(request.clone());
+            continue;
+        }
         match state.as_str() {
             "failed" | "interrupted" => {
-                history[index].status = CreativeStudioAgentHistoryStatus::Failed;
-                history[index].error_message = error.clone();
+                message.status = CreativeStudioAgentHistoryStatus::Failed;
+                message.error_message = error.clone();
             }
-            "cancelled" => history[index].status = CreativeStudioAgentHistoryStatus::Stopped,
+            "cancelled" => message.status = CreativeStudioAgentHistoryStatus::Stopped,
             _ => {}
         }
     }
-    Ok(history)
+    for (source, (_, _, request, seq)) in outcomes {
+        if !last_assistants.contains_key(&source) && let Some(request) = request {
+            history.push((seq, CreativeStudioAgentHistoryMessage {
+                id: super::engine_journal::canonical_assistant_message_id(&source)?,
+                role: CreativeStudioAgentHistoryRole::Assistant, status: CreativeStudioAgentHistoryStatus::InputRequired,
+                text: String::new(), activity_label: None, error_message: None, user_input_request: Some(request),
+            }));
+        }
+    }
+    history.sort_by_key(|(seq, _)| *seq);
+    Ok(history.into_iter().map(|(_, message)| message).collect())
 }
 
 async fn resolve_canonical_creative_studio_canvas_agent_session(
@@ -11607,6 +11702,11 @@ pub(super) async fn guard_app_development_completed_config(
         matching_source && receipt.status == nomifun_agent_session::TurnReceiptStatus::Completed && event.kind.0 == "turn/completed")
         .ok_or_else(|| NomiCoreApiError::new(StatusCode::CONFLICT, "APP_DEVELOPMENT_NOT_COMPLETED",
             "Application configuration can be completed only after the requested Turn succeeded"))?;
+    let output = store.turn_output_facts(&session_id, &operation).await.map_err(agent_session_store_error)?;
+    if nomifun_agent_execution::canonical_turn_delivery(&output, &receipt, false)?.user_input_request.is_some() {
+        return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "APP_DEVELOPMENT_INPUT_REQUIRED",
+            "Application configuration is waiting for user input; task delivery is unfinished"));
+    }
     let head = store.head(&session_id).await.map_err(agent_session_store_error)?;
     let mut cursor = nomifun_agent_contracts::SessionEventCursor { agent_session_id: session_id.clone(), seq: terminal.seq };
     while cursor.seq < head.last_seq {
@@ -12131,6 +12231,7 @@ async fn deterministic_agent_handoff(
         engine_events.last(),
         Some(
             AgentEngineEvent::TurnCompleted { .. }
+                | AgentEngineEvent::TurnInputRequired { .. }
                 | AgentEngineEvent::TurnFailed { .. }
                 | AgentEngineEvent::TurnCancelled { .. }
         )
@@ -14365,6 +14466,21 @@ fn canonical_message_response_with_observation(
             super::engine_journal::canonical_assistant_message_id(root_message_id)?;
         let started_at_ms = document.get("started_at_ms").cloned().unwrap_or(Value::Null);
         let finished_at_ms = document.get("finished_at_ms").cloned().unwrap_or(Value::Null);
+        if let Some(value) = document.get("user_input_request") {
+            if state != "completed" {
+                return Err(AppError::Conflict("User input handoff has no normal Turn terminal".into()).into());
+            }
+            let request: AgentUserInputRequest = serde_json::from_value(value.clone())?;
+            request.validate().map_err(AppError::Conflict)?;
+            return Ok(Some(MessageResponse {
+                message_id: summary_message_id.to_owned(), conversation_id: session_id.as_ref().to_owned(),
+                msg_id: Some(stream_message_id), r#type: MessageType::Tips,
+                content: json!({ "content":"", "type":"warning", "user_input_request":request,
+                    "turn_id":root_message_id, "started_at_ms":started_at_ms, "finished_at_ms":finished_at_ms }),
+                position: Some(MessagePosition::Center), status: Some(MessageStatus::Finish), hidden:false,
+                created_at:created_at.saturating_add(i64::try_from(projection.first_seq).unwrap_or(i64::MAX)),
+            }));
+        }
         if matches!(state, "failed" | "interrupted") {
             let error = document.get("error").cloned().unwrap_or_else(|| {
                 json!({

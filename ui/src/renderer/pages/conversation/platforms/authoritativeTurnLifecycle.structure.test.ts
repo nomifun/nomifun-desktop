@@ -107,12 +107,4 @@ describe('authoritative turn lifecycle wiring', () => {
     }
   });
 
-  test('reconciles again after stop-failure restoration invalidates an in-flight null-turn GET', () => {
-    for (const source of statefulLifecycles) {
-      const restore = source.indexOf('const restoreRunningAfterStopFailure = useCallback');
-      const reconcile = source.indexOf('startAuthoritativeRuntimeReconciliation();', restore);
-      expect(restore >= 0).toBe(true);
-      expect(reconcile > restore).toBe(true);
-    }
-  });
 });

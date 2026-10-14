@@ -123,6 +123,7 @@ fn replay_into(
     checkpoint_boundary: Option<u16>,
     input_replacements: &BTreeMap<String, ChatMessage>,
 ) -> Result<Option<(String, RecordedProcessResults)>, AgentEngineError> {
+    crate::user_input_request::recorded_pending(events)?;
     let last_reconciled = events.iter().rposition(|event| matches!(event, AgentEngineEvent::ExecutionTailReconciled { .. }));
     let (terminal_steps, interrupted) = if let Some(step) = checkpoint_boundary {
         if !matches!(events.last(), Some(AgentEngineEvent::ExecutionCheckpointSaved { step: actual, .. }) if *actual == step) {
@@ -131,6 +132,7 @@ fn replay_into(
         (step, false)
     } else { match events.last() {
         Some(AgentEngineEvent::TurnCompleted { model_steps, .. }) => (*model_steps, false),
+        Some(AgentEngineEvent::TurnInputRequired { model_steps, .. }) => (*model_steps, false),
         Some(
             AgentEngineEvent::TurnCancelled { model_steps }
             | AgentEngineEvent::TurnFailed { model_steps, .. },
@@ -150,6 +152,7 @@ fn replay_into(
             last_reconciled.is_none_or(|reconciled| index > reconciled) && matches!(
                 event,
                 AgentEngineEvent::TurnCompleted { .. }
+                    | AgentEngineEvent::TurnInputRequired { .. }
                     | AgentEngineEvent::TurnCancelled { .. }
                     | AgentEngineEvent::TurnFailed { .. }
             )
@@ -195,7 +198,7 @@ fn replay_into(
         // Only a committed owner reconciliation can supersede an engine-local
         // terminal proposal. The Store never reopens a canonical terminal.
         if last_reconciled.is_some_and(|boundary| index < boundary)
-            && matches!(event,AgentEngineEvent::TurnCompleted{..}|AgentEngineEvent::TurnCancelled{..}|AgentEngineEvent::TurnFailed{..}) { continue; }
+            && matches!(event,AgentEngineEvent::TurnCompleted{..}|AgentEngineEvent::TurnInputRequired{..}|AgentEngineEvent::TurnCancelled{..}|AgentEngineEvent::TurnFailed{..}) { continue; }
         batch.validate_event_step(event)?;
         protocol_recovery.observe(event)?;
         if last_checkpoint.is_some() && !matches!(event, AgentEngineEvent::ExecutionCheckpointSaved { .. } | AgentEngineEvent::ExecutionResumed { .. }) {
@@ -608,6 +611,16 @@ fn replay_into(
             AgentEngineEvent::CompletionReview { status } => {
                 batch.flush(history, false)?;
                 history.push(status.completion_review_message()?);
+            }
+            AgentEngineEvent::EndIntentReview { .. } => {
+                batch.flush(history, false)?;
+                history.push(crate::context_lifecycle::text_message(ChatRole::User,
+                    "Recorded end-intent review: declare actual completion with report_completion or missing user information with request_user_input. Neither a text stop nor an input request proves task completion.".into()));
+            }
+            AgentEngineEvent::UserInputRequested { request, .. } => {
+                batch.notices.push(crate::context_lifecycle::text_message(ChatRole::User,
+                    format!("Recorded user-input request (a source question, not an answer, completion evidence or execution authority): {}",
+                        serde_json::to_string(request).map_err(|error| AgentEngineError::ReplayContract(error.to_string()))?)));
             }
             AgentEngineEvent::CompletionCheckRejected { feedback, .. } => {
                 batch.flush(history, false)?;
@@ -1208,7 +1221,7 @@ mod tests {
             version: 1, binding: binding(), turn_operation_id: "turn".into(), active_set_generation: 0,
             model_steps: 1, tool_call_count: 0, accepted_input_count: 1, applied_steering_receipts: vec![],
             plan: Default::default(), work: Default::default(), patch_recovery: Default::default(),
-            segments: None, control_rejections: Default::default(), completion_review: Default::default(),
+            segments: None, control_rejections: Default::default(), completion_review: Default::default(), pending_user_input: None,
         };
         let recovery = crate::AgentTurnRecovery::new(checkpoint, 1, 1, prefix.clone(), vec![], vec![]).unwrap();
         let expected = vec![requirement(), crate::context_lifecycle::text_message(ChatRole::Assistant, text.into())];

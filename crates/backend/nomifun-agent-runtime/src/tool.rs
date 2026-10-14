@@ -103,10 +103,16 @@ fn report_only_refusal(
         let reason = serde_json::json!({
             "status":"not_executed",
             "code":"REPORT_ONLY_ACTION_CLOSED",
-            "phase":match phase { AgentExecutionPhase::DeliveryReview => "delivery_review", _ => "completion_review" },
+            "phase":match phase { AgentExecutionPhase::DeliveryReview => "delivery_review", AgentExecutionPhase::EndIntentReview => "end_intent_review", _ => "completion_review" },
             "tool":call.name,
             "message":"Only this newly proposed batch was held before dispatch because completion review is report-only. No call in this new batch ran. This is a phase restriction, not a missing capability or a command failure. Earlier calls in this same accepted turn retain their original receipts and invocation status; they were not erased, cancelled, or moved into an earlier turn. Determine whether original work ran from its original receipts, never from this refused new batch. Submit report_completion alone with a fresh call ID, using the original observations and unchanged runtime counts. Do not repeat settled actions, discover capabilities, or reopen the plan to repair this account. Missing or uncertain evidence and valid blockers remain unresolved."
-        }).to_string();
+        });
+        let mut reason = reason;
+        if phase == AgentExecutionPhase::EndIntentReview {
+            reason["code"] = serde_json::json!("END_INTENT_ACTION_CLOSED");
+            reason["message"] = serde_json::json!("This newly proposed batch was held before dispatch; no call in it ran. Declare the reply's end intent with request_user_input alone for missing information, or report_completion alone for an evidence-based completion account. Earlier receipts and unresolved work remain unchanged. A text stop or source question cannot prove task completion or erase failures.");
+        }
+        let reason = reason.to_string();
         (call.call_id.clone(), Ok(AgentToolResult::text(call.call_id.clone(), reason, true)))
     }).collect())
 }

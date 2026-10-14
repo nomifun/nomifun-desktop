@@ -75,7 +75,7 @@ fn closed_turn(binding: &EngineBinding, operation: &str, input: &str, reply: &st
             binding: binding.clone(), turn_operation_id: OperationId::from(operation),
         },
         AgentEngineEvent::ModelStepStarted {
-            step: 1, operation_id: OperationId::from(format!("{operation}:model:1")),
+            step: 1, operation_id: OperationId::from(format!("{operation}:model:1")), correction_source: None,
         },
         AgentEngineEvent::OutputTextDelta { step: 1, text: reply.into() },
         AgentEngineEvent::TurnCompleted {

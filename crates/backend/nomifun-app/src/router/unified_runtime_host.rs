@@ -61,6 +61,11 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../../../Cargo.lock"),
                     include_str!("../../Cargo.toml"),
                     include_str!("../../../nomifun-agent-runtime/src/lib.rs"),
+                    include_str!("../../../nomifun-agent-runtime/src/user_input.rs"),
+                    include_str!("../../../nomifun-agent-contracts/src/user_input.rs"),
+                    include_str!("../../../nomifun-agent-execution/src/user_input.rs"),
+                    include_str!("../../../nomifun-db/src/repository/agent_execution.rs"),
+                    include_str!("../../../nomifun-db/src/repository/sqlite_agent_execution.rs"),
                     include_str!("../../../nomifun-public/Cargo.toml"),
                     include_str!("../../../nomifun-agent-control-plane/src/kernel_catalog.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/engine_features.rs"),
@@ -82,6 +87,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-agent-runtime/src/recovery.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/reconciliation.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/segments.rs"),
+                    include_str!("../../../nomifun-agent-runtime/src/process_settlement.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/adaptive.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/execution_policy.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/error.rs"),
@@ -475,6 +481,42 @@ struct ConversationRuntimeHost {
     tools: Arc<JoinedTools>,
     resources: Arc<super::engine_kernel_session::EngineKernelSession>,
     supervision: Arc<dyn nomifun_idmm::IdmmProgressSink>,
+}
+
+struct UserInputRequestPort {
+    host: std::sync::Weak<ConversationRuntimeHost>,
+    enabled: bool,
+}
+
+impl std::fmt::Debug for UserInputRequestPort {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("UserInputRequestPort").field("enabled", &self.enabled).finish()
+    }
+}
+
+#[async_trait]
+impl AgentUserInputRequestPort for UserInputRequestPort {
+    fn enabled(&self) -> bool { self.enabled }
+
+    async fn check(&self, causality: &ChatCausality, request: &AgentUserInputRequest)
+        -> Result<Option<String>, AgentEngineError> {
+        request.validate().map_err(AgentEngineError::InvalidContract)?;
+        if !self.enabled { return Ok(Some("This non-interactive invocation cannot request a human reply.".into())); }
+        let host = self.host.upgrade().ok_or_else(|| AgentEngineError::EventSink("Session host has shut down".into()))?;
+        {
+            let active = host.active.lock().await;
+            let turn = active.as_ref().ok_or_else(|| AgentEngineError::InvalidContract("Input request has no active Turn".into()))?;
+            if causality.agent_session_id.as_ref() != host.options.conversation_id
+                || causality.turn_operation_id.as_ref() != turn.operation || turn.cleanup_started {
+                return Err(AgentEngineError::InvalidContract("Input request targets another or settling Turn".into()));
+            }
+        }
+        match host.session_host.check_user_input_handoff(&host.principal, causality).await {
+            Ok(()) => Ok(None),
+            Err(AppError::Conflict(message) | AppError::BadRequest(message) | AppError::Forbidden(message)) => Ok(Some(message)),
+            Err(error) => Err(AgentEngineError::EventSink(error.to_string())),
+        }
+    }
 }
 
 impl ConversationRuntimeHost {
@@ -1057,7 +1099,10 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             .with_context_image_input(context_image_input)
             .with_prior_task(prior_task)
             .with_patch_recovery(patch_recovery)
-            .with_input_port(self.input_port.clone());
+            .with_input_port(self.input_port.clone())
+            .with_user_input_request_port(Arc::new(UserInputRequestPort {
+                host:self.self_reference.clone(), enabled:!matches!(receipt.get("origin").and_then(Value::as_str), Some("cron" | "robot")),
+            }));
         if let Some(port)=self.active.lock().await.as_ref().and_then(|turn|turn.voice_control.clone()) {
             request=request.with_voice_immediate_correction(port);
         }
@@ -1103,6 +1148,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         let terminal_event = matches!(
             event,
             AgentEngineEvent::TurnCompleted { .. }
+                | AgentEngineEvent::TurnInputRequired { .. }
                 | AgentEngineEvent::TurnCancelled { .. }
                 | AgentEngineEvent::TurnPaused { .. }
                 | AgentEngineEvent::TurnFailed { .. }
@@ -1224,6 +1270,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         let terminal = matches!(
             event,
             AgentEngineEvent::TurnCompleted { .. }
+                | AgentEngineEvent::TurnInputRequired { .. }
                 | AgentEngineEvent::TurnCancelled { .. }
                 | AgentEngineEvent::TurnPaused { .. }
                 | AgentEngineEvent::TurnFailed { .. }
@@ -1273,6 +1320,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 nomifun_idmm::IdmmProgressPhase::Tool
             }
             AgentEngineEvent::TurnCompleted { .. }
+            | AgentEngineEvent::TurnInputRequired { .. }
             | AgentEngineEvent::TurnCancelled { .. }
             | AgentEngineEvent::TurnPaused { .. }
             | AgentEngineEvent::TurnFailed { .. } => nomifun_idmm::IdmmProgressPhase::Terminal,

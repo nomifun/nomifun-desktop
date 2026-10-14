@@ -12,6 +12,8 @@ pub enum CreativeStudioAgentHistoryRole {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CreativeStudioAgentHistoryStatus {
+    #[serde(rename = "input_required")]
+    InputRequired,
     Complete,
     Running,
     Failed,
@@ -21,6 +23,8 @@ pub enum CreativeStudioAgentHistoryStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreativeStudioAgentHistoryMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_input_request: Option<nomifun_agent_contracts::AgentUserInputRequest>,
     pub id: String,
     pub role: CreativeStudioAgentHistoryRole,
     pub status: CreativeStudioAgentHistoryStatus,

@@ -73,6 +73,9 @@ fn attempt_turn_input(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AttemptOutcome {
     pub conversation_id: String,
+    pub user_input_request: Option<nomifun_agent_contracts::AgentUserInputRequest>,
+    /// Exact source of a handoff, retained only for canonical settlement CAS.
+    pub user_input_turn: Option<(String, String)>,
     pub text: Option<String>,
     /// Verified artifact paths observed in this attempt's current turn.
     pub output_files: Vec<String>,
@@ -740,6 +743,7 @@ fn managed_process_allowed_tools() -> Vec<&'static str> {
 /// Agent turn successful, so its absence always produces a failed outcome.
 fn paused_delivery_outcome(conversation_id: &str, reason: &str, tokens: Option<i64>) -> AttemptOutcome {
     AttemptOutcome {
+        user_input_request: None, user_input_turn: None,
         conversation_id: conversation_id.to_owned(), text: None, output_files: Vec::new(),
         ok: false, tokens,
         error: Some(format!("agent_execution_paused: Agent turn paused ({reason}); no completed delivery exists. Automatic task replay is blocked.")),
@@ -752,6 +756,7 @@ fn missing_delivery_receipt_outcome(
     tokens: Option<i64>,
 ) -> AttemptOutcome {
     AttemptOutcome {
+        user_input_request: None, user_input_turn: None,
         conversation_id: conversation_id.to_owned(),
         text: None,
         output_files: Vec::new(),
@@ -780,6 +785,9 @@ fn completed_delivery_outcome(
         receipt.result_error_retryable = Some(false);
     }
     AttemptOutcome {
+        user_input_turn: receipt.user_input_request.as_ref().and_then(|_| output.terminal_event_id.clone()
+            .map(|terminal| (output.canonical_operation_id.clone(), terminal))),
+        user_input_request: receipt.user_input_request,
         conversation_id: conversation_id.to_owned(),
         text: receipt.result_text,
         output_files: output.output_files,
@@ -999,6 +1007,7 @@ mod tests {
     #[tokio::test]
     async fn canonical_pause_stops_receipt_wait_without_claiming_completion_or_retry() {
         let receipt = AgentExecutionDelivery {
+            user_input_request: None,
             message_id: CURRENT_USER_TURN_ID.into(), replayed: true, completed: false,
             paused_reason: Some("EXECUTION_MODEL_INVALID_REQUEST".into()),
             result_ok: None, result_text: None, result_error: None,
@@ -1184,10 +1193,32 @@ mod tests {
     }
 
     #[test]
+    fn completed_input_handoff_keeps_its_exact_source_for_settlement_and_recovery() {
+        let request = nomifun_agent_contracts::AgentUserInputRequest {
+            request_id:"ask-name".into(), question:"姓名？".into(), remaining_work:"生成 PPT。".into(),
+        };
+        let output = AgentExecutionTurnOutput {
+            canonical_operation_id:"original-operation".into(), terminal_event_id:Some("original-terminal".into()),
+            delivery:AgentExecutionDelivery {
+                message_id:CURRENT_USER_TURN_ID.into(), replayed:true, completed:true,
+                user_input_request:Some(request.clone()), paused_reason:None,
+                result_ok:Some(true), result_text:Some("请补充姓名。".into()),
+                result_error:None, result_error_code:None, result_error_retryable:Some(false),
+            }, output_files:vec!["/workspace/draft.pptx".into()], integrity_ok:true,
+        };
+        let outcome = completed_delivery_outcome(CONVERSATION_ID, output, Some(7));
+        assert!(outcome.ok);
+        assert_eq!(outcome.user_input_request, Some(request));
+        assert_eq!(outcome.user_input_turn, Some(("original-operation".into(),"original-terminal".into())));
+        assert!(!crate::scheduler::agent_outcome_can_complete(&outcome));
+    }
+
+    #[test]
     fn receipt_verification_failure_does_not_authorize_replay() {
         let output = AgentExecutionTurnOutput {
             canonical_operation_id: "operation".into(), terminal_event_id: Some("terminal".into()),
             delivery: AgentExecutionDelivery {
+                user_input_request: None,
                 message_id: CURRENT_USER_TURN_ID.into(), replayed: true, completed: true,
                 paused_reason: None, result_ok: Some(true), result_text: Some("done".into()),
                 result_error: None, result_error_code: None, result_error_retryable: Some(false),

@@ -179,6 +179,7 @@ impl AgentEventSink for TurnProjection {
         if matches!(
             event,
             AgentEngineEvent::TurnCompleted { .. }
+                | AgentEngineEvent::TurnInputRequired { .. }
                 | AgentEngineEvent::TurnCancelled { .. }
                 | AgentEngineEvent::TurnPaused { .. }
                 | AgentEngineEvent::TurnFailed { .. }
@@ -372,6 +373,7 @@ impl EngineSessionDriver for UnifiedSessionDriver {
                     model_steps: result.model_steps,
                     terminal: match result.terminal {
                         AgentTurnTerminal::Completed { finish_reason } => EngineTurnTerminal::Completed { finish_reason },
+                        AgentTurnTerminal::InputRequired { request } => EngineTurnTerminal::InputRequired { request },
                         AgentTurnTerminal::Cancelled => EngineTurnTerminal::Cancelled,
                         AgentTurnTerminal::Paused { reason } => EngineTurnTerminal::Paused { reason },
                         AgentTurnTerminal::Failed { message } => EngineTurnTerminal::Failed { message, failure: None },
@@ -444,6 +446,9 @@ fn runtime_terminal(outcome: &EngineTurnOutcome) -> AgentEngineEvent {
     match &outcome.terminal {
         EngineTurnTerminal::Completed { finish_reason } => AgentEngineEvent::TurnCompleted {
             model_steps: outcome.model_steps, finish_reason: finish_reason.clone(),
+        },
+        EngineTurnTerminal::InputRequired { request } => AgentEngineEvent::TurnInputRequired {
+            model_steps: outcome.model_steps, request: request.clone(),
         },
         EngineTurnTerminal::Cancelled => AgentEngineEvent::TurnCancelled { model_steps: outcome.model_steps },
         EngineTurnTerminal::Paused { reason } => AgentEngineEvent::TurnPaused { model_steps: outcome.model_steps, reason: reason.clone() },
@@ -611,6 +616,9 @@ mod tests {
 
     struct Host {
         block_completion: AtomicBool,
+        completion_checks: AtomicUsize,
+        allow_user_input: AtomicBool,
+        fail_terminal_record: AtomicBool,
         fail_record: AtomicBool,
         events: Mutex<Vec<AgentEngineEvent>>,
         cleanup_turns: AtomicUsize,
@@ -628,6 +636,9 @@ mod tests {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 block_completion: AtomicBool::new(false),
+                completion_checks: AtomicUsize::new(0),
+                allow_user_input: AtomicBool::new(false),
+                fail_terminal_record: AtomicBool::new(false),
                 fail_record: AtomicBool::new(false),
                 events: Mutex::new(Vec::new()),
                 cleanup_turns: AtomicUsize::new(0),
@@ -646,6 +657,7 @@ mod tests {
     #[async_trait]
     impl UnifiedRuntimeHost for Host {
         async fn completion_gate(&self, _message: &SendMessageData) -> Result<Option<EngineTurnTerminal>,AppError> {
+            self.completion_checks.fetch_add(1, Ordering::SeqCst);
             Ok(self.block_completion.load(Ordering::Acquire).then(|| EngineTurnTerminal::Paused {
                 reason:"PLUGIN_DELIVERY_REQUIRED".into(),
             }))
@@ -677,7 +689,7 @@ mod tests {
             }
             let route =
                 ChatRouteIdentity::new("preset@1", "agent_chat", ModelRouteId::from("route"), 1);
-            Ok(AgentTurnRequest::new(
+            let request = AgentTurnRequest::new(
                 ChatModelRequest {
                     contract_version: VersionString::from(
                         nomifun_chat_model_broker::CHAT_MODEL_CONTRACT_VERSION,
@@ -721,7 +733,10 @@ mod tests {
                     principal_id: OWNER.to_owned(),
                 },
                 1,
-            ))
+            );
+            Ok(if self.allow_user_input.load(Ordering::Acquire) {
+                request.with_user_input_request_port(Arc::new(AllowUserInput))
+            } else { request })
         }
         async fn record_event(
             &self,
@@ -734,6 +749,7 @@ mod tests {
             if matches!(
                 event,
                 AgentEngineEvent::TurnCompleted { .. }
+                    | AgentEngineEvent::TurnInputRequired { .. }
                     | AgentEngineEvent::TurnCancelled { .. }
                     | AgentEngineEvent::TurnFailed { .. }
             ) {
@@ -741,6 +757,9 @@ mod tests {
                     self.cleanup_turns.load(Ordering::Acquire) > 0,
                     "terminal must follow cleanup proof"
                 );
+                if self.fail_terminal_record.load(Ordering::Acquire) {
+                    return Err(AppError::Conflict("terminal receipt unavailable".into()));
+                }
             }
             let mut events = self.events.lock().unwrap();
             events.push(event.clone());
@@ -804,6 +823,138 @@ mod tests {
         ) -> Result<AgentToolResult, AgentEngineError> {
             panic!("an empty admitted plan must not invoke tools")
         }
+    }
+
+    #[derive(Debug)]
+    struct AllowUserInput;
+    #[async_trait]
+    impl nomifun_agent_runtime::AgentUserInputRequestPort for AllowUserInput {
+        async fn check(&self, causality: &ChatCausality, request: &nomifun_agent_contracts::AgentUserInputRequest)
+            -> Result<Option<String>, AgentEngineError> {
+            assert_eq!(causality.agent_session_id.as_ref(), SESSION);
+            assert_eq!(request.request_id.as_ref(), "ask-report-path");
+            Ok(None)
+        }
+    }
+
+    struct InputRequestModel;
+    #[async_trait]
+    impl AgentModelPort for InputRequestModel {
+        async fn open_stream(&self, request: ChatModelRequest, _: CancellationToken)
+            -> Result<AgentModelStream, ChatModelError> {
+            assert!(request.input.tools.iter().any(|tool| tool.name == "request_user_input"));
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(ChatModelEvent::ToolCallCompleted { call: nomifun_chat_model_broker::ChatToolCall {
+                    call_id: "ask-report-path".into(), name: "request_user_input".into(),
+                    arguments: nomifun_agent_contracts::StrictJsonValue(serde_json::json!({
+                        "question":"Where should the report be saved?", "remaining_work":"Save and verify the report."
+                    })), provider_metadata: None,
+                }}),
+                Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
+            ])))
+        }
+    }
+
+    fn input_request_runtime(host: Arc<Host>) -> UnifiedAgentRuntime {
+        host.allow_user_input.store(true, Ordering::Release);
+        host.block_completion.store(true, Ordering::Release);
+        static WORKSPACE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        let workspace = WORKSPACE.get_or_init(|| tempfile::tempdir().unwrap());
+        // This SDK-only host has no filesystem or Knowledge owner to lease.
+        let options = AgentRuntimeBuildOptions {
+            user_id:OWNER.into(), agent_type:AgentType::Nomi,
+            workspace:workspace.path().to_string_lossy().into_owned(), conversation_id:SESSION.into(),
+            model:None, delegation_policy:Default::default(), extra:serde_json::json!({}),
+            conversation_created_at:None, workspace_binding_lease:None,
+        };
+        UnifiedAgentRuntime::new(&options, engine(), binding(), Arc::new(InputRequestModel), Arc::new(NoTools), host).unwrap()
+    }
+
+    async fn input_request_events(events: &mut broadcast::Receiver<AgentStreamEvent>) -> Vec<AgentStreamEvent> {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let mut received = Vec::new();
+            loop {
+                let event = events.recv().await.unwrap();
+                let terminal = matches!(event, AgentStreamEvent::Finish(_) | AgentStreamEvent::Error(_));
+                received.push(event);
+                if terminal { return received; }
+            }
+        }).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn input_required_waits_for_cleanup_and_receipt_then_publishes_note_before_finish_without_success_gate() {
+        let host = Host::new();
+        host.block_cleanup.store(true, Ordering::Release);
+        let runtime = input_request_runtime(host.clone());
+        let mut events = runtime.subscribe();
+        runtime.send_message(message()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), host.cleanup_entered.notified()).await.unwrap();
+        while let Ok(event) = events.try_recv() {
+            assert!(!matches!(&event, AgentStreamEvent::Tips(data) if data.user_input_request.is_some()));
+            assert!(!matches!(event, AgentStreamEvent::Finish(_) | AgentStreamEvent::Error(_)));
+        }
+        assert_eq!(runtime.status(), Some(ConversationStatus::Running));
+        assert!(runtime.send_message(message()).await.is_err(), "cleanup retains original ownership");
+        assert!(!host.events.lock().unwrap().iter().any(|event| matches!(event, AgentEngineEvent::TurnInputRequired { .. })));
+        host.cleanup_release.add_permits(1);
+        let received = input_request_events(&mut events).await;
+        let tip = received.iter().position(|event| matches!(event, AgentStreamEvent::Tips(data) if data.user_input_request.is_some())).unwrap();
+        let finish = received.iter().position(|event| matches!(event, AgentStreamEvent::Finish(data) if data.stop_reason == Some(TurnStopReason::InputRequired))).unwrap();
+        assert!(tip < finish);
+        let AgentStreamEvent::Tips(data) = &received[tip] else { unreachable!() };
+        let request = data.user_input_request.as_ref().unwrap();
+        assert_eq!(request.question, "Where should the report be saved?");
+        let recorded = host.events.lock().unwrap();
+        assert_eq!(recorded.iter().filter(|event| matches!(event, AgentEngineEvent::TurnInputRequired { .. })).count(), 1);
+        assert!(!recorded.iter().any(|event| matches!(event, AgentEngineEvent::TurnCompleted { .. } | AgentEngineEvent::CompletionReview { .. })));
+        drop(recorded);
+        assert_eq!(host.completion_checks.load(Ordering::Acquire), 0);
+        assert_eq!(runtime.status(), Some(ConversationStatus::Finished));
+        runtime.kill_and_wait(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn input_required_cleanup_or_terminal_record_failure_never_publishes_the_question_or_releases_input() {
+        for fail_cleanup in [true, false] {
+            let host = Host::new();
+            host.fail_cleanup.store(fail_cleanup, Ordering::Release);
+            host.fail_terminal_record.store(!fail_cleanup, Ordering::Release);
+            let runtime = input_request_runtime(host.clone());
+            let mut events = runtime.subscribe();
+            runtime.send_message(message()).await.unwrap();
+            let received = input_request_events(&mut events).await;
+            assert!(matches!(received.last(), Some(AgentStreamEvent::Error(_))));
+            assert!(!received.iter().any(|event| matches!(event, AgentStreamEvent::Tips(data) if data.user_input_request.is_some())));
+            assert!(!host.events.lock().unwrap().iter().any(|event| matches!(event, AgentEngineEvent::TurnInputRequired { .. })));
+            assert!(!runtime.is_transport_healthy());
+            assert!(runtime.send_message(message()).await.is_err());
+            assert_eq!(host.completion_checks.load(Ordering::Acquire), 0);
+            host.fail_cleanup.store(false, Ordering::Release);
+            host.fail_terminal_record.store(false, Ordering::Release);
+            runtime.kill_and_wait(None).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn input_required_cancel_during_cleanup_records_cancelled_without_a_question_note() {
+        let host = Host::new();
+        host.block_cleanup.store(true, Ordering::Release);
+        let runtime = input_request_runtime(host.clone());
+        let mut events = runtime.subscribe();
+        runtime.send_message(message()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), host.cleanup_entered.notified()).await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(20), runtime.cancel()).await.is_err());
+        host.cleanup_release.add_permits(1);
+        let received = input_request_events(&mut events).await;
+        assert!(matches!(received.last(), Some(AgentStreamEvent::Finish(data)) if data.stop_reason == Some(TurnStopReason::Cancelled)));
+        assert!(!received.iter().any(|event| matches!(event, AgentStreamEvent::Tips(data) if data.user_input_request.is_some())));
+        let recorded = host.events.lock().unwrap();
+        assert!(recorded.iter().any(|event| matches!(event, AgentEngineEvent::TurnCancelled { .. })));
+        assert!(!recorded.iter().any(|event| matches!(event, AgentEngineEvent::TurnInputRequired { .. } | AgentEngineEvent::TurnCompleted { .. })));
+        drop(recorded);
+        assert!(runtime.is_transport_healthy());
+        runtime.kill_and_wait(None).await.unwrap();
     }
 
     fn runtime(host: Arc<Host>, model: Arc<Model>) -> UnifiedAgentRuntime {

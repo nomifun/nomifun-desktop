@@ -76,6 +76,7 @@ import type {
 } from '../config/storage';
 import type { OfficePreviewRequest, OfficePreviewStatus, PreviewHistoryTarget, PreviewSnapshotInfo } from '../types/office/preview';
 import type { TaskPlanSnapshot } from '../protocolBindings/TaskPlanSnapshot';
+import type { TurnStopReason } from '../protocolBindings/TurnStopReason';
 import {
   parsePreviewSnapshotId,
 } from '../types/ids';
@@ -999,6 +1000,7 @@ export const fromApiTurnCompletedEvent = (raw: unknown): IConversationTurnComple
   return {
     conversation_id: parseConversationId(r.conversation_id),
     turn_id: r.turn_id == null ? undefined : parseMessageId(r.turn_id),
+    stop_reason: r.stop_reason as TurnStopReason | undefined,
     status: (r.status ?? 'finished') as IConversationTurnCompletedEvent['status'],
     state: (r.state ??
       (r.status === 'finished' ? 'ai_waiting_input' : 'unknown')) as IConversationTurnCompletedEvent['state'],
@@ -3303,6 +3305,7 @@ export interface IConversationTurnCompletedEvent {
   /** Stable turn correlation id. Older servers may omit it; consumers must
    * retain a runtime-state fallback for backward compatibility. */
   turn_id?: MessageId;
+  stop_reason?: TurnStopReason;
   status: 'pending' | 'running' | 'finished';
   state:
     | 'ai_generating'

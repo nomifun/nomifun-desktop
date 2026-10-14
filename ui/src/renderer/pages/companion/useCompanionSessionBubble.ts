@@ -9,7 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import type { IConversationTurnCompletedEvent, IResponseMessage, IUserMessageCreatedEvent } from '@/common/adapter/ipcBridge';
-import type { TMessage } from '@/common/chat/chatLib';
+import { isUserInputRequestPresentation, type TMessage } from '@/common/chat/chatLib';
 import type { CompanionId, ConversationId, MessageId } from '@/common/types/ids';
 import { reconcileConversationAuthoritativeRuntime, terminalReconcileDelayForAttempt } from '../conversation/platforms/reconcileConversationTurnAfterStreamTerminal';
 import { browserNarrationFor } from './browserNarration';
@@ -150,10 +150,17 @@ export function useCompanionSessionBubble(companionId: CompanionId | null, compa
         }
       });
     };
-    const settle = (root: MessageId, paused = false) => {
+    const settle = (root: MessageId, paused = false, inputRequired = false) => {
       if (!currentBinding() || stateRef.current.turnId !== root) return;
       if (!paused) settledRoots.add(root);
-      update(current => settleCompanionSessionBubble(current, root, doneText(), paused));
+      update(current => {
+        const hint = inputRequired ? tRef.current('conversation.userInputRequest.title') : current.hint;
+        const hasReply = current.order.some(id => current.segments.get(id)?.trim());
+        const presentation = inputRequired ? { ...current, hint,
+          ...(current.phase === 'settled' && !hasReply ? { bubble: current.dismissed ? '' : hint } : {}),
+        } : current;
+        return settleCompanionSessionBubble(presentation, root, doneText(), paused);
+      });
       if (!paused) hydrate(root, true);
     };
     const begin = (root: MessageId, phase: 'accepted' | 'running') => {
@@ -231,7 +238,7 @@ export function useCompanionSessionBubble(companionId: CompanionId | null, compa
         const completed = active.conversation_id ? pendingCompleted.get(active.conversation_id) : undefined;
         if (completed?.turn_id && !stateRef.current.turnId) begin(completed.turn_id, 'accepted');
         if (completed?.turn_id && completed.turn_id === stateRef.current.turnId) {
-          settle(completed.turn_id);
+          settle(completed.turn_id, false, completed.stop_reason === 'input_required');
         }
         // A POST receipt is an identity hint, never execution authority.
         // If its stream already settled, a delayed response cannot reopen it.
@@ -288,7 +295,7 @@ export function useCompanionSessionBubble(companionId: CompanionId | null, compa
         if (!stateRef.current.turnId) begin(event.turn_id, 'accepted');
         if (event.turn_id !== stateRef.current.turnId) return;
         ++reconciliationGeneration.current;
-        settle(event.turn_id);
+        settle(event.turn_id, false, event.stop_reason === 'input_required');
       }),
       ipcBridge.conversation.turnPaused.on(event => {
         if (event.conversation_id === stateRef.current.conversationId && event.turn_id === stateRef.current.turnId) reconcileRuntime();
@@ -297,7 +304,7 @@ export function useCompanionSessionBubble(companionId: CompanionId | null, compa
         if (!currentBinding() || !message.turn_id) return;
         if (!stateRef.current.conversationId || (message.conversation_id === stateRef.current.conversationId
           && message.turn_id !== stateRef.current.turnId && !settledRoots.has(message.turn_id))) {
-          if (!message.stream_complete) {
+          if (!message.stream_complete || isUserInputRequestPresentation(message)) {
             pendingStreams.push(message);
             if (pendingStreams.length > 128) pendingStreams.shift();
           }
@@ -305,7 +312,8 @@ export function useCompanionSessionBubble(companionId: CompanionId | null, compa
         }
         if (message.conversation_id !== stateRef.current.conversationId || message.turn_id !== stateRef.current.turnId) return;
         applyStream(message);
-        if (!message.hidden && !message.stream_complete && (message.type === 'finish' || message.type === 'error')) {
+        if (!message.hidden && (isUserInputRequestPresentation(message)
+          || !message.stream_complete && (message.type === 'finish' || message.type === 'error'))) {
           // Terminal stream is a trigger to read authority; it does not lower busy.
           reconcileRuntime();
         }

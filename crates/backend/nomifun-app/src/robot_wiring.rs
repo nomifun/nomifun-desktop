@@ -692,6 +692,9 @@ impl nomifun_robot::wiring::RobotConversationBackend for AppRobotBackend {
 fn completed_robot_delivery_events(
     delivery: &nomifun_conversation::IdempotentMessageDelivery,
 ) -> Vec<TurnEvent> {
+    if delivery.user_input_request.is_some() {
+        return vec![robot_stream_failure("The non-interactive robot invocation requires user input")];
+    }
     match delivery.result_ok {
         Some(true) => {
             let mut events = Vec::with_capacity(2);
@@ -871,6 +874,7 @@ impl SpokenReplyReducer {
                     Some(TurnStopReason::Refusal) => "the model refused the request",
                     Some(TurnStopReason::Cancelled) => "the turn was cancelled",
                     Some(TurnStopReason::Paused) => "execution is paused pending owner authorization",
+                    Some(TurnStopReason::InputRequired) => "the invocation requires user input",
                     Some(TurnStopReason::EndTurn) | None => {
                         unreachable!("normal finish was handled above")
                     }
@@ -1115,6 +1119,7 @@ mod tests {
             TurnStopReason::Refusal,
             TurnStopReason::Cancelled,
             TurnStopReason::Paused,
+            TurnStopReason::InputRequired,
         ] {
             let mut reducer = SpokenReplyReducer::default();
             assert!(

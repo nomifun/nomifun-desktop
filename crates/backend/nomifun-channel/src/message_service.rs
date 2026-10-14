@@ -24,6 +24,20 @@ use crate::error::ChannelError;
 use crate::session_port::{ChannelSessionPort, ChannelTurnReceiptState};
 use crate::types::{OutgoingMessageType, PluginType, UnifiedOutgoingMessage};
 
+/// Present a committed input handoff beside any actual reply already produced.
+/// This formats delivery text only; it is never evidence of task completion.
+pub fn channel_reply_text(
+    body: Option<&str>,
+    request: Option<&nomifun_agent_contracts::AgentUserInputRequest>,
+) -> Option<String> {
+    let Some(request) = request else { return body.map(str::to_owned); };
+    let question = format!("{}\n\n{}", request.question, request.remaining_work);
+    Some(match body.filter(|body| !body.trim().is_empty()) {
+        Some(body) => format!("{}\n\n{question}", body.trim_end()),
+        None => question,
+    })
+}
+
 /// 客服域接缝 (customer-service routing seam) — the channel layer's ONLY
 /// contact point with the customer-service domain. Implemented in
 /// `nomifun-app` over the customer-service crate; the channel crate stays
@@ -961,6 +975,16 @@ impl ChannelMessageService {
                 restart_attempt: data.restart_attempt,
             }),
             AgentStreamEvent::Text(data) => Some(StreamAction::AppendText(data.content.clone())),
+            AgentStreamEvent::Tips(data) if data.user_input_request.is_some() => {
+                let request = data.user_input_request.as_ref().expect("matched input request");
+                match request.validate() {
+                    Ok(()) => Some(StreamAction::UserInputRequest(request.clone())),
+                    Err(_) => Some(StreamAction::Error("The input handoff has invalid structured metadata; no question was delivered.".into())),
+                }
+            }
+            AgentStreamEvent::Finish(data) if data.stop_reason == Some(nomifun_ai_agent::protocol::events::TurnStopReason::InputRequired) => {
+                Some(StreamAction::FinishInputRequired)
+            }
             AgentStreamEvent::Finish(data)
                 if matches!(
                     data.stop_reason,
@@ -986,6 +1010,8 @@ impl ChannelMessageService {
                         "the turn was cancelled",
                     Some(nomifun_ai_agent::protocol::events::TurnStopReason::Paused) =>
                         "execution is paused and requires Session-owner authorization to continue",
+                    Some(nomifun_ai_agent::protocol::events::TurnStopReason::InputRequired) =>
+                        unreachable!("input handoff was handled above"),
                     Some(nomifun_ai_agent::protocol::events::TurnStopReason::EndTurn) | None =>
                         unreachable!("normal finish was handled above"),
                 }
@@ -1185,8 +1211,12 @@ pub enum StreamAction {
     DiscardOutput { restart_attempt: u32 },
     /// Append text content to the current response.
     AppendText(String),
+    /// A committed Turn's question; unfinished work remains unfinished.
+    UserInputRequest(nomifun_agent_contracts::AgentUserInputRequest),
     /// Streaming finished.
     Finish,
+    /// Normal reply boundary awaiting a human answer, never task completion.
+    FinishInputRequired,
     /// An error occurred.
     Error(String),
     /// Agent is thinking/reasoning.
@@ -1581,6 +1611,34 @@ mod tests {
             Some(StreamAction::AppendText(text)) => assert_eq!(text, "Hello"),
             _ => panic!("Expected AppendText"),
         }
+    }
+
+    #[test]
+    fn input_handoff_uses_typed_question_and_rejects_invalid_metadata() {
+        use nomifun_ai_agent::protocol::events::{TipsEventData, TipType};
+        let request = nomifun_agent_contracts::AgentUserInputRequest {
+            request_id: "question-1".into(), question: "What name should appear?".into(),
+            remaining_work: "Finish the personal introduction slides.".into(),
+        };
+        let event = AgentStreamEvent::Tips(TipsEventData {
+            content: String::new(), tip_type: TipType::Warning, user_input_request: Some(request.clone()),
+        });
+        assert!(matches!(ChannelMessageService::process_stream_event(&event),
+            Some(StreamAction::UserInputRequest(recorded)) if recorded == request));
+        assert!(matches!(ChannelMessageService::process_stream_event(&AgentStreamEvent::Finish(FinishEventData {
+            session_id: None, stop_reason: Some(nomifun_ai_agent::protocol::events::TurnStopReason::InputRequired),
+        })), Some(StreamAction::FinishInputRequired)));
+        assert_eq!(channel_reply_text(None, Some(&request)).as_deref(),
+            Some("What name should appear?\n\nFinish the personal introduction slides."));
+        assert_eq!(channel_reply_text(Some("Design already prepared.\n"), Some(&request)).as_deref(),
+            Some("Design already prepared.\n\nWhat name should appear?\n\nFinish the personal introduction slides."));
+        assert_eq!(channel_reply_text(Some("ordinary reply\n"), None).as_deref(), Some("ordinary reply\n"));
+        let mut invalid = request;
+        invalid.question.clear();
+        assert!(matches!(ChannelMessageService::process_stream_event(&AgentStreamEvent::Tips(TipsEventData {
+            content: "Cannot substitute this prose for the structured question".into(),
+            tip_type: TipType::Warning, user_input_request: Some(invalid),
+        })), Some(StreamAction::Error(_))));
     }
 
     #[test]

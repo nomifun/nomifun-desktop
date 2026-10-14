@@ -42,6 +42,31 @@ const request: CreativeStudioAgentSessionPersistenceRequest = {
 };
 
 describe("Nomi Creative Studio Agent session HTTP port", () => {
+  test('restores an input handoff losslessly and rejects missing questions or proposal success', async () => {
+    const userInputRequest = {request_id:'question-1',question:'请输入姓名',remaining_work:'完成介绍页'};
+    const restored: readonly CreativeStudioAgentMessage[] = [history[0]!,{
+      id:priorAssistantMessageId,role:'assistant',status:'input_required',text:'',userInputRequest}];
+    let wireHistory: unknown = restored;
+    let applied: string[] = [];
+    const port = createNomiCreativeStudioAgentSessionHttpPort({async resolve(){return {
+      binding:{ownership:'creative-studio-exclusive',canvas_id:canvasId,session_id:sessionId,conversation_id:conversationId,
+        model:{provider_id:providerId,model:'nomi-chat'},history_key:serializeCreativeStudioAgentHistory(restored)},
+      history:wireHistory,applied_proposal_message_ids:applied,created:false,
+    };}});
+    expect((await port.resolveOrCreateExclusive(request)).history).toEqual(restored);
+    applied=[priorAssistantMessageId];
+    await expect(port.resolveOrCreateExclusive(request)).rejects.toThrow('completed assistant');
+    applied=[];
+    for (const invalid of [
+      {id:priorAssistantMessageId,role:'assistant',status:'input_required',text:''},
+      {...restored[1],userInputRequest:{...userInputRequest,question:''}},
+      {...restored[1],status:'complete'},
+    ]) {
+      wireHistory=[history[0],invalid];
+      await expect(port.resolveOrCreateExclusive(request)).rejects.toBeInstanceOf(CreativeStudioAgentSessionResolutionError);
+    }
+  });
+
   test("restores terminal failures and stops without authorizing their proposals", async () => {
     for (const status of ['failed', 'stopped'] as const) {
       const restored: readonly CreativeStudioAgentMessage[] = [history[0]!, {

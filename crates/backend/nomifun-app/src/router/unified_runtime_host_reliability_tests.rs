@@ -65,6 +65,12 @@ impl Fixture {
         ).await
     }
 
+    async fn with_input_model(scenario: &str, model_base: &str) -> Self {
+        Self::build_delivery(scenario, vec![], vec![], None, false, Some(model_base), false,
+            #[cfg(feature = "browser-use")] None,
+        ).await
+    }
+
     async fn build_delivery(scenario: &str, files: Vec<String>, inject_skills: Vec<String>, origin: Option<String>, explicit_metadata: bool,model_base_override:Option<&str>, knowledge: bool,
         #[cfg(feature = "browser-use")] browser: Option<(Arc<dyn nomifun_browser_platform::runtime::BrowserRuntimeFactory>, String)>,
     ) -> Self {
@@ -360,6 +366,7 @@ async fn voice_pending_decision_fixture(fixture:&Fixture)->nomifun_agent_contrac
         &event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();let attempt=running.current_attempt.unwrap().attempt;let stop=nomifun_common::generate_id();
     let mut effects=AttemptConversationEffects::default();effects.push_stop_turn(stop.clone(),"cleanup-retry-turn".into()).unwrap();
     repository.settle_attempt(owner,&created.execution_id,&step,running.step.version,&attempt.attempt_id,attempt.version,None,&SettleAgentExecutionAttemptParams {
+        expected_user_input_turn:None,
         expected_active_session_turn:Some(AgentExecutionActiveTurnGuard {conversation_id:session.clone(),canonical_operation_id:"cleanup-retry-turn".into()}),attempt_status:ExecutionAttemptStatus::WaitingInput,
         step_status:ExecutionStepStatus::WaitingInput,execution_status:Some(AgentExecutionStatus::WaitingInput),question:Some(Some("Choose option A or option B?".into())),error:None,output_summary:None,
         output_files:None,tokens:None,retry_after:None,runtime_state:Some(Some(effects.encode().unwrap())),started_at:None,finished_at:None,loop_repeat_reset:None},
@@ -1163,6 +1170,133 @@ mod browser_terminal_recovery {
     }
 }
 
+struct InputHandoffModelServer {
+    url: String,
+    requests: Arc<Mutex<Vec<Value>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl InputHandoffModelServer {
+    async fn new() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let router = axum::Router::new()
+            .route("/v1/models", axum::routing::get(|| async {
+                axum::Json(json!({"object":"list","data":[{"id":"cleanup-fixture","object":"model"}]}))
+            }))
+            .route("/v1/chat/completions", axum::routing::post(|
+                axum::extract::State(requests): axum::extract::State<Arc<Mutex<Vec<Value>>>>,
+                axum::Json(body): axum::Json<Value>,
+            | async move {
+                let call = {
+                    let mut recorded = requests.lock().unwrap();
+                    recorded.push(body.clone());
+                    recorded.len()
+                };
+                let (delta, reason) = if call == 1 {
+                    assert!(body["tools"].as_array().unwrap().iter().any(|tool|
+                        tool.pointer("/function/name").and_then(Value::as_str) == Some("request_user_input")));
+                    (json!({"role":"assistant","tool_calls":[{"index":0,"id":"ask-report-path","type":"function",
+                        "function":{"name":"request_user_input","arguments":json!({
+                            "question":"Where should the report be saved?", "remaining_work":"Save and verify the report."
+                        }).to_string()}}]}), "tool_calls")
+                } else {
+                    (json!({"role":"assistant","content":"The follow-up was accepted in the same Session."}), "stop")
+                };
+                let chunk = json!({"id":format!("input-handoff-{call}"),"object":"chat.completion.chunk","created":1,
+                    "model":"cleanup-fixture","choices":[{"index":0,"delta":delta,"finish_reason":null}]});
+                let end = json!({"id":format!("input-handoff-{call}"),"object":"chat.completion.chunk","created":1,
+                    "model":"cleanup-fixture","choices":[{"index":0,"delta":{},"finish_reason":reason}]});
+                ([ (axum::http::header::CONTENT_TYPE, "text/event-stream") ],
+                    format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n"))
+            }))
+            .with_state(requests.clone());
+        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+        Self { url, requests, task }
+    }
+
+    async fn close(self) {
+        self.task.abort();
+        let _ = self.task.await;
+    }
+}
+
+async fn receive_input_handoff_terminal(mut events: tokio::sync::broadcast::Receiver<nomifun_ai_agent::AgentStreamEvent>)
+    -> Vec<nomifun_ai_agent::AgentStreamEvent> {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        let mut received = Vec::new();
+        loop {
+            let event = events.recv().await.unwrap();
+            if let nomifun_ai_agent::AgentStreamEvent::Error(error) = &event {
+                panic!("installed Host input handoff failed: {error:?}");
+            }
+            let finished = matches!(event, nomifun_ai_agent::AgentStreamEvent::Finish(_));
+            received.push(event);
+            if finished { return received; }
+        }
+    }).await.expect("the input handoff must end without a second model request")
+}
+
+#[tokio::test]
+async fn installed_host_input_handoff_reopens_as_normal_history_and_the_human_starts_a_new_turn() {
+    use nomifun_ai_agent::{AgentStreamEvent, protocol::events::TurnStopReason};
+    let server = InputHandoffModelServer::new().await;
+    let fixture = Fixture::with_input_model("input-handoff-sdk-history", &server.url).await;
+    let events = fixture.runtime.subscribe();
+    fixture.runtime.send_message(fixture.message.clone()).await.unwrap();
+    let received = receive_input_handoff_terminal(events).await;
+    let tip = received.iter().position(|event| matches!(event, AgentStreamEvent::Tips(data) if data.user_input_request.is_some())).unwrap();
+    let finish = received.iter().position(|event| matches!(event, AgentStreamEvent::Finish(data) if data.stop_reason == Some(TurnStopReason::InputRequired))).unwrap();
+    assert!(tip < finish);
+    assert_eq!(server.requests.lock().unwrap().len(), 1, "asking does not auto-answer or continue the model");
+    assert_eq!(fixture.runtime.status(), Some(nomifun_common::ConversationStatus::Finished));
+    assert!(fixture.host.active.lock().await.is_none());
+    let session = AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let store = fixture.owner.canonical().store();
+    let original = store.read_turn_receipt(&session, &"cleanup-retry-turn".into()).await.unwrap();
+    let terminal = original.terminal_event.unwrap();
+    assert_eq!(terminal.kind.0, "turn/completed");
+    let nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload) = &terminal.payload else { panic!("inline terminal expected"); };
+    let expected = json!({"request_id":"ask-report-path","question":"Where should the report be saved?", "remaining_work":"Save and verify the report."});
+    assert_eq!(payload.0["user_input_request"], expected);
+    assert_eq!(payload.0["model_steps"], 1);
+    let (status, projection) = file_api_get(&fixture._router, &format!("/api/agent-sessions/{}/projection", session.as_ref()), true).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(projection["data"]["runtime"]["can_send_message"], true);
+    assert_eq!(projection["data"]["runtime"]["is_processing"], false);
+    assert!(projection["data"]["runtime"]["active_turn_id"].is_null());
+    let history_path = format!("/api/agent-sessions/{}/message-history?content_mode=full", session.as_ref());
+    let (status, history) = file_api_get(&fixture._router, &history_path, true).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let note = history["data"]["items"].as_array().expect("history items").iter()
+        .find(|message| message["content"].get("user_input_request").is_some()).expect("typed question survives reopening");
+    assert_eq!(note["type"], "tips");
+    assert_eq!(note["content"]["type"], "warning");
+    assert_eq!(note["content"]["user_input_request"], expected);
+    assert_eq!(note["content"]["turn_id"], fixture.message.source_message_id.as_ref().unwrap().as_str());
+    assert!(note["content"].get("error").is_none());
+    let note_id = note["message_id"].clone();
+    let events = fixture.runtime.subscribe();
+    let next = api(&fixture._router, &format!("/api/agent-sessions/{}/turns", session.as_ref()),
+        json!({"idempotency_key":"human-after-input-handoff", "input":{"content":"Save it in reports/; continue the remaining report."}})).await;
+    let follow_up = receive_input_handoff_terminal(events).await;
+    assert!(matches!(follow_up.last(), Some(AgentStreamEvent::Finish(data)) if data.stop_reason == Some(TurnStopReason::EndTurn)));
+    let operation = next["operation_id"].as_str().unwrap();
+    assert_ne!(operation, "cleanup-retry-turn");
+    assert_eq!(store.read_turn_receipt(&session, &operation.into()).await.unwrap().status,
+        nomifun_agent_session::TurnReceiptStatus::Completed);
+    assert_eq!(store.read_turn_receipt(&session, &"cleanup-retry-turn".into()).await.unwrap().terminal_event.unwrap().event_id, terminal.event_id);
+    assert_eq!(server.requests.lock().unwrap().len(), 2);
+    let (status, reopened) = file_api_get(&fixture._router, &history_path, true).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let original_note = reopened["data"]["items"].as_array().unwrap().iter()
+        .find(|message| message["message_id"] == note_id).unwrap();
+    assert_eq!(original_note["content"]["user_input_request"], expected);
+    fixture.finish().await;
+    server.close().await;
+}
+
 async fn file_api_get(router: &axum::Router, path: &str, trusted: bool) -> (axum::http::StatusCode, Value) {
     let mut request = Request::builder().method("GET").uri(path);
     if trusted { request = request.header("x-nomi-local-trust", "cleanup-fixture-local-trust"); }
@@ -1263,7 +1397,7 @@ async fn turn_file_api_requires_owner_and_returns_no_final_list_for_paused_turns
         active_set_generation:fixture.host.capability_state.snapshot().unwrap().generation,
         model_steps:0, tool_call_count:0, accepted_input_count:1, applied_steering_receipts:vec![],
         plan:Default::default(), work:Default::default(), patch_recovery:Default::default(), segments:None,
-        control_rejections:Default::default(), completion_review:Default::default(),
+        control_rejections:Default::default(), pending_user_input: None, completion_review:Default::default(),
     };
     fixture.host.save_execution_checkpoint(&fixture.message, &checkpoint).await.unwrap().unwrap();
     fixture.host.cleanup_turn(&fixture.message).await.unwrap();

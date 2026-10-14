@@ -12,6 +12,7 @@ mod tests;
 #[serde(rename_all = "snake_case")]
 pub enum AgentReconciliationSource {
     OwnerReceipt,
+    NativeControlReceipt,
     OwnerAttestation,
     ReadOutcomeUnavailable,
     NotDispatched,
@@ -54,9 +55,11 @@ pub fn reconcile_execution_tail(
     let plan_changed = tail.iter().any(|event| matches!(event, AgentEngineEvent::PlanUpdated { plan } if plan.revision != checkpoint.plan.revision));
     let mut protocol_verdicts = BTreeSet::new();
     let mut correction_sources = BTreeSet::new();
+    let mut input_requests = BTreeMap::new();
     for event in tail {
         match event {
             AgentEngineEvent::ModelStepStarted { step: current, correction_source, .. } => {
+                if next.pending_user_input.is_some() { return Err(invalid("pending input handoff crossed a model boundary without accepted input")); }
                 if *current != step.checked_add(1).ok_or_else(|| invalid("model counter exhausted"))?
                     || (!discarded && !proposed.is_empty() && proposed != current_results) {
                     return Err(invalid("a model step crossed an unresolved previous batch"));
@@ -95,6 +98,9 @@ pub fn reconcile_execution_tail(
                 let (recorded_step, call) = calls.get(&result.call_id).ok_or_else(|| invalid("result has no proposal"))?;
                 if recorded_step != current || !completed.insert(result.call_id.clone()) { return Err(invalid("duplicate or mismatched result")); }
                 result.validate_for(&result.call_id)?;
+                if input_requests.contains_key(&result.call_id) && result.is_error {
+                    return Err(invalid("accepted native input request has a contradicting failed result"));
+                }
                 next.plan.apply_exact_outcome(call,result,!admitted.contains(&result.call_id)
                     || crate::exact_actions::proven_nonstart(call,result));
                 if *current > 0 {
@@ -119,13 +125,39 @@ pub fn reconcile_execution_tail(
             }
             AgentEngineEvent::SteeringInputs { inputs: applied } => {
                 correction_sources.clear();
+                if !applied.is_empty() {
+                    next.pending_user_input = None;
+                    next.control_rejections.reset();
+                }
                 for input in applied {
                     input.validate()?;
                     let id = nomifun_agent_contracts::OperationId::from(input.receipt_operation_id.clone());
                     if !inputs.insert(id.clone()) { return Err(invalid("accepted input was applied twice")); }
                     next.applied_steering_receipts.push(id);
                 }
+                next.completion_review.align_inputs(1 + next.applied_steering_receipts.len());
             },
+            AgentEngineEvent::UserInputRequested { step: current, request } => {
+                let Some((source_step, call)) = calls.get(&request.request_id) else { return Err(invalid("input handoff has no exact proposal")); };
+                if next.pending_user_input.is_some() || next.completion_review.is_report_only() || *current != step
+                    || source_step != current || crate::user_input_request::from_call(call).as_ref() != Ok(request)
+                    || proposed.len() != 1 || admitted.contains(&request.request_id)
+                    || !next.work.running_processes.is_empty() { return Err(invalid("input handoff differs from its native source question")); }
+                input_requests.insert(request.request_id.clone(), request.clone());
+                next.pending_user_input = Some(request.clone());
+            }
+            AgentEngineEvent::EndIntentReview { .. } => {
+                if next.completion_review.is_report_only() { return Err(invalid("ending intent cannot reopen a locked completion review")); }
+                next.completion_review.phase = crate::AgentExecutionPhase::EndIntentReview;
+                next.completion_review.input_revision = 1 + next.applied_steering_receipts.len();
+            }
+            AgentEngineEvent::CompletionReview { .. } => {
+                next.completion_review.phase = crate::AgentExecutionPhase::CompletionReview;
+                next.completion_review.input_revision = 1 + next.applied_steering_receipts.len();
+            }
+            AgentEngineEvent::TurnInputRequired { request, .. } => {
+                if next.pending_user_input.as_ref() != Some(request) { return Err(invalid("terminal input disposition has no pending source question")); }
+            }
             AgentEngineEvent::PlanUpdated { plan } => next.plan = plan.clone(),
             AgentEngineEvent::WorkStatus { status } => next.work = status.clone(),
             AgentEngineEvent::PatchRecoveryUpdated { state } => next.patch_recovery = state.clone(),
@@ -136,7 +168,7 @@ pub fn reconcile_execution_tail(
             _ => {}
         }
     }
-    let keep_batch = !current_results.is_empty() || proposed.iter().any(|id| admitted.contains(id));
+    let keep_batch = !current_results.is_empty() || proposed.iter().any(|id| admitted.contains(id) || input_requests.contains_key(id));
     if keep_batch && proposed.iter().any(|id| !calls.contains_key(id)) { return Err(invalid("admitted batch contains incomplete arguments")); }
     let mut observations = Vec::new();
     for (id, (call_step, call)) in &calls {
@@ -148,7 +180,10 @@ pub fn reconcile_execution_tail(
             }
             continue;
         }
-        let outcome = if let Some(outcome) = outcomes.get(id) {
+        let outcome = if input_requests.contains_key(id) {
+            AgentReconciledOutcome { result: AgentToolResult::text(id.clone(), crate::user_input_request::ACK, false),
+                source: AgentReconciliationSource::NativeControlReceipt, evidence_event_id: None, owner_operation_id: None }
+        } else if let Some(outcome) = outcomes.get(id) {
             outcome.clone()
         } else if !admitted.contains(id) {
             AgentReconciledOutcome { result: AgentToolResult::text(id.clone(), "Not dispatched: the paused execution never admitted this proposal. Reconsider under the current task before any new call.", true),

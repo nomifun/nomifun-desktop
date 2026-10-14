@@ -6,7 +6,8 @@
 
 import { extractResponseTextChunk, toDisplayText } from '@/common/chat/displayText';
 import i18n from 'i18next';
-import { normalizeAgentStreamError } from '@/common/chat/chatLib';
+import { agentUserInputRequestText, normalizeAgentStreamError, normalizeAgentUserInputRequest } from '@/common/chat/chatLib';
+import type { AgentUserInputRequest } from '@/common/protocolBindings/AgentUserInputRequest';
 import type {
   IConversationTurnCompletedEvent,
   IConversationTurnStartedEvent,
@@ -169,11 +170,24 @@ const settledEvents = (
   resolution: NomiCreativeStudioAgentSessionResolution
 ): readonly CreativeStudioAgentTurnEvent[] => {
   const last = resolution.history.at(-1);
-  if (!last || last.role !== 'assistant' || last.status === 'running') {
+  if (!last || last.role !== 'assistant' || last.status === 'running' || last.status === 'paused') {
     throw new NomiCreativeStudioAgentRuntimeError(
       'AUTHORITATIVE_HISTORY_INCOMPLETE',
       'NomiFun did not return a terminal assistant message for the recovered turn'
     );
+  }
+  if ('userInputRequest' in last && last.status !== 'input_required') throw new NomiCreativeStudioAgentRuntimeError(
+    'INPUT_REQUEST_INVALID', 'A structured input handoff cannot be presented as a completed task',
+  );
+  if (last.status === 'input_required') {
+    const request = normalizeAgentUserInputRequest(last.userInputRequest);
+    if (!request) throw new NomiCreativeStudioAgentRuntimeError(
+      'INPUT_REQUEST_INVALID', 'The completed Nomi turn has no valid structured input question',
+    );
+    return [
+      { type: 'history-reconciled', history: resolution.history },
+      { type: 'input-required', request, assistantMessageId: last.id },
+    ];
   }
   return [
     { type: 'history-reconciled', history: resolution.history },
@@ -465,6 +479,7 @@ export function createNomiCreativeStudioAgentChatPort(
       let activeTurnId: IConversationTurnStartedEvent['turn_id'] | undefined;
       const streamedByMessageId = new Map<string, string>();
       let emittedAssistantText = '';
+      let observedInputRequest: AgentUserInputRequest | undefined;
       let admittedNonTerminalTurn = false;
       let lastPauseKey: string | null = null;
       const turnStartDeadline = Date.now() + turnStartTimeoutMs;
@@ -754,6 +769,21 @@ export function createNomiCreativeStudioAgentChatPort(
               }
             }
 
+            if (event.type === 'tips' && event.data && typeof event.data === 'object'
+              && 'user_input_request' in event.data) {
+              const inputRequest = normalizeAgentUserInputRequest(event.data.user_input_request);
+              if (!inputRequest || (observedInputRequest && JSON.stringify(observedInputRequest) !== JSON.stringify(inputRequest))) {
+                throw new NomiCreativeStudioAgentRuntimeError('INPUT_REQUEST_INVALID',
+                  'The Nomi input question is missing, invalid or conflicts with its committed source');
+              }
+              if (!observedInputRequest) {
+                observedInputRequest = inputRequest;
+                yield { type: 'activity', label: agentUserInputRequestText(inputRequest)! };
+              }
+              continue;
+            }
+
+            if (event.type === 'finish' && observedInputRequest) continue;
             const activity = activityFromResponse(event);
             if (activity) yield { type: 'activity', label: activity };
             continue;
@@ -804,6 +834,13 @@ export function createNomiCreativeStudioAgentChatPort(
             }
           }
           const resolution = await reconcileCompleted();
+          const last = resolution.history.at(-1);
+          if ((event.stop_reason === 'input_required') !== (last?.status === 'input_required')
+            || (observedInputRequest && (last?.status !== 'input_required'
+              || JSON.stringify(last.userInputRequest) !== JSON.stringify(observedInputRequest)))) {
+            throw new NomiCreativeStudioAgentRuntimeError('INPUT_REQUEST_TERMINAL_MISMATCH',
+              'The canonical Nomi terminal differs from its structured input handoff');
+          }
           for (const completedEvent of settledEvents(resolution)) yield completedEvent;
           return;
         }

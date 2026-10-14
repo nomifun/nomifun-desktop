@@ -165,7 +165,11 @@ const verifyHydrationTransition = async (): Promise<void> => {
   cleanup();
 };
 
-const verifyLocalPendingTurnKeepsTranscript = async (): Promise<void> => {
+const verifyLocalPendingTurnKeepsTranscript = async (handoff = false): Promise<void> => {
+  const userInputRequest = {request_id:'question-1',question:'请输入姓名',remaining_work:'完成介绍页'};
+  let persistedSession: CreativeChatSessionReference | undefined;
+  const ids = [IDEMPOTENCY_KEY, TRANSIENT_USER_ID, TRANSIENT_ASSISTANT_ID];
+  const createId = () => {const id = ids.shift(); if (!id) throw new Error('Creative Canvas Agent test exhausted UUIDs'); return id;};
   const initialSession: CreativeChatSessionReference = {
     id: SESSION_ID,
     title: '画布讨论',
@@ -207,12 +211,13 @@ const verifyLocalPendingTurnKeepsTranscript = async (): Promise<void> => {
         {
           id: DURABLE_ASSISTANT_ID,
           role: 'assistant',
-          status: 'complete',
           text: '已整理当前画布。',
+          ...(handoff ? {status:'input_required' as const,userInputRequest} : {status:'complete' as const}),
         },
       ];
       yield { type: 'history-reconciled', history };
-      yield { type: 'completed', assistantMessageId: DURABLE_ASSISTANT_ID };
+      if (handoff) yield {type:'input-required',request:userInputRequest,assistantMessageId:DURABLE_ASSISTANT_ID};
+      else yield { type: 'completed', assistantMessageId: DURABLE_ASSISTANT_ID };
     },
   };
 
@@ -255,6 +260,7 @@ const verifyLocalPendingTurnKeepsTranscript = async (): Promise<void> => {
         sessions: readonly CreativeChatSessionReference[],
         activeSessionId: string | null
       ) => {
+        persistedSession = sessions.find(session=>session.id===activeSessionId);
         setDocument({
           sessions: structuredClone([...sessions]),
           activeSessionId,
@@ -270,6 +276,7 @@ const verifyLocalPendingTurnKeepsTranscript = async (): Promise<void> => {
         activeSessionId={document.activeSessionId}
         resolveSession={resolveSession}
         chatPort={chatPort}
+        createId={createId}
         onPersist={persistDocument}
       />
     );
@@ -312,6 +319,13 @@ const verifyLocalPendingTurnKeepsTranscript = async (): Promise<void> => {
     assert.ok(screen.getByText('已整理当前画布。'));
   });
   assert.equal(resolverCalls, 1);
+  if (handoff) {
+    await waitFor(()=>assert.equal(persistedSession?.pendingTurn,null));
+    assert.ok(screen.getByText('请输入姓名'));
+    assert.ok(screen.getByText('完成介绍页'));
+    assert.equal((screen.getByPlaceholderText('Describe a creative goal or continue the current discussion') as HTMLTextAreaElement).disabled,false);
+    assert.equal(document.querySelector('[data-agent-message-role="assistant"][data-agent-message-status="complete"]'),null);
+  }
   cleanup();
 };
 
@@ -468,7 +482,7 @@ const verifyBackendHttpErrorUsesBackendMessage = async (): Promise<void> => {
 };
 
 const verifySettledPendingTurnRecovery = async (
-  status: 'complete' | 'failed' | 'stopped'
+  status: 'complete' | 'failed' | 'stopped' | 'input_required'
 ): Promise<void> => {
   const recoveredHistory: readonly CreativeStudioAgentMessage[] = [
     {
@@ -483,6 +497,7 @@ const verifySettledPendingTurnRecovery = async (
       status,
       text: '上一轮的已保存内容。',
       ...(status === 'failed' ? { errorMessage: TERMINAL_FAILURE_MESSAGE } : {}),
+      ...(status === 'input_required' ? {userInputRequest:{request_id:'question-1',question:'请输入姓名',remaining_work:'完成介绍页'}} : {}),
     } as CreativeStudioAgentMessage,
   ];
   const pendingSession: CreativeChatSessionReference = {
@@ -731,9 +746,10 @@ const run = async (): Promise<void> => {
     await verifyHydrationTransition();
     await verifyHistoricalFailureHasNoDeadRetry();
     await verifyLocalPendingTurnKeepsTranscript();
+    await verifyLocalPendingTurnKeepsTranscript(true);
     await verifyTerminalFailureRendersOnce();
     await verifyBackendHttpErrorUsesBackendMessage();
-    for (const status of ['complete', 'failed', 'stopped'] as const) {
+    for (const status of ['complete', 'failed', 'stopped', 'input_required'] as const) {
       await verifySettledPendingTurnRecovery(status);
     }
     await verifyCompletedTurnRecoveryAfterLegacyFenceLoss();

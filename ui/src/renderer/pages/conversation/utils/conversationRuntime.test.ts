@@ -5,11 +5,23 @@ import {
   getConversationRuntimeAuthority,
   isConversationProcessing,
   getConversationPauseNotice,
+  getConversationActivity,
+  isConversationBindingBlocked,
 } from './conversationRuntime';
 
 const activeTurnId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000081');
 
 describe('conversation runtime authority', () => {
+  test('three presentation states retain ownership and unknown hydration blocks binding changes', () => {
+    expect(getConversationActivity()).toBeUndefined();
+    expect(isConversationBindingBlocked()).toBe(true);
+    expect(getConversationActivity({ status: 'running', runtime: { is_processing: false } } as TChatConversation)).toBeUndefined();
+    expect(getConversationActivity({ status: 'finished' } as TChatConversation)).toBe('idle');
+    expect(isConversationBindingBlocked({ status: 'finished' } as TChatConversation)).toBe(false);
+    const running = { status: 'running', runtime: { is_processing: true, active_turn_id: activeTurnId } } as TChatConversation;
+    expect(getConversationActivity(running)).toBe('running');
+    expect(isConversationBindingBlocked(running)).toBe(true);
+  });
   test('pause presentation requires the exact nonprocessing owner and never grants idle authority', () => {
     const snapshot = {
       status: 'running', extra: { workspace: '/fixture', execution_phase: 'paused', execution_pause: {
@@ -21,6 +33,8 @@ describe('conversation runtime authority', () => {
       reason: 'EXECUTION_MODEL_PROVIDER_UNAVAILABLE', cleanupProven: true, pausedAt: 123,
       error: { message: '', workspacePath: '/fixture' } });
     expect(getConversationRuntimeAuthority(snapshot)).toBe('unknown');
+    expect(getConversationActivity(snapshot)).toBe('paused');
+    expect(isConversationBindingBlocked(snapshot)).toBe(true);
     for (const change of [
       { status: 'finished' },
       { extra: { ...snapshot.extra, execution_phase: 'running' } },

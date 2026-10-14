@@ -1005,7 +1005,7 @@ impl EngineTurnJournal {
                 }
                 Ok(())
             }
-            AgentEngineEvent::TurnCompleted { .. } | AgentEngineEvent::TurnFailed { .. } => {
+            AgentEngineEvent::TurnCompleted { .. } | AgentEngineEvent::TurnInputRequired { .. } | AgentEngineEvent::TurnFailed { .. } => {
                 let empty_step = AssistantStepCursor {
                     step: cursor.empty_response_step.unwrap_or(1),
                     message_id: cursor
@@ -1022,6 +1022,12 @@ impl EngineTurnJournal {
                 );
                 let message_event_id = message.event_id.clone();
                 let (kind, payload) = match event {
+                    AgentEngineEvent::TurnInputRequired { model_steps, request } => {
+                        request.validate().map_err(failure)?;
+                        ("turn/completed", json!({ "model_steps": model_steps,
+                            "finish_reason": nomifun_chat_model_broker::ChatFinishReason::Completed,
+                            "user_input_request": request, "finished_at_ms": now_ms() }))
+                    }
                     AgentEngineEvent::TurnCompleted { model_steps, finish_reason } => (
                         "turn/completed",
                         json!({
@@ -1416,7 +1422,7 @@ mod history_display_tests {
             turn_operation_id: journal.0.operation.clone(), active_set_generation: 0,
             model_steps: 0, tool_call_count: 0, accepted_input_count: 1, applied_steering_receipts: vec![],
             plan: Default::default(), work: Default::default(), patch_recovery: Default::default(),
-            segments: None, control_rejections: Default::default(), completion_review: Default::default(),
+            segments: None, control_rejections: Default::default(), pending_user_input: None, completion_review: Default::default(),
         };
         let receipt = journal.save_execution_checkpoint(checkpoint.clone(), owner.clone()).await.unwrap().unwrap();
         assert_eq!(receipt.revision, 1);
