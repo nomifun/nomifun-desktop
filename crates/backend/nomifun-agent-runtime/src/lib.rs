@@ -61,7 +61,8 @@ mod task_continuation;
 pub use task_continuation::AgentPriorTask;
 pub use requirements::{AgentInputCitation, AgentRequirementOrigin, AgentTaskRequirement};
 pub use planning::{AgentPlan, AgentPlanStatus, AgentPlanStep};
-mod standard_tools;
+#[cfg(test)]
+mod test_support;
 mod stream_limits;
 mod steering;
 pub use steering::{AgentInputPort, AgentSteeringInput};
@@ -100,7 +101,6 @@ pub use kernel::{
 pub use model::{BrokerAgentModelPort, AgentModelPort, AgentModelStream};
 mod immediate_correction;
 pub use immediate_correction::AgentImmediateCorrectionPort;
-pub use standard_tools::standard_agent_tool_exposures;
 pub use tool::{
     input_schema_digest, AgentEffectClass, AgentToolBinding, AgentToolInvocation,
     AgentToolInvoker, AgentToolPlan, AgentToolResult,

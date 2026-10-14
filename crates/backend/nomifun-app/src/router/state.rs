@@ -859,11 +859,17 @@ mod catalog_publisher_tests {
         registry: &MaterializedRegistry,
     ) -> Result<nomifun_agent_runtime::AgentToolPlan, nomifun_agent_runtime::AgentEngineError> {
         let active = SessionCapabilityState::new(snapshot).snapshot().unwrap();
-        let read = nomifun_agent_runtime::standard_agent_tool_exposures()
-            .into_iter().filter(|exposure| {
-                exposure.capability_id.as_ref() == "workspace.files"
-                    && exposure.action_id.as_ref() == "workspace.files/read"
-            });
+        let capability_id=nomifun_agent_contracts::CapabilityId::from("workspace.files");
+        let action_id=nomifun_agent_contracts::ActionId::from("workspace.files/read");
+        let capability=registry.capability(&capability_id).unwrap();
+        let action=capability.manifest.contributions.actions.iter().find(|action|action.action_id==action_id).unwrap();
+        let canonical=nomifun_agent_domain_wave2::resolve_action_schema(capability_id.as_ref(),&action.input_schema).unwrap();
+        let rendered=nomifun_agent_contracts::tool_model_guide::tool_model_guide(capability_id.as_ref(),action_id.as_ref())
+            .unwrap().render(&canonical,std::env::consts::OS).unwrap();
+        let read=[nomifun_agent_runtime::AgentToolExposure {
+            definition:nomifun_chat_model_broker::ChatToolDefinition {name:"read_file".into(),description:rendered.description,
+                input_schema:rendered.input_schema,deferred:false},capability_id,action_id,
+        }];
         nomifun_agent_runtime::compile_agent_tool_plan(snapshot, &active, registry, read)
     }
 

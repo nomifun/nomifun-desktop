@@ -109,6 +109,26 @@ provider 诊断。未测量的信息缺省，不能补造为零；prompt、响�
 
 准入后、Runtime 启动前就失败或取消的输入仍是有效 accepted input。读取时保留这个输入和明确的终态事实，不伪造 Runtime 启动、工具结果或完成证明。
 
+### 模型工具规则与说明
+
+标准工作区工具由同一 Snapshot 已授权的 Action、正式 schema 和
+`nomifun-agent-contracts/contracts/tool-model-guidance.json` 一次组装。
+正式 schema 是唯一参数约束来源；新说明数据只保存用途、已有参数节点的说明、合法示例及
+真实宿主平台的调用指导，不声明第二套类型、必填字段、互斥条件、默认值、上下限或权限。
+名称来自现有工具词汇表，资源与 Action 检查继续走原 ToolPlan 编译和 Kernel。
+
+说明数据通过严格类型读取；重复身份、非法参数路径及缺失的正式字段拒绝组装。
+原 Runtime 标准 schema 工厂、旧说明抽取覆盖及结构子集比较器已退役，测试直接消费正式
+Action schema 和实际组装结果。Runtime 只消费现役 ToolPlan，不依赖业务 schema 供应器。
+工作区根目录来自原已准入事实，说明不复制物理程序路径、环境快照或已执行结果。
+
+说明变更正确重算实际模型工具 schema 摘要；源码与新数据一起进入原 native build 摘要。
+正式注册身份、Snapshot、Session 内容、数据库 schema 及数据代际不因此改变。
+活动回合不热替换规则，native checkpoint 保留精确 build/binding 围栏，历史事实不回填。
+`start_process` 沿用正式 `wait_ms=0..30000` 范围；交互流程推荐 0 后显式轮询，不把旧模板
+中未进入生产的 0 上限搬回准入。延迟展示的组件入口短提示读取同一份新说明数据，且只从
+确切授权 ToolPlan 的实际组件字段产生，不改变原可见性预算或授权集合。
+
 ### 受管组件调用
 
 `workspace.process/exec` 与 `start` 的启动目标由 `component`、`command`、`cmd` 三选一。

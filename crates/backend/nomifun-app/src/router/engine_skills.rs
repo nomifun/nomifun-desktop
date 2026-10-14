@@ -132,7 +132,8 @@ pub(super) fn component_launch_instruction(plan: &EngineToolPlan) -> Option<Stri
             Some(format!("{name} ({action})"))
         }).collect::<Vec<_>>();
     if tools.is_empty() { return None; }
-    Some(format!("Host process launch contract for the current authorized tools: {}. Approved component IDs are officecli, bun and node. Use component=officecli with literal args for managed Office file operations; use component=bun or component=node for their host components. Choose exactly one of component, command or cmd. The host resolves the verified executable and required environment; do not copy paths or environment from Skill resources. This host launch contract takes precedence over Skill reference text describing component-path lookup or ambient command invocation. Office operations are one-shot: do not open a resident session or start watch. If a component is unavailable, report its actual failure; do not install it or substitute a same-named ambient program. This guidance grants no tools or permissions.", tools.join(", ")))
+    Some(format!("Host process launch contract for the current authorized tools: {}. {}", tools.join(", "),
+        nomifun_agent_contracts::tool_model_guide::managed_launch_notice()))
 }
 
 fn resource_key(provenance: &str, path: &str) -> String {

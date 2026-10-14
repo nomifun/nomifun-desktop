@@ -208,8 +208,7 @@ mod exact_declaration_tests {
     use super::*;
     #[test]
     fn native_shape_feedback_locates_files_without_echoing_private_input() {
-        let schema=crate::standard_tools::standard_agent_tool_exposures().into_iter()
-            .find(|tool|tool.definition.name=="apply_patch").unwrap().definition.input_schema.0;
+        let schema=crate::test_support::tool_definition("workspace.files", "workspace.files/patch").input_schema.0;
         let issues=declaration_issues(&schema,&json!({"path":"PRIVATE_PATH","hunks":[{"text":"PRIVATE_CONTENT"}]})).unwrap();
         assert!(!issues.is_empty());let text=serde_json::to_string(&issues).unwrap();
         assert!(text.contains("files"));assert!(!text.contains("PRIVATE_PATH")&&!text.contains("PRIVATE_CONTENT"));

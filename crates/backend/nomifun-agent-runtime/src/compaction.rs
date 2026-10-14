@@ -408,9 +408,7 @@ mod tests {
 
     #[test]
     fn bare_write_arguments_cannot_replace_continuation_state() {
-        let tools=crate::standard_tools::standard_agent_tool_exposures().into_iter()
-            .filter(|exposure| exposure.definition.name == "write_file")
-            .map(|exposure| exposure.definition).collect::<Vec<_>>();
+        let tools=vec![crate::test_support::tool_definition("workspace.files", "workspace.files/write")];
         assert!(bare_action_arguments(r#"{"path":"临时 结果.txt","content":"第一行 MAC-B\n第二行 after"}"#,&tools));
         for text in [r#"{"completed":["created file"],"pending":["modify then copy"]}"#,
             r#"{"goal":"explain JSON","path":"a historical path"}"#] {

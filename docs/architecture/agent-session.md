@@ -87,6 +87,31 @@ Creation prompts, Cron notices and Execution summaries enter context through for
 
 Current-generation history, immutable Snapshots, model changes and explicit Agent transitions remain supported product semantics. They are verified against identity, sequence, binding and content integrity. Executable recovery requires the native checkpoint's exact build and binding. Closed read-only event history may cross an explicitly validated transition without gaining authority.
 
+### Model tool rules and guidance
+
+Standard workspace tools are assembled once from the same Snapshot's authorized Actions,
+their canonical schemas and `nomifun-agent-contracts/contracts/tool-model-guidance.json`.
+Canonical schemas alone own parameter constraints. The new typed guidance contains usage,
+descriptions of existing parameter nodes, valid examples and actual host-platform advice;
+it cannot declare another set of types, required fields, unions, defaults, limits or grants.
+Names use the existing presentation vocabulary. Resource and Action admission remains with
+the original ToolPlan compiler and Kernel.
+
+Duplicate identities, invalid parameter paths and missing canonical fields reject assembly.
+The Runtime schema factory, old description-extraction overlay and structural subset checker
+are retired; tests use canonical Actions and actual assembled definitions. The Runtime receives
+the current ToolPlan without a production dependency on domain schema providers. Workspace
+roots remain admitted facts, never copied executable paths, environment snapshots or results.
+
+Guidance changes recompute the actual model-schema digest. New source and data participate in
+the original native build digest without changing canonical registration identities, Snapshots,
+Session content, database schemas or data generations. Active Turns do not hot-swap rules;
+native checkpoints retain exact build/binding fences and history is never backfilled.
+`start_process` keeps its canonical `wait_ms=0..30000` range; interactive usage recommends 0
+followed by explicit polling rather than restoring the old template's non-production zero ceiling.
+The early-visible component notice reads the same guidance and is derived only from actual
+component fields in the exact authorized ToolPlan, preserving visibility budgets and grants.
+
 ### User-input handoff
 
 The Runtime's `request_user_input` control declares a question and remaining work for an ordinary

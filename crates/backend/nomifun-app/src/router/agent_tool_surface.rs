@@ -9,12 +9,13 @@ use nomifun_ai_agent::{
 };
 use nomifun_chat_model_broker::ChatToolDefinition;
 use nomifun_agent_runtime::{
-    AgentToolExposure, AgentToolPlan, compile_agent_tool_plan, standard_agent_tool_exposures,
+    AgentToolExposure, AgentToolPlan, compile_agent_tool_plan,
 };
 use nomifun_common::AppError;
 use nomifun_agent_contracts::tool_presentation::{
     namespaced_tool_name, platform_tool_name, relative_action,
 };
+use nomifun_agent_contracts::tool_model_guide::{ToolModelGuide, tool_model_guide};
 
 fn error(value: impl std::fmt::Display) -> AppError {
     AppError::Conflict(format!("Nomi tool surface: {value}"))
@@ -49,40 +50,25 @@ pub(super) async fn compile(
             })
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    let mut exposures = standard_agent_tool_exposures();
-    retain_exact_platform_actions(&mut exposures, &active.active, &allowed_platform_actions);
-    let mut exposures = resource_ready_exposures(snapshot, exposures)?;
-    for exposure in &mut exposures {
-        let capability = registry
-            .capability(&exposure.capability_id)
-            .ok_or_else(|| error("tool is not materialized"))?;
-        let action = capability
-            .manifest
-            .contributions
-            .actions
-            .iter()
-            .find(|action| action.action_id == exposure.action_id)
-            .ok_or_else(|| error("tool action is unavailable"))?;
-        let schema = nomifun_agent_domain_wave2::resolve_action_schema(
-            exposure.capability_id.as_ref(),
-            &action.input_schema,
-        )
-        .map_err(error)?;
-        // Every standard builtin has a concrete contract. Fail assembly if a
-        // future owner accidentally falls back to an open/opaque object again;
-        // otherwise the model loses the fields needed to invoke the tool.
-        if !concrete_object_schema(
-            &schema.0,
-            exposure.action_id.as_ref() == "workspace.vcs/status",
-        ) {
-            return Err(error(format!(
-                "{} has no strict canonical tool schema",
-                exposure.capability_id.as_ref()
-            )));
+    let mut exposures = Vec::new();
+    for selected in snapshot.content().enabled_capabilities.iter().filter(|selected| {
+        active.active.contains(&selected.capability.id)
+            && selected.contribution_lock.source_kind == ContributionSourceKind::PlatformBuiltin
+            && nomifun_agent_domain_wave2::WORKSPACE_EXECUTION_CAPABILITY_IDS.contains(&selected.capability.id.as_ref())
+    }) {
+        let capability_id = &selected.capability.id;
+        let capability = registry.capability(capability_id).ok_or_else(|| error("tool is not materialized"))?;
+        let allowed = allowed_platform_actions.get(capability_id)
+            .ok_or_else(|| error("selected PlatformBuiltin has no compiled Action policy"))?;
+        for action in capability.manifest.contributions.actions.iter().filter(|action| {
+            action.presentation == ToolPresentationKind::FunctionTool && allowed.contains(&action.action_id)
+        }) {
+            if !action_resources_bound(snapshot, capability_id, &action.action_id)? { continue; }
+            let schema = nomifun_agent_domain_wave2::resolve_action_schema(capability_id.as_ref(), &action.input_schema)
+                .map_err(error)?;
+            exposures.push(standard_tool_exposure(capability_id, &action.action_id, &schema,
+                std::env::consts::OS, tool_model_guide(capability_id.as_ref(), action.action_id.as_ref()))?);
         }
-        exposure.definition.input_schema = standard_presentation_schema(
-            exposure.capability_id.as_ref(), schema, &exposure.definition.input_schema,
-        );
     }
     let mut exact_actions = exposures
         .iter()
@@ -271,50 +257,32 @@ fn resource_ready_exposures(
 ) -> Result<Vec<AgentToolExposure>, AppError> {
     let mut resource_ready = Vec::with_capacity(exposures.len());
     for exposure in exposures {
-        if action_resources_bound(
-            snapshot,
-            &exposure.capability_id,
-            &exposure.action_id,
-        )?
-        {
+        if action_resources_bound(snapshot, &exposure.capability_id, &exposure.action_id)? {
             resource_ready.push(exposure);
         }
     }
     Ok(resource_ready)
 }
 
-fn standard_presentation_schema(
-    capability_id: &str,
-    mut canonical: nomifun_agent_contracts::StrictJsonValue,
-    presentation: &nomifun_agent_contracts::StrictJsonValue,
-) -> nomifun_agent_contracts::StrictJsonValue {
-    // Guidance belongs to this model projection. Changing the registered
-    // canonical schema also changes frozen contribution provenance for old
-    // Sessions, even when only a description changed.
-    let fields: &[&str] = match capability_id {
-        "workspace.process" => &[
-            "/properties/cmd", "/properties/command", "/properties/args", "/properties/cwd",
-            "/properties/timeout_ms", "/properties/cursor", "/properties/wait_ms",
-            "/properties/input", "/properties/append_newline", "/properties/tty",
-        ],
-        "workspace.files" => &[
-            "/properties/path", "/properties/content",
-            "/properties/files/items/properties/path",
-            "/properties/files/items/properties/expected_source",
-            "/properties/files/items/properties/expected_source/oneOf/2/properties/sha256",
-            "/properties/files/items/properties/hunks/items",
-        ],
-        _ => &[],
-    };
-    for pointer in fields {
-        if let Some(description) = presentation.0.pointer(pointer)
-                .and_then(|property| property.get("description")).and_then(serde_json::Value::as_str)
-            && let Some(property) = canonical.0.pointer_mut(pointer).and_then(serde_json::Value::as_object_mut)
-        {
-            property.insert("description".into(), serde_json::Value::String(description.to_owned()));
-        }
+fn standard_tool_exposure(
+    capability_id: &CapabilityId, action_id: &ActionId,
+    canonical: &nomifun_agent_contracts::StrictJsonValue, host_os: &str,
+    guide: Option<&ToolModelGuide>,
+) -> Result<AgentToolExposure, AppError> {
+    let guide = guide.ok_or_else(|| error(format!("{} has no current model guide",action_id.as_ref())))?;
+    if guide.capability_id != capability_id.as_ref() || guide.action_id != action_id.as_ref() {
+        return Err(error("model guide belongs to another canonical Action"));
     }
-    canonical
+    if !concrete_object_schema(&canonical.0, action_id.as_ref() == "workspace.vcs/status") {
+        return Err(error(format!("{} has no strict canonical tool schema",capability_id.as_ref())));
+    }
+    let rendered = guide.render(canonical, host_os).map_err(error)?;
+    Ok(AgentToolExposure {
+        definition: ChatToolDefinition {
+            name: platform_tool_name(capability_id.as_ref(), action_id.as_ref()),
+            description: rendered.description, input_schema: rendered.input_schema, deferred: false,
+        }, capability_id:capability_id.clone(), action_id:action_id.clone(),
+    })
 }
 
 /// Model-visible Actions and execution admission share the exact resource
@@ -338,19 +306,6 @@ fn admitted_module_actions<'a>(
                 ToolPresentationKind::Hidden | ToolPresentationKind::CodeMode
             )
     })
-}
-
-fn retain_exact_platform_actions(
-    exposures: &mut Vec<AgentToolExposure>,
-    active_modules: &std::collections::BTreeSet<CapabilityId>,
-    allowed_actions: &std::collections::BTreeMap<CapabilityId, std::collections::BTreeSet<ActionId>>,
-) {
-    exposures.retain(|exposure| {
-        active_modules.contains(&exposure.capability_id)
-            && allowed_actions
-                .get(&exposure.capability_id)
-                .is_some_and(|allowed| allowed.contains(&exposure.action_id))
-    });
 }
 
 fn concrete_object_schema(schema: &serde_json::Value, allow_empty: bool) -> bool {
@@ -394,6 +349,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use nomifun_agent_contracts::tool_model_guide::tool_model_guides;
 
     fn canonical_process_schema(action_id: &str) -> StrictJsonValue {
         let registration = nomifun_agent_domain_wave2::workspace_execution_registration().unwrap();
@@ -404,12 +360,15 @@ mod tests {
         nomifun_agent_domain_wave2::resolve_action_schema("workspace.process", reference).unwrap()
     }
 
-    fn creative_snapshot(selected: &[(&str, &[&str])]) -> (CompiledSnapshot, std::sync::Arc<MaterializedRegistry>) {
+    fn platform_snapshot(
+        registrations: Vec<nomifun_agent_kernel::PluginRegistration>, selected: &[(&str, &[&str])],
+        resource_kinds: &[&str],
+    ) -> (CompiledSnapshot, std::sync::Arc<MaterializedRegistry>, std::sync::Arc<nomifun_agent_kernel::KernelRegistry>) {
         use nomifun_agent_contracts::*;
         use nomifun_agent_kernel::*;
-        let registry = KernelRegistry::new(MaterializationPolicy::stable("1.0.0"),
-            std::sync::Arc::new(InMemoryPluginStatePersistence::new())).unwrap();
-        let materialized = registry.replace_all(nomifun_agent_domain_wave3::registrations().unwrap()).unwrap();
+        let registry = std::sync::Arc::new(KernelRegistry::new(MaterializationPolicy::stable("1.0.0"),
+            std::sync::Arc::new(InMemoryPluginStatePersistence::new())).unwrap());
+        let materialized = registry.replace_all(registrations).unwrap();
         let owner = PrincipalRef { principal_kind: "user".into(), principal_id: "creative-owner".into() };
         let mut revision = AgentPresetRevision {
             reference: PresetRevisionRef { preset_id: "creative-resource-fixture".into(), revision: 1, revision_digest: "".into() },
@@ -436,12 +395,19 @@ mod tests {
             host_surface: "desktop".into(), availability_evidence_revision: "creative-resource-test".into(),
         }, CompileRequest { revision, principal: owner.clone(), scene: "creative".into(), surface: "desktop".into(),
             audience: "user".into(), created_at_ms: 1, resolver_run_id: "creative-resource-resolve".into(),
-        }).unwrap().with_target_resource_bindings(&owner, vec![TypedResourceBinding {
-            binding_id: "creative-library-binding".into(), resource_kind: "asset_library".into(),
-            resource_id: nomifun_agent_domain_wave3::CREATIVE_ASSET_LIBRARY_RESOURCE_ID.into(), owner_id: owner.principal_id.clone(),
-            operations: BTreeSet::from(["read".into(), "write".into()]), connection_config_ref: None, typed_parameters: BTreeMap::new(),
-        }]).unwrap();
-        (snapshot, materialized)
+        }).unwrap().with_target_resource_bindings(&owner, resource_kinds.iter().map(|kind|TypedResourceBinding {
+            binding_id:format!("fixture-{kind}-binding").into(),resource_kind:(*kind).into(),
+            resource_id:if *kind=="asset_library" {nomifun_agent_domain_wave3::CREATIVE_ASSET_LIBRARY_RESOURCE_ID.into()}
+                else {format!("fixture-{kind}").into()},owner_id:owner.principal_id.clone(),
+            operations:BTreeSet::from(["read".into(),"write".into(),"execute".into()]),
+            connection_config_ref:None,typed_parameters:BTreeMap::new(),
+        }).collect()).unwrap();
+        (snapshot, materialized, registry)
+    }
+
+    fn creative_snapshot(selected: &[(&str, &[&str])]) -> (CompiledSnapshot, std::sync::Arc<MaterializedRegistry>) {
+        let (snapshot,materialized,_)=platform_snapshot(nomifun_agent_domain_wave3::registrations().unwrap(),selected,&["asset_library"]);
+        (snapshot,materialized)
     }
 
     #[tokio::test]
@@ -507,149 +473,186 @@ mod tests {
             "an available resource cannot bypass a missing schema owner");
     }
 
-    #[test]
-    fn model_parameter_guidance_survives_canonical_schema_assembly() {
+    fn canonical_workspace_schema(capability_id: &str, action_id: &str) -> StrictJsonValue {
         let registration = nomifun_agent_domain_wave2::workspace_execution_registration().unwrap();
-        let presentations = standard_agent_tool_exposures();
-        for (capability_id,action_id,name,pointers) in [
-            ("workspace.process","workspace.process/exec","exec_command",vec!["/properties/cmd","/properties/command","/properties/args","/properties/cwd"]),
-            ("workspace.files","workspace.files/write","write_file",vec!["/properties/path","/properties/content"]),
-            ("workspace.files","workspace.files/patch","apply_patch",vec![
-                "/properties/files/items/properties/path",
-                "/properties/files/items/properties/expected_source",
-                "/properties/files/items/properties/expected_source/oneOf/2/properties/sha256",
-                "/properties/files/items/properties/hunks/items",
-            ]),
-        ] {
-            let capability = registration.metadata.manifest.payload.contributions.capabilities.iter()
-                .find(|capability|capability.id.as_ref()==capability_id).unwrap();
-            let reference = &capability.contributions.actions.iter().find(|action|action.action_id.as_ref()==action_id).unwrap().input_schema;
-            let canonical = nomifun_agent_domain_wave2::resolve_action_schema(capability_id,reference).unwrap();
-            let presentation = &presentations.iter().find(|tool|tool.definition.name==name).unwrap().definition.input_schema;
-            let projected = standard_presentation_schema(capability_id,canonical.clone(),presentation);
-            for pointer in pointers {
-                let expected = presentation.0.pointer(pointer).unwrap().get("description").unwrap();
-                assert_eq!(projected.0.pointer(pointer).unwrap().get("description"),Some(expected),"{name} {pointer}");
+        let capability = registration.metadata.manifest.payload.contributions.capabilities.into_iter()
+            .find(|capability| capability.id.as_ref() == capability_id).unwrap();
+        let action = capability.contributions.actions.iter().find(|action| action.action_id.as_ref() == action_id).unwrap();
+        nomifun_agent_domain_wave2::resolve_action_schema(capability_id, &action.input_schema).unwrap()
+    }
+
+    fn guided_workspace_exposures(host_os: &str) -> Vec<AgentToolExposure> {
+        tool_model_guides().iter().map(|guide| {
+            let schema = canonical_workspace_schema(&guide.capability_id, &guide.action_id);
+            standard_tool_exposure(&guide.capability_id.as_str().into(), &guide.action_id.as_str().into(),
+                &schema, host_os, Some(guide)).unwrap()
+        }).collect()
+    }
+
+    fn restore_guide_annotations(
+        rendered: &StrictJsonValue, canonical: &StrictJsonValue, guide: &ToolModelGuide,
+    ) -> StrictJsonValue {
+        let mut restored = rendered.clone();
+        for parameter in &guide.parameters {
+            let original=canonical.0.pointer(&parameter.pointer).unwrap().as_object().unwrap();
+            let node=restored.0.pointer_mut(&parameter.pointer).unwrap().as_object_mut().unwrap();
+            match original.get("description") {
+                Some(value)=>{node.insert("description".into(),value.clone());},
+                None=>{node.remove("description");},
             }
-            fn strip_descriptions(value:&mut serde_json::Value) {
-                match value {
-                    serde_json::Value::Object(object) => { object.remove("description"); for child in object.values_mut(){strip_descriptions(child);} }
-                    serde_json::Value::Array(array) => {for child in array{strip_descriptions(child);}}
-                    _ => {},
+        }
+        restored
+    }
+
+    #[test]
+    fn all_nineteen_guides_render_formal_schemas_and_valid_examples_without_constraint_copies() {
+        assert_eq!(tool_model_guides().len(),19);
+        for host_os in ["windows","macos","linux"] {
+            let mut names=BTreeSet::new();
+            let mut actions=BTreeSet::new();
+            for guide in tool_model_guides() {
+                let canonical=canonical_workspace_schema(&guide.capability_id,&guide.action_id);
+                let original=canonical.clone();
+                let rendered=guide.render(&canonical,host_os).unwrap();
+                assert_eq!(restore_guide_annotations(&rendered.input_schema,&canonical,guide),canonical,
+                    "{} / {host_os}: guide changed a formal constraint",guide.action_id);
+                assert_eq!(canonical,original,"render must not edit a registered schema");
+                assert!(names.insert(platform_tool_name(&guide.capability_id,&guide.action_id)));
+                assert!(actions.insert((&guide.capability_id,&guide.action_id)));
+                let validator=jsonschema::validator_for(&rendered.input_schema.0).unwrap();
+                for example in &guide.examples {
+                    assert!(validator.is_valid(&example.arguments.0),"{} / {}: example rejected by actual schema",guide.action_id,example.label);
                 }
             }
-            let mut before = canonical.0.clone();
-            let mut after = projected.0.clone();
-            strip_descriptions(&mut before); strip_descriptions(&mut after);
-            assert_eq!(before,after,"{name}: required/default/constraints/branches must stay exact");
-            assert_eq!(canonical,nomifun_agent_domain_wave2::resolve_action_schema(capability_id,reference).unwrap());
         }
     }
 
     #[test]
-    fn process_presentation_keeps_cursor_guidance_without_changing_canonical_contract() {
-        let canonical = canonical_process_schema("workspace.process/poll");
-        let original = canonical.clone();
-        let presentation = standard_agent_tool_exposures().into_iter()
-            .find(|tool| tool.definition.name == "poll_process").unwrap().definition.input_schema;
-        let projected = standard_presentation_schema("workspace.process", canonical, &presentation);
-        assert!(projected.0["properties"]["cursor"]["description"].as_str()
-            .is_some_and(|value| value.contains("output.next_cursor")));
-        assert_eq!(original, canonical_process_schema("workspace.process/poll"));
-        let validator = jsonschema::validator_for(&projected.0).unwrap();
-        for (args, valid) in [
-            (json!({"process_id":"owned"}), true),
-            (json!({"process_id":"owned","cursor":0,"wait_ms":30000}), true),
-            (json!({"process_id":"owned","cursor":25,"wait_ms":30000}), true),
-            (json!({"process_id":"owned","cursor":-1}), false),
-            (json!({"process_id":"owned","wait_ms":30001}), false),
-            (json!({"process_id":"owned","operation":"poll"}), false),
-        ] {
-            assert_eq!(validator.is_valid(&args), valid, "{args}");
-        }
-        let mut structural = projected.0.clone();
-        for property in structural["properties"].as_object_mut().unwrap().values_mut() {
-            property.as_object_mut().unwrap().remove("description");
-        }
-        assert_eq!(structural, original.0, "only presentation annotations may differ");
+    fn annotation_restoration_does_not_hide_a_real_description_parameter_constraint() {
+        let guide=tool_model_guide("workspace.process","workspace.process/exec").unwrap();
+        let mut canonical=canonical_process_schema("workspace.process/exec");
+        canonical.0["properties"]["description"]=json!({"type":"string","minLength":4});
+        let rendered=guide.render(&canonical,std::env::consts::OS).unwrap();
+        assert_eq!(restore_guide_annotations(&rendered.input_schema,&canonical,guide),canonical);
+        let mut altered=rendered.input_schema;
+        altered.0["properties"]["description"]["minLength"]=json!(0);
+        assert_ne!(restore_guide_annotations(&altered,&canonical,guide),canonical,
+            "a real parameter named description must remain part of the full structural comparison");
     }
 
     #[test]
-    fn newline_guidance_is_model_only_and_keeps_registered_byte_contracts() {
-        for (capability_id, action_id, name, field, expected) in [
-            ("workspace.process", "workspace.process/input", "write_process_stdin", "append_newline", "even if input already ends in LF"),
-            ("workspace.process", "workspace.process/start", "start_process", "tty", "exec_command still waits"),
-            ("workspace.files", "workspace.files/write", "write_file", "content", "no trailing newline is added"),
-        ] {
-            let registration = nomifun_agent_domain_wave2::workspace_execution_registration().unwrap();
-            let capability = registration.metadata.manifest.payload.contributions.capabilities.into_iter()
-                .find(|capability| capability.id.as_ref() == capability_id).unwrap();
-            let reference = &capability.contributions.actions.iter()
-                .find(|action| action.action_id.as_ref() == action_id).unwrap().input_schema;
-            let canonical = nomifun_agent_domain_wave2::resolve_action_schema(capability_id, reference).unwrap();
-            let original = canonical.clone();
-            let presentation = standard_agent_tool_exposures().into_iter()
-                .find(|tool| tool.definition.name == name).unwrap().definition.input_schema;
-            let projected = standard_presentation_schema(capability_id, canonical, &presentation);
-            assert!(projected.0["properties"][field]["description"].as_str().is_some_and(|text| text.contains(expected)));
-            let mut structural = projected.0.clone();
-            // Restore only whitelisted descriptions, then require exact
-            // identity, including defaults, limits and required fields.
-            for property in ["cmd", "command", "args", "cwd", "timeout_ms", "cursor", "wait_ms",
-                "input", "append_newline", "content", "path", "tty"] {
-                if let Some(value) = structural["properties"].get_mut(property) {
-                    if let Some(description) = original.0["properties"][property].get("description") {
-                        value["description"] = description.clone();
-                    } else { value.as_object_mut().unwrap().remove("description"); }
+    fn rendered_read_formats_keep_neutral_defaults_and_reject_incompatible_options() {
+        let tools=guided_workspace_exposures(std::env::consts::OS);
+        let read=&tools.iter().find(|tool|tool.definition.name=="read_file").unwrap().definition;
+        let validator=jsonschema::validator_for(&read.input_schema.0).unwrap();
+        for input in [
+            json!({"path":".","format":"instruction_scope","recursive":false,"missing_ok":false}),
+            json!({"path":"file.txt","recursive":false,"start_line":2,"line_count":10}),
+            json!({"path":"image.png","format":"image","recursive":false,"missing_ok":false}),
+        ] {assert!(validator.is_valid(&input),"{input}");}
+        for input in [
+            json!({"path":".","format":"instruction_scope","missing_ok":true}),
+            json!({"path":"file.txt","recursive":true}),
+            json!({"path":"image.png","format":"image","start_line":1}),
+            json!({"path":"file.txt","start_line":1,"offset":0}),json!({"path":"   "}),
+        ] {assert!(!validator.is_valid(&input),"{input}");}
+        assert!(read.description.contains("sha256 always identifies the entire source"));
+        assert!(read.description.contains("call read_file alone on its directory"));
+        assert!(read.description.contains("source reads with fresh call IDs"));
+        assert!(read.description.contains("never use the default text format for AGENTS.md"));
+        assert!(read.input_schema.0["properties"]["expected_sha256"]["description"].as_str().unwrap().contains("whole-source"));
+    }
+
+    #[test]
+    fn rendered_push_artifact_and_patch_rules_use_current_formal_contracts() {
+        let tools=guided_workspace_exposures(std::env::consts::OS);
+        let schema=|name:&str| &tools.iter().find(|tool|tool.definition.name==name).unwrap().definition.input_schema.0;
+        let push=jsonschema::validator_for(schema("git_push")).unwrap();
+        assert!(push.is_valid(&json!({"remote":"origin","refspec":"HEAD:refs/heads/main","force":false})));
+        for input in [json!({"remote":"origin","refspec":"main"}),json!({"remote":"origin","refspec":"HEAD:refs/heads/main","force":true})] {
+            assert!(!push.is_valid(&input),"{input}");
+        }
+        assert_eq!(schema("read_artifact")["properties"]["limit"]["default"],16384);
+        let patch=&tools.iter().find(|tool|tool.definition.name=="apply_patch").unwrap().definition;
+        assert!(patch.description.contains("lines=[{kind:remove,text:old},{kind:add,text:new}]"));
+        let hunk=&schema("apply_patch")["properties"]["files"]["items"]["properties"]["hunks"];
+        assert!(hunk["description"].as_str().unwrap().contains("context is unchanged text"));
+        let validator=jsonschema::validator_for(schema("apply_patch")).unwrap();
+        let guard=json!({"files":[{"path":"a.txt","expected_source":{"kind":"existing","sha256":"a".repeat(64)},
+            "hunks":[{"old_start":1,"old_lines":1,"new_start":1,"new_lines":1,
+                "lines":[{"kind":"remove","text":"old"},{"kind":"add","text":"new"}]}]}]});
+        assert!(validator.is_valid(&guard));
+        let mut invalid=guard;invalid["files"][0]["expected_source"]["sha256"]=json!("short");
+        assert!(!validator.is_valid(&invalid));
+    }
+
+    #[test]
+    fn rendered_launch_rules_cover_three_targets_and_the_actual_native_shell() {
+        for host_os in ["windows","macos","linux"] {
+            let tools=guided_workspace_exposures(host_os);
+            for name in ["exec_command","start_process"] {
+                let definition=&tools.iter().find(|tool|tool.definition.name==name).unwrap().definition;
+                let schema=&definition.input_schema.0;
+                assert_eq!(schema["oneOf"].as_array().unwrap().len(),3);
+                let validator=jsonschema::validator_for(schema).unwrap();
+                for input in [
+                    json!({"component":"officecli","args":["a path with spaces","$HOME","$(command)","line\nbreak"]}),
+                    json!({"command":"program with spaces","args":["literal"]}),
+                    json!({"cmd":"script text","args":[]}),
+                ] {assert!(validator.is_valid(&input),"{name}: {input}");}
+                for input in [json!({"component":"officecli","cmd":"script"}),json!({"component":"node","command":"node"}),
+                    json!({"cmd":"script","args":["forbidden"]}),json!({"component":"unapproved"})] {
+                    assert!(!validator.is_valid(&input),"{name}: {input}");
                 }
+                let args=schema["properties"]["args"]["description"].as_str().unwrap();
+                assert!(args.contains("command")&&args.contains("component"));
+                assert!(!args.contains("Valid only with command"));
+                let cmd=schema["properties"]["cmd"]["description"].as_str().unwrap();
+                assert!(cmd.contains(if host_os=="windows" {"Windows PowerShell 5.1"} else {"/bin/sh -c"}));
+                if host_os!="windows" {assert!(!cmd.contains("cmd.exe"));}
             }
-            assert_eq!(structural, original.0);
-            assert_eq!(nomifun_agent_domain_wave2::resolve_action_schema(capability_id, reference).unwrap(), original);
-            assert_eq!(standard_presentation_schema("other.module", original.clone(), &presentation), original);
         }
     }
 
     #[test]
-    fn nested_presentation_copies_only_existing_descriptions_and_no_authority() {
-        let registration = nomifun_agent_domain_wave2::workspace_execution_registration().unwrap();
-        let capability = registration.metadata.manifest.payload.contributions.capabilities.iter()
-            .find(|capability|capability.id.as_ref()=="workspace.files").unwrap();
-        let reference = &capability.contributions.actions.iter()
-            .find(|action|action.action_id.as_ref()=="workspace.files/patch").unwrap().input_schema;
-        let canonical = nomifun_agent_domain_wave2::resolve_action_schema("workspace.files",reference).unwrap();
-        let original = canonical.clone();
-        let pointer = "/properties/files/items/properties/expected_source/oneOf/2/properties/sha256";
-        let mut presentation = canonical.clone();
-        presentation.0.pointer_mut(pointer).unwrap()["description"] = json!("Copy the observed full digest.");
-        presentation.0.pointer_mut(pointer).unwrap()["pattern"] = json!(".*");
-        presentation.0.pointer_mut(pointer).unwrap()["default"] = json!("invented");
-        presentation.0["properties"]["files"]["maxItems"] = json!(99999);
-        presentation.0["properties"]["files"]["items"]["required"] = json!([]);
-        presentation.0["properties"]["files"]["items"]["properties"]["authority"] = json!({"description":"invented permission"});
-        let projected = standard_presentation_schema("workspace.files",canonical.clone(),&presentation);
-        assert_eq!(projected.0.pointer(pointer).unwrap()["description"],"Copy the observed full digest.");
-        let mut restored = projected.clone();
-        *restored.0.pointer_mut(pointer).unwrap() = canonical.0.pointer(pointer).unwrap().clone();
-        assert_eq!(restored,original,"no defaults, patterns, required, limits or invented authority fields may cross");
-        assert_eq!(standard_presentation_schema("unrelated.module",canonical.clone(),&presentation),canonical);
+    fn rendered_text_and_process_lifecycle_keep_exact_bytes_and_one_owned_handle() {
+        let tools=guided_workspace_exposures(std::env::consts::OS);
+        let definition=|name:&str| &tools.iter().find(|tool|tool.definition.name==name).unwrap().definition;
+        let content=definition("write_file").input_schema.0["properties"]["content"]["description"].as_str().unwrap();
+        assert!(content.contains("no trailing newline is added"));
+        assert!(content.contains(r#"{"content":"first\nsecond\n"}"#));
+        let stdin=&definition("write_process_stdin").input_schema.0;
+        let append=stdin["properties"]["append_newline"]["description"].as_str().unwrap();
+        assert!(append.contains("even if input already ends in LF"));
+        let validator=jsonschema::validator_for(stdin).unwrap();
+        for input in [json!({"process_id":"owned","input":"你好 MAC-B","append_newline":true}),
+            json!({"process_id":"owned","input":"你好 MAC-B\n","append_newline":false}),
+            json!({"process_id":"owned","input":"你好 MAC-B\n","append_newline":true})] {assert!(validator.is_valid(&input));}
+        assert_eq!(stdin["properties"]["append_newline"]["default"],false);
+        assert!(definition("exec_command").description.contains("does not return a live handle"));
+        assert!(definition("start_process").description.contains("same Turn"));
+        assert!(definition("start_process").description.contains("Never use shell backgrounding"));
+        assert!(definition("start_process").description.contains("close_process_stdin"));
+        assert_eq!(definition("start_process").input_schema.0["properties"]["wait_ms"]["maximum"],30000,
+            "current canonical start wait bounds must not inherit the retired model template's zero limit");
+        assert_eq!(definition("resize_process").input_schema.0["properties"]["cols"]["maximum"],32767);
+        assert!(definition("cancel_process").description.contains("cleanup.reaped=true"));
     }
 
     #[test]
-    fn process_presentation_never_copies_defaults_constraints_or_foreign_module_guidance() {
-        let canonical = canonical_process_schema("workspace.process/start");
-        let presentation = StrictJsonValue(json!({"properties":{
-            "timeout_ms":{"description":"Total lifetime, default 30000 ms.","default":600001,"maximum":999999},
-            "wait_ms":{"description":false,"maximum":999999},
-            "process_id":{"description":"invented field","type":"string"}
-        },"required":["invented"]}));
-        let projected = standard_presentation_schema("workspace.process", canonical.clone(), &presentation);
-        assert_eq!(projected.0["properties"]["timeout_ms"]["maximum"], 600000);
-        assert!(projected.0["properties"]["timeout_ms"].get("default").is_none());
-        assert_eq!(projected.0["properties"]["wait_ms"], canonical.0["properties"]["wait_ms"]);
-        assert!(projected.0["properties"].get("process_id").is_none());
-        assert_eq!(projected.0.get("required"), canonical.0.get("required"));
-        assert_eq!(standard_presentation_schema("other.module", canonical.clone(), &presentation), canonical);
-        assert_eq!(canonical, canonical_process_schema("workspace.process/start"));
+    fn rendered_workspace_paths_do_not_invent_a_conversation_or_project_prefix() {
+        let tools=guided_workspace_exposures(std::env::consts::OS);
+        for name in ["read_file","write_file","delete_path","git_stage","publish_artifact"] {
+            let schema=&tools.iter().find(|tool|tool.definition.name==name).unwrap().definition.input_schema.0;
+            let path=schema["properties"]["path"]["description"].as_str().unwrap();
+            assert!(path.contains("without prepending a project or conversation display name"),"{name}: root provenance lost");
+        }
+        let search=&tools.iter().find(|tool|tool.definition.name=="search_files").unwrap().definition.input_schema.0;
+        assert!(search["properties"]["path"]["description"].as_str().unwrap().contains("do not substitute its parent directory"));
+        for name in ["exec_command","start_process"] {
+            let schema=&tools.iter().find(|tool|tool.definition.name==name).unwrap().definition.input_schema.0;
+            assert!(schema["properties"]["cwd"]["description"].as_str().unwrap().contains("admitted workspace context owns the actual root"));
+        }
     }
 
     #[test]
@@ -686,29 +689,92 @@ mod tests {
                 }
             }
         }
-        for exposure in standard_agent_tool_exposures() {
+        for exposure in guided_workspace_exposures(std::env::consts::OS) {
             assert_eq!(platform_tool_name(exposure.capability_id.as_ref(), exposure.action_id.as_ref()),
                 exposure.definition.name);
         }
     }
 
-    #[test]
-    fn partial_module_grant_exposes_only_the_exact_allowed_action() {
-        let module = CapabilityId::from("workspace.files");
-        let mut exposures = standard_agent_tool_exposures();
-        retain_exact_platform_actions(
-            &mut exposures,
-            &BTreeSet::from([module.clone()]),
-            &BTreeMap::from([(
-                module.clone(),
-                BTreeSet::from([ActionId::from("workspace.files/read")]),
-            )]),
-        );
+    struct UnselectedSchemas;
+    #[async_trait::async_trait]
+    impl NomiPluginToolSchemaResolver for UnselectedSchemas {
+        async fn resolve(&self,_:&nomifun_agent_contracts::ResolvedCapability,_:&nomifun_agent_contracts::CanonicalSchemaRef)
+            ->Result<StrictJsonValue,String>{Err("no Plugin selected".into())}
+    }
+    #[async_trait::async_trait]
+    impl NomiPlatformBuiltinToolSchemaResolver for UnselectedSchemas {
+        async fn resolve(&self,_:&nomifun_agent_contracts::ResolvedCapability,_:&nomifun_agent_contracts::CanonicalSchemaRef)
+            ->Result<StrictJsonValue,String>{Err("workspace standard action must not use the generic resolver".into())}
+    }
 
-        assert_eq!(exposures.len(), 1);
-        assert_eq!(exposures[0].capability_id, module);
-        assert_eq!(exposures[0].action_id.as_ref(), "workspace.files/read");
-        assert_eq!(exposures[0].definition.name, "read_file");
+    #[tokio::test]
+    async fn full_workspace_tool_plan_and_partial_grants_use_only_formal_actions_and_new_guides() {
+        let all=[("workspace.files",nomifun_agent_domain_wave2::WORKSPACE_FILES_ACTION_IDS),
+            ("workspace.vcs",nomifun_agent_domain_wave2::WORKSPACE_VCS_ACTION_IDS),
+            ("workspace.process",nomifun_agent_domain_wave2::WORKSPACE_PROCESS_ACTION_IDS),
+            ("workspace.artifacts",nomifun_agent_domain_wave2::WORKSPACE_ARTIFACTS_ACTION_IDS)];
+        for selected in [all.as_slice(),&[("workspace.files",&["workspace.files/read"][..])][..]] {
+            let (snapshot,registry,_)=platform_snapshot(vec![nomifun_agent_domain_wave2::workspace_execution_registration().unwrap()],
+                selected,&["workspace","process_session"]);
+            let active=nomifun_agent_kernel::SessionCapabilityState::new(&snapshot).snapshot().unwrap();
+            let plan=compile(&snapshot,&active,&registry,&UnselectedSchemas,&UnselectedSchemas,&BTreeSet::new()).await.unwrap();
+            assert_eq!(plan.len(),if selected.len()==4 {19} else {1});
+            for definition in plan.model_definitions() {
+                let binding=plan.binding(&definition.name).unwrap();
+                let cap=registry.capability(&binding.capability_id).unwrap();
+                let action=cap.manifest.contributions.actions.iter().find(|action|action.action_id==binding.action_id).unwrap();
+                assert_eq!(binding.canonical_input_schema_ref,action.input_schema);
+                assert_eq!(binding.schema_digest,nomifun_engine_core::input_schema_digest(&definition.input_schema).unwrap());
+                let guide=tool_model_guide(binding.capability_id.as_ref(),binding.action_id.as_ref()).unwrap();
+                let canonical=nomifun_agent_domain_wave2::resolve_action_schema(binding.capability_id.as_ref(),&action.input_schema).unwrap();
+                assert_eq!(restore_guide_annotations(&definition.input_schema,&canonical,guide),canonical);
+                assert_eq!(binding.definition.deferred,false);
+                assert_eq!(definition.name,platform_tool_name(binding.capability_id.as_ref(),binding.action_id.as_ref()));
+            }
+            if selected.len()==1 {assert!(plan.binding("read_file").is_some());assert!(plan.binding("write_file").is_none());}
+        }
+    }
+
+    #[test]
+    fn missing_or_cross_action_guide_cannot_fall_back_to_generic_standard_tool_data() {
+        let canonical=canonical_process_schema("workspace.process/exec");
+        assert!(standard_tool_exposure(&"workspace.process".into(),&"workspace.process/exec".into(),&canonical,
+            std::env::consts::OS,None).unwrap_err().to_string().contains("no current model guide"));
+        assert!(standard_tool_exposure(&"workspace.process".into(),&"workspace.process/exec".into(),&canonical,
+            std::env::consts::OS,tool_model_guide("workspace.process","workspace.process/start")).is_err());
+    }
+
+    #[tokio::test]
+    async fn rendered_foreign_host_fact_preserves_the_actual_owner_pre_dispatch_guard() {
+        use nomifun_engine_core::{EngineToolInvoker,KernelEngineToolInvoker};
+        let (snapshot,materialized,registry)=platform_snapshot(vec![nomifun_agent_domain_wave2::workspace_execution_registration().unwrap()],
+            &[("workspace.process",&["workspace.process/exec"])],&["process_session"]);
+        let active=std::sync::Arc::new(nomifun_agent_kernel::SessionCapabilityState::new(&snapshot));
+        let observed=active.snapshot().unwrap();
+        let canonical=canonical_process_schema("workspace.process/exec");
+        let foreign=if std::env::consts::OS=="windows" {"linux"} else {"windows"};
+        let exposure=standard_tool_exposure(&"workspace.process".into(),&"workspace.process/exec".into(),&canonical,
+            foreign,tool_model_guide("workspace.process","workspace.process/exec")).unwrap();
+        assert!(exposure.definition.description.starts_with(&format!("Workspace process host OS: {foreign}.")));
+        let plan=compile_agent_tool_plan(&snapshot,&observed,&materialized,[exposure]).unwrap();
+        let binding=plan.binding("exec_command").unwrap().clone();
+        let owner=snapshot.envelope.actor.clone();
+        let session=nomifun_agent_contracts::AgentSessionId::from("host-fact-fixture");
+        let port=KernelEngineToolInvoker::for_session(registry,std::sync::Arc::new(snapshot.clone()),active,
+            owner.clone(),session.clone(),plan).unwrap();
+        let result=port.invoke(nomifun_engine_core::EngineToolInvocation {
+            agent_session_id:session,principal:owner,resolved_snapshot_ref:snapshot.snapshot_ref().clone(),
+            active_set_generation:observed.generation,turn_operation_id:"host-fact-turn".into(),operation_id:"host-fact-operation".into(),
+            idempotency_key:"host-fact-invocation".into(),correlation_id:"host-fact-call".into(),
+            call:nomifun_chat_model_broker::ChatToolCall {call_id:"host-fact-call".into(),name:"exec_command".into(),
+                arguments:StrictJsonValue(json!({"cmd":"THIS_MUST_NOT_RUN"})),provider_metadata:None},binding,
+        },tokio_util::sync::CancellationToken::new()).await.unwrap();
+        assert!(result.is_error);
+        let output:serde_json::Value=serde_json::from_str(&result.output_text()).unwrap();
+        assert_eq!(output["code"],"HOST_OS_COMMAND_MAPPING_ERROR");
+        assert_eq!(output["state"],"not_started");
+        assert_eq!(output["advertised_host_os"],foreign);
+        assert_eq!(output["actual_host_os"],std::env::consts::OS);
     }
 
     #[test]

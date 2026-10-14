@@ -1,0 +1,544 @@
+{
+  "managed_launch_notice": "Approved component IDs are officecli, bun and node. Use component=officecli with literal args for managed Office file operations; use component=bun or component=node for their host components. Choose exactly one of component, command or cmd. The host resolves the verified executable and required environment; do not copy paths or environment from Skill resources. This host launch contract takes precedence over Skill reference text describing component-path lookup or ambient command invocation. Office operations are one-shot: do not open a resident session or start watch. If a component is unavailable, report its actual failure; do not install it or substitute a same-named ambient program. This guidance grants no tools or permissions.",
+  "guides": [
+    {
+      "capability_id": "workspace.files",
+      "action_id": "workspace.files/read",
+      "description": "Read a workspace file or inspect instruction scope. Repository instructions are not ordinary text: never use the default text format for AGENTS.md or AGENTS.override.md. Their applicable bodies are injected separately after instruction discovery. Before reading a source file in any scope not already discovered, call read_file alone on its directory with format=instruction_scope (path=. for the workspace root; recursive=true only when needed); after that result, reconsider and send source reads with fresh call IDs. For format=instruction_scope, recursive is the only optional mode field; NEVER include missing_ok, offset, limit, start_line, line_count, or expected_sha256. Default format=text. For source inspection use start_line (1-based) and line_count (default 200), without offset/limit. A small file can be read with just path. Byte pagination remains available: bounded UTF-8 pages, source at most 8 MiB; offset reads are independent current-version observations. In every successful text result, sha256 always identifies the entire source and total_bytes is its full size, even when content is only one line/byte page and eof=false; do not read the whole file only to obtain its digest. To assemble consistent pages, follow next_offset with the prior expected_sha256 until eof; explicit hash mismatches still fail. Offsets/limit are bytes, not lines. FILE_CONTENT_CHANGED means discard prior pages and restart. Text-only missing_ok=true returns workspace_file_absent for genuine absence, never for denied access. format=image: PNG/JPEG/WebP at most 4 MiB, omit offset/limit/missing_ok and submit alone; requires an image-capable exact model route. Returns prepared pixels, not base64 text; images may be resized and must be re-read after history/compaction omitted pixels. Optional expected_sha256 guards text/image source versions. format=instruction_scope: metadata for a file or directory (path=. for workspace root). Optional recursive=true discovers descendant instruction directories, including hidden/ignored entries, within bounded limits. Check complete/incomplete_reasons and use canonical_path; incomplete is not absence. This is not a filesystem snapshot or proof of shell access scope.",
+      "parameters": [
+        {
+          "pointer": "/properties/path",
+          "description": "Exact workspace-relative path. Copy the user's supplied relative path without prepending a project or conversation display name. Use '.' for root instruction discovery; do not invent another project folder or compensate with mkdir. The admitted workspace context supplies the actual bound root."
+        },
+        {
+          "pointer": "/properties/start_line",
+          "description": "One-based source line, with line_count; omit byte offset/limit. For the last N lines, first observe total L, then use max(1,L-N+1). A head-only page does not satisfy a requested tail read."
+        },
+        {
+          "pointer": "/properties/line_count",
+          "description": "Number of source lines to inspect, still bounded by the response byte budget."
+        },
+        {
+          "pointer": "/properties/offset",
+          "description": "Byte offset, NOT a line number. For pagination use the exact prior next_offset and expected_sha256."
+        },
+        {
+          "pointer": "/properties/limit",
+          "description": "Byte budget, NOT a number of lines. Omit for normal reads; use line_count for source lines."
+        },
+        {
+          "pointer": "/properties/expected_sha256",
+          "description": "The whole-source SHA-256 returned by any successful text or image read. Use it to pin a later page or source version."
+        }
+      ],
+      "examples": [
+        {
+          "label": "Syntax only; Inspect instructions before reading undiscovered source",
+          "arguments": {
+            "path": ".",
+            "format": "instruction_scope",
+            "recursive": true
+          }
+        },
+        {
+          "label": "Syntax only; Read source lines",
+          "arguments": {
+            "path": "README.md",
+            "start_line": 1,
+            "line_count": 200
+          }
+        }
+      ]
+    },
+    {
+      "capability_id": "workspace.files",
+      "action_id": "workspace.files/search",
+      "description": "Fresh bounded literal single-line UTF-8 workspace search. Directory walks respect hidden/ignore rules and skip symlink entries. One match per line includes a snippet around the match, byte_offset and whole-source sha256 for read_file. Empty matches are not proof of absence; inspect truncated/incomplete_reasons/files_skipped and narrow path/query when needed. Not a filesystem snapshot.",
+      "parameters": [
+        {
+          "pointer": "/properties/path",
+          "description": "Accepts a workspace-relative file or directory. If the user limits search to one named file, copy that file's full relative path exactly; do not substitute its parent directory or expand the search scope."
+        }
+      ],
+      "examples": [
+        {
+          "label": "Syntax only; Search only the named source file",
+          "arguments": {
+            "query": "TODO",
+            "path": "src/main.rs",
+            "limit": 100
+          }
+        }
+      ]
+    },
+    {
+      "capability_id": "workspace.vcs",
+      "action_id": "workspace.vcs/status",
+      "description": "Inspect Git status for the bound workspace. A new directory without Git returns is_repository=false as a normal observation; this does not initialize Git.",
+      "parameters": [],
+      "examples": [
+        {
+          "label": "Syntax only; Observe repository status",
+          "arguments": {}
+        }
+      ]
+    },
+    {
+      "capability_id": "workspace.vcs",
+      "action_id": "workspace.vcs/diff",
+      "description": "Return the bound workspace diff, optionally scoped to one workspace-relative path. Omit path or use '.' for the workspace root, even when the workspace is a repository subdirectory.",
+      "parameters": [
+        {
+          "pointer": "/properties/path",
+          "description": "Exact workspace-relative path. Copy the user's supplied relative path without prepending a project or conversation display name. Use '.' for root instruction discovery; do not invent another project folder or compensate with mkdir. The admitted workspace context supplies the actual bound root."
+        }
+      ],
+      "examples": [
+        {
+          "label": "Syntax only; Read an exact workspace-relative diff",
+          "arguments": {
+            "path": "src"
+          }
+        }
+      ]
+    },
+    {
+      "capability_id": "workspace.files",
+      "action_id": "workspace.files/write",
+      "description": "Write exact complete UTF-8 text (at most 8 MiB) through the workspace owner; no trailing newline is added. Include any requested final line break in content itself. Missing parent directories are created automatically; no shell mkdir is needed. The receipt includes published bytes, line_count and sha256, so a command solely to count the file is unnecessary. These facts are not functional-test results. This replaces the whole file; inspect existing content and prefer apply_patch for focused edits. A prior read is not a write lock.",
+      "parameters": [
+        {
+          "pointer": "/properties/path",
+          "description": "Exact workspace-relative path. Copy the user's supplied relative path without prepending a project or conversation display name. Use '.' for root instruction discovery; do not invent another project folder or compensate with mkdir. The admitted workspace context supplies the actual bound root."
+        },
+        {
+          "pointer": "/properties/content",
+          "description": "Exact complete UTF-8 text; no trailing newline is added. For two lines with a requested final LF use {\"content\":\"first\\nsecond\\n\"}. Include the final LF in content, not just between lines. Host also enforces an 8 MiB byte limit. Prefer apply_patch for focused edits."
+        }
+      ],
+      "examples": [
+        {
+          "label": "Syntax only; Write two lines including the requested final LF",
+          "arguments": {
+            "path": "notes.txt",
+            "content": "first\nsecond\n"
+          }
+        }
+      ]
+    },
+    {
+      "capability_id": "workspace.files",
+      "action_id": "workspace.files/patch",
+      "description": "Apply bounded, ordered, exact line hunks through the workspace owner. Missing parent directories are created after the entire patch is validated. Prefer each file's expected_source={kind:existing,sha256:<full read_file digest>} or {kind:absent} after observing absence; this detects changes outside the hunk too. Omission/any uses line-only matching, not a source-version check. Never remove a rejected guard just to retry; re-read and replan. Supply logical text without CR/LF or a file-leading UTF-8 BOM; source BOM, unchanged line endings and EOF-newline policy are preserved, added lines use the first source ending (LF if none). For a one-line replacement use old_start=1, old_lines=1, new_start=1, new_lines=1 and lines=[{kind:remove,text:old},{kind:add,text:new}]. A context line is retained and counts in both old_lines and new_lines; context+add inserts after that line and does not replace it. Nonempty ranges are 1-based; old_lines=0 inserts after old_start source lines (0=BOF), new_lines=0 names the surviving output prefix. Context/remove text must match exactly; re-read on mismatch. All targets and source guards are prepared before writes, with per-file atomic publication and best-effort restoration of existing files, not a multi-file transaction. Failed patches may retain newly created files; inspect zero-based request.files indices in the failure observation and re-read every target before replanning/retrying. A restored result is historical, not a current-state lock. Concurrent native edits remain possible. Each file's written_sha256 identifies published bytes for a later guarded read_file or patch, not task completion.",
+      "parameters": [
+        {
+          "pointer": "/properties/files/items/properties/path",
+          "description": "Exact workspace-relative path. Copy the user's supplied relative path without prepending a project or conversation display name. Use '.' for root instruction discovery; do not invent another project folder or compensate with mkdir. The admitted workspace context supplies the actual bound root."
+        },
+        {
+          "pointer": "/properties/files/items/properties/expected_source",
+          "description": "Bind to the full sha256 from read_file, or to observed absence. Omission/any uses line-only matching without a source-version check. A conflict requires re-reading and replanning, not removing the guard."
+        },
+        {
+          "pointer": "/properties/files/items/properties/expected_source/oneOf/2/properties/sha256",
+          "description": "Copy the entire sha256 from the matching read_file result verbatim, all 64 lowercase hex characters. Do not calculate it from remembered text, guess, shorten or substitute another file's digest. On conflict re-read and replan; keep the source guard."
+        },
+        {
+          "pointer": "/properties/files/items/properties/hunks",
+          "description": "For replacement, lines must contain remove(old) then add(new). context is unchanged text and counts in both old_lines and new_lines; it does not replace itself. Schema keywords such as minItems/maxItems are not arguments."
+        }
+      ],
+      "examples": [
+        {
+          "label": "Syntax only; Insert only after observing target absence",
+          "arguments": {
+            "files": [
+              {
+                "path": "notes.txt",
+                "expected_source": {
+                  "kind": "absent"
+                },
+                "hunks": [
+                  {
+                    "old_start": 0,
+                    "old_lines": 0,
+                    "new_start": 1,
+                    "new_lines": 1,
+                    "lines": [
+                      {
+                        "kind": "add",
+                        "text": "Hello"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "capability_id": "workspace.files",
+      "action_id": "workspace.files/delete",
+      "description": "Delete one workspace-relative file or directory through the owner.",
+      "parameters": [
+        {
+          "pointer": "/properties/path",
+          "description": "Exact workspace-relative path. Copy the user's supplied relative path without prepending a project or conversation display name. Use '.' for root instruction discovery; do not invent another project folder or compensate with mkdir. The admitted workspace context supplies the actual bound root."
+        }
+      ],
+      "examples": [
+        {
+          "label": "Syntax only; Delete only the explicitly requested path",
+          "arguments": {
+            "path": "obsolete.txt"
+          }
+        }
+      ]
+    },
+    {
+      "capability_id": "workspace.vcs",
+      "action_id": "workspace.vcs/stage",
+      "description": "Stage one workspace-relative path.",
+      "parameters": [
+        {
+          "pointer": "/properties/path",
+          "description": "Exact workspace-relative path. Copy the user's supplied relative path without prepending a project or conversation display name. Use '.' for root instruction discovery; do not invent another project folder or compensate with mkdir. The admitted workspace context supplies the actual bound root."
+        }
+      ],
+      "examples": [
+        {
+          "label": "Syntax only; Stage the requested workspace-relative path",
+          "arguments": {
+            "path": "notes.txt"
+          }
+        }
+      ]
+    },
+    {
+      "capability_id": "workspace.process",
+      "action_id": "workspace.process/exec",
+      "description": "Run a workspace process synchronously: this call waits for exit/timeout and does not return a live handle for a later stdin write. If the process needs later input or EOF, use start_process with wait_ms=0 and tty=false, then poll/input/close/poll instead; do not choose exec_command merely to obtain READY. Choose exactly one launch target: component for an approved host component, command for a literal executable, or cmd for shell script text. For managed Office file operations use {\"component\":\"officecli\",\"args\":[\"help\",\"batch\"]}; component=bun or component=node chooses those approved host components. For an ordinary executable use {\"command\":\"program\",\"args\":[\"literal\",\"tokens\"]}, for example {\"command\":\"git\",\"args\":[\"status\",\"--short\"]}. For shell syntax use {\"cmd\":\"script text\"}, omitting args. component or command accepts a literal args array; do not mix either target with cmd or with one another. Never put a whole command line in command, or supply args as a JSON-encoded string. Use read_file/search_files for workspace file contents, source digests and literal text search; instruction_scope reports instruction locations, not directory entries or OS file attributes. Inspect truncated/incomplete_reasons before claiming a complete or absent search result. Do not substitute a shell wildcard such as .\\**\\* for a recursive workspace search. Never suppress stderr, catch and ignore errors, or redirect errors to null to manufacture a successful empty search; preserve errors and narrow the requested path. Shell exit 0 alone does not prove complete search coverage. A zero exit is an observation, not proof that verification passed. The following command examples describe input syntax only. Run them only when the accepted task requires their operation; do not add a directory listing, cwd probe or other preflight solely to prepare an exact-path file task.",
+      "parameters": [
+        {
+          "pointer": "/properties/component",
+          "description": "Approved host component ID: officecli, bun or node. The host resolves its verified executable and required environment. Choose exactly one of component, command or cmd; pass each literal argument in args without shell quoting or expansion. Follow the managed launch notice for one-shot Office use and unavailable-component handling."
+        },
+        {
+          "pointer": "/properties/cmd",
+          "description": "Shell-script form only: supply {\"cmd\":\"script text\"} and omit both command and component. Omit args for shell script text; never use cmd for an executable plus literal argument tokens.",
+          "host_os": {
+            "windows": "Runs script text directly through Windows PowerShell 5.1. PowerShell cmdlets such as Copy-Item, Move-Item, Remove-Item and New-Item are shell operations, not executables: use cmd, not command=Copy-Item or tokenized powershell.exe -Command arguments. For example {\"cmd\":\"Copy-Item -LiteralPath 'a path/source.txt' -Destination 'a path/copy.txt' -ErrorAction Stop\"}. Keep each quoted literal path in this script and preserve errors. Do not add mkdir when the accepted task says the directory already exists. Use exact workspace-relative paths without a project-name prefix. Do not prefix cmd with powershell.exe or pwsh. Do not assume PowerShell 7-only syntax such as ??, ??=, ?:, &&, or ||. Command Prompt syntax such as dir /b requires command=cmd.exe with args beginning [\"/d\",\"/c\"]. Ordinary executables such as bun/git use command plus args. Never combine the forms.",
+            "macos": "Use cmd only when shell semantics such as pipelines, redirection, globbing, compound syntax, or a shell script are required. Runs through /bin/sh -c on this process host. For an ordinary single executable use command plus args. Never combine the forms.",
+            "linux": "Use cmd only when shell semantics such as pipelines, redirection, globbing, compound syntax, or a shell script are required. Runs through /bin/sh -c on this process host. For an ordinary single executable use command plus args. Never combine the forms."
+          }
+        },
+        {
+          "pointer": "/properties/command",
+          "description": "Executable form: supply {\"command\":\"program\",\"args\":[...]} and omit cmd and component. This field is the executable name or path only. Never include arguments such as git status in this field.",
+          "host_os": {
+            "windows": "Examples are git, bun, powershell.exe, or cmd.exe. PowerShell cmdlets such as Copy-Item and Move-Item need cmd script text, not a literal executable or tokenized -Command arguments.",
+            "macos": "Examples are git, bun, or /bin/ls.",
+            "linux": "Examples are git, bun, or /usr/bin/ls."
+          }
+        },
+        {
+          "pointer": "/properties/args",
+          "description": "Valid with command or component, never as shell arguments for cmd. Literal separate argument tokens as an actual JSON array value, never a JSON-encoded string. Omit when empty; do not send null. Quoting, wildcards, environment references and substitution text are passed literally for component/command.",
+          "host_os": {
+            "windows": "Examples: [\"status\",\"--short\"] for git, or [\"/d\",\"/c\",\"echo ready\"] for command=cmd.exe. PowerShell cmdlets need cmd script text instead of tokenized -Command arguments.",
+            "macos": "Examples: [\"status\",\"--short\"] for git, [\"-a\"] for command=/bin/ls, or [\"help\",\"batch\"] for component=officecli.",
+            "linux": "Examples: [\"status\",\"--short\"] for git, [\"-a\"] for command=/usr/bin/ls, or [\"help\",\"batch\"] for component=officecli."
+          }
+        },
+        {
+          "pointer": "/properties/cwd",
+          "description": "Normalized workspace-relative directory only, for example src or tests. Omit cwd or use '.' to use the admitted workspace root. Never pass an absolute OS path, a drive prefix, backslashes, or '..'. Copy the exact user-supplied relative path; the admitted workspace context owns the actual root. Command arguments may contain the literal path format required by the executable."
+        },
+        {
+          "pointer": "/properties/timeout_ms",
+          "description": "Total owned process lifetime in milliseconds, starting at launch. Default 30000; polling does not reset it. Choose an explicit duration when the accepted task requires longer interaction or waiting. The owner terminates and cleans up on expiration; timeout is distinct from user cancellation."
+        },
+        {
+          "pointer": "/properties/tty",
+          "description": "false (or omitted) uses pipe; true uses PTY. For a requested pipe stdin/EOF lifecycle use start_process with tty=false and wait_ms=0. PTY is not a substitute for pipe close_stdin, and exec_command still waits for exit regardless of tty."
+        }
+      ],
+      "examples": [
+        {
+          "label": "Syntax only; Managed Office help; no ambient executable lookup",
+          "arguments": {
+            "component": "officecli",
+            "args": [
+              "help",
+              "batch"
+            ]
+          }
+        },
+        {
+          "label": "Syntax only; Literal Git arguments",
+          "arguments": {
+            "command": "git",
+            "args": [
+              "status",
+              "--short"
+            ]
+          }
+        },
+        {
+          "label": "Syntax only; Windows quoted-path shell operation",
+          "arguments": {
+            "cmd": "Copy-Item -LiteralPath 'a path/source.txt' -Destination 'a path/copy.txt' -ErrorAction Stop"
+          }
+        }
+      ],
+      "host_os": {
+        "windows": "The JSON field cmd is a Windows PowerShell 5.1 script, NOT cmd.exe. For workspace text and literal search, use read_file/search_files. Windows PowerShell 5.1 Get-Content without -Encoding can decode a BOM-less UTF-8 file as the local ANSI code page: correct hash/line counts do not prove correct decoded text. If a native shell read of a known UTF-8 file is required, use Get-Content -LiteralPath 'path' -Encoding UTF8 -Raw; use -Encoding UTF8 for Select-String too. Do not guess an unknown file encoding. Do not use cd && dir /a, &&, ||, ??, ??=, or ?: in that field. For the exact current directory use {\"cmd\":\"(Get-Location).Path\"}; plain Get-Location prints a table that can truncate the path. For root entries and their actual flags use {\"cmd\":\"Get-ChildItem -LiteralPath . -Force | ForEach-Object { [pscustomobject]@{Name=$_.Name;Attributes=$_.Attributes.ToString();Hidden=[bool]($_.Attributes -band [IO.FileAttributes]::Hidden);System=[bool]($_.Attributes -band [IO.FileAttributes]::System);LinkType=$_.LinkType} } | ConvertTo-Json -Compress\"}. Attributes is a flags enum: test each Hidden/System bit with a Boolean cast or compare the bitwise result to zero. FileAttributes.Normal is 128, not zero; comparing a masked Hidden bit to Normal incorrectly marks every entry hidden. Keep the shown Boolean-mask example. Include all returned names; describe Hidden/System only from those flags. A dot-prefixed Archive-only file is not hidden on Windows. A names-only listing cannot prove attributes. Do not recurse or follow links unless requested. For Command Prompt scripts use {\"command\":\"cmd.exe\",\"args\":[\"/d\",\"/c\",\"cd & dir /a\"]}. Do not prefix cmd with powershell.exe or pwsh. command plus args invokes a literal executable.",
+        "macos": "cmd invokes /bin/sh -c; command plus args invokes a literal executable. For the physical current directory, use {\"command\":\"/bin/pwd\",\"args\":[\"-P\"]}. For a top-level listing including dot entries, use {\"command\":\"/bin/ls\",\"args\":[\"-a\"]}. These are executable forms; omit cmd. Do not put the entire command line in command. Omit . and .. from business entry counts.",
+        "linux": "cmd invokes /bin/sh -c; command plus args invokes a literal executable. For the physical current directory, use {\"command\":\"/usr/bin/pwd\",\"args\":[\"-P\"]}. For a top-level listing including dot entries, use {\"command\":\"/usr/bin/ls\",\"args\":[\"-a\"]}. These are executable forms; omit cmd. Do not put the entire command line in command. Omit . and .. from business entry counts."
+      },
+      "host_os_fact": true
+    },
+    {
+      "capability_id": "workspace.process",
+      "action_id": "workspace.process/start",
+      "description": "Start one turn-owned background or interactive process and return its live handle with the requested bounded initial wait. For immediate interactive admission, use wait_ms=0; the formal start contract also permits a bounded nonzero initial wait. For READY/input/EOF prefer wait_ms=0,tty=false (pipe), then poll_process, write_process_stdin, close_process_stdin and poll to exit; PTY is not pipe EOF. The process lifetime defaults to 30 seconds; polling does not renew this deadline. For a user-requested longer interaction or wait, set timeout_ms explicitly to cover that requested duration (maximum 600000 ms). A timeout ends the owned process and triggers cleanup; it is not a user stop. For a start/wait/stop lifecycle, call start_process once with wait_ms=0, then make at least one distinct poll_process call until the expected output, then cancel_process with the exact returned process_id, all in the same Turn. Even when a start receipt already contains output, do not skip poll_process. Do not pre-read a user-specified existing executable or manually probe instruction files solely to launch it; the host injects applicable workspace instructions. Do not run ls, pwd, test -x, or another process preflight solely for that launch; the owner validates executable and cwd. Never use shell backgrounding, raw PID or temporary-log indirection, or split the lifecycle across AgentExecution steps. No process survives turn cleanup. Choose exactly one target: approved component, literal command, or shell cmd. component and command take literal args arrays; do not combine targets. The following command examples describe input syntax only. Run them only when the accepted task requires their operation; do not add a directory listing, cwd probe or other preflight solely to prepare an exact-path file task.",
+      "parameters": [
+        {
+          "pointer": "/properties/component",
+          "description": "Approved host component ID: officecli, bun or node. The host resolves its verified executable and required environment. Choose exactly one of component, command or cmd; pass each literal argument in args without shell quoting or expansion. Follow the managed launch notice for one-shot Office use and unavailable-component handling."
+        },
+        {
+          "pointer": "/properties/cmd",
+          "description": "Shell-script form only: supply {\"cmd\":\"script text\"} and omit both command and component. Omit args for shell script text; never use cmd for an executable plus literal argument tokens.",
+          "host_os": {
+            "windows": "Runs script text directly through Windows PowerShell 5.1. PowerShell cmdlets such as Copy-Item, Move-Item, Remove-Item and New-Item are shell operations, not executables: use cmd, not command=Copy-Item or tokenized powershell.exe -Command arguments. For example {\"cmd\":\"Copy-Item -LiteralPath 'a path/source.txt' -Destination 'a path/copy.txt' -ErrorAction Stop\"}. Keep each quoted literal path in this script and preserve errors. Do not add mkdir when the accepted task says the directory already exists. Use exact workspace-relative paths without a project-name prefix. Do not prefix cmd with powershell.exe or pwsh. Do not assume PowerShell 7-only syntax such as ??, ??=, ?:, &&, or ||. Command Prompt syntax such as dir /b requires command=cmd.exe with args beginning [\"/d\",\"/c\"]. Ordinary executables such as bun/git use command plus args. Never combine the forms.",
+            "macos": "Use cmd only when shell semantics such as pipelines, redirection, globbing, compound syntax, or a shell script are required. Runs through /bin/sh -c on this process host. For an ordinary single executable use command plus args. Never combine the forms.",
+            "linux": "Use cmd only when shell semantics such as pipelines, redirection, globbing, compound syntax, or a shell script are required. Runs through /bin/sh -c on this process host. For an ordinary single executable use command plus args. Never combine the forms."
+          }
+        },
+        {
+          "pointer": "/properties/command",
+          "description": "Executable form: supply {\"command\":\"program\",\"args\":[...]} and omit cmd and component. This field is the executable name or path only. Never include arguments such as git status in this field.",
+          "host_os": {
+            "windows": "Examples are git, bun, powershell.exe, or cmd.exe. PowerShell cmdlets such as Copy-Item and Move-Item need cmd script text, not a literal executable or tokenized -Command arguments.",
+            "macos": "Examples are git, bun, or /bin/ls.",
+            "linux": "Examples are git, bun, or /usr/bin/ls."
+          }
+        },
+        {
+          "pointer": "/properties/args",
+          "description": "Valid with command or component, never as shell arguments for cmd. Literal separate argument tokens as an actual JSON array value, never a JSON-encoded string. Omit when empty; do not send null. Quoting, wildcards, environment references and substitution text are passed literally for component/command.",
+          "host_os": {
+            "windows": "Examples: [\"status\",\"--short\"] for git, or [\"/d\",\"/c\",\"echo ready\"] for command=cmd.exe. PowerShell cmdlets need cmd script text instead of tokenized -Command arguments.",
+            "macos": "Examples: [\"status\",\"--short\"] for git, [\"-a\"] for command=/bin/ls, or [\"help\",\"batch\"] for component=officecli.",
+            "linux": "Examples: [\"status\",\"--short\"] for git, [\"-a\"] for command=/usr/bin/ls, or [\"help\",\"batch\"] for component=officecli."
+          }
+        },
+        {
+          "pointer": "/properties/cwd",
+          "description": "Normalized workspace-relative directory only, for example src or tests. Omit cwd or use '.' to use the admitted workspace root. Never pass an absolute OS path, a drive prefix, backslashes, or '..'. Copy the exact user-supplied relative path; the admitted workspace context owns the actual root. Command arguments may contain the literal path format required by the executable."
+        },
+        {
+          "pointer": "/properties/timeout_ms",
+          "description": "Total owned process lifetime in milliseconds, starting at launch. Default 30000; polling does not reset it. Choose an explicit duration when the accepted task requires longer interaction or waiting. The owner terminates and cleans up on expiration; timeout is distinct from user cancellation."
+        },
+        {
+          "pointer": "/properties/tty",
+          "description": "false (or omitted) uses pipe; true uses PTY. For a requested pipe stdin/EOF lifecycle use start_process with tty=false and wait_ms=0. PTY is not a substitute for pipe close_stdin, and exec_command still waits for exit regardless of tty."
+        },
+        {
+          "pointer": "/properties/wait_ms",
+          "description": "Initial bounded wait after starting the turn-owned process. Use 0 for immediate admission in READY/input/EOF workflows, then use poll_process with the exact process_id for each output wait. A nonzero initial wait is permitted by the formal contract; it does not replace a distinct poll when the task explicitly asks for start/poll/stop."
+        }
+      ],
+      "examples": [
+        {
+          "label": "Syntax only; Immediate pipe handle for an interactive program",
+          "arguments": {
+            "command": "program",
+            "args": [
+              "interactive"
+            ],
+            "tty": false,
+            "wait_ms": 0,
+            "timeout_ms": 120000
+          }
+        },
+        {
+          "label": "Syntax only; Bounded initial wait is a valid formal start input",
+          "arguments": {
+            "component": "node",
+            "args": [
+              "server.mjs"
+            ],
+            "wait_ms": 1,
+            "timeout_ms": 120000
+          }
+        }
+      ],
+      "host_os": {
+        "windows": "The JSON field cmd is a Windows PowerShell 5.1 script, NOT cmd.exe. For workspace text and literal search, use read_file/search_files. Windows PowerShell 5.1 Get-Content without -Encoding can decode a BOM-less UTF-8 file as the local ANSI code page: correct hash/line counts do not prove correct decoded text. If a native shell read of a known UTF-8 file is required, use Get-Content -LiteralPath 'path' -Encoding UTF8 -Raw; use -Encoding UTF8 for Select-String too. Do not guess an unknown file encoding. Do not use cd && dir /a, &&, ||, ??, ??=, or ?: in that field. For the exact current directory use {\"cmd\":\"(Get-Location).Path\"}; plain Get-Location prints a table that can truncate the path. For root entries and their actual flags use {\"cmd\":\"Get-ChildItem -LiteralPath . -Force | ForEach-Object { [pscustomobject]@{Name=$_.Name;Attributes=$_.Attributes.ToString();Hidden=[bool]($_.Attributes -band [IO.FileAttributes]::Hidden);System=[bool]($_.Attributes -band [IO.FileAttributes]::System);LinkType=$_.LinkType} } | ConvertTo-Json -Compress\"}. Attributes is a flags enum: test each Hidden/System bit with a Boolean cast or compare the bitwise result to zero. FileAttributes.Normal is 128, not zero; comparing a masked Hidden bit to Normal incorrectly marks every entry hidden. Keep the shown Boolean-mask example. Include all returned names; describe Hidden/System only from those flags. A dot-prefixed Archive-only file is not hidden on Windows. A names-only listing cannot prove attributes. Do not recurse or follow links unless requested. For Command Prompt scripts use {\"command\":\"cmd.exe\",\"args\":[\"/d\",\"/c\",\"cd & dir /a\"]}. Do not prefix cmd with powershell.exe or pwsh. command plus args invokes a literal executable.",
+        "macos": "cmd invokes /bin/sh -c; command plus args invokes a literal executable. For the physical current directory, use {\"command\":\"/bin/pwd\",\"args\":[\"-P\"]}. For a top-level listing including dot entries, use {\"command\":\"/bin/ls\",\"args\":[\"-a\"]}. These are executable forms; omit cmd. Do not put the entire command line in command. Omit . and .. from business entry counts.",
+        "linux": "cmd invokes /bin/sh -c; command plus args invokes a literal executable. For the physical current directory, use {\"command\":\"/usr/bin/pwd\",\"args\":[\"-P\"]}. For a top-level listing including dot entries, use {\"command\":\"/usr/bin/ls\",\"args\":[\"-a\"]}. These are executable forms; omit cmd. Do not put the entire command line in command. Omit . and .. from business entry counts."
+      },
+      "host_os_fact": true
+    },
+    {
+      "capability_id": "workspace.process",
+      "action_id": "workspace.process/poll",
+      "description": "Poll a turn-owned process from a bounded output cursor and observe its current state/cleanup evidence. For each following poll, copy the previous receipt's output.next_cursor into cursor and use wait_ms for bounded waiting. Omitting cursor means 0 and replays retained output; unread output returns immediately even with wait_ms=30000, so it cannot serve as a wait loop. After start_process, use poll_process with the exact process_id to wait for expected output before cancellation; do not infer readiness from a PID or temporary file. Report readiness once, then wait without repeating the same running-status narration. A terminal state=cancelled with cleanup.reaped=true is a successful poll observation, not a tool failure.",
+      "parameters": [
+        {
+          "pointer": "/properties/cursor",
+          "description": "For a following poll, pass the previous output.next_cursor. Default 0 deliberately replays retained output; it does not resume at the last observation."
+        },
+        {
+          "pointer": "/properties/wait_ms",
+          "description": "Per-poll wait in milliseconds, from 0 through 30000 inclusive. This is separate from the process lifetime timeout_ms: never copy a launch timeout such as 120000 here. Use 0 for an immediate observation, 1000 for a short wait, or 30000 for the longest allowed poll. Wait up to this duration for new output or terminal state. Retained output after cursor returns immediately. Advance cursor before waiting again; 0 only observes current state."
+        }
+      ],
+      "examples": [
+        {
+          "label": "Syntax only; Wait after the actual previous next_cursor",
+          "arguments": {
+            "process_id": "observed-process-id",
+            "cursor": 25,
+            "wait_ms": 1000
+          }
+        }
+      ]
+    },
+    {
+      "capability_id": "workspace.process",
+      "action_id": "workspace.process/input",
+      "description": "Write bounded input to a turn-owned process without trimming or normalization. For exactly one trailing LF, either use input without the LF and append_newline=true, or include the LF in input and omit append_newline/set it false. Combining a final LF in input with true sends two LFs, not one. This is an effect and invalidates older workspace evidence.",
+      "parameters": [
+        {
+          "pointer": "/properties/input",
+          "description": "Exact UTF-8 text to write without trimming or normalization. If input already contains the requested final LF, omit append_newline or set it false."
+        },
+        {
+          "pointer": "/properties/append_newline",
+          "description": "When true, always append one LF byte (0x0A), even if input already ends in LF. To send exactly one final LF use {\"input\":\"hello\",\"append_newline\":true} or {\"input\":\"hello\\n\",\"append_newline\":false}. Including LF in input with true sends two LFs; use that only when two are requested."
+        }
+      ],
+      "examples": [
+        {
+          "label": "Syntax only; Append exactly one requested LF",
+          "arguments": {
+            "process_id": "observed-process-id",
+            "input": "hello",
+            "append_newline": true
+          }
+        }
+      ]
+    },
+    {
+      "capability_id": "workspace.process",
+      "action_id": "workspace.process/close_stdin",
+      "description": "Close stdin for a turn-owned process and then poll it for a terminal observation.",
+      "parameters": [],
+      "examples": [
+        {
+          "label": "Syntax only; Close the observed pipe input",
+          "arguments": {
+            "process_id": "observed-process-id"
+          }
+        }
+      ]
+    },
+    {
+      "capability_id": "workspace.process",
+      "action_id": "workspace.process/resize",
+      "description": "Resize the PTY of a turn-owned interactive process.",
+      "parameters": [],
+      "examples": [
+        {
+          "label": "Syntax only; Resize the observed PTY",
+          "arguments": {
+            "process_id": "observed-process-id",
+            "cols": 120,
+            "rows": 40
+          }
+        }
+      ]
+    },
+    {
+      "capability_id": "workspace.process",
+      "action_id": "workspace.process/cancel",
+      "description": "Cancel a turn-owned process and obtain cleanup evidence. For an explicit stop request, state=cancelled with cleanup.reaped=true is successful stop evidence, not a task failure; cancellation is not rollback.",
+      "parameters": [],
+      "examples": [
+        {
+          "label": "Syntax only; Cancel the exact observed process",
+          "arguments": {
+            "process_id": "observed-process-id"
+          }
+        }
+      ]
+    },
+    {
+      "capability_id": "workspace.artifacts",
+      "action_id": "workspace.artifacts/read",
+      "description": "Read one bounded page of an exact Session artifact by content-addressed identity.",
+      "parameters": [
+        {
+          "pointer": "/properties/artifact_id",
+          "description": "Copy the exact artifact ID from an actual Session artifact receipt. Never invent a digest, compute one from remembered content, or copy a documentation placeholder."
+        }
+      ],
+      "examples": []
+    },
+    {
+      "capability_id": "workspace.artifacts",
+      "action_id": "workspace.artifacts/publish",
+      "description": "Publish a workspace file to the Session artifact owner with an optional exact source digest.",
+      "parameters": [
+        {
+          "pointer": "/properties/path",
+          "description": "Exact workspace-relative path. Copy the user's supplied relative path without prepending a project or conversation display name. Use '.' for root instruction discovery; do not invent another project folder or compensate with mkdir. The admitted workspace context supplies the actual bound root."
+        }
+      ],
+      "examples": [
+        {
+          "label": "Syntax only; Publish the requested workspace file",
+          "arguments": {
+            "path": "reports/report.pdf"
+          }
+        }
+      ]
+    },
+    {
+      "capability_id": "workspace.vcs",
+      "action_id": "workspace.vcs/commit",
+      "description": "Create a commit from the staged workspace changes.",
+      "parameters": [],
+      "examples": [
+        {
+          "label": "Syntax only; Commit only the staged accepted change",
+          "arguments": {
+            "message": "Update notes"
+          }
+        }
+      ]
+    },
+    {
+      "capability_id": "workspace.vcs",
+      "action_id": "workspace.vcs/push",
+      "description": "Publish an explicit refspec to an already configured local/file Git remote. Requires the Agent's workspace.vcs/push grant. Network SSH/HTTPS credentials, force push and ref deletion are unavailable. A timeout or unknown outcome is not permission to retry; inspect platform effect history. Do not push unless the user's task authorizes publication.",
+      "parameters": [],
+      "examples": [
+        {
+          "label": "Syntax only; Publish only the explicitly authorized refspec",
+          "arguments": {
+            "remote": "origin",
+            "refspec": "HEAD:refs/heads/main",
+            "force": false
+          }
+        }
+      ]
+    }
+  ]
+}
