@@ -216,3 +216,101 @@ test('an official editor read failure exposes an error and cannot use its immuta
   expect(hook.result.current.capabilities.actionIds.size).toBe(0);
   expect(hook.result.current.capabilities.requiredResourceKinds.size).toBe(0);
 });
+
+test.each([false, true])('compact editor wire defaults preserve capabilities with an empty model default (saved=%s)', async saved => {
+  const preset = summary(saved ? 1 : undefined);
+  const wireDocument: Partial<AgentPresetDocument> = extendedDocument();
+  delete wireDocument.chat_route_records;
+  delete wireDocument.system_role_provider_overrides;
+  delete wireDocument.starter_prompts;
+  const response = editor(preset, wireDocument as AgentPresetDocument);
+  const originalResponse = structuredClone(response);
+  const getEditor = spyOn(agentPlatform.getEditor, 'invoke').mockResolvedValue(response);
+  const prepare = spyOn(agentPlatform.createFromTemplate, 'invoke');
+  const save = spyOn(agentPlatform.saveRevision, 'invoke');
+  spyOn(console, 'error').mockImplementation(() => {});
+  const hook = mount(preset);
+  await waitFor(() => expect(hook.result.current.capabilities.isLoading).toBe(false));
+  expect(hook.result.current.capabilities.error).toBeUndefined();
+  expect(hook.result.current.capabilities.defaultModel).toBeNull();
+  expect(hook.result.current.capabilities.actionIds).toEqual(new Set(['platform.remote-review/read']));
+  expect(hook.result.current.capabilities.requiredResourceKinds).toEqual(new Set(['customer']));
+  expect(hook.result.current.capabilities.idmm.mode).toBe('rule_only');
+  expect(response).toEqual(originalResponse);
+  expect('chat_route_records' in (response.revision?.document ?? response.draft.document)).toBe(false);
+  expect(getEditor).toHaveBeenCalledTimes(1);
+  expect(prepare).not.toHaveBeenCalled();
+  expect(save).not.toHaveBeenCalled();
+});
+
+test('normalizing compact wire defaults preserves a configured model and the untouched editor response', async () => {
+  const preset = summary(1);
+  const wireDocument: Partial<AgentPresetDocument> = setDefaultModel(extendedDocument(), 'configured-model');
+  delete wireDocument.system_role_provider_overrides;
+  delete wireDocument.starter_prompts;
+  const response = editor(preset, wireDocument as AgentPresetDocument);
+  const originalResponse = structuredClone(response);
+  spyOn(agentPlatform.getEditor, 'invoke').mockResolvedValue(response);
+  const hook = mount(preset);
+  await waitFor(() => expect(hook.result.current.capabilities.isLoading).toBe(false));
+  expect(hook.result.current.capabilities.error).toBeUndefined();
+  expect(hook.result.current.capabilities.defaultModel).toEqual({
+    provider_id: '0190f5fe-7c00-7a00-8000-000000000201', model: 'configured-model',
+  });
+  expect(hook.result.current.capabilities.actionIds).toEqual(new Set(['platform.remote-review/read']));
+  expect(response).toEqual(originalResponse);
+  expect('system_role_provider_overrides' in response.revision!.document).toBe(false);
+});
+
+test.each(['preset editor', 'Agent catalog'] as const)('a failed %s read can be retried without saving or preparing an Agent', async source => {
+  const preset = summary(1);
+  const response = editor(preset, setDefaultModel(extendedDocument(), 'saved-model'));
+  const failure = new Error('Configuration temporarily unavailable');
+  const getEditor = spyOn(agentPlatform.getEditor, 'invoke').mockResolvedValue(response);
+  const getCatalog = spyOn(agentPlatform.catalog, 'invoke').mockResolvedValue({ modules: catalog, capabilities: [], skills: [], mcp_tools: [], roles: [] });
+  const log = spyOn(console, 'error').mockImplementation(() => {});
+  const prepare = spyOn(agentPlatform.createFromTemplate, 'invoke');
+  const save = spyOn(agentPlatform.saveRevision, 'invoke');
+  if (source === 'preset editor') getEditor.mockRejectedValueOnce(failure);
+  else getCatalog.mockRejectedValueOnce(failure);
+  const hook = mount(preset);
+  await waitFor(() => expect(hook.result.current.capabilities.error).toBe(failure));
+  expect(hook.result.current.capabilities.defaultModel).toBeNull();
+  expect(hook.result.current.capabilities.actionIds.size).toBe(0);
+  expect(log.mock.calls[0][1]).toEqual({ presetId: officialId, revisionDigest: preset.current_stable_revision!.revision_digest, failedRequest: source });
+
+  let resolveEditor!: (response: AgentPresetEditorResponse) => void;
+  getEditor.mockImplementationOnce(() => new Promise(resolve => { resolveEditor = resolve; }));
+  act(() => hook.result.current.capabilities.refresh());
+  expect(hook.result.current.capabilities.isLoading).toBe(true);
+  expect(hook.result.current.capabilities.error).toBeUndefined();
+  expect(hook.result.current.capabilities.defaultModel).toBeNull();
+  await act(async () => { resolveEditor(response); });
+  await waitFor(() => expect(hook.result.current.capabilities.isLoading).toBe(false));
+  expect(hook.result.current.capabilities.error).toBeUndefined();
+  expect(hook.result.current.capabilities.actionIds).toEqual(new Set(['platform.remote-review/read']));
+  expect(hook.result.current.capabilities.defaultModel?.model).toBe('saved-model');
+  expect(getEditor).toHaveBeenCalledTimes(2);
+  expect(getCatalog).toHaveBeenCalledTimes(2);
+  expect(prepare).not.toHaveBeenCalled();
+  expect(save).not.toHaveBeenCalled();
+});
+
+test('a late failure from an earlier read cannot undo a successful explicit retry', async () => {
+  const preset = summary(1);
+  let rejectEarlier!: (error: Error) => void;
+  const getEditor = spyOn(agentPlatform.getEditor, 'invoke')
+    .mockImplementationOnce(() => new Promise((_, reject) => { rejectEarlier = reject; }))
+    .mockResolvedValue(editor(preset, setDefaultModel(extendedDocument(), 'saved-model')));
+  const log = spyOn(console, 'error').mockImplementation(() => {});
+  const hook = mount(preset);
+  expect(hook.result.current.capabilities.isLoading).toBe(true);
+  act(() => hook.result.current.capabilities.refresh());
+  await waitFor(() => expect(hook.result.current.capabilities.defaultModel?.model).toBe('saved-model'));
+  await act(async () => { rejectEarlier(new Error('Late failed request')); });
+  expect(hook.result.current.capabilities.defaultModel?.model).toBe('saved-model');
+  expect(hook.result.current.capabilities.error).toBeUndefined();
+  expect(hook.result.current.capabilities.isLoading).toBe(false);
+  expect(getEditor).toHaveBeenCalledTimes(2);
+  expect(log).not.toHaveBeenCalled();
+});

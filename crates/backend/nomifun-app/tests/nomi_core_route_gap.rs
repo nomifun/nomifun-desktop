@@ -4165,6 +4165,66 @@ async fn official_template_creation_requires_explicit_persistence_intent() {
 }
 
 #[tokio::test]
+async fn official_agent_read_surfaces_load_on_the_full_product_graph_without_a_model() {
+    const TRUST: &str = "official-agent-read-surfaces";
+    async fn call(router: axum::Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+        let response = router.oneshot(Request::builder().method(method).uri(path)
+            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let (status, catalog) = call(router.clone(), "GET", "/api/agent-catalog", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "full host catalog failed: {catalog}");
+    let modules = catalog["data"]["modules"].as_array().unwrap();
+    assert!(!modules.is_empty(), "the product fixture must use the real module catalog");
+    let (status, library) = call(router.clone(), "GET", "/api/agent-preset-templates?source=official", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "official Agent library failed: {library}");
+    for (key, preset) in library["data"]["official_presets"].as_object().unwrap() {
+        let id = preset["preset_id"].as_str().unwrap();
+        let (status, editor) = call(router.clone(), "GET", &format!("/api/agent-presets/{id}/editor"), json!({})).await;
+        assert_eq!(status, StatusCode::OK, "official {key} capability defaults failed: {editor}");
+        assert_eq!(editor["data"]["draft"]["source_template_key"], key.as_str());
+        assert!(editor["data"]["revision"].is_null(), "reading {key} must not prepare a saved Revision");
+        assert_eq!(editor["data"]["draft"]["document"]["model_route_refs"], json!({}),
+            "reading {key} must not require or select a model");
+        let document = editor["data"]["draft"]["document"].as_object().unwrap();
+        for field in ["chat_route_records", "system_role_provider_overrides", "starter_prompts", "context_order", "middleware_order"] {
+            assert!(!document.contains_key(field), "{key}: the real compact editor wire omits empty {field}; renderer reads must normalize its documented default");
+        }
+    }
+    let (status, created) = call(router.clone(), "POST", "/api/companion/companions", json!({
+        "name": "Read-only Agent options", "character": "ink"
+    })).await;
+    assert_eq!(status, StatusCode::CREATED, "Companion creation failed: {created}");
+    let id = created["data"]["companion_id"].as_str().unwrap();
+    let path = format!("/api/product-agent-bindings/companion/{id}");
+    let (status, options) = call(router.clone(), "GET", &path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "Companion Agent options failed: {options}");
+    assert_eq!(options["data"]["selection"], json!({ "kind": "template", "template_key": "companion.default" }));
+    assert_eq!(options["data"]["needs_model"], true);
+    let companion_option = options["data"]["options"].as_array().unwrap().iter()
+        .find(|option| option["selection"]["template_key"] == "companion.default").unwrap();
+    assert_eq!(companion_option["available"], true, "the shipped Companion must remain selectable before model configuration: {companion_option}");
+    let provider = create_chat_provider(&router, TRUST, "Read-only model", "read-surfaces-chat", 0).await;
+    let (status, with_model) = call(router.clone(), "GET", &format!("{path}?provider_id={}&model=read-surfaces-chat",
+        provider["provider_id"].as_str().unwrap()), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "model-scoped Companion options failed: {with_model}");
+    assert_eq!(with_model["data"]["selection"], options["data"]["selection"]);
+    assert_eq!(with_model["data"]["needs_model"], false);
+    let companion_option = with_model["data"]["options"].as_array().unwrap().iter()
+        .find(|option| option["selection"]["template_key"] == "companion.default").unwrap();
+    assert_eq!(companion_option["available"], true, "missing optional native resources must not block the normal Companion: {companion_option}");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_preset_revisions")
+        .fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(count, 0, "these real host reads must not create executable Agent revisions");
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
 async fn product_agent_selection_precedes_models_and_reports_host_capability_availability() {
     const TRUST: &str = "product-selection-preflight";
     async fn call(router: axum::Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
@@ -4190,8 +4250,8 @@ async fn product_agent_selection_precedes_models_and_reports_host_capability_ava
         assert_eq!(reloaded["data"]["selection"], chosen);
         paths.push(path);
     }
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_presets").fetch_one(services.database.pool()).await.unwrap();
-    assert_eq!(count, 0, "model-free selection must not allocate executable presets or select a default model");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_preset_revisions").fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(count, 0, "model-free selection may initialize editable official identities but must not allocate executable revisions or select a default model");
     let upstream = wiremock::MockServer::start().await;
     let (status, provider) = call(router.clone(), "POST", "/api/providers", json!({
         "platform": "stepfun-plan", "name": "Preflight StepFun",
@@ -4208,16 +4268,16 @@ async fn product_agent_selection_precedes_models_and_reports_host_capability_ava
         let (status, options) = call(router.clone(), "GET", &query, json!({})).await;
         assert_eq!(status, StatusCode::OK, "{options}");
         let general = options["data"]["options"].as_array().unwrap().iter().find(|item| item["selection"]["template_key"] == "assistant.general").unwrap();
-        assert_eq!(general["available"], false, "{general}");
-        assert_eq!(general["reason"], "capability", "the headless route fixture has no native Browser resource owner");
+        assert_eq!(general["available"], true, "{general}");
+        assert!(general["reason"].is_null(), "optional Browser and Computer resources must not block the remaining General Agent tools");
         let coding = options["data"]["options"].as_array().unwrap().iter().find(|item| item["selection"]["template_key"] == "coding.codex").unwrap();
         assert_eq!(coding["available"], true, "{coding}");
         assert!(coding["reason"].is_null(), "{coding}");
         let (_, after) = call(router.clone(), "GET", path, json!({})).await;
         assert_eq!(after["data"]["selection"], chosen, "availability checks must not change the saved Agent");
     }
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_presets").fetch_one(services.database.pool()).await.unwrap();
-    assert_eq!(count, 0, "availability checks must not allocate executable presets");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_preset_revisions").fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(count, 0, "availability checks must not allocate executable Agent revisions");
     let coding = json!({ "kind": "template", "template_key": "coding.codex" });
     for path in &paths {
         let (status, saved) = call(router.clone(), "PUT", path, json!({
@@ -4840,6 +4900,119 @@ async fn save_companion_core_agent_for_fixture(router: axum::Router) {
             "expected_current_revision":original_editor["data"]["revision"]["reference"], "draft":core_draft,
         })).await;
     assert_eq!(status, StatusCode::OK, "{saved_core}");
+}
+
+#[tokio::test]
+async fn companion_options_survive_a_first_launch_selection_default_save_failure() {
+    let call = companion_agent_test_request;
+    let (router, services) = common::build_local_trust_app(COMPANION_AGENT_TEST_TRUST).await;
+    common::materialize_builtin_skills_for_fixture(&services).await;
+    save_companion_core_agent_for_fixture(router.clone()).await;
+    let (_, library) = call(router.clone(), "GET", "/api/agent-preset-templates", json!({})).await;
+    let official_id = library["data"]["official_presets"]["companion.default"]["preset_id"].as_str().unwrap();
+    let (_, editor) = call(router.clone(), "GET", &format!("/api/agent-presets/{official_id}/editor"), json!({})).await;
+    let (status, personal) = call(router.clone(), "POST", "/api/agent-presets", json!({
+        "display_name": "Personal first-launch companion",
+        "document": editor["data"]["draft"]["document"],
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{personal}");
+    let personal_id = personal["data"]["preset"]["preset_id"].as_str().unwrap();
+    let provider = create_chat_provider(&router, COMPANION_AGENT_TEST_TRUST, "First-launch selection", "first-launch-chat", 0).await;
+    let model = json!({ "provider_id": provider["provider_id"], "model": "first-launch-chat" });
+    let (status, companion) = call(router.clone(), "POST", "/api/companion/companions", json!({
+        "name": "Partially saved personal Agent", "character": "ink",
+    })).await;
+    assert_eq!(status, StatusCode::CREATED, "{companion}");
+    let companion_id = companion["data"]["companion_id"].as_str().unwrap();
+    let path = format!("/api/product-agent-bindings/companion/{companion_id}");
+    sqlx::query("CREATE TRIGGER fixture_first_launch_default_failure BEFORE INSERT ON product_agent_selections BEGIN SELECT RAISE(FAIL, 'fixture first-launch default write failure'); END")
+        .execute(services.database.pool()).await.unwrap();
+    let selection = json!({ "kind": "preset", "preset_id": personal_id });
+    let (status, partial) = call(router.clone(), "PUT", &path, json!({ "selection": selection, "model": model })).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{partial}");
+    let bindings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_bindings WHERE target_kind = 'companion' AND target_id = ?")
+        .bind(companion_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(bindings, 1, "a first-launch default failure can leave a real saved executable binding");
+    sqlx::query("DROP TRIGGER fixture_first_launch_default_failure").execute(services.database.pool()).await.unwrap();
+    let artifacts_before: (i64, i64) = sqlx::query_as("SELECT (SELECT COUNT(*) FROM agent_preset_revisions), (SELECT COUNT(*) FROM agent_runtime_snapshots)")
+        .fetch_one(services.database.pool()).await.unwrap();
+    let (status, before_launch_options) = call(router.clone(), "GET", &path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "the partially saved default must remain explicitly recoverable before launch: {before_launch_options}");
+    assert!(before_launch_options["data"]["selection"].is_null(), "an internal execution variant must not appear as the editable personal Agent");
+    let artifacts_after: (i64, i64) = sqlx::query_as("SELECT (SELECT COUNT(*) FROM agent_preset_revisions), (SELECT COUNT(*) FROM agent_runtime_snapshots)")
+        .fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(artifacts_after, artifacts_before, "reading recovery options must not prepare executable revisions or snapshots");
+    let (status, patched) = call(router.clone(), "PATCH", &format!("/api/companion/companions/{companion_id}"), json!({ "model": model })).await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    let (status, thread) = call(router.clone(), "POST", &format!("/api/companion/companions/{companion_id}/companion/threads"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    let session_id = thread["data"]["conversation_id"].as_str().unwrap();
+    const RETAINED_INPUT: &str = "Preserve this accepted input when explicitly restoring the Agent choice";
+    let (status, accepted) = call(router.clone(), "POST", &format!("/api/agent-sessions/{session_id}/turns"), json!({
+        "idempotency_key": uuid::Uuid::now_v7().to_string(),
+        "input": { "content": RETAINED_INPUT, "inject_skills": ["fixture-unselected-skill"] },
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    let operation = accepted["data"]["operation_id"].as_str().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let state: String = sqlx::query_scalar("SELECT state FROM agent_turns WHERE session_id = ? AND operation_id = ?")
+                .bind(session_id).bind(operation).fetch_one(services.database.pool()).await.unwrap();
+            if state == "failed" { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }).await.expect("the known pre-model Skill rejection must settle before explicit Agent recovery");
+    let failure_json: String = sqlx::query_scalar("SELECT error_json FROM agent_turns WHERE session_id = ? AND operation_id = ?")
+        .bind(session_id).bind(operation).fetch_one(services.database.pool()).await.unwrap();
+    let failure: Value = serde_json::from_str(&failure_json).unwrap();
+    assert_eq!(failure["model_steps"], 0, "the deliberate Skill rejection must precede any provider request");
+    assert_eq!(failure["error"]["code"], "NOMIFUN_STATE_INCONSISTENT");
+    assert!(failure["error"]["detail"].as_str().unwrap().contains("requested Skill is not in this Agent Snapshot"),
+        "an unrelated preparation failure must not stand in for the deliberate rejection: {failure}");
+    let (status, before_history) = call(router.clone(), "GET", &format!("/api/agent-sessions/{session_id}/message-history?page_size=50"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{before_history}");
+    assert!(before_history.to_string().contains(RETAINED_INPUT), "the fixture must contain real canonical input history");
+    let (status, before) = call(router.clone(), "GET", &format!("/api/agent-sessions/{session_id}"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    let (status, options) = call(router.clone(), "GET", &path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "a valid current-generation binding must not block explicit Agent recovery: {options}");
+    assert!(options["data"]["selection"].is_null(), "an unprovable authored source must not become a guessed template or hidden cache ID: {options}");
+    assert!(options["data"]["options"].as_array().unwrap().iter().any(|option|
+        option["selection"] == selection && option["available"] == true), "the original editable Agent must remain an explicit recovery candidate");
+    let (status, after) = call(router.clone(), "GET", &format!("/api/agent-sessions/{session_id}"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    assert_eq!(after["data"]["session"]["agent_binding"], before["data"]["session"]["agent_binding"],
+        "listing recovery options must preserve the frozen Agent and Session history");
+    let (status, repaired) = call(router.clone(), "PUT", &path, json!({ "selection": selection, "model": model })).await;
+    assert_eq!(status, StatusCode::OK, "explicitly choosing the personal Agent must repair its future default: {repaired}");
+    assert_eq!(repaired["data"]["conversation"]["conversation_id"], session_id);
+    let (status, repaired_session) = call(router.clone(), "GET", &format!("/api/agent-sessions/{session_id}"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{repaired_session}");
+    assert_eq!(repaired_session["data"]["session"]["agent_binding"]["typed_resource_bindings"],
+        before["data"]["session"]["agent_binding"]["typed_resource_bindings"]);
+    assert_eq!(repaired["data"]["conversation"]["model"]["provider_id"], model["provider_id"]);
+    assert_eq!(repaired["data"]["conversation"]["model"]["model"], model["model"]);
+    let transitions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id = ? AND kind = 'session/agent-binding-changed'")
+        .bind(session_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(transitions, 1, "the user's explicit choice must establish one canonical Agent transition");
+    let (status, after_history) = call(router.clone(), "GET", &format!("/api/agent-sessions/{session_id}/message-history?page_size=50"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{after_history}");
+    for retained in before_history["data"]["items"].as_array().unwrap() {
+        assert_eq!(after_history["data"]["items"].as_array().unwrap().iter()
+            .find(|message| message["message_id"] == retained["message_id"]), Some(retained),
+            "explicit recovery must preserve each existing canonical history item alongside its new transition notice");
+    }
+    let (status, options) = call(router.clone(), "GET", &path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{options}");
+    assert_eq!(options["data"]["selection"], selection);
+    let snapshot_id = repaired_session["data"]["session"]["agent_binding"]["resolved_snapshot_ref"]["snapshot_id"].as_str().unwrap();
+    sqlx::query("UPDATE agent_runtime_snapshots SET envelope_json = '{}' WHERE snapshot_id = ?")
+        .bind(snapshot_id).execute(services.database.pool()).await.unwrap();
+    let (status, damaged) = call(router.clone(), "GET", &path, json!({})).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "supported storage damage must not become a nullable authoring origin: {damaged}");
+    assert_eq!(damaged["code"], "PRESET_REVISION_SAVE_FAILED");
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
 }
 
 #[tokio::test]

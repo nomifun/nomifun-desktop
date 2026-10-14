@@ -3155,17 +3155,7 @@ fn kernel_error_to_app(error: nomifun_agent_kernel::KernelError) -> AppError {
 fn control_plane_error_to_app(
     error: nomifun_agent_control_plane::ControlPlaneError,
 ) -> AppError {
-    let message = format!("{}: {error}", error.code().as_ref());
-    match error.status() {
-        StatusCode::BAD_REQUEST => AppError::BadRequest(message),
-        StatusCode::FORBIDDEN => AppError::Forbidden(message),
-        StatusCode::NOT_FOUND => AppError::NotFound(message),
-        StatusCode::CONFLICT => AppError::Conflict(message),
-        StatusCode::UNPROCESSABLE_ENTITY => {
-            AppError::UnprocessableEntity(message)
-        }
-        _ => AppError::Internal(message),
-    }
+    super::state::control_plane_error_to_app(error)
 }
 
 fn idmm_config_from_runtime_policy(
@@ -8341,7 +8331,10 @@ struct ProductAgentOption {
 
 #[derive(Debug, Serialize)]
 struct ProductAgentOptions {
-    selection: ProductAgentSelection,
+    // A valid frozen product Session may outlive an authored default that
+    // failed to save. Its hidden execution cache cannot prove an editable
+    // Agent choice; keep the Session and offer explicit recovery candidates.
+    selection: Option<ProductAgentSelection>,
     options: Vec<ProductAgentOption>,
     needs_model: bool,
 }
@@ -8404,32 +8397,42 @@ async fn product_agent_options(
     let active_companion_selection = if kind == "companion" {
         if let Some(session_id) = companion_product_session(&state, &owner, &id).await? {
             let _operation_fence = state.session_owner.session_operation_lock(&session_id).read_owned().await;
-            let session = state.session_owner.canonical().get(&authenticated_principal(&owner), &parse_agent_session_id(&session_id)?).await?;
-            let binding = agent_binding_dto(&session.session.agent_binding)?;
+            let session = state.session_owner.canonical().session_record(&authenticated_principal(&owner), &parse_agent_session_id(&session_id)?).await?;
+            let binding = agent_binding_dto(&session.agent_binding)?;
             let (_, template) = state.control_plane.saved_binding_presentation(&owner, &binding).await?;
-            match companion_agent_transition_selection(&state, &session_id, &candidates).await? {
-                Some(selection) => Some(selection),
-                None => Some(saved_selection.clone().or_else(|| template.map(|template|
-                    ProductAgentSelection::Template { template_key: template.as_str().to_owned() }))
-                    .ok_or_else(|| NomiCoreApiError::new(StatusCode::CONFLICT,
-                        "COMPANION_AGENT_SELECTION_UNAVAILABLE", "The active Companion Agent's authoring selection cannot be proved"))?),
-            }
+            // The outer Some means an active Session was validated. Its
+            // absent authoring origin must remain absent; it cannot fall
+            // through to a template or an internal Preset cache identity.
+            Some(companion_agent_transition_selection(&state, &session_id, &candidates).await?
+                .or_else(|| saved_selection.clone())
+                .or_else(|| template.map(|template| ProductAgentSelection::Template {
+                    template_key: template.as_str().to_owned(),
+                })))
         } else { None }
     } else { None };
-    let selection = match active_companion_selection.or(saved_selection) {
+    let selection = match active_companion_selection {
         Some(selection) => selection,
-        None => match state.control_plane.get_agent_binding(&owner, kind.clone(), id.clone()).await? {
-            Some(record) => {
-                let id = record.agent_binding.preset_revision_ref.preset_id;
-                match state.control_plane.internal_official_template(&owner, &id).await.unwrap_or(None) {
-                    Some(key) => ProductAgentSelection::Template { template_key: key.as_str().to_owned() },
-                    None => ProductAgentSelection::Preset { preset_id: id },
+        None => match saved_selection {
+            Some(selection) => Some(selection),
+            None => match state.control_plane.get_agent_binding(&owner, kind.clone(), id.clone()).await? {
+                Some(record) => {
+                    let (_, template) = state.control_plane.saved_binding_presentation(&owner, &record.agent_binding).await?;
+                    let id = record.agent_binding.preset_revision_ref.preset_id;
+                    match template {
+                        Some(key) => Some(ProductAgentSelection::Template { template_key: key.as_str().to_owned() }),
+                        // A public owned Preset is itself an editable choice.
+                        // A hidden execution variant has no such provenance.
+                        None => library.user_presets.iter().any(|preset| preset.preset_id == id)
+                            .then_some(ProductAgentSelection::Preset { preset_id: id }),
+                    }
                 }
-            }
-            None => ProductAgentSelection::Template { template_key: default.to_owned() },
+                None => Some(ProductAgentSelection::Template { template_key: default.to_owned() }),
+            },
         },
     };
-    if !candidates.iter().any(|(candidate, _)| candidate == &selection) {
+    if let Some(selection) = selection.as_ref()
+        && !candidates.iter().any(|(candidate, _)| candidate == selection)
+    {
         let name = match selection.preset_id() {
             Some(id) => state.control_plane.editor(&owner, id, None).await.map(|editor| editor.preset.display_name).unwrap_or_default(),
             None => String::new(),

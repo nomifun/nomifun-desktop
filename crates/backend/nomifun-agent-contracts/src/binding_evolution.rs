@@ -71,6 +71,8 @@ pub fn validate_model_only_revision_derivation(
 /// Exact schemas and artifacts may change, but grants, effects, resources,
 /// dependency graph, provider mounts and runtime requirements may not. MCP,
 /// managed packages and Skill content must remain exact.
+/// Previously absent Action resource metadata may be completed only by
+/// retaining the entire former Module gate and constraining its operations.
 pub fn validate_bundled_contract_evolution(
     source_revision: &AgentPresetRevision,
     source: &ResolvedSnapshotEnvelope,
@@ -401,6 +403,21 @@ fn validate_capability_evolution(
             .ok_or_else(|| rejected("contract evolution introduced an action"))?;
         action.input_schema = original.input_schema.clone();
         action.output_schema = original.output_schema.clone();
+        // Older current-generation publications omitted the exact Action
+        // resource contract. Their fallback was the complete Module gate. An
+        // explicit contract can complete that metadata only when it retains
+        // every former resource slot. Its operation checks then add constraints
+        // on the same bindings, never authorize new resources or operations.
+        // Dropping a slot (including an empty map on a resource-backed Module)
+        // would bypass the former gate. Existing exact maps and their removal
+        // remain frozen, even when a different map appears more restrictive.
+        if source.required_resource_kinds == target.required_resource_kinds
+            && original.required_resource_operations.is_none()
+            && action.required_resource_operations.as_ref().is_some_and(|requirements|
+                requirements.keys().eq(source.required_resource_kinds.iter()))
+        {
+            action.required_resource_operations = None;
+        }
     }
     if &normalized != source {
         return Err(rejected(format!("capability {} changed authority, effects, resources, dependencies or provenance", source.capability.id.as_ref())));

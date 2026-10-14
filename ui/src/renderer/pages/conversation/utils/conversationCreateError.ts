@@ -7,6 +7,7 @@
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { parseError } from '@/common/utils';
 import type { TFunction } from 'i18next';
+import { conversationConfigurationErrorCode } from './conversationConfigurationError';
 
 type WorkspacePathErrorCode =
   | 'WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED'
@@ -99,13 +100,8 @@ const getWorkspacePathErrorPayload = (error: unknown): EmbeddedBackendErrorPaylo
 };
 
 const getConversationConfigurationErrorKey = (payload: EmbeddedBackendErrorPayload | undefined): string | undefined => {
-  const code = 'AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED';
-  const matches = payload?.code === code || (
-    payload?.code === 'CONFLICT'
-    && typeof payload.error === 'string'
-    && /^(?:Conflict:\s*)?AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED(?:\s*:|$)/.test(payload.error)
-  );
-  return matches ? `conversation.agentError.codes.${code}.body` : undefined;
+  const code = conversationConfigurationErrorCode(payload);
+  return code ? `conversation.agentError.codes.${code}.body` : undefined;
 };
 
 const getWorkspacePathFromErrorDetails = (error: unknown): string | undefined => {

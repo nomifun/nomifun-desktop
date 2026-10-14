@@ -9,6 +9,8 @@ import enConversation from '@/renderer/services/i18n/locales/en-US/conversation.
 import zhConversation from '@/renderer/services/i18n/locales/zh-CN/conversation.json';
 import enCommon from '@/renderer/services/i18n/locales/en-US/common.json';
 import ConversationErrorNote from './ConversationErrorNote';
+import { BackendHttpError } from '@/common/adapter/httpBridge';
+import { conversationRequestError } from '../../utils/conversationRequestError';
 
 afterEach(() => { cleanup(); mock.restore(); });
 
@@ -23,6 +25,20 @@ async function mount(error: AgentStreamErrorInfo, language = 'en-US') {
   /></I18nextProvider>);
   return { ...result, page: within(result.container) };
 }
+
+test.each(['en-US', 'zh-CN'])('an HTTP contract rejection displays actionable configuration guidance in %s', async language => {
+  const locale = language === 'zh-CN' ? zhConversation : enConversation;
+  const detail = 'Conflict: AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED: capability agent.tool-discovery changed authority, effects, resources, dependencies or provenance';
+  const error = new BackendHttpError({ method: 'POST', path: '/api/agent-sessions/session-1/turns', status: 409,
+    body: { code: 'CONFLICT', error: detail } });
+  const { page } = await mount(conversationRequestError(error, 'CONVERSATION_SEND_FAILED'), language);
+  expect(page.getByRole('alert').textContent).toBe(locale.agentError.codes.AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED.title);
+  expect(page.getByText(locale.agentError.codes.AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED.body).closest('[hidden]')).toBeNull();
+  expect(page.queryByText(locale.agentError.codes.CONVERSATION_SEND_FAILED.body)).toBeNull();
+  expect(page.getByText(detail).closest('[hidden]')).not.toBeNull();
+  fireEvent.click(page.getByRole('button', { name: locale.agentError.expandDetails }));
+  expect(page.getByRole('region').textContent).toContain(detail);
+});
 
 test.each(['en-US', 'zh-CN'])('distinct key, quota, permission, endpoint and transport evidence replaces generic copy in %s', async language => {
   const locale = language === 'zh-CN' ? zhConversation : enConversation;

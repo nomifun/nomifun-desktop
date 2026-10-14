@@ -15,6 +15,29 @@ test('request presentation preserves structured classification and exact path wi
   expect(conversationRequestError(new Error('Opaque upstream text'), 'CONVERSATION_SEND_FAILED').code).toBe('CONVERSATION_SEND_FAILED');
 });
 
+test.each(['CONFLICT', 'AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED'])('the exact configuration rejection in a %s envelope keeps its code and technical detail', code => {
+  const detail = 'Conflict: AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED: capability agent.tool-discovery changed authority, effects, resources, dependencies or provenance';
+  const error = new BackendHttpError({ method: 'POST', path: '/api/agent-sessions/session-1/turns', status: 409,
+    body: { code, error: detail } });
+  expect(conversationRequestError(error, 'CONVERSATION_SEND_FAILED')).toEqual({
+    message: detail, detail, code: 'AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED', retryable: false,
+  });
+});
+
+test.each([
+  ['CONFLICT', 'Conflict: supplied text contains AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED'],
+  ['CONFLICT', 'Conflict: AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED_EXAMPLE: quoted tag'],
+  ['BAD_GATEWAY', 'AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED: provider supplied text'],
+  ['CONFLICT', '"AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED: quoted tag"'],
+])('unrelated %s detail cannot manufacture a configuration rejection: %s', (code, detail) => {
+  const error = new BackendHttpError({ method: 'POST', path: '/api/agent-sessions/session-1/turns', status: 409,
+    body: { code, error: detail } });
+  const classified = conversationRequestError(error, 'CONVERSATION_SEND_FAILED');
+  expect(classified.code).toBe('CONVERSATION_SEND_FAILED');
+  expect(classified.detail).toBe(detail);
+  expect(classified.retryable).toBe(false);
+});
+
 test('only the newly admitted matching request replaces its HTTP fallback with the canonical error', () => {
   const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000061');
   const turnId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000062');

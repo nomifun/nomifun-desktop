@@ -8,7 +8,7 @@ import { Message } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
 import { BackendHttpError } from '@/common/adapter/httpBridge';
 import type { IProvider, TChatConversation } from '@/common/config/storage';
-import type { ProductAgentOptions } from '@/common/types/agentPlatform';
+import type { ProductAgentOptions, ProductAgentSelectionResult } from '@/common/types/agentPlatform';
 import { parseCompanionId, parseConversationId, parseProviderId } from '@/common/types/ids';
 import * as taskModels from '@/renderer/hooks/agent/useModelsForTask';
 import CompanionAgentModelQuickSettings from './CompanionAgentModelQuickSettings';
@@ -143,7 +143,7 @@ test('closing the sidebar during a model save releases its parent lock and refre
 
 test('closing the sidebar during an Agent save releases its parent lock', async () => {
   install();
-  let resolveSelect!: (saved: { selection: ProductAgentOptions['selection']; needs_model: boolean }) => void;
+  let resolveSelect!: (saved: ProductAgentSelectionResult) => void;
   const selected = spyOn(ipcBridge.agentPlatform.selectProductBinding, 'invoke').mockImplementation(() => new Promise((resolve) => { resolveSelect = resolve; }));
   restores.push(() => selected.mockRestore());
   const saving: boolean[] = [];

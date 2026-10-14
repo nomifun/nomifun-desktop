@@ -443,7 +443,8 @@ export type ProductAgentSelection =
 export type ProductAgentUnavailableReason = 'web_search' | 'vision' | 'model' | 'capability' | 'companion' | 'removed';
 
 export interface ProductAgentOptions {
-  selection: ProductAgentSelection;
+  /** Null only when an active Session's editable Agent origin cannot be proved. */
+  selection: ProductAgentSelection | null;
   needs_model: boolean;
   options: Array<{
     selection: ProductAgentSelection;

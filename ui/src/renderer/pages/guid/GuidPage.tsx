@@ -30,7 +30,7 @@ import {
   resolveAgentResourceSelections,
   type AgentResourceSelectionValue,
 } from '@/renderer/hooks/agent/agentResourceSelection';
-import { Alert, ConfigProvider } from '@arco-design/web-react';
+import { Alert, Button, ConfigProvider } from '@arco-design/web-react';
 import React, {
   useCallback,
   useEffect,
@@ -726,6 +726,9 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
                 showIcon
                 title={t('common.error')}
                 content={t('agentSettings.errors.presetCapabilitiesLoadFailed')}
+                action={<Button size='small' onClick={presetCapabilities.refresh}>
+                  {t('agentSettings.actions.retry')}
+                </Button>}
                 className={styles.guidPresetCapabilityError}
               />
             )}

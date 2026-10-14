@@ -129,6 +129,17 @@ impl Fixture {
             provider.provider.role.contract_digest = digest_payload(&"previous bundled role").unwrap();
             provider.provider.contribution_digest = digest_payload(&"previous bundled provider").unwrap();
         }
+        // The immediately preceding current-generation publisher did not
+        // encode per-Action resource operations. Its exact execution ceiling
+        // was the complete owning module resource-kind set, including the
+        // empty set for hidden tool discovery. Exercise the real forward
+        // transition for every Action, rather than merely changing an input
+        // schema on one already-normalized capability.
+        for capability in &mut previous.content.enabled_capabilities {
+            for action in &mut capability.actions {
+                action.required_resource_operations = None;
+            }
+        }
         let latest: i64 = sqlx::query_scalar("SELECT MAX(revision_no) FROM agent_preset_revisions WHERE preset_id=?")
             .bind(reference.preset_id.as_ref()).fetch_one(pool).await.unwrap();
         revision.reference.revision = u64::try_from(latest).unwrap() + 1;
@@ -288,6 +299,8 @@ impl Fixture {
 #[tokio::test]
 async fn bundled_contract_evolution_prepares_warmup_send_and_model_with_canonical_history() {
     let fixture = Fixture::new(false).await;
+    assert!(fixture.previous.content.enabled_capabilities.iter().flat_map(|capability| &capability.actions)
+        .all(|action| action.required_resource_operations.is_none()));
     for trigger in ["warmup", "send", "model"] {
         let id = fixture.old_session(false).await;
         let session_id = id.as_ref();
@@ -354,7 +367,7 @@ async fn bundled_contract_evolution_cannot_adopt_managed_source_drift() {
     ] {
         let (status, error) = response(&fixture.router, method, &format!("/api/agent-sessions/{session_id}/{endpoint}"), body).await;
         assert_eq!(status, StatusCode::CONFLICT, "{endpoint}: {error}");
-        assert!(error.to_string().contains("AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED"), "{error}");
+        assert_eq!(error["code"], "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED", "{endpoint}: {error}");
         assert_eq!(fixture.store.get_live_session(&id).await.unwrap().agent_binding, fixture.old_binding);
         assert_eq!(fixture.transitions(&id).await, 0);
     }

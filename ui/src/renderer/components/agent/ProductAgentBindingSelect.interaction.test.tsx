@@ -32,6 +32,8 @@ await i18n.init({ lng: 'en', keySeparator: false, resources: { en: { translation
   'agentSettings.productBinding.customTag': 'Custom',
   'agentSettings.productBinding.reasons.removed': 'This Agent was removed',
   'agentSettings.productBinding.currentUnavailable': 'Current Agent is unavailable: {{reason}}',
+  'agentSettings.productBinding.selectionNeeded': 'Choose an Agent setup',
+  'agentSettings.productBinding.selectionNeededHint': 'Confirm this conversation’s Agent setup by choosing the Agent to use. Existing conversation records are preserved.',
 } } } });
 const restores: Array<() => void> = [];
 afterEach(() => { cleanup(); restores.splice(0).reverse().forEach((restore) => restore()); });
@@ -43,6 +45,92 @@ const initial: ProductAgentOptions = {
     { selection: { kind: 'template', template_key: 'assistant.general' }, display_name: '', available: false, reason: 'web_search' },
   ],
 };
+
+test.each([false, true])('an unproved current Agent permits an explicit choice without guessing or applying a default (compact=%s)', async compact => {
+  const companionId = '019b0000-0000-7000-8000-000000000011';
+  const conversationId = parseConversationId('019b0000-0000-7000-8000-000000000012');
+  const providerId = parseProviderId('019b0000-0000-7000-8000-000000000013');
+  const personal = { kind: 'preset' as const, preset_id: '019b0000-0000-7000-8000-000000000014' };
+  let state: ProductAgentOptions = { ...structuredClone(initial), selection: null, needs_model: false,
+    options: [initial.options[0], { selection: personal, display_name: 'Recovered personal Agent', available: true, reason: null }],
+  };
+  const options = spyOn(agentPlatform.productBindingOptions, 'invoke').mockImplementation(async () => state);
+  const save = spyOn(agentPlatform.selectProductBinding, 'invoke').mockImplementation(async ({ request }) => {
+    state = { ...state, selection: request.selection };
+    return { selection: request.selection, needs_model: false };
+  });
+  const success = spyOn(Message, 'success').mockImplementation(() => () => {});
+  for (const spy of [options, save, success]) restores.push(() => spy.mockRestore());
+  let changed = 0;
+  const view = render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><MemoryRouter><I18nextProvider i18n={i18n}>
+    <ProductAgentBindingSelect compact={compact} targetKind='companion' targetId={companionId}
+      defaultTemplateKey='companion.default' model={{ id: providerId, use_model: 'model-a' }}
+      conversationId={conversationId} onChanged={() => { changed++; }} />
+  </I18nextProvider></MemoryRouter></SWRConfig>);
+  await waitFor(() => expect(view.getByRole('status').textContent).toBe('Confirm this conversation’s Agent setup by choosing the Agent to use. Existing conversation records are preserved.'));
+  expect(save).not.toHaveBeenCalled();
+  expect(view.container.querySelector('[data-agent-origin]')).toBeNull();
+  expect(view.queryByRole('link', { name: 'Edit Agent' })).toBeNull();
+  expect(view.queryByText('Apply latest setup')).toBeNull();
+  const trigger = compact
+    ? view.getByRole('button', { name: 'Agent setup: Choose an Agent setup' })
+    : view.container.querySelector('.arco-select')!;
+  if (!compact) expect(view.container.querySelector('.arco-select-view')?.textContent).toContain('Choose an Agent setup');
+  fireEvent.click(trigger);
+  expect(await view.findByText('Companion')).toBeTruthy();
+  expect(view.queryByText('Apply latest setup')).toBeNull();
+  fireEvent.click(await view.findByText('Recovered personal Agent'));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(save.mock.calls[0][0]).toEqual({ target_kind: 'companion', target_id: companionId,
+    request: { selection: personal, model: { provider_id: providerId, model: 'model-a' }, conversation_id: conversationId },
+  });
+  await waitFor(() => expect(changed).toBe(1));
+  await waitFor(() => expect(view.queryByRole('status')).toBeNull());
+  if (compact) {
+    fireEvent.click(await view.findByRole('button', { name: 'Agent setup: Recovered personal Agent' }));
+  } else {
+    await waitFor(() => expect(view.container.querySelector('.arco-select-view')?.textContent).toContain('Recovered personal Agent'));
+  }
+  const edit = await view.findByRole('link', { name: 'Edit Agent' });
+  expect(edit.getAttribute('href')).toBe(`/agent?preset=${personal.preset_id}`);
+  expect(await view.findByText('Apply latest setup')).toBeTruthy();
+});
+
+test.each([false, true])('a partial save with an unproved origin retries the explicitly chosen Agent (compact=%s)', async compact => {
+  const personal = { kind: 'preset' as const, preset_id: 'explicit-companion' };
+  let state: ProductAgentOptions = { ...structuredClone(initial), selection: null, needs_model: false,
+    options: [initial.options[0], { selection: personal, display_name: 'Explicit personal Agent', available: true, reason: null }],
+  };
+  const options = spyOn(agentPlatform.productBindingOptions, 'invoke').mockImplementation(async () => state);
+  const save = spyOn(agentPlatform.selectProductBinding, 'invoke').mockImplementation(async ({ request }) => {
+    if (save.mock.calls.length === 1) throw new BackendHttpError({ method: 'PUT', path: '/api/product-agent-bindings/companion/test', status: 500,
+      body: { code: 'COMPANION_AGENT_DEFAULT_SAVE_FAILED', error: 'private storage diagnostic' } });
+    state = { ...state, selection: request.selection };
+    return { selection: request.selection, needs_model: false };
+  });
+  const toast = spyOn(Message, 'error').mockImplementation(() => () => {});
+  const success = spyOn(Message, 'success').mockImplementation(() => () => {});
+  for (const spy of [options, save, toast, success]) restores.push(() => spy.mockRestore());
+  const view = render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><MemoryRouter><I18nextProvider i18n={i18n}>
+    <ProductAgentBindingSelect compact={compact} targetKind='companion' targetId='unproved-companion'
+      defaultTemplateKey='companion.default' />
+  </I18nextProvider></MemoryRouter></SWRConfig>);
+  const trigger = compact
+    ? await view.findByRole('button', { name: 'Agent setup: Choose an Agent setup' })
+    : await waitFor(() => { const node = view.container.querySelector('.arco-select'); expect(node).toBeTruthy(); return node!; });
+  fireEvent.click(trigger);
+  fireEvent.click(await view.findByText('Explicit personal Agent'));
+  await waitFor(() => expect(view.getByRole('alert').textContent).toContain('Current conversation updated; retry saving the default setup'));
+  expect(view.queryByText('Apply latest setup')).toBeNull();
+  expect(view.queryByRole('link', { name: 'Edit Agent' })).toBeNull();
+  expect(view.container.textContent).not.toContain('private storage diagnostic');
+  fireEvent.click(view.getByRole('button', { name: 'Retry' }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+  expect(save.mock.calls.map(([request]) => request.request.selection)).toEqual([personal, personal]);
+  await waitFor(() => expect(success).toHaveBeenCalledTimes(1));
+  expect(view.queryByRole('button', { name: 'Retry' })).toBeNull();
+  expect(view.queryByRole('status')).toBeNull();
+});
 
 test('compact product Agent selector updates a product binding with its existing session', async () => {
   let state = { ...structuredClone(initial), needs_model: false };

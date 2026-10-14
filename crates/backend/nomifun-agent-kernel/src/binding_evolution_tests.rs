@@ -144,12 +144,166 @@ fn bundled_evolution_accepts_forward_schemas_but_rejects_authority_and_source_dr
             },
             8 => { capability.contribution_lock.source_identity = "another-lock-owner".into(); },
             9 => { capability.actions[0].required_resource_operations.get_or_insert_with(BTreeMap::new).insert(
-                SAMPLE_RESOURCE_KIND.into(), BTreeSet::from(["new-operation".to_owned()]),
+                "another-resource".into(), BTreeSet::from(["new-operation".to_owned()]),
             ); },
             _ => unreachable!(),
         };
         refresh_snapshot(&mut invalid);
         assert!(validate_bundled_contract_evolution(&revision, &source, &target_revision, &invalid).is_err(), "case {case}");
+    }
+}
+
+#[test]
+fn bundled_evolution_accepts_an_equivalent_explicit_resource_free_action_contract() {
+    let policy = MaterializationPolicy::stable(VERSION);
+    let mut original_registration = bundled_registration();
+    let original_manifest = &mut original_registration.metadata.manifest.payload.contributions.capabilities[0];
+    original_manifest.contributions.resource_kinds.clear();
+    original_manifest.contributions.actions[0].effect_class = EffectClass::Pure;
+    original_manifest.contributions.actions[0].presentation = ToolPresentationKind::Hidden;
+    refresh_manifest(&mut original_registration);
+    let registry = Materializer::materialize(&policy, &[original_registration.clone()], 1).unwrap();
+    let revision = revision_for(&registry);
+    let source = AgentPresetCompiler::compile(&registry, &compiler_environment(registry.registry_digest.clone()),
+        compile_request(revision.clone(), principal("binding-owner"))).unwrap();
+    assert!(source.action_resources_bound(&SAMPLE_CAPABILITY.into(), &SAMPLE_ACTION.into()).unwrap());
+
+    let mut current_registration = original_registration;
+    current_registration.metadata.manifest.payload.contributions.capabilities[0].contributions.actions[0]
+        .required_resource_operations = Some(BTreeMap::new());
+    refresh_manifest(&mut current_registration);
+    let current = Materializer::materialize(&policy, &[current_registration], 2).unwrap();
+    let mut candidate_revision = revision.clone();
+    candidate_revision.reference.preset_id = "resource-free-publication".into();
+    update_direct_locks(&mut candidate_revision, &current);
+    let candidate = AgentPresetCompiler::compile(&current, &compiler_environment(current.registry_digest.clone()),
+        compile_request(candidate_revision.clone(), principal("binding-owner"))).unwrap();
+    assert!(candidate.action_resources_bound(&SAMPLE_CAPABILITY.into(), &SAMPLE_ACTION.into()).unwrap());
+    assert_ne!(source.content().enabled_capabilities, candidate.content().enabled_capabilities,
+        "the forward publication is a new immutable executable contract");
+    validate_bundled_contract_evolution(&revision, &source.envelope, &candidate_revision, &candidate.envelope).unwrap();
+    let infrastructure = BTreeSet::from([CapabilityId::from(SAMPLE_CAPABILITY)]);
+    validate_session_extension_derivation(&revision, &source.envelope, &candidate_revision,
+        &candidate.envelope, &infrastructure, &infrastructure).unwrap();
+    assert!(validate_bundled_contract_evolution(&candidate_revision, &candidate.envelope, &revision, &source.envelope).is_err(),
+        "removing a published exact resource contract is not forward metadata completion");
+
+    for case in 0..5 {
+        let mut invalid = candidate.envelope.clone();
+        let capability = &mut invalid.content.enabled_capabilities[0];
+        match case {
+            0 => capability.actions[0].effect_class = EffectClass::ExternalTransmit,
+            1 => capability.actions[0].presentation = ToolPresentationKind::FunctionTool,
+            2 => capability.resolved_source.source_identity = "another-publisher".into(),
+            3 => capability.source_package.version = "2.0.0".into(),
+            4 => capability.actions[0].required_resource_operations = Some(BTreeMap::from([
+                (SAMPLE_RESOURCE_KIND.into(), BTreeSet::from(["read".to_owned()])),
+            ])),
+            _ => unreachable!(),
+        }
+        refresh_snapshot(&mut invalid);
+        assert!(validate_bundled_contract_evolution(&revision, &source.envelope, &candidate_revision, &invalid).is_err(),
+            "case {case}: metadata completion cannot change execution authority or publisher identity");
+        assert!(validate_session_extension_derivation(&revision, &source.envelope, &candidate_revision,
+            &invalid, &infrastructure, &infrastructure).is_err(),
+            "case {case}: retained discovery infrastructure keeps the same authority fence");
+    }
+}
+
+#[test]
+fn bundled_evolution_can_complete_the_full_resource_gate_and_only_restrict_operations() {
+    let policy = MaterializationPolicy::stable(VERSION);
+    let original_registration = bundled_registration();
+    let registry = Materializer::materialize(&policy, &[original_registration.clone()], 1).unwrap();
+    let revision = revision_for(&registry);
+    let owner = principal("binding-owner");
+    let source = AgentPresetCompiler::compile(&registry, &compiler_environment(registry.registry_digest.clone()),
+        compile_request(revision.clone(), owner.clone())).unwrap();
+    let mut current_registration = original_registration;
+    current_registration.metadata.manifest.payload.contributions.capabilities[0].contributions.actions[0]
+        .required_resource_operations = Some(BTreeMap::from([
+            (SAMPLE_RESOURCE_KIND.into(), BTreeSet::from(["read".to_owned()])),
+        ]));
+    refresh_manifest(&mut current_registration);
+    let current = Materializer::materialize(&policy, &[current_registration], 2).unwrap();
+    let mut candidate_revision = revision.clone();
+    candidate_revision.reference.preset_id = "complete-resource-publication".into();
+    update_direct_locks(&mut candidate_revision, &current);
+    let candidate = AgentPresetCompiler::compile(&current, &compiler_environment(current.registry_digest.clone()),
+        compile_request(candidate_revision.clone(), owner.clone())).unwrap();
+    validate_bundled_contract_evolution(&revision, &source.envelope, &candidate_revision, &candidate.envelope).unwrap();
+    let infrastructure = BTreeSet::from([CapabilityId::from(SAMPLE_CAPABILITY)]);
+    validate_session_extension_derivation(&revision, &source.envelope, &candidate_revision,
+        &candidate.envelope, &infrastructure, &infrastructure).unwrap();
+    assert!(!source.action_resources_bound(&SAMPLE_CAPABILITY.into(), &SAMPLE_ACTION.into()).unwrap());
+    assert!(!candidate.action_resources_bound(&SAMPLE_CAPABILITY.into(), &SAMPLE_ACTION.into()).unwrap(),
+        "the completed contract keeps the former missing-resource gate");
+
+    for has_read in [false, true] {
+        let mut binding = resource_binding("binding-owner");
+        if has_read { binding.operations.insert("read".to_owned()); }
+        let original_bound = source.clone().with_target_resource_bindings(&owner, vec![binding.clone()]).unwrap();
+        let current_bound = candidate.clone().with_target_resource_bindings(&owner, vec![binding]).unwrap();
+        let original_active = SessionCapabilityState::new(&original_bound).snapshot().unwrap();
+        let current_active = SessionCapabilityState::new(&current_bound).snapshot().unwrap();
+        assert!(matches!(ThinAuthority::authorize(&original_bound, &original_active,
+            &invocation(&original_bound, owner.clone(), original_active.generation, "original grant")),
+            nomifun_agent_contracts::RuntimeAuthorityDecision::Allow));
+        let decision = ThinAuthority::authorize(&current_bound, &current_active,
+            &invocation(&current_bound, owner.clone(), current_active.generation, "completed contract"));
+        assert_eq!(matches!(decision, nomifun_agent_contracts::RuntimeAuthorityDecision::Allow), has_read,
+            "new metadata constrains operations on the same owned binding rather than granting them");
+    }
+    for changed_contract in [None, Some(BTreeMap::from([
+        (SAMPLE_RESOURCE_KIND.into(), BTreeSet::from(["read".to_owned(), "write".to_owned()])),
+    ]))] {
+        let mut invalid = candidate.envelope.clone();
+        invalid.content.enabled_capabilities[0].actions[0].required_resource_operations = changed_contract;
+        refresh_snapshot(&mut invalid);
+        assert!(validate_bundled_contract_evolution(&candidate_revision, &candidate.envelope,
+            &candidate_revision, &invalid).is_err(), "an already exact resource contract cannot be changed or removed");
+    }
+}
+
+#[test]
+fn bundled_evolution_cannot_complete_resource_metadata_by_bypassing_a_module_gate() {
+    let policy = MaterializationPolicy::stable(VERSION);
+    let mut original_registration = bundled_registration();
+    original_registration.metadata.manifest.payload.contributions.capabilities[0].contributions.resource_kinds
+        .insert("another-original-resource".into());
+    refresh_manifest(&mut original_registration);
+    let registry = Materializer::materialize(&policy, &[original_registration.clone()], 1).unwrap();
+    let revision = revision_for(&registry);
+    let source = AgentPresetCompiler::compile(&registry, &compiler_environment(registry.registry_digest.clone()),
+        compile_request(revision.clone(), principal("binding-owner"))).unwrap();
+    assert!(!source.action_resources_bound(&SAMPLE_CAPABILITY.into(), &SAMPLE_ACTION.into()).unwrap());
+    let infrastructure = BTreeSet::from([CapabilityId::from(SAMPLE_CAPABILITY)]);
+    for empty_contract in [true, false] {
+        let mut current_registration = original_registration.clone();
+        current_registration.metadata.manifest.payload.contributions.capabilities[0].contributions.actions[0]
+            .required_resource_operations = Some(if empty_contract { BTreeMap::new() } else {
+                BTreeMap::from([(SAMPLE_RESOURCE_KIND.into(), BTreeSet::from(["read".to_owned()]))])
+            });
+        refresh_manifest(&mut current_registration);
+        let current = Materializer::materialize(&policy, &[current_registration], 2).unwrap();
+        let mut candidate_revision = revision.clone();
+        candidate_revision.reference.preset_id = "resource-backed-publication".into();
+        update_direct_locks(&mut candidate_revision, &current);
+        let candidate = AgentPresetCompiler::compile(&current, &compiler_environment(current.registry_digest.clone()),
+            compile_request(candidate_revision.clone(), principal("binding-owner"))).unwrap();
+        let mut partial_binding = resource_binding("binding-owner");
+        partial_binding.operations.insert("read".to_owned());
+        let owner = principal("binding-owner");
+        let original_bound = source.clone().with_target_resource_bindings(&owner, vec![partial_binding.clone()]).unwrap();
+        let candidate_bound = candidate.clone().with_target_resource_bindings(&owner, vec![partial_binding]).unwrap();
+        assert!(!original_bound.action_resources_bound(&SAMPLE_CAPABILITY.into(), &SAMPLE_ACTION.into()).unwrap());
+        assert!(candidate_bound.action_resources_bound(&SAMPLE_CAPABILITY.into(), &SAMPLE_ACTION.into()).unwrap(),
+            "an empty or partial Action contract would actually bypass the former missing-resource gate");
+        assert!(validate_bundled_contract_evolution(&revision, &source.envelope,
+            &candidate_revision, &candidate.envelope).is_err(), "completing metadata must preserve the complete former gate");
+        assert!(validate_session_extension_derivation(&revision, &source.envelope, &candidate_revision,
+            &candidate.envelope, &infrastructure, &infrastructure).is_err(),
+            "an extension change cannot authorize bypassing retained infrastructure's resources");
     }
 }
 

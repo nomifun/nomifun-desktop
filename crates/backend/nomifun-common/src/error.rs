@@ -23,6 +23,13 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    /// A safe forward contract transition could not preserve frozen authority.
+    #[error("{message}")]
+    SessionContractEvolutionRejected {
+        message: String,
+        details: Option<Value>,
+    },
+
     #[error("Component {0} is missing. Install it on the system or explicitly choose to download it, then retry.")]
     ComponentPreparationRequired(String),
 
@@ -112,6 +119,7 @@ impl AppError {
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::SessionContractEvolutionRejected { .. } => StatusCode::CONFLICT,
             Self::ComponentPreparationRequired(_) => StatusCode::CONFLICT,
             Self::ComponentUnavailable { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::SessionConfigurationChanged(_) => StatusCode::CONFLICT,
@@ -147,6 +155,7 @@ impl AppError {
                 }
             }
             Self::Conflict(_) => "CONFLICT",
+            Self::SessionContractEvolutionRejected { .. } => "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED",
             Self::ComponentPreparationRequired(_) => "COMPONENT_PREPARATION_REQUIRED",
             Self::ComponentUnavailable { .. } => "COMPONENT_UNAVAILABLE",
             Self::SessionConfigurationChanged(_) => "NOMIFUN_SESSION_CONFIGURATION_CHANGED",
@@ -200,6 +209,7 @@ impl AppError {
                 Some(workspace_directory_details(path, "runtime"))
             }
             Self::ProviderInUse(details) => Some(json!({ "usages": details.usages })),
+            Self::SessionContractEvolutionRejected { details, .. } => details.clone(),
             Self::ComponentPreparationRequired(component) => {
                 Some(json!({ "component": component, "phase": "runtime_preparation" }))
             }
@@ -311,6 +321,21 @@ impl std::fmt::Display for ErrorChain<'_> {
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn session_contract_rejection_preserves_typed_code_and_details() {
+        let details = json!({ "capability": "workspace.files" });
+        let response = AppError::SessionContractEvolutionRejected {
+            message: "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED: changed resource authority".into(),
+            details: Some(details.clone()),
+        }.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED");
+        assert_eq!(body["details"], details);
+        assert!(body["error"].as_str().unwrap().contains("changed resource authority"));
+    }
 
     #[tokio::test]
     async fn component_preparation_required_has_a_typed_conflict_response() {

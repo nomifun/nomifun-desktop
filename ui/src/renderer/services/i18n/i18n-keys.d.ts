@@ -456,6 +456,8 @@ export type I18nKey =
   | 'agentSettings.productBinding.reasons.web_search'
   | 'agentSettings.productBinding.saveFailed'
   | 'agentSettings.productBinding.saved'
+  | 'agentSettings.productBinding.selectionNeeded'
+  | 'agentSettings.productBinding.selectionNeededHint'
   | 'agentSettings.productBinding.unavailableAgent'
   | 'agentSettings.providers.defaultsHint'
   | 'agentSettings.providers.defaultsLoadError'

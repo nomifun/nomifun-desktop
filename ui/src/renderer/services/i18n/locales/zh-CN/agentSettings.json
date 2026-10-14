@@ -87,10 +87,12 @@
     "chooseModelLater": "可先选择 Agent，再配置兼容的对话模型。",
     "loadFailed": "暂时无法读取 Agent 选项，请重试。",
     "saveFailed": "Agent 未能更新，请稍后重试。",
-    "partialSave": "当前会话已更新，但默认设定未能保存。请点击“应用最新设定”重试。",
+    "partialSave": "当前会话已更新，但默认设定未能保存。请重试保存这次选择。",
     "modelChanged": "当前模型与此 Agent 不兼容，选项已刷新，请重新选择。",
     "busy": "请等待当前回复结束后再切换 Agent。",
     "unavailableAgent": "不可用的 Agent",
+    "selectionNeeded": "请选择 Agent 设定",
+    "selectionNeededHint": "当前 Agent 设定需要重新确认。请选择要使用的 Agent，已有会话记录会保留。",
     "currentUnavailable": "当前 Agent 暂不可用：{{reason}}。请更换模型或 Agent。",
     "reasons": {
       "web_search": "当前模型未提供所需的联网搜索能力",

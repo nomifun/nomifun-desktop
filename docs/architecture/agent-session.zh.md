@@ -127,6 +127,8 @@ provider 诊断。未测量的信息缺省，不能补造为零；prompt、响�
 组件补造。取消单个会话的准备等待不取消其他会话共享的供应任务。此接缝不新增会话表、事件类型、
 绑定账本或 checkpoint；输入 schema 的发布使用现有空闲契约演进，旧 Snapshot、历史和 Skill 锁不改写。
 
+当前代旧发布未声明 Action 的 `required_resource_operations` 时，执行使用整个所属模块的资源槽准入。补充精确操作合同只有在新 map 的键完整保留新旧相同的 `required_resource_kinds` 时才可自动演进：原资源绑定身份和准入仍存在，新操作检查仅增加限制。无资源动作的缺省声明与空 map 同样成立。删除或新增资源槽、改变或移除已有精确 map，以及效果、权限、依赖和来源变化仍拒绝；失败通过确切 `AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED` 错误码传到发送界面，不泛化为未知发送失败。
+
 ### 模型提案验证与有界纠正
 
 模型参数尚未形成合法 JSON 对象时，记录的是未准入提案，不是工具执行失败。各协议 Adapter
@@ -399,7 +401,7 @@ SSH 会话的主机身份直接来自当前 `agent_snapshot.canonical_binding.ty
 
 官方 Agent 为每个 owner 保留稳定可编辑的 Preset 身份，保存通过同一不可变 Revision 链；发布 seed 只初始化尚未保存的配置，不覆盖用户修改。官方产品入口准备会话时读取该 owner 已保存的配置，模型或扩展变体仍由现有 Revision/Snapshot 路径冻结。官方身份由 host 验证的 owner、来源与稳定模板 key 确认，不以当前 seed 或最新可变配置的 payload 相等性判断历史身份。
 
-Agent 工作台的默认模型是可空的预设配置。选择器读取已启用的 Chat 模型目录，以供应商与模型身份向 Host 请求确切路由；解析候选不保存 Revision，也不改变 Session。选择或清空默认值通过原有 SaveRevision 与 CAS 保存，不把安装默认模型自动写入明确提交的空配置。新建会话页从所选 Agent 的同一已保存文档读取默认模型，仅用于当前选择，不写入安装默认值；用户随后明确选择的模型优先。创建会话时，界面中选定的模型由既有 Session 模型派生路径冻结；执行模型要求不因作者配置可空而放宽，已有 Revision、Snapshot 与会话历史不改写。
+Agent 工作台的默认模型是可空的预设配置。选择器读取已启用的 Chat 模型目录，以供应商与模型身份向 Host 请求确切路由；解析候选不保存 Revision，也不改变 Session。选择或清空默认值通过原有 SaveRevision 与 CAS 保存，不把安装默认模型自动写入明确提交的空配置。新建会话页从所选 Agent 的同一已保存文档读取默认模型，先通过现役预设文档边界还原接口省略的合法空字段，不把空模型误判为能力读取失败；仅用于当前选择，不写入安装默认值，用户随后明确选择的模型优先。真正的读取失败提供显式只读重试，等待期间继续阻止发送，不借模板或缓存补造已保存权限。创建会话时，界面中选定的模型由既有 Session 模型派生路径冻结；执行模型要求不因作者配置可空而放宽，已有 Revision、Snapshot 与会话历史不改写。
 
 内置 Agent 的会话名称来自 host 验证的 `official_template_key` 与统一翻译；创作入口统一显示“创作”。隐藏配置保留 host 写入的稳定模板 key，个人副本保持独立身份。浏览器创作草稿只保存媒体输入，不镜像 Agent 身份或名称；名称修正不改写不可变 Revision、Snapshot、Session binding 或事件历史。
 
@@ -432,6 +434,8 @@ Cron、Companion、Requirements、AutoWork、IDMM 和 AgentExecution 可以保�
 模型与扩展派生可能把执行 binding 指向隐藏的 Session-only Preset，它不能替代用户原先选择的可编辑 Agent 身份。选择器通过现有 typed Agent transition 的 `request_digest` 验证原始选择命令，不按名称或相似配置猜测来源，也不增加来源绑定账本。初次创建前保存的产品选择仍是创作意图；编辑个人 Agent 后须显式应用最新设定，才改变当前 Session 的冻结版本。
 
 保存伙伴 Agent 选择时，服务端在同一 Session owner 的操作围栏内验证目标归属、当前 binding 版本、可用模型与能力、资源完整性及运行清理。已有空闲 Session 使用现有 `session/agent-binding-changed` 事务切换，保留 Session 身份、当前模型、已选扩展和可继续使用的资源；旧 Revision、Snapshot 和历史事件不可改写。伙伴产品默认值供后续创建使用，不能代替当前 Session 的 canonical binding，也不能由 UI 投影补造已生效状态。已提交切换后默认值持久化失败时，API 明确报告当前设定已生效，并允许显式重试默认值保存。活动或暂停 Turn、Remote / Attempt 绑定、未结算效果、仍在运行的进程和待处理恢复继续阻断切换；切换不重放旧 checkpoint、工具或完成账本。
+
+首次伙伴绑定已提交但默认选择保存失败后，合法冻结产品绑定或会话可能没有可证明的可编辑 Agent 来源。选项查询仍校验 Session、存储和冻结配置；只在来源确实无法证明时返回 `selection: null` 与可选的兼容 Agent，不猜测官方模板、不丢弃当前绑定，也不把存储损坏伪装成未选择。用户明确重选后沿用同一切换事务恢复可编辑来源，保留原 Session、模型、资源和历史。该可空选项响应使用 UI/API contract version 30，阻止旧前端把缺失的来源当作已选 Agent。
 
 AgentExecution 的正常结算、重启恢复与人工采纳通过同一个 Session 输出查询读取精确 Turn 的终态、正文和工具效果。查询在同一事务中只解析该 Turn 的事件窗口，不扫描整个 Session 的历史。正文限于该 Turn 的 canonical assistant 内容，不能读取 UI 投影、推理文本或后续 Turn。产物来自该 Turn 已结算的文件操作或发布回执，并验证工作区身份、路径、字节数与摘要；目录扫描、模型声称已保存和旧工具展示 marker 都不是产物证据。同路径的后续写入、修改和删除按事件顺序决定最终可交付状态。
 

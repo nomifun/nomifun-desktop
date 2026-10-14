@@ -993,6 +993,12 @@ impl nomifun_cron::CronAgentPresetResolver for NomiCoreCronAgentPresetResolver {
 }
 
 pub(super) fn control_plane_error_to_app(error: nomifun_agent_control_plane::ControlPlaneError) -> AppError {
+    if error.code().as_ref() == nomifun_agent_contracts::SESSION_CONTRACT_EVOLUTION_REJECTED {
+        return AppError::SessionContractEvolutionRejected {
+            message: format!("{}: {error}", error.code().as_ref()),
+            details: error.details(),
+        };
+    }
     let mut message = format!("{}: {error}", error.code().as_ref());
     // Preserve compiler explanations across the product-domain adapter. The
     // outer preset error alone cannot identify an incompatible capability.
@@ -2111,6 +2117,20 @@ mod tests {
         let mapped = control_plane_error_to_app(error);
         assert_eq!(mapped.status_code(), StatusCode::UNPROCESSABLE_ENTITY);
         assert!(mapped.to_string().contains("MCP owner paths cannot be mixed"));
+    }
+
+    #[test]
+    fn session_contract_errors_keep_the_canonical_conflict_code() {
+        let details = serde_json::json!({ "capability": "agent.tool-discovery" });
+        let error = nomifun_agent_control_plane::ControlPlaneError::with_details(
+            nomifun_agent_contracts::SESSION_CONTRACT_EVOLUTION_REJECTED,
+            StatusCode::CONFLICT, "changed resource authority", details.clone(),
+        );
+        let mapped = control_plane_error_to_app(error);
+        assert_eq!(mapped.status_code(), StatusCode::CONFLICT);
+        assert_eq!(mapped.error_code(), nomifun_agent_contracts::SESSION_CONTRACT_EVOLUTION_REJECTED);
+        assert_eq!(mapped.error_details(), Some(details));
+        assert!(mapped.to_string().contains("changed resource authority"));
     }
 
     #[test]

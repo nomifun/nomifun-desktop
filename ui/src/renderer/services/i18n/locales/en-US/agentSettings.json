@@ -87,10 +87,12 @@
     "chooseModelLater": "Choose an Agent first, then configure a compatible chat model.",
     "loadFailed": "Could not load Agent options. Please retry.",
     "saveFailed": "Could not update the Agent. Please try again later.",
-    "partialSave": "The current conversation was updated, but the default setup could not be saved. Retry with Apply latest setup.",
+    "partialSave": "The current conversation was updated, but the default setup could not be saved. Retry saving this selection.",
     "modelChanged": "The current model is incompatible with this Agent. Options have been refreshed; please select again.",
     "busy": "Wait for the current reply to finish before switching Agents.",
     "unavailableAgent": "Unavailable Agent",
+    "selectionNeeded": "Choose an Agent setup",
+    "selectionNeededHint": "Confirm the Agent setup by choosing the Agent to use. Existing conversation records are preserved.",
     "currentUnavailable": "Current Agent unavailable: {{reason}}. Choose another model or Agent.",
     "reasons": {
       "web_search": "The current model does not provide the required web search capability",

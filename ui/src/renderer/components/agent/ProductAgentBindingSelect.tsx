@@ -70,7 +70,7 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
 
   const change = async (value: string, applyLatest = false) => {
     const option = data?.options.find((option) => productSelectionValue(option.selection) === value);
-    if (disabled || savingRef.current || !option?.available || !data || (!applyLatest && value === productSelectionValue(data.selection))) return;
+    if (disabled || savingRef.current || !option?.available || !data || (!applyLatest && data.selection && value === productSelectionValue(data.selection))) return;
     savingRef.current = true;
     setSaving(true);
     onSavingChange?.(true);
@@ -111,14 +111,17 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
     <Button size='mini' onClick={() => void mutate()}>{t('agentSettings.actions.retry')}</Button>
   </div>;
   if (isLoading || !data) return <Spin size={14} />;
-  const selected = data.options.find((option) => productSelectionValue(option.selection) === productSelectionValue(data.selection));
+  const selection = data.selection;
+  const selectedValue = selection ? productSelectionValue(selection) : undefined;
+  const selected = data.options.find((option) => productSelectionValue(option.selection) === selectedValue);
   const selectedName = selected
     ? nameFor(selected)
-    : t('agentSettings.productBinding.unavailableAgent');
-  const canApplyLatest = targetKind === 'companion';
-  const editPath = data.selection.kind === 'template'
-    ? `/agent?template=${encodeURIComponent(data.selection.template_key)}`
-    : `/agent?preset=${encodeURIComponent(data.selection.preset_id)}`;
+    : t(selection ? 'agentSettings.productBinding.unavailableAgent' : 'agentSettings.productBinding.selectionNeeded');
+  const selectionNeededHint = !selection ? t('agentSettings.productBinding.selectionNeededHint') : undefined;
+  const canApplyLatest = targetKind === 'companion' && Boolean(selection);
+  const editPath = selection?.kind === 'template'
+    ? `/agent?template=${encodeURIComponent(selection.template_key)}`
+    : selection?.kind === 'preset' ? `/agent?preset=${encodeURIComponent(selection.preset_id)}` : undefined;
   const canEdit = canApplyLatest && selected && selected.reason !== 'removed';
   const options = targetKind === 'companion'
     ? data.options.filter((option) => option.reason !== 'companion' && option.reason !== 'removed')
@@ -134,8 +137,14 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
   const currentUnavailable = selected && !selected.available
     ? t('agentSettings.productBinding.currentUnavailable', { reason: t(`agentSettings.productBinding.reasons.${selected.reason ?? 'capability'}`) })
     : undefined;
+  const retryValue = retrySelection ? productSelectionValue(retrySelection) : undefined;
+  const retryAction = retryValue && (!showManagementActions || !canApplyLatest)
+    ? <Button size='mini' type='text' loading={saving} disabled={disabled || saving}
+      onClick={() => void change(retryValue, true)}>{t('agentSettings.actions.retry')}</Button>
+    : null;
   if (compact) return (
-    <Tooltip content={currentUnavailable ?? t('agentSettings.productBinding.companionHint')}>
+    <span className='inline-flex min-w-0 flex-col gap-4px'>
+    <Tooltip content={currentUnavailable ?? selectionNeededHint ?? t('agentSettings.productBinding.companionHint')}>
       <span className='inline-flex min-w-0'>
       <Dropdown trigger='click' disabled={disabled || saving} droplist={
         <Menu className={styles.menu}>
@@ -150,11 +159,11 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
               {!option.available && <small className={styles.reason}>{t(`agentSettings.productBinding.reasons.${option.reason ?? 'capability'}`)}</small>}
             </span>
           </Menu.Item>)}
-          {showManagementActions && canEdit && <Menu.Item key='edit-agent'>
+          {showManagementActions && canEdit && editPath && <Menu.Item key='edit-agent'>
             <Link to={editPath}>{t('agentSettings.productBinding.editAgent')}</Link>
           </Menu.Item>}
           {showManagementActions && canApplyLatest && <Menu.Item key='apply-latest' disabled={!selected?.available} aria-disabled={!selected?.available}
-            onClick={() => void change(productSelectionValue(data.selection), true)}>
+            onClick={() => { if (selectedValue) void change(selectedValue, true); }}>
             {t('agentSettings.productBinding.applyLatest')}
           </Menu.Item>}
         </Menu>
@@ -173,16 +182,21 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
       </Dropdown>
       </span>
     </Tooltip>
+    {selectionNeededHint && <span role='status' className={styles.hint}>{selectionNeededHint}</span>}
+    {saveError && <span role='alert' className={styles.hint}>{saveError}</span>}
+    {retryAction}
+    </span>
   );
   return <div className={`flex min-w-0 max-w-full flex-col ${layout === 'stacked' ? 'w-full items-stretch' : 'items-end'} gap-4px`}>
     <div className={`flex min-w-0 max-w-full flex-col ${layout === 'stacked' ? 'w-full items-stretch' : 'items-end'} gap-2px`}>
       <NomiSelect size='mini' contentFit={layout !== 'stacked'} contentMaxWidth='min(220px, 100%)'
         className={layout === 'stacked' ? 'w-full' : undefined}
-        value={productSelectionValue(data.selection)} loading={saving} disabled={disabled || saving}
+        value={selectedValue} loading={saving} disabled={disabled || saving}
+        placeholder={t('agentSettings.productBinding.selectionNeeded')}
         onChange={(next: string) => void change(next)}
         dropdownMenuClassName={styles.popup}
         renderFormat={() => <span className={styles.selectedLabel}>
-          <span className={styles.name} title={selectedName}>{selectedName}</span>{sourceTag(data.selection)}
+          <span className={styles.name} title={selectedName}>{selectedName}</span>{selection && sourceTag(selection)}
         </span>}
         aria-label={t('agentSettings.productBinding.label')}>
         {options.map((option) => {
@@ -196,20 +210,20 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
         })}
       </NomiSelect>
       {showManagementActions && canApplyLatest && <div className='flex min-w-0 items-center gap-6px'>
-        {canEdit && <Link to={editPath} className={styles.editLink}>{t('agentSettings.productBinding.editAgent')}</Link>}
+        {canEdit && editPath && <Link to={editPath} className={styles.editLink}>{t('agentSettings.productBinding.editAgent')}</Link>}
         <Tooltip content={t('agentSettings.productBinding.applyLatestHint')}>
           <Button size='mini' type='text' className={styles.applyButton} loading={saving} disabled={disabled || saving || !selected?.available}
-            onClick={() => void change(productSelectionValue(data.selection), true)}>
+            onClick={() => { if (selectedValue) void change(selectedValue, true); }}>
             {t('agentSettings.productBinding.applyLatest')}
           </Button>
         </Tooltip>
       </div>}
     </div>
     {data.needs_model && <span className={styles.hint}>{t('agentSettings.productBinding.chooseModelLater')}</span>}
+    {selectionNeededHint && <span role='status' className={styles.hint}>{selectionNeededHint}</span>}
     {currentUnavailable && <span role='status' className={styles.hint}>{currentUnavailable}</span>}
     {saveError && <span role='alert' className={styles.hint}>{saveError}</span>}
-    {retrySelection && !showManagementActions && <Button size='mini' type='text' loading={saving} disabled={disabled || saving}
-      onClick={() => void change(productSelectionValue(retrySelection), true)}>{t('agentSettings.actions.retry')}</Button>}
+    {retryAction}
   </div>;
 };
 
