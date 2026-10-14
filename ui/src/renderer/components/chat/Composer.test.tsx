@@ -81,8 +81,14 @@ test('focus feedback and drag state share a surface while contextual tools keep 
   expect((page.getByTestId('sendbox-send-btn') as HTMLButtonElement).disabled).toBe(true);
   page.rerender(<Composer {...props} isFileDragging />);
   expect(surface.className).toContain('sendbox-panel--dragging');
+  expect(surface.style.borderColor).toBe(idle);
+  expect(surface.className).not.toContain('b-dashed');
+  expect(page.getByRole('status').className).toBe('sendbox-drop-overlay');
+  expect(page.getByRole('status').firstElementChild?.className).toBe('sendbox-drop-hint');
   fireEvent.drop(surface);
   expect(dropped).toBe(1);
+  page.rerender(<Composer {...props} />);
+  expect(page.queryByRole('status')).toBeNull();
 });
 
 test('compact stacked layout places attachments above the editor and actions below it', () => {

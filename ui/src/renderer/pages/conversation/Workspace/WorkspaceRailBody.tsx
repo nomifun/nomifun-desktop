@@ -17,7 +17,7 @@ import {
 import { getWorkspaceDisplayName as getDisplayName } from '@/renderer/utils/workspace/workspace';
 import { Empty, Tree } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import FileChangeList from './components/FileChangeList';
 import PasteConfirmModal from './components/PasteConfirmModal';
@@ -66,6 +66,7 @@ const WorkspaceRailBody: React.FC<{ source: WorkspaceSource; messageApi?: Messag
   const workspace = source.workspace;
   const uploadConfig = source.upload;
   const uploadEnabled = Boolean(uploadConfig);
+  const dragTargetRef = useRef<HTMLDivElement>(null);
   const panelTabStorageKey = sessionStorageKey('workspace-panel-tab', source.tree.target);
 
   // Message API setup
@@ -177,6 +178,8 @@ const WorkspaceRailBody: React.FC<{ source: WorkspaceSource; messageApi?: Messag
   // (hook-order stability); its handlers are only wired into the DOM when
   // uploads are enabled (see `dragHandlers` below).
   const dragImportHook = useWorkspaceDragImport({
+    targetRef: dragTargetRef,
+    enabled: uploadEnabled,
     messageApi,
     t,
     onFilesDropped: pasteHook.handleFilesToAdd,
@@ -284,6 +287,7 @@ const WorkspaceRailBody: React.FC<{ source: WorkspaceSource; messageApi?: Messag
     <>
       {shouldRenderLocalMessageContext && messageContext}
       <div
+        ref={dragTargetRef}
         className='chat-workspace size-full flex flex-col relative'
         tabIndex={0}
         onFocus={uploadEnabled ? pasteHook.onFocusPaste : undefined}

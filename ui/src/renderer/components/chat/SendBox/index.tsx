@@ -417,6 +417,7 @@ const SendBox: React.FC<{
 
   // 使用拖拽 hook
   const { isFileDragging, dragHandlers } = useDragUpload({
+    targetRef: containerRef,
     onFilesAdded,
     conversation_id:
       conversationContext?.conversation_id != null ? conversationContext.conversation_id : undefined,

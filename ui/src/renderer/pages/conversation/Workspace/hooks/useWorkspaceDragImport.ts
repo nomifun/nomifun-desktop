@@ -4,16 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import type { DragEvent } from 'react';
+import { useCallback, useRef, useState } from 'react';
+import type { DragEvent, RefObject } from 'react';
 import type { TFunction } from 'i18next';
 import { ipcBridge } from '@/common';
 import { isTauriRuntime } from '@/common/adapter/tauriRuntime';
 import { FileService } from '@/renderer/services/FileService';
+import { useNativeFileDrop } from '@/renderer/hooks/file/useNativeFileDrop';
 import type { MessageApi } from '../types';
 import type { ConversationId } from '@/common/types/ids';
 
 interface UseWorkspaceDragImportOptions {
+  targetRef: RefObject<HTMLElement | null>;
+  enabled?: boolean;
   onFilesDropped: (files: Array<{ path: string; name: string }>) => Promise<void> | void;
   messageApi: MessageApi;
   t: TFunction<'translation'>;
@@ -43,6 +46,8 @@ const dedupeItems = (items: DroppedItem[]): DroppedItem[] => {
 };
 
 export function useWorkspaceDragImport({
+  targetRef,
+  enabled = true,
   onFilesDropped,
   messageApi,
   t,
@@ -57,31 +62,34 @@ export function useWorkspaceDragImport({
   }, []);
 
   const handleDragEnter = useCallback((event: DragEvent) => {
+    if (!enabled || isTauriRuntime()) return;
     event.preventDefault();
     event.stopPropagation();
     dragCounterRef.current += 1;
     setIsDragging(true);
-  }, []);
+  }, [enabled]);
 
   const handleDragOver = useCallback(
     (event: DragEvent) => {
+      if (!enabled || isTauriRuntime()) return;
       event.preventDefault();
       event.stopPropagation();
       if (!isDragging) {
         setIsDragging(true);
       }
     },
-    [isDragging]
+    [enabled, isDragging]
   );
 
   const handleDragLeave = useCallback((event: DragEvent) => {
+    if (!enabled || isTauriRuntime()) return;
     event.preventDefault();
     event.stopPropagation();
     dragCounterRef.current = Math.max(0, dragCounterRef.current - 1);
     if (dragCounterRef.current === 0) {
       setIsDragging(false);
     }
-  }, []);
+  }, [enabled]);
 
   const createTempItemsFromFiles = useCallback(
     async (files: File[]): Promise<DroppedItem[]> => {
@@ -172,9 +180,9 @@ export function useWorkspaceDragImport({
       event.stopPropagation();
       resetDragState();
 
-      // Under Tauri, native file drops are delivered via onDragDropEvent (see useEffect
-      // below) with absolute paths. The browser drop handler only sees File objects
-      // without host paths, so we route them through the WebUI/HTTP-upload fallback.
+      if (!enabled || isTauriRuntime()) return;
+
+      // Browser files are uploaded; Tauri routes native absolute paths separately.
       const dataTransfer = event.dataTransfer || event.nativeEvent?.dataTransfer;
       const filesWithoutPath: File[] = [];
 
@@ -203,46 +211,18 @@ export function useWorkspaceDragImport({
 
       await dispatchTargets(tempItems);
     },
-    [createTempItemsFromFiles, dispatchTargets, resetDragState]
+    [createTempItemsFromFiles, dispatchTargets, enabled, resetDragState]
   );
 
-  /**
-   * Tauri v2: subscribe to native drag-drop events so we receive real absolute
-   * host paths (HTML5 File drops in the webview don't expose them). Web/PWA
-   * builds skip this entirely — the dynamic import keeps Tauri code out of the
-   * browser bundle.
-   */
-  useEffect(() => {
-    if (!isTauriRuntime()) return;
-
-    let unlisten: (() => void) | undefined;
-    let cancelled = false;
-
-    void (async () => {
-      try {
-        const { getCurrentWebview } = await import('@tauri-apps/api/webview');
-        const fn = await getCurrentWebview().onDragDropEvent((event) => {
-          const payload = event.payload as { type: string; paths?: string[] };
-          if (payload?.type === 'drop' && Array.isArray(payload.paths) && payload.paths.length > 0) {
-            resetDragState();
-            void handleAbsolutePaths(payload.paths);
-          }
-        });
-        if (cancelled) {
-          fn();
-        } else {
-          unlisten = fn;
-        }
-      } catch (error) {
-        console.warn('[WorkspaceDragImport] Failed to attach Tauri drag-drop listener:', error);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      if (unlisten) unlisten();
-    };
-  }, [handleAbsolutePaths, resetDragState]);
+  useNativeFileDrop({
+    targetRef,
+    enabled,
+    onHoverChange: setIsDragging,
+    onDrop: paths => {
+      resetDragState();
+      void handleAbsolutePaths(paths);
+    },
+  });
 
   const dragHandlers = {
     onDragEnter: handleDragEnter,

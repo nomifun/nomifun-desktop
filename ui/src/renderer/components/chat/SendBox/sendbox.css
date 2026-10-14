@@ -151,6 +151,28 @@
   }
 }
 
+/* File-drop feedback covers the composer without intercepting drag hit tests. */
+.sendbox-drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: inherit;
+  background-color: color-mix(in srgb, var(--color-mask-bg, rgba(0, 0, 0, 0.5)) 40%, transparent);
+  backdrop-filter: blur(2px);
+  pointer-events: none;
+}
+
+.sendbox-drop-hint {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  letter-spacing: 0.02em;
+}
+
 /* Input placeholder color */
 ::placeholder {
   color: #a1a2aa !important;

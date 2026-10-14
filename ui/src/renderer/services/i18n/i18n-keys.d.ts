@@ -1686,6 +1686,8 @@ export type I18nKey =
   | 'conversation.reasoningEffort.ultra'
   | 'conversation.reasoningEffort.updateFailed'
   | 'conversation.reasoningEffort.xhigh'
+  | 'conversation.sendbox.dropNoFiles'
+  | 'conversation.sendbox.dropToAttach'
   | 'conversation.sendbox.hint'
   | 'conversation.sideQuestion.alreadyRunning'
   | 'conversation.sideQuestion.answered'
