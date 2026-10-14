@@ -30,8 +30,7 @@ const NomiReadOnlyChat: React.FC<{
 
   return (
     <NomiChat
-      conversation_id={conversation.id}
-      workspace={conversation.extra.workspace}
+      conversation={conversation}
       modelSelection={modelSelection}
       agent_name={agent_name}
       hideSendBox

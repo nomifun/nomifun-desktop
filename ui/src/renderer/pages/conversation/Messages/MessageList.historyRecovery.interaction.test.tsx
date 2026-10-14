@@ -35,6 +35,7 @@ test('real route remount restores compact active thinking before runtime hydrati
   for (const name of ['turnStarted', 'turnCompleted', 'turnPaused', 'userCreated', 'messageAnnotated'] as const) {
     spyOn(ipcBridge.conversation[name], 'on').mockImplementation(() => () => {});
   }
+  spyOn(ipcBridge.agentPlatform.sessions.onAgentChanged, 'on').mockImplementation(() => () => {});
   const reconnectListeners = new Set<() => void>();
   spyOn(ipcBridge.conversation.reconnected, 'on').mockImplementation(listener => {
     const reconnect = () => listener();
@@ -55,7 +56,7 @@ test('real route remount restores compact active thinking before runtime hydrati
   spyOn(ipcBridge.fs.listWorkspaceFiles, 'invoke').mockResolvedValue([]);
 
   const startAt = Date.now() - 12_000;
-  const authority = { id: conversationId, type: 'nomi', status: 'running', runtime: {
+  const authority = { id: conversationId, type: 'nomi', extra: { workspace: '' }, status: 'running', runtime: {
     state: 'running', can_send_message: false, has_runtime: true, is_processing: true,
     active_turn_id: rootId, processing_started_at: startAt,
   } } as TChatConversation;
@@ -97,7 +98,7 @@ test('real route remount restores compact active thinking before runtime hydrati
         <Link to='/settings'>Open settings</Link><Link to='/conversation'>Return to conversation</Link>
         <Routes>
           <Route path='/settings' element={<div>Settings page</div>} />
-          <Route path='/conversation' element={<NomiChat conversation_id={conversationId} workspace=''
+          <Route path='/conversation' element={<NomiChat conversation={authority}
             modelSelection={selection} readOnly hideSendBox isProcessing={false} />} />
         </Routes>
       </PreviewProvider>

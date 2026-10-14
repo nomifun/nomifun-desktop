@@ -12,7 +12,7 @@ import type {
 import { getAgentLogo } from '@/renderer/utils/model/agentLogo';
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { officialConversationTemplateKey } from '@/renderer/pages/conversation/components/conversationAgentIdentity';
+import { officialAgentTemplateKey } from '@/renderer/pages/conversation/components/conversationAgentIdentity';
 import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
 
 export interface AgentInfo {
@@ -62,7 +62,7 @@ export function useAgentInfo(conversation: TChatConversation | undefined): {
     const presetId = resolveAgentPresetId(conversation);
     const snapshot = resolveAgentSnapshot(conversation);
     if (!presetId || !snapshot) return { info: null, isLoading: false as const };
-    const templateKey = officialConversationTemplateKey(conversation.extra);
+    const templateKey = officialAgentTemplateKey(conversation.extra);
     return {
       info: {
         preset_id: presetId,

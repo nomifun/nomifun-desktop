@@ -46,3 +46,26 @@ describe('official creation Agent presentation', () => {
     expect(hook.result.current.info?.name).toBe(name);
   });
 });
+
+test('product-owned official Agents use the same locale-aware identity as ordinary chat', async () => {
+  for (const [key, chinese, english] of [
+    ['companion.default', '伙伴', 'Companion'],
+    ['customer-service.default', '客户服务', 'Customer Service'],
+  ]) {
+    const hook = await mount(conversation({ official_template_key: key, agent_name: key }, key));
+    expect(hook.result.current.info?.name).toBe(chinese);
+    await act(async () => { await hook.i18n.changeLanguage('en-US'); });
+    expect(hook.result.current.info?.name).toBe(english);
+    hook.unmount();
+  }
+});
+
+test('a personal companion name is never inferred to be an official template', async () => {
+  for (const name of ['我的伙伴', 'companion.default']) {
+    const hook = await mount(conversation({ companion_session: true, agent_name: name }, name));
+    expect(hook.result.current.info?.name).toBe(name);
+    await act(async () => { await hook.i18n.changeLanguage('en-US'); });
+    expect(hook.result.current.info?.name).toBe(name);
+    hook.unmount();
+  }
+});

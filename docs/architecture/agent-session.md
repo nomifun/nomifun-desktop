@@ -295,6 +295,13 @@ second source-binding ledger. The product selection saved before initial
 creation remains authoring intent. Editing a personal Agent requires an explicit
 application of its latest setup before the current Session's frozen version changes.
 
+Ordinary, Companion and read-only conversations share `NomiChat`, deriving current
+Agent identity from the complete conversation projection. The shared history reader
+refreshes committed boundaries on `agentSession.agentChanged` for its own Session.
+Current and historical official names use host-verified template provenance,
+including product Agents such as Companion; ordinary chat selection filters never
+limit name presentation. Personal Agents retain their frozen names.
+
 Saving a Companion selection validates target ownership, the current binding
 version, model and capability availability, complete resources and runtime
 cleanup under the same Session owner's operation fence. An existing idle

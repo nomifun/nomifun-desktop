@@ -11,7 +11,8 @@ import { mcpService, type IResponseMessage, type ISendMessageResult } from '@/co
 import type { TChatConversation, TProviderWithModel } from '@/common/config/storage';
 import { configService } from '@/common/config/configService';
 import { ThemeProvider } from '@/renderer/hooks/context/ThemeContext';
-import { conversationTarget, parseConversationId, parseMessageId, parseProviderId } from '@/common/types/ids';
+import { conversationTarget, parseEntityId, parseConversationId, parseMessageId, parseProviderId } from '@/common/types/ids';
+import type { IMessageTips, TMessage } from '@/common/chat/chatLib';
 import type { AgentSessionCapabilitySelectionState } from '@/common/types/agentPlatform';
 import { sessionStorageKey, setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 import { PreviewProvider } from '../../Preview';
@@ -19,6 +20,9 @@ import { InitialMessageProvider, useInitialMessage } from '../../components/Conv
 import { persistInitialMessageDelivery, releaseInitialMessageDelivery } from '../initialMessageDelivery';
 import conversationLocale from '@/renderer/services/i18n/locales/en-US/conversation.json';
 import messagesLocale from '@/renderer/services/i18n/locales/en-US/messages.json';
+import agentSettingsLocale from '@/renderer/services/i18n/locales/en-US/agentSettings.json';
+import zhConversationLocale from '@/renderer/services/i18n/locales/zh-CN/conversation.json';
+import zhAgentSettingsLocale from '@/renderer/services/i18n/locales/zh-CN/agentSettings.json';
 import NomiChat from './NomiChat';
 import type { NomiModelSelection } from './useNomiModelSelection';
 
@@ -32,12 +36,15 @@ const model = { id: parseProviderId('0190f5fe-7c00-7a00-8000-000000001404'),
   use_model: 'test-model', name: 'Test provider', platform: 'openai' } as TProviderWithModel;
 const selection: NomiModelSelection = { current_model: model, providers: [], pickerDisabled: true,
   getAvailableModels: () => [], handleSelectModel: async () => {}, getDisplayModelName: name => name ?? '' };
+const conversation: TChatConversation = { id: conversationId, name: input, type: 'nomi',
+  model, extra: { workspace: '' } } as TChatConversation;
 const capabilitySelection: AgentSessionCapabilitySelectionState = {
   selection: { skill_names: [], mcp_server_ids: [] }, binding_version: 1, editable: true,
 };
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'en-US', resources: {
-  'en-US': { translation: { conversation: conversationLocale, messages: messagesLocale } },
+  'en-US': { translation: { conversation: conversationLocale, messages: messagesLocale, agentSettings: agentSettingsLocale } },
+  'zh-CN': { translation: { conversation: zhConversationLocale, messages: messagesLocale, agentSettings: zhAgentSettingsLocale } },
 } });
 
 function deferred<T>() {
@@ -59,6 +66,7 @@ beforeEach(() => {
   spyOn(ipcBridge.conversation.responseStream, 'on').mockImplementation(() => () => {});
   spyOn(ipcBridge.agentPlatform.sessions.onAgentChanged, 'on').mockImplementation(() => () => {});
   spyOn(ipcBridge.agentPlatform.sessions.onCapabilitiesChanged, 'on').mockImplementation(() => () => {});
+  spyOn(ipcBridge.agentPlatform.sessions.getCapabilitySelection, 'invoke').mockResolvedValue(capabilitySelection);
   spyOn(ipcBridge.mode.listProviders, 'invoke').mockResolvedValue([]);
   spyOn(ipcBridge.mode.onProvidersChanged, 'on').mockImplementation(() => () => {});
   spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue([]);
@@ -95,7 +103,7 @@ function mountConversation(strict = false) {
   function Start() {
     context = useInitialMessage();
     useLayoutEffect(() => { context.begin({ ...delivery, submittedAt: Date.now() }); }, []);
-    return <NomiChat conversation_id={conversationId} workspace='' modelSelection={selection} creationEnabled={false} />;
+    return <NomiChat conversation={conversation} modelSelection={selection} creationEnabled={false} />;
   }
   const cache = new Map();
   const page = render(<SWRConfig value={strict ? { dedupingInterval: 0 } : { provider: () => cache, dedupingInterval: 0 }}>
@@ -107,6 +115,94 @@ function mountConversation(strict = false) {
   </SWRConfig>, { reactStrictMode: strict });
   return { ...page, delivery, pending: () => context.pending };
 }
+
+test.each([false, true])('shared chat renders Agent switches immediately with localized history and an intact draft (companion=%p)', async (companion) => {
+  const sourcePreset = parseEntityId('agent-preset', '0190f5fe-7c00-7a00-8000-000000001420');
+  const nextPreset = parseEntityId('agent-preset', '0190f5fe-7c00-7a00-8000-000000001421');
+  const templateKey = companion ? 'companion.default' : 'assistant.general';
+  const englishLabel = companion ? 'Companion' : 'General';
+  const chineseLabel = companion ? '伙伴' : '通用';
+  const personalLabel = companion ? '我的研究伙伴' : 'My Research Agent';
+  let authority = { ...conversation, preset_id: sourcePreset,
+    extra: { workspace: '', official_template_key: templateKey, ...(companion ? { companion_session: true } : {}) },
+    agent_snapshot: { preset_id: sourcePreset, preset_name: templateKey, preset_revision: 1,
+      instructions: '', included_skills: [], excluded_auto_skills: [], enabled_capabilities: [],
+      enabled_capability_actions: {}, required_resource_kinds: [], warnings: [],
+      knowledge_policy: { enabled: false, writeback: false, grounded: false }, resolved_agent_backend: 'nomifun.nomi' },
+  } as TChatConversation;
+  spyOn(ipcBridge.conversation.get, 'invoke').mockImplementation(async () => authority);
+  const oldBoundary: IMessageTips = {
+    id: 'old-agent-boundary', message_id: parseMessageId('0190f5fe-7c00-7a00-8000-000000001422'),
+    msg_id: parseMessageId('0190f5fe-7c00-7a00-8000-000000001422'),
+    conversation_id: conversationId, type: 'tips', position: 'center', created_at: 20,
+    content: { type: 'success', content: '', agent_transition: {
+      transition_id: '0190f5fe-7c00-7a00-8000-000000001422',
+      previous_agent_label: templateKey, next_agent_label: templateKey,
+      previous_preset_id: sourcePreset, next_preset_id: sourcePreset,
+      previous_template_key: templateKey, next_template_key: templateKey,
+      effective_from: 'next_turn', handoff_mode: 'context_only', completion_gate_inherited: false,
+    } },
+  };
+  const answer: TMessage = { id: 'prior-answer', conversation_id: conversationId, type: 'text', position: 'left',
+    message_id: parseMessageId('0190f5fe-7c00-7a00-8000-000000001424'), msg_id: parseMessageId('0190f5fe-7c00-7a00-8000-000000001424'),
+    created_at: 10, content: { content: 'The previous answer stays visible.' } };
+  const history = spyOn(ipcBridge.database.getConversationMessages, 'invoke')
+    .mockResolvedValue({ items: [oldBoundary, answer], total: 2, has_more: false });
+  const listeners = new Set<Parameters<typeof ipcBridge.agentPlatform.sessions.onAgentChanged.on>[0]>();
+  spyOn(ipcBridge.agentPlatform.sessions.onAgentChanged, 'on').mockImplementation(listener => {
+    listeners.add(listener); return () => { listeners.delete(listener); };
+  });
+  const cache = new Map();
+  const view = () => <SWRConfig value={{ provider: () => cache, dedupingInterval: 0 }}>
+    <MemoryRouter><I18nextProvider i18n={i18n}><ThemeProvider>
+      <PreviewProvider persistNamespace={`agent-switch-${companion}`} subscribeGlobalOpen={false}>
+        <InitialMessageProvider><NomiChat conversation={authority} modelSelection={selection}
+          agent_name={companion ? '天天' : undefined} creationEnabled={false} compactProductComposer={companion} />
+        </InitialMessageProvider>
+      </PreviewProvider>
+    </ThemeProvider></I18nextProvider></MemoryRouter>
+  </SWRConfig>;
+  const page = render(view());
+  await page.findByText(`${englishLabel} → ${englishLabel} · effective from the next message`);
+  const scroller = page.getByTestId('message-list-scroller');
+  const editor = page.getByTestId('sendbox-input') as HTMLTextAreaElement;
+  fireEvent.change(editor, { target: { value: '未发送的草稿' } });
+  const newBoundary: IMessageTips = { ...oldBoundary, id: 'new-agent-boundary', created_at: 30,
+    message_id: parseMessageId('0190f5fe-7c00-7a00-8000-000000001423'), msg_id: parseMessageId('0190f5fe-7c00-7a00-8000-000000001423'),
+    content: { ...oldBoundary.content, agent_transition: { ...oldBoundary.content.agent_transition!,
+      transition_id: '0190f5fe-7c00-7a00-8000-000000001423',
+      // An internal receipt label must resolve through the exact current Agent,
+      // including on a Companion surface whose composer uses the persona name.
+      next_preset_id: nextPreset, next_template_key: undefined, next_agent_label: templateKey,
+    } },
+  };
+  history.mockResolvedValue({ items: [newBoundary, oldBoundary, answer], total: 3, has_more: false });
+  authority = { ...authority, preset_id: nextPreset, extra: { workspace: '', ...(companion ? { companion_session: true } : {}) },
+    agent_snapshot: { ...authority.agent_snapshot!, preset_id: nextPreset, preset_name: personalLabel },
+  };
+  const publish = () => listeners.forEach(listener => listener({
+    agent_session_id: parseEntityId('agent-session', conversationId), transition_id: newBoundary.content.agent_transition!.transition_id,
+    previous_agent_label: templateKey, current_agent_label: personalLabel, binding_version: 2, effective_from: 'next_turn',
+  }));
+  act(publish);
+  page.rerender(view());
+  await page.findByText(`${englishLabel} → ${personalLabel} · effective from the next message`);
+  expect(page.getByTestId('message-list-scroller')).toBe(scroller);
+  expect(page.getByTestId('sendbox-input')).toBe(editor);
+  expect(editor.value).toBe('未发送的草稿');
+  expect(page.container.textContent).not.toContain(templateKey);
+  act(publish);
+  await waitFor(() => expect(history).toHaveBeenCalledTimes(3));
+  expect(page.container.querySelectorAll('.agent-transition-boundary')).toHaveLength(2);
+  await act(async () => { await i18n.changeLanguage('zh-CN'); });
+  try {
+    expect(page.getByText(`${chineseLabel} → ${personalLabel} · 下一条消息起生效`)).toBeDefined();
+    expect(page.getByText(`${chineseLabel} → ${chineseLabel} · 下一条消息起生效`)).toBeDefined();
+    expect(editor.value).toBe('未发送的草稿');
+  } finally {
+    await act(async () => { await i18n.changeLanguage('en-US'); });
+  }
+});
 
 test('slow preparation and acceptance keep the real transcript mounted without a skeleton or a duplicate first message', async () => {
   const capabilities = deferred<AgentSessionCapabilitySelectionState>();
@@ -244,7 +340,7 @@ test.each([false, true])('Turn completion preserves an active composer and IME d
   const page = render(<SWRConfig value={{ provider: () => cache, dedupingInterval: 0 }}>
     <MemoryRouter><I18nextProvider i18n={i18n}><ThemeProvider>
       <PreviewProvider persistNamespace={`composer-completion-${compact}`} subscribeGlobalOpen={false}>
-        <InitialMessageProvider><NomiChat conversation_id={sessionId} workspace='' modelSelection={selection}
+        <InitialMessageProvider><NomiChat conversation={authority} modelSelection={selection}
           creationEnabled={false} compactProductComposer={compact} /></InitialMessageProvider>
       </PreviewProvider>
     </ThemeProvider></I18nextProvider></MemoryRouter>

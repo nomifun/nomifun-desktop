@@ -4,7 +4,7 @@ import type { PropsWithChildren } from 'react';
 import { ipcBridge } from '@/common';
 import type { IConversationTurnCompletedEvent } from '@/common/adapter/ipcBridge';
 import type { TMessage } from '@/common/chat/chatLib';
-import { parseConversationId, parseMessageId, type ConversationId } from '@/common/types/ids';
+import { parseEntityId, parseConversationId, parseMessageId, type ConversationId } from '@/common/types/ids';
 import { emitter } from '@/renderer/utils/emitter';
 import {
   MessageListProvider, MessageListLoadingProvider, useMessageList,
@@ -50,13 +50,24 @@ function mockHistoryTransport() {
     completed = listener;
     return () => { completed = undefined; };
   });
+  let agentChanged: Parameters<typeof ipcBridge.agentPlatform.sessions.onAgentChanged.on>[0] | undefined;
+  spyOn(ipcBridge.agentPlatform.sessions.onAgentChanged, 'on').mockImplementation((listener) => {
+    agentChanged = listener;
+    return () => { agentChanged = undefined; };
+  });
   const reply = async (index: number, items: TMessage[], hasMore = true) => {
     expect(requests[index]).toBeDefined();
     await act(async () => requests[index].resolve({ items, has_more: hasMore, total: items.length }));
   };
   const refresh = () => { act(() => { reconnect?.(); }); };
   const complete = (event: IConversationTurnCompletedEvent) => { act(() => { completed?.(event); }); };
-  return { requests, reply, refresh, complete };
+  const switchAgent = (id = a) => { act(() => { agentChanged?.({
+    agent_session_id: parseEntityId('agent-session', id),
+    transition_id: '0190f5fe-7c00-7a00-8000-000000000053',
+    previous_agent_label: 'Before', current_agent_label: 'After',
+    binding_version: 2, effective_from: 'next_turn',
+  }); }); };
+  return { requests, reply, refresh, complete, switchAgent };
 }
 
 function mountHistory(strict = false) {
@@ -219,6 +230,43 @@ test('settle refresh is scoped to the mounted conversation and unsubscribes on u
   h.hook.unmount();
   act(() => { emitter.emit('conversation.turn.settled', a); });
   expect(h.requests).toHaveLength(2);
+});
+
+test('Agent switches refresh their durable boundary immediately, preserve older pages and unsubscribe on unmount', async () => {
+  const h = mountHistory();
+  await h.reply(0, [message(20)]);
+  h.older();
+  await h.reply(1, [message(10)], false);
+  h.switchAgent(b);
+  expect(h.requests).toHaveLength(2);
+  h.switchAgent();
+  expect(h.requests).toHaveLength(3);
+  expect(h.requests[2].query.cursor).toBe('');
+  const boundary: TMessage = { ...message(30), type: 'tips', position: 'center', content: {
+    type: 'success', content: '', agent_transition: {
+      transition_id: '0190f5fe-7c00-7a00-8000-000000000053',
+      previous_agent_label: 'Before', next_agent_label: 'After', effective_from: 'next_turn',
+      handoff_mode: 'context_only', completion_gate_inherited: false,
+    },
+  } };
+  await h.reply(2, [boundary, message(20)], false);
+  expect(h.hook.result.current.messages.map((m) => m.created_at)).toEqual([10, 20, 30]);
+  expect(h.hook.result.current.messages.filter((m) => m.type === 'tips')).toHaveLength(1);
+  h.hook.unmount();
+  h.switchAgent();
+  expect(h.requests).toHaveLength(3);
+});
+
+test('a delayed switch refresh cannot enter a different conversation after navigation', async () => {
+  const h = mountHistory();
+  await h.reply(0, [message(20)], false);
+  h.switchAgent();
+  h.hook.rerender({ id: b });
+  await h.reply(2, [message(40, b)], false);
+  await h.reply(1, [message(30)], false);
+  expect(h.hook.result.current.messages.map((m) => m.created_at)).toEqual([40]);
+  h.switchAgent(a);
+  expect(h.requests).toHaveLength(3);
 });
 
 test('latest-page responses from an earlier conversation cannot replace the new transcript', async () => {

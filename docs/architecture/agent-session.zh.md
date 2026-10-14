@@ -377,6 +377,8 @@ UI 直接消费当前 stream 与 Message projection，不保留缺少旧协议 m
 
 Agent transition 的展示 `reference` 保持严格的 typed Payload，不混入 `last_event_id` 等投影诊断。所有消息查询在同一读取事务内，按精确 Session、sequence 和投影身份从 canonical Event 及已解析 Payload 重新生成 transition reference，现存展示投影不成为 transition 事实来源。读取验证投影摘要、事件边界、Payload 所属 Session 及存储迁移 proof；事实缺失或损坏拒绝读取，不删字段后兼容、不改写历史事件，也不在查询中重建数据库。
 
+普通会话、伙伴相处页和只读会话共用 `NomiChat`，从完整会话投影解析当前 Agent 身份。共用消息历史层收到当前 Session 的 `agentSession.agentChanged` 后立即读取已提交的切换边界。当前身份与历史边界按宿主验证的官方模板标识本地化，包含伙伴等产品 Agent；普通会话的可选模板过滤不参与名称展示，自定义 Agent 保留冻结名称。
+
 所有新准入输入在 Runtime 派发前，从同一 Turn 已提交的 typed accepted event 与已解析 Payload 发布
 `message.userCreated`，普通文字、桌面伙伴、消息渠道与 IDMM 共用这条通知；幂等重放不重复发布。
 会话窗口以服务端消息身份即时合并输入，不等待任务终态或发起窗口的本地历史刷新。

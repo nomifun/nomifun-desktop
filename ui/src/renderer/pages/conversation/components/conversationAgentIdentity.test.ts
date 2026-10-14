@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { officialConversationTemplateKey } from './conversationAgentIdentity';
+import { officialAgentTemplateKey, officialConversationTemplateKey } from './conversationAgentIdentity';
 
 describe('officialConversationTemplateKey', () => {
   test('uses only verified host projection, not a matching display name', () => {
@@ -14,4 +14,15 @@ describe('officialConversationTemplateKey', () => {
     expect(officialConversationTemplateKey({ official_template_key: 'customer-service.default' })).toBeNull();
     expect(officialConversationTemplateKey({ official_template_key: 'unknown.template' })).toBeNull();
   });
+});
+
+test('presentation recognizes product Agents without exposing them in ordinary chat selection', () => {
+  for (const key of ['companion.default', 'customer-service.default'] as const) {
+    expect(officialAgentTemplateKey({ official_template_key: key })).toBe(key);
+    expect(officialConversationTemplateKey({ official_template_key: key })).toBeNull();
+    expect(officialAgentTemplateKey({ agent_name: key })).toBeNull();
+  }
+  for (const extra of [null, [], 'companion.default', { official_template_key: 'unknown.template' }]) {
+    expect(officialAgentTemplateKey(extra)).toBeNull();
+  }
 });

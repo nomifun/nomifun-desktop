@@ -90,12 +90,9 @@ const CompanionConversation: React.FC<Props> = ({ conversation, companion, compa
     onSelectModel,
   });
 
-  const workspace = conversation.extra?.workspace ?? '';
-
   return (
     <NomiChat
-      conversation_id={conversation.id}
-      workspace={workspace}
+      conversation={conversation}
       modelSelection={modelSelection}
       modelSelectionHint={t('nomi.chat.sessionModelConfigHint', { defaultValue: '空闲时切换当前会话模型，下一条消息生效；同时保存为伙伴默认模型。' })}
       modelSelectionDisabled={modelSaving || agentSaving || sessionBlocked}

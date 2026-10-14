@@ -3,10 +3,11 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
-import type { ConversationId, CronJobId } from '@/common/types/ids';
+import type { TChatConversation } from '@/common/config/storage';
 
 import type { ConversationContextValue } from '@/renderer/hooks/context/ConversationContext';
 import { ConversationProvider } from '@/renderer/hooks/context/ConversationContext';
+import { useAgentInfo } from '@/renderer/hooks/agent/useAgentInfo';
 import FlexFullContainer from '@renderer/components/layout/FlexFullContainer';
 import MessageList from '@renderer/pages/conversation/Messages/MessageList';
 import {
@@ -28,16 +29,14 @@ import type { IMessageText } from '@/common/chat/chatLib';
 import { buildDisplayMessage } from '@/renderer/utils/file/messageFiles';
 
 const NomiChat: React.FC<{
-  conversation_id: ConversationId;
-  workspace: string;
+  /** All surfaces derive Session identity and Agent presentation here. */
+  conversation: Extract<TChatConversation, { type: 'nomi' }>;
   modelSelection: NomiModelSelection;
   agentSelectorNode?: React.ReactNode;
-  cron_job_id?: CronJobId;
   hideSendBox?: boolean;
   readOnly?: boolean;
   emptySlot?: React.ReactNode;
   agent_name?: string;
-  currentAgent?: ConversationContextValue['currentAgent'];
   isProcessing?: boolean;
   modelSelectionHint?: string;
   modelSelectionDisabled?: boolean;
@@ -59,16 +58,13 @@ const NomiChat: React.FC<{
   /** Keep a followed Turn's final reply visible on product chat surfaces. */
   followTurnCompletion?: boolean;
 }> = ({
-  conversation_id,
-  workspace,
+  conversation,
   modelSelection,
   agentSelectorNode,
-  cron_job_id,
   hideSendBox,
   readOnly,
   emptySlot,
   agent_name,
-  currentAgent,
   isProcessing,
   modelSelectionHint,
   modelSelectionDisabled,
@@ -85,6 +81,12 @@ const NomiChat: React.FC<{
   onBeforeSubmit,
   followTurnCompletion = false,
 }) => {
+  const { id: conversation_id, cron_job_id } = conversation;
+  const workspace = conversation.extra.workspace ?? '';
+  const { info: agentInfo } = useAgentInfo(conversation);
+  const currentAgent = useMemo(() => agentInfo
+    ? { presetId: agentInfo.preset_id, label: agentInfo.name }
+    : undefined, [agentInfo]);
   // Windowed history: load only the newest page on mount + lazily prepend older
   // pages on scroll-up. The nomi surface backs both work conversations and the
   // companion's single session (which also absorbs every IM-channel turn and can
@@ -173,7 +175,7 @@ const NomiChat: React.FC<{
               conversation_id={conversation_id}
               modelSelection={modelSelection}
               agentSelectorNode={agentSelectorNode}
-              agent_name={agent_name}
+              agent_name={agent_name ?? agentInfo?.name}
               modelSelectionHint={modelSelectionHint}
               modelSelectionDisabled={modelSelectionDisabled}
               reasoningEffort={reasoningEffort}

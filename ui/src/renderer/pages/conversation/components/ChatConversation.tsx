@@ -39,7 +39,6 @@ import {
   isConversationAgentTemplate,
 } from '@/renderer/components/agent/conversationAgentCatalog';
 import { useConversationAgentSwitch } from './useConversationAgentSwitch';
-import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
 import { officialConversationTemplateKey } from './conversationAgentIdentity';
 import {
   capabilityOf,
@@ -121,15 +120,10 @@ const NomiConversationLayout: React.FC<{
       workspaceExtraTabs={workspaceExtraTabs}
     >
       <NomiChat
-        conversation_id={conversation.id}
-        workspace={conversation.extra.workspace}
+        conversation={conversation}
         modelSelection={modelSelection}
         agentSelectorNode={agentSelectorNode}
-        cron_job_id={conversation.cron_job_id}
         agent_name={currentAgentLabel}
-        currentAgent={conversation.preset_id
-          ? { presetId: conversation.preset_id, label: currentAgentLabel }
-          : undefined}
         modelSelectionDisabled={modelSelectionDisabled}
         reasoningEffort={reasoningEffort}
         reasoningEffortUpdating={reasoningEffortUpdating}
@@ -297,9 +291,7 @@ const NomiConversationPanel: React.FC<{
     });
   };
   const exitCreation = () => creation.setMode(null);
-  const currentAgentLabel = fixedAgentLabel ?? (officialTemplateKey
-    ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[officialTemplateKey]}.name`)
-    : presetPresetInfo?.name ?? conversation.agent_snapshot?.preset_name ?? 'Agent');
+  const currentAgentLabel = fixedAgentLabel ?? presetPresetInfo?.name ?? 'Agent';
   const agentSelectorNode = fixedAgentLabel ? <span data-testid='fixed-app-agent'>{fixedAgentLabel}</span> : (
     <GuidAgentSelector
       presets={executableAgentPresets}

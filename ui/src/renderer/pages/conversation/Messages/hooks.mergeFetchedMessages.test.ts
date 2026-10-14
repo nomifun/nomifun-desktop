@@ -1308,6 +1308,37 @@ describe('normalizeDbMessage', () => {
     });
   });
 
+  test.each(['companion.default', 'customer-service.default'])('retains verified %s presentation on both sides of an old boundary', (key) => {
+    const normalized = normalizeDbMessage(baseMessage({
+      type: 'tips', position: 'center', content: { type: 'success', content: '',
+        agent_transition: {
+          transition_id: '0190f5fe-7c00-7a00-8000-000000000053',
+          previous_agent_label: key, next_agent_label: key,
+          previous_template_key: key, next_template_key: key,
+          effective_from: 'next_turn', handoff_mode: 'context_only', completion_gate_inherited: false,
+        },
+      } as any,
+    }));
+    expect(normalized.type).toBe('tips');
+    if (normalized.type !== 'tips') throw new Error('expected transition boundary');
+    expect(normalized.content.agent_transition).toMatchObject({ previous_template_key: key, next_template_key: key });
+  });
+
+  test('never infers template provenance from a custom Agent name or an unknown template key', () => {
+    const normalized = normalizeDbMessage(baseMessage({
+      type: 'tips', content: { type: 'success', content: '', agent_transition: {
+        transition_id: '0190f5fe-7c00-7a00-8000-000000000053',
+        previous_agent_label: 'companion.default', next_agent_label: 'companion.default',
+        next_template_key: 'unknown.template',
+        effective_from: 'next_turn', handoff_mode: 'context_only', completion_gate_inherited: false,
+      } } as any,
+    }));
+    if (normalized.type !== 'tips') throw new Error('expected transition boundary');
+    expect(normalized.content.agent_transition).not.toHaveProperty('previous_template_key');
+    expect(normalized.content.agent_transition).not.toHaveProperty('next_template_key');
+    expect(normalized.content.agent_transition?.next_agent_label).toBe('companion.default');
+  });
+
   test('keeps the owning turn identity supplied by the transport boundary', () => {
     const turnId = messageId('failed-turn');
     const normalized = normalizeDbMessage(

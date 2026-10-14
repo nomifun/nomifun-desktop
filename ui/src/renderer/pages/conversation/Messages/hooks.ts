@@ -20,7 +20,7 @@ import type {
 } from '@/common/chat/chatLib';
 import { toDisplayText } from '@/common/chat/displayText';
 import { normalizeIdmmDecisionExplanation, normalizeIdmmDecisionNotice } from '@/common/types/idmm';
-import { isConversationAgentTemplateKey } from '@/renderer/components/agent/conversationAgentCatalog';
+import { OFFICIAL_PRESET_KEYS, type OfficialPresetKey } from '@/common/types/agentPlatform';
 import {
   composeMessage,
   mergeToolCallContent,
@@ -456,10 +456,10 @@ const normalizeAgentTransition = (
     next_agent_label: value.next_agent_label,
     ...(typeof value.previous_preset_id === 'string' ? { previous_preset_id: value.previous_preset_id } : {}),
     ...(typeof value.next_preset_id === 'string' ? { next_preset_id: value.next_preset_id } : {}),
-    ...(typeof value.previous_template_key === 'string' && isConversationAgentTemplateKey(value.previous_template_key)
-      ? { previous_template_key: value.previous_template_key } : {}),
-    ...(typeof value.next_template_key === 'string' && isConversationAgentTemplateKey(value.next_template_key)
-      ? { next_template_key: value.next_template_key } : {}),
+    ...(OFFICIAL_PRESET_KEYS.includes(value.previous_template_key as OfficialPresetKey)
+      ? { previous_template_key: value.previous_template_key as OfficialPresetKey } : {}),
+    ...(OFFICIAL_PRESET_KEYS.includes(value.next_template_key as OfficialPresetKey)
+      ? { next_template_key: value.next_template_key as OfficialPresetKey } : {}),
     effective_from: 'next_turn',
     handoff_mode: value.handoff_mode,
     completion_gate_inherited: false,
@@ -1028,8 +1028,11 @@ export const useMessageLstCache = (key: ConversationId) => {
   useEffect(() => { void loadMessages(); }, [loadMessages]);
 
   useEffect(() => {
-    // These are three delivery paths for the same durable-history refresh:
-    // authoritative terminal state, WebSocket recovery and HTTP-poll settle.
+    // Every surface reads the durable boundary after a committed Agent switch,
+    // just as it rehydrates history after terminal state or connection recovery.
+    const offAgentChanged = ipcBridge.agentPlatform.sessions.onAgentChanged.on((event) => {
+      if (String(event.agent_session_id) === String(key)) void loadMessages();
+    });
     const offCompleted = ipcBridge.conversation.turnCompleted.on((event) => {
       if (event.conversation_id === key && isAuthoritativeCompletionRuntimeIdle(event.runtime)) {
         void loadMessages();
@@ -1039,7 +1042,7 @@ export const useMessageLstCache = (key: ConversationId) => {
     const offSettled = addEventListener('conversation.turn.settled', (conversationId) => {
       if (conversationId === key) void loadMessages();
     });
-    return () => { offCompleted(); offReconnect(); offSettled(); };
+    return () => { offAgentChanged(); offCompleted(); offReconnect(); offSettled(); };
   }, [key, loadMessages]);
 
   return {
