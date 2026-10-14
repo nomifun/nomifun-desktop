@@ -1,7 +1,7 @@
 {
   "version": "0.8.8",
   "notes": "- Recover agent capability loading: capability lists recover correctly\n  after load failures, and guided-page preset capabilities and agent\n  binding selection no longer stall on errors.\n- Make session binding evolution safe: the binding evolution path gains\n  safety checks and recovery logic, and session configuration errors\n  surface readable diagnostics to the frontend.",
-  "pub_date": "2026-10-14T04:26:15.581Z",
+  "pub_date": "2026-10-14T05:55:27.782Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHp5Y2IxT1RTZ0dJYVAwdThtLzh3bURvNjUwU2ZDMHJ4bmk3UTVrQVNtOGloUTRwbXZndWJrekQ0K1RnaXQ5b2hnbzlSVDJ1THkwTndrRzRhVmQ1RHdZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxOTUwNzQ4CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6Ck9hd1ljUG1WRTk2aTU3SFRKVkJqZWVxdUJjWW5LdzdURWcrV3VJeitGWE9YWFVKMytRZnloR21ISVQ3eXhMNWZZUytOL3ZwOVlDY2FLNDlqdDVzOUNnPT0K",
@@ -10,6 +10,10 @@
     "darwin-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOCtRN2NsUUlYZVpBR3FvK2orSWkxbElsTytEaGlCTGdWblNxM2JBUEFIM09GemR6K3Q4dm1ONm1KQ0dQc1psN2hBVDIyNTgzdXlsMDdid3pTZjlwN2dZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxOTUxODk1CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6Cnh5SG1JQnhmNXkwQXRUZXc1N2NvdHhDWDBOemdpREVyRkFTZzYwQkttRksxcjJ2SDc5MXlBbGV2SE0zTmNMVWMySXM4bVNjSDh1U3NoS3JVWHdCbURnPT0K",
       "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.8/NomiFun_0.8.8_x64.app.tar.gz"
+    },
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHc0MTIzWnpiRGdUTFdWNFpFbUZPWFBSbWJVS3NjMnJFN0tDajJab0lmalY1VUt3SjF2MGJZK2NUTTlOUmI4cEcrdzZwdjNza2tHWDVxeDdaYjB5d1FvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxOTI0MjEzCWZpbGU6Tm9taUZ1bl8wLjguN194NjQtc2V0dXAuZXhlClAwdmRaS3plTHhwSVJqZmhkVjBtQmh4U2lzWEE4OXRKaVlrcFJBK2VrUlRSYjJoZTQxVjdaU3VMOUpGTHE0cFQwTDU3OUVpRHR4a0t5V0N0SVRvOUNnPT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.8/NomiFun_0.8.7_x64-setup.exe"
     }
   }
 }
