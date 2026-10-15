@@ -36,10 +36,11 @@ const idle = { id: conversationId, type: 'nomi', status: 'pending', extra: { wor
   runtime: { state: 'idle', is_processing: false, can_send_message: true, has_runtime: false },
 } as TChatConversation;
 const options: ProductAgentOptions = { selection: { kind: 'template', template_key: 'companion.default' }, needs_model: false, options: [] };
+const workspaceRoot = 'C:\\Companion\\existing-workspace';
 const resources = [
   { resource_kind: 'companion', resource_id: companionId },
   { resource_kind: 'companion_memory', resource_id: companionId },
-  { resource_kind: 'workspace', resource_id: 'default-workspace' },
+  { resource_kind: 'workspace', resource_id: 'selected-workspace-existing' },
   { resource_kind: 'project_memory', resource_id: 'project-workspace-memory:existing' },
   { resource_kind: 'knowledge_base', resource_id: 'knowledge-a' },
   { resource_kind: 'knowledge_base', resource_id: 'knowledge-b' },
@@ -49,7 +50,8 @@ const resources = [
 const binding = (robotId?: string, version = 1, capabilityRevision = 0) => ({ binding_version: version, typed_resource_bindings:
   [...resources, ...(robotId ? [{ resource_kind: 'robot', resource_id: robotId }] : [])]
     .map((resource) => ({ ...resource, binding_id: resource.resource_id, owner_id: 'owner', operations: ['read'],
-      typed_parameters: resource.resource_kind === 'robot' ? { capability_revision: String(capabilityRevision) } : {} })),
+      typed_parameters: resource.resource_kind === 'robot' ? { capability_revision: String(capabilityRevision) }
+        : resource.resource_kind === 'workspace' ? { workspace_root: workspaceRoot } : {} })),
 } as AgentBindingValue);
 const robot = (robot_id: string, name: string, owner = companionId, capability_revision = 0) => ({ robot_id, name, companion_id: owner, capability_revision } as IApiRobot);
 const restores: Array<() => void> = [];
@@ -85,7 +87,7 @@ const choose = async (view: ReturnType<typeof mount>, text: string) => {
   fireEvent.click(await view.findByText(text));
 };
 
-test('paired robots need an explicit apply and retain every other canonical resource', async () => {
+test('paired robots need an explicit apply and submit catalog identities for a frozen workspace while retaining other resources', async () => {
   const { save, get, permissions } = install();
   let resolveSave!: () => void;
   save.mockImplementation(() => new Promise((resolve) => { resolveSave = () => resolve({ selection: options.selection!, needs_model: false }); }));
@@ -100,7 +102,9 @@ test('paired robots need an explicit apply and retain every other canonical reso
   expect(save.mock.calls[0][0]).toEqual({ target_kind: 'companion', target_id: companionId, request: {
     selection: options.selection, conversation_id: conversationId, model: { provider_id: providerId, model: 'model-a' },
     resource_selections: [...resources.map((resource) => resource.resource_kind === 'project_memory'
-      ? { ...resource, resource_id: 'default-project-memory' } : resource), { resource_kind: 'robot', resource_id: 'robot-b' }],
+      ? { ...resource, resource_id: 'default-project-memory' }
+      : resource.resource_kind === 'workspace' ? { ...resource, resource_id: 'default-workspace' } : resource),
+    { resource_kind: 'robot', resource_id: 'robot-b' }],
   } });
   expect(view.container.querySelector('.arco-select-disabled')).not.toBeNull();
   expect(view.getByRole('button', { name: 'Apply robot' }).hasAttribute('disabled')).toBe(true);

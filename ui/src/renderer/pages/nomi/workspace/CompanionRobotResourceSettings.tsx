@@ -93,10 +93,10 @@ const CompanionRobotResourceSettings: React.FC<Props> = ({ companionId, conversa
       const resourceSelections = latest.binding.typed_resource_bindings
         .filter((resource) => resource.resource_kind !== 'robot')
         .map(({ resource_kind, resource_id }) => ({ resource_kind,
-          // The Session owner carries the frozen project-memory namespace across
-          // the transition; the selection resolver accepts its catalog identity.
-          resource_id: resource_kind === 'project_memory'
-            ? resolveAgentResourceSelections(['project_memory'], {}).selections[0].resource_id : resource_id }));
+          // The Session owner carries the frozen workspace and project-memory
+          // namespace; the selection resolver accepts their catalog identities.
+          resource_id: resource_kind === 'workspace' || resource_kind === 'project_memory'
+            ? resolveAgentResourceSelections([resource_kind], {}).selections[0].resource_id : resource_id }));
       if (selected) resourceSelections.push({ resource_kind: 'robot', resource_id: selected });
       await ipcBridge.agentPlatform.selectProductBinding.invoke({ target_kind: 'companion', target_id: companionId,
         request: { selection: latest.options.selection, conversation_id: conversation.id,
