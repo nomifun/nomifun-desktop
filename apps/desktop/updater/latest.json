@@ -1,11 +1,15 @@
 {
   "version": "0.8.9",
   "notes": "- Add scoped attachment drag and drop to conversations; unify commands and\n  canonical context clearing; unify scrollbars and compact the companion\n  UI.\n- Unify canonical turn results; derive agent tools from canonical schemas\n  with typed guidance; settle continuations and user input handoffs\n  safely.\n- Harden the embedded browser: fence macOS popup admission and history\n  navigation, and stabilize the embedded identity and navigation\n  lifecycle.\n- Revamp the template workspace: move task history into a compact popover,\n  compact workspace cards with pagination, and refine the editor layout\n  and controls.\n- Preserve robot session bindings and device reconnects.",
-  "pub_date": "2026-10-15T13:09:59.882Z",
+  "pub_date": "2026-10-15T13:28:56.527Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODMxV2wwTlM5dk5ab3I3aVErU3dJUFM4RkxZMmIvQURrRjlIbTRjWHJEMWRGVytzbGhQMVFOYnpBK0xNTVcxdU5lM2x3Y0NSUUFyVmtGaFEzOHBzVXc4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDY5NzM4CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CmQ1anVCcU9UeW83RmhNdCtvVVlQaUdMa0xoOTV4R08vYmR1MTJBYXlEUkJLeW9RNndTZUZKZDdsdEZnV1BhRDZlQ1N4VU80YkIwZmFxS2draGVEZ0RnPT0K",
       "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.9/NomiFun.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODJNR3ZJbi95ajQyQ3JjUXdUWHNSZG5VUXdQVFh6QThVYnhsSmJFOEpOWnQyWG9MaGQzL0J5b2FyMDNZNmdhS3NyRXJIdlBQS0g0NSszZ01QOGxxRXdJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDcwODU4CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CkdCOCtXd2FHSGF0U0tScFhsakF6TSs4MjlZbHgyOGR6bHljTGd5L2R0SUR2RGNReXNYOHlsekU0dnlWSEV1UzBkb3pINjRUWEtMV2RFZWZHcEpjUkRnPT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.9/NomiFun_0.8.9_x64.app.tar.gz"
     }
   }
 }
