@@ -1458,6 +1458,7 @@
       "addVariable": "添加变量",
       "basicInfo": "基础信息",
       "cancel": "取消",
+      "category": "分类",
       "categoryPlaceholder": "分类，例如电商海报",
       "concurrency": "并发",
       "count": "张数",
@@ -1504,6 +1505,7 @@
       "size": "尺寸",
       "splitInstruction": "系列拆分要求",
       "splitPlaceholder": "说明每张图之间如何分工并保持连贯",
+      "variableKey": "变量标识",
       "variableKeyPlaceholder": "变量名，例如 product_name",
       "variableLabelPlaceholder": "显示名称",
       "variableType": {
@@ -1515,6 +1517,7 @@
         "number": "数字",
         "text": "单行文本"
       },
+      "variableTypeLabel": "变量类型",
       "variables": "输入变量",
       "width": "宽度"
     },

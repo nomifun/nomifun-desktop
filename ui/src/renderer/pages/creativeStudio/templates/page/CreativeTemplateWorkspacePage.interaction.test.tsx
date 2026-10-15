@@ -167,6 +167,41 @@ describe('Creative Template workspace interactions', () => {
     expect(await repository.list()).toHaveLength(0);
   });
 
+  test('changes a variable type through the visible selector and saves its typed default', async () => {
+    const template = createTemplateFixture();
+    const originalVariable = template.variables[0];
+    const repository = memoryRepository([template]);
+    const view = renderWorkspace([template], { repository });
+    fireEvent.click(view.getByRole('button', { name: 'Edit Product poster' }));
+    const editor = within(await view.findByRole('dialog', { name: 'Edit template' }));
+    fireEvent.click(editor.getByRole('button', { name: /^Product name/ }));
+
+    const typeSelector = editor.getByRole('combobox', { name: 'Variable type' });
+    fireEvent.click(within(typeSelector).getByText('Single-line text'));
+    expect(typeSelector.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(await view.findByRole('option', { name: 'Long text' }));
+    expect(editor.getByRole('textbox', { name: 'Default long text (optional)' }).tagName).toBe('TEXTAREA');
+    expect(editor.queryByRole('textbox', { name: 'Default value (optional)' })).toBeNull();
+
+    fireEvent.click(within(typeSelector).getByText('Long text'));
+    fireEvent.click(await view.findByRole('option', { name: 'Number' }));
+    expect(editor.queryByRole('textbox', { name: 'Default long text (optional)' })).toBeNull();
+    expect(editor.getByPlaceholderText('Minimum')).not.toBeNull();
+    expect(editor.getByPlaceholderText('Maximum')).not.toBeNull();
+    fireEvent.change(editor.getByPlaceholderText('Default number'), { target: { value: '42' } });
+    await act(async () => { fireEvent.click(editor.getByRole('button', { name: 'Save' })); });
+    const savedVariable = (await repository.load(template.id)).variables[0];
+    expect(savedVariable).toMatchObject({
+      id: originalVariable.id,
+      key: originalVariable.key,
+      label: originalVariable.label,
+      required: originalVariable.required,
+      type: 'number',
+      defaultValue: 42,
+    });
+    expect(template.variables[0].type).toBe('text');
+  });
+
   test('opens a card run dialog and dispatches typed inputs with an isolated template snapshot', async () => {
     const template = createExecutableTemplateFixture();
     let request: Parameters<CreativeTemplateRunnerPort['start']>[0] | undefined;

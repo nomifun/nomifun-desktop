@@ -1458,6 +1458,7 @@
       "addVariable": "Add variable",
       "basicInfo": "Basic information",
       "cancel": "Cancel",
+      "category": "Category",
       "categoryPlaceholder": "Category, e.g., e-commerce poster",
       "concurrency": "Concurrency",
       "count": "Number of images",
@@ -1504,6 +1505,7 @@
       "size": "Size",
       "splitInstruction": "Series breakdown requirements",
       "splitPlaceholder": "Explain the role of each image and how the series should stay coherent",
+      "variableKey": "Variable key",
       "variableKeyPlaceholder": "Variable key, e.g. product_name",
       "variableLabelPlaceholder": "Display name",
       "variableType": {
@@ -1515,6 +1517,7 @@
         "number": "Number",
         "text": "Single-line text"
       },
+      "variableTypeLabel": "Variable type",
       "variables": "Input variables",
       "width": "Width"
     },

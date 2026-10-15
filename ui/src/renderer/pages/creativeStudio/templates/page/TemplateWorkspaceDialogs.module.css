@@ -1,7 +1,7 @@
 /** Template workspace dialog and durable run surfaces. Colors follow the active Nomifun theme. */
 
 .editorModal {
-  width: 1000px !important;
+  width: 960px !important;
 }
 
 .runModal {
@@ -12,22 +12,24 @@
   width: 780px !important;
 }
 
-.editorModal :global(.arco-modal-content),
 .runModal :global(.arco-modal-content) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
-.editorModal :global(.arco-modal-content) {
-  container: template-editor-shell / inline-size;
+.editorModal:global(.arco-modal) :global(.arco-modal-content) {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .runModal :global(.arco-modal-content) {
   container: template-run-shell / inline-size;
 }
 
-.editorGrid,
 .runGrid {
   display: grid;
   min-height: 0;
@@ -37,11 +39,21 @@
 }
 
 .editorGrid {
-  grid-template-columns: minmax(0, 1.3fr) minmax(250px, .9fr);
+  display: grid;
+  flex: 1 0 auto;
+  min-width: 0;
+  min-height: min(610px, calc(var(--nomi-modal-max-height) - 112px));
+  grid-template-columns: minmax(0, 1fr) clamp(260px, 30%, 300px);
 }
 
 .editorMain,
-.editorAside,
+.editorAside {
+  box-sizing: border-box;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .runColumn {
   min-width: 0;
   min-height: 0;
@@ -51,15 +63,10 @@
 }
 
 .editorMain {
-  container: template-variable-fields / inline-size;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  padding-right: 2px;
+  gap: 16px;
+  padding: 18px 20px 20px;
 }
 
-.editorSection,
-.editorAside,
 .runSection {
   box-sizing: border-box;
   display: flex;
@@ -73,7 +80,22 @@
 
 .editorAside {
   align-self: stretch;
-  background: color-mix(in srgb, var(--brand) 4%, var(--bg-base));
+  gap: 14px;
+  padding: 18px;
+  border-left: 1px solid var(--border-base);
+  background: var(--bg-1);
+}
+
+.editorSection {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.metadataSection {
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-light);
 }
 
 .editorSection h3,
@@ -92,7 +114,13 @@
 }
 
 .editorSection h3,
-.editorAside h3,
+.editorAside h3 {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 22px;
+}
+
 .runSection h3 {
   color: var(--text-primary);
   font-size: 14px;
@@ -108,6 +136,15 @@
   gap: 8px;
 }
 
+.editorMain .sectionHeadingRow {
+  justify-content: flex-start;
+  gap: 7px;
+}
+
+.editorMain .sectionHeadingRow > :last-child {
+  margin-left: auto;
+}
+
 .twoColumns,
 .variableValueGrid,
 .infoGrid {
@@ -119,41 +156,196 @@
 .variableList {
   display: flex;
   flex-direction: column;
-  gap: 10px;
 }
 
 .variableCard {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--border-light);
+  border-bottom: 1px solid var(--border-light);
+}
+
+.variableCard[data-expanded='true'] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin: 4px 0;
+  padding: 10px;
+  border: 1px solid var(--border-base);
   border-radius: 10px;
   background: var(--bg-1);
-  transition: border-color 160ms ease;
 }
 
-.variableCard:focus-within {
-  border-color: color-mix(in srgb, var(--brand) 50%, var(--border-base));
-}
-
-.variableRow {
-  display: grid;
-  grid-template-columns: minmax(100px, 1fr) minmax(100px, 1fr) 120px auto 30px;
+.variableHeader {
+  display: flex;
+  min-width: 0;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
-@container template-variable-fields (max-width: 560px) {
-  .variableRow {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 30px;
-  }
+.variableHeader > :global(.arco-btn) {
+  flex: none;
+}
 
-  .variableRow > :nth-child(1) { grid-column: 1; grid-row: 1; }
-  .variableRow > :nth-child(2) { grid-column: 2; grid-row: 1; }
-  .variableRow > :nth-child(3) { grid-column: 1; grid-row: 2; }
-  .variableRow > :nth-child(4) { grid-column: 2; grid-row: 2; }
-  .variableRow > :nth-child(5) { grid-column: 3; grid-row: 1; }
+.variableCard[data-expanded='true'] .variableHeader {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: end;
+  min-height: 32px;
+  gap: 2px;
+}
+
+.variableSummary {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex: 1;
+  min-height: 52px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 2px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition: background 160ms ease;
+}
+
+.variableCard[data-expanded='true'] .variableSummary {
+  width: 28px;
+  min-height: 28px;
+  flex: none;
+  justify-content: center;
+  padding: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.variableSummary:hover {
+  background: color-mix(in srgb, var(--text-primary) 3%, transparent);
+}
+
+.variableIcon {
+  display: flex;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text-secondary);
+}
+
+.variableIdentity {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.variableName {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.variableKey {
+  overflow: hidden;
+  color: var(--color-text-3);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.variableMeta {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  color: var(--color-text-3);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: right;
+}
+
+.variableChevron {
+  display: inline-flex;
+  flex: none;
+  color: var(--color-text-3);
+  transition: transform 160ms ease;
+}
+
+.variableSummary[aria-expanded='true'] .variableChevron {
+  transform: rotate(180deg);
+}
+
+.variableDetails {
+  display: contents;
+}
+
+.variableDetails[hidden] {
+  display: none;
+}
+
+.variableFields {
+  display: grid;
+  min-width: 0;
+  grid-column: 1;
+  grid-row: 1;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 10px;
+}
+
+.variableFields > .fieldLabel {
+  gap: 4px;
+}
+
+.variableOptions {
+  display: flex;
+  min-width: 0;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 10px;
+}
+
+.variableOptions > .fieldLabel {
+  display: grid;
+  flex: none;
+  grid-template-columns: auto 112px;
+  align-items: center;
+  gap: 6px;
+}
+
+.variableInlineValue {
+  min-width: 0;
+  flex: 1;
+}
+
+.variableValue {
+  min-width: 0;
+  grid-column: 1 / -1;
+}
+
+.variableRequired {
+  display: flex;
+  min-height: 32px;
+  flex: none;
+  align-items: center;
+}
+
+.sectionCount {
+  color: var(--color-text-3);
+  font-size: 12px;
+  font-weight: 400;
 }
 
 .toggleRow {
@@ -193,17 +385,270 @@
 .seriesSettings {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 14px;
-  border: 1px solid var(--border-light);
-  border-radius: 10px;
-  background: var(--bg-1);
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-base);
 }
 
 .seriesSettings h4 {
   font-size: 13px;
   font-weight: 600;
   line-height: 20px;
+}
+
+.descriptionDetails > summary,
+.advancedSettings > summary {
+  display: flex;
+  width: fit-content;
+  align-items: center;
+  gap: 6px;
+  border-radius: 4px;
+  color: var(--color-text-3);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 20px;
+  list-style: none;
+}
+
+.descriptionDetails > summary::-webkit-details-marker,
+.advancedSettings > summary::-webkit-details-marker {
+  display: none;
+}
+
+.descriptionDetails > summary::before {
+  content: '+';
+  font-size: 15px;
+}
+
+.descriptionDetails[open] > summary::before {
+  content: '−';
+}
+
+.descriptionDetails > summary:hover,
+.advancedSettings > summary:hover {
+  color: var(--text-primary);
+}
+
+.descriptionDetails[open] > :not(summary) {
+  margin-top: 9px;
+}
+
+.advancedSettings > summary::after {
+  width: 5px;
+  height: 5px;
+  margin: 0 3px 3px;
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
+  content: '';
+  transform: rotate(45deg);
+}
+
+.advancedSettings[open] > summary::after {
+  margin-top: 4px;
+  transform: rotate(225deg);
+}
+
+.advancedSettings[open] > :not(summary) {
+  margin-top: 12px;
+}
+
+.promptEditor {
+  overflow: hidden;
+  border: 1px solid var(--border-base);
+  border-radius: var(--nomi-modal-control-radius);
+  background: var(--nomi-modal-control-bg);
+}
+
+.promptEditor:focus-within {
+  border-color: var(--brand);
+}
+
+.promptEditor :global(.arco-textarea-wrapper) {
+  display: block;
+  width: 100%;
+}
+
+.promptEditor :global(.arco-textarea) {
+  display: block;
+  width: 100%;
+  padding: 12px 14px;
+  border-width: 0;
+  box-shadow: none;
+  font-size: 13px;
+  line-height: 1.85;
+}
+
+.promptFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border-light);
+  background: var(--bg-1);
+  color: var(--color-text-3);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.promptFooter > :last-child {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.settingsGroup {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.editorAside > .imageSizeSettings + .settingsGroup {
+  padding-top: 12px;
+  border-top: 1px solid var(--border-base);
+}
+
+.modelField[data-creative-model-select] {
+  grid-template-columns: 52px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px 10px;
+}
+
+.seriesSettings .modelField[data-creative-model-select] {
+  grid-template-columns: 84px minmax(0, 1fr);
+}
+
+.modelField > div:first-child {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.modelField > div:first-child > :first-child {
+  overflow: visible;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 18px;
+  white-space: normal;
+}
+
+.modelField > div:first-child > :last-child {
+  display: none;
+}
+
+.modelField > :global(.arco-select) {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+/* Fill the selected option's grid so its text centers within the control. */
+.modelField :global(.arco-select-view-value > span) {
+  height: 100%;
+}
+
+.modelField > :not(:first-child):not(:global(.arco-select)) {
+  grid-column: 1 / -1;
+}
+
+.inlineField {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.imageSizeSettings {
+  padding-top: 12px;
+  border-top: 1px solid var(--border-base);
+}
+
+.imageSizeSettings [data-image-size-picker] {
+  gap: 12px;
+}
+
+.imageSizeSettings [data-image-size-picker] legend {
+  margin-bottom: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 19px;
+}
+
+.imageSizeSettings [data-image-size-picker] > fieldset > div:first-of-type {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.imageSizeSettings [data-image-size-picker] button {
+  min-height: 36px;
+  border-color: var(--border-base);
+  border-radius: 7px;
+  background: var(--nomi-modal-control-bg);
+  color: var(--text-secondary);
+}
+
+.imageSizeSettings [data-image-size-picker] button[aria-pressed='true'] {
+  border-color: var(--text-primary);
+  background: color-mix(in srgb, var(--text-primary) 5%, var(--nomi-modal-control-bg));
+  color: var(--text-primary);
+}
+
+.imageSizeSettings [data-image-size-picker] button:disabled {
+  opacity: 0.45;
+}
+
+.imageSizeSettings [data-image-size-picker] > fieldset > [aria-live] {
+  color: var(--color-text-3);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.quantityOptions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--border-base);
+  border-radius: 8px;
+  background: var(--bg-2);
+}
+
+.quantityOption {
+  min-width: 0;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.quantityOption:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
+.quantityOption[aria-pressed='true'] {
+  border-color: var(--border-base);
+  background: var(--dialog-fill-0);
+  color: var(--text-primary);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--text-primary) 7%, transparent);
+}
+
+.quantityOption:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.variableSummary:focus-visible,
+.descriptionDetails > summary:focus-visible,
+.advancedSettings > summary:focus-visible,
+.quantityOption:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
 }
 
 .runGrid {
@@ -308,20 +753,6 @@
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-}
-
-@container template-editor-shell (max-width: 700px) {
-  .editorGrid {
-    grid-template-columns: minmax(0, 1fr);
-    overflow-y: auto;
-    overscroll-behavior: contain;
-  }
-
-  .editorMain,
-  .editorAside {
-    overflow: visible;
-    scrollbar-gutter: auto;
-  }
 }
 
 @container template-run-shell (max-width: 680px) {
@@ -686,7 +1117,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .variableCard,
+  .variableSummary,
+  .variableChevron,
   .runCard,
   .runResults button,
   .runProgressBar::-webkit-progress-value {
