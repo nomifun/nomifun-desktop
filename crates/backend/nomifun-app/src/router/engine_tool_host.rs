@@ -43,13 +43,6 @@ pub trait EngineToolObservationPolicy: Send + Sync {
         result: &EngineToolResult,
     ) -> EngineToolResult;
 }
-pub struct BoundedEngineToolObservation;
-impl EngineToolObservationPolicy for BoundedEngineToolObservation {
-    fn project(&self, _: &EngineToolInvocation, result: &EngineToolResult) -> EngineToolResult {
-        bounded_engine_tool_result(result)
-    }
-}
-
 struct Turn {
     operation: String,
     journal: EngineTurnJournal,
@@ -249,6 +242,14 @@ mod tests {
     use nomifun_chat_model_broker::ChatToolCall;
     use nomifun_db::sqlx;
     use serde_json::Value;
+
+    struct BoundedEngineToolObservation;
+    impl EngineToolObservationPolicy for BoundedEngineToolObservation {
+        fn project(&self, _: &EngineToolInvocation, result: &EngineToolResult) -> EngineToolResult {
+            bounded_engine_tool_result(result)
+        }
+    }
+
     fn tools(inner: Arc<dyn EngineToolInvoker>) -> EngineToolHost {
         EngineToolHost::new(inner, Arc::new(BoundedEngineToolObservation))
     }

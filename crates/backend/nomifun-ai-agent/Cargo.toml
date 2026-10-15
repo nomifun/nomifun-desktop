@@ -42,9 +42,6 @@ nomi-types.workspace = true
 nomi-config.workspace = true
 nomi-providers.workspace = true
 nomi-redact.workspace = true
-# Native Workspace contracts and isolated local-search engine. Knowledge uses
-# its own typed port; the legacy BrowserTool/Hub adapter is not a dependency.
-nomifun-browser-platform = { workspace = true, optional = true }
 nomi-browser-engine = { workspace = true, optional = true }
 uuid.workspace = true
 tokio-util = { version = "0.7", features = ["compat"] }
@@ -59,14 +56,14 @@ fs2.workspace = true
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [features]
-# Enables the `AgentRuntimeHandle::Mock` variant used by downstream test harnesses
-# (conversation/cron/team/app) to inject trait-object stubs without having to
+# Enables the `AgentRuntimeHandle::Mock` variant used by downstream application
+# test harnesses to inject trait-object stubs without having to
 # spawn a real agent process. Production builds must NOT turn this on — it
 # retains test-only no-op lifecycle behavior. The source-installed Runtime
 # implements OfficialAgentRuntime and must provide result-bearing teardown.
 test-support = []
 # Browser-automation tools for the nomi engine (desktop host only).
-browser-use = ["dep:nomifun-browser-platform", "dep:nomi-browser-engine"]
+browser-use = ["dep:nomi-browser-engine"]
 
 [dev-dependencies]
 tempfile.workspace = true

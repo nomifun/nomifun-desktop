@@ -78,6 +78,16 @@ const textContent = (message: TMessage): string => {
   return typeof value === 'string' ? value : '';
 };
 
+const imageArtifact = (filename: string, digest: string) => ({
+  id: '019b0000-0000-7000-8000-000000000002',
+  kind: 'image',
+  mime_type: 'image/png',
+  path: `/workspace/${filename}`,
+  relative_path: `nomifun-artifacts/${filename}`,
+  size_bytes: 10,
+  sha256: digest.repeat(64),
+});
+
 describe('independent canonical knowledge write-back updates', () => {
   const target = { kb_id: parseKnowledgeBaseId('019b0000-0000-7000-8000-000000000010'), rel_path: 'notes.md' };
   const summary = (status: KnowledgeWritebackState['status'], event_seq?: number) => baseMessage({
@@ -847,17 +857,7 @@ describe('mergeFetchedMessagesForConversation', () => {
         name: 'Generate',
         args: {},
         status: 'completed',
-        artifacts: [
-          {
-            id: '019b0000-0000-7000-8000-000000000002',
-            kind: 'image',
-            mime_type: 'image/png',
-            path: '/workspace/stale.png',
-            relative_path: 'nomifun-artifacts/stale.png',
-            size_bytes: 10,
-            sha256: 'a'.repeat(64),
-          },
-        ],
+        artifacts: [imageArtifact('stale.png', 'a')],
       },
     } as any);
 
@@ -1106,81 +1106,19 @@ describe('composeMessageForTest', () => {
     expect((merged[0] as any).content.status).toBe('completed');
   });
 
-  test('applies a terminal error correction over completed artifact delivery', () => {
-    const completed = baseMessage({
-      id: 'turn-1:tool:artifact-1',
-      msg_id: 'turn-1',
-      type: 'tool_call',
+  test.each([
+    ['applies a terminal error correction over completed artifact delivery', 'completed', 'error', 'old.png', 'a'],
+    ['keeps generic tool error absorbing against late completed artifact delivery', 'error', 'completed', 'stale.png', 'b'],
+  ] as const)('%s', (_name, initialStatus, incomingStatus, filename, digest) => {
+    const tool = (status: 'completed' | 'error') => baseMessage({
+      id: 'turn-1:tool:artifact-1', msg_id: 'turn-1', type: 'tool_call',
       content: {
-        call_id: 'artifact-1',
-        name: 'Generate',
-        args: {},
-        status: 'completed',
-        artifacts: [
-          {
-            id: '019b0000-0000-7000-8000-000000000002',
-            kind: 'image',
-            mime_type: 'image/png',
-            path: '/workspace/old.png',
-            relative_path: 'nomifun-artifacts/old.png',
-            size_bytes: 10,
-            sha256: 'a'.repeat(64),
-          },
-        ],
+        call_id: 'artifact-1', name: 'Generate', args: {}, status,
+        artifacts: status === 'completed' ? [imageArtifact(filename, digest)] : [],
       },
     } as any);
-    const correction = baseMessage({
-      id: 'turn-1:tool:artifact-1',
-      msg_id: 'turn-1',
-      type: 'tool_call',
-      content: {
-        call_id: 'artifact-1',
-        name: 'Generate',
-        args: {},
-        status: 'error',
-        artifacts: [],
-      },
-    } as any);
-
-    const merged = composeMessageForTest(correction, [completed]);
-
+    const merged = composeMessageForTest(tool(incomingStatus), [tool(initialStatus)]);
     expect(merged).toHaveLength(1);
-    expect((merged[0] as any).content.status).toBe('error');
-    expect((merged[0] as any).content.artifacts).toEqual([]);
-  });
-
-  test('keeps generic tool error absorbing against late completed artifact delivery', () => {
-    const failed = baseMessage({
-      id: 'turn-1:tool:artifact-1',
-      msg_id: 'turn-1',
-      type: 'tool_call',
-      content: { call_id: 'artifact-1', name: 'Generate', args: {}, status: 'error', artifacts: [] },
-    } as any);
-    const lateCompleted = baseMessage({
-      id: 'turn-1:tool:artifact-1',
-      msg_id: 'turn-1',
-      type: 'tool_call',
-      content: {
-        call_id: 'artifact-1',
-        name: 'Generate',
-        args: {},
-        status: 'completed',
-        artifacts: [
-          {
-            id: '019b0000-0000-7000-8000-000000000002',
-            kind: 'image',
-            mime_type: 'image/png',
-            path: '/workspace/stale.png',
-            relative_path: 'nomifun-artifacts/stale.png',
-            size_bytes: 10,
-            sha256: 'b'.repeat(64),
-          },
-        ],
-      },
-    } as any);
-
-    const merged = composeMessageForTest(lateCompleted, [failed]);
-
     expect((merged[0] as any).content.status).toBe('error');
     expect((merged[0] as any).content.artifacts).toEqual([]);
   });
@@ -1274,15 +1212,7 @@ describe('normalizeDbMessage', () => {
     }
   );
 
-  const persistedArtifact = {
-    id: '019b0000-0000-7000-8000-000000000002',
-    kind: 'image',
-    mime_type: 'image/png',
-    path: '/workspace/image.png',
-    relative_path: 'nomifun-artifacts/image.png',
-    size_bytes: 10,
-    sha256: 'c'.repeat(64),
-  };
+  const persistedArtifact = imageArtifact('image.png', 'c');
 
   test('rehydrates the canonical Agent transition instead of leaving an empty success tip', () => {
     const normalized = normalizeDbMessage(baseMessage({
@@ -1512,42 +1442,16 @@ describe('normalizeDbMessage', () => {
     expect(nestedOnly.turn_id).toBeUndefined();
   });
 
-  test('does not promote nested turn metadata from renderer content', () => {
-    const malformed = 'turn-from-another-protocol';
-    const normalized = [
-      normalizeDbMessage(
-        baseMessage({
-          id: 'invalid-tips-turn',
-          type: 'tips',
-          content: { content: 'warning', type: 'warning', turn_id: malformed } as any,
-        })
-      ),
-      normalizeDbMessage(
-        baseMessage({
-          id: 'invalid-generic-turn',
-          type: 'tool_call',
-          content: {
-            call_id: 'invalid-generic-call',
-            name: 'Generate',
-            status: 'running',
-            turn_id: malformed,
-          } as any,
-        })
-      ),
-      normalizeDbMessage(
-        baseMessage({
-          id: 'invalid-text-turn',
-          type: 'text',
-          content: { content: 'answer', turn_id: malformed } as any,
-        })
-      ),
-    ];
-
-    expect(normalized.map((message) => message.turn_id)).toEqual([
-      undefined,
-      undefined,
-      undefined,
-    ]);
+  test.each([
+    { type: 'tips', content: { content: 'warning', type: 'warning' } },
+    { type: 'tool_call', content: { call_id: 'invalid-generic-call', name: 'Generate', status: 'running' } },
+    { type: 'text', content: { content: 'answer' } },
+  ] as const)('does not promote nested turn metadata from $type content', ({ type, content }) => {
+    const normalized = normalizeDbMessage(baseMessage({
+      id: `invalid-${type}-turn`, type,
+      content: { ...content, turn_id: 'turn-from-another-protocol' } as any,
+    }));
+    expect(normalized.turn_id).toBeUndefined();
   });
 
   test('keeps a delayed persisted tool attached to its old turn after a newer user request', () => {
@@ -1583,78 +1487,24 @@ describe('normalizeDbMessage', () => {
     ]);
   });
 
-  test('row-level generic error removes stale completed artifact receipts from history', () => {
-    const normalized = normalizeDbMessage(
-      baseMessage({
-        id: 'failed-tool-row',
-        msg_id: 'assistant-failed-tool',
-        type: 'tool_call',
-        status: 'error',
-        content: {
-          call_id: 'failed-image',
-          name: 'Generate',
-          status: 'completed',
-          artifacts: [persistedArtifact],
-        } as any,
-      })
-    );
-
+  test.each([
+    { name: 'row-level generic error removes stale completed artifact receipts', rowStatus: 'error', committed: undefined, malformed: false, expected: 'error' },
+    { name: 'one malformed completed receipt rejects the entire batch', rowStatus: 'finish', committed: true, malformed: true, expected: 'error' },
+    { name: 'receipts without an enclosing turn commit marker stay hidden', rowStatus: 'finish', committed: undefined, malformed: false, expected: 'error' },
+    { name: 'an enclosing turn commit marker exposes valid receipts', rowStatus: 'finish', committed: true, malformed: false, expected: 'completed' },
+  ] as const)('$name', ({ rowStatus, committed, malformed, expected }) => {
+    const normalized = normalizeDbMessage(baseMessage({
+      id: 'persisted-tool-row', msg_id: 'persisted-tool', type: 'tool_call', status: rowStatus,
+      content: {
+        call_id: 'persisted-image', name: 'Generate', status: 'completed',
+        ...(committed === undefined ? {} : { artifact_delivery_committed: committed }),
+        artifacts: [persistedArtifact, ...(malformed ? [{ ...persistedArtifact, id: 'bad', sha256: 'invalid' }] : [])],
+      },
+    } as any));
     expect(normalized.type).toBe('tool_call');
     if (normalized.type !== 'tool_call') throw new Error('expected generic tool call');
-    expect(normalized.content.status).toBe('error');
-    expect(normalized.content.artifacts).toEqual([]);
-  });
-
-  test('history hydration rejects an entire completed receipt batch when one member is malformed', () => {
-    const normalized = normalizeDbMessage(
-      baseMessage({
-        id: 'mixed-tool-row',
-        msg_id: 'assistant-mixed-tool',
-        type: 'tool_call',
-        status: 'finish',
-        content: {
-          call_id: 'mixed-image',
-          name: 'Generate',
-          status: 'completed',
-          artifact_delivery_committed: true,
-          artifacts: [persistedArtifact, { ...persistedArtifact, id: 'bad', sha256: 'invalid' }],
-        },
-      } as any)
-    );
-
-    expect(normalized.type).toBe('tool_call');
-    if (normalized.type !== 'tool_call') throw new Error('expected generic tool call');
-    expect(normalized.content.status).toBe('error');
-    expect(normalized.content.artifacts).toEqual([]);
-  });
-
-  test('history exposes generic receipts only after the enclosing turn commit marker', () => {
-    const hydrate = (artifact_delivery_committed?: boolean) =>
-      normalizeDbMessage(
-        baseMessage({
-          id: artifact_delivery_committed ? 'committed-tool-row' : 'legacy-tool-row',
-          msg_id: 'assistant-committed-tool',
-          type: 'tool_call',
-          status: 'finish',
-          content: {
-            call_id: 'committed-image',
-            name: 'Generate',
-            status: 'completed',
-            ...(artifact_delivery_committed === undefined ? {} : { artifact_delivery_committed }),
-            artifacts: [persistedArtifact],
-          },
-        } as any)
-      );
-
-    const legacy = hydrate();
-    if (legacy.type !== 'tool_call') throw new Error('expected generic tool call');
-    expect(legacy.content.status).toBe('error');
-    expect(legacy.content.artifacts).toEqual([]);
-
-    const committed = hydrate(true);
-    if (committed.type !== 'tool_call') throw new Error('expected generic tool call');
-    expect(committed.content.status).toBe('completed');
-    expect(committed.content.artifacts).toEqual([persistedArtifact]);
+    expect(normalized.content.status).toBe(expected);
+    expect(normalized.content.artifacts).toEqual(expected === 'completed' ? [persistedArtifact] : []);
   });
 
 });

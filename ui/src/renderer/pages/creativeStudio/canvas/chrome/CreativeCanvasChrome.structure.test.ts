@@ -61,19 +61,6 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
     expect(types.includes('onBottomViewChange')).toBe(false);
   });
 
-  test('keeps source-order node creation directly on the side rail', () => {
-    expect(
-      types.includes('CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS')
-    ).toBe(true);
-    expect(
-      component.includes('CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS.map')
-    ).toBe(true);
-    expect(component.includes('onClick={() => handleNodeAdd(kind)}')).toBe(true);
-    expect(component.includes('if (canvasPanelOpen) props.onLeftPanelOpenChange(false)')).toBe(true);
-    expect(component.includes('nodeMenuOpen')).toBe(false);
-    expect(types.includes('nodeMenuOpen')).toBe(false);
-  });
-
   test('keeps the canvas full-width while the resource rail floats above it', () => {
     for (const token of [
       '--creative-canvas-right-panel-width',

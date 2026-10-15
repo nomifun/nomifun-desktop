@@ -247,10 +247,15 @@ mod tests {
     }
 
     #[test]
-    fn test_login_request_missing_field() {
-        let raw = r#"{"username":"admin"}"#;
-        let result = serde_json::from_str::<LoginRequest>(raw);
-        assert!(result.is_err());
+    fn test_login_request_rejects_missing_and_unknown_fields() {
+        for raw in [
+            r#"{"username":"admin"}"#,
+            r#"{"password":"secret"}"#,
+            r#"{}"#,
+            r#"{"username":"admin","password":"secret","extra":"ignored"}"#,
+        ] {
+            assert!(serde_json::from_str::<LoginRequest>(raw).is_err(), "accepted {raw}");
+        }
     }
 
     #[test]
@@ -293,10 +298,13 @@ mod tests {
     }
 
     #[test]
-    fn test_change_password_request_camel_case_rejected() {
-        let raw = r#"{"currentPassword":"old","newPassword":"new"}"#;
-        let result = serde_json::from_str::<ChangePasswordRequest>(raw);
-        assert!(result.is_err());
+    fn test_change_password_request_rejects_camel_case_and_missing_fields() {
+        for raw in [
+            r#"{"currentPassword":"old","newPassword":"new"}"#,
+            r#"{"current_password":"old"}"#,
+        ] {
+            assert!(serde_json::from_str::<ChangePasswordRequest>(raw).is_err(), "accepted {raw}");
+        }
     }
 
     #[test]
@@ -307,10 +315,10 @@ mod tests {
     }
 
     #[test]
-    fn test_qr_login_request_camel_case_rejected() {
-        let raw = r#"{"qrToken":"abc"}"#;
-        let result = serde_json::from_str::<QrLoginRequest>(raw);
-        assert!(result.is_err());
+    fn test_qr_login_request_rejects_camel_case_and_missing_fields() {
+        for raw in [r#"{"qrToken":"abc"}"#, r#"{}"#] {
+            assert!(serde_json::from_str::<QrLoginRequest>(raw).is_err(), "accepted {raw}");
+        }
     }
 
     #[test]
@@ -330,6 +338,11 @@ mod tests {
         assert!(json.get("needsSetup").is_none());
         assert!(json.get("userCount").is_none());
         assert!(json.get("isAuthenticated").is_none());
+        let deserialized: AuthStatusResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(deserialized.success, resp.success);
+        assert_eq!(deserialized.needs_setup, resp.needs_setup);
+        assert_eq!(deserialized.user_count, resp.user_count);
+        assert_eq!(deserialized.is_authenticated, resp.is_authenticated);
     }
 
     #[test]

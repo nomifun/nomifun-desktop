@@ -113,23 +113,12 @@ async fn bundle_verification_rejects_v2_manifest_and_prefixed_graph_root() {
     assert!(!prefixed_bundle.exists());
 
     let bundle = dir.path().join("v2.nomifun");
-    create_backup_bundle(
-        &database,
-        &bundle,
-        &generate_id(),
-        BackupObjectGraph::full_database(),
-    )
-    .await
-    .unwrap();
+    create_full_backup(&database, &bundle).await;
     let manifest_path = bundle.join(MANIFEST_FILE);
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
     manifest["schema"] = json!("id-contract-v2");
-    std::fs::write(
-        manifest_path,
-        serde_json::to_vec_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
+    write_manifest(&manifest_path, &manifest);
 
     let error = verify_backup_bundle(&bundle)
         .expect_err("v3 verification must reject v2 manifests without migration");
@@ -439,69 +428,30 @@ async fn verification_rejects_legacy_format_and_coverage_drift() {
     let dir = tempfile::tempdir().unwrap();
     let database = init_database(&dir.path().join("source.db")).await.unwrap();
     let bundle = dir.path().join("backup.nomifun");
-    create_backup_bundle(
-        &database,
-        &bundle,
-        &generate_id(),
-        BackupObjectGraph::full_database(),
-    )
-    .await
-    .unwrap();
+    create_full_backup(&database, &bundle).await;
 
     let manifest_path = bundle.join(MANIFEST_FILE);
-    let original = std::fs::read(&manifest_path).unwrap();
-    let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
-    manifest["format_version"] = json!(1);
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_vec_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
-    assert!(matches!(
-        verify_backup_bundle(&bundle),
-        Err(BackupError::InvalidManifest(_))
-    ));
-
-    let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
-    manifest["coverage"]["excluded"]
-        .as_array_mut()
-        .unwrap()
-        .pop();
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_vec_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
-    assert!(matches!(
-        verify_backup_bundle(&bundle),
-        Err(BackupError::InvalidManifest(_))
-    ));
-
-    let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
-    manifest["coverage"]["excluded"]
-        .as_array_mut()
-        .unwrap()
-        .swap(0, 1);
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_vec_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
-    assert!(matches!(
-        verify_backup_bundle(&bundle),
-        Err(BackupError::InvalidManifest(_))
-    ));
-
-    let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
-    manifest["legacy_compatibility"] = json!(true);
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_vec_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
-    let error = verify_backup_bundle(&bundle)
-        .expect_err("strict v3 manifests must reject unknown compatibility fields");
-    assert!(matches!(error, BackupError::InvalidManifest(_)));
+    let original: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let mutations: [(&str, fn(&mut serde_json::Value)); 4] = [
+        ("legacy format", |manifest| manifest["format_version"] = json!(1)),
+        ("missing exclusion", |manifest| {
+            manifest["coverage"]["excluded"].as_array_mut().unwrap().pop();
+        }),
+        ("reordered exclusions", |manifest| {
+            manifest["coverage"]["excluded"].as_array_mut().unwrap().swap(0, 1);
+        }),
+        ("unknown compatibility flag", |manifest| manifest["legacy_compatibility"] = json!(true)),
+    ];
+    for (name, mutate) in mutations {
+        let mut manifest = original.clone();
+        mutate(&mut manifest);
+        write_manifest(&manifest_path, &manifest);
+        assert!(
+            matches!(verify_backup_bundle(&bundle), Err(BackupError::InvalidManifest(_))),
+            "must reject {name}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -511,14 +461,7 @@ async fn pre_work_root_owner_v2_coverage_remains_verifiable_and_restorable() {
     let bundle = dir.path().join("backup.nomifun");
     let destination = dir.path().join("restored");
     let database = init_database(&source).await.unwrap();
-    create_backup_bundle(
-        &database,
-        &bundle,
-        &generate_id(),
-        BackupObjectGraph::full_database(),
-    )
-    .await
-    .unwrap();
+    create_full_backup(&database, &bundle).await;
 
     let manifest_path = bundle.join(MANIFEST_FILE);
     let mut manifest: serde_json::Value =
@@ -529,11 +472,7 @@ async fn pre_work_root_owner_v2_coverage_remains_verifiable_and_restorable() {
             && entry["path"] != WORK_ROOT_BINDING_FILE
             && entry["path"] != "agent-process-registry.json"
     });
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_vec_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
+    write_manifest(&manifest_path, &manifest);
 
     let verified = verify_backup_bundle(&bundle).unwrap();
     assert_eq!(verified.format_version, BACKUP_FORMAT_VERSION);
@@ -568,11 +507,7 @@ async fn pre_work_root_owner_v2_coverage_remains_verifiable_and_restorable() {
     assert!(destination.join(DATASET_RECEIPT_FILE).is_file());
 
     manifest["coverage"]["excluded"][0]["exclusion_reason"] = json!("tampered");
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_vec_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
+    write_manifest(&manifest_path, &manifest);
     assert!(matches!(
         verify_backup_bundle(&bundle),
         Err(BackupError::InvalidManifest(_))
@@ -584,14 +519,7 @@ async fn pre_browser_v4_coverage_remains_verifiable_and_restorable_without_relax
     let dir = tempfile::tempdir().unwrap();
     let bundle = dir.path().join("backup.nomifun");
     let database = init_database(&dir.path().join("source.db")).await.unwrap();
-    let current = create_backup_bundle(
-        &database,
-        &bundle,
-        &generate_id(),
-        BackupObjectGraph::full_database(),
-    )
-    .await
-    .unwrap();
+    let current = create_full_backup(&database, &bundle).await;
     database.close().await;
     let browser_root = managed_dataset_roots()
         .find(|root| root.path == "browser-v4")
@@ -618,7 +546,7 @@ async fn pre_browser_v4_coverage_remains_verifiable_and_restorable_without_relax
                     || (entry.path != WORK_ROOT_OWNER_FILE
                         && entry.path != "agent-process-registry.json"))
         });
-        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&previous).unwrap()).unwrap();
+        write_manifest(&manifest_path, &previous);
         assert_eq!(verify_backup_bundle(&bundle).unwrap(), previous, "{shape}");
         let destination = dir.path().join(format!("restored-{shape}"));
         let outcome = restore_backup_data_dir(&bundle, &destination).await.unwrap();
@@ -628,22 +556,22 @@ async fn pre_browser_v4_coverage_remains_verifiable_and_restorable_without_relax
 
         let mut tampered = previous.clone();
         tampered.coverage.excluded[0].exclusion_reason = Some("tampered".into());
-        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&tampered).unwrap()).unwrap();
+        write_manifest(&manifest_path, &tampered);
         assert!(matches!(verify_backup_bundle(&bundle), Err(BackupError::InvalidManifest(_))));
 
         let mut incomplete = previous.clone();
         incomplete.coverage.excluded.retain(|entry| entry.path != "browser-data");
-        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&incomplete).unwrap()).unwrap();
+        write_manifest(&manifest_path, &incomplete);
         assert!(matches!(verify_backup_bundle(&bundle), Err(BackupError::InvalidManifest(_))));
 
         let mut incomplete = previous.clone();
         incomplete.coverage.included.retain(|entry| entry.path != "attachments");
-        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&incomplete).unwrap()).unwrap();
+        write_manifest(&manifest_path, &incomplete);
         assert!(matches!(verify_backup_bundle(&bundle), Err(BackupError::InvalidManifest(_))));
 
         let mut wrong_schema = previous;
         wrong_schema.schema = "incompatible-schema".into();
-        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&wrong_schema).unwrap()).unwrap();
+        write_manifest(&manifest_path, &wrong_schema);
         assert!(matches!(verify_backup_bundle(&bundle), Err(BackupError::InvalidManifest(_))));
     }
 }
@@ -719,14 +647,7 @@ async fn bundle_verification_fails_closed_after_tampering() {
     let source = dir.path().join("source.db");
     let bundle = dir.path().join("backup.nomifun");
     let database = init_database(&source).await.unwrap();
-    create_backup_bundle(
-        &database,
-        &bundle,
-        &uuid::Uuid::now_v7().to_string(),
-        BackupObjectGraph::full_database(),
-    )
-    .await
-    .unwrap();
+    create_full_backup(&database, &bundle).await;
 
     std::fs::write(bundle.join(DATABASE_FILE), b"tampered").unwrap();
     assert!(matches!(
@@ -953,14 +874,7 @@ async fn restore_preserves_the_exact_database_identity_graph() {
     .await
     .unwrap();
 
-    create_backup_bundle(
-        &database,
-        &bundle,
-        &generate_id(),
-        BackupObjectGraph::full_database(),
-    )
-    .await
-    .unwrap();
+    create_full_backup(&database, &bundle).await;
     database.close().await;
 
     restore_backup_data_dir(&bundle, &destination)
@@ -1235,14 +1149,7 @@ async fn restore_rejects_valid_sqlite_with_wrong_schema_after_checksum_rewrite()
     let source = dir.path().join("source.db");
     let bundle = dir.path().join("backup.nomifun");
     let database = init_database(&source).await.unwrap();
-    create_backup_bundle(
-        &database,
-        &bundle,
-        &uuid::Uuid::now_v7().to_string(),
-        BackupObjectGraph::full_database(),
-    )
-    .await
-    .unwrap();
+    create_full_backup(&database, &bundle).await;
     database.close().await;
 
     let wrong_database = dir.path().join("wrong-schema.db");
@@ -1279,14 +1186,7 @@ async fn restore_rejects_missing_installation_identity_after_checksum_rewrite() 
     let dir = tempfile::tempdir().unwrap();
     let bundle = dir.path().join("backup.nomifun");
     let database = init_database(&dir.path().join("source.db")).await.unwrap();
-    create_backup_bundle(
-        &database,
-        &bundle,
-        &uuid::Uuid::now_v7().to_string(),
-        BackupObjectGraph::full_database(),
-    )
-    .await
-    .unwrap();
+    create_full_backup(&database, &bundle).await;
     database.close().await;
 
     let bundle_pool = SqlitePool::connect_with(
@@ -1332,14 +1232,7 @@ async fn restore_rejects_noncanonical_row_ids_after_checksum_rewrite() {
     .execute(database.pool())
     .await
     .unwrap();
-    create_backup_bundle(
-        &database,
-        &bundle,
-        &uuid::Uuid::now_v7().to_string(),
-        BackupObjectGraph::full_database(),
-    )
-    .await
-    .unwrap();
+    create_full_backup(&database, &bundle).await;
     database.close().await;
 
     let bundle_pool = SqlitePool::connect_with(
@@ -1384,14 +1277,7 @@ async fn traversal_and_undeclared_payloads_fail_closed() {
     let source = dir.path().join("source.db");
     let bundle = dir.path().join("backup.nomifun");
     let database = init_database(&source).await.unwrap();
-    create_backup_bundle(
-        &database,
-        &bundle,
-        &uuid::Uuid::now_v7().to_string(),
-        BackupObjectGraph::full_database(),
-    )
-    .await
-    .unwrap();
+    create_full_backup(&database, &bundle).await;
 
     std::fs::write(bundle.join("undeclared"), b"x").unwrap();
     assert!(matches!(
@@ -1404,7 +1290,7 @@ async fn traversal_and_undeclared_payloads_fail_closed() {
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
     manifest["files"][0]["path"] = json!("../database.sqlite3");
-    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    write_manifest(&manifest_path, &manifest);
     assert!(matches!(
         verify_backup_bundle(&bundle),
         Err(BackupError::InvalidManifest(_))
@@ -1480,6 +1366,19 @@ async fn symlink_sources_and_broken_link_destinations_fail_closed_without_stagin
     );
 }
 
+async fn create_full_backup(
+    database: &nomifun_db::Database,
+    bundle: &std::path::Path,
+) -> nomifun_db::backup_bundle::BackupManifest {
+    create_backup_bundle(database, bundle, &generate_id(), BackupObjectGraph::full_database())
+        .await
+        .unwrap()
+}
+
+fn write_manifest(path: &std::path::Path, manifest: &impl serde::Serialize) {
+    std::fs::write(path, serde_json::to_vec_pretty(manifest).unwrap()).unwrap();
+}
+
 fn rewrite_database_manifest_entry(bundle: &std::path::Path) {
     let manifest_path = bundle.join(MANIFEST_FILE);
     let mut manifest: serde_json::Value =
@@ -1494,11 +1393,7 @@ fn rewrite_database_manifest_entry(bundle: &std::path::Path) {
         .unwrap();
     entry["bytes"] = json!(bytes.len() as u64);
     entry["sha256"] = json!(hex::encode(Sha256::digest(bytes)));
-    std::fs::write(
-        manifest_path,
-        serde_json::to_vec_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
+    write_manifest(&manifest_path, &manifest);
 }
 
 fn copy_tree_for_test(source: &std::path::Path, destination: &std::path::Path) {

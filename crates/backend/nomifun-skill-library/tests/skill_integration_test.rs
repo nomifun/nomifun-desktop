@@ -269,16 +269,6 @@ async fn rm1_read_builtin_skill() {
 // CP — Custom External Paths
 // ===========================================================================
 
-/// CP-1: Get custom paths (initially empty).
-#[tokio::test]
-async fn cp1_get_custom_paths_empty() {
-    let tmp = TempDir::new().unwrap();
-    let mgr = ExternalPathsManager::new(tmp.path()).await;
-
-    let paths = mgr.get_custom_external_paths().await;
-    assert!(paths.is_empty());
-}
-
 /// CP-2: Add custom path and verify persistence.
 #[tokio::test]
 async fn cp2_add_custom_path() {

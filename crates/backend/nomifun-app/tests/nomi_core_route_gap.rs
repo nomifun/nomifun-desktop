@@ -16,6 +16,64 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+/// Keep authentication and mutation idempotency explicit at each call site.
+struct LocalJsonClient<'a>(&'a str);
+
+impl LocalJsonClient<'_> {
+    async fn call(
+        &self,
+        router: axum::Router,
+        method: &str,
+        path: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        self.request(router, method, path, body, None).await
+    }
+
+    async fn call_with_idempotency(
+        &self,
+        router: axum::Router,
+        method: &str,
+        path: &str,
+        body: Value,
+        key: &str,
+    ) -> (StatusCode, Value) {
+        self.request(router, method, path, body, Some(key)).await
+    }
+
+    async fn request(
+        &self,
+        router: axum::Router,
+        method: &str,
+        path: &str,
+        body: Value,
+        key: Option<&str>,
+    ) -> (StatusCode, Value) {
+        let mut request = Request::builder().method(method).uri(path)
+            .header("x-nomi-local-trust", self.0)
+            .header("content-type", "application/json");
+        if let Some(key) = key {
+            request = request.header("idempotency-key", key);
+        }
+        let response = router.oneshot(request
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+        let value = if bytes.is_empty() { Value::Null } else {
+            serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+                if status.is_client_error() {
+                    // Axum rejects malformed query extractors before the JSON
+                    // application error layer; cursor fences assert this text.
+                    Value::String(String::from_utf8_lossy(&bytes).into_owned())
+                } else {
+                    panic!("{method} {path} returned {status}: {error}; {}", String::from_utf8_lossy(&bytes))
+                }
+            })
+        };
+        (status, value)
+    }
+}
+
 fn repo_file(relative: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join(relative)
@@ -205,36 +263,8 @@ fn nomi_core_projection_does_not_reintroduce_preset_resource_fields() {
 
 #[tokio::test]
 async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
+    let client = LocalJsonClient(TRUST);
     const TRUST: &str = "canonical-turn-dispatch";
-    async fn call(
-        router: axum::Router,
-        method: &str,
-        path: &str,
-        body: Value,
-    ) -> (StatusCode, Value) {
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(path)
-                    .header("x-nomi-local-trust", TRUST)
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
-            .await
-            .unwrap();
-        let body = if bytes.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes).unwrap()
-        };
-        (status, body)
-    }
 
     let upstream = wiremock::MockServer::start().await;
     const REPLY: &str = "CANONICAL_STORE_ONLY_OK";
@@ -250,7 +280,7 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
         .mount(&upstream)
         .await;
     let (router, services) = common::build_local_trust_app(TRUST).await;
-    let (status, provider) = call(
+    let (status, provider) = client.call(
         router.clone(),
         "POST",
         "/api/providers",
@@ -280,7 +310,7 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
         "provider_id": provider["data"]["provider_id"],
         "model": "step-3.7-flash"
     });
-    let (status, preset) = call(
+    let (status, preset) = client.call(
         router.clone(),
         "POST",
         "/api/agent-presets/from-template/chat.minimal",
@@ -295,7 +325,7 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
     .await;
     assert_eq!(status, StatusCode::OK, "{preset}");
     let preset_id = preset["data"]["preset"]["preset_id"].as_str().unwrap();
-    let (status, session) = call(
+    let (status, session) = client.call(
         router.clone(),
         "POST",
         "/api/agent-sessions",
@@ -305,7 +335,7 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
     assert_eq!(status, StatusCode::OK, "{session}");
     let session_id = session["data"]["agent_session_id"].as_str().unwrap();
     let key = uuid::Uuid::now_v7().to_string();
-    let (status, turn) = call(
+    let (status, turn) = client.call(
         router.clone(),
         "POST",
         &format!("/api/agent-sessions/{session_id}/turns"),
@@ -315,7 +345,7 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
     assert_eq!(status, StatusCode::OK, "{turn}");
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
-            let (status, history) = call(
+            let (status, history) = client.call(
                 router.clone(),
                 "GET",
                 &format!("/api/agent-sessions/{session_id}/message-history?page_size=50"),
@@ -359,7 +389,7 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
     let before_rebuild = canonical_store.head(&session_key).await.unwrap();
     let rebuilt = canonical_store.rebuild_projections(&session_key).await.unwrap();
     assert_eq!(rebuilt, before_rebuild, "projection rebuild must be deterministic");
-    let (status, listed) = call(
+    let (status, listed) = client.call(
         router.clone(),
         "GET",
         "/api/agent-sessions?limit=50",
@@ -369,7 +399,7 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
     assert_eq!(status, StatusCode::OK, "{listed}");
     assert!(listed["data"]["items"].as_array().unwrap().iter()
         .any(|item| item["conversation_id"] == session_id));
-    let (status, updated) = call(
+    let (status, updated) = client.call(
         router.clone(),
         "PATCH",
         &format!("/api/agent-sessions/{session_id}"),
@@ -389,7 +419,7 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
             .await
             .unwrap();
     assert_eq!((legacy_conversations, legacy_messages), (0, 0));
-    let (status, deleted) = call(
+    let (status, deleted) = client.call(
         router.clone(),
         "DELETE",
         &format!("/api/agent-sessions/{session_id}"),
@@ -397,7 +427,7 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{deleted}");
-    let (status, _) = call(
+    let (status, _) = client.call(
         router.clone(),
         "GET",
         &format!("/api/agent-sessions/{session_id}"),
@@ -410,7 +440,7 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
         ("POST", "/api/conversations"),
         ("GET", "/api/messages/search"),
     ] {
-        let (status, _) = call(router.clone(), method, path, json!({})).await;
+        let (status, _) = client.call(router.clone(), method, path, json!({})).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "retired route survived: {method} {path}");
     }
     services.shutdown_browser_platform().await.unwrap();
@@ -419,33 +449,17 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
 
 #[tokio::test]
 async fn message_history_http_cursor_preserves_tool_details_and_crosses_filtered_pages() {
+    let client = LocalJsonClient(TRUST);
     const TRUST:&str = "settlement-history-cursor";
-    async fn call(
-        router:axum::Router,
-        method:&str,
-        path:&str,
-        body:Value,
-    ) -> (StatusCode,Value) {
-        let response = router.oneshot(
-            Request::builder().method(method).uri(path)
-                .header("x-nomi-local-trust",TRUST)
-                .header("content-type","application/json")
-                .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap(),
-        ).await.unwrap();
-        let status=response.status();
-        let bytes=axum::body::to_bytes(response.into_body(),4*1024*1024).await.unwrap();
-        let value=if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap() };
-        (status,value)
-    }
     let (router,services)=common::build_local_trust_app(TRUST).await;
     let provider=create_chat_provider(&router,TRUST,"Settlement history","step-3.7-flash",1).await;
     let model=json!({"provider_id":provider["provider_id"],"model":"step-3.7-flash"});
-    let (status,preset)=call(router.clone(),"POST","/api/agent-presets/from-template/chat.minimal",json!({
+    let (status,preset)=client.call(router.clone(),"POST","/api/agent-presets/from-template/chat.minimal",json!({
         "display_name":"Settlement history","reuse_existing":true,"model_route_refs":{},"chat_route_records":{},"model":model
     })).await;
     assert_eq!(status,StatusCode::OK,"{preset}");
     let preset_id=preset["data"]["preset"]["preset_id"].as_str().unwrap();
-    let (status,session)=call(router.clone(),"POST","/api/agent-sessions",json!({
+    let (status,session)=client.call(router.clone(),"POST","/api/agent-sessions",json!({
         "preset_id":preset_id,"model":model,"title":"Settlement history"
     })).await;
     assert_eq!(status,StatusCode::OK,"{session}");
@@ -537,7 +551,7 @@ async fn message_history_http_cursor_preserves_tool_details_and_crosses_filtered
             || format!("/api/agent-sessions/{session_id}/message-history?page_size=1"),
             |cursor| format!("/api/agent-sessions/{session_id}/message-history?page_size=1&cursor={cursor}"),
         );
-        let (status,page)=call(router.clone(),"GET",&path,json!({})).await;
+        let (status,page)=client.call(router.clone(),"GET",&path,json!({})).await;
         assert_eq!(status,StatusCode::OK,"{page}");
         let data=&page["data"];
         let page_items=data["items"].as_array().unwrap();
@@ -743,37 +757,8 @@ async fn message_history_http_cursor_reads_persisted_relocation_projections_from
 
 #[tokio::test]
 async fn settlement_error_survives_event_cursor_reconnect_after_backend_restart() {
+    let client = LocalJsonClient(TRUST);
     const TRUST: &str = "settlement-events-reconnect";
-    async fn call(
-        router: axum::Router,
-        method: &str,
-        path: &str,
-        body: Value,
-    ) -> (StatusCode, Value) {
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(path)
-                    .header("x-nomi-local-trust", TRUST)
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
-            .await
-            .unwrap();
-        let value = if bytes.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes)
-                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()))
-        };
-        (status, value)
-    }
 
     let root = tempfile::tempdir().unwrap();
     let config = AppConfig {
@@ -792,7 +777,7 @@ async fn settlement_error_survives_event_cursor_reconnect_after_backend_restart(
     let provider =
         create_chat_provider(&router, TRUST, "Settlement events", "step-3.7-flash", 1).await;
     let model = json!({"provider_id":provider["provider_id"],"model":"step-3.7-flash"});
-    let (status, preset) = call(
+    let (status, preset) = client.call(
         router.clone(),
         "POST",
         "/api/agent-presets/from-template/chat.minimal",
@@ -804,7 +789,7 @@ async fn settlement_error_survives_event_cursor_reconnect_after_backend_restart(
     .await;
     assert_eq!(status, StatusCode::OK, "{preset}");
     let preset_id = preset["data"]["preset"]["preset_id"].as_str().unwrap();
-    let (status, session) = call(
+    let (status, session) = client.call(
         router.clone(),
         "POST",
         "/api/agent-sessions",
@@ -905,7 +890,7 @@ async fn settlement_error_survives_event_cursor_reconnect_after_backend_restart(
         .unwrap();
 
     // The consumer drops after one page; the event cursor is all it keeps.
-    let (status, page) = call(
+    let (status, page) = client.call(
         router.clone(),
         "GET",
         &format!("/api/agent-sessions/{session_id}/events?limit=1"),
@@ -932,7 +917,7 @@ async fn settlement_error_survives_event_cursor_reconnect_after_backend_restart(
     let restored = create_router(&second).await;
 
     loop {
-        let (status, page) = call(
+        let (status, page) = client.call(
             restored.clone(),
             "GET",
             &format!("/api/agent-sessions/{session_id}/events?after_seq={after_seq}&limit=1"),
@@ -1020,7 +1005,7 @@ async fn settlement_error_survives_event_cursor_reconnect_after_backend_restart(
     // Event and message-history cursors stay on independent axes: each rejects
     // the other's wire form, and a forward cursor fails closed instead of
     // silently returning an empty page.
-    let (status, mixed) = call(
+    let (status, mixed) = client.call(
         restored.clone(),
         "GET",
         &format!(
@@ -1034,7 +1019,7 @@ async fn settlement_error_survives_event_cursor_reconnect_after_backend_restart(
         mixed.as_str().is_some_and(|body| body.contains("after_seq")),
         "events endpoint must reject a message-history cursor, got {mixed}"
     );
-    let (status, mixed) = call(
+    let (status, mixed) = client.call(
         restored.clone(),
         "GET",
         &format!("/api/agent-sessions/{session_id}/message-history?cursor={after_seq}"),
@@ -1046,7 +1031,7 @@ async fn settlement_error_survives_event_cursor_reconnect_after_backend_restart(
         mixed.as_str().is_some_and(|body| body.contains("cursor")),
         "history endpoint must reject an event-seq cursor, got {mixed}"
     );
-    let (status, ahead) = call(
+    let (status, ahead) = client.call(
         restored.clone(),
         "GET",
         &format!("/api/agent-sessions/{session_id}/events?after_seq={}", after_seq + 1000),
@@ -1067,7 +1052,7 @@ async fn settlement_error_survives_event_cursor_reconnect_after_backend_restart(
                 format!("/api/agent-sessions/{session_id}/message-history?page_size=1&cursor={cursor}")
             },
         );
-        let (status, page) = call(restored.clone(), "GET", &path, json!({})).await;
+        let (status, page) = client.call(restored.clone(), "GET", &path, json!({})).await;
         assert_eq!(status, StatusCode::OK, "{page}");
         let data = &page["data"];
         let page_items = data["items"].as_array().unwrap();
@@ -1213,43 +1198,14 @@ async fn append_settlement_events(
 
 #[tokio::test]
 async fn messages_forward_cursor_keeps_truncated_and_appended_projections() {
+    let client = LocalJsonClient(TRUST);
     const TRUST: &str = "settlement-messages-forward-cursor";
-    async fn call(
-        router: axum::Router,
-        method: &str,
-        path: &str,
-        body: Value,
-    ) -> (StatusCode, Value) {
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(path)
-                    .header("x-nomi-local-trust", TRUST)
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
-            .await
-            .unwrap();
-        let value = if bytes.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes)
-                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()))
-        };
-        (status, value)
-    }
 
     let (router, services) = common::build_local_trust_app(TRUST).await;
     let provider =
         create_chat_provider(&router, TRUST, "Forward cursor", "step-3.7-flash", 1).await;
     let model = json!({"provider_id":provider["provider_id"],"model":"step-3.7-flash"});
-    let (status, preset) = call(
+    let (status, preset) = client.call(
         router.clone(),
         "POST",
         "/api/agent-presets/from-template/chat.minimal",
@@ -1261,7 +1217,7 @@ async fn messages_forward_cursor_keeps_truncated_and_appended_projections() {
     .await;
     assert_eq!(status, StatusCode::OK, "{preset}");
     let preset_id = preset["data"]["preset"]["preset_id"].as_str().unwrap();
-    let (status, session) = call(
+    let (status, session) = client.call(
         router.clone(),
         "POST",
         "/api/agent-sessions",
@@ -1396,7 +1352,7 @@ async fn messages_forward_cursor_keeps_truncated_and_appended_projections() {
     let mut seen_ids = Vec::<String>::new();
     let mut appended = false;
     loop {
-        let (status, page) = call(
+        let (status, page) = client.call(
             router.clone(),
             "GET",
             &format!("/api/agent-sessions/{session_id}/messages?after_seq={after_seq}&limit=1"),
@@ -1470,43 +1426,14 @@ async fn messages_forward_cursor_keeps_truncated_and_appended_projections() {
 
 #[tokio::test]
 async fn events_and_history_cursors_stay_stable_while_events_append() {
+    let client = LocalJsonClient(TRUST);
     const TRUST: &str = "settlement-cursor-concurrent-append";
-    async fn call(
-        router: axum::Router,
-        method: &str,
-        path: &str,
-        body: Value,
-    ) -> (StatusCode, Value) {
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(path)
-                    .header("x-nomi-local-trust", TRUST)
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
-            .await
-            .unwrap();
-        let value = if bytes.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes)
-                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()))
-        };
-        (status, value)
-    }
 
     let (router, services) = common::build_local_trust_app(TRUST).await;
     let provider =
         create_chat_provider(&router, TRUST, "Concurrent append", "step-3.7-flash", 1).await;
     let model = json!({"provider_id":provider["provider_id"],"model":"step-3.7-flash"});
-    let (status, preset) = call(
+    let (status, preset) = client.call(
         router.clone(),
         "POST",
         "/api/agent-presets/from-template/chat.minimal",
@@ -1518,7 +1445,7 @@ async fn events_and_history_cursors_stay_stable_while_events_append() {
     .await;
     assert_eq!(status, StatusCode::OK, "{preset}");
     let preset_id = preset["data"]["preset"]["preset_id"].as_str().unwrap();
-    let (status, session) = call(
+    let (status, session) = client.call(
         router.clone(),
         "POST",
         "/api/agent-sessions",
@@ -1542,7 +1469,7 @@ async fn events_and_history_cursors_stay_stable_while_events_append() {
     let mut appended = false;
     let mut turn_two_started: Option<nomifun_agent_contracts::EventId> = None;
     loop {
-        let (status, page) = call(
+        let (status, page) = client.call(
             router.clone(),
             "GET",
             &format!("/api/agent-sessions/{session_id}/events?after_seq={after_seq}&limit=2"),
@@ -1662,7 +1589,7 @@ async fn events_and_history_cursors_stay_stable_while_events_append() {
                 )
             },
         );
-        let (status, page) = call(router.clone(), "GET", &path, json!({})).await;
+        let (status, page) = client.call(router.clone(), "GET", &path, json!({})).await;
         assert_eq!(status, StatusCode::OK, "{page}");
         let data = &page["data"];
         for item in data["items"].as_array().unwrap() {
@@ -1722,7 +1649,7 @@ async fn events_and_history_cursors_stay_stable_while_events_append() {
     // A fresh first page sees the appended Turn at the head (its derived
     // turn_summary sorts newest) alongside its source message, without
     // invalidating anything the earlier walk already delivered.
-    let (status, fresh) = call(
+    let (status, fresh) = client.call(
         router.clone(),
         "GET",
         &format!("/api/agent-sessions/{session_id}/message-history?page_size=2"),
@@ -1989,78 +1916,19 @@ async fn effectful_coding_session_switches_same_workspace_to_read_only_with_new_
 
 #[tokio::test]
 async fn started_agent_session_switches_model_then_agent_in_place_with_segmented_history() {
+    let client = LocalJsonClient(TRUST);
     const TRUST: &str = "started-session-model-switch";
     const FIRST_REPLY: &str = "FIRST_MODEL_REPLY";
     const SECOND_REPLY: &str = "SECOND_MODEL_REPLY";
     const THIRD_REPLY: &str = "TARGET_AGENT_REPLY";
     const FOURTH_REPLY: &str = "CONFIG_DOWNGRADE_REPLY";
 
-    async fn call(
-        router: axum::Router,
-        method: &str,
-        path: &str,
-        body: Value,
-    ) -> (StatusCode, Value) {
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(path)
-                    .header("x-nomi-local-trust", TRUST)
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
-            .await
-            .unwrap();
-        let body = if bytes.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes).unwrap()
-        };
-        (status, body)
-    }
 
-    async fn call_with_idempotency(
-        router: axum::Router,
-        method: &str,
-        path: &str,
-        body: Value,
-        idempotency_key: &str,
-    ) -> (StatusCode, Value) {
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(path)
-                    .header("x-nomi-local-trust", TRUST)
-                    .header("content-type", "application/json")
-                    .header("idempotency-key", idempotency_key)
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
-            .await
-            .unwrap();
-        let body = if bytes.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes).unwrap()
-        };
-        (status, body)
-    }
 
-    async fn wait_for_reply(router: axum::Router, session_id: &str, reply: &str) {
+    async fn wait_for_reply(client: &LocalJsonClient<'_>, router: axum::Router, session_id: &str, reply: &str) {
         let mut last_history = Value::Null;
         for _ in 0..600 {
-            let (status, history) = call(
+            let (status, history) = client.call(
                 router.clone(),
                 "GET",
                 &format!("/api/agent-sessions/{session_id}/message-history?page_size=100"),
@@ -2079,7 +1947,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
             last_history = history;
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-        let (_, events) = call(
+        let (_, events) = client.call(
             router,
             "GET",
             &format!("/api/agent-sessions/{session_id}/events?after_seq=0&limit=500"),
@@ -2127,7 +1995,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
         .await;
 
     let (router, services) = common::build_local_trust_app(TRUST).await;
-    let (status, provider_one) = call(
+    let (status, provider_one) = client.call(
         router.clone(),
         "POST",
         "/api/providers",
@@ -2153,7 +2021,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{provider_one}");
-    let (status, provider_two) = call(
+    let (status, provider_two) = client.call(
         router.clone(),
         "POST",
         "/api/providers",
@@ -2187,7 +2055,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
         "provider_id": provider_two["data"]["provider_id"],
         "model": "model-two"
     });
-    let (status, preset) = call(
+    let (status, preset) = client.call(
         router.clone(),
         "POST",
         "/api/agent-presets/from-template/coding.codex",
@@ -2207,7 +2075,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
         {"resource_kind":"process_session", "resource_id":"managed-process-session"},
         {"resource_kind":"project_memory", "resource_id":"default-project-memory"}
     ]);
-    let (status, session) = call(
+    let (status, session) = client.call(
         router.clone(),
         "POST",
         "/api/agent-sessions",
@@ -2221,7 +2089,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
     .await;
     assert_eq!(status, StatusCode::OK, "{session}");
     let session_id = session["data"]["agent_session_id"].as_str().unwrap();
-    let (status, initial_projection) = call(
+    let (status, initial_projection) = client.call(
         router.clone(),
         "GET",
         &format!("/api/agent-sessions/{session_id}/projection"),
@@ -2235,7 +2103,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
     tokio::fs::create_dir_all(workspace).await.unwrap();
 
     let first_key = uuid::Uuid::now_v7().to_string();
-    let (status, first_turn) = call(
+    let (status, first_turn) = client.call(
         router.clone(),
         "POST",
         &format!("/api/agent-sessions/{session_id}/turns"),
@@ -2246,8 +2114,8 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{first_turn}");
-    wait_for_reply(router.clone(), session_id, FIRST_REPLY).await;
-    let (status, before) = call(
+    wait_for_reply(&client, router.clone(), session_id, FIRST_REPLY).await;
+    let (status, before) = client.call(
         router.clone(),
         "GET",
         &format!("/api/agent-sessions/{session_id}/projection"),
@@ -2256,7 +2124,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
     .await;
     assert_eq!(status, StatusCode::OK, "{before}");
 
-    let (status, switched) = call(
+    let (status, switched) = client.call(
         router.clone(),
         "PUT",
         &format!("/api/agent-sessions/{session_id}/model"),
@@ -2293,7 +2161,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
         switched_binding["binding_version"].as_u64(),
         before_binding["binding_version"].as_u64().map(|version| version + 1)
     );
-    let (status, repeated) = call(
+    let (status, repeated) = client.call(
         router.clone(),
         "PUT",
         &format!("/api/agent-sessions/{session_id}/model"),
@@ -2309,7 +2177,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
 
     // Normal model configuration changes must be usable on the next Turn
     // without reselecting the same model or rebuilding this conversation.
-    let (status, configured_model) = call(
+    let (status, configured_model) = client.call(
         router.clone(), "PUT", "/api/provider-models", json!({
             "provider_id": second_model["provider_id"],
             "model": {
@@ -2324,14 +2192,14 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
         }),
     ).await;
     assert_eq!(status, StatusCode::OK, "{configured_model}");
-    let (status, replay) = call(
+    let (status, replay) = client.call(
         router.clone(), "POST", &format!("/api/agent-sessions/{session_id}/turns"),
         json!({"idempotency_key": first_key, "input": {"content": "first turn"}}),
     ).await;
     assert_eq!(status, StatusCode::OK, "{replay}");
     assert_eq!(replay["data"]["operation_id"], first_turn["data"]["operation_id"]);
     assert_eq!(model_requests.lock().unwrap().len(), 1, "redelivery must not call a new model");
-    let (status, conflict) = call(
+    let (status, conflict) = client.call(
         router.clone(), "POST", &format!("/api/agent-sessions/{session_id}/turns"),
         json!({"idempotency_key": first_key, "input": {"content": "changed old turn"}}),
     ).await;
@@ -2340,11 +2208,11 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
     // The UI warms the selected Session after a model save, before accepting
     // its next task. A warm runtime must not freeze the old canonical snapshot
     // while remembering the new provider revision.
-    let (status,warmed)=call(router.clone(),"POST",
+    let (status,warmed)=client.call(router.clone(),"POST",
         &format!("/api/agent-sessions/{session_id}/warmup"),json!({})).await;
     assert_eq!(status,StatusCode::OK,"{warmed}");
 
-    let (status, second_turn) = call(
+    let (status, second_turn) = client.call(
         router.clone(),
         "POST",
         &format!("/api/agent-sessions/{session_id}/turns"),
@@ -2355,19 +2223,19 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{second_turn}");
-    wait_for_reply(router.clone(), session_id, SECOND_REPLY).await;
+    wait_for_reply(&client, router.clone(), session_id, SECOND_REPLY).await;
     {
         let wire=model_requests.lock().unwrap();
         assert_eq!(wire[1]["reasoning_effort"],"medium","new model parameter must reach the next actual request");
         assert_eq!(wire[1]["max_tokens"],4096);
     }
-    let (status,config_refreshed)=call(router.clone(),"GET",&format!("/api/agent-sessions/{session_id}/projection"),json!({})).await;
+    let (status,config_refreshed)=client.call(router.clone(),"GET",&format!("/api/agent-sessions/{session_id}/projection"),json!({})).await;
     assert_eq!(status,StatusCode::OK,"{config_refreshed}");
     assert_eq!(config_refreshed["data"]["agent_snapshot"]["canonical_binding"]["binding_version"].as_u64(),
         switched_binding["binding_version"].as_u64().map(|version|version+1));
     assert_eq!(config_refreshed["data"]["agent_snapshot"]["canonical_binding"]["typed_resource_bindings"],
         switched_binding["typed_resource_bindings"]);
-    let (status, reasoning) = call(
+    let (status, reasoning) = client.call(
         router.clone(), "PUT",
         &format!("/api/agent-sessions/{session_id}/reasoning-effort"),
         json!({"reasoning_effort": "high"}),
@@ -2538,7 +2406,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
         .await
         .unwrap();
 
-    let (status, target_preset) = call(
+    let (status, target_preset) = client.call(
         router.clone(),
         "POST",
         "/api/agent-presets/from-template/chat.minimal",
@@ -2556,7 +2424,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
         .as_str()
         .unwrap();
     let selection = json!({ "kind": "preset", "preset_id": target_preset_id });
-    let (status, preview) = call(
+    let (status, preview) = client.call(
         router.clone(),
         "POST",
         &format!("/api/agent-sessions/{session_id}/agent-switch/preview"),
@@ -2578,7 +2446,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
         "expected_binding_version": expected_binding_version
     });
     let switch_key = uuid::Uuid::now_v7().to_string();
-    let (status, switched_agent) = call_with_idempotency(
+    let (status, switched_agent) = client.call_with_idempotency(
         router.clone(),
         "PUT",
         &format!("/api/agent-sessions/{session_id}/agent"),
@@ -2597,7 +2465,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
         switched_agent["data"]["binding_version"],
         expected_binding_version + 1
     );
-    let (status, switched_capabilities) = call(
+    let (status, switched_capabilities) = client.call(
         router.clone(),
         "GET",
         &format!("/api/agent-sessions/{session_id}/capabilities"),
@@ -2611,7 +2479,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
         "canonical_agent_store"
     );
 
-    let (status, replayed_switch) = call_with_idempotency(
+    let (status, replayed_switch) = client.call_with_idempotency(
         router.clone(),
         "PUT",
         &format!("/api/agent-sessions/{session_id}/agent"),
@@ -2626,7 +2494,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
         switched_agent["data"]["binding_version"]
     );
 
-    let (status, raw_messages_after_switch) = call(
+    let (status, raw_messages_after_switch) = client.call(
         router.clone(),
         "GET",
         &format!("/api/agent-sessions/{session_id}/messages?after_seq=0&limit=500"),
@@ -2643,7 +2511,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
         "{raw_messages_after_switch}"
     );
 
-    let (status, history_after_switch) = call(
+    let (status, history_after_switch) = client.call(
         router.clone(),
         "GET",
         &format!("/api/agent-sessions/{session_id}/message-history?page_size=100"),
@@ -2663,7 +2531,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
         "{history_after_switch}"
     );
 
-    let (status, third_turn) = call(
+    let (status, third_turn) = client.call(
         router.clone(),
         "POST",
         &format!("/api/agent-sessions/{session_id}/turns"),
@@ -2674,9 +2542,9 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{third_turn}");
-    wait_for_reply(router.clone(), session_id, THIRD_REPLY).await;
+    wait_for_reply(&client, router.clone(), session_id, THIRD_REPLY).await;
 
-    let (status, events_after_switch) = call(
+    let (status, events_after_switch) = client.call(
         router.clone(),
         "GET",
         &format!("/api/agent-sessions/{session_id}/events?after_seq=0&limit=500"),
@@ -2731,7 +2599,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
     );
     drop(requests);
 
-    let (status, minimal_preview) = call(
+    let (status, minimal_preview) = client.call(
         router.clone(),
         "POST",
         &format!("/api/agent-sessions/{session_id}/agent-switch/preview"),
@@ -2740,7 +2608,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
     .await;
     assert_eq!(status, StatusCode::OK, "{minimal_preview}");
     assert_eq!(minimal_preview["data"]["can_apply"], true);
-    let (status, minimal_switch) = call_with_idempotency(
+    let (status, minimal_switch) = client.call_with_idempotency(
         router.clone(),
         "PUT",
         &format!("/api/agent-sessions/{session_id}/agent"),
@@ -2755,7 +2623,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
     assert_eq!(status, StatusCode::OK, "{minimal_switch}");
     assert_eq!(minimal_switch["data"]["conversation"]["extra"]["official_template_key"], "chat.minimal");
     let minimal_preset_id = minimal_switch["data"]["conversation"]["preset_id"].as_str().unwrap();
-    let (status, localized_history) = call(
+    let (status, localized_history) = client.call(
         router.clone(),
         "GET",
         &format!("/api/agent-sessions/{session_id}/message-history?page_size=100"),
@@ -2771,7 +2639,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
     // Removing reasoning support must also remove the incompatible Session
     // override. Unsetting the output limit must also use provider defaults,
     // including when the UI warms a host before the next Turn.
-    let (status, downgraded_model) = call(
+    let (status, downgraded_model) = client.call(
         router.clone(), "PUT", "/api/provider-models", json!({
             "provider_id": second_model["provider_id"],
             "model": {
@@ -2797,16 +2665,16 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
             .mark_technical_capability_unsupported(provider_id, revision, "model-two", "chat", "reasoning")
             .await.unwrap());
     }
-    let (status,warmed_default)=call(router.clone(),"POST",
+    let (status,warmed_default)=client.call(router.clone(),"POST",
         &format!("/api/agent-sessions/{session_id}/warmup"),json!({})).await;
     assert_eq!(status,StatusCode::OK,"{warmed_default}");
-    let (status, fourth_turn) = call(
+    let (status, fourth_turn) = client.call(
         router.clone(), "POST", &format!("/api/agent-sessions/{session_id}/turns"),
         json!({"idempotency_key": uuid::Uuid::now_v7().to_string(), "input": {"content": "fourth turn"}}),
     ).await;
     assert_eq!(status, StatusCode::OK, "{fourth_turn}");
-    wait_for_reply(router.clone(), session_id, FOURTH_REPLY).await;
-    let (status, downgraded_projection) = call(
+    wait_for_reply(&client, router.clone(), session_id, FOURTH_REPLY).await;
+    let (status, downgraded_projection) = client.call(
         router.clone(), "GET", &format!("/api/agent-sessions/{session_id}/projection"), json!({}),
     ).await;
     assert_eq!(status, StatusCode::OK, "{downgraded_projection}");
@@ -2826,6 +2694,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
 
 #[tokio::test]
 async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatically() {
+    let client = LocalJsonClient(TRUST);
     const TRUST: &str = "canonical-knowledge-tool";
     const QUERY: &str = "NOMIFUN_KNOWLEDGE_QUERY_9233";
     const RESULT_MARKER: &str = "KNOWLEDGE_TOOL_RESULT_9233";
@@ -2834,35 +2703,6 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     const DISABLED_REPLY: &str = "KNOWLEDGE_WAS_DISABLED";
     const READ_ONLY_REPLY: &str = "KNOWLEDGE_WAS_READ_ONLY";
 
-    async fn call(
-        router: axum::Router,
-        method: &str,
-        path: &str,
-        body: Value,
-    ) -> (StatusCode, Value) {
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(path)
-                    .header("x-nomi-local-trust", TRUST)
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
-            .await
-            .unwrap();
-        let body = if bytes.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes).unwrap()
-        };
-        (status, body)
-    }
 
     let upstream = wiremock::MockServer::start().await;
     let model_requests = Arc::new(Mutex::new(Vec::<Value>::new()));
@@ -3098,7 +2938,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
         .await
         .unwrap();
 
-    let (status, provider) = call(
+    let (status, provider) = client.call(
         router.clone(),
         "POST",
         "/api/providers",
@@ -3128,7 +2968,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
         "provider_id": provider["data"]["provider_id"],
         "model": "step-3.7-flash"
     });
-    let (status, minimal) = call(
+    let (status, minimal) = client.call(
         router.clone(),
         "POST",
         "/api/agent-presets/from-template/chat.minimal",
@@ -3148,7 +2988,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     document["instructions"] = Value::String(
         "Use the mounted Knowledge bases for covered questions.".to_owned(),
     );
-    let (status, read_only_preset) = call(
+    let (status, read_only_preset) = client.call(
         router.clone(),
         "POST",
         "/api/agent-presets",
@@ -3163,7 +3003,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     let read_only_preset_id = read_only_preset["data"]["preset"]["preset_id"]
         .as_str()
         .unwrap();
-    let (status, rejected_writeback) = call(
+    let (status, rejected_writeback) = client.call(
         router.clone(),
         "POST",
         "/api/agent-sessions",
@@ -3193,7 +3033,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
             "knowledge/write"
         ]
     }]);
-    let (status, preset) = call(
+    let (status, preset) = client.call(
         router.clone(),
         "POST",
         "/api/agent-presets",
@@ -3207,7 +3047,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     assert_eq!(status, StatusCode::OK, "{preset}");
     let preset_id = preset["data"]["preset"]["preset_id"].as_str().unwrap();
 
-    let (status, session) = call(
+    let (status, session) = client.call(
         router.clone(),
         "POST",
         "/api/agent-sessions",
@@ -3242,7 +3082,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     }));
 
     let session_id = session["data"]["agent_session_id"].as_str().unwrap();
-    let (status, consumers) = call(
+    let (status, consumers) = client.call(
         router.clone(),
         "GET",
         &format!(
@@ -3258,7 +3098,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
             && consumer["target_id"] == session_id
             && consumer["enabled"] == true
     }));
-    let (status, mounted_delete) = call(
+    let (status, mounted_delete) = client.call(
         router.clone(),
         "DELETE",
         &format!(
@@ -3269,7 +3109,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{mounted_delete}");
-    let (status, projection) = call(
+    let (status, projection) = client.call(
         router.clone(),
         "GET",
         &format!("/api/agent-sessions/{session_id}/projection"),
@@ -3286,7 +3126,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
             "grounded": true
         })
     );
-    let (status, disabled) = call(
+    let (status, disabled) = client.call(
         router.clone(),
         "PUT",
         &format!("/api/agent-sessions/{session_id}/knowledge"),
@@ -3301,7 +3141,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     assert_eq!(status, StatusCode::OK, "{disabled}");
     assert_eq!(disabled["data"]["enabled"], false);
     assert_eq!(disabled["data"]["kb_ids"].as_array().unwrap().len(), 2);
-    let (status, disabled_projection) = call(
+    let (status, disabled_projection) = client.call(
         router.clone(),
         "GET",
         &format!("/api/agent-sessions/{session_id}/projection"),
@@ -3318,7 +3158,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
         })
     );
 
-    let (status, manual) = call(
+    let (status, manual) = client.call(
         router.clone(),
         "PUT",
         &format!("/api/agent-sessions/{session_id}/knowledge"),
@@ -3333,7 +3173,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     assert_eq!(status, StatusCode::OK, "{manual}");
     assert_eq!(manual["data"]["writeback_eagerness"], "manual");
 
-    let (status, automatic) = call(
+    let (status, automatic) = client.call(
         router.clone(),
         "PUT",
         &format!("/api/agent-sessions/{session_id}/knowledge"),
@@ -3348,7 +3188,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     assert_eq!(status, StatusCode::OK, "{automatic}");
     assert_eq!(automatic["data"]["writeback"], true);
     assert_eq!(automatic["data"]["writeback_eagerness"], "auto");
-    let (status, retired_binding) = call(
+    let (status, retired_binding) = client.call(
         router.clone(),
         "POST",
         &format!("/api/knowledge/binding/conversation/{session_id}"),
@@ -3363,7 +3203,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{retired_binding}");
 
-    let (status, turn) = call(
+    let (status, turn) = client.call(
         router.clone(),
         "POST",
         &format!("/api/agent-sessions/{session_id}/turns"),
@@ -3376,7 +3216,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     assert_eq!(status, StatusCode::OK, "{turn}");
     let completed = tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
-            let (status, history) = call(
+            let (status, history) = client.call(
                 router.clone(),
                 "GET",
                 &format!("/api/agent-sessions/{session_id}/message-history?page_size=50"),
@@ -3397,14 +3237,14 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     })
     .await;
     if completed.is_err() {
-        let (_, events) = call(
+        let (_, events) = client.call(
             router.clone(),
             "GET",
             &format!("/api/agent-sessions/{session_id}/events?after_seq=0&limit=200"),
             json!({}),
         )
         .await;
-        let (_, history) = call(
+        let (_, history) = client.call(
             router.clone(),
             "GET",
             &format!("/api/agent-sessions/{session_id}/message-history?page_size=50"),
@@ -3481,7 +3321,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     .expect("automatic write-back must publish a durable Knowledge file");
     assert!(written.content.contains(WRITEBACK_MARKER));
 
-    let (status, disabled_after_runtime) = call(
+    let (status, disabled_after_runtime) = client.call(
         router.clone(),
         "PUT",
         &format!("/api/agent-sessions/{session_id}/knowledge"),
@@ -3494,7 +3334,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{disabled_after_runtime}");
-    let (status, disabled_turn) = call(
+    let (status, disabled_turn) = client.call(
         router.clone(),
         "POST",
         &format!("/api/agent-sessions/{session_id}/turns"),
@@ -3507,7 +3347,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     assert_eq!(status, StatusCode::OK, "{disabled_turn}");
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
-            let (status, history) = call(
+            let (status, history) = client.call(
                 router.clone(),
                 "GET",
                 &format!("/api/agent-sessions/{session_id}/message-history?page_size=50"),
@@ -3540,7 +3380,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     }));
     drop(requests);
 
-    let (status, read_only) = call(
+    let (status, read_only) = client.call(
         router.clone(),
         "PUT",
         &format!("/api/agent-sessions/{session_id}/knowledge"),
@@ -3553,7 +3393,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{read_only}");
-    let (status, read_only_turn) = call(
+    let (status, read_only_turn) = client.call(
         router.clone(),
         "POST",
         &format!("/api/agent-sessions/{session_id}/turns"),
@@ -3566,7 +3406,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     assert_eq!(status, StatusCode::OK, "{read_only_turn}");
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
-            let (_, history) = call(
+            let (_, history) = client.call(
                 router.clone(),
                 "GET",
                 &format!("/api/agent-sessions/{session_id}/message-history?page_size=50"),
@@ -4085,18 +3925,11 @@ async fn nomi_core_accepts_exact_module_action_grants() {
 
 #[tokio::test]
 async fn configured_agent_creation_persists_adjusted_capabilities_and_keeps_official_seeds() {
+    let client = LocalJsonClient(TRUST);
     const TRUST: &str = "configured-agent-workbench-test";
-    async fn call(router: axum::Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
-        let response = router.oneshot(Request::builder().method(method).uri(path)
-            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap())
-    }
     let (router, services) = common::build_local_trust_app(TRUST).await;
     create_chat_provider(&router, TRUST, "Configured Agent fixture", "configured-chat", 0).await;
-    let (_, before) = call(router.clone(), "GET", "/api/agent-preset-templates?source=official", json!({})).await;
+    let (_, before) = client.call(router.clone(), "GET", "/api/agent-preset-templates?source=official", json!({})).await;
     let before_count = before["data"]["user_presets"].as_array().unwrap().len();
     let official_before = before["data"]["official_templates"].clone();
     let document = json!({
@@ -4109,7 +3942,7 @@ async fn configured_agent_creation_persists_adjusted_capabilities_and_keeps_offi
         "skill_bindings":[], "system_role_provider_overrides":{}, "persona":"Research helper",
         "instructions":"Use only the selected capabilities.", "starter_prompts":[]
     });
-    let (status, created) = call(router.clone(), "POST", "/api/agent-presets", json!({
+    let (status, created) = client.call(router.clone(), "POST", "/api/agent-presets", json!({
         "display_name":"My adjusted assistant", "description":"Custom capability scope", "document":document,
     })).await;
     assert_eq!(status, StatusCode::OK, "{created}");
@@ -4117,15 +3950,15 @@ async fn configured_agent_creation_persists_adjusted_capabilities_and_keeps_offi
     assert_eq!(created["data"]["revision"]["reference"]["revision"], 1);
     assert!(created["data"]["draft"]["source_template_key"].is_null());
     let id = created["data"]["preset"]["preset_id"].as_str().unwrap();
-    let (status, reloaded) = call(router.clone(), "GET", &format!("/api/agent-presets/{id}/editor"), json!({})).await;
+    let (status, reloaded) = client.call(router.clone(), "GET", &format!("/api/agent-presets/{id}/editor"), json!({})).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(reloaded["data"]["draft"]["document"]["enabled_capabilities"], created["data"]["revision"]["document"]["enabled_capabilities"]);
     assert_eq!(reloaded["data"]["draft"]["document"]["enabled_capabilities"].as_array().unwrap().len(), 3);
     let mut invalid = document;
     invalid["enabled_capabilities"] = json!([{"capability":{"id":"missing.capability"}}]);
-    let (status, _) = call(router.clone(), "POST", "/api/agent-presets", json!({"display_name":"Must not persist", "document":invalid})).await;
+    let (status, _) = client.call(router.clone(), "POST", "/api/agent-presets", json!({"display_name":"Must not persist", "document":invalid})).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    let (_, after) = call(router, "GET", "/api/agent-preset-templates?source=official", json!({})).await;
+    let (_, after) = client.call(router, "GET", "/api/agent-preset-templates?source=official", json!({})).await;
     assert_eq!(after["data"]["user_presets"].as_array().unwrap().len(), before_count + 1);
     assert_eq!(after["data"]["official_templates"], official_before);
     services.shutdown_browser_platform().await.unwrap();
@@ -4136,6 +3969,12 @@ async fn configured_agent_creation_persists_adjusted_capabilities_and_keeps_offi
 async fn official_template_creation_requires_explicit_persistence_intent() {
     const TRUST: &str = "official-agent-explicit-intent";
     let (router, services) = common::build_local_trust_app(TRUST).await;
+    let (status, before) = LocalJsonClient(TRUST).call(
+        router.clone(), "GET", "/api/agent-preset-templates", json!({}),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    let presets_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_presets")
+        .fetch_one(services.database.pool()).await.unwrap();
     let response = router.clone().oneshot(Request::builder()
         .method("POST")
         .uri("/api/agent-presets/from-template/chat.minimal")
@@ -4157,34 +3996,28 @@ async fn official_template_creation_requires_explicit_persistence_intent() {
     let library: Value = serde_json::from_slice(&axum::body::to_bytes(
         library_response.into_body(), 4 * 1024 * 1024).await.unwrap()).unwrap();
     assert_eq!(library["data"]["user_presets"], json!([]));
+    assert_eq!(library["data"]["official_presets"], before["data"]["official_presets"]);
     let persisted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_presets")
         .fetch_one(services.database.pool()).await.unwrap();
-    assert_eq!(persisted, 0, "rejected ambiguous requests must not write hidden or visible configurations");
+    assert_eq!(persisted, presets_before, "rejected ambiguous requests must not write hidden or visible configurations");
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
 }
 
 #[tokio::test]
 async fn official_agent_read_surfaces_load_on_the_full_product_graph_without_a_model() {
+    let client = LocalJsonClient(TRUST);
     const TRUST: &str = "official-agent-read-surfaces";
-    async fn call(router: axum::Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
-        let response = router.oneshot(Request::builder().method(method).uri(path)
-            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap())
-    }
     let (router, services) = common::build_local_trust_app(TRUST).await;
-    let (status, catalog) = call(router.clone(), "GET", "/api/agent-catalog", json!({})).await;
+    let (status, catalog) = client.call(router.clone(), "GET", "/api/agent-catalog", json!({})).await;
     assert_eq!(status, StatusCode::OK, "full host catalog failed: {catalog}");
     let modules = catalog["data"]["modules"].as_array().unwrap();
     assert!(!modules.is_empty(), "the product fixture must use the real module catalog");
-    let (status, library) = call(router.clone(), "GET", "/api/agent-preset-templates?source=official", json!({})).await;
+    let (status, library) = client.call(router.clone(), "GET", "/api/agent-preset-templates?source=official", json!({})).await;
     assert_eq!(status, StatusCode::OK, "official Agent library failed: {library}");
     for (key, preset) in library["data"]["official_presets"].as_object().unwrap() {
         let id = preset["preset_id"].as_str().unwrap();
-        let (status, editor) = call(router.clone(), "GET", &format!("/api/agent-presets/{id}/editor"), json!({})).await;
+        let (status, editor) = client.call(router.clone(), "GET", &format!("/api/agent-presets/{id}/editor"), json!({})).await;
         assert_eq!(status, StatusCode::OK, "official {key} capability defaults failed: {editor}");
         assert_eq!(editor["data"]["draft"]["source_template_key"], key.as_str());
         assert!(editor["data"]["revision"].is_null(), "reading {key} must not prepare a saved Revision");
@@ -4195,13 +4028,13 @@ async fn official_agent_read_surfaces_load_on_the_full_product_graph_without_a_m
             assert!(!document.contains_key(field), "{key}: the real compact editor wire omits empty {field}; renderer reads must normalize its documented default");
         }
     }
-    let (status, created) = call(router.clone(), "POST", "/api/companion/companions", json!({
+    let (status, created) = client.call(router.clone(), "POST", "/api/companion/companions", json!({
         "name": "Read-only Agent options", "character": "ink"
     })).await;
     assert_eq!(status, StatusCode::CREATED, "Companion creation failed: {created}");
     let id = created["data"]["companion_id"].as_str().unwrap();
     let path = format!("/api/product-agent-bindings/companion/{id}");
-    let (status, options) = call(router.clone(), "GET", &path, json!({})).await;
+    let (status, options) = client.call(router.clone(), "GET", &path, json!({})).await;
     assert_eq!(status, StatusCode::OK, "Companion Agent options failed: {options}");
     assert_eq!(options["data"]["selection"], json!({ "kind": "template", "template_key": "companion.default" }));
     assert_eq!(options["data"]["needs_model"], true);
@@ -4209,7 +4042,7 @@ async fn official_agent_read_surfaces_load_on_the_full_product_graph_without_a_m
         .find(|option| option["selection"]["template_key"] == "companion.default").unwrap();
     assert_eq!(companion_option["available"], true, "the shipped Companion must remain selectable before model configuration: {companion_option}");
     let provider = create_chat_provider(&router, TRUST, "Read-only model", "read-surfaces-chat", 0).await;
-    let (status, with_model) = call(router.clone(), "GET", &format!("{path}?provider_id={}&model=read-surfaces-chat",
+    let (status, with_model) = client.call(router.clone(), "GET", &format!("{path}?provider_id={}&model=read-surfaces-chat",
         provider["provider_id"].as_str().unwrap()), json!({})).await;
     assert_eq!(status, StatusCode::OK, "model-scoped Companion options failed: {with_model}");
     assert_eq!(with_model["data"]["selection"], options["data"]["selection"]);
@@ -4226,26 +4059,19 @@ async fn official_agent_read_surfaces_load_on_the_full_product_graph_without_a_m
 
 #[tokio::test]
 async fn product_agent_selection_precedes_models_and_reports_host_capability_availability() {
+    let client = LocalJsonClient(TRUST);
     const TRUST: &str = "product-selection-preflight";
-    async fn call(router: axum::Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
-        let response = router.oneshot(Request::builder().method(method).uri(path)
-            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap())
-    }
     let (router, services) = common::build_local_trust_app(TRUST).await;
-    let (_, created) = call(router.clone(), "POST", "/api/companion/companions", json!({ "name": "Choose Agent first", "character": "ink" })).await;
+    let (_, created) = client.call(router.clone(), "POST", "/api/companion/companions", json!({ "name": "Choose Agent first", "character": "ink" })).await;
     let companion_id = created["data"]["companion_id"].as_str().unwrap();
     let chosen = json!({ "kind": "template", "template_key": "chat.minimal" });
     let mut paths = Vec::new();
     for kind in ["customer", "creative_studio_canvas"] {
         let path = format!("/api/product-agent-bindings/{kind}/{companion_id}");
-        let (status, saved) = call(router.clone(), "PUT", &path, json!({ "selection": chosen })).await;
+        let (status, saved) = client.call(router.clone(), "PUT", &path, json!({ "selection": chosen })).await;
         assert_eq!(status, StatusCode::OK, "{saved}");
         assert_eq!(saved["data"]["needs_model"], true);
-        let (status, reloaded) = call(router.clone(), "GET", &path, json!({})).await;
+        let (status, reloaded) = client.call(router.clone(), "GET", &path, json!({})).await;
         assert_eq!(status, StatusCode::OK, "{reloaded}");
         assert_eq!(reloaded["data"]["selection"], chosen);
         paths.push(path);
@@ -4253,7 +4079,7 @@ async fn product_agent_selection_precedes_models_and_reports_host_capability_ava
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_preset_revisions").fetch_one(services.database.pool()).await.unwrap();
     assert_eq!(count, 0, "model-free selection may initialize editable official identities but must not allocate executable revisions or select a default model");
     let upstream = wiremock::MockServer::start().await;
-    let (status, provider) = call(router.clone(), "POST", "/api/providers", json!({
+    let (status, provider) = client.call(router.clone(), "POST", "/api/providers", json!({
         "platform": "stepfun-plan", "name": "Preflight StepFun",
         "base_url": format!("{}/step_plan/v1", upstream.uri()),
         "auth_scheme": "bearer", "credentials": { "api_keys": ["test-only"] }, "enabled": true,
@@ -4265,7 +4091,7 @@ async fn product_agent_selection_precedes_models_and_reports_host_capability_ava
     let model = json!({ "provider_id": provider["data"]["provider_id"], "model": "step-3.7-flash" });
     for path in &paths {
         let query = format!("{path}?provider_id={}&model=step-3.7-flash", model["provider_id"].as_str().unwrap());
-        let (status, options) = call(router.clone(), "GET", &query, json!({})).await;
+        let (status, options) = client.call(router.clone(), "GET", &query, json!({})).await;
         assert_eq!(status, StatusCode::OK, "{options}");
         let general = options["data"]["options"].as_array().unwrap().iter().find(|item| item["selection"]["template_key"] == "assistant.general").unwrap();
         assert_eq!(general["available"], true, "{general}");
@@ -4273,14 +4099,14 @@ async fn product_agent_selection_precedes_models_and_reports_host_capability_ava
         let coding = options["data"]["options"].as_array().unwrap().iter().find(|item| item["selection"]["template_key"] == "coding.codex").unwrap();
         assert_eq!(coding["available"], true, "{coding}");
         assert!(coding["reason"].is_null(), "{coding}");
-        let (_, after) = call(router.clone(), "GET", path, json!({})).await;
+        let (_, after) = client.call(router.clone(), "GET", path, json!({})).await;
         assert_eq!(after["data"]["selection"], chosen, "availability checks must not change the saved Agent");
     }
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_preset_revisions").fetch_one(services.database.pool()).await.unwrap();
     assert_eq!(count, 0, "availability checks must not allocate executable Agent revisions");
     let coding = json!({ "kind": "template", "template_key": "coding.codex" });
     for path in &paths {
-        let (status, saved) = call(router.clone(), "PUT", path, json!({
+        let (status, saved) = client.call(router.clone(), "PUT", path, json!({
             "selection": coding, "model": model,
             "resource_selections": [
                 {"resource_kind":"workspace", "resource_id":"default-workspace"},
@@ -4290,7 +4116,7 @@ async fn product_agent_selection_precedes_models_and_reports_host_capability_ava
         })).await;
         assert_eq!(status, StatusCode::OK, "a chat-only model must support the headless-safe Coding Agent: {saved}");
         assert_eq!(saved["data"]["needs_model"], false);
-        let (status, reloaded) = call(router.clone(), "GET", path, json!({})).await;
+        let (status, reloaded) = client.call(router.clone(), "GET", path, json!({})).await;
         assert_eq!(status, StatusCode::OK, "{reloaded}");
         assert_eq!(reloaded["data"]["selection"], coding);
     }
@@ -4489,18 +4315,11 @@ async fn http_execution_freezes_the_lead_session_snapshot_and_projects_its_link(
 
 #[tokio::test]
 async fn creative_studio_entry_uses_its_official_agent() {
+    let client = LocalJsonClient(TRUST);
     const TRUST: &str = "creative-product-agent";
-    async fn call(router: axum::Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
-        let response = router.oneshot(Request::builder().method(method).uri(path)
-            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap())
-    }
     let (router, services) = common::build_local_trust_app(TRUST).await;
     let upstream = wiremock::MockServer::start().await;
-    let (status, provider) = call(router.clone(), "POST", "/api/providers", json!({
+    let (status, provider) = client.call(router.clone(), "POST", "/api/providers", json!({
         "platform": "stepfun-plan", "name": "Creative Agent regression",
         "base_url": format!("{}/step_plan/v1", upstream.uri()),
         "auth_scheme": "bearer", "credentials": { "api_keys": ["test-only"] },
@@ -4512,7 +4331,7 @@ async fn creative_studio_entry_uses_its_official_agent() {
     })).await;
     assert_eq!(status, StatusCode::CREATED, "{provider}");
     let provider_id = provider["data"]["provider_id"].as_str().unwrap();
-    let (status, canvas) = call(router.clone(), "POST", "/api/creative-studio/canvases",
+    let (status, canvas) = client.call(router.clone(), "POST", "/api/creative-studio/canvases",
         json!({
             "title": "Agent-bound canvas",
             "agentKickoff": {
@@ -4529,7 +4348,7 @@ async fn creative_studio_entry_uses_its_official_agent() {
     let session_id = document["chatSessions"][0]["id"].as_str().unwrap();
     let pending_key = document["chatSessions"][0]["pendingTurn"]["idempotencyKey"]
         .as_str().unwrap();
-    let (status, session) = call(router.clone(), "POST",
+    let (status, session) = client.call(router.clone(), "POST",
         "/api/creative-studio/canvas-agent-sessions/resolve", json!({
             "canvas_id": canvas_id,
             "session_id": session_id,
@@ -4538,7 +4357,7 @@ async fn creative_studio_entry_uses_its_official_agent() {
         })).await;
     assert_eq!(status, StatusCode::CREATED, "{session}");
     let conversation_id = session["data"]["binding"]["conversation_id"].as_str().unwrap();
-    let (status, projected) = call(
+    let (status, projected) = client.call(
         router.clone(),
         "GET",
         &format!("/api/agent-sessions/{conversation_id}/projection"),
@@ -4569,7 +4388,7 @@ async fn creative_studio_entry_uses_its_official_agent() {
             .set_body_string("data: {\"id\":\"creative\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"CREATIVE_SKILL_OK\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"creative\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
         .mount(&upstream).await;
     for (skill, expected_state) in [("creative-studio-canvas", "completed"), ("not-selected", "failed")] {
-        let (status, turn) = call(router.clone(), "POST",
+        let (status, turn) = client.call(router.clone(), "POST",
             &format!("/api/agent-sessions/{conversation_id}/turns"), json!({
                 "idempotency_key": uuid::Uuid::now_v7().to_string(),
                 "input": { "content": "Discuss the current canvas without changing it.", "inject_skills": [skill] }
@@ -4591,7 +4410,7 @@ async fn creative_studio_entry_uses_its_official_agent() {
             assert_eq!(error["error"]["code"], "NOMIFUN_STATE_INCONSISTENT");
             assert_eq!(error["error"]["ownership"], "nomifun");
             assert_eq!(error["error"]["retryable"], false);
-            let (status, restored) = call(router.clone(), "POST",
+            let (status, restored) = client.call(router.clone(), "POST",
                 "/api/creative-studio/canvas-agent-sessions/resolve", json!({
                     "canvas_id": canvas_id,
                     "session_id": session_id,
@@ -4631,19 +4450,12 @@ async fn creative_studio_entry_uses_its_official_agent() {
 
 #[tokio::test]
 async fn creative_canvas_new_session_rebinds_exact_target_after_stale_product_selection() {
+    let client = LocalJsonClient(TRUST);
     const TRUST: &str = "creative-canvas-stale-target-binding";
-    async fn call(router: axum::Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
-        let response = router.oneshot(Request::builder().method(method).uri(path)
-            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap())
-    }
 
     let (router, services) = common::build_local_trust_app(TRUST).await;
     let upstream = wiremock::MockServer::start().await;
-    let (status, provider) = call(router.clone(), "POST", "/api/providers", json!({
+    let (status, provider) = client.call(router.clone(), "POST", "/api/providers", json!({
         "platform": "stepfun-plan", "name": "Canvas target fixture",
         "base_url": format!("{}/step_plan/v1", upstream.uri()),
         "auth_scheme": "bearer", "credentials": { "api_keys": ["fixture-only"] },
@@ -4655,13 +4467,13 @@ async fn creative_canvas_new_session_rebinds_exact_target_after_stale_product_se
     })).await;
     assert_eq!(status, StatusCode::CREATED, "{provider}");
     let provider_id = provider["data"]["provider_id"].as_str().unwrap();
-    let (status, other) = call(router.clone(), "POST", "/api/creative-studio/canvases",
+    let (status, other) = client.call(router.clone(), "POST", "/api/creative-studio/canvases",
         json!({ "title": "Other owned Canvas" })).await;
     assert_eq!(status, StatusCode::CREATED, "{other}");
     let other_id = other["data"]["canvas"]["canvasId"].as_str().unwrap();
 
     for selected_canvas in [Some(other_id), None] {
-        let (status, canvas) = call(router.clone(), "POST", "/api/creative-studio/canvases",
+        let (status, canvas) = client.call(router.clone(), "POST", "/api/creative-studio/canvases",
             json!({
                 "title": "Target Canvas",
                 "agentKickoff": { "prompt": "plan", "model": {
@@ -4687,7 +4499,7 @@ async fn creative_canvas_new_session_rebinds_exact_target_after_stale_product_se
         if let Some(id) = selected_canvas {
             selections.push(json!({"resource_kind":"canvas", "resource_id":id}));
         }
-        let (status, saved) = call(router.clone(), "PUT",
+        let (status, saved) = client.call(router.clone(), "PUT",
             &format!("/api/product-agent-bindings/creative_studio_canvas/{canvas_id}"),
             json!({
                 "selection": {"kind":"template", "template_key":"creative-studio.default"},
@@ -4696,7 +4508,7 @@ async fn creative_canvas_new_session_rebinds_exact_target_after_stale_product_se
             })).await;
         assert_eq!(status, StatusCode::OK, "formal product selection fixture: {saved}");
 
-        let (status, resolved) = call(router.clone(), "POST",
+        let (status, resolved) = client.call(router.clone(), "POST",
             "/api/creative-studio/canvas-agent-sessions/resolve", json!({
                 "canvas_id": canvas_id, "session_id": session_id,
                 "model": {"provider_id": provider_id, "model": "step-3.7-flash"},
@@ -4724,20 +4536,8 @@ async fn creative_canvas_new_session_rebinds_exact_target_after_stale_product_se
 
 #[tokio::test]
 async fn companion_implicit_entry_binds_its_exact_owner_resources() {
+    let client = LocalJsonClient(TRUST);
     const TRUST: &str = "companion-implicit-resource-binding";
-    async fn call(
-        router: axum::Router,
-        method: &str,
-        path: &str,
-        body: Value,
-    ) -> (StatusCode, Value) {
-        let response = router.oneshot(Request::builder().method(method).uri(path)
-            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap())
-    }
 
     let (router, services) = common::build_local_trust_app(TRUST).await;
     common::materialize_builtin_skills_for_fixture(&services).await;
@@ -4748,7 +4548,7 @@ async fn companion_implicit_entry_binds_its_exact_owner_resources() {
             .insert_header("content-type", "text/event-stream")
             .set_body_string("data: {\"id\":\"companion\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"companion\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
         .mount(&upstream).await;
-    let (status, provider) = call(router.clone(), "POST", "/api/providers", json!({
+    let (status, provider) = client.call(router.clone(), "POST", "/api/providers", json!({
         "platform": "stepfun-plan", "name": "Companion binding fixture",
         "base_url": format!("{}/step_plan/v1", upstream.uri()),
         "auth_scheme": "bearer", "credentials": { "api_keys": ["fixture-no-network"] },
@@ -4760,15 +4560,15 @@ async fn companion_implicit_entry_binds_its_exact_owner_resources() {
     })).await;
     assert_eq!(status, StatusCode::CREATED, "{provider}");
     let provider_id = provider["data"]["provider_id"].as_str().unwrap();
-    let (status, companion) = call(router.clone(), "POST", "/api/companion/companions",
+    let (status, companion) = client.call(router.clone(), "POST", "/api/companion/companions",
         json!({ "name": "Implicit binding companion", "character": "ink" })).await;
     assert_eq!(status, StatusCode::CREATED, "{companion}");
     let companion_id = companion["data"]["companion_id"].as_str().unwrap();
-    let (status, patched) = call(router.clone(), "PATCH",
+    let (status, patched) = client.call(router.clone(), "PATCH",
         &format!("/api/companion/companions/{companion_id}"),
         json!({ "model": { "provider_id": provider_id, "model": "step-3.7-flash" } })).await;
     assert_eq!(status, StatusCode::OK, "{patched}");
-    let (status, thread) = call(router.clone(), "POST",
+    let (status, thread) = client.call(router.clone(), "POST",
         &format!("/api/companion/companions/{companion_id}/companion/threads"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{thread}");
     let session_id = thread["data"]["conversation_id"].as_str().unwrap();
@@ -4797,10 +4597,10 @@ async fn companion_implicit_entry_binds_its_exact_owner_resources() {
     for absent in ["channel", "robot", "knowledge_base", "ssh_host", "canvas"] {
         assert_eq!(resource(absent), None, "optional {absent} must not be invented");
     }
-    let (status, unrelated) = call(router.clone(), "POST", "/api/companion/companions",
+    let (status, unrelated) = client.call(router.clone(), "POST", "/api/companion/companions",
         json!({ "name": "Unrelated companion must stay private", "character": "ink" })).await;
     assert_eq!(status, StatusCode::CREATED, "{unrelated}");
-    let (status, turn) = call(router.clone(), "POST",
+    let (status, turn) = client.call(router.clone(), "POST",
         &format!("/api/agent-sessions/{session_id}/turns"), json!({
             "idempotency_key": uuid::Uuid::now_v7().to_string(),
             "input": { "content": "Tell me your name." }
@@ -4824,11 +4624,11 @@ async fn companion_implicit_entry_binds_its_exact_owner_resources() {
         .map(|message| message["content"].to_string()).collect::<Vec<_>>().join("\n");
     assert!(instructions.contains("Implicit binding companion"), "selected persona must reach the model");
     assert!(!instructions.contains("Unrelated companion must stay private"));
-    let (status, patched) = call(router.clone(), "PATCH",
+    let (status, patched) = client.call(router.clone(), "PATCH",
         &format!("/api/companion/companions/{companion_id}"),
         json!({ "name": "Renamed bound companion" })).await;
     assert_eq!(status, StatusCode::OK, "{patched}");
-    let (status, turn) = call(router.clone(), "POST",
+    let (status, turn) = client.call(router.clone(), "POST",
         &format!("/api/agent-sessions/{session_id}/turns"), json!({
             "idempotency_key": uuid::Uuid::now_v7().to_string(),
             "input": { "content": "Tell me your current name." }
@@ -5015,20 +4815,35 @@ async fn companion_options_survive_a_first_launch_selection_default_save_failure
     services.database.close().await;
 }
 
-#[tokio::test]
-async fn companion_agent_settings_switch_in_place_and_preserve_persona_history_and_model() {
+const COMPANION_REPLY: &str = "COMPANION_CHAT_WITHOUT_DEVICE_OK";
+
+struct StartedCompanion {
+    router: axum::Router,
+    services: AppServices,
+    upstream: wiremock::MockServer,
+    provider_id: String,
+    companion_id: String,
+    conversation_id: String,
+    preset_id: String,
+    snapshot: Value,
+    history: Value,
+    unchanged: Value,
+}
+
+/// Exercise real initial admission, concurrent ensure, failure cleanup and history
+/// once per isolated fixture; both Agent-edit paths begin from this same state.
+async fn started_companion_fixture() -> StartedCompanion {
     let call = companion_agent_test_request;
     let (router, services) = common::build_local_trust_app(COMPANION_AGENT_TEST_TRUST).await;
     common::materialize_builtin_skills_for_fixture(&services).await;
     let upstream = wiremock::MockServer::start().await;
-    const REPLY: &str = "COMPANION_CHAT_WITHOUT_DEVICE_OK";
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path_regex(".*/chat/completions$"))
         .respond_with(
             wiremock::ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(format!(
-                    "data: {{\"id\":\"companion\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{REPLY}\"}},\"finish_reason\":null}}]}}\n\ndata: {{\"id\":\"companion\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
+                    "data: {{\"id\":\"companion\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{COMPANION_REPLY}\"}},\"finish_reason\":null}}]}}\n\ndata: {{\"id\":\"companion\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
                 )),
         )
         .mount(&upstream)
@@ -5186,7 +5001,7 @@ async fn companion_agent_settings_switch_in_place_and_preserve_persona_history_a
             let items = history["data"]["items"].as_array().unwrap();
             if let Some(reply) = items
                 .iter()
-                .find(|message| message["content"]["content"] == REPLY)
+                .find(|message| message["content"]["content"] == COMPANION_REPLY)
                 && items.iter().any(|message| {
                     message["type"] == "agent_status"
                         && message["content"]["turn_summary"] == true
@@ -5204,7 +5019,7 @@ async fn companion_agent_settings_switch_in_place_and_preserve_persona_history_a
     let history_items = durable_history["data"]["items"].as_array().unwrap();
     let reply = history_items
         .iter()
-        .find(|message| message["content"]["content"] == REPLY)
+        .find(|message| message["content"]["content"] == COMPANION_REPLY)
         .expect("durable Companion reply");
     let turn_summary = history_items
         .iter()
@@ -5275,6 +5090,31 @@ async fn companion_agent_settings_switch_in_place_and_preserve_persona_history_a
                 .contains("robot")),
         "an unbound Robot must not reach the model tool surface: {model_request}"
     );
+
+    StartedCompanion {
+        router, services, upstream,
+        provider_id: provider_id.to_owned(),
+        companion_id: companion_id.to_owned(),
+        conversation_id: conversation_id.to_owned(),
+        preset_id,
+        snapshot: snapshot.clone(),
+        history: durable_history,
+        unchanged,
+    }
+}
+
+#[tokio::test]
+async fn companion_agent_settings_switch_in_place_and_preserve_persona_history_and_model() {
+    let call = companion_agent_test_request;
+    let fixture = started_companion_fixture().await;
+    let router = fixture.router;
+    let services = fixture.services;
+    let upstream = fixture.upstream;
+    let provider_id = fixture.provider_id.as_str();
+    let companion_id = fixture.companion_id.as_str();
+    let conversation_id = fixture.conversation_id.as_str();
+    let preset_id = fixture.preset_id;
+    let path = format!("/api/companion/companions/{companion_id}/companion/threads");
 
     // A personal Companion Agent can customize its instructions without
     // creating another Session or granting access to another Companion.
@@ -5439,7 +5279,7 @@ async fn companion_agent_settings_switch_in_place_and_preserve_persona_history_a
     let (status, history) = call(router.clone(), "GET",
         &format!("/api/agent-sessions/{conversation_id}/message-history?page_size=100"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{history}");
-    assert!(history["data"]["items"].as_array().unwrap().iter().any(|message| message["content"]["content"] == REPLY));
+    assert!(history["data"]["items"].as_array().unwrap().iter().any(|message| message["content"]["content"] == COMPANION_REPLY));
 
     // Equal compiled contracts can belong to different authored Agents. The
     // explicit source choice must survive cache reuse and later source edits.
@@ -5548,263 +5388,18 @@ async fn companion_agent_settings_switch_in_place_and_preserve_persona_history_a
 #[tokio::test]
 async fn companion_official_agent_edits_require_an_exact_preview_and_preserve_history() {
     let call = companion_agent_test_request;
-    let (router, services) = common::build_local_trust_app(COMPANION_AGENT_TEST_TRUST).await;
-    common::materialize_builtin_skills_for_fixture(&services).await;
-    let upstream = wiremock::MockServer::start().await;
-    const REPLY: &str = "COMPANION_CHAT_WITHOUT_DEVICE_OK";
-    wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path_regex(".*/chat/completions$"))
-        .respond_with(
-            wiremock::ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(format!(
-                    "data: {{\"id\":\"companion\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{REPLY}\"}},\"finish_reason\":null}}]}}\n\ndata: {{\"id\":\"companion\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
-                )),
-        )
-        .mount(&upstream)
-        .await;
-    let (status, provider) = call(router.clone(), "POST", "/api/providers", json!({
-        "platform": "stepfun-plan", "name": "Companion Agent regression",
-        "base_url": format!("{}/step_plan/v1", upstream.uri()),
-        "auth_scheme": "bearer", "credentials": { "api_keys": ["test-only"] },
-        "enabled": true, "initial_model": {
-            "model": "step-3.7-flash", "enabled": true,
-            "capabilities": [{ "task": "chat", "traits": [],
-                "protocol": "openai.chat_text", "connection_role": "default", "provider_params": {} }]
-        }
-    })).await;
-    assert_eq!(status, StatusCode::CREATED, "{provider}");
-    let provider_id = provider["data"]["provider_id"].as_str().unwrap();
-    let (status, companion) = call(router.clone(), "POST", "/api/companion/companions",
-        json!({ "name": "Agent-bound companion", "character": "ink" })).await;
-    assert_eq!(status, StatusCode::CREATED, "{companion}");
-    let companion_id = companion["data"]["companion_id"].as_str().unwrap();
-    let (status, patched) = call(router.clone(), "PATCH",
-        &format!("/api/companion/companions/{companion_id}"),
-        json!({ "model": { "provider_id": provider_id, "model": "step-3.7-flash" } })).await;
-    assert_eq!(status, StatusCode::OK, "{patched}");
-    save_companion_core_agent_for_fixture(router.clone()).await;
-    let (status, selected_default) = call(router.clone(), "PUT",
-        &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({
-            "selection": { "kind": "template", "template_key": "companion.default" },
-            "model": { "provider_id": provider_id, "model": "step-3.7-flash" },
-            "resource_selections": [
-                { "resource_kind": "companion", "resource_id": companion_id },
-                { "resource_kind": "companion_memory", "resource_id": companion_id },
-                { "resource_kind": "scheduler", "resource_id": "installation-scheduler" }
-            ]
-        })).await;
-    assert_eq!(status, StatusCode::OK, "{selected_default}");
-    let frozen_resources = selected_default["data"]["agent_binding"]["typed_resource_bindings"]
-        .as_array().expect("typed product resources");
-    assert_eq!(frozen_resources.len(), 3);
-    assert!(frozen_resources.iter().all(|resource|
-        resource["resource_kind"] != "robot" && resource["resource_kind"] != "channel"));
-    let path = format!("/api/companion/companions/{companion_id}/companion/threads");
-    let ((status, thread), (other_status, other_thread)) = tokio::join!(
-        call(router.clone(), "POST", &path, json!({})),
-        call(router.clone(), "POST", &path, json!({})),
-    );
-    assert_eq!(status, StatusCode::OK, "{thread}");
-    assert_eq!(other_status, StatusCode::OK, "{other_thread}");
-    assert_eq!(thread["data"]["conversation_id"], other_thread["data"]["conversation_id"], "concurrent home/sidebar/device opens must share the first conversation");
-    let conversation_id = thread["data"]["conversation_id"].as_str().unwrap();
-    let (status, projected) = call(
-        router.clone(),
-        "GET",
-        &format!("/api/agent-sessions/{conversation_id}/projection"),
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{projected}");
-    let snapshot = &projected["data"]["agent_snapshot"];
-    let preset_id = projected["data"]["preset_id"].as_str().unwrap().to_owned();
-    let enabled = snapshot["enabled_capabilities"].as_array().unwrap().iter()
+    let fixture = started_companion_fixture().await;
+    let router = fixture.router;
+    let services = fixture.services;
+    let upstream = fixture.upstream;
+    let provider_id = fixture.provider_id.as_str();
+    let companion_id = fixture.companion_id.as_str();
+    let conversation_id = fixture.conversation_id.as_str();
+    let enabled = fixture.snapshot["enabled_capabilities"].as_array().unwrap().iter()
         .map(|capability| capability.as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(enabled, std::collections::BTreeSet::from([
-        "agent.tool-discovery", "automation.schedule", "channel.messaging", "companion",
-        "companion.memory", "knowledge", "robot",
-    ]));
-    for (module, expected) in [
-        ("companion", &["companion/evolve", "companion/learn"][..]),
-        ("companion.memory", &["companion.memory/recall", "companion.memory/write"][..]),
-        ("knowledge", &["knowledge/read", "knowledge/search"][..]),
-        ("channel.messaging", &["channel.messaging/reply"][..]),
-        ("robot", &["robot/vision"][..]),
-        ("automation.schedule", &["automation.schedule/create", "automation.schedule/delete", "automation.schedule/list", "automation.schedule/update"][..]),
-        ("agent.tool-discovery", &["tool.discovery.rank"][..]),
-    ] {
-        let actual = snapshot["enabled_capability_actions"][module].as_array().unwrap().iter()
-            .map(|action| action.as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(actual, expected.iter().copied().collect(), "{module}");
-    }
-    assert_eq!(snapshot["preset_name"], "companion.default");
-    assert_eq!(projected["data"]["extra"]["companion_session"], true);
-    assert_eq!(projected["data"]["extra"]["companion_id"], companion_id);
-    assert_eq!(projected["data"]["extra"]["product_agent_target_kind"], "companion");
-    assert_eq!(projected["data"]["extra"]["product_agent_target_id"], companion_id);
-    let (status, warmed) = call(
-        router.clone(),
-        "POST",
-        &format!("/api/agent-sessions/{conversation_id}/warmup"),
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{warmed}");
-    let failed_key = uuid::Uuid::now_v7().to_string();
-    let (status, failed_turn) = call(
-        router.clone(),
-        "POST",
-        &format!("/api/agent-sessions/{conversation_id}/turns"),
-        json!({
-            "idempotency_key": failed_key,
-            "input": {
-                "content": "exercise pre-model cleanup",
-                "inject_skills": ["not-selected"]
-            }
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{failed_turn}");
-    let failed_operation = failed_turn["data"]["operation_id"].as_str().unwrap().to_owned();
-    let failed_error = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        loop {
-            let row = sqlx::query_as::<_, (String, Option<String>)>(
-                "SELECT state, error_json FROM agent_turns WHERE session_id = ? AND operation_id = ?",
-            )
-            .bind(conversation_id)
-            .bind(&failed_operation)
-            .fetch_one(services.database.pool())
-            .await
-            .unwrap();
-            if row.0 == "failed" {
-                break row.1.unwrap_or_default();
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("pre-model Companion failure did not reach a durable terminal");
-    let failed_error: Value = serde_json::from_str(&failed_error).expect("canonical pre-model failure diagnostics");
-    assert_eq!(failed_error["model_steps"], 0, "an unselected Skill must fail before the model starts");
-    assert_eq!(failed_error["error"]["code"], "NOMIFUN_STATE_INCONSISTENT");
-    assert_eq!(failed_error["error"]["agentTemplateKey"], "companion.default");
-    let detail = failed_error["error"]["detail"].as_str().expect("native Skill admission diagnostic");
-    assert!(detail.contains("Agent Skills: requested Skill is not in this Agent Snapshot"), "{failed_error}");
-    assert!(!detail.contains("turn no longer admits progress"), "cleanup masked the preparation failure: {failed_error}");
-    let (status, turn) = call(
-        router.clone(),
-        "POST",
-        &format!("/api/agent-sessions/{conversation_id}/turns"),
-        json!({
-            "idempotency_key": uuid::Uuid::now_v7().to_string(),
-            "input": { "content": "hello without a robot or IM channel" }
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{turn}");
-    let durable_history = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        loop {
-            let (status, history) = call(
-                router.clone(),
-                "GET",
-                &format!("/api/agent-sessions/{conversation_id}/message-history?page_size=50"),
-                json!({}),
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK, "{history}");
-            let items = history["data"]["items"].as_array().unwrap();
-            if let Some(reply) = items
-                .iter()
-                .find(|message| message["content"]["content"] == REPLY)
-                && items.iter().any(|message| {
-                    message["type"] == "agent_status"
-                        && message["content"]["turn_summary"] == true
-                        && message["content"]["status"] == "prepared"
-                        && message["msg_id"] == reply["message_id"]
-                })
-            {
-                break history;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("Companion reply without a Robot or IM binding did not become durable");
-    let history_items = durable_history["data"]["items"].as_array().unwrap();
-    let reply = history_items
-        .iter()
-        .find(|message| message["content"]["content"] == REPLY)
-        .expect("durable Companion reply");
-    let turn_summary = history_items
-        .iter()
-        .find(|message| {
-            message["type"] == "agent_status"
-                && message["content"]["turn_summary"] == true
-                && message["content"]["status"] == "prepared"
-                && message["msg_id"] == reply["message_id"]
-        })
-        .expect("completed turn must expose one durable renderer summary");
-    assert_eq!(turn_summary["position"], "center");
-    assert_ne!(turn_summary["message_id"], turn_summary["msg_id"]);
-    assert!(turn_summary["content"]["turn_id"].as_str().is_some());
-    let conversation_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'conversations'")
-        .fetch_one(services.database.pool()).await.unwrap();
-    assert_eq!(conversation_count, 0, "canonical Companion must not write the retired Conversation Store");
-    let session_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_sessions WHERE state = 'live'")
-        .fetch_one(services.database.pool()).await.unwrap();
-    assert_eq!(session_count, 1, "concurrent ensure must create one canonical AgentSession");
-    let (status, options) = call(router.clone(), "GET",
-        &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({})).await;
-    assert_eq!(status, StatusCode::OK, "{options}");
-    assert_eq!(options["data"]["selection"], json!({ "kind": "template", "template_key": "companion.default" }),
-        "the implicit official choice must remain a template selection rather than a personal Agent");
-    let minimal_option = options["data"]["options"].as_array().unwrap().iter()
-        .find(|option| option["selection"]["template_key"] == "chat.minimal").unwrap();
-    assert_eq!(minimal_option["available"], false);
-    assert_eq!(minimal_option["reason"], "companion", "Agents must retain the Companion persona contract");
-    let target_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM agent_bindings WHERE target_kind = 'companion' AND target_id = ?")
-        .bind(companion_id).fetch_one(services.database.pool()).await.unwrap();
-    assert_eq!(target_count, 1);
-
-    let (status, minimal) = call(router.clone(), "POST",
-        "/api/agent-presets/from-template/chat.minimal", json!({
-            "display_name": "chat.minimal", "reuse_existing": true,
-            "model": { "provider_id": provider_id, "model": "step-3.7-flash" }
-        })).await;
-    assert_eq!(status, StatusCode::OK, "{minimal}");
-    let minimal_id = minimal["data"]["preset"]["preset_id"].as_str().unwrap();
-    let (status, selected) = call(router.clone(), "PUT",
-        &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({
-            "preset_id": minimal_id
-        })).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{selected}");
-    assert_eq!(selected["code"], "COMPANION_AGENT_REQUIRED");
-    let (status, unchanged) = call(
-        router.clone(),
-        "GET",
-        &format!("/api/agent-sessions/{conversation_id}/projection"),
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{unchanged}");
-    assert_eq!(unchanged["data"]["preset_id"], preset_id);
-    assert_eq!(unchanged["data"]["agent_snapshot"]["enabled_capabilities"], snapshot["enabled_capabilities"]);
-    let requests = upstream.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 1, "the chat turn must use exactly one model request");
-    let model_request = requests[0].body_json::<Value>().unwrap();
-    assert!(
-        model_request["tools"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .all(|tool| !tool["function"]["name"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("robot")),
-        "an unbound Robot must not reach the model tool surface: {model_request}"
-    );
+    let path = format!("/api/companion/companions/{companion_id}/companion/threads");
+    let history_items = fixture.history["data"]["items"].as_array().unwrap();
+    let unchanged = fixture.unchanged;
 
     // The library's owner-scoped official ID is directly editable. Saving a
     // revision must not silently replace this existing Companion Session.
@@ -5953,7 +5548,7 @@ async fn companion_official_agent_edits_require_an_exact_preview_and_preserve_hi
         .filter(|message| message["role"] == "system")
         .map(|message| message["content"].to_string()).collect::<Vec<_>>().join("\n");
     assert!(rules.contains(ADDED_RULE), "the applied official instructions must reach the next real model request");
-    assert!(continued["messages"].to_string().contains(REPLY), "the same canonical history must reach the refreshed Runtime");
+    assert!(continued["messages"].to_string().contains(COMPANION_REPLY), "the same canonical history must reach the refreshed Runtime");
     let (status, library) = call(router.clone(), "GET", "/api/agent-preset-templates", json!({})).await;
     assert_eq!(status, StatusCode::OK, "{library}");
     assert_eq!(library["data"]["official_presets"]["companion.default"]["preset_id"], official_id);
@@ -6152,15 +5747,8 @@ async fn official_agent_launch_reuses_current_configuration_and_opens_canonical_
 
 #[tokio::test]
 async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_unchanged() {
+    let client = LocalJsonClient(TRUST);
     const TRUST: &str = "agent-model-selection-test";
-    async fn call(router: axum::Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
-        let response = router.oneshot(Request::builder().method(method).uri(path)
-            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap())
-    }
     async fn delete(router: axum::Router, path: &str, key: &str) -> (StatusCode, Value) {
         let response = router.oneshot(Request::builder().method("DELETE").uri(path)
             .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
@@ -6177,8 +5765,8 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
     )
     .unwrap();
     create_chat_provider(&router, TRUST, "Primary model fixture", "primary-chat", 0).await;
-    create_chat_provider(&router, TRUST, "Fallback model fixture", "fallback-chat", 1).await;
-    let (status, original) = call(router.clone(), "POST", "/api/agent-presets", json!({
+    let fallback = create_chat_provider(&router, TRUST, "Fallback model fixture", "fallback-chat", 1).await;
+    let (status, original) = client.call(router.clone(), "POST", "/api/agent-presets", json!({
         "display_name": "Personal model test", "document": {
             "schema_version": "1.0.0", "model_route_refs": {}, "chat_route_records": {},
             "enabled_capabilities": [{
@@ -6192,24 +5780,22 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
     assert_eq!(status, StatusCode::OK, "{original}");
     let original = original["data"].clone();
     let preset_id = original["preset"]["preset_id"].as_str().unwrap();
-    let alternate = original["revision"]["document"]["chat_route_records"]["agent_chat"]["failovers"][0].clone();
-    assert!(alternate["model"].is_string());
-    let selection = json!({ "provider_id": alternate["provider_id"], "model": alternate["model"] });
+    let selection = json!({ "provider_id": fallback["provider_id"], "model": "fallback-chat" });
     let mut sessions = Vec::new();
     let mut session_ids = Vec::new();
     let mut session_workspaces = Vec::new();
     for _ in 0..2 {
-        let (status, result) = call(router.clone(), "POST", "/api/agent-sessions", json!({
+        let (status, result) = client.call(router.clone(), "POST", "/api/agent-sessions", json!({
             "preset_id": preset_id, "title": "Chosen model", "model": selection,
             "resource_selections": [{ "resource_kind": "workspace", "resource_id": "default-workspace" }]
         })).await;
         assert_eq!(status, StatusCode::OK, "{result}");
         let id = result["data"]["agent_session_id"].as_str().unwrap();
-        let (status, observation) = call(router.clone(), "GET", &format!("/api/agent-sessions/{id}"), json!({})).await;
+        let (status, observation) = client.call(router.clone(), "GET", &format!("/api/agent-sessions/{id}"), json!({})).await;
         assert_eq!(status, StatusCode::OK);
         let binding = result["data"]["agent_binding"].clone();
         assert_eq!(observation["data"]["session"]["agent_binding"], binding);
-        let (status, projection) = call(
+        let (status, projection) = client.call(
             router.clone(),
             "GET",
             &format!("/api/agent-sessions/{id}/projection"),
@@ -6235,7 +5821,7 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
         );
         assert_eq!(workspace.file_name().and_then(|name| name.to_str()), Some(id));
         assert!(workspace.is_dir(), "managed workspace must exist at Session creation");
-        let (status, listing) = call(
+        let (status, listing) = client.call(
             router.clone(),
             "GET",
             &format!("/api/agent-sessions/{id}/workspace?path=."),
@@ -6251,7 +5837,7 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
         );
         if sessions.is_empty() {
             let original_workspace = projection["data"]["extra"]["workspace"].clone();
-            let (status, enabled) = call(
+            let (status, enabled) = client.call(
                 router.clone(),
                 "POST",
                 "/api/requirements/autowork",
@@ -6265,7 +5851,7 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
             .await;
             assert_eq!(status, StatusCode::OK, "{enabled}");
 
-            let (status, refreshed) = call(
+            let (status, refreshed) = client.call(
                 router.clone(),
                 "GET",
                 &format!("/api/agent-sessions/{id}/projection"),
@@ -6284,7 +5870,7 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
                 true
             );
 
-            let (status, disabled) = call(
+            let (status, disabled) = client.call(
                 router.clone(),
                 "POST",
                 "/api/requirements/autowork",
@@ -6300,7 +5886,7 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
         session_ids.push(id.to_owned());
         session_workspaces.push(workspace);
         let variant = binding["preset_revision_ref"]["preset_id"].as_str().unwrap();
-        let (status, editor) = call(router.clone(), "GET", &format!("/api/agent-presets/{variant}/editor"), json!({})).await;
+        let (status, editor) = client.call(router.clone(), "GET", &format!("/api/agent-presets/{variant}/editor"), json!({})).await;
         assert_eq!(status, StatusCode::OK);
         let record = &editor["data"]["revision"]["document"]["chat_route_records"]["agent_chat"];
         assert_eq!(record["primary"]["provider_id"], selection["provider_id"]);
@@ -6328,7 +5914,7 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
         session_workspaces[0], session_workspaces[1],
         "default Sessions must never share one writable workspace",
     );
-    let (status, fork) = call(
+    let (status, fork) = client.call(
         router.clone(),
         "POST",
         &format!("/api/agent-sessions/{}/forks", session_ids[1]),
@@ -6343,7 +5929,7 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
     let child_id = fork["data"]["child_agent_session_id"]
         .as_str()
         .expect("fork child Session id");
-    let (status, child_projection) = call(
+    let (status, child_projection) = client.call(
         router.clone(),
         "GET",
         &format!("/api/agent-sessions/{child_id}/projection"),
@@ -6400,7 +5986,7 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
         .join("user-selected-project");
     fs::create_dir_all(&custom_workspace).unwrap();
     fs::write(custom_workspace.join("keep.txt"), b"user-owned").unwrap();
-    let (status, custom) = call(
+    let (status, custom) = client.call(
         router.clone(),
         "POST",
         "/api/agent-sessions",
@@ -6417,7 +6003,7 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
     let custom_id = custom["data"]["agent_session_id"]
         .as_str()
         .expect("custom Session id");
-    let (status, custom_projection) = call(
+    let (status, custom_projection) = client.call(
         router.clone(),
         "GET",
         &format!("/api/agent-sessions/{custom_id}/projection"),
@@ -6430,7 +6016,7 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
         custom_projection["data"]["extra"]["is_temporary_workspace"],
         false,
     );
-    let (status, custom_deleted) = call(
+    let (status, custom_deleted) = client.call(
         router.clone(),
         "DELETE",
         &format!("/api/agent-sessions/{custom_id}"),
@@ -6443,17 +6029,17 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
         "user-owned",
         "Session deletion must never reclaim a user-selected workspace",
     );
-    let (_, reloaded) = call(router.clone(), "GET", &format!("/api/agent-presets/{preset_id}/editor"), json!({})).await;
+    let (_, reloaded) = client.call(router.clone(), "GET", &format!("/api/agent-presets/{preset_id}/editor"), json!({})).await;
     assert_eq!(reloaded["data"]["revision"], original["revision"]);
-    let (_, library) = call(router.clone(), "GET", "/api/agent-preset-templates", json!({})).await;
+    let (_, library) = client.call(router.clone(), "GET", "/api/agent-preset-templates", json!({})).await;
     assert_eq!(library["data"]["user_presets"].as_array().unwrap().len(), 1, "internal model variants stay out of the Agent library");
-    let (status, official) = call(router.clone(), "POST", "/api/agent-presets/from-template/chat.minimal", json!({
+    let (status, official) = client.call(router.clone(), "POST", "/api/agent-presets/from-template/chat.minimal", json!({
         "display_name": "Official chosen model", "model_route_refs": {}, "chat_route_records": {},
         "model": selection, "reuse_existing": true
     })).await;
     assert_eq!(status, StatusCode::OK, "{official}");
     assert_eq!(official["data"]["revision"]["document"]["chat_route_records"]["agent_chat"]["primary"]["model"], selection["model"]);
-    let (status, _) = call(router, "POST", "/api/agent-sessions", json!({
+    let (status, _) = client.call(router, "POST", "/api/agent-sessions", json!({
         "preset_id": preset_id, "model": { "provider_id": selection["provider_id"], "model": "nonexistent-model" }
     })).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "an unknown model cannot silently fall back");

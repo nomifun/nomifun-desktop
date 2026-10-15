@@ -99,15 +99,19 @@ fn item_params(
     }
 }
 
-#[tokio::test]
-async fn source_ensure_is_idempotent_and_configuration_updates_use_revision_cas() {
+async fn repository_with_base(
+    name: &str,
+) -> (nomifun_db::Database, SqliteKnowledgeRepository, KnowledgeBaseId) {
     let database = init_database_memory().await.unwrap();
     let repository = SqliteKnowledgeRepository::new(database.pool().clone());
     let knowledge_base_id = KnowledgeBaseId::new();
-    repository
-        .insert_base(&base(&knowledge_base_id, "source"))
-        .await
-        .unwrap();
+    repository.insert_base(&base(&knowledge_base_id, name)).await.unwrap();
+    (database, repository, knowledge_base_id)
+}
+
+#[tokio::test]
+async fn source_ensure_is_idempotent_and_configuration_updates_use_revision_cas() {
+    let (_database, repository, knowledge_base_id) = repository_with_base("source").await;
     let folder_id = KnowledgeEntryId::new();
     repository
         .upsert_entry(&entry(&knowledge_base_id, &folder_id, "Web", "directory"))
@@ -174,13 +178,7 @@ async fn source_ensure_is_idempotent_and_configuration_updates_use_revision_cas(
 
 #[tokio::test]
 async fn projection_tombstones_clear_source_default_parent_in_the_same_transaction() {
-    let database = init_database_memory().await.unwrap();
-    let repository = SqliteKnowledgeRepository::new(database.pool().clone());
-    let knowledge_base_id = KnowledgeBaseId::new();
-    repository
-        .insert_base(&base(&knowledge_base_id, "placement"))
-        .await
-        .unwrap();
+    let (_database, repository, knowledge_base_id) = repository_with_base("placement").await;
     let first_folder_id = KnowledgeEntryId::new();
     let second_folder_id = KnowledgeEntryId::new();
     repository
@@ -252,13 +250,7 @@ async fn projection_tombstones_clear_source_default_parent_in_the_same_transacti
 
 #[tokio::test]
 async fn source_items_enforce_live_url_and_ordinal_uniqueness_and_record_sync_history() {
-    let database = init_database_memory().await.unwrap();
-    let repository = SqliteKnowledgeRepository::new(database.pool().clone());
-    let knowledge_base_id = KnowledgeBaseId::new();
-    repository
-        .insert_base(&base(&knowledge_base_id, "items"))
-        .await
-        .unwrap();
+    let (_database, repository, knowledge_base_id) = repository_with_base("items").await;
     let source_id = KnowledgeSourceId::new();
     repository
         .ensure_source(&source_params(&knowledge_base_id, &source_id, None))
@@ -441,13 +433,7 @@ async fn source_items_enforce_live_url_and_ordinal_uniqueness_and_record_sync_hi
 
 #[tokio::test]
 async fn staged_publication_survives_reload_and_settles_with_hash_cas() {
-    let database = init_database_memory().await.unwrap();
-    let repository = SqliteKnowledgeRepository::new(database.pool().clone());
-    let knowledge_base_id = KnowledgeBaseId::new();
-    repository
-        .insert_base(&base(&knowledge_base_id, "staged publication"))
-        .await
-        .unwrap();
+    let (database, repository, knowledge_base_id) = repository_with_base("staged publication").await;
     let source_id = KnowledgeSourceId::new();
     repository
         .ensure_source(&source_params(&knowledge_base_id, &source_id, None))
@@ -619,13 +605,7 @@ async fn staged_publication_survives_reload_and_settles_with_hash_cas() {
 
 #[tokio::test]
 async fn managed_detached_and_copy_provenance_are_identity_based_and_transactional() {
-    let database = init_database_memory().await.unwrap();
-    let repository = SqliteKnowledgeRepository::new(database.pool().clone());
-    let knowledge_base_id = KnowledgeBaseId::new();
-    repository
-        .insert_base(&base(&knowledge_base_id, "provenance"))
-        .await
-        .unwrap();
+    let (_database, repository, knowledge_base_id) = repository_with_base("provenance").await;
     let managed_entry_id = KnowledgeEntryId::new();
     let copy_entry_id = KnowledgeEntryId::new();
     let second_entry_id = KnowledgeEntryId::new();
@@ -786,13 +766,7 @@ async fn managed_detached_and_copy_provenance_are_identity_based_and_transaction
 
 #[tokio::test]
 async fn remove_managed_source_item_is_atomic_and_replay_safe_from_both_live_and_detached_states() {
-    let database = init_database_memory().await.unwrap();
-    let repository = SqliteKnowledgeRepository::new(database.pool().clone());
-    let knowledge_base_id = KnowledgeBaseId::new();
-    repository
-        .insert_base(&base(&knowledge_base_id, "remove source"))
-        .await
-        .unwrap();
+    let (database, repository, knowledge_base_id) = repository_with_base("remove source").await;
     let first_entry_id = KnowledgeEntryId::new();
     let second_entry_id = KnowledgeEntryId::new();
     repository

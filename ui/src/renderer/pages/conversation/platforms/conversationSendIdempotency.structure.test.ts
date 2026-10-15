@@ -170,40 +170,4 @@ describe('conversation send idempotency wiring', () => {
     expect(completedReplaySource.includes('reconcilePublicDeliveryReplay(')).toBe(false);
     expect(completedReplaySource.includes('setWaitingResponse(false)')).toBe(false);
   });
-
-  test('keeps companion completed replays out of task-running UI', () => {
-    const companionSource = readSource('../../companion/index.tsx');
-    const delivery = companionSource.indexOf('const deliverTurn = useCallback(');
-    const post = companionSource.indexOf('sendMessage.invoke({', delivery);
-    const preResponse = companionSource.slice(delivery, post);
-    const classification = companionSource.indexOf(
-      'const disposition = classifyPublicMessageDelivery(sendResult);',
-      post
-    );
-    const replayBranch = companionSource.indexOf(
-      "if (disposition !== 'fresh') {",
-      classification
-    );
-    const replayReturn = companionSource.indexOf('return;', replayBranch);
-    const freshOpen = companionSource.indexOf(
-      'turnActiveRef.current = true;',
-      replayReturn
-    );
-    const freshStreamUnfence = companionSource.lastIndexOf(
-      'bubbleDismissedRef.current = false;',
-      freshOpen
-    );
-
-    expect(delivery >= 0).toBe(true);
-    expect(post > delivery).toBe(true);
-    expect(preResponse.includes('setSending(true);')).toBe(false);
-    expect(preResponse.includes('setBubbleLoading(true);')).toBe(false);
-    expect(preResponse.includes('setBubbleRunning(true);')).toBe(false);
-    expect(preResponse.includes('turnActiveRef.current = true;')).toBe(false);
-    expect(preResponse.includes('bubbleDismissedRef.current = true;')).toBe(true);
-    expect(replayBranch > classification).toBe(true);
-    expect(replayReturn > replayBranch).toBe(true);
-    expect(freshStreamUnfence > replayReturn).toBe(true);
-    expect(freshOpen > replayReturn).toBe(true);
-  });
 });

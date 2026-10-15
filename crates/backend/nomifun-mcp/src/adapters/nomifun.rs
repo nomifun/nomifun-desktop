@@ -173,16 +173,19 @@ mod tests {
         let rows = vec![
             make_row("srv-a", "stdio", r#"{"command":"npx","args":[]}"#),
             make_row("srv-b", "http", r#"{"url":"https://b.com/mcp","headers":{}}"#),
+            make_row("srv-c", "sse", r#"{"url":"https://c.com/sse","headers":{}}"#),
         ];
         let repo = Arc::new(MockRepo::new(rows));
         let adapter = NomifunAdapter::new(repo);
 
         let servers = adapter.detect_existing().await.unwrap();
-        assert_eq!(servers.len(), 2);
+        assert_eq!(servers.len(), 3);
         assert_eq!(servers[0].name, "srv-a");
         assert_eq!(servers[1].name, "srv-b");
+        assert_eq!(servers[2].name, "srv-c");
         assert!(matches!(servers[0].transport, McpServerTransport::Stdio { .. }));
         assert!(matches!(servers[1].transport, McpServerTransport::Http { .. }));
+        assert!(matches!(servers[2].transport, McpServerTransport::Sse { .. }));
     }
 
     #[tokio::test]

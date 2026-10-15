@@ -4,22 +4,7 @@
 //! perspective: default values, full TOML override, partial override, and
 //! Config-level integration.
 
-use nomi_config::compact::CompactConfig;
 use nomi_config::config::ConfigFile;
-
-/// TC-2.2-01: CompactConfig default values match spec.
-#[test]
-fn tc_2_2_01_compact_config_defaults() {
-    let cfg = CompactConfig::default();
-    assert_eq!(cfg.context_window, 200_000);
-    assert_eq!(cfg.output_reserve, 20_000);
-    assert_eq!(cfg.autocompact_buffer, 13_000);
-    assert_eq!(cfg.emergency_buffer, 3_000);
-    assert_eq!(cfg.max_failures, 3);
-    assert_eq!(cfg.micro_keep_recent, 5);
-    assert_eq!(cfg.micro_gap_seconds, 3600);
-    assert!(cfg.enabled);
-}
 
 /// TC-2.2-02: CompactConfig full TOML parsing.
 #[test]

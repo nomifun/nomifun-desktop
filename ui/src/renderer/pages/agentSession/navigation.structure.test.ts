@@ -17,8 +17,10 @@ describe('Agent navigation', () => {
         "t('agentSettings.navigation.railTitle', { defaultValue: 'Agent Workbench' })"
       )
     ).toBe(true);
-    expect(entry.match(/content=\{label\}/g)).toHaveLength(2);
-    expect(entry.includes('>{label}</span>')).toBe(true);
+    expect(entry.includes('<SiderNavItem')).toBe(true);
+    const navItem = read(new URL('../../components/layout/Sider/SiderNav/SiderNavItem.tsx', import.meta.url));
+    expect(navItem.includes('content={label}')).toBe(true);
+    expect(navItem.includes('>{label}</span>')).toBe(true);
   });
 
   test('the main router owns only the public Agent routes', () => {

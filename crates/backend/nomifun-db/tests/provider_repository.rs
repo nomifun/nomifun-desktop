@@ -13,28 +13,11 @@ use nomifun_db::{
 const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
 const CALLER_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000010";
 
-static CHAT_CAPABILITIES: [NewProviderModelCapability<'static>; 1] = [NewProviderModelCapability {
-    task: "chat",
-    traits: "[\"vision_input\"]",
-    protocol: "openai.chat_text",
-    connection_role: "default",
-    base_url_override: None,
-    endpoint: Some("/chat/completions"),
-    poll_endpoint: None,
-    content_endpoint: None,
-    realtime_endpoint: None,
-    allow_cross_origin_credentials: false,
-    provider_params: "{}",
-    context_limit: Some(128_000),
-    output_limit: None,
-    compaction_threshold_pct: None,
-}];
-
-static IMAGE_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
-    [NewProviderModelCapability {
-        task: "image_generation",
+const fn capability(task: &'static str, protocol: &'static str) -> NewProviderModelCapability<'static> {
+    NewProviderModelCapability {
+        task,
+        protocol,
         traits: "[]",
-        protocol: "ark.images",
         connection_role: "default",
         base_url_override: None,
         endpoint: None,
@@ -42,47 +25,37 @@ static IMAGE_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
         content_endpoint: None,
         realtime_endpoint: None,
         allow_cross_origin_credentials: false,
-        provider_params: "{\"seed\":7}",
-        context_limit: None,
-        output_limit: None,
-        compaction_threshold_pct: None,
-    }];
-
-static VIDEO_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
-    [NewProviderModelCapability {
-        task: "video_generation",
-        traits: "[]",
-        protocol: "openai.videos",
-        connection_role: "default",
-        base_url_override: None,
-        endpoint: Some("/videos"),
-        poll_endpoint: Some("/videos/{id}"),
-        content_endpoint: Some("/videos/{id}/content"),
-        realtime_endpoint: None,
-        allow_cross_origin_credentials: false,
         provider_params: "{}",
         context_limit: None,
         output_limit: None,
         compaction_threshold_pct: None,
-    }];
+    }
+}
 
-static VOICE_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
-    [NewProviderModelCapability {
-        task: "speech_synthesis",
-        traits: "[]",
-        protocol: "volc.tts_v3",
-        connection_role: "voice",
-        base_url_override: None,
-        endpoint: Some("/api/v3/tts/unidirectional"),
-        poll_endpoint: None,
-        content_endpoint: None,
-        realtime_endpoint: None,
-        allow_cross_origin_credentials: false,
-        provider_params: "{}",
-        context_limit: None,
-        output_limit: None,
-        compaction_threshold_pct: None,
-    }];
+static CHAT_CAPABILITIES: [NewProviderModelCapability<'static>; 1] = [NewProviderModelCapability {
+    traits: "[\"vision_input\"]",
+    endpoint: Some("/chat/completions"),
+    context_limit: Some(128_000),
+    ..capability("chat", "openai.chat_text")
+}];
+
+static IMAGE_CAPABILITIES: [NewProviderModelCapability<'static>; 1] = [NewProviderModelCapability {
+    provider_params: "{\"seed\":7}",
+    ..capability("image_generation", "ark.images")
+}];
+
+static VIDEO_CAPABILITIES: [NewProviderModelCapability<'static>; 1] = [NewProviderModelCapability {
+    endpoint: Some("/videos"),
+    poll_endpoint: Some("/videos/{id}"),
+    content_endpoint: Some("/videos/{id}/content"),
+    ..capability("video_generation", "openai.videos")
+}];
+
+static VOICE_CAPABILITIES: [NewProviderModelCapability<'static>; 1] = [NewProviderModelCapability {
+    connection_role: "voice",
+    endpoint: Some("/api/v3/tts/unidirectional"),
+    ..capability("speech_synthesis", "volc.tts_v3")
+}];
 
 fn provider_params(provider_id: Option<&str>) -> CreateProviderParams<'_> {
     CreateProviderParams {
@@ -136,6 +109,19 @@ async fn insert_provider(
         .create(params, &model("chat", &CHAT_CAPABILITIES), &[])
         .await
         .unwrap();
+}
+
+async fn provider_with_model(
+    name: &str,
+    capabilities: &[NewProviderModelCapability<'_>],
+) -> (nomifun_db::Database, SqliteProviderRepository) {
+    let db = init_database_memory().await.unwrap();
+    let repository = SqliteProviderRepository::new(db.pool().clone());
+    repository
+        .create(provider_params(Some(PROVIDER_ID)), &model(name, capabilities), &[])
+        .await
+        .unwrap();
+    (db, repository)
 }
 
 #[tokio::test]
@@ -206,16 +192,7 @@ async fn chat_compaction_threshold_survives_model_save() {
 
 #[tokio::test]
 async fn model_display_name_is_separate_from_the_runtime_model_id() {
-    let db = init_database_memory().await.unwrap();
-    let repository = SqliteProviderRepository::new(db.pool().clone());
-    repository
-        .create(
-            provider_params(Some(PROVIDER_ID)),
-            &model("ep-test-endpoint", &CHAT_CAPABILITIES),
-            &[],
-        )
-        .await
-        .unwrap();
+    let (db, _repository) = provider_with_model("ep-test-endpoint", &CHAT_CAPABILITIES).await;
 
     let models = SqliteProviderModelRepository::new(db.pool().clone());
     models
@@ -278,16 +255,7 @@ async fn aggregate_create_rolls_back_everything_on_invalid_child() {
 
 #[tokio::test]
 async fn model_save_preserves_health_only_when_invocation_config_is_unchanged() {
-    let db = init_database_memory().await.unwrap();
-    let providers = SqliteProviderRepository::new(db.pool().clone());
-    providers
-        .create(
-            provider_params(Some(PROVIDER_ID)),
-            &model("multi", &CHAT_CAPABILITIES),
-            &[],
-        )
-        .await
-        .unwrap();
+    let (db, providers) = provider_with_model("multi", &CHAT_CAPABILITIES).await;
     sqlx::query(
         "UPDATE provider_model_capabilities SET updated_at = 123 \
          WHERE provider_id = ? AND model = 'multi' AND task = 'chat'",
@@ -341,20 +309,8 @@ async fn model_save_preserves_health_only_when_invocation_config_is_unchanged() 
 
     static TWO: [NewProviderModelCapability<'static>; 2] = [
         NewProviderModelCapability {
-            task: "chat",
-            traits: "[]",
-            protocol: "openai.chat_text",
-            connection_role: "default",
-            base_url_override: None,
             endpoint: Some("/v2/chat"),
-            poll_endpoint: None,
-            content_endpoint: None,
-            realtime_endpoint: None,
-            allow_cross_origin_credentials: false,
-            provider_params: "{}",
-            context_limit: None,
-            output_limit: None,
-            compaction_threshold_pct: None,
+            ..capability("chat", "openai.chat_text")
         },
         NewProviderModelCapability {
             task: "image_generation",
@@ -456,16 +412,7 @@ async fn model_save_preserves_health_only_when_invocation_config_is_unchanged() 
 
 #[tokio::test]
 async fn concurrent_model_saves_use_provider_config_revision_as_a_cas_guard() {
-    let db = init_database_memory().await.unwrap();
-    let providers = SqliteProviderRepository::new(db.pool().clone());
-    providers
-        .create(
-            provider_params(Some(PROVIDER_ID)),
-            &model("chat", &CHAT_CAPABILITIES),
-            &[],
-        )
-        .await
-        .unwrap();
+    let (db, providers) = provider_with_model("chat", &CHAT_CAPABILITIES).await;
     let first = SqliteProviderModelRepository::new(db.pool().clone());
     let second = first.clone();
     let video = model("video", &VIDEO_CAPABILITIES);
@@ -494,16 +441,7 @@ async fn concurrent_model_saves_use_provider_config_revision_as_a_cas_guard() {
 
 #[tokio::test]
 async fn stale_provider_and_connection_mutations_fail_after_a_model_revision_wins() {
-    let db = init_database_memory().await.unwrap();
-    let providers = SqliteProviderRepository::new(db.pool().clone());
-    providers
-        .create(
-            provider_params(Some(PROVIDER_ID)),
-            &model("chat", &CHAT_CAPABILITIES),
-            &[],
-        )
-        .await
-        .unwrap();
+    let (db, providers) = provider_with_model("chat", &CHAT_CAPABILITIES).await;
     SqliteProviderModelRepository::new(db.pool().clone())
         .save(PROVIDER_ID, 0, &model("video", &VIDEO_CAPABILITIES))
         .await
@@ -537,16 +475,7 @@ async fn stale_provider_and_connection_mutations_fail_after_a_model_revision_win
 
 #[tokio::test]
 async fn stale_health_probe_cannot_overwrite_a_newer_invocation_graph() {
-    let db = init_database_memory().await.unwrap();
-    let providers = SqliteProviderRepository::new(db.pool().clone());
-    providers
-        .create(
-            provider_params(Some(PROVIDER_ID)),
-            &model("chat", &CHAT_CAPABILITIES),
-            &[],
-        )
-        .await
-        .unwrap();
+    let (db, _providers) = provider_with_model("chat", &CHAT_CAPABILITIES).await;
     let changed_capabilities = [NewProviderModelCapability {
         endpoint: Some("/v2/chat/completions"),
         ..CHAT_CAPABILITIES[0]
@@ -751,16 +680,7 @@ async fn model_save_persists_distinct_async_route_endpoints() {
 
 #[tokio::test]
 async fn clone_graph_copies_configuration_but_not_health() {
-    let db = init_database_memory().await.unwrap();
-    let repository = SqliteProviderRepository::new(db.pool().clone());
-    repository
-        .create(
-            provider_params(Some(PROVIDER_ID)),
-            &model("gpt-5", &CHAT_CAPABILITIES),
-            &[],
-        )
-        .await
-        .unwrap();
+    let (db, repository) = provider_with_model("gpt-5", &CHAT_CAPABILITIES).await;
     SqliteProviderModelCapabilityRepository::new(db.pool().clone())
         .set_health(
             PROVIDER_ID,
@@ -788,16 +708,7 @@ async fn clone_graph_copies_configuration_but_not_health() {
 
 #[tokio::test]
 async fn provider_delete_explicitly_removes_owned_graph() {
-    let db = init_database_memory().await.unwrap();
-    let repository = SqliteProviderRepository::new(db.pool().clone());
-    repository
-        .create(
-            provider_params(Some(PROVIDER_ID)),
-            &model("gpt-5", &CHAT_CAPABILITIES),
-            &[],
-        )
-        .await
-        .unwrap();
+    let (db, repository) = provider_with_model("gpt-5", &CHAT_CAPABILITIES).await;
     repository.delete(PROVIDER_ID).await.unwrap();
     for table in [
         "providers",
@@ -816,16 +727,7 @@ async fn provider_delete_explicitly_removes_owned_graph() {
 
 #[tokio::test]
 async fn provider_auth_scheme_is_explicit_and_nonblank() {
-    let db = init_database_memory().await.unwrap();
-    let repository = SqliteProviderRepository::new(db.pool().clone());
-    repository
-        .create(
-            provider_params(Some(PROVIDER_ID)),
-            &model("gpt-5", &CHAT_CAPABILITIES),
-            &[],
-        )
-        .await
-        .unwrap();
+    let (_db, repository) = provider_with_model("gpt-5", &CHAT_CAPABILITIES).await;
     let updated = repository
         .update(
             PROVIDER_ID,
@@ -854,16 +756,7 @@ async fn provider_auth_scheme_is_explicit_and_nonblank() {
 
 #[tokio::test]
 async fn default_connection_changes_invalidate_only_effective_health() {
-    let db = init_database_memory().await.unwrap();
-    let providers = SqliteProviderRepository::new(db.pool().clone());
-    providers
-        .create(
-            provider_params(Some(PROVIDER_ID)),
-            &model("gpt-5", &CHAT_CAPABILITIES),
-            &[],
-        )
-        .await
-        .unwrap();
+    let (db, providers) = provider_with_model("gpt-5", &CHAT_CAPABILITIES).await;
     let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
     capabilities
         .set_health(
@@ -1018,20 +911,8 @@ async fn named_connection_changes_invalidate_only_its_capability_health() {
 #[tokio::test]
 async fn bedrock_provider_allows_the_manifest_defined_empty_base_url() {
     static BEDROCK: [NewProviderModelCapability<'static>; 1] = [NewProviderModelCapability {
-        task: "chat",
-        traits: "[]",
-        protocol: "bedrock.anthropic_messages",
-        connection_role: "default",
-        base_url_override: None,
-        endpoint: None,
-        poll_endpoint: None,
-        content_endpoint: None,
-        realtime_endpoint: None,
-        allow_cross_origin_credentials: false,
-        provider_params: "{}",
-        context_limit: None,
         output_limit: Some(8192),
-        compaction_threshold_pct: None,
+        ..capability("chat", "bedrock.anthropic_messages")
     }];
     let db = init_database_memory().await.unwrap();
     let repository = SqliteProviderRepository::new(db.pool().clone());

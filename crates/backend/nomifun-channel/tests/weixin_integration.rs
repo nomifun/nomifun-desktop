@@ -11,61 +11,22 @@
 //! login event serialization, etc.).
 
 #[cfg(feature = "weixin")]
-mod weixin_tests {
-    use std::sync::Mutex;
+#[path = "support/manager.rs"]
+mod manager_support;
 
-    use nomifun_api_types::WebSocketMessage;
+#[cfg(feature = "weixin")]
+mod weixin_tests {
+    use super::manager_support::manager_fixture;
+
     use nomifun_channel::manager::{ChannelManager, EnableChannelSpec, PluginFactory};
     use nomifun_channel::plugin::ChannelPlugin;
     use nomifun_channel::plugins::weixin::WeixinPlugin;
     use nomifun_channel::types::{PluginConfig, PluginCredentials, PluginStatus, PluginType};
-    use nomifun_db::{IChannelRepository, SqliteChannelRepository, init_database_memory};
-    use nomifun_realtime::UserEventSink;
-    use std::sync::Arc;
-    use tokio::sync::mpsc;
 
     // -- Test infrastructure ------------------------------------------------
 
-    struct MockBroadcaster {
-        events: Mutex<Vec<WebSocketMessage<serde_json::Value>>>,
-    }
-
-    impl MockBroadcaster {
-        fn new() -> Self {
-            Self {
-                events: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    impl UserEventSink for MockBroadcaster {
-        fn send_to_user(&self, _user_id: &str, event: WebSocketMessage<serde_json::Value>) {
-            self.events.lock().unwrap().push(event);
-        }
-    }
-
-    fn make_encryption_key() -> [u8; 32] {
-        [0x42u8; 32]
-    }
-
-    async fn setup() -> (ChannelManager, Arc<dyn IChannelRepository>, Arc<MockBroadcaster>) {
-        let db = init_database_memory().await.unwrap();
-        let repo: Arc<dyn IChannelRepository> = Arc::new(SqliteChannelRepository::new(db.pool().clone()));
-        let broadcaster = Arc::new(MockBroadcaster::new());
-        let (message_tx, _message_rx) = mpsc::channel(16);
-
-        let manager = ChannelManager::new(
-            repo.clone(),
-            broadcaster.clone(),
-            "018f1234-5678-7abc-8def-012345678973",
-            make_encryption_key(),
-            message_tx,
-        );
-
-        // Keep db alive — test process exits anyway
-        std::mem::forget(db);
-
-        (manager, repo, broadcaster)
+    async fn setup() -> (ChannelManager, nomifun_db::Database) {
+        manager_fixture("018f1234-5678-7abc-8def-012345678973").await
     }
 
     fn weixin_factory() -> PluginFactory {
@@ -106,16 +67,6 @@ mod weixin_tests {
     // -- Plugin construction ------------------------------------------------
 
     #[test]
-    fn weixin_plugin_initial_state() {
-        let plugin = WeixinPlugin::new();
-        assert_eq!(plugin.status(), PluginStatus::Created);
-        assert!(plugin.bot_info().is_none());
-        assert!(plugin.last_error().is_none());
-        assert_eq!(plugin.plugin_type(), PluginType::Weixin);
-        assert_eq!(plugin.active_user_count(), 0);
-    }
-
-    #[test]
     fn weixin_plugin_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<WeixinPlugin>();
@@ -153,7 +104,7 @@ mod weixin_tests {
 
     #[tokio::test]
     async fn test_plugin_missing_bot_token_fails() {
-        let (manager, _repo, _bc) = setup().await;
+        let (manager, _db) = setup().await;
         let factory = weixin_factory();
 
         let config = make_plugin_config(None, Some("acc_1"));
@@ -168,7 +119,7 @@ mod weixin_tests {
 
     #[tokio::test]
     async fn test_plugin_missing_account_id_fails() {
-        let (manager, _repo, _bc) = setup().await;
+        let (manager, _db) = setup().await;
         let factory = weixin_factory();
 
         let config = make_plugin_config(Some("tok_1"), None);
@@ -183,7 +134,7 @@ mod weixin_tests {
 
     #[tokio::test]
     async fn test_plugin_empty_bot_token_fails() {
-        let (manager, _repo, _bc) = setup().await;
+        let (manager, _db) = setup().await;
         let factory = weixin_factory();
 
         let config = make_plugin_config(Some(""), Some("acc_1"));
@@ -193,7 +144,7 @@ mod weixin_tests {
 
     #[tokio::test]
     async fn test_plugin_empty_account_id_fails() {
-        let (manager, _repo, _bc) = setup().await;
+        let (manager, _db) = setup().await;
         let factory = weixin_factory();
 
         let config = make_plugin_config(Some("tok_1"), Some(""));
@@ -205,7 +156,7 @@ mod weixin_tests {
 
     #[tokio::test]
     async fn enable_invalid_plugin_type_fails() {
-        let (manager, _repo, _bc) = setup().await;
+        let (manager, _db) = setup().await;
         let factory = weixin_factory();
 
         let config = make_config_value(Some("tok_1"), Some("acc_1"));
@@ -224,46 +175,9 @@ mod weixin_tests {
         assert!(result.is_err());
     }
 
-    // -- DP-2: Disable without enable (idempotent/error) -------------------
 
-    #[tokio::test]
-    async fn disable_without_db_row_returns_error() {
-        let (manager, _repo, _bc) = setup().await;
-        let result = manager
-            .disable_plugin("0190f5fe-7c00-7a00-8000-00000000ffff")
-            .await;
-        assert!(result.is_err());
-    }
 
-    // -- PS-1: Empty plugin status ------------------------------------------
 
-    #[tokio::test]
-    async fn get_plugin_status_empty() {
-        let (manager, _repo, _bc) = setup().await;
-        let statuses = manager.get_plugin_status().await.unwrap();
-        assert!(statuses.is_empty());
-    }
-
-    // -- Restore with nothing stored ----------------------------------------
-
-    #[tokio::test]
-    async fn restore_plugins_none_stored() {
-        let (manager, _repo, _bc) = setup().await;
-        let factory = weixin_factory();
-        let result = manager.restore_plugins(&factory).await;
-        assert!(result.is_ok());
-        assert_eq!(manager.active_plugin_count(), 0);
-    }
-
-    // -- Plugin running check -----------------------------------------------
-
-    #[tokio::test]
-    async fn is_plugin_running_false_when_not_enabled() {
-        let (manager, _repo, _bc) = setup().await;
-        assert!(!manager.is_plugin_running(
-            "0190f5fe-7c00-7a00-8000-00000000ffff"
-        ));
-    }
 
     // -- Login event serialization ------------------------------------------
 

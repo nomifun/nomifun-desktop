@@ -350,65 +350,32 @@ async fn auto_group_identity_is_idempotent_hidden_and_promotable() {
 }
 
 #[tokio::test]
-async fn classifying_legacy_session_clears_conversation_atomically() {
+async fn unknown_session_rejects_reclassification_without_erasing_conversation() {
     let (repo, db) = repo().await;
     let plugin = create_plugin(&repo, "lark", "lark-bot").await;
     let user = create_user(&repo, &plugin.channel_plugin_id, "ou_group").await;
-    let legacy = repo
-        .get_or_create_session(
-            &user.channel_user_id,
-            "oc_group",
-            &plugin.channel_plugin_id,
-            &session_fixture(
-                &user.channel_user_id,
-                &plugin.channel_plugin_id,
-                "oc_group",
-            ),
-        )
+    let original = create_session_with_kind(&repo, &user, &plugin, "oc_group", "unknown").await;
+    let conversation_id = "0190f5fe-7c00-7a00-8abc-0123456789dd";
+    sqlx::query("UPDATE channel_sessions SET conversation_id = ? WHERE channel_session_id = ?")
+        .bind(conversation_id)
+        .bind(&original.channel_session_id)
+        .execute(db.pool())
         .await
         .unwrap();
-    assert_eq!(legacy.chat_kind, "unknown");
 
-    sqlx::query(
-        "UPDATE channel_sessions SET conversation_id = ? WHERE channel_session_id = ?",
-    )
-    .bind("0190f5fe-7c00-7a00-8abc-0123456789dd")
-    .bind(&legacy.channel_session_id)
-    .execute(db.pool())
-    .await
-    .unwrap();
-
-    let mut classified = session_fixture(
-        &user.channel_user_id,
-        &plugin.channel_plugin_id,
-        "oc_group",
-    );
-    classified.chat_kind = "group".into();
-    let group_session = repo
-        .get_or_create_session(
-            &user.channel_user_id,
-            "oc_group",
-            &plugin.channel_plugin_id,
-            &classified,
-        )
-        .await
-        .unwrap();
-    assert_eq!(group_session.channel_session_id, legacy.channel_session_id);
-    assert_eq!(group_session.chat_kind, "group");
-    assert!(group_session.conversation_id.is_none());
-
-    let mut conflicting = classified;
-    conflicting.chat_kind = "direct".into();
-    assert!(matches!(
-        repo.get_or_create_session(
-            &user.channel_user_id,
-            "oc_group",
-            &plugin.channel_plugin_id,
-            &conflicting,
-        )
-        .await,
-        Err(DbError::Conflict(_))
-    ));
+    for chat_kind in ["group", "direct"] {
+        let mut classified = session_fixture(&user.channel_user_id, &plugin.channel_plugin_id, "oc_group");
+        classified.chat_kind = chat_kind.into();
+        assert!(matches!(
+            repo.get_or_create_session(
+                &user.channel_user_id, "oc_group", &plugin.channel_plugin_id, &classified,
+            ).await,
+            Err(DbError::Conflict(_))
+        ), "must reject unknown-to-{chat_kind} reclassification");
+        let retained = repo.get_session(&original.channel_session_id).await.unwrap().unwrap();
+        assert_eq!(retained.chat_kind, "unknown");
+        assert_eq!(retained.conversation_id.as_deref(), Some(conversation_id));
+    }
 }
 
 #[tokio::test]
@@ -502,6 +469,41 @@ async fn session_identity_is_scoped_by_plugin_user_and_chat() {
     assert_ne!(a1.channel_session_id, b1.channel_session_id);
 }
 
+async fn assert_prompt_states(
+    db: &nomifun_db::Database,
+    prompts: &[ChannelPendingPromptRow],
+    expected: &[&str],
+) {
+    let rows: Vec<(String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT prompt_id, state, settled_at FROM channel_pending_prompts ORDER BY id",
+    )
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(prompts.len(), expected.len());
+    assert_eq!(rows.len(), expected.len());
+    for ((id, state, settled_at), (prompt, expected_state)) in rows.iter().zip(prompts.iter().zip(expected)) {
+        assert_eq!(id, &prompt.prompt_id);
+        assert_eq!(state, expected_state, "prompt {id}");
+        assert_eq!(settled_at.is_some(), *expected_state != "queued", "prompt {id} settlement");
+    }
+}
+
+async fn assert_sessions_exist(
+    repo: &Arc<dyn IChannelRepository>,
+    sessions: &[&ChannelSessionRow],
+    expected: bool,
+) {
+    for session in sessions {
+        assert_eq!(
+            repo.get_session(&session.channel_session_id).await.unwrap().is_some(),
+            expected,
+            "session {} presence",
+            session.channel_session_id
+        );
+    }
+}
+
 #[tokio::test]
 async fn deleting_group_sessions_cancels_only_their_queued_prompts() {
     let (repo, db) = repo().await;
@@ -510,142 +512,25 @@ async fn deleting_group_sessions_cancels_only_their_queued_prompts() {
     let first_user = create_user(&repo, &first_plugin.channel_plugin_id, "tg_1").await;
     let second_user = create_user(&repo, &second_plugin.channel_plugin_id, "tg_2").await;
 
-    let mut group_fixture = session_fixture(
-        &first_user.channel_user_id,
-        &first_plugin.channel_plugin_id,
-        "group-a",
-    );
-    group_fixture.chat_kind = "group".into();
-    let group_session = repo
-        .get_or_create_session(
-            &first_user.channel_user_id,
-            "group-a",
-            &first_plugin.channel_plugin_id,
-            &group_fixture,
-        )
-        .await
-        .unwrap();
-
-    let mut direct_fixture = session_fixture(
-        &first_user.channel_user_id,
-        &first_plugin.channel_plugin_id,
-        "direct-a",
-    );
-    direct_fixture.chat_kind = "direct".into();
-    let direct_session = repo
-        .get_or_create_session(
-            &first_user.channel_user_id,
-            "direct-a",
-            &first_plugin.channel_plugin_id,
-            &direct_fixture,
-        )
-        .await
-        .unwrap();
-
-    let unknown_session = repo
-        .get_or_create_session(
-            &first_user.channel_user_id,
-            "unknown-a",
-            &first_plugin.channel_plugin_id,
-            &session_fixture(
-                &first_user.channel_user_id,
-                &first_plugin.channel_plugin_id,
-                "unknown-a",
-            ),
-        )
-        .await
-        .unwrap();
-
-    let mut other_group_fixture = session_fixture(
-        &second_user.channel_user_id,
-        &second_plugin.channel_plugin_id,
-        "group-b",
-    );
-    other_group_fixture.chat_kind = "group".into();
-    let other_group_session = repo
-        .get_or_create_session(
-            &second_user.channel_user_id,
-            "group-b",
-            &second_plugin.channel_plugin_id,
-            &other_group_fixture,
-        )
-        .await
-        .unwrap();
-
-    let now = nomifun_common::now_ms();
-    let mut queued = Vec::new();
-    for (plugin_product_id, chat_id, session_id, text) in [
-        (
-            first_plugin.channel_plugin_id.as_str(),
-            "group-a",
-            group_session.channel_session_id.as_str(),
-            "group prompt",
-        ),
-        (
-            first_plugin.channel_plugin_id.as_str(),
-            "direct-a",
-            direct_session.channel_session_id.as_str(),
-            "direct prompt",
-        ),
-        (
-            first_plugin.channel_plugin_id.as_str(),
-            "unknown-a",
-            unknown_session.channel_session_id.as_str(),
-            "unknown prompt",
-        ),
-        (
-            second_plugin.channel_plugin_id.as_str(),
-            "group-b",
-            other_group_session.channel_session_id.as_str(),
-            "other plugin prompt",
-        ),
-    ] {
-        let mut prompt = pending_prompt_fixture(
-            &nomifun_common::ConversationId::new().into_string(),
-            chat_id,
-            text,
-        );
-        prompt.channel_plugin_id = plugin_product_id.to_owned();
-        prompt.channel_session_id = session_id.to_owned();
-        let nomifun_db::PendingPromptEnqueue::Queued { row, .. } =
-            repo.enqueue_pending_prompt(&prompt, now).await.unwrap()
-        else {
-            panic!("fixture prompt must be queued");
-        };
-        queued.push(row);
-    }
+    let group_session = create_session_with_kind(&repo, &first_user, &first_plugin, "group-a", "group").await;
+    let direct_session = create_session_with_kind(&repo, &first_user, &first_plugin, "direct-a", "direct").await;
+    let unknown_session = create_session_with_kind(&repo, &first_user, &first_plugin, "unknown-a", "unknown").await;
+    let other_group_session = create_session_with_kind(&repo, &second_user, &second_plugin, "group-b", "group").await;
+    let queued = vec![
+        enqueue_session_prompt(&repo, &first_plugin, &group_session, "group prompt").await,
+        enqueue_session_prompt(&repo, &first_plugin, &direct_session, "direct prompt").await,
+        enqueue_session_prompt(&repo, &first_plugin, &unknown_session, "unknown prompt").await,
+        enqueue_session_prompt(&repo, &second_plugin, &other_group_session, "other plugin prompt").await,
+    ];
 
     repo.delete_group_sessions_by_channel(&first_plugin.channel_plugin_id)
         .await
         .unwrap();
 
     assert!(repo.get_session(&group_session.channel_session_id).await.unwrap().is_none());
-    for retained in [&direct_session, &unknown_session, &other_group_session] {
-        assert!(
-            repo.get_session(&retained.channel_session_id)
-                .await
-                .unwrap()
-                .is_some(),
-            "non-target session {} must be retained",
-            retained.channel_session_id
-        );
-    }
+    assert_sessions_exist(&repo, &[&direct_session, &unknown_session, &other_group_session], true).await;
 
-    let states: Vec<(String, String, Option<i64>)> = sqlx::query_as(
-        "SELECT prompt_id, state, settled_at FROM channel_pending_prompts ORDER BY id",
-    )
-    .fetch_all(db.pool())
-    .await
-    .unwrap();
-    assert_eq!(states.len(), 4);
-    assert_eq!(states[0].0, queued[0].prompt_id);
-    assert_eq!(states[0].1, "cancelled");
-    assert!(states[0].2.is_some());
-    for (index, retained) in states.iter().enumerate().skip(1) {
-        assert_eq!(retained.0, queued[index].prompt_id);
-        assert_eq!(retained.1, "queued");
-        assert!(retained.2.is_none());
-    }
+    assert_prompt_states(&db, &queued, &["cancelled", "queued", "queued", "queued"]).await;
 }
 
 #[tokio::test]
@@ -656,106 +541,16 @@ async fn atomic_group_access_update_rolls_back_then_clears_non_direct_sessions()
     let target_user = create_user(&repo, &target_plugin.channel_plugin_id, "ou_target").await;
     let other_user = create_user(&repo, &other_plugin.channel_plugin_id, "ou_other").await;
 
-    let mut target_group_fixture = session_fixture(
-        &target_user.channel_user_id,
-        &target_plugin.channel_plugin_id,
-        "target-group",
-    );
-    target_group_fixture.chat_kind = "group".into();
-    let target_group = repo
-        .get_or_create_session(
-            &target_user.channel_user_id,
-            "target-group",
-            &target_plugin.channel_plugin_id,
-            &target_group_fixture,
-        )
-        .await
-        .unwrap();
-
-    let target_unknown = repo
-        .get_or_create_session(
-            &target_user.channel_user_id,
-            "target-unknown",
-            &target_plugin.channel_plugin_id,
-            &session_fixture(
-                &target_user.channel_user_id,
-                &target_plugin.channel_plugin_id,
-                "target-unknown",
-            ),
-        )
-        .await
-        .unwrap();
-
-    let mut target_direct_fixture = session_fixture(
-        &target_user.channel_user_id,
-        &target_plugin.channel_plugin_id,
-        "target-direct",
-    );
-    target_direct_fixture.chat_kind = "direct".into();
-    let target_direct = repo
-        .get_or_create_session(
-            &target_user.channel_user_id,
-            "target-direct",
-            &target_plugin.channel_plugin_id,
-            &target_direct_fixture,
-        )
-        .await
-        .unwrap();
-
-    let mut other_group_fixture = session_fixture(
-        &other_user.channel_user_id,
-        &other_plugin.channel_plugin_id,
-        "other-group",
-    );
-    other_group_fixture.chat_kind = "group".into();
-    let other_group = repo
-        .get_or_create_session(
-            &other_user.channel_user_id,
-            "other-group",
-            &other_plugin.channel_plugin_id,
-            &other_group_fixture,
-        )
-        .await
-        .unwrap();
-
-    let now = nomifun_common::now_ms();
-    let mut queued = Vec::new();
-    for (plugin_product_id, session, text) in [
-        (
-            target_plugin.channel_plugin_id.as_str(),
-            &target_group,
-            "target group prompt",
-        ),
-        (
-            target_plugin.channel_plugin_id.as_str(),
-            &target_unknown,
-            "target unknown prompt",
-        ),
-        (
-            target_plugin.channel_plugin_id.as_str(),
-            &target_direct,
-            "target direct prompt",
-        ),
-        (
-            other_plugin.channel_plugin_id.as_str(),
-            &other_group,
-            "other group prompt",
-        ),
-    ] {
-        let mut prompt = pending_prompt_fixture(
-            &nomifun_common::ConversationId::new().into_string(),
-            session.chat_id.as_deref().unwrap(),
-            text,
-        );
-        prompt.channel_plugin_id = plugin_product_id.to_owned();
-        prompt.channel_session_id = session.channel_session_id.clone();
-        let nomifun_db::PendingPromptEnqueue::Queued { row, .. } =
-            repo.enqueue_pending_prompt(&prompt, now).await.unwrap()
-        else {
-            panic!("fixture prompt must be queued");
-        };
-        queued.push(row);
-    }
+    let target_group = create_session_with_kind(&repo, &target_user, &target_plugin, "target-group", "group").await;
+    let target_unknown = create_session_with_kind(&repo, &target_user, &target_plugin, "target-unknown", "unknown").await;
+    let target_direct = create_session_with_kind(&repo, &target_user, &target_plugin, "target-direct", "direct").await;
+    let other_group = create_session_with_kind(&repo, &other_user, &other_plugin, "other-group", "group").await;
+    let queued = vec![
+        enqueue_session_prompt(&repo, &target_plugin, &target_group, "target group prompt").await,
+        enqueue_session_prompt(&repo, &target_plugin, &target_unknown, "target unknown prompt").await,
+        enqueue_session_prompt(&repo, &target_plugin, &target_direct, "target direct prompt").await,
+        enqueue_session_prompt(&repo, &other_plugin, &other_group, "other group prompt").await,
+    ];
 
     // Force the final session deletion to fail after the policy write, queue
     // cancellation and binding deletion. Every earlier mutation must roll back.
@@ -790,27 +585,8 @@ async fn atomic_group_access_update_rolls_back_then_clears_non_direct_sessions()
             .group_access_mode,
         "allowlist"
     );
-    for session in [&target_group, &target_unknown, &target_direct, &other_group] {
-        assert!(
-            repo.get_session(&session.channel_session_id)
-                .await
-                .unwrap()
-                .is_some(),
-            "failed transaction must retain session {}",
-            session.channel_session_id
-        );
-    }
-    let rolled_back_states: Vec<(String, Option<i64>)> = sqlx::query_as(
-        "SELECT state, settled_at FROM channel_pending_prompts ORDER BY id",
-    )
-    .fetch_all(db.pool())
-    .await
-    .unwrap();
-    assert!(
-        rolled_back_states
-            .iter()
-            .all(|(state, settled_at)| state == "queued" && settled_at.is_none())
-    );
+    assert_sessions_exist(&repo, &[&target_group, &target_unknown, &target_direct, &other_group], true).await;
+    assert_prompt_states(&db, &queued, &["queued"; 4]).await;
 
     sqlx::query("DROP TRIGGER fail_non_direct_channel_session_delete")
         .execute(db.pool())
@@ -832,44 +608,10 @@ async fn atomic_group_access_update_rolls_back_then_clears_non_direct_sessions()
             .group_access_mode,
         "all_members"
     );
-    for removed in [&target_group, &target_unknown] {
-        assert!(
-            repo.get_session(&removed.channel_session_id)
-                .await
-                .unwrap()
-                .is_none(),
-            "target non-direct session {} must be retired",
-            removed.channel_session_id
-        );
-    }
-    for retained in [&target_direct, &other_group] {
-        assert!(
-            repo.get_session(&retained.channel_session_id)
-                .await
-                .unwrap()
-                .is_some(),
-            "direct or other-plugin session {} must be retained",
-            retained.channel_session_id
-        );
-    }
+    assert_sessions_exist(&repo, &[&target_group, &target_unknown], false).await;
+    assert_sessions_exist(&repo, &[&target_direct, &other_group], true).await;
 
-    let states: Vec<(String, String, Option<i64>)> = sqlx::query_as(
-        "SELECT prompt_id, state, settled_at FROM channel_pending_prompts ORDER BY id",
-    )
-    .fetch_all(db.pool())
-    .await
-    .unwrap();
-    assert_eq!(states.len(), 4);
-    for index in [0_usize, 1] {
-        assert_eq!(states[index].0, queued[index].prompt_id);
-        assert_eq!(states[index].1, "cancelled");
-        assert!(states[index].2.is_some());
-    }
-    for index in [2_usize, 3] {
-        assert_eq!(states[index].0, queued[index].prompt_id);
-        assert_eq!(states[index].1, "queued");
-        assert!(states[index].2.is_none());
-    }
+    assert_prompt_states(&db, &queued, &["cancelled", "cancelled", "queued", "queued"]).await;
 
     let missing = nomifun_common::ChannelPluginId::new().into_string();
     assert!(matches!(
@@ -960,20 +702,8 @@ async fn pairing_approval_atomically_retires_guest_non_direct_authority() {
             .status,
         "pending"
     );
-    for session in [&group, &unknown, &direct, &other] {
-        assert!(
-            repo.get_session(&session.channel_session_id)
-                .await
-                .unwrap()
-                .is_some()
-        );
-    }
-    let rolled_back_states: Vec<String> =
-        sqlx::query_scalar("SELECT state FROM channel_pending_prompts ORDER BY id")
-            .fetch_all(db.pool())
-            .await
-            .unwrap();
-    assert_eq!(rolled_back_states, vec!["queued"; 4]);
+    assert_sessions_exist(&repo, &[&group, &unknown, &direct, &other], true).await;
+    assert_prompt_states(&db, &prompts, &["queued"; 4]).await;
 
     sqlx::query("DROP TRIGGER fail_pairing_session_retirement")
         .execute(db.pool())
@@ -996,34 +726,9 @@ async fn pairing_approval_atomically_retires_guest_non_direct_authority() {
             .status,
         "approved"
     );
-    for removed in [&group, &unknown] {
-        assert!(
-            repo.get_session(&removed.channel_session_id)
-                .await
-                .unwrap()
-                .is_none()
-        );
-    }
-    for retained in [&direct, &other] {
-        assert!(
-            repo.get_session(&retained.channel_session_id)
-                .await
-                .unwrap()
-                .is_some()
-        );
-    }
-    let states: Vec<(String, String)> = sqlx::query_as(
-        "SELECT prompt_id, state FROM channel_pending_prompts ORDER BY id",
-    )
-    .fetch_all(db.pool())
-    .await
-    .unwrap();
-    for index in [0_usize, 1] {
-        assert_eq!(states[index], (prompts[index].prompt_id.clone(), "cancelled".into()));
-    }
-    for index in [2_usize, 3] {
-        assert_eq!(states[index], (prompts[index].prompt_id.clone(), "queued".into()));
-    }
+    assert_sessions_exist(&repo, &[&group, &unknown], false).await;
+    assert_sessions_exist(&repo, &[&direct, &other], true).await;
+    assert_prompt_states(&db, &prompts, &["cancelled", "cancelled", "queued", "queued"]).await;
 }
 
 #[tokio::test]
@@ -1065,20 +770,8 @@ async fn user_revocation_atomically_cancels_every_chat_kind_and_preserves_others
             .is_err()
     );
     assert!(repo.get_user(&target.channel_user_id).await.unwrap().is_some());
-    for session in [&group, &unknown, &direct, &other_direct] {
-        assert!(
-            repo.get_session(&session.channel_session_id)
-                .await
-                .unwrap()
-                .is_some()
-        );
-    }
-    let rolled_back_states: Vec<String> =
-        sqlx::query_scalar("SELECT state FROM channel_pending_prompts ORDER BY id")
-            .fetch_all(db.pool())
-            .await
-            .unwrap();
-    assert_eq!(rolled_back_states, vec!["queued"; 4]);
+    assert_sessions_exist(&repo, &[&group, &unknown, &direct, &other_direct], true).await;
+    assert_prompt_states(&db, &prompts, &["queued"; 4]).await;
 
     sqlx::query("DROP TRIGGER fail_channel_user_revocation")
         .execute(db.pool())
@@ -1089,30 +782,14 @@ async fn user_revocation_atomically_cancels_every_chat_kind_and_preserves_others
         .unwrap();
     assert!(repo.get_user(&target.channel_user_id).await.unwrap().is_none());
     assert!(repo.get_user(&other.channel_user_id).await.unwrap().is_some());
-    for removed in [&group, &unknown, &direct] {
-        assert!(
-            repo.get_session(&removed.channel_session_id)
-                .await
-                .unwrap()
-                .is_none()
-        );
-    }
+    assert_sessions_exist(&repo, &[&group, &unknown, &direct], false).await;
     assert!(
         repo.get_session(&other_direct.channel_session_id)
             .await
             .unwrap()
             .is_some()
     );
-    let states: Vec<(String, String)> = sqlx::query_as(
-        "SELECT prompt_id, state FROM channel_pending_prompts ORDER BY id",
-    )
-    .fetch_all(db.pool())
-    .await
-    .unwrap();
-    for index in [0_usize, 1, 2] {
-        assert_eq!(states[index], (prompts[index].prompt_id.clone(), "cancelled".into()));
-    }
-    assert_eq!(states[3], (prompts[3].prompt_id.clone(), "queued".into()));
+    assert_prompt_states(&db, &prompts, &["cancelled", "cancelled", "cancelled", "queued"]).await;
 }
 
 #[tokio::test]

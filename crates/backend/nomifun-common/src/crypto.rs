@@ -80,25 +80,16 @@ mod tests {
     #[test]
     fn test_roundtrip() {
         let key = test_key();
-        let encrypted = encrypt_string("hello", &key).unwrap();
-        let decrypted = decrypt_string(&encrypted, &key).unwrap();
-        assert_eq!(decrypted, "hello");
-    }
-
-    #[test]
-    fn test_empty_string() {
-        let key = test_key();
-        let encrypted = encrypt_string("", &key).unwrap();
-        let decrypted = decrypt_string(&encrypted, &key).unwrap();
-        assert_eq!(decrypted, "");
-    }
-
-    #[test]
-    fn test_unicode() {
-        let key = test_key();
-        let encrypted = encrypt_string("你好世界", &key).unwrap();
-        let decrypted = decrypt_string(&encrypted, &key).unwrap();
-        assert_eq!(decrypted, "你好世界");
+        for plaintext in [
+            "hello".to_owned(),
+            String::new(),
+            "你好世界🌍".to_owned(),
+            "x".repeat(1_000_000),
+        ] {
+            let encrypted = encrypt_string(&plaintext, &key).unwrap();
+            let decrypted = decrypt_string(&encrypted, &key).unwrap();
+            assert_eq!(decrypted, plaintext);
+        }
     }
 
     #[test]

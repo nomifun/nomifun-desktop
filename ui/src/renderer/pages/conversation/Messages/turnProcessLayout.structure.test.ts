@@ -9,9 +9,6 @@ import { describe, expect, test } from 'bun:test';
 
 const cssSource = readFileSync(new URL('./messages.css', import.meta.url), 'utf8');
 const disclosureSource = readFileSync(new URL('./components/TurnProcessDisclosure.tsx', import.meta.url), 'utf8');
-const processTraceSource = readFileSync(new URL('./components/ProcessTraceItem.tsx', import.meta.url), 'utf8');
-const messageListSource = readFileSync(new URL('./MessageList.tsx', import.meta.url), 'utf8');
-const modelSource = readFileSync(new URL('./turnDisclosureModel.ts', import.meta.url), 'utf8');
 type MessagesLocale = Record<string, unknown> & {
   turnDuration: string;
   turnDurationUnknown: string;
@@ -46,42 +43,6 @@ describe('turn process continuous work journal layout', () => {
     expect(zhMessages.turnProcess.expand).toBe('展开执行进度');
     expect(zhMessages.turnProcess.collapse).toBe('收起执行进度');
     expect(disclosureSource.includes('messages.turnProcess.runningSummary')).toBe(false);
-  });
-
-  test('marks the current running turn as live', () => {
-    expect(disclosureSource.includes("running && 'turn-process-disclosure--live'")).toBe(true);
-  });
-
-  test('opens the running journal and collapses it after completion', () => {
-    expect(disclosureSource.includes('hasProcessItems && !defaultCollapsed')).toBe(true);
-    expect(modelSource.includes('defaultCollapsed: false')).toBe(true);
-    expect(modelSource.includes("defaultCollapsed: state !== 'running'")).toBe(true);
-    expect(disclosureSource.includes('shouldResetTurnProcessDisclosureExpansion')).toBe(true);
-  });
-
-  test('removes the legacy live-step and expand-all paths', () => {
-    expect(messageListSource.includes('turn-live-step')).toBe(false);
-    expect(messageListSource.includes('planTurnLiveStep')).toBe(false);
-    expect(disclosureSource.includes('getProcessItemCanExpandAll')).toBe(false);
-    expect(disclosureSource.includes('expandAllProcessItemKeys')).toBe(false);
-    expect(cssSource.includes('.turn-live-step')).toBe(false);
-    expect(cssSource.includes('.turn-process-disclosure__header-actions')).toBe(false);
-  });
-
-  test('keeps durable turn summaries as timing metadata rather than visible rows', () => {
-    expect(messageListSource.includes("item.content.turn_summary ? 'metadata' : 'process'")).toBe(true);
-    expect(processTraceSource.includes('if (item.content.turn_summary) return null;')).toBe(true);
-    expect(modelSource.includes("entry.role === 'metadata'")).toBe(true);
-  });
-
-  test('renders public progress and returned thinking as prose', () => {
-    expect(processTraceSource.includes("case 'text':")).toBe(true);
-    expect(processTraceSource.includes("data-testid='process-narration'")).toBe(true);
-    expect(processTraceSource.includes('<MarkdownView')).toBe(true);
-    expect(processTraceSource.includes('Private reasoning omitted')).toBe(true);
-    expect(processTraceSource.includes('<MessageThinking')).toBe(true);
-    expect(messageListSource.includes('isHiddenProcessItem')).toBe(true);
-    expect(messageListSource.includes("item.type !== 'thinking' && item.type !== 'text'")).toBe(true);
   });
 
   test('uses an unbounded document flow with compact muted receipt rows', () => {
@@ -122,13 +83,6 @@ describe('turn process continuous work journal layout', () => {
     expect(cssSource.includes('.turn-process-disclosure__item--current .turn-process-trace__row--running')).toBe(false);
     expect(cssSource.includes('.turn-process-trace__row--current-activity .turn-process-trace__text')).toBe(true);
     expect(cssSource.includes('prefers-reduced-motion: reduce')).toBe(true);
-  });
-
-  test('keeps content-kind hooks for current-row targeting', () => {
-    expect(disclosureSource.includes('getProcessItemLayoutKind')).toBe(true);
-    expect(disclosureSource.includes('turn-process-disclosure__item--')).toBe(true);
-    expect(disclosureSource.includes("'turn-process-disclosure__item--current'")).toBe(true);
-    expect(messageListSource.includes('getProcessItemLayoutKind={getProcessItemLayoutKind}')).toBe(true);
   });
 
   test('keeps the shared conversation typography contract', () => {

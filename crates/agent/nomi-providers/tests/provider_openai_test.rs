@@ -14,36 +14,16 @@ use tokio::net::TcpListener;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
+mod support;
+use support::collect_events;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 /// Build a minimal LlmRequest suitable for all tests.
 fn make_request() -> LlmRequest {
-    LlmRequest {
-        model: "gpt-4o".to_string(),
-        system: "You are a test assistant.".to_string(),
-        messages: vec![Message::new(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: "Hello".to_string(),
-            }],
-        )],
-        tools: vec![],
-        max_tokens: Some(512),
-        thinking: None,
-        reasoning_effort: None,
-        retain_provider_round: false,
-    }
-}
-
-/// Collect all events from the receiver until the channel closes.
-async fn collect_events(mut rx: tokio::sync::mpsc::Receiver<LlmEvent>) -> Vec<LlmEvent> {
-    let mut events = Vec::new();
-    while let Some(event) = rx.recv().await {
-        events.push(event);
-    }
-    events
+    support::request("gpt-4o", "You are a test assistant.", "Hello", 512)
 }
 
 /// Build a raw SSE body string from a slice of JSON lines.

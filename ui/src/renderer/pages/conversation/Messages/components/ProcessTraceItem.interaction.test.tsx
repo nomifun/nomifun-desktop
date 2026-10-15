@@ -3,7 +3,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
-import type { IMessageText, IMessageThinking, IMessageToolCall, IMessageToolGroup } from '@/common/chat/chatLib';
+import type { IMessageText, IMessageThinking, IMessageTips, IMessageToolCall, IMessageToolGroup } from '@/common/chat/chatLib';
 import { parseConversationId } from '@/common/types/ids';
 import ProcessTraceItem from './ProcessTraceItem';
 import messagesLocale from '@/renderer/services/i18n/locales/en-US/messages.json';
@@ -52,6 +52,7 @@ describe('replayed process trace', () => {
           <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} variant={variant} /></I18nextProvider>
         );
         const toggle = getByRole('button');
+        expect(toggle.querySelector('.turn-process-trace__row-icon')).not.toBeNull();
         expect(toggle.querySelector('.turn-process-trace__status')).toBeNull();
         expect(toggle.lastElementChild?.classList.contains('turn-process-trace-tool__arrow')).toBe(true);
         fireEvent.click(toggle);
@@ -107,6 +108,42 @@ describe('replayed process trace', () => {
     };
     const { container } = render(<I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>);
     expect(container.childElementCount).toBe(0);
+  });
+
+  test.each(['[Private reasoning omitted]', '[Private reasoning omitted from replay]'])(
+    'does not render a private reasoning placeholder: %s', (content) => {
+      const item: IMessageThinking = { id: 'private-placeholder', type: 'thinking',
+        conversation_id: conversationId, created_at: 1, content: { content, status: 'done' } };
+      const { container } = render(<I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>);
+      expect(container.childElementCount).toBe(0);
+    }
+  );
+
+  test('context compression is a lightweight system row with an icon', () => {
+    const item: IMessageTips = { id: 'compaction', type: 'tips', conversation_id: conversationId,
+      created_at: 1, content: { type: 'success', content: 'Context compaction completed' } };
+    const { container, queryByRole } = render(
+      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>
+    );
+    expect(container.textContent).toBe(messagesLocale.processReceipt.contextCompressed);
+    expect(container.querySelector('.turn-process-trace__row-icon')).not.toBeNull();
+    expect(queryByRole('button')).toBeNull();
+  });
+
+  test.each([
+    ['Skipped because a previous tool call in this assistant turn failed.', 'Skipped'],
+    ["Invalid arguments for tool 'write_file': JSON Schema validation failed: missing path. Correct the arguments and retry; the tool was not executed.", 'Arguments did not pass validation'],
+  ])('pre-dispatch rejection stays neutral and inspectable: %s', (output, label) => {
+    const item: IMessageToolCall = { id: 'not-executed', type: 'tool_call', conversation_id: conversationId,
+      created_at: 1, content: { call_id: 'not-executed', name: 'write_file', status: 'error',
+        args: { path: 'src/app.ts' }, output, artifacts: [] } };
+    const { container, getByRole } = render(
+      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} stateOverride='completed' /></I18nextProvider>
+    );
+    expect(getByRole('button').textContent).toContain(label);
+    expect(container.querySelector('.turn-process-trace__row--failed')).toBeNull();
+    fireEvent.click(getByRole('button'));
+    expect(container.textContent).toContain(output);
   });
 
   test('a model-emitted tool-call payload never becomes a public process paragraph', () => {

@@ -42,12 +42,14 @@ fn existing_spec(channel_plugin_id: &str, plugin_type: &str) -> EnableChannelSpe
 // ── Test infrastructure ─────────────────────────────────────────────
 
 struct MockBroadcaster {
+    _database: nomifun_db::Database,
     events: Mutex<Vec<WebSocketMessage<serde_json::Value>>>,
 }
 
 impl MockBroadcaster {
-    fn new() -> Self {
+    fn new(database: nomifun_db::Database) -> Self {
         Self {
+            _database: database,
             events: Mutex::new(Vec::new()),
         }
     }
@@ -166,7 +168,7 @@ fn test_key() -> [u8; 32] {
 async fn setup() -> (ChannelManager, Arc<dyn IChannelRepository>, Arc<MockBroadcaster>) {
     let db = init_database_memory().await.unwrap();
     let repo: Arc<dyn IChannelRepository> = Arc::new(SqliteChannelRepository::new(db.pool().clone()));
-    let bc = Arc::new(MockBroadcaster::new());
+    let bc = Arc::new(MockBroadcaster::new(db));
     let (msg_tx, _msg_rx) = mpsc::channel(16);
     let mgr = ChannelManager::new(
         repo.clone(),
@@ -175,8 +177,6 @@ async fn setup() -> (ChannelManager, Arc<dyn IChannelRepository>, Arc<MockBroadc
         test_key(),
         msg_tx,
     );
-    // Keep db alive by leaking — test process exits anyway
-    std::mem::forget(db);
     (mgr, repo, bc)
 }
 
@@ -252,6 +252,15 @@ async fn ps1_get_status_empty() {
     let (mgr, _repo, _bc) = setup().await;
     let statuses = mgr.get_plugin_status().await.unwrap();
     assert!(statuses.is_empty());
+    let missing = "0190f5fe-7c00-7a00-8000-00000000ffff";
+    assert!(!mgr.is_plugin_running(missing));
+    assert!(mgr.disable_plugin(missing).await.is_err());
+
+    let (factory, starts) = make_counting_factory();
+    mgr.restore_plugins(&factory).await.unwrap();
+    assert_eq!(mgr.active_plugin_count(), 0);
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+    assert!(mgr.get_plugin_status().await.unwrap().is_empty());
 }
 
 // ── PS-2: Get plugin status (with plugins) ────────────────────────

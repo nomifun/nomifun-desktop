@@ -5,8 +5,8 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import { SWRConfig } from 'swr';
 import { ipcBridge } from '@/common';
-import type { IMessageToolCall, TMessage } from '@/common/chat/chatLib';
-import { parseConversationId, parseMessageId, parsePersistedArtifactId, parseProviderId } from '@/common/types/ids';
+import type { TMessage } from '@/common/chat/chatLib';
+import { parseConversationId, parseMessageId, parseProviderId } from '@/common/types/ids';
 import { ConversationCreationTasksProvider } from '@/renderer/creation/ConversationCreationTasks';
 import * as creationClient from '@/renderer/creation/client';
 import type { ConversationCreationTask } from '@/renderer/creation/types';
@@ -72,7 +72,8 @@ beforeEach(() => {
   const result = spyOn(creativeAssetClient, 'get').mockResolvedValue(asset);
   restoreMocks = () => {
     content.mockRestore(); tree.mockRestore(); entry.mockRestore(); watchStart.mockRestore(); watchStop.mockRestore();
-    watchFiles.mockRestore(); files.mockRestore(); completed.mockRestore(); reconnect.mockRestore(); turnFiles.mockRestore(); tasks.mockRestore(); result.mockRestore();
+    watchFiles.mockRestore(); files.mockRestore(); completed.mockRestore(); reconnect.mockRestore(); turnFiles.mockRestore();
+    tasks.mockRestore(); result.mockRestore();
   };
 });
 afterEach(() => { cleanup(); restoreMocks(); });
@@ -126,24 +127,17 @@ test('media from a completed turn appears after its reply and before the only re
 });
 
 test('mixed file deliverables and multiple media tasks share one footer in a read-only historical turn', async () => {
-  spyOn(ipcBridge.conversation.turnFiles, 'invoke').mockResolvedValue([{ turn_id: requestId, complete: true, files: [
-    { identity: 'workspace:report', relative_path: 'outputs/report.txt', file_name: 'report.txt', path: `${workspace}/outputs/report.txt`, operation: 'create', size_bytes: 42 },
-  ] }]);
   spyOn(creationClient, 'listCreationTasks').mockResolvedValue([
     task(), task({ creation_task_id: '0190f5fe-7c00-7a00-8000-000000000307', status: 'queued', result_asset_ids: [], finished_at: null }),
   ]);
-  const file: IMessageToolCall = {
-    id: 'media-file-result', message_id: parseMessageId('0190f5fe-7c00-7a00-8000-000000000308'),
-    msg_id: parseMessageId('0190f5fe-7c00-7a00-8000-000000000308'), turn_id: requestId,
-    conversation_id: conversationId, position: 'left', type: 'tool_call', created_at: createdAt + 500,
-    content: { call_id: 'write-report', name: 'write_file', status: 'completed', args: { path: 'outputs/report.txt' },
-      output: 'Report written', artifacts: [{ id: parsePersistedArtifactId('0190f5fe-7c00-7a00-8000-000000000309'),
-        kind: 'file', mime_type: 'text/plain', path: `${workspace}/outputs/report.txt`, relative_path: 'outputs/report.txt',
-        size_bytes: 42, sha256: 'a'.repeat(64) }] },
-  };
-  const page = render(timeline([request, file, reply], { readOnly: true })(false));
+  const turnFiles = spyOn(ipcBridge.conversation.turnFiles, 'invoke').mockResolvedValue([{
+    turn_id: requestId, complete: true, files: [{ identity: 'workspace:report', relative_path: 'outputs/report.txt',
+      file_name: 'report.txt', path: `${workspace}/outputs/report.txt`, operation: 'create', size_bytes: 42 }],
+  }]);
+  const page = render(timeline([request, reply], { readOnly: true })(false));
   await page.findByRole('button', { name: '预览图片：Generated cat' });
   await waitFor(() => expect(page.container.querySelector('[data-deliverable-path="outputs/report.txt"]')).not.toBeNull());
+  expect(turnFiles).toHaveBeenCalledWith({ conversation_id: conversationId, turn_ids: [requestId] });
   const { assistant, footer } = expectSingleReplyFooter(page);
   const files = page.getByTestId('turn-deliverables');
   const media = page.container.querySelectorAll('[data-creation-task]');

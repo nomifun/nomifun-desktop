@@ -11,21 +11,14 @@ use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
+mod support;
+use support::collect_events as collect;
+
 fn request(retain_provider_round: bool) -> LlmRequest {
     LlmRequest {
-        model: "gpt-test".into(),
-        system: "system prompt".into(),
-        messages: vec![Message::new(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: "hello".into(),
-            }],
-        )],
-        tools: Vec::new(),
-        max_tokens: Some(321),
-        thinking: None,
         reasoning_effort: Some("high".into()),
         retain_provider_round,
+        ..support::request("gpt-test", "system prompt", "hello", 321)
     }
 }
 
@@ -116,14 +109,6 @@ fn completed_text(response_id: &str, store: bool, text: &str) -> String {
             }),
         ),
     ])
-}
-
-async fn collect(mut receiver: tokio::sync::mpsc::Receiver<LlmEvent>) -> Vec<LlmEvent> {
-    let mut events = Vec::new();
-    while let Some(event) = receiver.recv().await {
-        events.push(event);
-    }
-    events
 }
 
 #[tokio::test]

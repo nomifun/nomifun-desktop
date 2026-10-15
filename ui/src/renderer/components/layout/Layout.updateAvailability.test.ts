@@ -13,7 +13,7 @@ const layoutCss = readFileSync(new URL('../../styles/layout.css', import.meta.ur
 
 describe('global update availability entry', () => {
   test('shows the Logo update button only when a new version is available', () => {
-    expect(layoutSource.includes('updateAvailability.available && !collapsed')).toBe(true);
+    expect(layoutSource.includes('updateAvailability.available && !effectiveCollapsed')).toBe(true);
     expect(layoutSource.includes("className='sidebar-update-button'")).toBe(true);
     expect(layoutSource.includes("detail: { source: 'sidebar' }")).toBe(true);
   });
