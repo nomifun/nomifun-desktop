@@ -59,9 +59,11 @@ test('failed send restores the original text when the draft is untouched', async
 test('late send and interrupt failures after unmount are silent', async () => {
   const f = fixture();
   const pending = f.send('command');
-  act(() => f.props().onSlashBuiltinCommand?.('interrupt'));
+  const interrupt = f.props().commands!.find(command => command.name === 'interrupt')!;
+  let interrupted!: Promise<void>;
+  act(() => { interrupted = Promise.resolve(interrupt.execute?.({ isCurrent: () => true, idempotencyKey: 'fixture' })); });
   f.view.unmount();
-  await act(async () => { f.writes.forEach(write => write.reject('late')); await pending; });
+  await act(async () => { f.writes.forEach(write => write.reject('late')); await Promise.all([pending, interrupted]); });
   expect(f.error).not.toHaveBeenCalled();
 });
 
@@ -74,10 +76,12 @@ test('an old terminal handle failure cannot restore text or notify after replace
   expect(f.error).not.toHaveBeenCalled();
 });
 
-test('clear uses the shared composer clear-context entry and clears only the view/draft', () => {
+test('terminal advertises its own clear and interrupt actions without chat commands', () => {
   const f = fixture();
   f.change('/clear');
-  act(() => { void f.props().onClearContext?.(); });
+  expect(f.props().commands!.map(command => command.name)).toEqual(['clear', 'interrupt']);
+  const clear = f.props().commands!.find(command => command.id === 'terminal.clear-view')!;
+  act(() => { void clear.execute?.({ isCurrent: () => true, idempotencyKey: 'fixture' }); });
   expect(f.clear).toHaveBeenCalledTimes(1);
   expect(f.props().value).toBe('');
   expect(f.writes).toEqual([]);

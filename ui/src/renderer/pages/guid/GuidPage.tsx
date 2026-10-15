@@ -4,9 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ipcBridge } from '@/common';
 import Composer, { ComposerSendButton } from '@/renderer/components/chat/Composer';
 import ComposerAttachments from '@/renderer/components/chat/ComposerAttachments';
+import { useComposerCommands } from '@/renderer/components/chat/commands/useComposerCommands';
+import { useSessionComposerCommands } from '@/renderer/components/chat/commands/useSessionComposerCommands';
+import { useOpenFileSelector } from '@/renderer/hooks/file/useOpenFileSelector';
 import FileAttachButton from '@/renderer/components/media/FileAttachButton';
 import { ComposerSceneHeader } from '@/renderer/creation/ComposerSceneSelector';
 import GuidWorkspaceFootnote from './components/GuidWorkspaceFootnote';
@@ -33,6 +35,7 @@ import {
 import { Alert, Button, ConfigProvider } from '@arco-design/web-react';
 import React, {
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -57,6 +60,7 @@ import CollaborationComposerControl from '@/renderer/components/collaboration/Co
 import { useCollaborationDraft } from '@/renderer/components/collaboration/useCollaborationDraft';
 import { shouldStartCollaboration } from '@/renderer/components/collaboration/collaborationSubmission';
 import { useGuidInput } from './hooks/useGuidInput';
+import { GuidDraftScopeContext } from './hooks/useGuidDraftState';
 import { useGuidMention } from './hooks/useGuidMention';
 import { useGuidModelSelection } from './hooks/useGuidModelSelection';
 import { useGuidPresetCapabilities } from './hooks/useGuidPresetCapabilities';
@@ -105,6 +109,8 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
+  const draftScope = useContext(GuidDraftScopeContext);
+  const composerTargetKey = `guid:${draftScope ?? 'home'}:${location.key}`;
   const initialMessage = useInitialMessage();
   const guidContainerRef = useRef<HTMLDivElement>(null);
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
@@ -394,6 +400,24 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
     onConversationCreated: productEntry?.onConversationCreated,
   });
 
+  const { openFileSelector } = useOpenFileSelector({
+    targetKey: composerTargetKey,
+    onFilesSelected: guidInput.handleFilesUploaded,
+  });
+  const sessionCommands = useSessionComposerCommands({
+    openFiles: openFileSelector,
+    disabledReason: guidInput.loading || productEntry?.submissionDisabled
+      ? t('messages.conversationInProgress') : undefined,
+  });
+  const commands = useComposerCommands({
+    targetKey: composerTargetKey,
+    input: guidInput.input,
+    setInput: guidInput.setInput,
+    commands: sessionCommands.commands,
+    panel: sessionCommands.panel,
+    anchorRef: guidInput.surfaceRef,
+  });
+
   const handleInputChange = useCallback(
     (value: string) => {
       guidInput.setInput(value);
@@ -418,10 +442,14 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
 
   const [sendKeyPref] = useConfig('chat.sendKey');
   const sendKey = sendKeyPref ?? 'enter';
-  const submitInput = creation.draft.mode ? creation.send : send.sendMessageHandler;
+  const submitInput = useCallback(() => {
+    if (commands.dispatchInput()) return;
+    return creation.draft.mode ? creation.send() : send.sendMessageHandler();
+  }, [commands.dispatchInput, creation.draft.mode, creation.send, send.sendMessageHandler]);
 
   const handleInputKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
+      if (commands.onKeyDown(event)) return;
       if (
         (mention.mentionOpen || mention.mentionSelectorOpen) &&
         (event.key === 'ArrowDown' || event.key === 'ArrowUp')
@@ -517,6 +545,7 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
     },
     [
       guidInput.input,
+      commands.onKeyDown,
       isAutoWorkMode,
       mention,
       sendKey,
@@ -701,11 +730,6 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
   const autoWorkButtonDisabled =
     !hasLaunchTarget || !resourceSelectionsReady || !collaboration.ready ||
     autoWorkStartDisabled(guidInput.loading, advancedConfig.autoWork);
-  const openFileSelector = () => {
-    void ipcBridge.dialog.showOpen.invoke({ properties: ['openFile', 'multiSelections'] })
-      .then(paths => { if (paths?.length) guidInput.handleFilesUploaded(paths); })
-      .catch(error => console.error('Failed to open file dialog:', error));
-  };
 
   return (
     <CreationComposerContext.Provider value={productEntry ? null : creation}>
@@ -797,7 +821,7 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
                 isFileDragging={guidInput.isFileDragging}
                 surfaceRef={guidInput.surfaceRef}
                 dragHandlers={guidInput.dragHandlers}
-                overlayOpen={mention.mentionOpen}
+                overlayOpen={commands.isOpen || mention.mentionOpen}
                 header={<ComposerSceneHeader sceneSelectionEnabled={!productEntry} agent={
                   productEntry ? <span data-testid='fixed-app-agent'>{productEntry.agentLabel}</span> : <GuidAgentSelector
                     presets={agentSelection.presets}
@@ -833,7 +857,7 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
                   mentionMenu={mentionDropdownNode}
                   onResetQuery={() => mention.setMentionQuery(null)}
                 />}
-                overlays={!productEntry && mention.mentionOpen && <div className='absolute left-12px right-12px bottom-[calc(100%+8px)] z-70'>{mentionDropdownNode}</div>}
+                overlays={<>{commands.menu}{!productEntry && mention.mentionOpen && !commands.isOpen && <div className='absolute left-12px right-12px bottom-[calc(100%+8px)] z-70'>{mentionDropdownNode}</div>}</>}
                 inputProps={{
                   value: guidInput.input,
                   onChange: handleInputChange,
@@ -853,10 +877,10 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
                   <SpeechInputButton disabled={guidInput.loading} locale={i18n.language}
                     onTranscript={transcript => guidInput.setInput(current => appendSpeechTranscript(current, transcript))} />
                   <ComposerSendButton
-                    loading={guidInput.loading || creation.loading}
-                    disabled={creation.draft.mode ? creation.loading || !creation.ready || !guidInput.input.trim() : isAutoWorkMode ? autoWorkButtonDisabled : send.isButtonDisabled}
-                    icon={!creation.draft.mode && isAutoWorkMode ? <Robot theme='filled' size='14' fill='currentColor' strokeWidth={5} /> : undefined}
-                    title={creation.draft.mode ? creation.disabledReason : isAutoWorkMode ? t('requirements.autowork.startSession') : undefined}
+                    loading={commands.busy || guidInput.loading || creation.loading}
+                    disabled={commands.hasCommandInput ? commands.busy : creation.draft.mode ? creation.loading || !creation.ready || !guidInput.input.trim() : isAutoWorkMode ? autoWorkButtonDisabled : send.isButtonDisabled}
+                    icon={!commands.hasCommandInput && !creation.draft.mode && isAutoWorkMode ? <Robot theme='filled' size='14' fill='currentColor' strokeWidth={5} /> : undefined}
+                    title={commands.hasCommandInput ? undefined : creation.draft.mode ? creation.disabledReason : isAutoWorkMode ? t('requirements.autowork.startSession') : undefined}
                     onClick={() => void submitInput()}
                     testId='guid-send-btn'
                   />

@@ -73,12 +73,11 @@ async fn voice_off_start_keeps_original_input_and_turn_payload_bytes() {
 
 #[tokio::test]
 async fn voice_start_context_fence_rejects_binding_or_clear_race_without_admission() {
-    let store=AgentSessionStore::open_in_memory().await.unwrap();let (session,ready)=create_ready(&store,"voice-start-context").await;
+    let store=AgentSessionStore::open_in_memory().await.unwrap();let (session,_ready)=create_ready(&store,"voice-start-context").await;
     let input=StrictJsonValue(json!({"content":"explicit queued voice input"}));
     let stale_binding=crate::NativeInputContextFence {binding_version:session.agent_binding.binding_version+1,context_floor:0,supersede_model_step:false};
     assert!(matches!(store.start_voice_turn(&session.agent_session_id,"session_api".into(),"wrong-binding".into(),"wrong-binding-operation".into(),input.clone(),&stale_binding).await,Err(SessionStoreError::ExecutionFenced)));
-    let clear=append(&session.agent_session_id,"voice-context-clear","session_api","voice-context-clear","context/cleared",session.agent_session_id.as_ref(),Some(ready),json!({}));
-    let cleared=store.append_event(&clear).await.unwrap().cursor.seq;
+    let cleared=clear_context(&store,&session.agent_session_id,"voice-context-clear").await.cursor.seq;
     let stale=crate::NativeInputContextFence {binding_version:session.agent_binding.binding_version,context_floor:0,supersede_model_step:false};
     assert!(matches!(store.start_voice_turn(&session.agent_session_id,"session_api".into(),"old-context".into(),"old-context-operation".into(),input.clone(),&stale).await,Err(SessionStoreError::ExecutionFenced)));
     assert_eq!(store.read_turn_receipt(&session.agent_session_id,&"old-context-operation".into()).await.unwrap().status,TurnReceiptStatus::NotFound);

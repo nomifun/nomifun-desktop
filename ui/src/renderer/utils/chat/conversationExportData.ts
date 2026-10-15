@@ -7,6 +7,7 @@
 import { ipcBridge } from '@/common';
 import type { TMessage } from '@/common/chat/chatLib';
 import type { ConversationId } from '@/common/types/ids';
+import { getLastAssistantText } from './getLastAssistantText';
 
 export const EXPORT_IO_TIMEOUT_MS = 15000;
 
@@ -30,6 +31,29 @@ const compareMessages = (left: TMessage, right: TMessage): number => {
   const leftId = left.message_id ?? '';
   const rightId = right.message_id ?? '';
   return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+};
+
+/** Copy uses the same full canonical projection on every surface, independent
+ * of which history windows happen to be mounted. Older pages are read only
+ * when the newest window has no copyable assistant reply. */
+export const fetchLatestConversationReply = async (conversation_id: ConversationId, isCurrent: () => boolean): Promise<TMessage[]> => {
+  let cursor = '';
+  for (;;) {
+    if (!isCurrent()) return [];
+    const page = await withTimeout(ipcBridge.database.getConversationMessages.invoke({
+      conversation_id, cursor, page_size: 50, content_mode: 'full',
+    }), EXPORT_IO_TIMEOUT_MS, 'copy conversation reply');
+    if (!isCurrent()) return [];
+    const messages = page.items.toSorted(compareMessages);
+    if (getLastAssistantText(messages, false) || !page.has_more) return messages;
+    const next = page.next_cursor;
+    const timestamp = Number(next?.split(':')[0]);
+    if (!next || !/^\d+:[^:]+$/.test(next) || !Number.isSafeInteger(timestamp)
+      || next === cursor || (cursor && timestamp >= Number(cursor.split(':')[0]))) {
+      throw new Error('Conversation copy history cursor did not advance');
+    }
+    cursor = next;
+  }
 };
 
 /** Read every canonical history window. The backend caps pages at 500 and

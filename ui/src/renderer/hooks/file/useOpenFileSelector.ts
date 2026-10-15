@@ -1,52 +1,39 @@
 import { ipcBridge } from '@/common';
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
+import type { ComposerCommandExecution } from '@/renderer/components/chat/commands/types';
 
 interface UseOpenFileSelectorOptions {
   onFilesSelected: (files: string[]) => void;
+  targetKey: string;
 }
 
 interface UseOpenFileSelectorResult {
-  openFileSelector: () => void;
-  onSlashBuiltinCommand: (name: string) => void;
+  openFileSelector: (execution?: ComposerCommandExecution) => Promise<void>;
 }
 
 /**
  * Shared open-file selector behavior for send boxes.
  * Unifies '+' button and '/open' builtin command handling.
  *
- * In Electron: opens native file dialog.
+ * In the desktop shell: opens the native file dialog.
  * In WebUI: triggers DirectorySelectionModal via bridge events.
  */
 export function useOpenFileSelector(options: UseOpenFileSelectorOptions): UseOpenFileSelectorResult {
-  const { onFilesSelected } = options;
+  const { onFilesSelected, targetKey } = options;
+  const current = useRef({ targetKey, generation: 0, mounted: true });
+  if (current.current.targetKey !== targetKey) {
+    current.current = { ...current.current, targetKey, generation: current.current.generation + 1 };
+  }
+  useEffect(() => { current.current.mounted = true; return () => { current.current.mounted = false; }; }, []);
 
-  const openFileSelector = useCallback(() => {
-    void ipcBridge.dialog.showOpen
-      .invoke({ properties: ['openFile', 'multiSelections'] })
-      .then((files) => {
-        if (!files || files.length === 0) {
-          return;
-        }
-        onFilesSelected(files);
-      })
-      .catch((error) => {
-        // In WebUI, dialog may fail if DirectorySelectionModal is not rendered
-        // or bridge is not properly connected. Log error for debugging.
-        console.warn('[useOpenFileSelector] Failed to open file selector:', error);
-      });
+  const openFileSelector = useCallback(async (execution?: ComposerCommandExecution) => {
+    const owner = { ...current.current };
+    const isCurrent = () => current.current.mounted && owner.generation === current.current.generation
+      && (!execution || execution.isCurrent());
+    try {
+      const files = await ipcBridge.dialog.showOpen.invoke({ properties: ['openFile', 'multiSelections'] });
+      if (isCurrent() && files?.length) onFilesSelected(files);
+    } catch (error) { if (isCurrent()) throw error; }
   }, [onFilesSelected]);
-
-  const onSlashBuiltinCommand = useCallback(
-    (name: string) => {
-      if (name === 'open') {
-        openFileSelector();
-      }
-    },
-    [openFileSelector]
-  );
-
-  return {
-    openFileSelector,
-    onSlashBuiltinCommand,
-  };
+  return { openFileSelector };
 }

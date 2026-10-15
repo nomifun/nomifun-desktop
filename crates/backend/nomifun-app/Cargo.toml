@@ -180,6 +180,10 @@ path = "tests/live_agnes_preset_creation.rs"
 required-features = ["browser-use", "computer-use"]
 
 [[test]]
+name = "live_session_context_clear"
+path = "tests/live_session_context_clear.rs"
+
+[[test]]
 name = "live_text_model_creation"
 path = "tests/live_text_model_creation.rs"
 required-features = ["browser-use", "computer-use"]

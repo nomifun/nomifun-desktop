@@ -8,7 +8,7 @@ import React, { useCallback, useLayoutEffect, useMemo, useRef, useState } from '
 import { useTranslation } from 'react-i18next';
 import { Message } from '@arco-design/web-react';
 import SendBox from '@renderer/components/chat/SendBox';
-import type { SlashCommandItem } from '@/common/chat/slash/types';
+import type { ComposerCommand } from '@/renderer/components/chat/commands/types';
 import { useAddEventListener } from '@/renderer/utils/emitter';
 import type { FileOrFolderItem } from '@/renderer/utils/file/fileTypes';
 import type { XtermViewHandle } from './XtermView';
@@ -41,9 +41,10 @@ interface TerminalSendBoxProps {
   /** Handle to the xterm view — used to detect bracketed paste mode on submit. */
   terminalApi?: React.MutableRefObject<XtermViewHandle | null>;
   disabled?: boolean;
+  commandTargetKey?: string;
 }
 
-const TerminalSendBox: React.FC<TerminalSendBoxProps> = ({ onClearView, terminalApi, disabled }) => {
+const TerminalSendBox: React.FC<TerminalSendBoxProps> = ({ onClearView, terminalApi, disabled, commandTargetKey }) => {
   const { t } = useTranslation();
   const [input, setInput] = useState('');
   const active = useRef(false);
@@ -84,26 +85,6 @@ const TerminalSendBox: React.FC<TerminalSendBoxProps> = ({ onClearView, terminal
   // rail body, not the composer.
   useAddEventListener('terminal.selected.file', insertPaths, [insertPaths]);
   useAddEventListener('terminal.selected.file.append', insertPaths, [insertPaths]);
-
-  const quickCommands = useMemo<SlashCommandItem[]>(
-    () => [
-      {
-        name: 'clear',
-        description: t('terminal.quickCommand.clear'),
-        kind: 'builtin',
-        source: 'builtin',
-        selectionBehavior: 'execute',
-      },
-      {
-        name: 'interrupt',
-        description: t('terminal.quickCommand.interrupt'),
-        kind: 'builtin',
-        source: 'builtin',
-        selectionBehavior: 'execute',
-      },
-    ],
-    [t]
-  );
 
   const writeToPty = async (text: string): Promise<void> => {
     const api = terminalApi?.current;
@@ -146,18 +127,17 @@ const TerminalSendBox: React.FC<TerminalSendBoxProps> = ({ onClearView, terminal
     changeInput('');
   };
 
-  const handleBuiltin = (name: string) => {
-    if (!active.current || disabled) return;
-    if (name === 'interrupt') {
-      const api = terminalApi?.current;
-      // Send Ctrl-C (ETX) to the PTY.
-      void writeToPty('\x03').catch(() => {
-        if (active.current && terminalApi?.current === api) {
-          Message.error(t('terminal.inputFailed', { defaultValue: 'Failed to send terminal input.' }));
-        }
-      });
-    }
-  };
+  const quickCommands = useMemo<ComposerCommand[]>(() => [
+    { id: 'terminal.clear-view', name: 'clear', description: t('terminal.quickCommand.clear'),
+      ...(disabled ? { disabledReason: t('common.processing') } : { execute: handleClear }) },
+    { id: 'terminal.interrupt', name: 'interrupt', description: t('terminal.quickCommand.interrupt'),
+      ...(disabled ? { disabledReason: t('common.processing') } : { execute: async () => {
+        if (!active.current) return;
+        const api = terminalApi?.current;
+        try { await writeToPty('\x03'); }
+        catch (error) { if (active.current && terminalApi?.current === api) throw error; }
+      } }) },
+  ], [disabled, onClearView, terminalApi, t]);
 
   // Surface the submit shortcut (Enter) next to the send button. Enter already
   // submits via SendBox's keydown handler; this is just the visual affordance.
@@ -178,10 +158,8 @@ const TerminalSendBox: React.FC<TerminalSendBoxProps> = ({ onClearView, terminal
       onChange={changeInput}
       onSend={handleSend}
       disabled={disabled}
-      enableBtw={false}
-      slash_commands={quickCommands}
-      onClearContext={handleClear}
-      onSlashBuiltinCommand={handleBuiltin}
+      commands={quickCommands}
+      commandTargetKey={commandTargetKey}
       sendButtonPrefix={enterHint}
       placeholder={t('terminal.composerPlaceholder')}
     />

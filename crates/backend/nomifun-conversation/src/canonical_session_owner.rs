@@ -924,15 +924,12 @@ mod tests {
         let grandchild_facts = owner_service.store.chat_causality_facts(&grandchild.child_session.agent_session_id,
             &turn.operation_id).await.unwrap();
         assert_eq!(grandchild_facts.fork_context.unwrap().messages[0].content, "keep accepted parent input");
-        let ready = facts.events.iter().find(|event| event.kind.0 == "session/ready").unwrap();
-        owner_service.store.append_event(&SessionEventAppend {
-            agent_session_id: child_id.clone(), event_id: "clear-child".into(), producer_id: "session_api".into(),
-            idempotency_key: "clear-child".into(), semantic_event: SemanticSessionEventDraft {
-                kind: SessionEventKind("context/cleared".into()), kind_version: 1,
-                correlation_id: child_id.as_ref().into(), causation_event_id: Some(ready.event_id.clone()),
-                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"operation_id":"clear-child"}))),
-            },
-        }).await.unwrap();
+        let clear = nomifun_agent_session::ClearSessionContext {
+            idempotency_key: "clear-child".into(), reason: "user_requested".into(),
+        };
+        let nomifun_agent_session::ContextClearPreparation::Ready(boundary) = owner_service.store
+            .preflight_context_clear(&owner(), child_id, &clear).await.unwrap() else { panic!("fresh clear") };
+        owner_service.store.clear_context(&owner(), child_id, &clear, &boundary).await.unwrap();
         let cleared_cursor = owner_service.store.current_cursor(child_id).await.unwrap();
         let cleared_fork = owner_service.fork(&owner(), child_id, cleared_cursor.seq, None, "fork-cleared-child", 5).await.unwrap();
         let cleared_facts = owner_service.store.chat_causality_facts(&cleared_fork.child_session.agent_session_id,

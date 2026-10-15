@@ -209,13 +209,6 @@ fn default_delegation_policy() -> DelegationPolicy {
     DelegationPolicy::Automatic
 }
 
-/// A slash command item available in a conversation session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SlashCommandItem {
-    pub command: String,
-    pub description: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -719,8 +719,6 @@ const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean; hideActi
         return <MessageAgentStatus message={message}></MessageAgentStatus>;
       case 'thinking':
         return <MessageThinking message={message}></MessageThinking>;
-      case 'available_commands':
-        return null;
       default:
         return <div>{t('messages.unknownMessageType', { type: getUnhandledMessageType(message) })}</div>;
     }
@@ -823,7 +821,7 @@ const MessageList: React.FC<{
 
     for (let i = 0, len = journalSources.length; i < len; i++) {
       const message = journalSources[i];
-      // Skip hidden and available_commands messages
+      // Skip hidden messages
       if (message.hidden) continue;
       if (isInternalInstructionToolCall(message)) continue;
       // A progress declaration closes the preceding group without adding a
@@ -833,7 +831,6 @@ const MessageList: React.FC<{
         toolSourceMessageIds = [];
         continue;
       }
-      if (message.type === 'available_commands') continue;
       // Connection-handshake status banners (connecting/connected/authenticated/
       // session_active) are implementation noise: never render them as chat
       // items, and never let them fragment the tool-execution trace below.

@@ -6,7 +6,7 @@
 //! result in `ApiResponse`.
 //!
 //! Session-scoped operations (mode/model/config/usage/capabilities/
-//! slash-commands/side-question/workspace) now live in
+//! workspace) now live in
 //! the canonical AgentSession owner, which dispatches through
 //! `AgentRuntimeHandle`. This service retains agent-catalog listing and
 //! model-provider health checks.

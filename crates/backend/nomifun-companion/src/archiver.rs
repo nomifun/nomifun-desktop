@@ -5,7 +5,7 @@
 //! can't take on dense work. This loop cuts that thread into **windows**: when a
 //! window goes idle for `idle_minutes`, its messages are compressed into a
 //! day-partitioned digest (stored in `companion_session_windows`), the live
-//! engine context is durably reset (`clear_context`, via [`ArchiveConversationPort`]),
+//! model context is durably reset by the canonical Session owner,
 //! and a fresh window begins — so the live context stays small while long-term
 //! continuity is preserved as retrievable day-digests ("去年今日发生的事情").
 //!
@@ -45,6 +45,14 @@ pub struct WindowMessage {
     pub created_at: i64,
 }
 
+/// The short owner read captures this immutable transient boundary before
+/// summarization. A later reset cannot acquire authority over newer inputs.
+#[derive(Clone, Debug)]
+pub struct ArchiveWindow {
+    pub messages: Vec<WindowMessage>,
+    pub context_boundary: nomifun_agent_session::ContextClearBoundary,
+}
+
 /// Seam over the conversation domain. The archiver only needs to (a) read a
 /// window's messages and (b) durably reset the live engine context. A trait
 /// keeps `nomifun-companion` from hard-depending on conversation internals and
@@ -53,11 +61,12 @@ pub struct WindowMessage {
 #[async_trait::async_trait]
 pub trait ArchiveConversationPort: Send + Sync {
     /// Messages of `conversation_id` with `created_at > since_ts`, oldest first.
-    async fn window_messages(&self, conversation_id: &str, since_ts: i64) -> Result<Vec<WindowMessage>, AppError>;
-    /// Durably reset the conversation's agent context: warm the agent if needed,
-    /// then `clear_context` so the engine forgets the archived window while the
-    /// visible transcript stays. Best-effort; the caller tolerates failure.
-    async fn reset_context(&self, conversation_id: &str) -> Result<(), AppError>;
+    async fn window_messages(&self, conversation_id: &str, since_ts: i64, idempotency_key: &str) -> Result<ArchiveWindow, AppError>;
+    /// Commit one canonical context boundary for this archive window while
+    /// preserving the transcript and long-term memory. Never warms a Runtime.
+    /// Best-effort; the caller tolerates failure.
+    async fn reset_context(&self, conversation_id: &str, idempotency_key: &str,
+        expected: &nomifun_agent_session::ContextClearBoundary) -> Result<(), AppError>;
 }
 
 /// Sweep thresholds (subset of [`crate::SharedArchiveConfig`] needed by [`decide`]).
@@ -190,7 +199,9 @@ impl Archiver {
         // The first window covers all current history (boundary 0); rolled
         // windows set their own boundary at close time.
         let window = self.store.ensure_open_window(companion_id, &conversation_id, 0).await?;
-        let msgs = self.port.window_messages(&conversation_id, window.boundary_ts).await?;
+        let context_key = format!("companion-archive-context:{}", window.session_window_id);
+        let observed = self.port.window_messages(&conversation_id, window.boundary_ts, &context_key).await?;
+        let msgs = &observed.messages;
 
         let now = now_ms();
         let user_messages = msgs.iter().filter(|m| m.is_user).count();
@@ -259,7 +270,7 @@ impl Archiver {
                     .await?;
                 // Durable context reset so the next window starts small. Best-
                 // effort: a failed reset must not lose the digest we just stored.
-                if let Err(e) = self.port.reset_context(&conversation_id).await {
+                if let Err(e) = self.port.reset_context(&conversation_id, &context_key, &observed.context_boundary).await {
                     tracing::warn!(companion = %companion_id, error = %e, "reset_context after archive failed");
                 }
                 self.store.ensure_open_window(companion_id, &conversation_id, now).await?;
@@ -333,13 +344,14 @@ mod tests {
     struct MockPort {
         msgs: Vec<WindowMessage>,
         resets: Arc<StdMutex<Vec<String>>>,
+        context_boundary: nomifun_agent_session::ContextClearBoundary,
     }
     #[async_trait::async_trait]
     impl ArchiveConversationPort for MockPort {
-        async fn window_messages(&self, _conversation_id: &str, since_ts: i64) -> Result<Vec<WindowMessage>, AppError> {
-            Ok(self.msgs.iter().filter(|m| m.created_at > since_ts).cloned().collect())
+        async fn window_messages(&self, _conversation_id: &str, since_ts: i64, _idempotency_key: &str) -> Result<ArchiveWindow, AppError> {
+            Ok(ArchiveWindow { messages:self.msgs.iter().filter(|m| m.created_at > since_ts).cloned().collect(), context_boundary:self.context_boundary.clone() })
         }
-        async fn reset_context(&self, conversation_id: &str) -> Result<(), AppError> {
+        async fn reset_context(&self, conversation_id: &str, _idempotency_key: &str, _expected: &nomifun_agent_session::ContextClearBoundary) -> Result<(), AppError> {
             self.resets.lock().unwrap().push(conversation_id.to_owned());
             Ok(())
         }
@@ -380,7 +392,7 @@ mod tests {
             config: Arc::new(RwLock::new(config)),
             registry,
             completer: Arc::new(CannedCompleter { reply: reply.to_owned(), calls: calls.clone() }),
-            port: Arc::new(MockPort { msgs, resets: resets.clone() }),
+            port: Arc::new(MockPort { msgs, resets: resets.clone(), context_boundary:crate::archive_port::tests::context_boundary().await }),
             run_lock: Arc::new(Mutex::new(())),
         };
         (archiver, companion.companion_id, resets, calls)

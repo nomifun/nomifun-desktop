@@ -6050,6 +6050,7 @@ dependencies = [
  "nomi-redact",
  "nomifun-agent-contracts",
  "nomifun-agent-domain-wave4",
+ "nomifun-agent-session",
  "nomifun-ai-agent",
  "nomifun-api-types",
  "nomifun-auth",

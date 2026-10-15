@@ -175,7 +175,7 @@ impl AgentSessionStore {
         let mut tx = self.pool.begin().await?;
         let apps = managed_app_namespaces_tx(&mut tx, app_ids).await?;
         require_relocation_idle_tx(&mut tx).await?;
-        require_native_storage_quiescent_tx(&mut tx).await?;
+        require_native_storage_quiescent_tx(&mut tx, None).await?;
         for id in live_session_ids_tx(&mut tx).await? {
             require_settled_patch_history_tx(&mut tx, &id).await?;
             let session = live_session_by_id_tx(&mut tx, &id).await?;
@@ -208,7 +208,7 @@ impl AgentSessionStore {
         let mut tx = self.begin_write_transaction().await?;
         let apps = managed_app_namespaces_tx(&mut tx, app_ids).await?;
         require_relocation_idle_tx(&mut tx).await?;
-        require_native_storage_quiescent_tx(&mut tx).await?;
+        require_native_storage_quiescent_tx(&mut tx, None).await?;
         let mut changed = 0;
         let mut managed_namespaces = Vec::new();
         let mut app_workspaces = BTreeMap::new();
@@ -703,15 +703,18 @@ async fn require_relocation_idle_tx(tx: &mut Transaction<'_, Sqlite>) -> Result<
 /// Read the existing canonical owner receipts, including those of terminal
 /// Turns. Missing proofs fail closed; this never probes/kills guessed PIDs or
 /// obtains authority from the retired agent-process registry.
-async fn require_native_storage_quiescent_tx(tx: &mut Transaction<'_, Sqlite>) -> Result<(), SessionStoreError> {
+pub(super) async fn require_native_storage_quiescent_tx(tx: &mut Transaction<'_, Sqlite>, session: Option<&AgentSessionId>) -> Result<(), SessionStoreError> {
     #[derive(Default)]
     struct Scope {
         pending_operations: BTreeSet<(String, String)>,
         latest_process: Option<(String, u16)>,
     }
     let turns: BTreeSet<(String, String)> = sqlx::query_as::<_, (String, String)>(
-        "SELECT session_id,operation_id FROM agent_turns").fetch_all(&mut **tx).await?.into_iter().collect();
-    let rows: Vec<StoredEventRow> = sqlx::query_as("SELECT session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,causation_event_id,inline_json,payload_id FROM agent_events WHERE kind='runtime/progress-recorded' ORDER BY session_id,seq")
+        "SELECT session_id,operation_id FROM agent_turns WHERE (? IS NULL OR session_id=?)")
+        .bind(session.map(|id| id.as_ref())).bind(session.map(|id| id.as_ref()))
+        .fetch_all(&mut **tx).await?.into_iter().collect();
+    let rows: Vec<StoredEventRow> = sqlx::query_as("SELECT session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,causation_event_id,inline_json,payload_id FROM agent_events WHERE kind='runtime/progress-recorded' AND (? IS NULL OR session_id=?) ORDER BY session_id,seq")
+        .bind(session.map(|id| id.as_ref())).bind(session.map(|id| id.as_ref()))
         .fetch_all(&mut **tx).await?;
     let mut scopes = BTreeMap::<(String, String), Scope>::new();
     for row in rows {

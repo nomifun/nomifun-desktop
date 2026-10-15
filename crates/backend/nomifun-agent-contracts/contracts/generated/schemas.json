@@ -4214,6 +4214,112 @@
     "title": "CapabilityCatalogEntry",
     "type": "object"
   },
+  "context_cleared_payload": {
+    "$defs": {
+      "AgentHandoffBindingRefV1": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "preset_revision_ref": {
+            "$ref": "#/$defs/PresetRevisionRef"
+          },
+          "resolved_snapshot_ref": {
+            "$ref": "#/$defs/ResolvedSnapshotRef"
+          }
+        },
+        "required": [
+          "preset_revision_ref",
+          "resolved_snapshot_ref",
+          "binding_version"
+        ],
+        "type": "object"
+      },
+      "ContextClearAdmissionProofV1": {
+        "additionalProperties": false,
+        "description": "Exact existing binding and active-set authority at one canonical clear.\nResource and model replacement advance the referenced binding version.",
+        "properties": {
+          "active_set_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "binding_ref": {
+            "$ref": "#/$defs/AgentHandoffBindingRefV1"
+          }
+        },
+        "required": [
+          "binding_ref",
+          "active_set_generation"
+        ],
+        "type": "object"
+      },
+      "PresetRevisionRef": {
+        "additionalProperties": false,
+        "properties": {
+          "preset_id": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision_digest": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "preset_id",
+          "revision",
+          "revision_digest"
+        ],
+        "type": "object"
+      },
+      "ResolvedSnapshotRef": {
+        "additionalProperties": false,
+        "properties": {
+          "snapshot_digest": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "snapshot_digest"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "The original clear command remains replayable for reason-only facts from\nthis generation. New writers always include admission; its absence cannot\nauthorize a product input that has not yet been accepted.",
+    "properties": {
+      "admission": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ContextClearAdmissionProofV1"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "reason": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "reason"
+    ],
+    "title": "ContextClearedPayloadV1",
+    "type": "object"
+  },
   "contribution_lock": {
     "$defs": {
       "ContributionSourceKind": {

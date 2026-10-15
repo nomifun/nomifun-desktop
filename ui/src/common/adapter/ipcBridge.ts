@@ -1089,8 +1089,9 @@ export const conversation = {
       );
     },
   },
-  clearContext: httpPost<void, { conversation_id: ConversationId }>(
-    (p) => `/api/agent-sessions/${p.conversation_id}/clear-context`
+  clearContext: httpPost<void, { conversation_id: ConversationId; idempotency_key: string }>(
+    (p) => `/api/agent-sessions/${p.conversation_id}/clear-context`,
+    (p) => ({ idempotency_key: requireConversationIdempotencyKey(p.idempotency_key) })
   ),
   taskPlan: httpGet<TaskPlanSnapshot, { conversation_id: ConversationId }>(
     (p) => `/api/agent-sessions/${p.conversation_id}/task-plan`,
@@ -1157,10 +1158,6 @@ export const conversation = {
       });
     },
   },
-  askSideQuestion: httpPost<ConversationSideQuestionResult, { conversation_id: ConversationId; question: string }>(
-    (p) => `/api/agent-sessions/${p.conversation_id}/side-question`,
-    (p) => ({ question: p.question })
-  ),
   responseStream: wsMappedEmitter<IResponseMessage>('message.stream', (raw) =>
     fromApiResponseMessage(raw as IResponseMessage)
   ),
@@ -3345,13 +3342,6 @@ export interface IConversationListChangedEvent {
   action: 'created' | 'updated' | 'deleted';
   source?: string;
 }
-
-export type ConversationSideQuestionResult =
-  | { status: 'ok'; answer: string }
-  | { status: 'noAnswer' }
-  | { status: 'unsupported' }
-  | { status: 'invalid'; reason: 'emptyQuestion' }
-  | { status: 'toolsRequired' };
 
 interface IBridgeResponse<D = {}> {
   success: boolean;

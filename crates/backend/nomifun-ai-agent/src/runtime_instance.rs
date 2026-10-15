@@ -9,9 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use async_trait::async_trait;
-use nomifun_api_types::{
-    GetModelInfoResponse, SideQuestionRequest, SideQuestionResponse, SlashCommandItem,
-};
+use nomifun_api_types::GetModelInfoResponse;
 use nomifun_common::{AgentKillReason, AppError};
 
 use crate::{AgentRuntimeControl, SystemResourceNoticeDelivery};
@@ -39,10 +37,6 @@ pub trait OfficialAgentRuntime: AgentRuntimeControl {
 
     fn requires_turn_boundary_recycle(&self) -> bool {
         false
-    }
-
-    async fn clear_context(&self) -> Result<(), AppError> {
-        Err(unsupported("clear context"))
     }
 
     fn steer(&self, _text: String) -> Result<bool, AppError> {
@@ -90,19 +84,6 @@ pub trait OfficialAgentRuntime: AgentRuntimeControl {
         Err(unsupported("model switching"))
     }
 
-    async fn get_slash_commands(&self) -> Result<Vec<SlashCommandItem>, AppError> {
-        Ok(Vec::new())
-    }
-
-    async fn handle_side_question(
-        &self,
-        _request: SideQuestionRequest,
-    ) -> Result<SideQuestionResponse, AppError> {
-        Ok(SideQuestionResponse {
-            status: "unsupported".to_owned(),
-            answer: None,
-        })
-    }
 }
 
 fn unsupported(operation: &str) -> AppError {

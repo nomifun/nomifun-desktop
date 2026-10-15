@@ -58,16 +58,16 @@ export const useGuidInput = ({ locationState }: UseGuidInputOptions): GuidInputR
   const handleFilesPasted = useCallback((pastedFiles: FileMetadata[]) => {
     const file_paths = pastedFiles.map((file) => file.path);
     setFiles((prevFiles) => [...prevFiles, ...file_paths]);
-  }, []);
+  }, [setFiles]);
 
   // Handle files uploaded via dialog (append mode)
   const handleFilesUploaded = useCallback((uploadedPaths: string[]) => {
     setFiles((prevFiles) => [...prevFiles, ...uploadedPaths]);
-  }, []);
+  }, [setFiles]);
 
   const handleRemoveFile = useCallback((targetPath: string) => {
     setFiles((prevFiles) => prevFiles.filter((file) => file !== targetPath));
-  }, []);
+  }, [setFiles]);
 
   // Use drag upload hook (drag treated like paste, appends to existing files)
   const { isFileDragging, dragHandlers } = useDragUpload({

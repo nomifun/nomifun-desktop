@@ -14,9 +14,9 @@ const typeSource = readFileSync(
 );
 
 describe('agent metadata wire ID contract', () => {
-  test('removes retired Skill command discovery while retaining system side questions', () => {
+  test('removes retired Runtime command discovery and unsupported side questions', () => {
     expect(bridgeSource.includes('/slash-commands')).toBe(false);
-    expect(bridgeSource.includes('/side-question')).toBe(true);
+    expect(bridgeSource.includes('/side-question')).toBe(false);
   });
 
   test('uses agent_id without a generic id compatibility path', () => {

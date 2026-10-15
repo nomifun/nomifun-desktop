@@ -233,7 +233,7 @@ mod tests {
             args: Some("[]"),
             env: Some("[]"),
             native_skills_dirs: Some(r#"[".nomi/skills"]"#),
-            behavior_policy: Some(r#"{"supports_side_question":true}"#),
+            behavior_policy: Some(r#"{"self_identity_sticky":true}"#),
             sort_order: 1100,
         }
     }
@@ -322,19 +322,19 @@ mod tests {
     async fn set_behavior_policy_overwrites_column_and_misses_unknown_row() {
         let (repo, _db) = setup().await;
         let updated = repo
-            .set_behavior_policy(NOMI_AGENT_ID, r#"{"supports_side_question":true}"#)
+            .set_behavior_policy(NOMI_AGENT_ID, r#"{"self_identity_sticky":true}"#)
             .await
             .unwrap()
             .expect("nomi row exists");
         assert_eq!(
             updated.behavior_policy.as_deref(),
-            Some(r#"{"supports_side_question":true}"#)
+            Some(r#"{"self_identity_sticky":true}"#)
         );
         // Re-read confirms persistence.
         let row = repo.get(NOMI_AGENT_ID).await.unwrap().unwrap();
         assert_eq!(
             row.behavior_policy.as_deref(),
-            Some(r#"{"supports_side_question":true}"#)
+            Some(r#"{"self_identity_sticky":true}"#)
         );
         // Unknown id is a no-op returning None.
         assert!(repo.set_behavior_policy("missing", "{}").await.unwrap().is_none());

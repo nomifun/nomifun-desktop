@@ -46,6 +46,16 @@ mod app_project_tests;
 mod knowledge_writeback_tests;
 #[path = "turn_outcome_history_tests.rs"]
 mod turn_outcome_history_tests;
+#[path = "context_clear_tests.rs"]
+mod context_clear_tests;
+
+async fn clear_context(store: &AgentSessionStore, session: &AgentSessionId, key: &str) -> crate::SessionEventAppendResult {
+    let request = crate::ClearSessionContext { idempotency_key: key.into(), reason: "user_requested".into() };
+    match store.preflight_context_clear(&owner(), session, &request).await.unwrap() {
+        crate::ContextClearPreparation::Ready(boundary) => store.clear_context(&owner(), session, &request, &boundary).await.unwrap(),
+        crate::ContextClearPreparation::AlreadyCleared(result) => result,
+    }
+}
 
 fn session_id() -> AgentSessionId {
     AgentSessionId(Uuid::now_v7().to_string())

@@ -1,5 +1,6 @@
 import '../../../../../../test/setup-dom.ts';
 import '@arco-design/web-react/lib/_util/react-19-adapter';
+import { Message } from '@arco-design/web-react';
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
@@ -56,7 +57,7 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); mock.restore(); configService.reset(); sessionStorage.clear(); });
 
-function mountPausedComposer(conversation: TChatConversation, initialPaused = false, onBeforeSubmit?: () => Promise<void>) {
+function mountPausedComposer(conversation: TChatConversation, initialPaused = false, onBeforeSubmit?: () => Promise<void>, runtimeActivity = activity) {
   let pause!: (disabled: boolean) => void;
   spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue(conversation);
   spyOn(ipcBridge.conversation.taskPlan, 'invoke').mockResolvedValue({ conversation_id: conversation.id, sequence: 0, turn_id: null, turn_status: null, plan: null });
@@ -66,7 +67,7 @@ function mountPausedComposer(conversation: TChatConversation, initialPaused = fa
   });
   function Composer() {
     const [paused, setPaused] = useState(initialPaused); pause = setPaused;
-    return <NomiSendBox conversation_id={conversation.id} modelSelection={modelSelection} turnActivity={activity}
+    return <NomiSendBox conversation_id={conversation.id} modelSelection={modelSelection} turnActivity={runtimeActivity}
       creationEnabled={false} compactProductComposer submissionDisabled={paused} onBeforeSubmit={onBeforeSubmit} />;
   }
   const view = render(<MemoryRouter><I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(),
@@ -81,6 +82,42 @@ function freshConversation(): TChatConversation {
   return { id: parseConversationId(uuidv7()), name: 'App development', type: 'nomi', session_purpose: 'conversation', status: 'finished',
     created_at: 1, modified_at: 1, model, extra: { workspace: 'C:/NomiFun/apps/test', official_template_key: 'app.developer' } as TChatConversation['extra'] };
 }
+
+test.each(['button', 'keyboard', 'menu'])('native Session uses canonical clear without sending a message for %s', async gesture => {
+  const conversation = freshConversation();
+  spyOn(ipcBridge.database.getConversationMessages, 'invoke').mockResolvedValue({ items: [], total: 0, has_more: false });
+  const clear = spyOn(ipcBridge.conversation.clearContext, 'invoke').mockResolvedValue();
+  const composer = mountPausedComposer(conversation);
+  const input = composer.view.getByTestId('sendbox-input') as HTMLTextAreaElement;
+  await waitFor(() => expect(input.disabled).toBe(false));
+  fireEvent.change(input, { target: { value: '/clear' } });
+  if (gesture === 'button') fireEvent.click(composer.view.getByTestId('sendbox-send-btn'));
+  else if (gesture === 'keyboard') fireEvent.keyDown(input, { key: 'Enter' });
+  else fireEvent.click(await composer.view.findByRole('option', { name: /\/clear/ }));
+  await waitFor(() => expect(clear).toHaveBeenCalledTimes(1));
+  expect(clear.mock.calls[0][0]).toMatchObject({ conversation_id: conversation.id });
+  expect(clear.mock.calls[0][0].idempotency_key).toBeString();
+  expect(composer.send).not.toHaveBeenCalled();
+  await waitFor(() => expect(input.value).toBe(''));
+});
+
+test('commands retain the paused Turn cancellation control and cannot clear its context', async () => {
+  const conversation = freshConversation();
+  spyOn(ipcBridge.database.getConversationMessages, 'invoke').mockResolvedValue({ items: [], total: 0, has_more: false });
+  const clear = spyOn(ipcBridge.conversation.clearContext, 'invoke').mockResolvedValue();
+  const warning = spyOn(Message, 'warning').mockImplementation(() => () => {});
+  const pausedActivity = { ...activity, pauseNotice: { turnId: parseMessageId(uuidv7()) } } as NomiMessageRuntime;
+  const composer = mountPausedComposer(conversation, false, undefined, pausedActivity);
+  const input = composer.view.getByTestId('sendbox-input') as HTMLTextAreaElement;
+  await waitFor(() => expect(input.disabled).toBe(false));
+  fireEvent.change(input, { target: { value: '/clear' } });
+  expect(composer.view.getByTestId('sendbox-paused-cancel-btn')).toBeTruthy();
+  expect(composer.view.queryByTestId('sendbox-stop-btn')).toBeNull();
+  fireEvent.click(composer.view.getByTestId('sendbox-send-btn'));
+  expect(warning).toHaveBeenCalledTimes(1);
+  expect(clear).not.toHaveBeenCalled(); expect(composer.send).not.toHaveBeenCalled();
+  expect(input.value).toBe('/clear');
+});
 
 test.each([false, true])('manual file work cancels an old authority read and resumes the same initial key (released before receipt=%s)', async releaseBeforeReceipt => {
   const conversation = freshConversation();

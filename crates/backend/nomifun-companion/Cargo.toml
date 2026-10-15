@@ -15,6 +15,7 @@ nomifun-skill-library.workspace = true
 nomifun-auth.workspace = true
 nomifun-knowledge.workspace = true
 nomifun-agent-contracts.workspace = true
+nomifun-agent-session.workspace = true
 nomifun-agent-domain-wave4.workspace = true
 axum.workspace = true
 tokio.workspace = true

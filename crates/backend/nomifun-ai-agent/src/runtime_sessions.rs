@@ -71,19 +71,6 @@ pub trait AgentRuntimeSessions: Send + Sync {
     /// alone does not prove that the reusable slot has released this owner.
     fn active_turn_generation(&self, _conversation_id: &str) -> Option<u64> { None }
 
-    /// Query commands without creating a runtime or acquiring turn authority.
-    /// Callers authenticate conversation ownership before entering this seam.
-    async fn get_slash_commands(
-        &self,
-        _owner_id: &str,
-        conversation_id: &str,
-    ) -> Result<Vec<nomifun_api_types::SlashCommandItem>, AppError> {
-        match self.get_runtime(conversation_id) {
-            Some(runtime) => runtime.get_slash_commands().await,
-            None => Ok(Vec::new()),
-        }
-    }
-
     /// Get an existing runtime or create one if none exists.
     ///
     /// Concurrent callers with the same `conversation_id` block on a shared
@@ -1827,7 +1814,6 @@ mod tests {
     #[tokio::test]
     async fn official_runtime_optional_mutations_fail_closed() {
         let runtime = AgentRuntimeHandle::Official(Arc::new(MockAgent::new("custom", None)));
-        assert!(runtime.clear_context().await.is_err());
         assert!(runtime.steer("new input".to_owned()).is_err());
         assert!(runtime.notify_system_resource("resource update".to_owned()).is_err());
         assert!(runtime.ensure_can_rewind_last_turn("source").await.is_err());

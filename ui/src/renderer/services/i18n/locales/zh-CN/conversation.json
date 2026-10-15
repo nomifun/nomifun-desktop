@@ -843,22 +843,6 @@
       "tokensTooltip": "本轮 token 用量（输入 + 输出）"
     }
   },
-  "sideQuestion": {
-    "title": "顺便问一下",
-    "description": "针对当前对话快速提一个小问题",
-    "started": "正在发起顺便提问...",
-    "answered": "顺便提问已返回结果。",
-    "noAnswer": "当前会话里没有明确的答案。",
-    "loading": "思考中...",
-    "parentTaskRunning": "主任务仍在后台继续运行。",
-    "dismissHint": "按 Escape、Enter 或 Space 关闭",
-    "unsupported": "当前会话暂不支持顺便提问。",
-    "alreadyRunning": "已有一个顺便提问正在进行中。",
-    "attachmentsNotAllowed": "顺便提问不能附带文件或 DOM 片段。",
-    "emptyQuestion": "请在 /btw 后输入问题。",
-    "toolsRequired": "/btw 只能根据当前对话中已有的内容作答，无法搜索、浏览或获取新信息。",
-    "error": "顺便提问失败。"
-  },
   "commandQueue": {
     "title": "排队指令",
     "clear": "清空队列",
@@ -978,11 +962,6 @@
   "editMessage": {
     "action": "编辑",
     "banner": "正在编辑消息——发送后将从这里重新生成"
-  },
-  "slashCommands": {
-    "compact": {
-      "description": "压缩会话上下文"
-    }
   },
   "clearContext": {
     "description": "清空会话上下文",

@@ -189,6 +189,35 @@ voice 产品回执的可选 `request_kind` 仅来自应用实际解析、执行�
 
 Creation prompt、Cron notice、AgentExecution summary 使用正式消息事件成为数据上下文。Agent 切换前的文本和工具结果只从已提交的 canonical event/payload 读取。工具结果保持原文，以明确的不可信历史数据包装进入下一 Agent；不重放旧工具角色，不继承旧 Agent 系统指令、权限、可用进程句柄或完成门槛。历史图片和音频不作为新观察传输；MCP resource journal 仅记录 owner settlement 时不能补造资源正文。上下文清空事件和当前 accepted root cursor 限定读取窗口。
 
+用户清空上下文、伙伴归档后的重置和 Cron 的每次运行清空都使用同一个 Session owner 命令。
+命令先在现有 Session 操作围栏内验证本地可写的普通用途和精确归属，拒绝活动、暂停、待对账
+Turn、Remote 与 Attempt / automation 审计会话，以及未结算效果和待恢复工作；随后取消并等待
+知识回写、证明旧 Runtime 与资源清理完成，再由 Store 写事务复查确切 binding 和上下文边界，
+提交唯一 `context/cleared` 事件。没有 live Runtime 不代表空闲，清空也不创建或预热 Runtime。
+历史消息、Session 身份、冻结配置、长期记忆及已有终态回执保持原样；下一 Turn 只从新的
+canonical context floor 读取上下文，不引入 Runtime 私有清空状态或额外 checkpoint 账本。
+
+伙伴归档读取消息时在短操作围栏内捕获同一个 typed context boundary，摘要模型调用期间不持锁。
+完成摘要后必须在 Runtime teardown 前及最终清空事务中核验原 binding、active set、输入和上下文
+边界均未变化；期间到达的新 Turn 即使已经结束，也不属于旧摘要的清空权限。过期归档保留已写
+摘要，跳过上下文重置与 Runtime 清理，不用消息时间戳推导准入，也不增加归档清空账本。
+
+清空命令的幂等身份保存在原 Event 链。伙伴归档以窗口身份去重，Cron 以确切运行身份去重；
+Cron 在同一个 Session 操作围栏中先读取原 Turn receipt，已准入重投直接认原输入，禁止再次
+清空或停止后继 Runtime。只有尚未准入的新运行执行清空并提交输入，清空成功后准入失败的
+重试仍复用原事件，不重复移动 context floor。UI/API contract version 32 要求用户清空携带
+明确的幂等键，并拒绝仍依赖退役命令发现、旁路提问及命令消息类型的旧前端。
+快捷命令目录属于产品输入行为，不能从 Runtime 或 Skill 正文发现权限；Skill 继续使用冻结
+Snapshot 与 typed `inject_skills` 链路。同一目标中未修改命令草稿的失败重试沿用原动作键，
+成功后或用户明确修改草稿才创建新动作，防止丢失清空响应后误清后继输入；该交互状态不另存账本。
+新清空事实同时记录现役 typed binding 引用与 active-set generation。Cron 在尚无 accepted
+receipt 的重试中核对原事实、当前绑定和上下文边界，模型或资源 CAS 即使没有新的消息也会
+使旧准入窗口失效。既有缺少此证明的清空事实仍限定历史 context floor，并可返回原用户清空
+回执，但不能授权 Cron 的新输入；不从现配置补造过去的准入证明。
+退役旁路提问后，现役 metadata 前向迁移只删除 `behavior_policy.supports_side_question`，保留
+其他已保存配置与原迁移回执；损坏、未知或重复 policy 字段拒绝迁移。合法空配置仍可读，
+后续 metadata 解码错误直接失败，不通过默认值掩盖配置损失，不读取或转换退役 Agent 数据。
+
 ### 用户输入交接
 
 普通会话使用 Runtime 的 `request_user_input` 控制声明问题与剩余工作，问题身份来自确切
@@ -222,7 +251,7 @@ Event/Payload 只读派生，包含 `answered`、`input_required`、`failed`、`
 历史查询和终态后的实时投影共用同一结果 reducer、确切消息身份与 Turn 归属。界面按结果引用
 展示公共内容，过程折叠只处理过程条目，不再根据最后一条助手消息、到达顺序或显示时间猜最终
 回答。空消息封口不成为公开结果；请求用户信息必须在折叠过程外显示，并允许后续输入创建新
-Turn。UI/API contract version 31 阻止旧界面把结构化结果继续当成通用文字提示消费。
+Turn。UI/API contract version 32 阻止旧界面把结构化结果继续当成通用文字提示消费。
 
 部分历史页在同一数据库快照中附带其涉及 Turn 的结果摘要，不占原始分页窗口；下一页游标只由
 原始窗口决定，界面直接使用服务端 `next_cursor`。迟到的暂停快照不能覆盖已提交终态。正式领域
@@ -528,7 +557,7 @@ Cron、Companion、Requirements、AutoWork、IDMM 和 AgentExecution 可以保�
 
 保存伙伴 Agent 选择时，服务端在同一 Session owner 的操作围栏内验证目标归属、当前 binding 版本、可用模型与能力、资源完整性及运行清理。已有空闲 Session 使用现有 `session/agent-binding-changed` 事务切换，保留 Session 身份、当前模型、已选扩展和可继续使用的资源；旧 Revision、Snapshot 和历史事件不可改写。伙伴产品默认值供后续创建使用，不能代替当前 Session 的 canonical binding，也不能由 UI 投影补造已生效状态。已提交切换后默认值持久化失败时，API 明确报告当前设定已生效，并允许显式重试默认值保存。活动或暂停 Turn、Remote / Attempt 绑定、未结算效果、仍在运行的进程和待处理恢复继续阻断切换；切换不重放旧 checkpoint、工具或完成账本。
 
-首次伙伴绑定已提交但默认选择保存失败后，合法冻结产品绑定或会话可能没有可证明的可编辑 Agent 来源。选项查询仍校验 Session、存储和冻结配置；只在来源确实无法证明时返回 `selection: null` 与可选的兼容 Agent，不猜测官方模板、不丢弃当前绑定，也不把存储损坏伪装成未选择。用户明确重选后沿用同一切换事务恢复可编辑来源，保留原 Session、模型、资源和历史。该可空选项响应使用 UI/API contract version 30，阻止旧前端把缺失的来源当作已选 Agent。
+首次伙伴绑定已提交但默认选择保存失败后，合法冻结产品绑定或会话可能没有可证明的可编辑 Agent 来源。选项查询仍校验 Session、存储和冻结配置；只在来源确实无法证明时返回 `selection: null` 与可选的兼容 Agent，不猜测官方模板、不丢弃当前绑定，也不把存储损坏伪装成未选择。用户明确重选后沿用同一切换事务恢复可编辑来源，保留原 Session、模型、资源和历史。可空选项响应受现役 UI/API 合同围栏保护，阻止旧前端把缺失的来源当作已选 Agent。
 
 AgentExecution 的正常结算、重启恢复与人工采纳通过同一个 Session 输出查询读取精确 Turn 的终态、正文和工具效果。查询在同一事务中只解析该 Turn 的事件窗口，不扫描整个 Session 的历史。正文限于该 Turn 的 canonical assistant 内容，不能读取 UI 投影、推理文本或后续 Turn。产物来自该 Turn 已结算的文件操作或发布回执，并验证工作区身份、路径、字节数与摘要；目录扫描、模型声称已保存和旧工具展示 marker 都不是产物证据。同路径的后续写入、修改和删除按事件顺序决定最终可交付状态。
 

@@ -44,8 +44,7 @@ type TMessageType =
   | 'tool_call'
   | 'tool_group'
   | 'agent_status'
-  | 'thinking'
-  | 'available_commands';
+  | 'thinking';
 
 interface IMessage<T extends TMessageType, Content extends Record<string, any>> {
   /**
@@ -607,20 +606,6 @@ export type IMessageThinking = IMessage<
   }
 >;
 
-// Available commands advertised by the agent runtime.
-type AvailableCommand = {
-  name: string;
-  description: string;
-  hint?: string;
-};
-
-type IMessageAvailableCommands = IMessage<
-  'available_commands',
-  {
-    commands: AvailableCommand[];
-  }
->;
-
 // eslint-disable-next-line max-len
 export type TMessage =
   | IMessageText
@@ -628,8 +613,7 @@ export type TMessage =
   | IMessageToolCall
   | IMessageToolGroup
   | IMessageAgentStatus
-  | IMessageThinking
-  | IMessageAvailableCommands;
+  | IMessageThinking;
 
 // 统一所有需要用户交互的用户类型
 const AGENT_ERROR_OWNERSHIPS = new Set<AgentErrorOwnership>([
@@ -1110,9 +1094,6 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
         },
       };
     }
-    // Disabled: available_commands messages are too noisy and distracting in the chat UI
-    case 'available_commands':
-      return undefined;
     case 'start':
     case 'output_discarded':
     case 'finish':

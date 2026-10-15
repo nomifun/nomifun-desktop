@@ -6,8 +6,13 @@
 
 import { ArrowUp, CloseSmall, Robot, Square } from '@icon-park/react';
 import { Button, Input, Popover } from '@arco-design/web-react';
-import React from 'react';
+import React, { useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+import { parseConversationId } from '@/common/types/ids';
+import { useComposerCommands } from '@/renderer/components/chat/commands/useComposerCommands';
+import { useSessionComposerCommands } from '@/renderer/components/chat/commands/useSessionComposerCommands';
+import { useCompositionInput } from '@/renderer/hooks/chat/useCompositionInput';
+import { useConfig } from '@/renderer/hooks/config/useConfig';
 
 import {
   NomiCreativeModelSelect,
@@ -27,6 +32,8 @@ export const CREATIVE_STUDIO_AGENT_MODEL_FILTER = {
 } as const satisfies CreativeModelFilter;
 
 interface CreativeStudioAgentComposerProps {
+  targetKey: string;
+  conversationId?: string;
   draft: string;
   model: CreativeModelSelectionRef | null;
   modelLocked: boolean;
@@ -45,6 +52,8 @@ interface CreativeStudioAgentComposerProps {
 }
 
 const CreativeStudioAgentComposer: React.FC<CreativeStudioAgentComposerProps> = ({
+  targetKey,
+  conversationId,
   draft,
   model,
   modelLocked,
@@ -62,6 +71,22 @@ const CreativeStudioAgentComposer: React.FC<CreativeStudioAgentComposerProps> = 
   onOpenModelSettings,
 }) => {
   const { t } = useTranslation();
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  const { compositionHandlers, createKeyDownHandler } = useCompositionInput();
+  const [sendKeyPreference] = useConfig('chat.sendKey');
+  const sessionCommands = useSessionComposerCommands({
+    conversationId: conversationId ? parseConversationId(conversationId) : undefined,
+    activity: isRunning ? 'busy' : undefined,
+    disabledReason: disabled ? t('messages.conversationInProgress') : undefined,
+  });
+  const commands = useComposerCommands({
+    targetKey,
+    input: draft,
+    setInput: onDraftChange,
+    commands: sessionCommands.commands,
+    panel: sessionCommands.panel,
+    anchorRef: surfaceRef,
+  });
   const canSend =
     !disabled &&
     !isRunning &&
@@ -70,8 +95,9 @@ const CreativeStudioAgentComposer: React.FC<CreativeStudioAgentComposerProps> = 
     selectedSkillIds.length > 0;
 
   const submit = () => {
+    if (commands.dispatchInput()) return;
     const prompt = draft.trim();
-    if (!prompt || !model || disabled || isRunning) return;
+    if (!canSend || !model) return;
     onSend({
       prompt,
       model,
@@ -79,6 +105,7 @@ const CreativeStudioAgentComposer: React.FC<CreativeStudioAgentComposerProps> = 
       skillIds: [...selectedSkillIds],
     });
   };
+  const stopAction = isRunning && !commands.hasCommandInput;
 
   const modelPicker = (
     <div className={styles.modelPopover}>
@@ -109,7 +136,8 @@ const CreativeStudioAgentComposer: React.FC<CreativeStudioAgentComposerProps> = 
       data-agent-composer
       data-agent-model-locked={modelLocked || undefined}
     >
-      <div className={styles.composerCard}>
+      <div ref={surfaceRef} className={styles.composerCard}>
+        {commands.menu}
         {contextItems.length > 0 ? (
           <div className={styles.planningField} data-agent-context-items>
             <span className={styles.planningLabel}>
@@ -181,20 +209,8 @@ const CreativeStudioAgentComposer: React.FC<CreativeStudioAgentComposerProps> = 
             defaultValue: 'Describe a creative goal or continue the current discussion',
           })}
           onChange={onDraftChange}
-          onKeyDown={(event) => {
-            if (
-              event.key !== 'Enter' ||
-              event.shiftKey ||
-              event.ctrlKey ||
-              event.metaKey ||
-              event.altKey ||
-              event.nativeEvent.isComposing
-            ) {
-              return;
-            }
-            event.preventDefault();
-            submit();
-          }}
+          {...compositionHandlers}
+          onKeyDown={createKeyDownHandler(submit, commands.onKeyDown, sendKeyPreference ?? 'enter')}
         />
         <div className={styles.composerFooter}>
           <Popover
@@ -230,25 +246,36 @@ const CreativeStudioAgentComposer: React.FC<CreativeStudioAgentComposerProps> = 
               </span>
             </Button>
           </Popover>
+          {isRunning && commands.hasCommandInput && <Button
+            className={styles.sendButton}
+            type='primary'
+            shape='circle'
+            size='large'
+            disabled={disabled}
+            aria-label={t('creativeStudio.agent.stop', { defaultValue: 'Stop Agent' })}
+            icon={<Square theme='filled' size='15' />}
+            onClick={onStop}
+          />}
           <Button
             className={styles.sendButton}
             type='primary'
             shape='circle'
             size='large'
-            disabled={isRunning ? disabled : !canSend}
+            disabled={stopAction ? disabled : commands.hasCommandInput ? commands.busy : !canSend}
             aria-label={
-              isRunning
+              stopAction
                 ? t('creativeStudio.agent.stop', { defaultValue: 'Stop Agent' })
                 : t('creativeStudio.agent.send', { defaultValue: 'Send to Agent' })
             }
             icon={
-              isRunning ? (
+              stopAction ? (
                 <Square theme='filled' size='15' />
               ) : (
                 <ArrowUp theme='outline' size='17' />
               )
             }
-            onClick={isRunning ? onStop : submit}
+            loading={commands.busy}
+            onClick={stopAction ? onStop : submit}
           />
         </div>
       </div>

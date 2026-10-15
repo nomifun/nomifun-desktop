@@ -56,8 +56,8 @@ describe('history projection', () => {
       toHistoryEntry({
         id: '05',
         conversation_id: CONVERSATION_ID,
-        type: 'available_commands',
-        content: { commands: [] },
+        type: 'agent_status',
+        content: { status: 'connecting' },
         hidden: false,
         created_at: at(10),
       } as unknown as TMessage)

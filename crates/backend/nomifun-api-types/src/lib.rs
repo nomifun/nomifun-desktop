@@ -46,12 +46,10 @@ mod webhook;
 mod websocket;
 
 pub use session_ops::{
-    GetModelInfoResponse, ModelInfoEntry, ModelInfoPayload, SideQuestionRequest,
-    SideQuestionResponse, WorkspaceBrowseQuery, WorkspaceEntry,
+    GetModelInfoResponse, ModelInfoEntry, ModelInfoPayload, WorkspaceBrowseQuery, WorkspaceEntry,
 };
 pub use agent_build_extra::{
     NomiBuildExtra, NomiGoalSpec, NomiMcpCapabilityPolicy, NomiRuntimeProfile,
-    SlashCommandItem,
 };
 pub use agent_discovery::{
     AgentEnvEntry, AgentMetadata, AgentSource, AgentSourceInfo, BehaviorPolicy,

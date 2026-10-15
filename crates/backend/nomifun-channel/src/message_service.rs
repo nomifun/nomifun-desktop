@@ -1061,13 +1061,11 @@ impl ChannelMessageService {
             | AgentStreamEvent::ToolGroup(_)
             | AgentStreamEvent::AgentStatus(_)
             | AgentStreamEvent::TaskPlanChanged
-            | AgentStreamEvent::AvailableCommands(_)
             | AgentStreamEvent::SkillSuggest(_)
             | AgentStreamEvent::CronTrigger(_)
             | AgentStreamEvent::TurnCompleted(_)
             | AgentStreamEvent::System(_)
             | AgentStreamEvent::RequestTrace(_)
-            | AgentStreamEvent::SlashCommandsUpdated(_)
             | AgentStreamEvent::SessionAssigned(_) => None,
         }
     }

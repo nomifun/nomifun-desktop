@@ -843,22 +843,6 @@
       "tokensTooltip": "Tokens used this turn (input + output)"
     }
   },
-  "sideQuestion": {
-    "title": "Side Question",
-    "description": "Ask a quick question about the current conversation",
-    "started": "Starting side question...",
-    "answered": "Side question answered.",
-    "noAnswer": "The side question did not have a clear answer in the current conversation.",
-    "loading": "Thinking...",
-    "parentTaskRunning": "Main task still running in the background.",
-    "dismissHint": "Press Escape, Enter, or Space to dismiss",
-    "unsupported": "Side questions are not available for this conversation.",
-    "alreadyRunning": "A side question is already running.",
-    "attachmentsNotAllowed": "Side questions cannot include files or DOM snippets.",
-    "emptyQuestion": "Please enter a side question after /btw.",
-    "toolsRequired": "/btw can only answer questions based on what's already in this conversation. It doesn't have access to search, browse, or fetch new information.",
-    "error": "Failed to answer the side question."
-  },
   "commandQueue": {
     "title": "Queued Commands",
     "clear": "Clear Queue",
@@ -980,11 +964,6 @@
   "editMessage": {
     "action": "Edit",
     "banner": "Editing message — sending will re-run from here"
-  },
-  "slashCommands": {
-    "compact": {
-      "description": "Compress conversation context"
-    }
   },
   "clearContext": {
     "description": "Clear conversation context",

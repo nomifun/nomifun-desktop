@@ -7,7 +7,7 @@ use nomifun_agent_contracts::{
     AgentBindingChangedPayloadV1, AgentBindingValue, AgentPresetRevision, AgentPresetRevisionDigestInput,
     AgentPresetRevisionPayload, AgentSessionAggregate, ArtifactEnvelope,
     AgentStoreSchemaManifestPayload,
-    IdmmDecisionExplanation, IdmmDecisionNotice, AgentTurnOutcome,
+    IdmmDecisionExplanation, IdmmDecisionNotice, ContextClearedPayloadV1, AgentTurnOutcome,
     TurnWorkspaceFilesObservedV1, KnowledgeWritebackStartedV1, KnowledgeWritebackSettledV1,
     CanonicalAgentStoreSchemaManifestPayload, CanonicalApiInventoryPayload, CanonicalHttpMethod,
     CanonicalErrorRegistryPayload,
@@ -570,6 +570,7 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
     add_schema::<ResolvedSnapshotEnvelope>(&mut schemas, "agent_snapshot")?;
     add_schema::<AgentBindingValue>(&mut schemas, "agent_binding")?;
     add_schema::<AgentBindingChangedPayloadV1>(&mut schemas, "agent_binding_changed_payload")?;
+    add_schema::<ContextClearedPayloadV1>(&mut schemas, "context_cleared_payload")?;
     add_schema::<RemoteBinding>(&mut schemas, "remote_binding")?;
     add_schema::<AgentSessionAggregate>(&mut schemas, "agent_session")?;
     add_schema::<IdmmDecisionExplanation>(&mut schemas, "idmm_decision_explanation")?;
@@ -603,6 +604,7 @@ fn validate_generated_schemas(
         "capability_catalog_entry",
         "agent_snapshot",
         "agent_binding_changed_payload",
+        "context_cleared_payload",
     ];
     for name in required {
         if !schemas.contains_key(name) {
