@@ -75,16 +75,22 @@ pub fn documented_model_defaults(platform: &str, model: &str) -> Option<ModelCon
     let model = model.trim();
     let profile = provider.models.iter().find(|profile| profile.ids.iter().any(|id| id == model))?;
     let protocol_id = profile.chat_protocol.as_ref().or(provider.chat_protocol.as_ref())?;
-    let mut sources = provider.sources.clone();
-    for source in &profile.sources {
-        if !sources.contains(source) { sources.push(source.clone()); }
-    }
+    let sources = documentation_sources(provider, profile);
     Some(ModelConfigurationDefaults {
         model:model.to_owned(), protocol_id:protocol_id.clone(),
         context_limit:profile.context_limit, context_limit_kind:profile.context_limit_kind,
         output_limit:profile.output_limit, provider_params:profile.provider_params.clone(),
         reasoning_efforts:profile.reasoning_efforts.clone(), sources, checked_at:provider.checked_at.clone(),
     })
+}
+
+fn documentation_sources(provider: &ProviderProfile, model: &DocumentedModel) -> Vec<String> {
+    let preferred = if model.sources.is_empty() { &provider.sources } else { &model.sources };
+    let mut sources = Vec::new();
+    for source in preferred {
+        if !sources.contains(source) { sources.push(source.clone()); }
+    }
+    sources
 }
 
 /// Fill only absent native catalog information, with field-level document
@@ -120,6 +126,49 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use crate::manifest::{platform_presets, protocol_manifest_for_model_connection, validate_provider_params_for_protocol};
+
+    #[test]
+    fn model_documentation_sources_take_priority_and_are_deduplicated() {
+        let provider: ProviderProfile = serde_json::from_value(serde_json::json!({
+            "platforms":["fixture"],"checked_at":"2026-10-15","notes":"fixture",
+            "sources":["https://vendor.example/audit","https://vendor.example/audit"],
+            "models":[{"ids":["model"],"sources":["https://vendor.example/model","https://vendor.example/model","https://vendor.example/protocol"]}]
+        })).unwrap();
+        assert_eq!(documentation_sources(&provider,&provider.models[0]),
+            vec!["https://vendor.example/model","https://vendor.example/protocol"]);
+        assert_eq!(provider.sources.len(),2,"provider audit evidence remains intact");
+    }
+
+    #[test]
+    fn model_documentation_sources_fall_back_to_provider_evidence() {
+        let provider: ProviderProfile = serde_json::from_value(serde_json::json!({
+            "platforms":["fixture"],"checked_at":"2026-10-15","notes":"fixture",
+            "sources":["https://vendor.example/audit","https://vendor.example/audit","https://vendor.example/protocol"],
+            "models":[{"ids":["model"]}]
+        })).unwrap();
+        assert_eq!(documentation_sources(&provider,&provider.models[0]),
+            vec!["https://vendor.example/audit","https://vendor.example/protocol"]);
+        let step = provider_profile("stepfun").unwrap();
+        assert_eq!(documented_model_defaults("stepfun","step-3.7-flash").unwrap().sources,step.sources);
+    }
+
+    #[test]
+    fn step5_documentation_is_model_specific_without_changing_its_configuration() {
+        let defaults = documented_model_defaults("stepfun","step-5-preview").unwrap();
+        assert_eq!(defaults.sources,vec![
+            "https://platform.stepfun.com/docs/zh/guides/models/step-5-preview",
+            "https://platform.stepfun.com/docs/zh/api-reference/responses/responses-create",
+            "https://platform.stepfun.com/docs/zh/guides/developer/reasoning",
+            "https://platform.stepfun.com/docs/zh/guides/developer/integrations/codex",
+        ]);
+        assert_eq!(provider_profile("stepfun").unwrap().sources.len(),8);
+        assert_eq!(defaults.protocol_id,"openai.responses");
+        assert_eq!(defaults.context_limit,Some(1_000_000));
+        assert_eq!(defaults.context_limit_kind,Some(ModelContextLimitKind::Combined));
+        assert_eq!(defaults.output_limit,None);
+        assert_eq!(defaults.reasoning_efforts,Some(vec!["low".into(),"medium".into(),"high".into()]));
+        assert_eq!(defaults.provider_params,serde_json::json!({"reasoning_effort":"medium","chain_rounds":false,"include":null}));
+    }
 
     #[test]
     fn every_preset_is_reviewed_and_documented_profiles_are_executable_configuration() {

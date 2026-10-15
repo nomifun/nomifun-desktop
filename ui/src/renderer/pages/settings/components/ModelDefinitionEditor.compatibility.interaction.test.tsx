@@ -34,6 +34,16 @@ function Harness({ raw, protocol = 'openai.chat_text' }: { raw: string; protocol
   </I18nextProvider>;
 }
 
+function openProtocol(page: ReturnType<typeof render>) {
+  const disclosure = page.container.querySelector<HTMLButtonElement>('[data-capability-disclosure="chat"]')!;
+  if (disclosure.getAttribute('aria-expanded') !== 'true') fireEvent.click(disclosure);
+  fireEvent.click(page.container.querySelector<HTMLButtonElement>('[data-call-config-tab="protocol"]')!);
+}
+async function chooseProtocol(page: ReturnType<typeof render>, protocol: string) {
+  fireEvent.click(page.getByRole('combobox', { name: zhSettings.modelAdvanced.protocol }));
+  fireEvent.click(await page.findByRole('option', { name: new RegExp(protocol.replace('.', '\\.')) }));
+}
+
 describe('Chat compatibility controls', () => {
   test('edits max output and stream settings through the form while preserving authored parameters', async () => {
     const page = render(<Harness raw='{"temperature":0.4,"reasoning_effort":"high","future":{"enabled":true}}' />);
@@ -63,23 +73,64 @@ describe('Chat compatibility controls', () => {
   for (const scenario of [
     { protocol: 'openai.chat_text', target: 'openai.responses', parameter: 'stream_options', value: null },
     { protocol: 'openai.responses', target: 'openai.chat_text', parameter: 'chain_rounds', value: true },
-  ]) test(`switching ${scenario.protocol} to ${scenario.target} preserves ${scenario.parameter} and blocks save with a named correction`, async () => {
+  ]) test(`switching ${scenario.protocol} suspends ${scenario.parameter}, permits save, and restores it when switching back`, async () => {
     const raw = JSON.stringify({ [scenario.parameter]: scenario.value, future: { mode: 'fast' } });
     const page = render(<Harness raw={raw} protocol={scenario.protocol} />);
-    fireEvent.click(page.container.querySelector<HTMLButtonElement>('[data-capability-disclosure="chat"]')!);
-    fireEvent.click(page.container.querySelector<HTMLButtonElement>('[data-call-config-tab="protocol"]')!);
-    fireEvent.click(page.getByRole('combobox', { name: zhSettings.modelAdvanced.protocol }));
-    fireEvent.click(await page.findByRole('option', { name: new RegExp(scenario.target.replace('.', '\\.')) }));
+    openProtocol(page);
+    await chooseProtocol(page, scenario.target);
     const saved = JSON.parse(page.getByTestId('serialized').textContent!)[0];
     expect(saved.protocol).toBe(scenario.target);
-    expect(saved.provider_params).toEqual({ [scenario.parameter]: scenario.value, future: { mode: 'fast' } });
+    expect(saved.provider_params).toEqual({ future: { mode: 'fast' } });
+    expect((page.getByTestId('save') as HTMLButtonElement).disabled).toBe(false);
+    expect(page.container.querySelector('[data-protocol-parameter-transition]')?.textContent).toContain('已暂存旧协议设置');
+    expect(page.container.querySelector('[data-protocol-parameter-transition]')?.textContent).toContain('本次编辑');
+    expect(saved).not.toHaveProperty('protocolParameterStash');
+    await chooseProtocol(page, scenario.protocol);
+    expect(JSON.parse(page.getByTestId('serialized').textContent!)[0].provider_params).toEqual({ [scenario.parameter]: scenario.value, future: { mode: 'fast' } });
+    expect((page.getByTestId('save') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  test('converts structured output with stream controls directly into a saveable Responses draft', async () => {
+    const page = render(<Harness raw={JSON.stringify({ response_format: { type: 'json_schema', json_schema: { name: 'answer', schema: { type: 'object' }, strict: true } },
+      verbosity: 'high', reasoning: { effort: 'low' }, stream_options: null, max_tokens_field: 'max_completion_tokens', vendor: { enabled: true } })} />);
+    openProtocol(page); await chooseProtocol(page, 'openai.responses');
+    const saved = JSON.parse(page.getByTestId('serialized').textContent!)[0];
+    expect(saved.provider_params).toEqual({ text: { format: { type: 'json_schema', name: 'answer', schema: { type: 'object' }, strict: true }, verbosity: 'high' },
+      reasoning_effort: 'low', vendor: { enabled: true } });
+    expect((page.getByTestId('save') as HTMLButtonElement).disabled).toBe(false);
+    expect(page.container.querySelector('[data-protocol-parameter-transition]')?.textContent).toContain('输出格式');
+    expect(page.container.querySelector('[data-protocol-parameter-transition]')?.textContent).toContain('回答详略');
+  });
+
+  test('format conflicts require an explicit choice and unrelated edits cannot dismiss the review', async () => {
+    const raw = JSON.stringify({ response_format: { type: 'json_object' }, text: { format: { type: 'text' } } });
+    const page = render(<Harness raw={raw} />);
+    openProtocol(page); await chooseProtocol(page, 'openai.responses');
     expect((page.getByTestId('save') as HTMLButtonElement).disabled).toBe(true);
-    const error = page.container.querySelector<HTMLElement>('[data-capability-error="provider_param_scope"]')!;
-    expect(error.textContent).toContain(scenario.parameter);
-    expect(error.textContent).toContain('切换已保留原值');
+    expect(page.container.querySelector('[data-protocol-transition-conflicts]')?.textContent).toContain('输出格式');
+    expect(page.container.querySelector('[data-protocol-transition-conflicts]')?.textContent).toContain('不参与当前调用');
+    const textarea = page.container.querySelector<HTMLTextAreaElement>('[data-provider-params-json] textarea')!;
+    fireEvent.change(textarea, { target: { value: JSON.stringify({ ...JSON.parse(raw), temperature: 0.2 }) } });
+    expect((page.getByTestId('save') as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(page.getByRole('button', { name: zhSettings.protocolTransition.useTarget }));
+    expect(JSON.parse(page.getByTestId('serialized').textContent!)[0].provider_params).toEqual({ text: { format: { type: 'text' } }, temperature: 0.2 });
+    expect((page.getByTestId('save') as HTMLButtonElement).disabled).toBe(false);
+    await chooseProtocol(page, 'openai.chat_text');
+    expect(JSON.parse(page.getByTestId('serialized').textContent!)[0].provider_params.response_format).toEqual({ type: 'text' });
+    fireEvent.click(page.getByRole('button', { name: zhSettings.protocolTransition.restore }));
+    expect(JSON.parse(page.getByTestId('serialized').textContent!)[0].provider_params).toEqual({ response_format: { type: 'json_object' }, temperature: 0.2 });
+    expect((page.getByTestId('save') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  test('invalid JSON stays verbatim and offers a return action without requiring its deletion', async () => {
+    const raw = '{  "unfinished":';
+    const page = render(<Harness raw={raw} />);
+    openProtocol(page); await chooseProtocol(page, 'openai.responses');
     const textarea = page.container.querySelector<HTMLTextAreaElement>('[data-provider-params-json] textarea')!;
     expect(textarea.value).toBe(raw);
-    fireEvent.change(textarea, { target: { value: '{"future":{"mode":"fast"}}' } });
-    expect((page.getByTestId('save') as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(page.getByRole('button', { name: '切回 openai.chat_text' }));
+    expect(textarea.value).toBe(raw);
+    expect(page.queryByRole('button', { name: '切回 openai.chat_text' })).toBeNull();
+    expect((page.getByTestId('save') as HTMLButtonElement).disabled).toBe(true);
   });
 });

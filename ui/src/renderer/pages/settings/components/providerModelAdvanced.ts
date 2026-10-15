@@ -24,6 +24,7 @@ import {
   type SessionReasoningEffort,
 } from '@/common/types/reasoningEffort';
 import { validateProviderParameterControls, type ProviderParameterIssue } from './providerParameterValidation';
+import { refreshCapabilityTransitionIssues, transitionCapabilityParams, type ProtocolParameterStash, type ProtocolParameterTransitionNotice } from './chatProtocolDraftTransition';
 
 /** The endpoint fields owned by a task capability on the wire. */
 export const CAPABILITY_ENDPOINT_FIELDS = [
@@ -72,6 +73,9 @@ export interface ModelCapabilityDraft {
   contextLimitSource?: 'user';
   outputLimitSource?: 'user';
   providerParamsSource?: 'user';
+  /** Current edit only. Never serialized or cached with provider credentials. */
+  protocolParameterStash?: ProtocolParameterStash;
+  protocolParameterTransition?: ProtocolParameterTransitionNotice;
   /** Advisory values owned by one exact model; never serialized. */
   modelDefaults?: {
     model: string;
@@ -83,7 +87,7 @@ export interface ModelCapabilityDraft {
 }
 
 export type ModelCapabilityDraftPatch = Partial<
-  Omit<ModelCapabilityDraft, 'task' | 'routeSource' | 'transportSource' | 'modelDefaults' | 'providerParamsSource'>
+  Omit<ModelCapabilityDraft, 'task' | 'routeSource' | 'transportSource' | 'modelDefaults' | 'providerParamsSource' | 'protocolParameterStash' | 'protocolParameterTransition'>
 > & { providerParamsEditedKeys?: readonly string[] };
 
 export interface ModelDefinitionDraft {
@@ -146,6 +150,7 @@ export type CapabilityValidationError =
   | 'cross_origin_consent_required'
   | 'invalid_max_tokens_field'
   | 'native_reasoning_effort'
+  | 'protocol_parameter_transition'
   | ProviderParameterIssue['code']
   | 'invalid_provider_params';
 
@@ -688,7 +693,7 @@ export const patchCapabilityDraft = (
       ? Object.fromEntries(Object.entries(previousDefaults.providerParams).filter(([key]) => !providerParamsEditedKeys.includes(key)))
       : {},
   } : previousDefaults;
-  return {
+  const next: ModelCapabilityDraft = {
   ...capability,
   ...fields,
   ...(modelDefaults ? { modelDefaults } : {}),
@@ -703,6 +708,7 @@ export const patchCapabilityDraft = (
     ? { transportSource: 'user' as const }
     : {}),
   };
+  return paramsEdited ? refreshCapabilityTransitionIssues(next) : next;
 };
 
 /**
@@ -715,10 +721,9 @@ export const changeCapabilityProtocol = (
   manifest?: ModelProtocolManifest
 ): ModelCapabilityDraft => {
   const normalizedProtocol = protocol.trim();
+  const transitioned = transitionCapabilityParams(capability, normalizedProtocol);
   if (normalizedProtocol === capability.protocol.trim()) {
-    return capability.routeSource !== 'user' || capability.transportSource === 'recommendation' || capability.transportSource === 'blank'
-      ? { ...capability, routeSource: 'user', transportSource: 'user' }
-      : capability;
+    return { ...transitioned, routeSource: 'user', transportSource: 'user' };
   }
   const recommendation = manifest?.recommendation;
   const isRecommendation = recommendation?.protocol_id === normalizedProtocol;
@@ -732,7 +737,7 @@ export const changeCapabilityProtocol = (
       : '';
 
   return {
-    ...resetCapabilityTransport(capability, 'user'),
+    ...resetCapabilityTransport(transitioned, 'user'),
     routeSource: 'user',
     protocol: normalizedProtocol,
     connectionRole,
@@ -1168,6 +1173,9 @@ export const validateModelDefinition = (
       errors.push({ task: capability.task, code: 'cross_origin_consent_required' });
     }
     const providerParams = parseProviderParams(capability.providerParamsJson);
+    if (capability.protocolParameterTransition?.issues.length) {
+      errors.push({ task: capability.task, code: 'protocol_parameter_transition' });
+    }
     if (!providerParams.ok) {
       errors.push({ task: capability.task, code: 'invalid_provider_params' });
     } else if (providerParams.value.reasoning_effort !== undefined) {

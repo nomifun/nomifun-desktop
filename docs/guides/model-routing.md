@@ -111,8 +111,15 @@ and timeout failures do not establish that another protocol works. This action
 may incur small model usage and checks at most two protocols; typing an ID never
 starts a paid request. A verified selection updates the draft and takes effect
 only after saving. Background discovery does not replace a working manual choice.
-If protocol-specific output or thinking options cannot be transferred safely, the
-check preserves the draft and asks you to configure those options explicitly.
+Manually switching Chat Completions and Responses converts equivalent output
+formats, verbosity and reasoning settings, and resets incompatible standard output
+field names. Options belonging to the previous protocol are held in the current
+editing draft and can be restored by switching back. Held options are neither sent
+to the model nor written into saved parameter JSON. Switching alone makes no paid call.
+For conflicts or options without an equivalent, the editor explains the affected
+settings and offers a single action to hold them and use the target protocol's
+configuration, or you can switch back. No manual JSON deletion is needed. Actual-model
+detection never drops these semantic constraints without that explicit choice.
 
 ## Add models from a conversation
 

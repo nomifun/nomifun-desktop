@@ -9,6 +9,7 @@ import type { ProbeProviderConnectionResponse } from '@/common/protocolBindings/
 import type { ProviderReachability } from '@/common/protocolBindings/ProviderReachability';
 import type { ProtocolDescriptor } from '@/common/types/provider/modelProtocolManifest';
 import {
+  changeCapabilityProtocol,
   isProtocolAuthSchemeAllowed,
   type ModelDefinitionDraft,
   type ModelProtocolManifest,
@@ -391,8 +392,10 @@ export const applyProviderCompatibilityMode = (
         return capability;
       }
       const resetTransport = force || capability.protocol.trim() !== protocol;
+      const transitioned = changeCapabilityProtocol(capability, protocol);
       return {
-        ...capability,
+        ...transitioned,
+        routeSource: capability.routeSource,
         // An explicit mode is a user choice. Keep it out of the manifest's
         // automatic recommendation loop, otherwise Custom's OpenAI fallback
         // would immediately overwrite a selected Claude mode.
@@ -407,7 +410,6 @@ export const applyProviderCompatibilityMode = (
               contentEndpoint: '',
               realtimeEndpoint: '',
               allowCrossOriginCredentials: false,
-              providerParamsJson: capability.providerParamsJson,
             }
           : {}),
         // A transport switch must not replace a configured model limit with

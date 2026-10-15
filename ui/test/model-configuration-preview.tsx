@@ -21,8 +21,26 @@ import { purposeManifests } from './fixtures/modelPurposeEditor';
 
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'zh-CN', resources: { 'zh-CN': { translation: { settings, common } } }, interpolation: { escapeValue: false } });
-const manifests = purposeManifests;
 const previewParams = new URLSearchParams(window.location.search);
+const previewModelReferences = previewParams.get('reference') === 'stepfun';
+const manifests = previewModelReferences ? { ...purposeManifests, chat: {
+  ...purposeManifests.chat!,
+  recommendation: { ...purposeManifests.chat!.recommendation!, protocol_id: 'openai.responses' },
+  protocols: purposeManifests.chat!.protocols.map(protocol => protocol.protocol_id === 'openai.chat_text' ? {
+    ...protocol, protocol_id: 'openai.responses', endpoints: protocol.endpoints.map(endpoint =>
+      endpoint.field === 'endpoint' ? { ...endpoint, default_value: '/responses' } : endpoint),
+  } : protocol),
+  model_defaults: {
+    model: 'step-5-preview', protocol_id: 'openai.responses', context_limit: 1_000_000,
+    provider_params: { reasoning_effort: 'medium' }, checked_at: '2026-10-15',
+    sources: [
+      'https://platform.stepfun.com/docs/zh/guides/models/step-5-preview',
+      'https://platform.stepfun.com/docs/zh/api-reference/responses/responses-create',
+      'https://platform.stepfun.com/docs/zh/guides/developer/reasoning',
+      'https://platform.stepfun.com/docs/zh/guides/developer/integrations/codex',
+    ],
+  },
+} } : purposeManifests;
 const previewPurpose = previewParams.get('purpose') === 'chat' ? 'chat' : undefined;
 const previewReferenceCatalog = previewParams.get('source') === 'official_documentation';
 const EMPTY_ERRORS: never[] = [];
@@ -34,7 +52,8 @@ const INITIAL_CATALOG: ModelCatalogSuggestion[] = [
   { value: 'new-model-no-metadata', label: 'new-model-no-metadata', tasks: [], traits: [] },
 ];
 function Preview() {
-  const [value, setValue] = useState<ModelDefinitionDraft>(() => ({ ...createModelDefinitionDraft(previewPurpose), model: previewPurpose ? 'chat-example' : 'new-model-no-metadata' }));
+  const [value, setValue] = useState<ModelDefinitionDraft>(() => ({ ...createModelDefinitionDraft(previewModelReferences ? 'chat' : previewPurpose),
+    model: previewModelReferences ? 'step-5-preview' : previewPurpose ? 'chat-example' : 'new-model-no-metadata' }));
   const [catalog, setCatalog] = useState(INITIAL_CATALOG);
   const [saved, setSaved] = useState('');
   const validation = useMemo(() => validateModelDefinition(value, manifests, aliasProviderBaseUrl, [], [], [], 'bearer'), [value]);

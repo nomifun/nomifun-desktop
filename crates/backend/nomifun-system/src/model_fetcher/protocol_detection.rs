@@ -153,6 +153,16 @@ fn prepare_candidate(platform: &str, model: &str, original: &ProviderModelCapabi
 fn candidate_capability(original: &ProviderModelCapabilityInput, protocol: &str) -> Result<ProviderModelCapabilityInput, AppError> {
     let mut candidate = original.clone();
     candidate.protocol = protocol.into();
+    let params = original.provider_params.as_object().ok_or_else(|| AppError::BadRequest("provider_params must be an object".into()))?;
+    let transition = nomifun_model_invoke::transition_chat_provider_params(params,&original.protocol,protocol);
+    if !transition.issues.is_empty() {
+        let issues = transition.issues.iter().map(|issue| format!("provider_params.{} ({:?})",issue.parameter,issue.kind))
+            .collect::<Vec<_>>().join(", ");
+        return Err(AppError::BadRequest(format!(
+            "protocol parameters require a choice before verification: {issues}; resolve these policies in the editor before testing the other protocol"
+        )));
+    }
+    candidate.provider_params = Value::Object(transition.params);
     if original.protocol.trim() == protocol { return Ok(candidate); }
     if let Some(endpoint) = original.endpoint.as_deref() {
         let suffix_start = endpoint.find(['?', '#']).unwrap_or(endpoint.len());
@@ -167,30 +177,6 @@ fn candidate_capability(original: &ProviderModelCapabilityInput, protocol: &str)
             return Err(AppError::BadRequest("custom endpoint cannot be safely converted to another protocol; configure its endpoint explicitly".into()));
         };
         candidate.endpoint = Some(format!("{converted}{tail}"));
-    }
-    let params = candidate.provider_params.as_object_mut().ok_or_else(|| AppError::BadRequest("provider_params must be an object".into()))?;
-    for key in ["text", "response_format", "reasoning", "thinking"] {
-        let has_policy = params.get(key).is_some_and(|value| match value {
-            Value::Null => false,
-            Value::Object(value) => !value.is_empty(),
-            Value::Array(value) => !value.is_empty(),
-            Value::String(value) => !value.trim().is_empty(),
-            Value::Bool(_) | Value::Number(_) => true,
-        });
-        if has_policy {
-            return Err(AppError::BadRequest(format!(
-                "provider_params.{key} cannot be safely converted between Chat Completions and Responses; keep the current protocol or explicitly configure this policy for the other protocol"
-            )));
-        }
-    }
-    if protocol == CHAT {
-        for key in ["chain_rounds", "include"] { params.remove(key); }
-    } else {
-        for key in ["stream_options", "require_reasoning_content"] { params.remove(key); }
-    }
-    if params.get("max_tokens_field").and_then(Value::as_str)
-        .is_some_and(|field| matches!(field.trim(), "max_tokens" | "max_completion_tokens" | "max_output_tokens")) {
-        params.remove("max_tokens_field");
     }
     Ok(candidate)
 }

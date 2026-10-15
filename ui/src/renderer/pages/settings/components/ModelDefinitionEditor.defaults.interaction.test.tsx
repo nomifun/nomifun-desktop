@@ -29,21 +29,26 @@ function Harness() {
   </I18nextProvider>;
 }
 
-test('late model defaults fill the form, show evidence and exact efforts, and cancel retains recommended values', async () => {
+test('late defaults fill the form, keep references collapsed, and preserve exact effort choices', async () => {
   const page = render(<Harness />);
   fireEvent.click(page.getByRole('button', { name: 'Load model defaults' }));
   const saved = () => JSON.parse(page.getByTestId('serialized').textContent!)[0];
   await waitFor(() => expect(saved().context_limit).toBe(100_000));
   expect(saved().provider_params).toEqual({ reasoning_effort: 'high' });
-  expect(page.getByText(/核验于 2026-10-15/)).toBeTruthy();
-  expect((page.getByRole('link', { name: '来源 1' }) as HTMLAnchorElement).href).toBe('https://vendor.example/docs/model');
+  expect(page.queryByText(/资料核对日期/)).toBeNull();
+  expect(page.queryByRole('link')).toBeNull();
+  fireEvent.click(page.getByRole('button', { name: zhSettings.modelAdvanced.referenceTitle }));
+  expect(await page.findByText(/资料核对日期：2026-10-15/)).toBeTruthy();
+  const source = page.getByRole('link', { name: /docs\/model.*vendor.example/ });
+  expect((source as HTMLAnchorElement).href).toBe('https://vendor.example/docs/model');
   const open = spyOn(window, 'open').mockReturnValue(null);
   try {
-    fireEvent.click(page.getByRole('link', { name: '来源 1' }));
+    fireEvent.click(source);
     expect(open).toHaveBeenCalledWith('https://vendor.example/docs/model', '_blank', 'noopener,noreferrer');
   } finally {
     open.mockRestore();
   }
+  fireEvent.click(page.getByRole('button', { name: zhSettings.modelAdvanced.referenceTitle }));
   fireEvent.click(page.container.querySelector<HTMLButtonElement>('[data-capability-disclosure="chat"]')!);
   fireEvent.click(page.getByRole('tab', { name: zhSettings.modelAdvanced.reasoningEffort }));
   expect(page.container.querySelector('[data-reasoning-effort="xhigh"]')).toBeNull();

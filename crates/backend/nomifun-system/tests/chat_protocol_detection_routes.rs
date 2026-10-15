@@ -109,14 +109,53 @@ async fn an_explicit_missing_responses_endpoint_can_select_the_working_chat_rout
 }
 
 #[tokio::test]
-async fn protocol_specific_output_and_thinking_policies_are_never_dropped_to_make_a_candidate_work() {
+async fn equivalent_output_and_thinking_policies_are_preserved_in_the_tested_candidate() {
+    let schema=json!({"name":"result","strict":true,"schema":{"type":"object",
+        "properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}});
+    let scenarios = [
+        ("openai.responses", "/v1/responses", "/v1/chat/completions", "openai.chat_text", false,
+            json!({"text":{"format":{"type":"json_schema","name":"result","strict":true,
+                "schema":schema["schema"]},"verbosity":"low"}}),
+            json!({"response_format":{"type":"json_schema","json_schema":schema},"verbosity":"low"})),
+        ("openai.chat_text", "/v1/chat/completions", "/v1/responses", "openai.responses", true,
+            json!({"thinking":{"type":"disabled"},"response_format":{"type":"json_object"},
+                "verbosity":"high","stream_options":{"include_usage":false}}),
+            json!({"thinking":{"type":"disabled"},"text":{"format":{"type":"json_object"},"verbosity":"high"}})),
+    ];
+    for (protocol,endpoint,other,selected,responses,params,expected) in scenarios {
+        let server=MockServer::start().await;
+        Mock::given(method("POST")).and(path(endpoint))
+            .respond_with(ResponseTemplate::new(405).set_body_json(json!({"error":{"code":"unsupported_endpoint"}})))
+            .expect(1).mount(&server).await;
+        mount_success(&server,other,responses,1).await;
+        let (router,_)=setup().await;
+        let mut draft=anonymous(&server,protocol);
+        draft["capability"]["provider_params"]=params;
+        let (status,body)=post(&router,"/api/providers/detect-chat-protocol",draft).await;
+        assert_eq!(status,StatusCode::OK,"{body}");
+        assert_eq!(body["data"]["selected_protocol"],selected,"{body}");
+        assert_eq!(body["data"]["selected_capability"]["provider_params"],expected);
+        assert_eq!(body["data"]["selected_capability"]["output_limit"],16000);
+        let received=server.received_requests().await.unwrap();
+        assert_eq!(received.len(),2);
+        let tested: Value=serde_json::from_slice(&received[1].body).unwrap();
+        for (key,value) in expected.as_object().unwrap() { assert_eq!(&tested[key],value,"{key}"); }
+        if responses {
+            assert!(tested.get("response_format").is_none());
+            assert!(tested.get("stream_options").is_none());
+        } else { assert!(tested.get("text").is_none()); }
+    }
+}
+
+#[tokio::test]
+async fn conflicting_or_unmapped_policies_stop_before_a_paid_candidate_without_losing_values() {
     let scenarios = [
         ("openai.responses", "/v1/responses", "/v1/chat/completions", "text",
-            json!({"format":{"type":"json_schema","name":"result","strict":true,
-                "schema":{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}}})),
-        ("openai.chat_text", "/v1/chat/completions", "/v1/responses", "thinking", json!({"type":"disabled"})),
+            json!({"text":{"future_policy":"keep"}})),
+        ("openai.chat_text", "/v1/chat/completions", "/v1/responses", "response_format",
+            json!({"response_format":{"type":"json_object"},"text":{"format":{"type":"text"}}})),
     ];
-    for (protocol,endpoint,other,key,policy) in scenarios {
+    for (protocol,endpoint,other,key,params) in scenarios {
         let server=MockServer::start().await;
         Mock::given(method("POST")).and(path(endpoint))
             .respond_with(ResponseTemplate::new(405).set_body_json(json!({"error":{"code":"unsupported_endpoint"}})))
@@ -124,7 +163,7 @@ async fn protocol_specific_output_and_thinking_policies_are_never_dropped_to_mak
         mount_success(&server,other,protocol == "openai.chat_text",0).await;
         let (router,_)=setup().await;
         let mut draft=anonymous(&server,protocol);
-        draft["capability"]["provider_params"]=json!({key:policy});
+        draft["capability"]["provider_params"]=params;
         let original=draft.clone();
         let (status,body)=post(&router,"/api/providers/detect-chat-protocol",draft).await;
         assert_eq!(status,StatusCode::OK,"{body}");
@@ -140,6 +179,23 @@ async fn protocol_specific_output_and_thinking_policies_are_never_dropped_to_mak
         assert_eq!(tested[key],original["capability"]["provider_params"][key]);
         assert_eq!(original["capability"]["output_limit"],16000);
     }
+}
+
+#[tokio::test]
+async fn same_protocol_nested_reasoning_effort_is_normalized_before_testing_and_returning_the_draft() {
+    let server=MockServer::start().await;
+    mount_success(&server,"/v1/responses",true,1).await;
+    let (router,_)=setup().await;
+    let mut draft=anonymous(&server,"openai.responses");
+    draft["capability"]["provider_params"]=json!({"reasoning":{"effort":"high","summary":"auto"}});
+    let (status,body)=post(&router,"/api/providers/detect-chat-protocol",draft).await;
+    assert_eq!(status,StatusCode::OK,"{body}");
+    assert_eq!(body["data"]["selected_capability"]["provider_params"],
+        json!({"reasoning_effort":"high","reasoning":{"summary":"auto"}}));
+    assert_eq!(body["data"]["attempts"].as_array().unwrap().len(),1);
+    let received=server.received_requests().await.unwrap();
+    let tested: Value=serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(tested["reasoning"],json!({"effort":"high","summary":"auto"}));
 }
 
 #[tokio::test]

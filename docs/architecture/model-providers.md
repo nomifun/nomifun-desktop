@@ -93,8 +93,17 @@ the draft snapshot before applying results, blocks duplicate submissions and
 discards stale results after model, credential or manual changes. A click and a
 usage notice precede real requests; normal typing and reachability discovery do
 not trigger billable model calls.
-Cross-protocol candidates must retain output and thinking semantics. When native
-parameters cannot be transferred safely, selection stops without changing the draft.
+Chat/Responses parameter conversion is verified against shared frontend/backend
+test vectors. It maps `response_format` and `text.format` using the
+[official OpenAI migration shapes](https://developers.openai.com/api/docs/guides/migrate-to-responses),
+and preserves verbosity and reasoning semantics. Local effort configuration remains
+the normalized top-level `reasoning_effort`. Unknown vendor extensions retain their
+original values; their names cannot establish protocol support.
+Manual switching holds protocol-specific controls in the current editor draft so
+switching back can restore them. This UI metadata never enters save requests.
+Conflicting or unmappable semantic constraints require an explicit action to hold
+them. Actual-model detection uses equivalent conversion rules and stops before any
+candidate request that would lose unresolved constraints.
 
 ## Sources and validation
 

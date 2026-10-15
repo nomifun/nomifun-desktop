@@ -180,6 +180,12 @@
         "context_limit": 1000000,
         "context_limit_kind": "combined",
         "reasoning_efforts": ["low", "medium", "high"],
+        "sources": [
+          "https://platform.stepfun.com/docs/zh/guides/models/step-5-preview",
+          "https://platform.stepfun.com/docs/zh/api-reference/responses/responses-create",
+          "https://platform.stepfun.com/docs/zh/guides/developer/reasoning",
+          "https://platform.stepfun.com/docs/zh/guides/developer/integrations/codex"
+        ],
         "provider_params": {"reasoning_effort": "medium", "chain_rounds": false, "include": null}
       },
       {

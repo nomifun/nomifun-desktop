@@ -10,7 +10,6 @@ import type { ModelTaskSource } from '@/common/protocolBindings/ModelTaskSource'
 import type { ModelCatalogSource } from '@/common/protocolBindings/ModelCatalogSource';
 import type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
 import { ttsSupportsProviderParamVoice, ttsVoiceOptionsFor } from '@/renderer/components/model/ttsVoiceOptions';
-import { openExternalUrl } from '@/renderer/utils/platform';
 import { AutoComplete, Button, Checkbox, Input, Popconfirm, Select, Tag, Tooltip } from '@arco-design/web-react';
 import { CheckOne, Code, DeleteFour, Down, Left, LinkOne, Refresh, Right, Search, Shield, TagOne } from '@icon-park/react';
 import React, { useEffect, useId, useMemo, useState } from 'react';
@@ -18,6 +17,8 @@ import { useTranslation } from 'react-i18next';
 import { ContextLimitSelect } from './ContextLimitSelect';
 import { OutputLimitInput } from './OutputLimitInput';
 import ModelProtocolDetectionControl from './ModelProtocolDetectionControl';
+import ModelConfigurationReference from './ModelConfigurationReference';
+import ProtocolParameterTransitionFeedback from './ProtocolParameterTransitionFeedback';
 import { applyDetectedChatProtocol, chatProtocolDetectionSnapshot, isDetectableChatProtocol,
   type ModelProtocolDetectionContext } from './modelProtocolDetection';
 import {
@@ -156,6 +157,7 @@ const callConfigIntentForError = (code: CapabilityValidationError): CallConfigIn
     case 'provider_param_type':
     case 'provider_param_owned':
     case 'provider_param_output_limit':
+    case 'protocol_parameter_transition':
       return 'protocol';
     default:
       return 'diagnostics';
@@ -1357,45 +1359,11 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                 className='space-y-10px border-0 border-t border-solid border-[var(--color-border-2)] px-14px py-12px'
                 data-model-context-settings={capability.task}
               >
-                {modelDefaults && (
-                  <div className='space-y-4px text-11px text-t-secondary' data-model-configuration-evidence>
-                    <div>
-                      {t('settings.modelAdvanced.documentedDefaults', {
-                        defaultValue: '官方模型配置建议 · 核验于 {{date}}', date: modelDefaults.checked_at,
-                      })}
-                    </div>
-                    <div className='flex flex-wrap items-center gap-x-8px gap-y-2px'>
-                      <span>{modelDefaults.protocol_id}</span>
-                      {modelDefaults.context_limit !== undefined && <span>{t('settings.modelAdvanced.documentedContext', {
-                        defaultValue: '建议上下文：{{tokens}}', tokens: modelDefaults.context_limit.toLocaleString(),
-                      })}</span>}
-                      {modelDefaults.output_limit !== undefined && <span>{t('settings.modelAdvanced.documentedOutput', {
-                        defaultValue: '建议最大输出：{{tokens}}', tokens: modelDefaults.output_limit.toLocaleString(),
-                      })}</span>}
-                      {typeof modelDefaults.provider_params.reasoning_effort === 'string' && (
-                        <span>{t('settings.modelAdvanced.recommendedReasoning', {
-                          defaultValue: '默认思考：{{effort}}', effort: modelDefaults.provider_params.reasoning_effort,
-                        })}</span>
-                      )}
-                      {modelDefaults.sources.filter(source => /^https:\/\//i.test(source)).map((source, index) => (
-                        <a key={source} href={source} target='_blank' rel='noreferrer' className='text-primary-6'
-                          onClick={(event) => {
-                            event.preventDefault();
-                            void openExternalUrl(source).catch(error => {
-                              console.error('Failed to open model documentation:', error);
-                            });
-                          }}>
-                          {t('settings.modelAdvanced.documentationSource', { defaultValue: '来源 {{index}}', index: index + 1 })}
-                        </a>
-                      ))}
-                    </div>
-                    <div>{t('settings.modelAdvanced.documentedDefaultsHint', {
-                      defaultValue: '仅补充新建草稿的空白配置；已保存配置、手动修改和供应商目录声明值保持优先。',
-                    })}</div>
+                <div className='flex items-center justify-between gap-8px'>
+                  <div className='text-12px font-600 text-t-primary'>
+                    {t('settings.modelAdvanced.contextSettingsTitle', { defaultValue: '上下文与输出' })}
                   </div>
-                )}
-                <div className='text-12px font-600 text-t-primary'>
-                  {t('settings.modelAdvanced.contextSettingsTitle', { defaultValue: '上下文与输出' })}
+                  {modelDefaults && <ModelConfigurationReference key={`${modelDefaults.model}:${modelDefaults.protocol_id}`} defaults={modelDefaults} />}
                 </div>
                 <div className='grid grid-cols-2 gap-10px'>
                   <div className='space-y-6px'>
@@ -1723,6 +1691,12 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   });
                 }}
                 triggerProps={{ getPopupContainer: () => document.body }}
+              />
+              <ProtocolParameterTransitionFeedback capability={capability}
+                onUpdate={(update) => onChange((current) => ({ ...current, capabilities: current.capabilities.map(candidate =>
+                  candidate.task === capability.task ? update(candidate) : candidate) }))}
+                onReturn={(protocol) => onChange((current) => ({ ...current, capabilities: current.capabilities.map(candidate =>
+                  candidate.task === capability.task ? changeCapabilityProtocol(candidate, protocol, manifest) : candidate) }))}
               />
               {capability.task === 'chat' && (capability.protocol === 'openai.responses' || capability.protocol === 'openai.chat_text') && (
                 <div className='text-11px text-t-tertiary' data-openai-protocol-hint={capability.protocol}>

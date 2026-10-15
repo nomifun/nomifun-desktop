@@ -1,0 +1,707 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "chat_to_responses_transport_controls",
+      "source": "openai.chat_text",
+      "target": "openai.responses",
+      "params": {
+        "stream_options": {
+          "include_usage": false
+        },
+        "require_reasoning_content": true,
+        "max_tokens_field": "max_completion_tokens",
+        "reasoning_effort": "high",
+        "temperature": 0.3,
+        "vendor": {
+          "enabled": true
+        }
+      },
+      "expected": {
+        "params": {
+          "reasoning_effort": "high",
+          "temperature": 0.3,
+          "vendor": {
+            "enabled": true
+          }
+        },
+        "suspended": {
+          "stream_options": {
+            "include_usage": false
+          },
+          "require_reasoning_content": true,
+          "max_tokens_field": "max_completion_tokens"
+        },
+        "issues": []
+      }
+    },
+    {
+      "name": "responses_to_chat_transport_controls",
+      "source": "openai.responses",
+      "target": "openai.chat_text",
+      "params": {
+        "include": null,
+        "chain_rounds": false,
+        "max_tokens_field": "max_output_tokens",
+        "reasoning_effort": "low"
+      },
+      "expected": {
+        "params": {
+          "reasoning_effort": "low"
+        },
+        "suspended": {
+          "include": null,
+          "chain_rounds": false,
+          "max_tokens_field": "max_output_tokens"
+        },
+        "issues": []
+      }
+    },
+    {
+      "name": "custom_output_alias_and_thinking_are_preserved",
+      "source": "openai.chat_text",
+      "target": "openai.responses",
+      "params": {
+        "max_tokens_field": "vendor_output_cap",
+        "thinking": {
+          "type": "disabled"
+        },
+        "future_param": {
+          "mode": "custom"
+        }
+      },
+      "expected": {
+        "params": {
+          "max_tokens_field": "vendor_output_cap",
+          "thinking": {
+            "type": "disabled"
+          },
+          "future_param": {
+            "mode": "custom"
+          }
+        },
+        "suspended": {},
+        "issues": []
+      }
+    },
+    {
+      "name": "json_schema_chat_to_responses",
+      "source": "openai.chat_text",
+      "target": "openai.responses",
+      "params": {
+        "response_format": {
+          "type": "json_schema",
+          "json_schema": {
+            "name": "answer",
+            "description": "Answer schema",
+            "strict": false,
+            "schema": {
+              "type": "object",
+              "properties": {
+                "ok": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "ok"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "expected": {
+        "params": {
+          "text": {
+            "format": {
+              "type": "json_schema",
+              "name": "answer",
+              "description": "Answer schema",
+              "strict": false,
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "suspended": {},
+        "issues": []
+      }
+    },
+    {
+      "name": "json_schema_responses_to_chat",
+      "source": "openai.responses",
+      "target": "openai.chat_text",
+      "params": {
+        "text": {
+          "format": {
+            "type": "json_schema",
+            "name": "answer",
+            "strict": true,
+            "schema": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "value"
+              ]
+            }
+          },
+          "verbosity": "low"
+        }
+      },
+      "expected": {
+        "params": {
+          "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+              "name": "answer",
+              "strict": true,
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value"
+                ]
+              }
+            }
+          },
+          "verbosity": "low"
+        },
+        "suspended": {},
+        "issues": []
+      }
+    },
+    {
+      "name": "json_object_chat_to_responses_merges_verbosity",
+      "source": "openai.chat_text",
+      "target": "openai.responses",
+      "params": {
+        "response_format": {
+          "type": "json_object"
+        },
+        "verbosity": "high",
+        "text": {
+          "provider_extension": "keep"
+        }
+      },
+      "expected": {
+        "params": {
+          "text": {
+            "format": {
+              "type": "json_object"
+            },
+            "verbosity": "high",
+            "provider_extension": "keep"
+          }
+        },
+        "suspended": {},
+        "issues": []
+      }
+    },
+    {
+      "name": "plain_text_responses_to_chat",
+      "source": "openai.responses",
+      "target": "openai.chat_text",
+      "params": {
+        "text": {
+          "format": {
+            "type": "text"
+          },
+          "verbosity": null
+        }
+      },
+      "expected": {
+        "params": {
+          "response_format": {
+            "type": "text"
+          },
+          "verbosity": null
+        },
+        "suspended": {},
+        "issues": []
+      }
+    },
+    {
+      "name": "duplicate_equivalent_format_is_unified",
+      "source": "openai.chat_text",
+      "target": "openai.responses",
+      "params": {
+        "response_format": {
+          "type": "json_object"
+        },
+        "text": {
+          "format": {
+            "type": "json_object"
+          }
+        }
+      },
+      "expected": {
+        "params": {
+          "text": {
+            "format": {
+              "type": "json_object"
+            }
+          }
+        },
+        "suspended": {},
+        "issues": []
+      }
+    },
+    {
+      "name": "format_conflict_keeps_both_choices",
+      "source": "openai.chat_text",
+      "target": "openai.responses",
+      "params": {
+        "response_format": {
+          "type": "json_object"
+        },
+        "text": {
+          "format": {
+            "type": "text"
+          }
+        }
+      },
+      "expected": {
+        "params": {
+          "response_format": {
+            "type": "json_object"
+          },
+          "text": {
+            "format": {
+              "type": "text"
+            }
+          }
+        },
+        "suspended": {},
+        "issues": [
+          {
+            "parameter": "response_format",
+            "kind": "conflict"
+          }
+        ]
+      }
+    },
+    {
+      "name": "reverse_format_conflict_keeps_both_choices",
+      "source": "openai.responses",
+      "target": "openai.chat_text",
+      "params": {
+        "text": {
+          "format": {
+            "type": "json_object"
+          }
+        },
+        "response_format": {
+          "type": "text"
+        }
+      },
+      "expected": {
+        "params": {
+          "text": {
+            "format": {
+              "type": "json_object"
+            }
+          },
+          "response_format": {
+            "type": "text"
+          }
+        },
+        "suspended": {},
+        "issues": [
+          {
+            "parameter": "text.format",
+            "kind": "conflict"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown_source_format_requires_choice",
+      "source": "openai.chat_text",
+      "target": "openai.responses",
+      "params": {
+        "response_format": {
+          "type": "vendor_format",
+          "options": {
+            "x": 1
+          }
+        }
+      },
+      "expected": {
+        "params": {
+          "response_format": {
+            "type": "vendor_format",
+            "options": {
+              "x": 1
+            }
+          }
+        },
+        "suspended": {},
+        "issues": [
+          {
+            "parameter": "response_format",
+            "kind": "unsupported"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown_responses_text_option_requires_choice",
+      "source": "openai.responses",
+      "target": "openai.chat_text",
+      "params": {
+        "text": {
+          "format": {
+            "type": "json_object"
+          },
+          "future_policy": "keep"
+        }
+      },
+      "expected": {
+        "params": {
+          "response_format": {
+            "type": "json_object"
+          },
+          "text": {
+            "future_policy": "keep"
+          }
+        },
+        "suspended": {},
+        "issues": [
+          {
+            "parameter": "text",
+            "kind": "unsupported"
+          }
+        ]
+      }
+    },
+    {
+      "name": "nested_effort_is_normalized",
+      "source": "openai.chat_text",
+      "target": "openai.responses",
+      "params": {
+        "reasoning": {
+          "effort": "high",
+          "summary": "auto"
+        }
+      },
+      "expected": {
+        "params": {
+          "reasoning_effort": "high",
+          "reasoning": {
+            "summary": "auto"
+          }
+        },
+        "suspended": {},
+        "issues": []
+      }
+    },
+    {
+      "name": "same_protocol_nested_effort_is_normalized",
+      "source": "openai.responses",
+      "target": "openai.responses",
+      "params": {
+        "reasoning": {
+          "effort": "low",
+          "summary": "auto"
+        }
+      },
+      "expected": {
+        "params": {
+          "reasoning_effort": "low",
+          "reasoning": {
+            "summary": "auto"
+          }
+        },
+        "suspended": {},
+        "issues": []
+      }
+    },
+    {
+      "name": "reasoning_summary_requires_choice_for_chat",
+      "source": "openai.responses",
+      "target": "openai.chat_text",
+      "params": {
+        "reasoning": {
+          "effort": "high",
+          "summary": "auto"
+        }
+      },
+      "expected": {
+        "params": {
+          "reasoning_effort": "high",
+          "reasoning": {
+            "summary": "auto"
+          }
+        },
+        "suspended": {},
+        "issues": [
+          {
+            "parameter": "reasoning",
+            "kind": "unsupported"
+          }
+        ]
+      }
+    },
+    {
+      "name": "conflicting_effort_keeps_both_values",
+      "source": "openai.chat_text",
+      "target": "openai.responses",
+      "params": {
+        "reasoning_effort": "medium",
+        "reasoning": {
+          "effort": "high",
+          "summary": "auto"
+        }
+      },
+      "expected": {
+        "params": {
+          "reasoning_effort": "medium",
+          "reasoning": {
+            "effort": "high",
+            "summary": "auto"
+          }
+        },
+        "suspended": {},
+        "issues": [
+          {
+            "parameter": "reasoning.effort",
+            "kind": "conflict"
+          }
+        ]
+      }
+    },
+    {
+      "name": "conflicting_verbosity_keeps_both_values",
+      "source": "openai.chat_text",
+      "target": "openai.responses",
+      "params": {
+        "verbosity": "high",
+        "text": {
+          "verbosity": "low"
+        }
+      },
+      "expected": {
+        "params": {
+          "verbosity": "high",
+          "text": {
+            "verbosity": "low"
+          }
+        },
+        "suspended": {},
+        "issues": [
+          {
+            "parameter": "verbosity",
+            "kind": "conflict"
+          }
+        ]
+      }
+    },
+    {
+      "name": "null_source_format_is_non_semantic",
+      "source": "openai.chat_text",
+      "target": "openai.responses",
+      "params": {
+        "response_format": null
+      },
+      "expected": {
+        "params": {},
+        "suspended": {
+          "response_format": null
+        },
+        "issues": []
+      }
+    },
+    {
+      "name": "same_protocol_preserves_other_options",
+      "source": "openai.chat_text",
+      "target": "openai.chat_text",
+      "params": {
+        "stream_options": null,
+        "max_tokens_field": "max_output_tokens",
+        "vendor": {
+          "enabled": true
+        }
+      },
+      "expected": {
+        "params": {
+          "stream_options": null,
+          "max_tokens_field": "max_output_tokens",
+          "vendor": {
+            "enabled": true
+          }
+        },
+        "suspended": {},
+        "issues": []
+      }
+    },
+    {
+      "name": "non_openai_protocol_is_not_reinterpreted",
+      "source": "anthropic.messages",
+      "target": "openai.responses",
+      "params": {
+        "thinking": {
+          "type": "enabled",
+          "budget_tokens": 1024
+        },
+        "temperature": 0.4
+      },
+      "expected": {
+        "params": {
+          "thinking": {
+            "type": "enabled",
+            "budget_tokens": 1024
+          },
+          "temperature": 0.4
+        },
+        "suspended": {},
+        "issues": []
+      }
+    },
+    {
+      "name": "nullable_reasoning_is_suspended_without_changing_the_default",
+      "source": "openai.responses",
+      "target": "openai.responses",
+      "params": { "reasoning": null, "temperature": 0.2 },
+      "expected": { "params": { "temperature": 0.2 }, "suspended": { "reasoning": null }, "issues": [] }
+    },
+    {
+      "name": "empty_reasoning_options_are_non_semantic",
+      "source": "openai.responses",
+      "target": "openai.chat_text",
+      "params": { "reasoning": {}, "reasoning_effort": "medium" },
+      "expected": { "params": { "reasoning_effort": "medium" }, "suspended": { "reasoning": {} }, "issues": [] }
+    },
+    {
+      "name": "reordered_equivalent_schema_is_unified",
+      "source": "openai.chat_text",
+      "target": "openai.responses",
+      "params": {
+        "response_format": { "type": "json_schema", "json_schema": {
+          "name": "answer", "schema": { "type": "object", "properties": { "a": { "type": "string" }, "b": { "type": "number" } } }, "strict": true
+        } },
+        "text": { "format": { "strict": true, "schema": { "properties": { "b": { "type": "number" }, "a": { "type": "string" } }, "type": "object" }, "name": "answer", "type": "json_schema" } }
+      },
+      "expected": {
+        "params": { "text": { "format": { "strict": true, "schema": { "properties": { "b": { "type": "number" }, "a": { "type": "string" } }, "type": "object" }, "name": "answer", "type": "json_schema" } } },
+        "suspended": {}, "issues": []
+      }
+    },
+    {
+      "name": "schema_wrapper_vendor_fields_are_preserved_losslessly",
+      "source": "openai.chat_text", "target": "openai.responses",
+      "params": { "response_format": { "type": "json_schema", "json_schema": {
+        "name": "answer", "schema": { "type": "object" }, "strict": null, "vendor_policy": { "mode": "keep" }
+      } } },
+      "expected": {
+        "params": { "text": { "format": { "type": "json_schema", "name": "answer", "schema": { "type": "object" }, "strict": null, "vendor_policy": { "mode": "keep" } } } },
+        "suspended": {}, "issues": []
+      }
+    },
+    {
+      "name": "schema_outer_extension_has_no_unambiguous_flattening",
+      "source": "openai.chat_text", "target": "openai.responses",
+      "params": { "response_format": { "type": "json_schema", "outer_policy": "keep", "json_schema": { "name": "answer", "schema": { "type": "object" } } } },
+      "expected": {
+        "params": { "response_format": { "type": "json_schema", "outer_policy": "keep", "json_schema": { "name": "answer", "schema": { "type": "object" } } } },
+        "suspended": {}, "issues": [{ "parameter": "response_format", "kind": "unsupported" }]
+      }
+    },
+    {
+      "name": "schema_wrapper_type_cannot_be_overwritten_by_flattening",
+      "source": "openai.chat_text", "target": "openai.responses",
+      "params": { "response_format": { "type": "json_schema", "json_schema": { "name": "answer", "type": "vendor_type", "schema": { "type": "object" } } } },
+      "expected": {
+        "params": { "response_format": { "type": "json_schema", "json_schema": { "name": "answer", "type": "vendor_type", "schema": { "type": "object" } } } },
+        "suspended": {}, "issues": [{ "parameter": "response_format", "kind": "unsupported" }]
+      }
+    },
+    {
+      "name": "multiple_conflicts_preserve_every_unresolved_choice",
+      "source": "openai.chat_text", "target": "openai.responses",
+      "params": {
+        "response_format": { "type": "json_object" }, "verbosity": "low", "text": { "format": { "type": "text" }, "verbosity": "high" },
+        "reasoning_effort": "low", "reasoning": { "effort": "high" }, "thinking": { "type": "disabled" }
+      },
+      "expected": {
+        "params": {
+          "response_format": { "type": "json_object" }, "verbosity": "low", "text": { "format": { "type": "text" }, "verbosity": "high" },
+          "reasoning_effort": "low", "reasoning": { "effort": "high" }, "thinking": { "type": "disabled" }
+        },
+        "suspended": {}, "issues": [
+          { "parameter": "response_format", "kind": "conflict" },
+          { "parameter": "verbosity", "kind": "conflict" },
+          { "parameter": "reasoning.effort", "kind": "conflict" }
+        ]
+      }
+    },
+    {
+      "name": "invalid_array_format_is_preserved_for_an_explicit_choice",
+      "source": "openai.chat_text", "target": "openai.responses",
+      "params": { "response_format": [] },
+      "expected": {
+        "params": { "response_format": [] }, "suspended": {},
+        "issues": [{ "parameter": "response_format", "kind": "unsupported" }]
+      }
+    },
+    {
+      "name": "equivalent_json_number_spellings_preserve_the_existing_target_schema",
+      "source": "openai.chat_text", "target": "openai.responses",
+      "params": {
+        "response_format": { "type": "json_schema", "json_schema": { "name": "answer", "schema": { "type": "number", "minimum": 1 } } },
+        "text": { "format": { "type": "json_schema", "name": "answer", "schema": { "type": "number", "minimum": 1.0 } } }
+      },
+      "expected": {
+        "params": { "text": { "format": { "type": "json_schema", "name": "answer", "schema": { "type": "number", "minimum": 1.0 } } } },
+        "suspended": {}, "issues": []
+      }
+    },
+    {
+      "name": "null_text_without_another_alias_is_suspended_for_responses",
+      "source": "openai.chat_text", "target": "openai.responses",
+      "params": { "text": null },
+      "expected": { "params": {}, "suspended": { "text": null }, "issues": [] }
+    },
+    {
+      "name": "empty_text_without_another_alias_is_suspended_for_responses",
+      "source": "openai.chat_text", "target": "openai.responses",
+      "params": { "text": {} },
+      "expected": { "params": {}, "suspended": { "text": {} }, "issues": [] }
+    },
+    {
+      "name": "chat_standard_output_alias_whitespace_is_normalized_for_comparison",
+      "source": " openai.chat_text ", "target": " openai.responses ",
+      "params": { "max_tokens_field": " max_tokens " },
+      "expected": { "params": {}, "suspended": { "max_tokens_field": " max_tokens " }, "issues": [] }
+    },
+    {
+      "name": "responses_standard_output_alias_whitespace_is_normalized_for_comparison",
+      "source": "openai.responses", "target": "openai.chat_text",
+      "params": { "max_tokens_field": " max_output_tokens " },
+      "expected": { "params": {}, "suspended": { "max_tokens_field": " max_output_tokens " }, "issues": [] }
+    },
+    {
+      "name": "null_reasoning_is_suspended_while_switching_to_responses",
+      "source": "openai.chat_text", "target": "openai.responses",
+      "params": { "reasoning": null },
+      "expected": { "params": {}, "suspended": { "reasoning": null }, "issues": [] }
+    }
+  ]
+}

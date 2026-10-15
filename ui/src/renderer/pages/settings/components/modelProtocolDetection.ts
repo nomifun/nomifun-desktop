@@ -2,6 +2,7 @@ import type { ProviderId } from '@/common/types/ids';
 import type { ProviderCredentials } from '@/common/types/provider/providerApi';
 import type { ProviderConnectionInput } from '@/common/types/provider/providerConnection';
 import type { ProviderModelCapabilityInput } from '@/common/types/provider/providerModel';
+import { transitionCapabilityParams } from './chatProtocolDraftTransition';
 import {
   capabilityDraftFromResponse, capabilityInputsFromDefinition,
   type ModelCapabilityDraft, type ModelDefinitionDraft,
@@ -44,10 +45,16 @@ export const applyDetectedChatProtocol = (
   const current = definition.capabilities.find(capability => capability.task === 'chat');
   if (!current || selected.task !== 'chat' || !isDetectableChatProtocol(selected.protocol) ||
     chatProtocolDetectionSnapshot(definition.model, current) !== snapshot) return definition;
+  // The returned capability is exactly what was tested. Preserve target-side
+  // cache for an explicit later restore instead of applying untested settings.
+  const transitioned = transitionCapabilityParams(current, selected.protocol, { restoreTarget: false });
   return {
     ...definition,
     capabilities: definition.capabilities.map(capability => capability.task === 'chat' ? {
       ...capability,
+      protocolParameterStash: transitioned.protocolParameterStash,
+      protocolParameterTransition: transitioned.protocolParameterTransition,
+      modelDefaults: transitioned.modelDefaults,
       ...capabilityDraftFromResponse(selected),
       routeSource: 'user',
       transportSource: 'user',
