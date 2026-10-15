@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { launchMacosApplication, MacosApplicationLaunchCancelled } from './macos-application-launch.mjs';
+import { launchMacosApplication, MacosApplicationLaunchCancelled, validateApplicationLaunch } from './macos-application-launch.mjs';
 
 async function fixtureLaunch(kind = 'verified', symbolic = false, {
   terminalOverrides = {}, applicationScope = 'desktop_development', controllerCode = 0, controllerSignal = null,
@@ -16,7 +16,8 @@ async function fixtureLaunch(kind = 'verified', symbolic = false, {
   const cwd = symbolic ? join(root, 'alias') : physicalCwd;
   if (symbolic) await symlink(physicalCwd, cwd);
   const request = { program: join(root, 'Fixture.app/Contents/MacOS/nomifun-desktop'), controllerProgram: join(root, 'macos_application_controller'),
-    args: applicationScope === 'browser_media_audit' ? ['--media-permissions'] : [],
+    args: applicationScope === 'browser_media_audit' ? ['--media-permissions']
+      : applicationScope === 'appkit_main_loop_audit' ? ['--report', join(root, 'report.json')] : [],
     environment: { NOMIFUN_DATA_DIR: join(root, 'data'), FIXTURE_PRIVATE_ENV: 'private-value' }, cwd,
     applicationScope, ...requestOverride };
   let descriptor;
@@ -152,6 +153,29 @@ describe.skipIf(process.platform === 'win32')('LaunchServices controller protoco
       if (restart_requested) await expect(fixture.launch.exit).rejects.toThrow('media audit cannot request');
       else expect((await fixture.launch.exit).restartRequested).toBe(false);
     } finally { await rm(fixture.root, { recursive: true, force: true }); await rm(fixture.launch.evidenceDirectory, { recursive: true, force: true }); }
+  });
+
+  test.each(['browser_compatibility_audit', 'appkit_main_loop_audit'])('%s keeps admission and final cleanup in its own audit scope', async applicationScope => {
+    for (const restart_requested of [false, true]) {
+      const fixture = await fixtureLaunch('verified', false, { applicationScope, terminalOverrides: { restart_requested } });
+      try {
+        if (restart_requested) await expect(fixture.launch.exit).rejects.toThrow('all audit scopes reject restart');
+        else {
+          expect((await fixture.launch.exit).cleanupVerified).toBe(true);
+          expect(fixture.inspect().descriptor.application_scope).toBe(applicationScope);
+        }
+      } finally { await rm(fixture.root, { recursive: true, force: true }); await rm(fixture.launch.evidenceDirectory, { recursive: true, force: true }); }
+    }
+  });
+
+  test('fixed audit entries reject cross-scope permission or missing report arguments before controller submission', () => {
+    const base = { program: '/tmp/Audit.app/Contents/MacOS/nomifun-desktop', controllerProgram: '/tmp/macos_application_controller', cwd: '/tmp',
+      environment: { NOMIFUN_DATA_DIR: '/tmp/independent-audit-data' } };
+    expect(() => validateApplicationLaunch({ ...base, applicationScope: 'browser_media_audit', args: [] })).toThrow('fixed permission');
+    expect(() => validateApplicationLaunch({ ...base, applicationScope: 'browser_compatibility_audit', args: ['--media-permissions'] })).toThrow('cannot enter the media');
+    expect(() => validateApplicationLaunch({ ...base, applicationScope: 'browser_compatibility_audit', args: ['--media-user-ready'] })).toThrow('cannot enter the media');
+    expect(() => validateApplicationLaunch({ ...base, applicationScope: 'appkit_main_loop_audit', args: ['--report', 'relative.json'] })).toThrow('absolute report');
+    expect(validateApplicationLaunch({ ...base, applicationScope: 'browser_compatibility_audit', args: ['--identity-ab'] }).applicationScope).toBe('browser_compatibility_audit');
   });
 
   test('a contradictory second terminal cannot upgrade an earlier receipt', async () => {

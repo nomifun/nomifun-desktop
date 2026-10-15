@@ -4,7 +4,11 @@
 
 用户已进一步确认产品约束：保持内嵌浏览器为主场景；系统浏览器仅保留部分场景功能，不作为主场景重构或自动故障回退。其他不改变该形态的优化继续执行。下面承载方案按此约束收束，系统浏览器对照成功不能替代内嵌原生验收。
 
-**当前Windows Bili结论与同步状态（2026-10-15）**
+**当前 Mac 本地整改边界（2026-10-15）**：真实 macOS 26.6.2 / 25G83 / arm64 从已发布 `6409993b776c95f14ebc4785b2eb4d2759a526f8` 继续，不再要求导入旧 portable patch。本轮已修补 queued/in-flight popup Pause 准入与同文档 History 的源码缺口，定向 unit 的已测范围另记；它们尚未成为百度现场根因或修复效果的实机证明。computer use 明确拒绝 Terminal，本轮没有换终端/shell 绕过；NomiFun 与两个 smoke 尚未启动，WK receipt、请求时间线、生产 GUI、存储重启与身份三臂对照仍未取得。系统 Safari private 窗口百度主页/搜索的独立可视正常记录没有 HTTP 计数，不能调整默认 Safari17 或代替内嵌验收。完整构建、首轮失败与剩余项见[本轮 Mac 记录](2026-10-15-browser-macos-local-remediation.zh.md)。
+
+构建验收基准已 fast-forward 到包含该修复的 `5259ca8e53a0e15f08d725fa15ab3f39cd2cad56`。上游仅 6 个模板/i18n 文件，与本轮本地 task 路径无交集，Rust/browser/fixture 来源不变；最新静态 App、embedded mock gate 与 desktop boundary 均通过，最新来源快照零漂移。用户随后授权本轮 commit+push，接续应包含本轮 macOS 修复。此结果仍不提供原生运行或百度现场归因；旧 App、unit 与 fixture 证据保留各自版本和范围，不倒改历史。
+
+**Windows Bili结论与同步状态（发布前历史，2026-10-15）**
 
 Windows搜索子页持续加载已定位并作最小修补。应用在真实popup激活时过早把opener的WebView2 controller设为不可见；保持准确opener controller活性、HWND继续隐藏，能使首次child文档正常完成。相同原S1 Profile、相同内嵌静态UI的A/B/A中，旧行为77A在22.773s仍0%，C212修补的3次真实鼠标搜索均出现结果，撤回为E429又在25.616s仍0%。旧行为两次均在切回parent后约126–175ms收到正文/结束回调。C212三次准确Document loadingFinished距点击为1019.768/1294.166/1028.589ms；这些为host callback时间，不是线上TTFB。该对照确认本次Windows/WebView2 155的应用边界原因，不泛化未测得的SDK内部机制，也不直接归因macOS百度。
 

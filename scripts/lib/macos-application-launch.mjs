@@ -25,11 +25,17 @@ export function validateApplicationLaunch({ program, controllerProgram, args, en
     || !Array.isArray(args) || !args.every(value => typeof value === 'string' && !value.includes('\0') && value !== MACOS_DEVELOPMENT_DESCRIPTOR_ARGUMENT)
     || !environment || typeof environment !== 'object' || Object.entries(environment).some(([key, value]) => !key || key.includes('=') || key.includes('\0') || typeof value !== 'string' || value.includes('\0'))
     || !isAbsolute(environment.NOMIFUN_DATA_DIR ?? '')
-    || !['desktop_development', 'browser_media_audit'].includes(applicationScope)) {
+    || !['desktop_development', 'browser_media_audit', 'browser_compatibility_audit', 'appkit_main_loop_audit'].includes(applicationScope)) {
     throw new Error('macOS application launch requires an exact App, compiled controller, cwd and isolated environment');
   }
   if (applicationScope === 'browser_media_audit' && !args.includes('--media-permissions')) {
     throw new Error('macOS media audit launch requires its fixed permission fixture entry');
+  }
+  if (applicationScope === 'browser_compatibility_audit' && args.some(arg => ['--media-permissions', '--media-user-ready'].includes(arg))) {
+    throw new Error('macOS compatibility audit cannot enter the media audit');
+  }
+  if (applicationScope === 'appkit_main_loop_audit' && !args.some((arg, index) => arg === '--report' && isAbsolute(args[index + 1] ?? ''))) {
+    throw new Error('macOS AppKit audit requires its fixed absolute report entry');
   }
   return { program: resolve(program), controllerProgram: resolve(controllerProgram), cwd: resolve(cwd), args, environment, applicationScope };
 }
@@ -96,8 +102,8 @@ export async function launchMacosApplication(request, { spawnController = spawn,
           && (frame.signal === null || Number.isInteger(frame.signal) && frame.signal > 0)
           && typeof frame.cleanup_verified === 'boolean'
           && typeof frame.restart_requested === 'boolean') {
-          if (launch.applicationScope === 'browser_media_audit' && frame.restart_requested) {
-            fail('macOS media audit cannot request an application restart'); return;
+          if (launch.applicationScope !== 'desktop_development' && frame.restart_requested) {
+            fail('macOS media audit cannot request an application restart; all audit scopes reject restart'); return;
           }
           terminal = frame;
         } else { fail('macOS application controller response was out of sequence or did not match admission'); return; }

@@ -9,6 +9,11 @@ use tokio_util::sync::CancellationToken;
 
 fn error(value: impl std::fmt::Display) -> String { value.to_string() }
 
+#[path = "macos_browser_compatibility_navigation.rs"]
+mod navigation_probe;
+#[path = "macos_browser_compatibility_popup_pause.rs"]
+mod popup_pause_probe;
+
 pub(crate) async fn verify(app: &tauri::AppHandle, fixture: &Fixture, hold_ui: bool, live_sites: bool,
     manual_sites: bool, evidence_dir: Option<&std::path::Path>, media_permissions: bool,
     media_user_ready: bool, cleanup_verified: &AtomicBool) -> Result<Value, String> {
@@ -27,7 +32,9 @@ pub(crate) async fn verify(app: &tauri::AppHandle, fixture: &Fixture, hold_ui: b
         }
     };
     let base = if manual_sites { 900 } else if live_sites { 360 } else { 120 };
-    let timeout = base.max(if media_user_ready { 420 } else { 0 }) + if media_permissions { 120 } else { 0 };
+    // Physical popup acceptance has four independent 60-second click waits.
+    let timeout = base.max(if media_user_ready { 420 } else { 0 })
+        + if hold_ui { 240 } else { 0 } + if media_permissions { 120 } else { 0 };
     let result = tokio::time::timeout(Duration::from_secs(timeout), async {
         let mut report = scenarios(app, fixture, &runtime, hold_ui).await?;
         if media_permissions { report["media_permissions"] = super::permissions::verify(app, &runtime, fixture, media_user_ready).await?; }
@@ -158,6 +165,12 @@ async fn scenarios(app: &tauri::AppHandle, fixture: &Fixture, runtime: &Arc<dyn 
     command(runtime, BrowserTabCommand::Activate { target: tab(runtime, &stopped_id).await?.target }).await?;
     surface(runtime).await?;
 
+    eprintln!("MACOS_BROWSER_COMPATIBILITY_SMOKE_STAGE popup_pause_admission");
+    let popup_pause = popup_pause_probe::verify(runtime, fixture, &stopped_id, hold_ui).await?;
+
+    eprintln!("MACOS_BROWSER_COMPATIBILITY_SMOKE_STAGE spa_history");
+    let history = navigation_probe::verify(runtime, fixture, &stopped_id).await?;
+
     // A two-hop server redirect belongs to one host request and one native attempt.
     eprintln!("MACOS_BROWSER_COMPATIBILITY_SMOKE_STAGE redirects");
     let before_redirect = trace_sequence(runtime, &stopped_id).await?;
@@ -277,7 +290,8 @@ async fn scenarios(app: &tauri::AppHandle, fixture: &Fixture, runtime: &Arc<dyn 
         "runtime":final_report.runtime,
         "first_stop_without_content":true,"stop_and_failure_surface_mask":true,
         "same_tab_recovery":true,"http_and_javascript_ua":{"root":true,"iframe":true,"fetch":true,"image":true},
-        "popup":popup_evidence,"redirect_single_attempt":true,"page_reload_distinguished":true,
+        "popup":popup_evidence,"popup_pause_admission":popup_pause,"spa_history":history,
+        "redirect_single_attempt":true,"page_reload_distinguished":true,
         "automatic_navigation_pause":loops,
         "failed_observation_returns_promptly":true,"http_403_document_retained":true,
         "provisional_failure_retains_old_document":true,"diagnostics_redacted_and_target_checked":true,

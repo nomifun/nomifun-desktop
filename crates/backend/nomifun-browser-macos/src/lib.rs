@@ -13,6 +13,8 @@ mod identity;
 mod navigation;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod state;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod popup;
 #[cfg(target_os = "macos")]
 pub use identity::{report as identity_report, runtime_info, BrowserIdentityPolicy};
 #[cfg(target_os = "macos")]

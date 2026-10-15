@@ -3,7 +3,7 @@ import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promi
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { packageMacosBrowserMediaFixture } from './package-macos-browser-media-fixture.mjs';
+import { packageMacosBrowserMediaFixture, packageMacosNativeFixture } from './package-macos-browser-media-fixture.mjs';
 
 test.skipIf(process.platform !== 'darwin')('proves exact supply before real Mach-O signing and preserves the signed final copy', async () => {
   const root = await mkdtemp(join(tmpdir(), 'nomifun-media-signing-test-'));
@@ -114,5 +114,44 @@ test.skipIf(process.platform !== 'darwin')('rejects an existing output and an un
     await expect(packageMacosBrowserMediaFixture({ binary, outputRoot: join(root, 'new-cache-output') }, {
       ensureBundle: async () => binary,
     })).rejects.toThrow('pre-signing supply witness');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform !== 'darwin')('packages independent compatibility and AppKit scopes without submitting any application', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'nomifun-native-package-test-'));
+  try {
+    const binary = join(root, 'fixture');
+    await writeFile(binary, 'exact fixture bytes');
+    let launches = 0;
+    const hooks = {
+      ensureBundle: async (request, hooks) => {
+        const identity = JSON.parse(request.environment.TAURI_CONFIG);
+        const appPath = join(await mkdtemp(join(root, 'cache-')), `${identity.productName}.app`);
+        const program = join(appPath, 'Contents/MacOS/nomifun-desktop');
+        await mkdir(join(appPath, 'Contents/MacOS'), { recursive: true });
+        await cp(binary, program);
+        await hooks.sign({ appPath });
+        return program;
+      },
+      signBundle: async () => {}, run: async () => {},
+      launchApplication: async () => { launches++; throw new Error('packaging cannot launch'); },
+    };
+    for (const kind of ['compatibility', 'appkit']) {
+      const outputRoot = join(root, kind);
+      const report = await packageMacosNativeFixture({ kind, binary, outputRoot,
+        applicationArgs: kind === 'compatibility' ? ['--identity-ab'] : ['--case', 'all'] }, hooks);
+      expect(report.packaging_only).toBe(true);
+      expect(report.identifier).toBe(`com.nomifun.desktop.audit.${kind === 'appkit' ? 'mainloop' : kind}`);
+      expect(report.application_scope).toBe(kind === 'appkit' ? 'appkit_main_loop_audit' : 'browser_compatibility_audit');
+      expect(report.application_args).toContain(kind === 'appkit' ? '--report' : '--evidence-dir');
+      expect((await stat(join(outputRoot, 'evidence'))).mode & 0o777).toBe(0o700);
+      expect(report.pre_signing_copy_sha256).toBe(report.fixture_binary_sha256);
+      expect(report.packaged_binary_sha256).toBe(report.codesigned_binary_sha256);
+    }
+    expect(launches).toBe(0);
+    const refused = join(root, 'refused-cross-scope');
+    await expect(packageMacosNativeFixture({ kind: 'compatibility', binary, outputRoot: refused,
+      applicationArgs: ['--media-permissions'] }, hooks)).rejects.toThrow('fixed media audit');
+    await expect(stat(refused)).rejects.toHaveProperty('code', 'ENOENT');
   } finally { await rm(root, { recursive: true, force: true }); }
 });

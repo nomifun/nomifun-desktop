@@ -22,7 +22,18 @@ const ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ApplicationScope { DesktopDevelopment, BrowserMediaAudit }
+pub enum ApplicationScope { DesktopDevelopment, BrowserMediaAudit, BrowserCompatibilityAudit, AppkitMainLoopAudit }
+
+impl ApplicationScope {
+    fn audit_identifier(self) -> Option<&'static str> {
+        match self {
+            Self::DesktopDevelopment => None,
+            Self::BrowserMediaAudit => Some("com.nomifun.desktop.audit.media"),
+            Self::BrowserCompatibilityAudit => Some("com.nomifun.desktop.audit.compatibility"),
+            Self::AppkitMainLoopAudit => Some("com.nomifun.desktop.audit.mainloop"),
+        }
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,6 +114,21 @@ fn descriptor(path: &Path) -> io::Result<Descriptor> {
     if request.application_scope == ApplicationScope::BrowserMediaAudit
         && !request.args.iter().any(|argument| argument == "--media-permissions") {
         return Err(invalid("browser media admission requires its fixed audit entry"));
+    }
+    if request.application_scope == ApplicationScope::BrowserCompatibilityAudit
+        && request.args.iter().any(|argument| matches!(argument.as_str(), "--media-permissions" | "--media-user-ready")) {
+        return Err(invalid("browser compatibility admission cannot enter the media audit"));
+    }
+    if request.application_scope == ApplicationScope::AppkitMainLoopAudit
+        && !request.args.windows(2).any(|arguments| arguments[0] == "--report" && Path::new(&arguments[1]).is_absolute()) {
+        return Err(invalid("AppKit admission requires its fixed report entry"));
+    }
+    if let Some(expected) = request.application_scope.audit_identifier() {
+        let metadata = plist::Value::from_file(request.app_path.join("Contents/Info.plist"))
+            .map_err(|_| invalid("audit application metadata is unavailable"))?;
+        let identifier = metadata.as_dictionary().and_then(|dictionary| dictionary.get("CFBundleIdentifier"))
+            .and_then(plist::Value::as_string);
+        if identifier != Some(expected) { return Err(invalid("audit application identifier does not match its fixed scope")); }
     }
     Ok(request)
 }
@@ -444,6 +470,10 @@ fn validate_running_application(application: &NSRunningApplication, pid: u32, re
         || PathBuf::from(paths.1.to_string()).canonicalize()? != request.program.canonicalize()? {
         return Err(invalid("LaunchServices public application record did not match admission"));
     }
+    if let Some(expected) = request.application_scope.audit_identifier()
+        && application.bundleIdentifier().is_none_or(|identifier| identifier.to_string() != expected) {
+        return Err(invalid("LaunchServices audit identifier did not match its fixed scope"));
+    }
     Ok(())
 }
 
@@ -585,6 +615,44 @@ mod tests {
         assert!(absent.state.lock().unwrap().delivered.is_none());
     }
     #[test]
+    fn audit_descriptors_require_the_fixed_identity_and_entry_before_admission() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let app = root.path().join("Audit.app");
+        let program = app.join("Contents/MacOS/nomifun-desktop");
+        std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+        std::fs::write(&program, b"owned exact executable fixture").unwrap();
+        let path = root.path().join("launch.json");
+        for (scope, identifier, args) in [
+            (ApplicationScope::BrowserMediaAudit, "com.nomifun.desktop.audit.media", vec!["--media-permissions"]),
+            (ApplicationScope::BrowserCompatibilityAudit, "com.nomifun.desktop.audit.compatibility", vec!["--identity-ab"]),
+            (ApplicationScope::AppkitMainLoopAudit, "com.nomifun.desktop.audit.mainloop", vec!["--report", "/tmp/owned-report.json"]),
+        ] {
+            let request = serde_json::json!({"protocol_version":1,"nonce":"a".repeat(64),"application_scope":scope,
+                "app_path":app,"program":program,"cwd":root.path(),"args":args,
+                "environment":{"NOMIFUN_DATA_DIR":root.path().join("data")},
+                "socket_path":root.path().join("application.sock"),"stdout_path":root.path().join("stdout"),"stderr_path":root.path().join("stderr")});
+            std::fs::write(&path, serde_json::to_vec(&request).unwrap()).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let write_identifier = |identifier: &str| {
+                let mut metadata = plist::Dictionary::new();
+                metadata.insert("CFBundleIdentifier".into(), plist::Value::String(identifier.into()));
+                plist::Value::Dictionary(metadata).to_file_xml(app.join("Contents/Info.plist")).unwrap();
+            };
+            write_identifier(identifier);
+            assert!(descriptor(&path).is_ok());
+            write_identifier("com.nomifun.desktop");
+            assert!(descriptor(&path).is_err());
+            write_identifier(identifier);
+            let mut invalid = request;
+            invalid["args"] = if scope == ApplicationScope::BrowserCompatibilityAudit { serde_json::json!(["--media-permissions"]) }
+                else { serde_json::json!([]) };
+            std::fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            assert!(descriptor(&path).is_err());
+        }
+    }
+    #[test]
     fn restart_intent_is_a_required_boolean_and_media_never_has_restart_authority() {
         let base = serde_json::json!({"event":"shutdown_verified","nonce":"fixture","exit_code":0,"cleanup_verified":true});
         assert!(serde_json::from_value::<ShutdownReceipt>(base.clone()).is_err());
@@ -598,6 +666,8 @@ mod tests {
         let mut receipt: ShutdownReceipt = serde_json::from_value(value).unwrap();
         validate_receipt_scope(&receipt, ApplicationScope::DesktopDevelopment).unwrap();
         assert!(validate_receipt_scope(&receipt, ApplicationScope::BrowserMediaAudit).is_err());
+        assert!(validate_receipt_scope(&receipt, ApplicationScope::BrowserCompatibilityAudit).is_err());
+        assert!(validate_receipt_scope(&receipt, ApplicationScope::AppkitMainLoopAudit).is_err());
         receipt.cleanup_verified = false;
         assert!(validate_receipt_scope(&receipt, ApplicationScope::DesktopDevelopment).is_err());
         receipt.cleanup_verified = true;

@@ -14,6 +14,7 @@ pub(crate) struct Receipt {
     pub javascript_user_agent: Option<String>,
     pub case: Option<String>,
     pub storage_ok: Option<bool>,
+    pub document_nonce: Option<String>,
     pub media_probe: Option<serde_json::Value>,
 }
 
@@ -57,6 +58,15 @@ impl Fixture {
     pub fn count(&self, path: &str) -> usize {
         self.receipts.lock().unwrap().iter().filter(|receipt| receipt.path == path).count()
     }
+    pub fn count_case(&self, path: &str, case: &str) -> usize {
+        self.receipts.lock().unwrap().iter().filter(|receipt|
+            receipt.path == path && receipt.case.as_deref() == Some(case)).count()
+    }
+    pub fn document_nonce(&self, path: &str, case: &str) -> Result<String, String> {
+        self.receipts.lock().unwrap().iter().rev().find(|receipt|
+            receipt.path == path && receipt.case.as_deref() == Some(case))
+            .and_then(|receipt| receipt.document_nonce.clone()).ok_or_else(|| "Fixture document nonce is missing".into())
+    }
 }
 
 impl Drop for Fixture {
@@ -87,6 +97,8 @@ fn serve(mut stream: TcpStream, receipts: Arc<Mutex<Vec<Receipt>>>, stop: Arc<At
         key.eq_ignore_ascii_case("user-agent").then(|| value.trim().to_owned())
     }).unwrap_or_default();
     let path = url.path();
+    let document_nonce = matches!(path, "/spa-history" | "/popup-pause-parent" | "/popup-pause-child")
+        .then(|| uuid::Uuid::now_v7().to_string());
     {
         let mut receipts = receipts.lock().unwrap();
         if receipts.len() >= 1024 { return; }
@@ -94,6 +106,7 @@ fn serve(mut stream: TcpStream, receipts: Arc<Mutex<Vec<Receipt>>>, stop: Arc<At
             path: path.into(), user_agent, javascript_user_agent: parameters.get("ua").cloned(),
             case: parameters.get("case").cloned(),
             storage_ok: parameters.get("storage_ok").map(|value| value == "true"),
+            document_nonce: document_nonce.clone(),
             media_probe: path.starts_with("/media-").then(|| {
                 let flag = |key: &str| parameters.get(key).and_then(|value| match value.as_str() { "true" => Some(true), "false" => Some(false), _ => None });
                 let count = |key: &str| parameters.get(key).and_then(|value|value.parse::<u32>().ok()).filter(|value|*value <= 256);
@@ -119,6 +132,13 @@ fn serve(mut stream: TcpStream, receipts: Arc<Mutex<Vec<Receipt>>>, stop: Arc<At
         "/ua-root" => html(&mut stream, 200, &ua_page("root", "Compatibility UA root", true)),
         "/ua-frame" => html(&mut stream, 200, &ua_page("frame", "Compatibility UA frame", false)),
         "/popup" => html(&mut stream, 200, &ua_page("popup", "Compatibility popup ready", false)),
+        "/popup-pause-parent" => html(&mut stream, 200, &popup_pause_page(
+            parameters.get("case").map(String::as_str).unwrap_or("unknown"),
+            document_nonce.as_deref().unwrap(), true)),
+        "/popup-pause-child" => html(&mut stream, 200, &popup_pause_page(
+            parameters.get("case").map(String::as_str).unwrap_or("unknown"),
+            document_nonce.as_deref().unwrap(), false)),
+        "/spa-history" => html(&mut stream, 200, &spa_history_page(document_nonce.as_deref().unwrap())),
         "/identity-warm" => reply(&mut stream, 200, "text/html; charset=utf-8", identity_warm_page().as_bytes(),
             "Set-Cookie: compatibility-fixture=warm; Path=/; SameSite=Lax\r\n"),
         "/identity-check" => html(&mut stream, 200, &identity_check_page()),
@@ -191,6 +211,31 @@ fn serve(mut stream: TcpStream, receipts: Arc<Mutex<Vec<Receipt>>>, stop: Arc<At
         "/ua-image" => reply(&mut stream, 200, "image/gif", b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff!\xf9\x04\x01\0\0\0\0,\0\0\0\0\x01\0\x01\0\0\x02\x02D\x01\0;", ""),
         _ => reply(&mut stream, 404, "text/plain", b"Fixture not found", ""),
     }
+}
+
+fn popup_pause_page(case: &str, nonce: &str, parent: bool) -> String {
+    let query = url::form_urlencoded::Serializer::new(String::new()).append_pair("case", case).finish();
+    let link = if parent {
+        format!(r#"<a href="/popup-pause-child?{query}" target="_blank">Open Pause race popup</a>"#)
+    } else { String::new() };
+    let title = if parent { "Compatibility popup Pause parent" } else { "Compatibility popup Pause child" };
+    format!(r#"<!doctype html><meta charset="utf-8"><title>{title}</title>
+      <style>body{{font:18px system-ui;padding:24px}}a{{display:block;padding:24px}}</style>
+      <h1>{title}</h1><p>Document nonce: {nonce}</p>{link}"#)
+}
+
+fn spa_history_page(nonce: &str) -> String {
+    format!(r#"<!doctype html><meta charset="utf-8"><title>Compatibility SPA history</title>
+      <style>body{{font:18px system-ui;padding:24px}}button{{font:18px system-ui;padding:16px;margin:8px}}</style>
+      <h1>Compatibility SPA history</h1><p>Document nonce: {nonce}</p><p id="state"></p>
+      <button id="first">Push SPA first</button><button id="second">Push SPA second</button>
+      <script>
+        const render = () => document.getElementById('state').textContent = 'SPA step: ' + (new URL(location.href).searchParams.get('step') || 'root');
+        const push = step => {{const url = new URL(location.href);url.searchParams.set('step',step);history.pushState({{step}},'',url);render();}};
+        document.getElementById('first').onclick = () => push('first');
+        document.getElementById('second').onclick = () => push('second');
+        addEventListener('popstate', render); render();
+      </script>"#)
 }
 
 fn identity_warm_page() -> String {

@@ -106,6 +106,8 @@ Windows 在 `content_state=None` 的所有阶段保持 controller 与 child HWND
 
 Windows 的 Back/Forward 推进当前控制 fence 并记录宿主 dispatch，同时保留真实文档的阶段、进度、问题和原生绑定；同文档历史切换不会等待新的完整文档加载。只有真实 NativeStarting 才创建新的 Loading 尝试，`Page.navigateToHistoryEntry` 的空回复不证明导航完成，SourceChanged(false) 只更新元数据。公开 `load.navigation_sequence` 可以在没有新原生文档尝试时推进，因此取消和轨迹关联仍使用准确 NavigationId 及其原 attempt 序号。后继回复不能证明迟到历史来源时继续保持 Unknown。BeforeUnload 保留原有精确命令/对话框 scope 和真实原生决定，不恢复快照或补造已取消的尝试。
 
+macOS 的 Back/Forward 同样先推进控制 fence 并记录 dispatch，保留现有文档与原生 attempt 状态；只有准确 pending `WKNavigation` 的 `didStartProvisionalNavigation` 才将同一 dispatch 绑定到新文档 Loading。命令返回、URL/标题变化和 metadata 采样都不证明新文档已开始或完成。已结算文档的地址变化仍保守推进 document generation，使旧 DOM 引用失效，但不伪造主文档请求或新 attempt。Stop/取消 receipt 区分准确 History dispatch 与原 native attempt，不把最新控制序号重新绑定到旧导航。[本轮源码与验证边界](../reports/2026-10-15-browser-macos-local-remediation.zh.md)单独记录；unit 通过不等于 WK 生产 GUI 已验。
+
 `load.navigation_control` 表达可选的重复跳转提示与标签暂停。提示只看独立主文档 attempt 的原始地址等价性，在内存使用页内随机盐 hash；redirect、普通子资源或未关联 action 不作为刷新次数。提示不自动暂停。用户明确暂停后，原生 policy 阻止页面发起的后续主导航和 popup，保留可用内容；继续只解除 hold，不自动刷新。用户明确地址栏/刷新/历史命令按原有 guard 解除 hold。Stop 只停止当前加载，不能声称阻止未来网页 timer 或全部 Fetch/XHR。Stop/Pause 可以取消同标签当前的人工导航，但必须等待原操作原生清理后完成，不能取消 Agent operation、提前解锁或重放 Stop 到后继文档。
 
 Windows 的 NavigationStarting.Cancel 可能发生在 GET 已发出之后，因此暂停还需要精确 root Document 的 CDP Fetch 请求阶段拦截。首次明确暂停后，拦截器保留到该原生 controller 关闭；继续只转换逻辑状态，不调用 Fetch.disable 释放尚未送达回调的旧请求。原生 root frame、Fetch.networkId 和 Network 的最早创建时间共同证明请求归属；不修改 HTTP method、headers 或 body。当前共享时钟证明限定为报告 invariant TSC 的 x86/x64 CPU，其他 CPU 不提供 navigation_control，Pause 返回 UnsupportedAction，普通导航与 Stop 保持可用。该能力范围和实机通过范围分别记录在[整改证据](../reports/2026-10-13-browser-remediation-evidence.zh.md)。

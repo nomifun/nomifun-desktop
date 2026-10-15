@@ -1,5 +1,6 @@
 //! Real WKWebView compatibility smoke with disposable loopback pages.
-//! Run: cargo run -p nomifun-desktop --example macos_browser_compatibility_smoke
+//! Package the exact build with package-macos-native-fixture.mjs and launch its
+//! plan through LaunchServices; a bare executable has no audit admission.
 //! --hold-ui waits for a physical click on the popup link with user input unlocked.
 //! --live-sites observes Baidu homepage/search and Bilibili for 60s each.
 //! --manual-sites adds physical page input and host Back/Reload/show/hide steps.
@@ -65,6 +66,9 @@ fn main() {
                 // validation; consume only its paired value in this CLI parser.
                 arguments.next().expect("development descriptor needs a path");
             }
+            "-ApplePersistenceIgnoreState" => {
+                assert_eq!(arguments.next().as_deref(), Some("YES"), "invalid native restoration argument");
+            }
             _ => panic!("Unknown compatibility runner option"),
         }
     }
@@ -78,8 +82,14 @@ fn main() {
     }
     // The fixed audit scope admits LaunchServices before the loopback worker,
     // storage, Tauri runtime, or any native browser object can be created.
-    let mut bootstrap = match application_launch::prepare_application(application_launch::ApplicationScope::BrowserMediaAudit) {
-        Ok(bootstrap) => bootstrap,
+    let scope = if media_permissions { application_launch::ApplicationScope::BrowserMediaAudit }
+        else { application_launch::ApplicationScope::BrowserCompatibilityAudit };
+    let mut bootstrap = match application_launch::prepare_application(scope) {
+        Ok(Some(bootstrap)) => Some(bootstrap),
+        Ok(None) => {
+            eprintln!("MACOS_BROWSER_COMPATIBILITY_SMOKE_FAIL LaunchServices audit admission is required");
+            std::process::exit(1);
+        }
         Err(error) => {
             eprintln!("MACOS_BROWSER_COMPATIBILITY_SMOKE_FAIL application admission failed: {error}");
             std::process::exit(1);
@@ -112,7 +122,9 @@ fn main() {
             let watchdog = handle.clone();
             tauri::async_runtime::spawn(async move {
                 let base = if manual_sites { 960 } else if live_sites { 420 } else { 150 };
-                let per_arm = base.max(if media_user_ready { 450 } else { 0 }) + if media_permissions { 120 } else { 0 };
+                // Four 60-second native popup clicks plus 30 seconds to settle cleanup.
+                let per_arm = base.max(if media_user_ready { 450 } else { 0 })
+                    + if hold_ui { 270 } else { 0 } + if media_permissions { 120 } else { 0 };
                 tokio::time::sleep(std::time::Duration::from_secs(per_arm * if compare_identity { 2 } else { 1 })).await;
                 eprintln!("MACOS_BROWSER_COMPATIBILITY_SMOKE_FAIL native runtime timed out");
                 watchdog.exit(1);

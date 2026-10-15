@@ -16,9 +16,19 @@ async function digestFile(path) {
   return digest.digest('hex');
 }
 
-export async function packageMacosBrowserMediaFixture({ binary, outputRoot, launch = false, controllerProgram, userReady = false, environment: suppliedEnvironment = process.env },
+const AUDITS = {
+  media: { productName: 'NomiFun WK Media Audit', identifier: 'com.nomifun.desktop.audit.media', scope: 'browser_media_audit' },
+  compatibility: { productName: 'NomiFun WK Compatibility Audit', identifier: 'com.nomifun.desktop.audit.compatibility', scope: 'browser_compatibility_audit' },
+  appkit: { productName: 'NomiFun AppKit Main Loop Audit', identifier: 'com.nomifun.desktop.audit.mainloop', scope: 'appkit_main_loop_audit' },
+};
+
+export async function packageMacosNativeFixture({ binary, outputRoot, kind = 'media', launch = false, controllerProgram, userReady = false, applicationArgs = [], environment: suppliedEnvironment = process.env },
   { ensureBundle = ensureMacosDevelopmentBundle, signBundle = signMacosAppBundle, run = runCommand, launchApplication = launchMacosApplication } = {}) {
   if (process.platform !== 'darwin' || !isAbsolute(binary ?? '') || !isAbsolute(outputRoot ?? '')) throw new Error('macOS and absolute --binary /CURRENT/EXAMPLE --output-dir /NEW/ROOT required');
+  const audit = AUDITS[kind];
+  if (!audit || !Array.isArray(applicationArgs) || applicationArgs.some(arg => typeof arg !== 'string' || arg.includes('\0'))) throw new Error('A fixed media, compatibility or appkit audit is required');
+  if (kind !== 'media' && (userReady || applicationArgs.some(arg => ['--media-permissions', '--media-user-ready'].includes(arg)))) throw new Error('Media flags require the fixed media audit');
+  if (kind === 'media' && applicationArgs.length) throw new Error('The media audit retains its fixed permission entry');
   binary = resolve(binary);
   outputRoot = resolve(outputRoot);
   if (!(await stat(binary)).isFile()) throw new Error('Compiled fixture binary is not a file');
@@ -29,7 +39,13 @@ export async function packageMacosBrowserMediaFixture({ binary, outputRoot, laun
   await mkdir(outputRoot); // An existing directory is rejected; never replace an App.
   const dataDir = join(outputRoot, 'data');
   await mkdir(dataDir);
-  const identity = { productName: 'NomiFun WK Media Audit', identifier: 'com.nomifun.desktop.audit.media' };
+  const evidenceDir = join(outputRoot, 'evidence');
+  await mkdir(evidenceDir, { mode: 0o700 });
+  const { productName, identifier } = audit;
+  const identity = { productName, identifier };
+  const args = kind === 'media' ? ['--media-permissions', ...(userReady ? ['--media-user-ready'] : [])]
+    : kind === 'appkit' ? ['--report', join(evidenceDir, 'main-loop-report.json'), ...applicationArgs]
+    : ['--evidence-dir', evidenceDir, ...applicationArgs];
   const environment = { ...suppliedEnvironment, NOMIFUN_DATA_DIR: dataDir, TAURI_CONFIG: JSON.stringify(identity) };
   const sourceSha256 = await digestFile(binary);
   let preSigningCopySha256;
@@ -56,15 +72,15 @@ export async function packageMacosBrowserMediaFixture({ binary, outputRoot, laun
   const packagedSha256 = await digestFile(program);
   if (codesignedSha256 !== packagedSha256) throw new Error('Final App copy differs from the verified codesigned fixture');
   await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', app]);
-  const report = { app, program, data_dir: dataDir, ...identity, fixture_binary_sha256: sourceSha256,
+  const report = { app, program, data_dir: dataDir, ...identity, application_scope: audit.scope, application_args: args, fixture_binary_sha256: sourceSha256,
     pre_signing_copy_sha256: preSigningCopySha256, codesigned_binary_sha256: codesignedSha256, packaged_binary_sha256: packagedSha256,
     supply_verified_before_signing: true, package_matches_codesigned_cache: true, signature_verification: 'codesign_verify_deep_strict',
     system_webkit: true, grants_media: false, actual_sensor_capture: false, packaging_only: !launch };
   await writeFile(join(outputRoot, 'package-report.json'), `${JSON.stringify(report, null, 2)}\n`, { flag: 'wx' });
   if (launch) {
     const application = await launchApplication({ program, controllerProgram: resolve(controllerProgram),
-      args: macosDevelopmentApplicationArguments(['--media-permissions', ...(userReady ? ['--media-user-ready'] : [])]),
-      environment, cwd: dirname(binary), applicationScope: 'browser_media_audit' });
+      args: macosDevelopmentApplicationArguments(args),
+      environment, cwd: dirname(binary), applicationScope: audit.scope });
     if (application.evidenceDirectory) console.error(`[audit] native application logs: ${application.evidenceDirectory}`);
     const exited = await application.exit;
     if (exited.code !== 0 || exited.signal || !exited.cleanupVerified) throw new Error('Media audit application cleanup and actual normal exit were not verified');
@@ -73,6 +89,10 @@ export async function packageMacosBrowserMediaFixture({ binary, outputRoot, laun
     await writeFile(join(outputRoot, 'package-report.json'), `${JSON.stringify(report, null, 2)}\n`);
   }
   return report;
+}
+
+export async function packageMacosBrowserMediaFixture(options, hooks) {
+  return packageMacosNativeFixture({ ...options, kind: 'media' }, hooks);
 }
 
 export async function main(args = process.argv.slice(2)) {

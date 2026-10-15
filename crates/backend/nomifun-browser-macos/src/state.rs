@@ -25,6 +25,10 @@ pub struct PageSnapshot {
     pub bootstrap_ready: bool,
     pub(crate) bootstrap_loading: bool,
     pub(crate) navigation_source: BrowserNavigationSource,
+    // A history command can advance the control fence without starting a new
+    // document load. Native facts keep the original attempt's identity.
+    pub(crate) navigation_attempt_sequence: u64,
+    pub(crate) navigation_dispatch_sequence: u64,
     pub can_go_back: bool,
     pub can_go_forward: bool,
     pub dialog: Option<NativeDialog>,
@@ -43,6 +47,8 @@ impl Default for PageSnapshot {
             bootstrap_ready: false,
             bootstrap_loading: false,
             navigation_source: BrowserNavigationSource::Unknown,
+            navigation_attempt_sequence: 0,
+            navigation_dispatch_sequence: 0,
             can_go_back: false,
             can_go_forward: false,
             dialog: None,

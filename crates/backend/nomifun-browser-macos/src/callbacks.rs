@@ -27,6 +27,8 @@ pub(crate) struct DelegateState {
     page: Weak<Page>,
     interactions: Rc<NativeInteractions>,
     navigation: RefCell<Option<Retained<WKNavigation>>>,
+    history_navigation: RefCell<Option<Retained<WKNavigation>>>,
+    history_dispatch: Cell<Option<(BrowserNavigationSource, u64)>>,
     announced: Cell<bool>,
     start_seen: Cell<bool>,
     // Replaced requests without a native start acknowledgement must retain
@@ -150,12 +152,36 @@ define_class!(
             };
             if self.retired(navigation) { return; }
             if navigation.is_none() { page.mark_navigation_routing_lost(); return; }
+            let history = self.ivars().history_navigation.borrow().as_deref()
+                .is_some_and(|pending| navigation_id(Some(pending)) == navigation_id(navigation));
+            if history {
+                self.retire_current();
+                self.ivars().history_navigation.borrow_mut().take();
+                let Some((source, dispatch_sequence)) = self.ivars().history_dispatch.get() else {
+                    page.mark_navigation_routing_lost();
+                    return;
+                };
+                self.ivars().announced.set(false);
+                self.ivars().start_seen.set(true);
+                *self.ivars().navigation.borrow_mut() = navigation.map(|value| unsafe { Retained::retain(value as *const WKNavigation as *mut WKNavigation) }.unwrap());
+                // Only this exact native start turns a history command into
+                // a new document attempt. Same-document history has no public
+                // full-load callbacks and keeps its already settled state.
+                page.transition(Update::HistoryStarted { url: view_url(view), source, dispatch_sequence });
+                page.transition(Update::Started { url: view_url(view) });
+                self.ivars().interactions.drain_dialogs();
+                self.refresh(view);
+                if page.snapshot().load.navigation_control.as_ref().is_some_and(|control| control.paused) {
+                    self.stop_loading_with_reason(view, BrowserCancellationReason::AutomaticNavigationPaused);
+                }
+                return;
+            }
             if self.ivars().announced.get() && !self.current(navigation) {
                 page.mark_navigation_routing_lost();
                 return;
             }
             if !self.ivars().announced.get() && self.current(navigation) { return; }
-            if !self.current(navigation) { self.retire_current(); }
+            if !self.current(navigation) { self.retire_history(); self.retire_current(); }
             self.ivars().start_seen.set(true);
             *self.ivars().navigation.borrow_mut() = navigation.map(|value| unsafe { Retained::retain(value as *const WKNavigation as *mut WKNavigation) }.unwrap());
             if !self.ivars().announced.replace(false) {
@@ -216,6 +242,7 @@ define_class!(
         #[unsafe(method(webViewWebContentProcessDidTerminate:))]
         fn crashed(&self, _view: &WKWebView) {
             self.ivars().announced.set(false);
+            self.retire_history();
             if let Some(page) = self.page() {
                 page.transition(Update::Crashed);
                 self.ivars().interactions.drain_dialogs();
@@ -341,15 +368,15 @@ impl Delegate {
         let output = opener.popup_sender.lock().unwrap().clone()?;
         let parent = native_page(opener.id)?.parent.clone();
         let page = opener.engine.allocate_page(opener.context.clone());
+        let ticket = opener.reserve_popup(&page)?;
         page.inherit_input_lock(&opener);
-        let native = create_native_page(&page, parent, Some(configuration)).ok()?;
+        let native = match create_native_page(&page, parent, Some(configuration)) {
+            Ok(native) => native,
+            Err(_) => { page.close_native(); return None; }
+        };
         let (tx, ready) = tokio::sync::oneshot::channel();
         if output
-            .try_send(PopupCandidate {
-                page: page.clone(),
-                target_url: url,
-                ready,
-            })
+            .try_send(PopupCandidate::new(page.clone(), url, &opener, ticket, ready))
             .is_err()
         {
             page.close_native();
@@ -367,6 +394,8 @@ impl Delegate {
             page,
             interactions,
             navigation: RefCell::new(None),
+            history_navigation: RefCell::new(None),
+            history_dispatch: Cell::new(None),
             announced: Cell::new(false),
             start_seen: Cell::new(true),
             awaiting_retired_start: RefCell::new(Vec::new()),
@@ -380,7 +409,24 @@ impl Delegate {
     pub(crate) fn prepare_navigation(&self, url: Option<String>, source: BrowserNavigationSource) {
         self.prepare(url, source, false);
     }
+    pub(crate) fn prepare_history_navigation(&self, source: BrowserNavigationSource) {
+        self.retire_history();
+        if let Some(page) = self.page() {
+            page.transition(Update::AutomaticNavigationPaused(false));
+            page.transition(Update::HistoryRequested { source });
+            self.ivars().history_dispatch.set(Some((source, page.snapshot().navigation_dispatch_sequence)));
+        }
+        self.ivars().interactions.drain_dialogs();
+    }
+    pub(crate) fn track_history_navigation(&self, navigation: Option<Retained<WKNavigation>>, view: &WKWebView) {
+        if navigation.is_none() { self.ivars().history_dispatch.set(None); }
+        *self.ivars().history_navigation.borrow_mut() = navigation;
+        // Sampling after ACK updates metadata only; neither an ACK nor
+        // isLoading=false is sufficient evidence to synthesize Finished.
+        self.refresh(view);
+    }
     fn prepare(&self, url: Option<String>, source: BrowserNavigationSource, bootstrap: bool) {
+        self.retire_history();
         self.ivars().announced.set(true);
         // Drop the prior retained navigation before dispatch. Completion from
         // its native token is inert even before replacement didStart arrives.
@@ -406,6 +452,13 @@ impl Delegate {
     pub(crate) fn stop_loading(&self, view: &WKWebView) {
         self.stop_loading_with_reason(view, BrowserCancellationReason::UserStop);
     }
+    pub(crate) fn stop_history_dispatch(&self, view: &WKWebView, receipt: crate::engine::NativeNavigationReceipt) -> Result<(), String> {
+        if !receipt.matches_history_dispatch(self.ivars().history_dispatch.get().map(|(_, sequence)| sequence)) {
+            return Err("BROWSER_STALE_OBSERVATION".into());
+        }
+        self.stop_loading_with_reason(view, BrowserCancellationReason::UserStop);
+        Ok(())
+    }
     pub(crate) fn pause_navigation(&self, view: &WKWebView) {
         let tracked = self.page().is_some_and(|page| navigation::in_flight(page.snapshot().load.phase));
         self.stop_loading_with_reason(view, BrowserCancellationReason::AutomaticNavigationPaused);
@@ -415,12 +468,16 @@ impl Delegate {
         if !tracked { unsafe { view.stopLoading(); } }
     }
     fn stop_loading_with_reason(&self, view: &WKWebView, reason: BrowserCancellationReason) {
+        let pending_history = self.ivars().history_navigation.borrow().is_some();
+        self.retire_history();
         if let Some(page) = self.page() {
             if navigation::in_flight(page.snapshot().load.phase) {
                 // Publish the terminal result and invalidate the token before
                 // stopLoading can synchronously deliver cancellation/finish.
                 self.ivars().announced.set(false);
                 page.transition(Update::Cancelled(reason));
+                unsafe { view.stopLoading(); }
+            } else if pending_history {
                 unsafe { view.stopLoading(); }
             }
         }
@@ -452,6 +509,12 @@ impl Delegate {
         if let Some(previous) = self.ivars().navigation.borrow_mut().take() {
             if !self.ivars().start_seen.get() { self.ivars().awaiting_retired_start.borrow_mut().push(previous); }
             else { self.remember_retired(previous); }
+        }
+    }
+    fn retire_history(&self) {
+        self.ivars().history_dispatch.set(None);
+        if let Some(previous) = self.ivars().history_navigation.borrow_mut().take() {
+            self.remember_retired(previous);
         }
     }
     fn remember_retired(&self, previous: Retained<WKNavigation>) {

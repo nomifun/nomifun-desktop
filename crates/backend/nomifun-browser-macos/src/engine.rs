@@ -2,6 +2,11 @@
 //! No browser subprocess owner, protocol server, IPC bridge or second event loop.
 use crate::{callbacks::Delegate, interactions::NativeInteractions, navigation};
 pub use crate::state::{NativeDialog, PageSnapshot};
+#[cfg(debug_assertions)]
+#[path = "popup_probe.rs"]
+mod popup_probe;
+#[cfg(debug_assertions)]
+pub use popup_probe::{hold_popup_admission, PopupAdmissionHold, PopupAdmissionObservation, PopupAdmissionSettlement, PopupAdmissionStage};
 use block2::RcBlock;
 use nomifun_browser_platform::runtime::{
     BrowserDownloadSnapshot, BrowserSurfaceBounds, BrowserContentState, BrowserNavigationPhase,
@@ -51,11 +56,18 @@ pub enum NavigationCommand {
 pub struct NativeNavigationReceipt {
     pub document_generation: u64,
     pub navigation_sequence: u64,
+    pub dispatched: bool,
+    // History may acquire its real document identity only after this receipt.
+    // Keep its original exact native dispatch binding for internal cleanup.
+    pub history_dispatch_sequence: Option<u64>,
 }
 impl NativeNavigationReceipt {
     fn matches(self, snapshot: &PageSnapshot) -> bool {
         self.document_generation == snapshot.document_generation
             && self.navigation_sequence == snapshot.load.navigation_sequence
+    }
+    pub(crate) fn matches_history_dispatch(self, sequence: Option<u64>) -> bool {
+        self.dispatched && self.history_dispatch_sequence.is_some() && self.history_dispatch_sequence == sequence
     }
 }
 const INTERRUPTED: &str = "BROWSER_ACTION_INTERRUPTED";
@@ -234,6 +246,8 @@ impl Engine {
             change_listener: Mutex::new(None),
             shortcut_listener: Mutex::new(None),
             popup_sender: Mutex::new(None),
+            popup_admission: Mutex::new(Default::default()),
+            popup_opener: Mutex::new(None),
             pending: Mutex::new(BTreeMap::new()),
             downloads: Mutex::new(vec![]),
             navigation_trace: Mutex::new(BrowserNavigationTrace::default()),
@@ -539,7 +553,40 @@ impl Drop for Context {
 pub struct PopupCandidate {
     pub page: Arc<Page>,
     pub target_url: String,
-    pub ready: oneshot::Receiver<Result<(), String>>,
+    opener: Weak<Page>,
+    ticket: crate::popup::Ticket,
+    ready: Option<oneshot::Receiver<Result<(), String>>>,
+}
+impl PopupCandidate {
+    pub(crate) fn new(page: Arc<Page>, target_url: String, opener: &Arc<Page>, ticket: crate::popup::Ticket,
+        ready: oneshot::Receiver<Result<(), String>>) -> Self {
+        Self { page, target_url, opener: Arc::downgrade(opener), ticket, ready: Some(ready) }
+    }
+    pub async fn wait_ready(&mut self) -> Result<(), String> {
+        self.ready.take().ok_or("WK popup readiness already consumed")?.await.map_err(|_| INTERRUPTED.to_owned())?
+    }
+    /// Commit registration while holding the same owner lock that Pause
+    /// revokes. No await, display, or native dispatch may occur in `commit`.
+    pub fn admit<R>(&self, expected_opener: &Arc<Page>, commit: impl FnOnce() -> R) -> Option<R> {
+        let opener = self.opener.upgrade()?;
+        if !Arc::ptr_eq(&opener, expected_opener) || opener.close_requested.load(Ordering::Acquire)
+            || self.page.close_requested.load(Ordering::Acquire) { return None; }
+        let mut admission = opener.popup_admission.lock().unwrap();
+        let snapshot = opener.snapshot();
+        if opener.close_requested.load(Ordering::Acquire) || self.page.close_requested.load(Ordering::Acquire)
+            || snapshot.load.navigation_control.as_ref().is_some_and(|control| control.paused) { return None; }
+        let result = admission.admit(self.ticket, snapshot.document_generation, snapshot.load.navigation_sequence, commit);
+        if result.is_some() { self.page.popup_opener.lock().unwrap().take(); }
+        result
+    }
+    #[cfg(debug_assertions)]
+    pub async fn wait_admission_stage(&self, stage: PopupAdmissionStage) {
+        popup_probe::wait_at_stage(self, stage).await;
+    }
+    #[cfg(debug_assertions)]
+    pub fn settlement_callback(&self) -> Box<dyn FnOnce(bool) + Send> {
+        popup_probe::settlement_callback(self)
+    }
 }
 pub struct Page {
     pub(crate) id: Uuid,
@@ -556,6 +603,8 @@ pub struct Page {
     change_listener: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     shortcut_listener: Mutex<Option<Arc<dyn Fn(crate::BrowserShortcutAction, u64, u64) -> bool + Send + Sync>>>,
     pub(crate) popup_sender: Mutex<Option<mpsc::Sender<PopupCandidate>>>,
+    popup_admission: Mutex<crate::popup::Admission<Arc<Page>>>,
+    popup_opener: Mutex<Option<(Weak<Page>, crate::popup::Ticket)>>,
     pending: Mutex<BTreeMap<Uuid, Box<dyn FnOnce(&'static str) + Send>>>,
     downloads: Mutex<Vec<BrowserDownloadSnapshot>>,
     navigation_trace: Mutex<BrowserNavigationTrace>,
@@ -632,8 +681,12 @@ impl Page {
     }
     pub(crate) fn transition(&self, update: navigation::Update) {
         let mut trace = self.navigation_trace.lock().unwrap();
+        // Registration validates the exact opener snapshot under this lock.
+        // Fence document/navigation updates with that same atomic commit.
+        let mut popup_admission = self.popup_admission.lock().unwrap();
         if matches!(&update, navigation::Update::AutomaticNavigationPaused(false)) {
             trace.clear_repeat_window();
+            popup_admission.resume();
         }
         let changed = self.metadata.send_if_modified(|snapshot| {
             let before = snapshot.clone();
@@ -642,6 +695,7 @@ impl Page {
             snapshot.load.navigation_control = Some(trace.control(paused));
             *snapshot != before
         });
+        drop(popup_admission);
         drop(trace);
         if changed {
             if let Some(native) = native_page(self.id) { apply_native_mask(&native); }
@@ -744,6 +798,15 @@ impl Page {
         *slot = Some(tx);
         Ok(rx)
     }
+    pub(crate) fn reserve_popup(self: &Arc<Self>, child: &Arc<Page>) -> Option<crate::popup::Ticket> {
+        let mut admission = self.popup_admission.lock().unwrap();
+        let snapshot = self.snapshot();
+        if self.close_requested.load(Ordering::Acquire)
+            || snapshot.load.navigation_control.as_ref().is_some_and(|control| control.paused) { return None; }
+        let ticket = admission.reserve(child.clone(), snapshot.document_generation, snapshot.load.navigation_sequence)?;
+        *child.popup_opener.lock().unwrap() = Some((Arc::downgrade(self), ticket));
+        Some(ticket)
+    }
     async fn mutate(
         self: &Arc<Self>,
         work: impl FnOnce(&NativePage) -> Result<(), String> + Send + 'static,
@@ -795,17 +858,22 @@ impl Page {
             if !guard() {
                 return Err("BROWSER_CANCELLED".into());
             }
+            let history = matches!(&command, NavigationCommand::Back | NavigationCommand::Forward);
             unsafe {
                 if matches!(command, NavigationCommand::Back) && !native.view.canGoBack() {
                     let snapshot = page.snapshot();
-                    return Ok(NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence });
+                    return Ok(NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence, dispatched: false, history_dispatch_sequence: None });
                 }
                 if matches!(command, NavigationCommand::Forward) && !native.view.canGoForward() {
                     let snapshot = page.snapshot();
-                    return Ok(NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence });
+                    return Ok(NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence, dispatched: false, history_dispatch_sequence: None });
                 }
-                let requested = match &command { NavigationCommand::Navigate(url) => Some(url.clone()), _ => Some(page.snapshot().url) };
-                native.delegate.prepare_navigation(requested, source);
+                if history {
+                    native.delegate.prepare_history_navigation(source);
+                } else {
+                    let requested = match &command { NavigationCommand::Navigate(url) => Some(url.clone()), _ => Some(page.snapshot().url) };
+                    native.delegate.prepare_navigation(requested, source);
+                }
                 let navigation = match command {
                     NavigationCommand::Navigate(url) => {
                         let url = NSURL::URLWithString(&NSString::from_str(&url))
@@ -816,10 +884,12 @@ impl Page {
                     NavigationCommand::Forward => native.view.goForward(),
                     NavigationCommand::Reload => native.view.reload(),
                 };
-                native.delegate.track_navigation(navigation, &native.view);
+                if history { native.delegate.track_history_navigation(navigation, &native.view); }
+                else { native.delegate.track_navigation(navigation, &native.view); }
             }
             let snapshot = page.snapshot();
-            Ok(NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence })
+            Ok(NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence, dispatched: true,
+                history_dispatch_sequence: history.then_some(snapshot.navigation_dispatch_sequence) })
         })
         .await
     }
@@ -827,21 +897,44 @@ impl Page {
         let expected = self.snapshot();
         self.stop_loading_guarded(expected.document_generation, expected.load.navigation_sequence, Arc::new(|| true)).await
     }
+    /// Cancel this dispatch even if its own native History start has since
+    /// advanced the public document/control identity. Successors never inherit
+    /// the original dispatch binding.
+    pub async fn stop_navigation_receipt(self: &Arc<Self>, receipt: NativeNavigationReceipt) -> Result<(), String> {
+        if !receipt.dispatched { return Ok(()); }
+        if receipt.history_dispatch_sequence.is_some() {
+            return self.mutate(move |native| native.delegate.stop_history_dispatch(&native.view, receipt)).await;
+        }
+        self.stop_loading_guarded(receipt.document_generation, receipt.navigation_sequence, Arc::new(|| true)).await
+    }
     /// A pause holds future page-originated main-frame actions. Resuming only
     /// releases that hold; it never repeats a request or an input operation.
     pub async fn set_automatic_navigation_paused_guarded(
         self: &Arc<Self>, paused: bool, generation: u64, navigation_sequence: u64, guard: Arc<DispatchGuard>,
     ) -> Result<(), String> {
-        self.mutate(move |native| {
+        let page = self.clone();
+        let children = on_main(move || {
+            if page.close_requested.load(Ordering::Acquire) { return Err(INTERRUPTED.into()); }
+            let native = native_page(page.id).ok_or(INTERRUPTED)?;
             if !guard() { return Err("BROWSER_CANCELLED".into()); }
-            let page = native.owner.upgrade().ok_or(INTERRUPTED)?;
-            if !(NativeNavigationReceipt { document_generation: generation, navigation_sequence }).matches(&page.snapshot()) {
+            if !(NativeNavigationReceipt { document_generation: generation, navigation_sequence, dispatched: false, history_dispatch_sequence: None }).matches(&page.snapshot()) {
                 return Err("BROWSER_STALE_TARGET".into());
             }
+            let children = if paused {
+                let mut admission = page.popup_admission.lock().unwrap();
+                admission.pause();
+                admission.children().cloned().collect::<Vec<_>>()
+            } else { Vec::new() };
             page.transition(navigation::Update::AutomaticNavigationPaused(paused));
             if paused { native.delegate.pause_navigation(&native.view); }
-            Ok(())
-        }).await
+            for child in &children { child.close_native(); }
+            Ok(children)
+        }).await?;
+        // Pause ACK includes real child destruction, even if the candidate
+        // worker is still queued/claimed behind a host lock or a debug gate.
+        // Failed closes retain ownership in the opener registry for retry.
+        for child in children { child.force_close().await?; }
+        Ok(())
     }
     pub async fn stop_loading_guarded(
         self: &Arc<Self>, generation: u64, navigation_sequence: u64, guard: Arc<DispatchGuard>,
@@ -850,7 +943,7 @@ impl Page {
             if !guard() { return Err("BROWSER_CANCELLED".into()); }
             let page = n.owner.upgrade().ok_or(INTERRUPTED)?;
             let snapshot = page.snapshot();
-            if !(NativeNavigationReceipt { document_generation: generation, navigation_sequence }).matches(&snapshot) { return Err(STALE.into()); }
+            if !(NativeNavigationReceipt { document_generation: generation, navigation_sequence, dispatched: false, history_dispatch_sequence: None }).matches(&snapshot) { return Err(STALE.into()); }
             n.delegate.stop_loading(&n.view);
             Ok(())
         })
@@ -1182,6 +1275,12 @@ impl Page {
         self.visible.store(false, Ordering::Release);
         self.panel_presented.store(false, Ordering::Release);
         self.dialog_draining.store(true, Ordering::Release);
+        let children = {
+            let mut admission = self.popup_admission.lock().unwrap();
+            admission.close();
+            admission.children().cloned().collect::<Vec<_>>()
+        };
+        for child in children { child.close_native(); }
         if *self.closed.borrow() {
             return;
         }
@@ -1219,10 +1318,18 @@ impl Page {
         self.settle_pending(UNCONFIRMED);
         self.transition(navigation::Update::Closed);
         self.closed.send_replace(true);
+        let popup_opener = self.popup_opener.lock().unwrap().take();
+        if let Some((opener, ticket)) = popup_opener && let Some(opener) = opener.upgrade() {
+            opener.popup_admission.lock().unwrap().remove(ticket);
+        }
         self.engine.pages.lock().unwrap().remove(&self.id);
     }
     pub async fn force_close(self: &Arc<Self>) -> Result<(), String> {
         self.close_requested.store(true, Ordering::Release);
+        // close_requested fences new reservation before taking this snapshot.
+        // A parent ACK alone does not prove retained candidate downloads/views
+        // have completed their own native close callbacks.
+        let children = self.popup_admission.lock().unwrap().children().cloned().collect::<Vec<_>>();
         let mut closed = self.closed();
         let page = self.clone();
         on_main(move || {
@@ -1235,6 +1342,12 @@ impl Page {
                 .changed()
                 .await
                 .map_err(|_| "WK close acknowledgement lost".to_owned())?;
+        }
+        for child in children {
+            let mut closed = child.closed();
+            while !*closed.borrow_and_update() {
+                closed.changed().await.map_err(|_| "WK popup close acknowledgement lost".to_owned())?;
+            }
         }
         Ok(())
     }
@@ -1427,13 +1540,54 @@ mod event_contract_tests {
     fn stale_stop_receipt_does_not_match_a_successor_or_crashed_document() {
         let mut snapshot = PageSnapshot::default();
         navigation::reduce(&mut snapshot, navigation::Update::Begin { url: Some("https://fixture.invalid/first".into()), source: BrowserNavigationSource::UserCommand, bootstrap: false });
-        let receipt = NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence };
+        let receipt = NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence, dispatched: true, history_dispatch_sequence: None };
         assert!(receipt.matches(&snapshot));
         navigation::reduce(&mut snapshot, navigation::Update::Begin { url: Some("https://fixture.invalid/second".into()), source: BrowserNavigationSource::PageNavigation, bootstrap: false });
         assert!(!receipt.matches(&snapshot));
-        let second = NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence };
+        let second = NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence, dispatched: true, history_dispatch_sequence: None };
         navigation::reduce(&mut snapshot, navigation::Update::Crashed);
         assert!(!second.matches(&snapshot));
+    }
+    #[test]
+    fn history_receipt_revokes_old_controls_before_a_new_native_document_starts() {
+        let mut snapshot = PageSnapshot::default();
+        navigation::reduce(&mut snapshot, navigation::Update::Begin { url: Some("https://fixture.invalid/spa".into()), source: BrowserNavigationSource::UserCommand, bootstrap: false });
+        navigation::reduce(&mut snapshot, navigation::Update::Finished { url: "https://fixture.invalid/spa".into() });
+        let old = NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence, dispatched: true, history_dispatch_sequence: None };
+        navigation::reduce(&mut snapshot, navigation::Update::HistoryRequested { source: BrowserNavigationSource::UserCommand });
+        let history = NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence, dispatched: true, history_dispatch_sequence: Some(snapshot.navigation_dispatch_sequence) };
+        assert_eq!(old.document_generation, history.document_generation);
+        assert_ne!(old.navigation_sequence, history.navigation_sequence);
+        assert!(!old.matches(&snapshot));
+        assert!(history.matches(&snapshot));
+        navigation::reduce(&mut snapshot, navigation::Update::HistoryRequested { source: BrowserNavigationSource::UserCommand });
+        assert!(!history.matches(&snapshot), "cancelling a delayed history receipt must not stop its successor");
+    }
+    #[test]
+    fn original_history_receipt_survives_its_native_start_but_never_matches_a_successor_dispatch() {
+        let mut snapshot = PageSnapshot::default();
+        navigation::reduce(&mut snapshot, navigation::Update::Begin { url: Some("https://fixture.invalid/first".into()), source: BrowserNavigationSource::UserCommand, bootstrap: false });
+        navigation::reduce(&mut snapshot, navigation::Update::Finished { url: "https://fixture.invalid/first".into() });
+        navigation::reduce(&mut snapshot, navigation::Update::HistoryRequested { source: BrowserNavigationSource::UserCommand });
+        let dispatch_sequence = snapshot.navigation_dispatch_sequence;
+        let receipt = NativeNavigationReceipt { document_generation: snapshot.document_generation,
+            navigation_sequence: snapshot.load.navigation_sequence, dispatched: true, history_dispatch_sequence: Some(dispatch_sequence) };
+        assert!(receipt.matches_history_dispatch(Some(dispatch_sequence)));
+
+        // The original receipt is delayed while its own exact WKNavigation
+        // begins. Public identity changes, but cleanup retains this binding.
+        navigation::reduce(&mut snapshot, navigation::Update::HistoryStarted { url: "https://fixture.invalid/back".into(), source: BrowserNavigationSource::UserCommand, dispatch_sequence });
+        navigation::reduce(&mut snapshot, navigation::Update::Started { url: "https://fixture.invalid/back".into() });
+        assert!(!receipt.matches(&snapshot));
+        assert!(receipt.matches_history_dispatch(Some(dispatch_sequence)));
+        assert!(navigation::in_flight(snapshot.load.phase));
+
+        navigation::reduce(&mut snapshot, navigation::Update::Finished { url: "https://fixture.invalid/back".into() });
+        assert!(!navigation::in_flight(snapshot.load.phase), "finished history cleanup cannot manufacture a cancelled load");
+        assert!(receipt.matches_history_dispatch(Some(dispatch_sequence)));
+        assert!(!receipt.matches_history_dispatch(None), "normal/automatic successors clear the exact history binding");
+        navigation::reduce(&mut snapshot, navigation::Update::HistoryRequested { source: BrowserNavigationSource::UserCommand });
+        assert!(!receipt.matches_history_dispatch(Some(snapshot.navigation_dispatch_sequence)));
     }
     #[test]
     fn late_show_cannot_cover_an_empty_failure_but_retained_content_stays_visible() {
@@ -1467,6 +1621,34 @@ mod event_contract_tests {
         page.transition(navigation::Update::Crashed);
         assert!(page.is_presented());
         assert!(!page.allows_user_download());
+    }
+}
+#[cfg(test)]
+mod popup_admission_tests {
+    use super::*;
+    fn candidate(opener: &Arc<Page>) -> PopupCandidate {
+        let child = opener.engine.allocate_page(opener.context.clone());
+        let ticket = opener.reserve_popup(&child).unwrap();
+        let (_, ready) = oneshot::channel();
+        PopupCandidate::new(child, "https://example.com/popup".into(), opener, ticket, ready)
+    }
+    #[test]
+    fn candidate_requires_the_exact_opener_and_commits_once() {
+        let opener = Page::test_user_surface(true, true, false, false);
+        let unrelated = Page::test_user_surface(true, true, false, false);
+        let candidate = candidate(&opener);
+        assert!(candidate.admit(&unrelated, || panic!("wrong opener admitted")).is_none());
+        assert_eq!(candidate.admit(&opener, || 42), Some(42));
+        assert!(candidate.page.popup_opener.lock().unwrap().is_none());
+        assert!(candidate.admit(&opener, || panic!("duplicate admission")).is_none());
+    }
+    #[test]
+    fn closed_child_cannot_become_an_active_tab() {
+        let opener = Page::test_user_surface(true, true, false, false);
+        let candidate = candidate(&opener);
+        candidate.page.close_requested.store(true, Ordering::Release);
+        assert!(candidate.admit(&opener, || panic!("closed child admitted")).is_none());
+        assert_eq!(opener.popup_admission.lock().unwrap().children().count(), 1);
     }
 }
 pub(crate) fn navigation_allowed(value: &str) -> bool {

@@ -224,6 +224,7 @@ impl DesktopBrowserRuntime {
         let stop = tab.popup_stop.clone();
         let work = tab.popup_work.clone();
         let cleanup = tab.popup_cleanup.clone();
+        let opener = Arc::downgrade(&tab.view.page);
         tokio::spawn(async move {
             let _work = work.lock().await;
             loop {
@@ -232,34 +233,43 @@ impl DesktopBrowserRuntime {
                     _ = stop.cancelled() => break,
                     candidate = popups.recv() => candidate,
                 };
-                let Some(candidate) = candidate else { break; };
+                let Some(mut candidate) = candidate else { break; };
                 let page = candidate.page.clone();
-                if let Some(runtime) = weak.upgrade() {
-                    if let Err(error) = runtime.consume_popup(candidate, &stop).await {
-                        tracing::debug!(code = error.code(), "macOS WK popup was not admitted");
-                        if page.force_close().await.is_err() { cleanup.lock().await.push(page); }
+                #[cfg(debug_assertions)]
+                let settled = candidate.settlement_callback();
+                #[cfg_attr(not(debug_assertions), allow(unused_variables, unused_assignments))]
+                let mut admitted = false;
+                if let (Some(runtime), Some(opener)) = (weak.upgrade(), opener.upgrade()) {
+                    match runtime.consume_popup(candidate, &opener, &stop).await {
+                        Ok(()) => admitted = true,
+                        Err(error) => {
+                            tracing::debug!(code = error.code(), "macOS WK popup was not admitted");
+                            if page.force_close().await.is_err() { cleanup.lock().await.push(page); }
+                        }
                     }
                 } else {
-                    let _ = candidate.ready.await;
+                    let _ = candidate.wait_ready().await;
                     if page.force_close().await.is_err() { cleanup.lock().await.push(page); }
                 }
+                #[cfg(debug_assertions)]
+                settled(admitted);
             }
             // Queued popups already own real WK views. Closing the receiver and
             // relying on Drop is not an acknowledged Profile-cleanup barrier.
-            while let Ok(candidate) = popups.try_recv() {
+            while let Ok(mut candidate) = popups.try_recv() {
                 let page = candidate.page.clone();
-                let _ = candidate.ready.await;
+                let _ = candidate.wait_ready().await;
                 if page.force_close().await.is_err() { cleanup.lock().await.push(page); }
             }
         });
         Ok(())
     }
 
-    async fn consume_popup(self: &Arc<Self>, candidate: PopupCandidate, opener_stop: &CancellationToken) -> Result<(), WorkspaceError> {
+    async fn consume_popup(self: &Arc<Self>, mut candidate: PopupCandidate, opener: &Arc<Page>, opener_stop: &CancellationToken) -> Result<(), WorkspaceError> {
         let page = candidate.page.clone();
-        if candidate.ready.await.map_err(native_error)?.is_err() {
-            return Err(WorkspaceError::NativeCommandFailed);
-        }
+        candidate.wait_ready().await.map_err(native_error)?;
+        #[cfg(debug_assertions)]
+        candidate.wait_admission_stage(nomifun_browser_macos::engine::PopupAdmissionStage::Queued).await;
         let _creation = tokio::select! { biased;
             _ = opener_stop.cancelled() => {
                 page.force_close().await.map_err(native_error)?;
@@ -267,25 +277,37 @@ impl DesktopBrowserRuntime {
             }
             guard = self.creating.lock() => guard,
         };
+        #[cfg(debug_assertions)]
+        candidate.wait_admission_stage(nomifun_browser_macos::engine::PopupAdmissionStage::Claimed).await;
         let tab = self.build_native_tab(page.clone());
         let id = tab.metadata.lock().unwrap().target.tab_id.clone();
+        // Configure the still-hidden native child before making it an active
+        // workspace tab. Pause owns and can close it throughout these awaits.
+        if let Err(error) = self.initialize_native_tab(&tab).await {
+            self.retire_native_tab(&tab).await?;
+            return Err(error);
+        }
         {
             let mut state = self.state.lock().await;
             if state.closed || self.closing.is_cancelled() || opener_stop.is_cancelled() || state.tabs.len() >= 8 {
                 drop(state);
-                page.force_close().await.map_err(native_error)?;
+                self.retire_native_tab(&tab).await?;
                 return Err(if self.closing.is_cancelled() {
                     WorkspaceError::WorkspaceClosed
                 } else {
                     WorkspaceError::TabLimit
                 });
             }
-            state.tabs.insert(id.clone(), tab.clone());
-            state.active = Some(id);
-        }
-        if let Err(error) = self.initialize_native_tab(&tab).await {
-            self.retire_native_tab(&tab).await?;
-            return Err(error);
+            // The opener is exact, and registration shares the revocation
+            // lock with the main-thread Pause. Resume cannot revive a ticket.
+            if candidate.admit(opener, || {
+                state.tabs.insert(id.clone(), tab.clone());
+                state.active = Some(id);
+            }).is_none() {
+                drop(state);
+                self.retire_native_tab(&tab).await?;
+                return Err(WorkspaceError::StaleTarget);
+            }
         }
         {
             let mut state = self.state.lock().await;
@@ -521,13 +543,16 @@ async fn navigation_command(view: &View, command: Navigation, generation: u64, e
     // snapshot which may already belong to a website-initiated successor.
     let result = view.page.navigate_guarded_receipt(command, guard, source).await;
     let performed = match &result {
-        Ok(receipt) => receipt.document_generation != generation,
+        // History can retain its document, and unavailable history is a no-op.
+        // The native dispatch records this fact instead of inferring it from
+        // a document/control identity that may have changed while queued.
+        Ok(receipt) => receipt.dispatched,
         // If no receipt acknowledged a dispatched request, preserve uncertainty.
         Err(_) => dispatched.load(Ordering::Acquire),
     };
     if closing.is_cancelled() || cancel.is_cancelled() {
         if let Ok(receipt) = &result && performed {
-            match view.page.stop_loading_guarded(receipt.document_generation, receipt.navigation_sequence, Arc::new(|| true)).await {
+            match view.page.stop_navigation_receipt(*receipt).await {
                 Ok(()) => {},
                 Err(error) if matches!(error.as_str(), "BROWSER_STALE_OBSERVATION" | "BROWSER_STALE_TARGET" | "BROWSER_CANCELLED") => {},
                 Err(error) => return Err(native_error(error)),

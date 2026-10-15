@@ -1,11 +1,12 @@
 //! Native component acceptance for the production CF dispatcher and WK owner.
 //!
 //! Build: cargo build -p nomifun-desktop --example macos_appkit_main_loop_smoke
-//! Run: target/debug/examples/macos_appkit_main_loop_smoke --report <new.json>
-//!      [--case all|main-loop|deferred-engine]
+//! Package the exact build with package-macos-native-fixture.mjs and launch its
+//! fixed AppKit plan through LaunchServices.
 //! The report's existing parent must be an owned, private 0700 directory. The
 //! report is created once with 0600 permissions; existing evidence is rejected.
-//! No backend, database, network, permissions, or desktop exit receipt is used.
+//! No backend, database, network, or permissions are used. The component report
+//! and the authenticated launcher exit/cleanup receipt have separate scopes.
 //! A failed modal deadline remains a failure even when the same WK futures
 //! subsequently settle after the original Tauri event callback returns.
 
@@ -17,6 +18,9 @@ use main_loop as macos_appkit_main_loop;
 #[cfg(target_os = "macos")]
 #[path = "../src/browser_surface/macos/lifecycle.rs"]
 mod lifecycle;
+#[cfg(target_os = "macos")]
+#[path = "../src/macos_development_launch.rs"]
+mod application_launch;
 
 #[cfg(target_os = "macos")]
 mod native {
@@ -81,6 +85,10 @@ mod native {
                         _ => bail!("--case must be all, main-loop, or deferred-engine"),
                     };
                     selected = true;
+                } else if argument == super::application_launch::DESCRIPTOR_ARGUMENT {
+                    ensure!(arguments.next().is_some(), "development descriptor needs a path");
+                } else if argument == "-ApplePersistenceIgnoreState" {
+                    ensure!(arguments.next().as_deref() == Some(std::ffi::OsStr::new("YES")), "invalid native restoration argument");
                 } else {
                     bail!("use --report <new absolute JSON path> [--case all|main-loop|deferred-engine]");
                 }
@@ -217,6 +225,9 @@ mod native {
         process_id: u32,
         modal_bound_ms: u128,
         desktop_server_started: bool,
+        launchservices_admitted: bool,
+        // The controller can verify this only after our process exits. This
+        // component report never promotes its own cleanup to actual-exit proof.
         authenticated_exit_receipt_verified: bool,
         default_mode: Option<NativeWitness>,
         cases: Vec<CaseReport>,
@@ -471,7 +482,7 @@ mod native {
         let mut report = Report {
             scope: "production CF main-loop dispatcher and DeferredEngine components",
             selection: options.selection, process_id: std::process::id(),
-            modal_bound_ms: MODAL_BOUND.as_millis(), desktop_server_started: false,
+            modal_bound_ms: MODAL_BOUND.as_millis(), desktop_server_started: false, launchservices_admitted: true,
             authenticated_exit_receipt_verified: false, default_mode: None,
             cases: Vec::new(), failures: Vec::new(), passed: false,
         };
@@ -510,6 +521,9 @@ mod native {
     }
 
     pub fn run() -> anyhow::Result<i32> {
+        let mut bootstrap = super::application_launch::prepare_application(
+            super::application_launch::ApplicationScope::AppkitMainLoopAudit,
+        )?.context("LaunchServices AppKit audit admission is required")?;
         let options = Options::parse()?;
         let completed = Arc::new(AtomicBool::new(false));
         let success = Arc::new(AtomicBool::new(false));
@@ -530,6 +544,7 @@ mod native {
             .build(context)?;
         let driver_completed = completed.clone();
         let driver_success = success.clone();
+        let final_exit_allowed = exit_allowed.clone();
         let result = app.run_return(move |handle, event| {
             if matches!(event, tauri::RunEvent::Ready) && !started.swap(true, Ordering::AcqRel) {
                 let options = driver_options.lock().unwrap_or_else(|p| p.into_inner()).take();
@@ -550,7 +565,10 @@ mod native {
                 _ => {}
             }
         });
-        Ok(if result == 0 && completed.load(Ordering::Acquire) && success.load(Ordering::Acquire) { 0 } else { 1 })
+        let cleanup_verified = final_exit_allowed.load(Ordering::Acquire);
+        let code = if result == 0 && completed.load(Ordering::Acquire) && success.load(Ordering::Acquire) && cleanup_verified { 0 } else { 1 };
+        bootstrap.report_exit(code, cleanup_verified)?;
+        Ok(code)
     }
 }
 

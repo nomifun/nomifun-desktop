@@ -1,10 +1,16 @@
 # 内置浏览器整改实施记录
 
+**当前 macOS 接续（2026-10-15）**：已在 macOS 26.6.2 / 25G83 / arm64，从初始 clean 的 `main=origin/main=6409993b776c95f14ebc4785b2eb4d2759a526f8` 继续本地修复。准确的源码修改、首次失败、最终构建/定向检查、computer use 启动限制、Safari 独立 baseline 与剩余项见[本轮 macOS 记录](2026-10-15-browser-macos-local-remediation.zh.md)。本轮已处理 queued/in-flight popup Pause 与 History 源码缺口，但尚无融合后 NomiFun/WK 原生及生产 GUI 通过，原始任务保持未完成。已发布基线可直接取得；下文“251 路径尚未提交”“必须携带 portable”“仅 pull 不足”等均属发布前 Windows 历史，不作为当前 Mac 操作指令。
+
+构建验收时已正常 fast-forward 到包含浏览器修复的 `HEAD=origin/main=5259ca8e53a0e15f08d725fa15ab3f39cd2cad56`；6 个上游模板/i18n 文件与本轮 26 个本地 task 路径无交集，前后本地 hash 无漂移。最新静态 App、embedded UI mock gate 与 desktop boundary 窄重验均 EXIT0，最新 4812 来源路径无漂移，最终产物及保留 copy 见本轮记录。旧 `6409993b` App 和快照保留历史范围；用户随后授权本轮 commit+push，接续使用包含本轮修复的提交。最终 App 仍未原生启动。
+
+**以下为 Windows 批次及发布前历史证据**。原时间、artifact、首次失败与当时待办保留各自范围；当前 Mac 结果以上方链接为准。
+
 整改覆盖共享 UI、Windows WebView2、macOS WKWebView、原生普通页与 popup、人工导航取消、Profile 与网站验证结果。任务保持进行中。用户随后明确要求当前环境先不继续 macOS 工作，保留已有改动并准备 [macOS 交接](../handoffs/2026-10-13-browser-macos.zh.md)；当前执行集中于 Windows 和共享层。Windows 本地原生 fixture 的导航、Profile 与 Agent 链已通过，9C6F 正式 GUI 及真实网站已取得下文限定范围的证据。9C6F 发现的同文档 History 状态缺陷现已源码修复并通过定向原生验证，后续95E5新主程序已构建并接续启动，对应同文档History已实机通过，本轮880×600原生输入、显隐与宽屏恢复也已实际通过；macOS 原生验收没有被视为通过。
 
 当前已确认的产品约束：内嵌浏览器保持主要场景，用户与 Agent 使用同页；系统浏览器只保留部分场景功能，不作为主场景重构、自动回退或替代验收。防重、状态、兼容性、存储、诊断及恢复优化继续在此边界内推进。external_page 是内嵌 WebView 的外站创建选项，未改变产品窗口或浏览器入口。
 
-**Windows Bilibili根因、修补与当前证据（2026-10-15）**
+**Windows Bilibili根因、修补与当时证据（历史，2026-10-15）**
 
 Windows搜索子页持续加载已定位到应用的原生呈现切换：真实popup激活后，宿主过早把opener的WebView2 controller设为不可见。相同原S1 Session/Profile的静态UI对照中，旧行为使child停在Provisional/None/0%，切回parent后才很快收到正文事件；只保留准确opener的controller活性即可正常完成，撤回该修补又重现。由此确认本次Windows/WebView2 155环境下的应用边界原因；不把未直接测得的SDK/Chromium内部调度细节写成普遍规范，也不据此归因原始macOS百度现场。
 
