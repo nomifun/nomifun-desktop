@@ -267,10 +267,28 @@ describe('compact message errors', () => {
     expect(page.queryByRole('button', { name: 'Retry' }) !== null).toBe(expected);
   });
 
-  test.each([{ isProcessing: true }, { readOnly: true }])('does not offer retry in a restricted context %j', (context) => {
+  test.each([
+    { isProcessing: true },
+    { readOnly: true },
+    { executionPause: { turnId: sourceId, reason: undefined, cleanupProven: true, pausedAt: undefined } },
+  ])('does not offer retry in a restricted context %j', (context) => {
     const { page } = mount(error, context);
     expect(page.queryByRole('button', { name: 'Retry' })).toBeNull();
     expect(page.getByRole('button', { name: 'Technical details' })).toBeDefined();
+  });
+
+  test.each([
+    { recovery: { kind: 'continue_truncated' as const, source_message_id: sourceId, failure_code: 'output_truncated' as const } },
+    { execution_pause: { cleanupProven: true } },
+  ])('recovery and pause notices cannot offer a second retry path: %j', (notice) => {
+    const { page } = mount({ ...error, content: { ...error.content, ...notice } });
+    expect(page.queryByTestId('message-error-retry')).toBeNull();
+    expect(page.queryByTestId('message-error-continue-truncated')).toBeNull();
+  });
+
+  test('stop failure copy exists in both supported locales', () => {
+    expect(conversation.stop.failed).toBeTruthy();
+    expect(zhConversation.stop.failed).toBeTruthy();
   });
 
   test('non-retryable errors keep their reason available', () => {

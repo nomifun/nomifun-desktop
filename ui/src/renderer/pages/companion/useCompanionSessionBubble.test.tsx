@@ -264,7 +264,7 @@ describe('companion bubble observes canonical cross-window lifecycle', () => {
     const process = { ...stored(''), message_id: newestId, msg_id: newestId, type: 'thinking', created_at: 200,
       content: { content: 'Thinking', status: 'done' } } as TMessage;
     wire.history.mockImplementation(async query => query.cursor === ''
-      ? { items: [process], total: 102, has_more: true }
+      ? { items: [process], total: 102, has_more: true, next_cursor: `${process.created_at}:${process.message_id}` }
       : { items: [stored('Earlier response'), { ...stored('Question'), message_id: root, msg_id: root, position: 'right' }],
         total: 102, has_more: true });
     const view = renderHook(() => useCompanionSessionBubble(companionId), { wrapper });

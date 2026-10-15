@@ -1,7 +1,0 @@
-{
-  "status": "followup_failed_before_tool_preactivation_fix",
-  "firstGameStartPauseObserved": "已暂停 · 按空格继续",
-  "secondFrameText": "🐍 贪吃蛇\n0\n按 开始 或空格键开始\n开始\n暂停\n重置\n方向键 / WASD 控制 · 空格键开始/暂停 · 吃到食物得分 · 撞墙或撞自己结束",
-  "secondOwnerUI": "贪吃蛇\n运行中\n开始使用\n停止\n重新打包并启动\n\n一个可直接在浏览器中运行的贪吃蛇小游戏，支持键盘方向键/WASD 控制、计分、暂停和重置。\n\n运行配置已填写，可在高级配置中查看和修改。\n\n编辑\n名称\n应用描述\n标签\n高级配置：安装、预览、打包与启动\n\n你修改的字段尚未保存；其余字段继续同步应用的最新配置。\n\n保存\n程序预览\n独立打开\n刷新预览\n放大\n收起预览\n文件目录与命令输出\n覆盖文件\n删除",
-  "dirtyDescFinal": "我的游戏备注（未保存）"
-}

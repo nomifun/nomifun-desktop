@@ -1,291 +1,132 @@
 # 疑难排查
 
-运行 NomiFun 时可能遇到的症状，以及它们背后真实的成因。如果你遇到的
-问题不在本表里，源码就是最快的参考——本页描述的每一个行为都对应
-`crates/backend/` 下的某个具体文件。
+[English](troubleshooting.md)
 
-## 后端端口 / 连接问题
+先确认实际进程日志、选中的数据目录和宿主模式。
+[配置](configuration.zh.md)解释参数及目录优先级，
+[API 概览](api-overview.zh.md)用于定位所属路由。
 
-### `nomifun-web: invalid --host '<value>'`
+## 网络与端口
 
-host 参数必须能被解析为 IP 地址（`127.0.0.1`、`0.0.0.0`、某个具体
-网卡的 IP）。`localhost` 这样的主机名不会被解析——`nomifun-web` 会
-直接以这条信息快速失败，而不是稍后再抛出晦涩的 socket 错误。请传入
-一个 IP 字面量。
+| 现象 | 检查 |
+| --- | --- |
+| `invalid --host` | 使用 `127.0.0.1`、`0.0.0.0` 等 IP 字面量，不接受 hostname。 |
+| `address already in use` | Unix 用 `lsof -i :8787`、PowerShell 用 `Get-NetTCPConnection -LocalPort 8787` 定位监听者；停止目标进程或换端口。 |
+| 其他电脑无法连接 | Web 默认绑定 loopback。检查目标绑定地址、防火墙、反向代理和实际发布端口，广泛暴露前完成 owner 设置。 |
+| Desktop 远程地址不可用 | 以[连接与设备](../guides/webui-remote-access.zh.md)显示的地址和状态为准；LAN 与 relay 独立控制。 |
 
-### 配置端口上出现 `address already in use`
+## 鉴权与 CSRF
 
-有别的进程占着同一个端口。Web 宿主默认使用 `8787`
-（`NOMIFUN_WEB_PORT`）。桌面外壳没有这个问题——它启动时会向 OS 索要
-一个空闲的 localhost 端口，然后通过 IPC 告知渲染端。
+没有预置凭据的全新独立 Web 宿主返回
+`GET /api/auth/status` 的 `needs_setup: true` 属于正常状态，
+暴露服务前完成首次设置。Setup 返回 `409` 表示 owner 已存在。
+启动管理员环境变量不替换已有账号。
 
-在 Linux/macOS 上找出占用者：`lsof -i :8787`。Windows 上：
-`Get-NetTCPConnection -LocalPort 8787`。要么把它杀掉，要么修改
-`--port` / `NOMIFUN_WEB_PORT`。
+登录后反复 `401`，用浏览器开发工具检查请求与响应：
 
-### 浏览器无法在非 loopback 地址上访问服务
+- Cookie/Bearer token 是否到达同一部署 origin。
+- 代理是否保留 cookie 和鉴权 header。
+- HTTPS 部署设置 `NOMIFUN_HTTPS=true`，启用 `Secure` 和
+  `SameSite=Strict`；Secure cookie 不会通过普通 HTTP 发送。
+- 服务端时钟是否正确，密码修改是否已使旧会话失效。
 
-`nomifun-web` 默认绑定 `127.0.0.1`。要接受 LAN/VPN 流量，需要传入
-`--host 0.0.0.0` 或设置 `NOMIFUN_WEB_HOST=0.0.0.0`。如果该主机可被较大范围访问，
-请先预置管理员或完成首次设置。在 Windows / macOS 宿主上还要检查防火墙——OS
-可能默默丢弃连接。
+`403 CSRF token validation failed` 要求 `nomifun-csrf-token` cookie
+与 `x-csrf-token` header 相同。检查 origin/cookie 策略及代理重写。
+公开 login/setup 路由豁免；登录后变更遵循当前鉴权策略。
+桌面使用注入的本地信任路径。
 
-如果目标只是从手机或同一 LAN 上的其他设备进行远程访问，
-[WebUI 远程访问](../guides/webui-remote-access.md) 通常比完整的服务
-部署更省事。
-
-## 首次启动管理员与登录问题
-
-### 启动服务后 `GET /api/auth/status` 返回 `needs_setup: true`
-
-这是全新安装且没有设置 `NOMIFUN_ADMIN_PASSWORD` 时的预期状态。第一个
-访问浏览器的人输入的用户名 + 密码会通过 `POST /api/auth/setup` 成为
-管理员。打开 URL，填写表单，登录即可完成。
-
-如果希望在服务对外可达之前关闭这个时间窗口，请在首次启动前设置
-`NOMIFUN_ADMIN_PASSWORD`（可选地再设置 `NOMIFUN_ADMIN_USERNAME`）。
-
-### `/api/auth/setup` 返回 `409 Conflict`
-
-管理员已经存在了。setup 端点只能调用一次。请改用 `POST /login`；
-如果在自托管实例上忘了密码，可通过
-[WebUI 远程访问](../guides/webui-remote-access.md) 描述的仅本地 WebUI
-流程恢复。
-
-### 登录看起来成功，但下一个请求返回 `401`
-
-绝大多数情况是 TLS 反向代理后的 cookie 问题。`Secure` 标记只在
-`NOMIFUN_HTTPS=true` 时才会被加到 cookie 上。在没有该标记的 HTTPS
-响应中，浏览器会直接拒收 cookie，下一个请求于是没有会话。设置
-`NOMIFUN_HTTPS=true` 然后重新加载即可。
-
-第二个原因：服务器时钟漂移。如果系统时钟差得太远，签发它的同一台
-服务器都会把 JWT 当作过期。请确认 NTP 在跑。
-
-### 修改密码时密码明明对，却报 `Current password is incorrect`
-
-该端点会用恒定时间的 bcrypt 比对存储的哈希。如果你怀疑数据损坏：
-停止服务、备份数据目录，通过 `installation_identity.owner_user_id` 找到
-安装所有者，然后查看该用户的 `password_hash` 列。可以做精细的修复（在本地模式下使用
-`POST /api/webui/reset-password`），但最简单的路径是从备份
-恢复或重新初始化。
-
-### 用一个含糊的校验错误拒绝"用户名/密码"
-
-校验器拒绝一小撮显而易见的模式——长度小于 8 的密码、常见词典词、
-不在 `[a-zA-Z0-9_-]` 中的用户名，或者以 `-`/`_` 开头/结尾的用户名。
-请换一个。
-
-## CSRF 错误
-
-### 在 POST/PUT/PATCH/DELETE 上出现 `403 CSRF token validation failed`
-
-`nomifun-csrf-token` cookie 的值必须与 `x-csrf-token` 请求头匹配。
-中间件会在第一个没带它的响应中自动设置该 cookie，因此一个新加载的
-SPA 会在它的第一个 GET 请求中拿到。这通常因为以下几种原因失败：
-
-- 客户端假设服务处于无鉴权本地模式，但服务实际运行在已鉴权模式下
-  （或反过来）。`nomicore --local` 与 `nomifun-web --insecure-no-auth`
-  会跳过 CSRF；普通 `nomifun-web` 需要它。桌面外壳使用 `TrustLocalToken`，
-  自己的 WebView 正常不应看到 CSRF 失败，除非注入的本地信任 header/cookie
-  流程被破坏。
-- 反向代理剥掉了 cookie 或重写了 `Set-Cookie`。Caddy/nginx 的标准配置
-  不会动它们；自定义 rewrite 规则可能会。
-- 浏览器的第三方 cookie 屏蔽影响到了部署域名。
-
-`/login`、`/api/auth/setup`、`/api/auth/qr-login` 对 CSRF 豁免；CSRF
-仅作用于*登录后*的状态变更类路由。
+忘记密码时，可信 Desktop 应用可在
+**连接与设备 → 其他电脑浏览器**管理其 WebUI 账号。
+Loopback 浏览器或独立宿主连接不会获得桌面信任。
+独立宿主应保留数据并收集鉴权错误/日志，由维护者协助恢复。
+不要清空密码 hash、删除数据库或通过暴露无鉴权模式恢复访问。
 
 ## WebSocket 断连
 
-### 连接立刻以 1008 关闭
+策略关闭码 `1008` 通常表示缺少 token 或 token 过期。
+重新获取 `GET /api/ws-token` 后连接，确认代理保留 upgrade 和所用鉴权传输。
+正常关闭码为 `1000`。
 
-1008 是"策略违规"——服务端在两种特定情况下使用：
+服务端心跳默认 30s、超时 60s。连接停止收事件时检查代理 idle timeout 和网络变化。
+自定义客户端应退避重连，忽略未知事件类型。
 
-- "no token provided" —— WebSocket 升级请求没有携带 JWT。
-- 一条 `auth-expired` 事件后接关闭——token 存在但无效或已过期。
+## Agent CLI 与受管组件
 
-这两种通常都是 token 过期导致。通过 `GET /api/ws-token` 刷新 token
-后重连即可。如果你在登录后立刻看到这一现象，请确认 cookie 是否被
-正常透传（参见上面 cookie 不生效的小节），并确认
-`Sec-WebSocket-Protocol`（或你使用的请求头）原样到达了服务端。
-
-### WebSocket 连上之后悄悄不再收到事件
-
-服务端每 30 秒 ping 一次，60 秒未响应则视为客户端已死。如果网络静默
-地断掉了连接（移动 NAT、强制门户、不靠谱的代理），在服务端清理它
-之前客户端侧仍显示已连接。客户端应当负责重连；SPA 会自动重连。如果
-你写了自己的客户端，请在 close 事件上实现指数退避重连。
-
-## "Agent CLI not found" 与 bun 相关问题
-
-### 终端预设立即以 "command not found" 失败
-
-终端的智能体预设（`claude`、`codex`、`gemini`）启动的是你自己安装的
-第三方 CLI，它们必须出现在**进程**的 `PATH` 里。
-进程 PATH 在启动时被增强（`nomifun_runtime::enhance_process_path`），
-但若二进制位置不寻常，仍可能被错过。
-
-跑一下 doctor：
+会话使用内置 `nomi` runtime；`claude`、`codex`、`gemini`
+等终端预设启动的是另外安装的 CLI。
 
 ```bash
 nomicore doctor
+nomicore tool-doctor
 ```
 
-它会逐个探测 `$PATH` 上已知的智能体 CLI，并打印一张按智能体维度的
-可用性表格。务必在与启动应用相同的 shell 中运行它，
-以看到应用真正看到的内容。如果某个 CLI 缺失，请安装它或把它
-的 bin 目录加入 `PATH` 后重启。注意会话本身不依赖这些：内置
-`nomi` 引擎已编译进二进制。
+诊断使用与应用相同的用户、PATH 和数据根。
+安装缺失的第三方 CLI 或修正 PATH 后重启。
+`tool-doctor` 读取组件目录；`tool-doctor --verify` 才会明确解包/探测现有组件，
+不打开数据库、不下载 Node/Bun。Web 宿主可执行文件不提供这些子命令；
+诊断 binary 可用 `cargo build --release -p nomifun-app --bin nomicore` 构建。
 
-### systemd 下的受管工具
-
-Release 二进制内嵌 OfficeCLI；后端启动无需准备或下载 Node/Bun。用户命令优先
-使用服务账户的系统 Bun／`bunx`，其次是有效的既有受管 Bun 缓存。两者都缺失时，
-终端或 MCP 操作提供由用户明确选择的下载入口。应用托管使用系统或用户指定的
-Node。受管制品在配置的数据目录离线复用，使用已验证的绝对路径。以服务账户
-检查数据目录访问与可用组件：
-
-使用从 `nomifun-app` 构建的可选 `nomicore` 诊断程序
-（`cargo build --release -p nomifun-app --bin nomicore`）。WebUI 宿主 CLI
-不接受 `tool-doctor`，部署参见[受管执行组件](../guides/web-server-deployment.zh.md#受管执行组件)。
-
-```bash
-sudo -u nomifun /opt/nomifun/nomicore --data-dir /var/lib/nomifun tool-doctor --verify
-```
-
-不带 `--verify` 的 `tool-doctor` 只输出供应清单；显式验证检查本地可用制品，
-可能解压内嵌 OfficeCLI 与运行私有探测，但不会打开数据库或发起、等待 Node/Bun
-下载。请检查缓存读写／执行权限；缺失的可选组件保持不可用，直到用户选择安装。
-未内嵌 OfficeCLI 的 debug 构建需要它的显式、经验证的开发路径覆盖。
+发布构建内嵌 OfficeCLI。命令优先系统 Bun/`bunx`，再用已验证受管缓存；
+缺失组件需要用户选择下载。应用托管使用系统或配置的 Node。
+Systemd 下确认服务账号可读/执行缓存，按需设置 `SHELL`。
 详见[外部工具](../architecture/external-tools.zh.md)。
+
+NomiRelay 恢复/重启同样只复用批准的本地 `nfagent`。
+缺失或变化时需要用户明确选择下载；
+离线 `NOMIFUN_NFAGENT_PATH` 仍须符合 manifest hash。
 
 ## Office 预览
 
-### Word／Excel／PPT 无法预览
+组件准入失败时，用同一数据根执行 `tool-doctor --verify`。
+无效/加密文档、不支持格式、资源上限及写入不稳定有独立错误；
+进程提前退出属于渲染失败。界面提供重试时可重试，也可系统打开或下载。
 
-三类文档共用 `/api/office-preview/*` 与受管 `iOfficeAI/OfficeCLI` 组件。
-在相同数据根运行 `tool-doctor --verify`，检查实际可执行文件、版本、摘要及
-能力探测错误。组件准入失败时修复或更新应用；debug 覆盖必须是满足组件清单
-开发要求的绝对路径。
+Artifact frame 空白时，反向代理必须保留完整
+`/api/office-preview-artifacts/{capability}/` 路径和 query。
+请求身份、capability 和 nonce 必须匹配当前预览。
+不要放宽 CSP 或豁免任意 API。HTTP ready 和 iframe load 不证明已经显示成功。
+详见 [Office artifact 契约](../architecture/external-tools.zh.md)。
 
-界面区分准备、渲染和显示。进程提前退出属于渲染失败，不是端口就绪超时。
-不支持的格式、不完整／加密文档、资源上限和仍在写入的文件均有明确错误；
-仅可恢复失败提供重试。刷新失败保留上一版，系统打开和下载仍可用。
+## 数据目录与数据库
 
-### iframe 被阻止或空白
+`unable to open database file` 先检查实际服务账号的目录所有权、磁盘空间和
+挂载权限。Docker bind mount 必须对容器 UID 可写，命名卷可简化所有权。
+在允许预期数据路径访问时保留部署加固。
 
-活跃请求返回 `/api/office-preview-artifacts/{capability}/`，iframe 在查询参数
-加入 UUIDv7 request ID 和 nonce。反向代理须保留完整路径和查询参数。
-产物由随机、可撤销的 capability 授权；start／status／stop 仍要求鉴权。
-不要放开任意 `/api/*`，也不要削弱产物的 CSP 和 sandbox。
+`data directory ... is already in use` 时关闭提示的占用者，或改用其他
+`NOMIFUN_DATA_DIR` / `--data-dir`。
+不要删除 `server.lock` 绕过仍存活的持有者。
+进程退出时 OS 释放锁，遗留文件无害。同通道宿主共享默认值，
+开发脚本选择独立数据根。
 
-HTTP ready 与 iframe load 不能单独标为显示成功。生成的 frame 必须发送首屏
-完成消息，且匹配来源、opaque origin、request ID、capability 和 nonce。
-检查浏览器策略／连接错误及后端有界渲染诊断。详见
-[外部工具与 Office 产物](../architecture/external-tools.zh.md)。
+可读但不兼容的数据库 lineage 由启动 dataset coordinator
+按当前破坏性 baseline 处理重建。支持 schema 的损坏和 I/O 失败保持关闭；
+restore 不获得重建权限。不要用迁移条数推断应用版本顺序。
+详见[数据存储](../architecture/data-and-storage.zh.md)。
 
-## 数据目录权限
+## Docker 构建与启动
 
-### 服务起来了，但数据库写入失败 / "unable to open database file"
+先看 `docker compose logs nomifun` 与 `docker compose ps`，
+检查端口映射、构建后的 SPA 路径和数据卷权限。
+没有管理员密码时首次设置仍可用，不代表启动崩溃。
 
-配置的数据目录必须对进程可写。常见情况：
+选择镜像源前先定位失败阶段：
 
-- 在 systemd 下以 `User=nomifun` 运行，但数据目录的所属者是另一个
-  用户。修复：`chown -R nomifun:nomifun /var/lib/nomifun`。
-- 一个只读挂载（`RootDirectory=`、`ProtectHome=yes` 等）覆盖了数据
-  路径。请去掉过宽的沙箱；保留官方 unit 中的中度加固
-  （`NoNewPrivileges=yes`、`PrivateTmp=yes`）。
-- 在 Docker 下，把宿主目录挂载进来但 UID 与容器不一致。请改用命名
-  卷，或将宿主目录 `chown` 到正确的 UID。
+| 阶段 | 运维配置 |
+| --- | --- |
+| 基础镜像 metadata / TLS timeout | Docker registry 配置，或可信 `BUN_IMAGE`、`RUST_IMAGE`、`RUNTIME_IMAGE` |
+| apt 包 | `APT_MIRROR` |
+| JS 包 | `BUN_REGISTRY` |
+| crates.io | `CARGO_REGISTRY_MIRROR` |
 
-桌面外壳的默认数据目录是**按用户的应用数据目录**（Windows 上是
-`%LOCALAPPDATA%\NomiFun`，macOS 上是
-`~/Library/Application Support/NomiFun`，Linux 上是
-`$XDG_DATA_HOME/NomiFun`），它天然对启动应用的用户可写。设置
-`NOMIFUN_DATA_DIR=<absolute path>` 后，该路径即按字面值作为数据
-根——任何宿主都不附加 `/Nomi` 后缀。位于 `NomiFun/Nomi`（或更早的
-`<system temp>/nomifun-data/Nomi`）的遗留安装会在升级后首次启动时
-被自动迁移到新默认位置；迁移是抗崩溃的，未能完成时会在下次启动
-续跑（若旧应用实例仍在运行，则推迟到下次启动）。
+只使用可信且兼容的镜像源，详见[部署指南](../guides/web-server-deployment.zh.md)。
 
-### `data directory ... is already in use by another running NomiFun backend`（数据目录被占用）
+## 日志与问题报告
 
-所有宿主（桌面外壳、`nomifun-web`、`nomicore` 二进制）默认使用
-**同一个**按用户的数据目录，而后端启动时会对 `{data_dir}/server.lock`
-取一把 OS 级排他锁——同一目录上的第二个后端会以这条信息快速失败，
-而不是悄悄破坏共享状态。最经典的触发方式：桌面应用还开着，又去跑
-`bun run serve:web` / `dev:web`（或反过来）。两条出路：关掉另一个实例
-（错误信息会写明持有者的 pid 与可执行文件名），或用
-`NOMIFUN_DATA_DIR` / `--data-dir` 给新实例指一个独立目录。持有者
-退出或崩溃时锁由 OS 自动释放；残留的 `server.lock` 文件无害。
-`nomicore doctor` 与 `mcp-*` stdio 子命令不取这把锁，因此不受影响。
+日志写 stdout 和默认 `<data-dir>/logs` 下的按日文件，除非显式覆盖。
+查看 `docker compose logs nomifun`、`journalctl -u nomifun-web`
+或本地 `nomicore.log`。定向追踪可向 `nomicore` 传入
+`--log-level info,nomifun_mcp=trace`。
 
-## Docker 专项
-
-### `docker compose up` 完成构建并启动后立刻退出
-
-请阅读日志（`docker compose logs nomifun`）。最常见的原因有：
-
-- 数据卷为空*而且*没有设置 `NOMIFUN_ADMIN_PASSWORD`——服务运行
-  正常，但你必须先通过 HTTP 完成首次启动设置才能进得去。这其实不是
-  失败，而是一种状态。
-- 镜像内 `--dist` 路径指错。官方 Dockerfile 把 `ui/dist` 复制到
-  `/opt/nomifun/web`，`CMD` 也据此引用——只在你定制了 Dockerfile
-  时才会出问题。
-- 一个被 bind 挂载的、容器用户无写权限的数据目录。
-
-### 日志显示 `nomifun-web: embedded backend + SPA on one port` 但浏览器无法连接
-
-请确认端口映射（`docker compose ps`）。默认 compose 文件发布
-`8787:8787`；如果你在前面放了 Caddy，应改为 `expose: ["8787"]`。
-连错端口是最常见的元凶。
-
-### 在国内网络或企业代理后构建很慢或失败
-
-先看失败日志所在的阶段：
-
-- `load metadata for docker.io/...` / `TLS handshake timeout`：基础镜像尚未
-  拉取成功。配置 Docker daemon registry mirror，或设置 `BUN_IMAGE`、
-  `RUST_IMAGE`、`RUNTIME_IMAGE` 为可信的兼容镜像地址。
-- `apt-get` / `bun install` / `Updating crates.io index`：分别设置
-  `APT_MIRROR`、`BUN_REGISTRY`、`CARGO_REGISTRY_MIRROR`。
-
-Compose 可以一次传入这些参数：
-
-```bash
-APT_MIRROR=http://mirrors.aliyun.com \
-CARGO_REGISTRY_MIRROR=https://rsproxy.cn/index/ \
-BUN_REGISTRY=<可用的-npm-镜像地址> \
-docker compose up -d --build
-```
-
-Dockerfile 已为 apt 与 Cargo 启用重试，并使用更小的 Rust slim 基础镜像；
-上述参数仍应指向部署者信任且实际可达的镜像。
-
-## 日志
-
-后端**同时**写入 stdout 与 `<log-dir>/nomicore.log` 上的按日滚动文件
-（默认 `<data-dir>/logs`）。出问题时：
-
-- `journalctl -u nomifun-web` / `docker compose logs nomifun` 视图能
-  看到最近几分钟的日志。
-- `<log-dir>` 下的滚动文件保存了历史。
-- 把受影响模块的级别拉高：MCP 问题用
-  `--log-level info,nomifun_mcp=trace`，终端用
-  `info,nomifun_terminal=debug`，智能体会话用
-  `info,nomifun_conversation=debug`。
-
-## 当一切都不奏效
-
-读源码。每个路由 handler 都在其归属 crate 的 `routes.rs`（或
-`routes/`）文件里；装配在
-`crates/backend/nomifun-app/src/router/routes.rs`。handler 抛出的错误
-信息就是 HTTP 响应里那串字面量字符串，所以一次精确 grep 通常几秒就
-能落到出错的检查上。
-
-## 另见
-
-- [配置参考](./configuration.zh.md) —— 每个参数与环境变量。
-- [API 概览](./api-overview.zh.md) —— 路由、鉴权与 WebSocket 模型导览。
-- [常见问题](./faq.zh.md) —— 那些最常见的"X 是这样吗？"的简短回答。
+报告包含应用版本、OS、宿主模式、准确错误、复现步骤和相关脱敏日志。
+排除凭据、隐私 prompt 与 token。用 `rg` 搜索准确后端错误可找到所属检查。

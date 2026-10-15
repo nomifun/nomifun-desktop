@@ -205,7 +205,7 @@ canonical context floor 读取上下文，不引入 Runtime 私有清空状态�
 清空命令的幂等身份保存在原 Event 链。伙伴归档以窗口身份去重，Cron 以确切运行身份去重；
 Cron 在同一个 Session 操作围栏中先读取原 Turn receipt，已准入重投直接认原输入，禁止再次
 清空或停止后继 Runtime。只有尚未准入的新运行执行清空并提交输入，清空成功后准入失败的
-重试仍复用原事件，不重复移动 context floor。UI/API contract version 31 要求用户清空携带
+重试仍复用原事件，不重复移动 context floor。UI/API contract version 32 要求用户清空携带
 明确的幂等键，并拒绝仍依赖退役命令发现、旁路提问及命令消息类型的旧前端。
 快捷命令目录属于产品输入行为，不能从 Runtime 或 Skill 正文发现权限；Skill 继续使用冻结
 Snapshot 与 typed `inject_skills` 链路。同一目标中未修改命令草稿的失败重试沿用原动作键，
@@ -236,6 +236,35 @@ steering；回合关闭后的回复在同 Session 开启新 Turn。上下文只�
 AgentExecution 的 canonical 输出、恢复、采纳与调度消费同一 typed 交接，不能把有正文的
 闭合回合当作 Step 完成。AskUser 仍须校验精确活动 Link、Attempt、策略和原 Turn 回执；
 自动决策及 Cron 不因普通提问获得人工授权。没有真实回复时不轮询模型，也不自动重放效果。
+
+### 回合公开结果
+
+Turn 生命周期与用户任务是否交付分开表达。共享 `AgentTurnOutcome` 从精确 Turn 的已提交
+Event/Payload 只读派生，包含 `answered`、`input_required`、`failed`、`cancelled`、`paused` 和
+`unavailable`。它不新增结果表、完成账本或 checkpoint，也不改变原生清理、取消与终态提交顺序。
+`answered` 只引用该 Turn 最终有效模型步骤中完整封口的非空公共消息，以及有明确截断续写关系
+的前段；终态步骤与 typed Runtime 事实共同证明其归属，不能从较早进度回退寻找答案。思考、工具
+输出、已撤回的语音步骤和后继 Turn 不能供给回答。`input_required` 只引用原问题 ID，问题和剩余工作
+仍来自唯一 typed request，不复制进助手正文。`unavailable` 如实表达已关闭历史缺少可证明的
+公开结果，不回填内容、不重跑模型或效果。`answered` 本身不证明用户的整个任务已完成。
+
+历史查询和终态后的实时投影共用同一结果 reducer、确切消息身份与 Turn 归属。界面按结果引用
+展示公共内容，过程折叠只处理过程条目，不再根据最后一条助手消息、到达顺序或显示时间猜最终
+回答。空消息封口不成为公开结果；请求用户信息必须在折叠过程外显示，并允许后续输入创建新
+Turn。UI/API contract version 32 阻止旧界面把结构化结果继续当成通用文字提示消费。
+
+部分历史页在同一数据库快照中附带其涉及 Turn 的结果摘要，不占原始分页窗口；下一页游标只由
+原始窗口决定，界面直接使用服务端 `next_cursor`。迟到的暂停快照不能覆盖已提交终态。正式领域
+`message/assistant-projected` 合成回复沿其确切事件获得独立展示标记，缺少 `turn_id` 本身不构成
+公开内容证明。结果查询失败显示独立提示并允许重新读取，不改写原回合结果。
+
+普通文字回合的空终态进入原有有界协议纠正；思考和供应商的正常 stop 不构成公共回答。空回答
+纠正允许直接补充正文，不强制调用工具；非法工具提案仍沿用原有工具约束与预算。合法用户交接、
+已证明的领域交付、取消、截断和完成审核继续使用各自现役边界。
+
+Execution、Cron 和 IDMM 消费同一结果类别，再由领域自身判断任务交付或是否可以安全代答。
+未取得公开结果不授予重放效果的权限，个人资料问题不能由自动决策编造答案。回归需覆盖实时
+完成刷新、重开、分页、迟到事件、结构化提问和后续 Turn 的真实时间轴可见性。
 
 ### 执行窗口与暂停
 
@@ -309,7 +338,7 @@ Store 在同一事务中更新当前 binding 并保留必要的历史引用；�
 | `assistant.general` | 通用文件、进程、版本管理、产物、项目记忆、网页研究、计划任务、浏览器、桌面操作、媒体、素材和 Office，以及 SSH、知识库和会话管理。 |
 | `coding.codex` | 文件、版本管理、进程、产物、项目记忆、研究、协作、SSH、知识库和会话管理；保留 headless Runtime 要求，不依赖浏览器或桌面控制。 |
 | `app.developer` | 完整 Coding 基线加应用托管十个动作；应用目录固定为工作区，普通多会话与运行设置共用原 owner。其他预设不默认选择应用托管。 |
-| `companion.default` | 保留伙伴人格、长期记忆、机器人视觉、渠道和计划任务；补齐日常文件、进程、产物、研究、浏览器、桌面、媒体、素材、Office、SSH、协作与管理能力。 |
+| `companion.default` | 保留伙伴人格、长期记忆、渠道和计划任务；推荐机器人视觉、显示、动作及其他设备控制，并继续受明确资源选择和设备许可约束；补齐日常文件、进程、产物、研究、浏览器、桌面、媒体、素材、Office、SSH、协作与管理能力。 |
 | `customer-service.default` | 客服笔记读写与交接、知识检索、渠道发送和回复，以及文件、进程、产物、研究和计划任务；不默认授予全局知识库或跨会话、终端管理。 |
 | `creative-studio.default` | 媒体、Canvas、素材、模板、Office、文件、进程、产物、项目记忆、研究、浏览器、协作和计划任务；保留三个创作 Package Skill。 |
 
@@ -515,6 +544,14 @@ Channel 从当前 owner 和 typed binding 找 Session。存在会话记录但没
 Cron、Companion、Requirements、AutoWork、IDMM 和 AgentExecution 可以保留各自业务配置及监督状态，但会话输入、准入、取消与终态必须引用 canonical Turn receipt。Conversation 名称不代表另一个存储源。
 
 伙伴的产品 Agent 选择可以使用官方“伙伴”模板或兼容的个人 Agent。兼容性要求保留伙伴能力与必需的 `companion` 资源；资源解析始终以目标伙伴的精确身份为准，不能继承另一个伙伴的身份或记忆资源。伙伴产品会话由 owner-scoped canonical opening 事实确认，具体伙伴归属再从 typed binding 派生，与所选 Agent 是否来自官方模板无关；普通 Agent 会话仅挂载伙伴资源不会成为该伙伴的产品会话。桌面、Channel 与 Robot 继续引用同一个现役 Session。
+
+已绑定机器人的语音是该伙伴现役 Session 的普通输入，不以摄像头或 `robot/vision` 授权为前提，也不要求提前挂载 `robot` 资源。入口校验 canonical 伙伴身份、设备绑定与当前连接；若 Session 已明确选择机器人资源，仍须唯一匹配本次输入的设备和伙伴。接入语音不改写共享 Session 的冻结资源，也不授予设备控制权限；工具调用继续经过已选择资源、当前 Turn、精确连接和设备权限的原有门禁。
+
+已有视觉观察是可选上下文。设备关闭视觉权限时省略该观察，也不读取先前缓存的视觉内容；这不会阻塞同一设备已授权的显示或其他设备工具。显式拍照调用仍在执行时校验视觉权限，关闭权限不会获得例外。机器人资源的操作集合只来自已冻结的精确 Action 选择，选择显示或设备动作不会补造视觉授权。
+
+已成功物化机器人工具目录的 Runtime，在完整关闭的 Turn 之后，通过现有 turn-boundary recycle 证明旧 Runtime 退出并结算效果，再为下一 Turn 重建本地资源，按当前设备连接重新冻结目录。尚未开始任何 Turn 的设备预热实例，也在首次输入准入时重新物化，避免预热后重连留下旧连接目录。空目录同样刷新；普通未物化设备目录的 Session 继续复用 Runtime。该过程保留同一 Session、canonical 历史、Agent、模型及资源授权；暂停回合不触发这条重建路径，未知效果或清理未完成仍阻断后继。当前实现为每个设备新 Turn 承担一次本地 Runtime 重建，不通过放宽旧连接调用或重放旧操作处理重连。
+
+产品 Agent 绑定入口中的显式资源选择应用于当前伙伴 Session；请求同时带有 `model` 时，也物化对应的未来默认绑定。省略 `model` 不重建未来默认绑定，仍保存用户选择的 Agent 并保留 `needs_model` 合同。即使 Agent 身份相同，也比较解析后的真实资源并沿用空闲边界的 ContextOnly / CAS 切换，保留 Session ID、当前模型和伙伴身份；完全相同的选择不追加转换事件。现役 Session 应用失败时，不先保存未来默认配置。
 
 模型与扩展派生可能把执行 binding 指向隐藏的 Session-only Preset，它不能替代用户原先选择的可编辑 Agent 身份。选择器通过现有 typed Agent transition 的 `request_digest` 验证原始选择命令，不按名称或相似配置猜测来源，也不增加来源绑定账本。初次创建前保存的产品选择仍是创作意图；编辑个人 Agent 后须显式应用最新设定，才改变当前 Session 的冻结版本。
 

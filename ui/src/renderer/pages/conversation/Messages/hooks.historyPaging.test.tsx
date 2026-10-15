@@ -55,9 +55,10 @@ function mockHistoryTransport() {
     agentChanged = listener;
     return () => { agentChanged = undefined; };
   });
-  const reply = async (index: number, items: TMessage[], hasMore = true) => {
+  const reply = async (index: number, items: TMessage[], hasMore = true, rawCursor?: string) => {
     expect(requests[index]).toBeDefined();
-    await act(async () => requests[index].resolve({ items, has_more: hasMore, total: items.length }));
+    await act(async () => requests[index].resolve({ items, has_more: hasMore, total: items.length,
+      ...(hasMore ? { next_cursor: rawCursor ?? `${Math.min(...items.map(item => item.created_at ?? 0))}:${items.at(-1)?.message_id}` } : {}) }));
   };
   const refresh = () => { act(() => { reconnect?.(); }); };
   const complete = (event: IConversationTurnCompletedEvent) => { act(() => { completed?.(event); }); };
@@ -394,4 +395,29 @@ test('terminal events refresh only this conversation with an explicitly idle run
   expect(h.requests).toHaveLength(2);
   await h.reply(1, [message(30)]);
   expect(h.hook.result.current.messages.map((m) => m.created_at)).toEqual([20, 30]);
+});
+
+test('attached old Turn summaries do not replace the server raw-window cursor or skip unloaded messages', async () => {
+  const h = mountHistory();
+  const body = { ...message(100), position: 'left' as const, turn_id: message(1).msg_id };
+  const summary = { ...message(5), turn_id: message(1).msg_id, type: 'agent_status' as const,
+    content: { backend: 'nomi', status: 'prepared' as const, turn_summary: true,
+      turn_outcome: { kind: 'answered' as const, message_ids: [body.message_id!] } } };
+  await h.reply(0, [body, summary], true, `90:${body.message_id}`);
+  h.older();
+  expect(h.requests[1].query.cursor).toBe(`90:${body.message_id}`);
+  await h.reply(1, [{ ...body, ...message(80) }, summary], true, `70:${body.message_id}`);
+  h.older();
+  expect(h.requests[2].query.cursor).toBe(`70:${body.message_id}`);
+  expect(h.hook.result.current.messages.filter(row => row.message_id === summary.message_id)).toHaveLength(1);
+  await h.reply(2, [message(60)], false);
+});
+
+test('an empty visible window advances its raw cursor until actual history is available', async () => {
+  const h = mountHistory();
+  await h.reply(0, [], true, `50:${message(50).message_id}`);
+  expect(h.requests[1].query.cursor).toBe(`50:${message(50).message_id}`);
+  await h.reply(1, [message(20)], false);
+  expect(h.hook.result.current.messages.map(row => row.created_at)).toEqual([20]);
+  expect(h.hook.result.current.hasMore).toBe(false);
 });

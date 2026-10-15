@@ -290,7 +290,7 @@ impl QueueDrain {
                     return;
                 }
                 Ok(ChannelTurnReceiptState::Completed(delivery)) => {
-                    if delivery.result_ok == Some(true) {
+                    if delivery.has_public_reply() {
                         self.settle(&head, "delivered").await;
                         continue;
                     }

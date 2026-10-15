@@ -515,33 +515,17 @@ describe('model definition capability selection', () => {
     });
   });
 
-  test('prefills a provider-declared context window without overriding the user', () => {
-    // Only an explicit provider declaration supplies a numeric window.
-    expect(
-      applyCatalogSuggestion(
-        { model: '', capabilities: [] },
-        { model: 'catalog/chat', tasksSource: 'provider_declared' as const, tasks: ['chat'], traits: [], contextLimit: 32_000 }
-      ).capabilities[0]?.contextLimit
-    ).toBe(32_000);
-
-    // An explicit user value wins: correcting the provider is the point.
-    expect(
-      applyCatalogSuggestion(
-        {
-          model: '',
-          capabilities: [patchCapabilityDraft(emptyCapabilityDraft('chat'), { contextLimit: 8_000 })],
-        },
-        { model: 'catalog/chat', tasksSource: 'provider_declared' as const, tasks: ['chat'], traits: [], contextLimit: 32_000 }
-      ).capabilities[0]?.contextLimit
-    ).toBe(8_000);
-
-    // A provider that declares nothing must not manufacture a window.
-    expect(
-      applyCatalogSuggestion(
-        { model: '', capabilities: [] },
-        { model: 'catalog/chat', tasksSource: 'provider_declared' as const, tasks: ['chat'], traits: [] }
-      ).capabilities[0]?.contextLimit
-    ).toBeUndefined();
+  test.each([
+    { name: 'a declared window fills an untouched model', declared: 32_000, authored: undefined, expected: 32_000 },
+    { name: 'an explicit user window wins over the provider', declared: 32_000, authored: 8_000, expected: 8_000 },
+    { name: 'a provider without a window does not manufacture one', declared: undefined, authored: undefined, expected: undefined },
+  ])('$name', ({ declared, authored, expected }) => {
+    const capabilities = authored === undefined ? [] : [patchCapabilityDraft(emptyCapabilityDraft('chat'), { contextLimit: authored })];
+    const applied = applyCatalogSuggestion({ model: '', capabilities }, {
+      model: 'catalog/chat', tasksSource: 'provider_declared', tasks: ['chat'], traits: [],
+      ...(declared === undefined ? {} : { contextLimit: declared }),
+    });
+    expect(applied.capabilities[0]?.contextLimit).toBe(expected);
   });
 
   test('catalog limits are advisory, including an explicit provider-default choice', () => {
@@ -1292,47 +1276,24 @@ describe('model reasoning effort', () => {
     }
   });
 
-  test('validation rejects malformed or unsupported authored reasoning levels', () => {
-    const chatManifest = manifest('chat', 'openai.chat_text');
-    const base = {
-      ...emptyCapabilityDraft('chat'),
-      protocol: 'openai.chat_text',
-      transportSource: 'user' as const,
-    };
-    expect(validateModelDefinition(
-      { model: 'reasoner', capabilities: [{ ...base, providerParamsJson: '{"reasoning_effort":"high"}' }] },
-      { chat: chatManifest },
+  test.each([
+    ['openai.chat_text', 'high', true],
+    ['openai.chat_text', 'ultra', true],
+    ['openai.chat_text', 'extreme', false],
+    ['gemini.generate_text', 'max', false],
+    ['anthropic.messages', 'low', false],
+  ] as const)('%s validates authored reasoning level %s', (protocol, effort, valid) => {
+    const capability = { ...emptyCapabilityDraft('chat'), protocol, transportSource: 'user' as const,
+      providerParamsJson: JSON.stringify({ reasoning_effort: effort }) };
+    const result = validateModelDefinition(
+      { model: 'reasoner', capabilities: [capability] },
+      { chat: manifest('chat', protocol) },
       'https://api.stepfun.com/v1'
-    ).valid).toBe(true);
-    expect(validateModelDefinition(
-      { model: 'reasoner', capabilities: [{ ...base, providerParamsJson: '{"reasoning_effort":"ultra"}' }] },
-      { chat: chatManifest },
-      'https://api.stepfun.com/v1'
-    ).valid).toBe(true);
-    expect(validateModelDefinition(
-      { model: 'reasoner', capabilities: [{ ...base, providerParamsJson: '{"reasoning_effort":"extreme"}' }] },
-      { chat: chatManifest },
-      'https://api.stepfun.com/v1'
-    ).errors).toContainEqual({ task: 'chat', code: 'invalid_provider_params' });
-    expect(validateModelDefinition(
-      { model: 'reasoner', capabilities: [{
-        ...base,
-        protocol: 'gemini.generate_text',
-        providerParamsJson: '{"reasoning_effort":"max"}',
-      }] },
-      { chat: manifest('chat', 'gemini.generate_text') },
-      'https://api.stepfun.com/v1'
-    ).errors).toContainEqual({ task: 'chat', code: 'invalid_provider_params' });
-    expect(validateModelDefinition(
-      { model: 'reasoner', capabilities: [{
-        ...base,
-        protocol: 'anthropic.messages',
-        providerParamsJson: '{"reasoning_effort":"low"}',
-      }] },
-      { chat: manifest('chat', 'anthropic.messages') },
-      'https://api.stepfun.com/v1'
-    ).errors).toContainEqual({ task: 'chat', code: 'invalid_provider_params' });
+    );
+    if (valid) expect(result.valid).toBe(true);
+    else expect(result.errors).toContainEqual({ task: 'chat', code: 'invalid_provider_params' });
   });
+
 });
 
 /**

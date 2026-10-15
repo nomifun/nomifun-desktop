@@ -93,7 +93,7 @@ The sole result is an idempotent `context/cleared` event; Session identity, immu
 bindings, visible history and long-term memory remain intact. Archived windows carry
 their original typed boundary across summary generation, so intervening inputs invalidate
 the reset before teardown. Cron resets use the exact run identity and admission fence;
-replaying accepted input never clears or stops successor work. UI/API contract 31
+replaying accepted input never clears or stops successor work. UI/API contract 32
 requires an explicit user-action key and retires unsupported Runtime command discovery
 and side-question interfaces.
 
@@ -224,7 +224,7 @@ Official seeds grant concrete business Actions rather than deriving authority fr
 | `assistant.general` | Files, processes, version control, artifacts, project memory, research, schedules, browser and computer operations, media, assets, Office, SSH, knowledge and Session management. |
 | `coding.codex` | Files, version control, processes, artifacts, project memory, research, collaboration, SSH, knowledge and Session management; retains headless Runtime requirements without browser or desktop-control dependencies. |
 | `app.developer` | Complete Coding baseline plus ten application-hosting actions; its independent project uses ordinary Sessions and the same application owner. Other presets keep application hosting optional. |
-| `companion.default` | Keeps persona, long-term memory, robot vision, channels and schedules; adds everyday files, processes, artifacts, research, browser, computer, media, assets, Office, SSH, collaboration and management. |
+| `companion.default` | Keeps persona, long-term memory, channels and schedules; recommends robot vision, display, motion and other device controls subject to explicit resource selection and device permissions; adds everyday files, processes, artifacts, research, browser, computer, media, assets, Office, SSH, collaboration and management. |
 | `customer-service.default` | Customer notes, handoff, knowledge retrieval, channel replies and sends, files, processes, artifacts, research and schedules; no default global knowledge-registry, cross-Session or terminal management. |
 | `creative-studio.default` | Media, Canvas, assets, templates, Office, files, processes, artifacts, project memory, research, browser, collaboration and schedules; retains its three creative Package Skills. |
 
@@ -378,6 +378,44 @@ Session; its typed binding establishes the exact companion ownership regardless
 of whether the selected Agent is an official template. A regular Agent Session
 that mounts a Companion resource does not become that companion's product
 Session. Desktop, Channel and Robot continue to reference the same current Session.
+
+Voice from a paired robot is ordinary input to that Companion's current Session.
+It requires neither camera permission nor `robot/vision` authority, and does not
+require a selected `robot` resource. Admission verifies the canonical Companion
+identity, device pairing and current connection. If the Session explicitly
+selects a robot resource, it must uniquely match that device and Companion.
+Voice input neither changes the shared Session's frozen resources nor grants
+device control. Tools retain their selected-resource, current-Turn, exact
+connection and device-permission checks.
+
+Existing visual observations are optional context. When the device disables
+vision permission, the host omits that context without reading cached images;
+authorized display and other device tools remain available. Explicit photo
+requests still check vision permission when invoked. Robot resource operations
+come only from the exact frozen Action selection; display or device Actions
+cannot grant vision authority.
+
+A Runtime that materialized a robot tool catalog uses the existing turn-boundary
+recycle after a fully closed Turn: it proves that the old Runtime exited and
+effects settled, then rebuilds local resources for the next Turn against the
+current device connection. A prewarmed instance that has not started a Turn
+also rematerializes at first-input admission, so a reconnect cannot retain its
+old catalog. Empty catalogs refresh too. Sessions without a materialized robot
+catalog keep ordinary Runtime reuse. This preserves the Session, canonical
+history, Agent, model and resource authority. Paused Turns do not enter this
+path; unknown effects and incomplete cleanup still block a successor. Each new
+device Turn currently incurs one local Runtime rebuild, without permitting old
+connection calls or replaying old operations.
+
+Explicit resource selections at the product Agent binding endpoint apply to
+the current Companion Session. A request with `model` also materializes the
+corresponding future default binding. Omitting `model` does not rematerialize
+that binding, while still saving the user's Agent selection and preserving
+the `needs_model` contract. Even when Agent identity is unchanged, the host
+compares resolved resources and uses the idle ContextOnly / CAS transition,
+preserving Session ID, current model and Companion identity. An identical
+selection appends no transition. Failure to apply the current Session does not
+first save its future default configuration.
 
 Model and extension derivation may bind execution to a hidden Session-only
 Preset. That cache ID cannot replace the user's original editable Agent choice.

@@ -19,7 +19,7 @@
  * generator against ui/uno.config.ts — there is no colour named `bg`, `text` or
  * `border` in the theme, so the doubled prefix indexes into nothing). Elements
  * written that way silently keep their inherited background/colour. See
- * ui/src/renderer/styles/MIGRATION.md and scripts/check-dead-css-utilities.mjs.
+ * docs/contributing/styling.zh.md and scripts/check-dead-css-utilities.mjs.
  */
 
 /**

@@ -52,14 +52,22 @@ struct ConstrainedTools {
 /// Media hints and ToolSearch may reveal an already frozen deferred Tool. All
 /// names, schemas, digests, actions, resources and effect labels must still be
 /// byte-for-byte equal to the admitted binding.
+pub(super) fn frozen_tool_binding<'a>(
+    plan: &'a EngineToolPlan,
+    provider_name: &str,
+    presented: &nomifun_engine_core::EngineToolBinding,
+) -> Option<&'a nomifun_engine_core::EngineToolBinding> {
+    let frozen = plan.binding(provider_name)?;
+    let mut normalized = frozen.clone();
+    normalized.definition.deferred = presented.definition.deferred;
+    (normalized == *presented).then_some(frozen)
+}
+
 fn frozen_invocation_binding<'a>(
     plan: &'a EngineToolPlan,
     invocation: &nomifun_engine_core::EngineToolInvocation,
 ) -> Option<&'a nomifun_engine_core::EngineToolBinding> {
-    let frozen = plan.binding(&invocation.call.name)?;
-    let mut presented = frozen.clone();
-    presented.definition.deferred = invocation.binding.definition.deferred;
-    (presented == invocation.binding).then_some(frozen)
+    frozen_tool_binding(plan, &invocation.call.name, &invocation.binding)
 }
 
 #[async_trait::async_trait]
@@ -738,6 +746,10 @@ impl EngineKernelSession {
 
     /// Host-frozen Robot device schemas. Catalog reads never activate link or
     /// audio; the retained tool owner acquires only already-active grants.
+    pub fn has_frozen_robot_surface(&self) -> bool {
+        self.robot_tools.get().is_some_and(Option::is_some)
+    }
+
     pub async fn robot_tool_plan(&self) -> Result<EngineToolPlan, AppError> {
         if self.constraints.restricted() {
             return Ok(EngineToolPlan::default());
@@ -987,8 +999,8 @@ impl EngineKernelSession {
                     .robot_tools
                     .get()
                     .and_then(Option::as_ref)
-                    .and_then(|frozen| frozen.plan.binding(&definition.name))
-                    != Some(binding)
+                    .and_then(|frozen| frozen_tool_binding(&frozen.plan, &definition.name, binding))
+                    .is_none()
             {
                 return Err(failure(
                     "Robot tools require the exact host-frozen device surface",
@@ -1424,6 +1436,43 @@ mod workspace_module_tests {
     }
 
     #[test]
+    fn robot_schema_deferral_keeps_the_host_frozen_install_and_dispatch_mapping() {
+        let mut robot = media_invocation("robot/device");
+        robot.call.name = "robot_extension_read".into();
+        robot.binding.model_name = robot.call.name.clone();
+        robot.binding.definition.name = robot.call.name.clone();
+        robot.binding.definition.description = "Read the bound device status".into();
+        robot.binding.definition.deferred = false;
+        robot.binding.capability_id = "robot".into();
+        robot.binding.effect_class = nomifun_engine_core::EngineEffectClass::ExternalUncertainEffect;
+        robot.binding.resource_binding_ids.insert("robot-binding".into());
+        let frozen = EngineToolPlan::new([robot.binding.clone()]).unwrap();
+        let mut definitions = vec![robot.binding.clone()];
+        // Exercise the real presentation budget. A large selected catalog
+        // defers Robot schemas after their device owner has already frozen
+        // the exact tool mapping, just as ordinary ToolSearch later reveals it.
+        for index in 0..4 {
+            let mut filler = media_invocation("creation.media/image").binding;
+            filler.model_name = format!("catalog_tool_{index}");
+            filler.definition.name = filler.model_name.clone();
+            filler.definition.description = "x".repeat(8192);
+            filler.definition.deferred = false;
+            definitions.push(filler);
+        }
+        let projected = super::super::agent_tool_presentation::project(
+            EngineToolPlan::new(definitions).unwrap(), true,
+        ).unwrap();
+        let presented = projected.binding(&robot.call.name).unwrap();
+        assert!(presented.definition.deferred);
+        assert_ne!(presented, &robot.binding, "presentation changed after device freezing");
+        assert_eq!(frozen_tool_binding(&frozen, &robot.call.name, presented), Some(&robot.binding));
+        robot.binding = presented.clone();
+        assert_eq!(frozen_invocation_binding(&frozen, &robot), frozen.binding(&robot.call.name));
+        robot.binding.definition.deferred = false;
+        assert_eq!(frozen_invocation_binding(&frozen, &robot), frozen.binding(&robot.call.name));
+    }
+
+    #[test]
     fn visible_tool_cannot_change_any_execution_authority_or_schema_field() {
         use nomifun_engine_core::{EngineEffectClass, EngineToolBinding};
         let frozen = media_invocation("creation.media/image");
@@ -1446,6 +1495,7 @@ mod workspace_module_tests {
             let mut forged = frozen.clone();
             forged.binding.definition.deferred = false;
             change(&mut forged.binding);
+            assert!(frozen_tool_binding(&plan, &forged.call.name, &forged.binding).is_none());
             assert!(frozen_invocation_binding(&plan, &forged).is_none());
         }
         let mut renamed = frozen;

@@ -786,6 +786,15 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
 
     fn supports_execution_checkpoints(&self) -> bool { true }
 
+    fn requires_turn_boundary_recycle(&self) -> bool {
+        // A device reconnect ends the old physical tool lease. Rebuild only
+        // local Runtime resources at the next closed-Turn boundary, retaining
+        // this Session's canonical history, Agent/model and resource grants.
+        // An unused warmup is also refreshed at its first accepted admission.
+        // Even an empty but successfully frozen catalog must be refreshed.
+        self.resources.has_frozen_robot_surface()
+    }
+
     async fn execution_pressure(&self, message: &SendMessageData) -> Result<nomifun_agent_runtime::AgentExecutionPressure, AppError> {
         let active = self.active.lock().await;
         let turn = active.as_ref().ok_or_else(|| error("execution budget has no admitted Turn"))?;

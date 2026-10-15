@@ -138,24 +138,7 @@ pub(super) fn canonical_assistant_step_message_id(
     root_message_id: &str,
     step: u16,
 ) -> Result<String, AppError> {
-    let root = Uuid::parse_str(root_message_id)
-        .map_err(|error| failure(format!("turn root is not a UUID: {error}")))?;
-    if root.get_version_num() != 7 || step == 0 {
-        return Err(failure("turn root is not UUIDv7"));
-    }
-    let mut bytes = *root.as_bytes();
-    // Preserve version/variant/time ordering while selecting a deterministic,
-    // distinct point in the UUIDv7 random suffix for each model step. Step 1
-    // retains the existing canonical assistant ID used by the live relay.
-    let suffix = u16::from_be_bytes([bytes[14], bytes[15]]) ^ step;
-    let suffix_bytes = suffix.to_be_bytes();
-    bytes[14] = suffix_bytes[0];
-    bytes[15] = suffix_bytes[1];
-    let assistant = Uuid::from_bytes(bytes);
-    if assistant == root || assistant.get_version_num() != 7 {
-        return Err(failure("assistant message identity derivation failed"));
-    }
-    Ok(assistant.to_string())
+    nomifun_agent_contracts::canonical_assistant_step_message_id(root_message_id, step).map_err(failure)
 }
 
 /// Reasoning has its own per-step identity so a completed phase cannot be
@@ -1006,19 +989,30 @@ impl EngineTurnJournal {
                 Ok(())
             }
             AgentEngineEvent::TurnCompleted { .. } | AgentEngineEvent::TurnInputRequired { .. } | AgentEngineEvent::TurnFailed { .. } => {
+                let final_step=match event {
+                    AgentEngineEvent::TurnCompleted {model_steps,..}|AgentEngineEvent::TurnInputRequired {model_steps,..}
+                        if *model_steps>0=>Some(*model_steps),_=>None,
+                };
+                if let (Some(current),Some(final_step))=(cursor.assistant_step.as_ref(),final_step) {
+                    if current.step>final_step {return Err(failure("terminal precedes the current public model step"));}
+                    if current.step<final_step {
+                        // Retain the earlier progress message, but seal the
+                        // actual closing step separately even when it is empty.
+                        // A tool preface can never become the final answer.
+                        journal.append_projection(&Self::assistant_completion_event(journal,current)).await.map_err(failure)?;
+                    }
+                }
+                let empty_step_number=final_step.unwrap_or(cursor.empty_response_step.unwrap_or(1));
                 let empty_step = AssistantStepCursor {
-                    step: cursor.empty_response_step.unwrap_or(1),
-                    message_id: cursor
-                        .assistant_message_id
-                        .clone()
-                        .unwrap_or_else(|| Uuid::now_v7().to_string()),
+                    step: empty_step_number,
+                    message_id: canonical_assistant_step_message_id(journal.root.as_ref(),empty_step_number)?,
                     parts: 0,
                     text: Vec::new(),
                     last_event_id: None,
                 };
                 let message = Self::assistant_completion_event(
                     journal,
-                    cursor.assistant_step.as_ref().unwrap_or(&empty_step),
+                    cursor.assistant_step.as_ref().filter(|current|final_step.is_none_or(|step|current.step==step)).unwrap_or(&empty_step),
                 );
                 let message_event_id = message.event_id.clone();
                 let (kind, payload) = match event {
@@ -1501,6 +1495,24 @@ mod history_display_tests {
         assert_ne!(notes[0].projection_id, notes[1].projection_id);
         assert!(notes.iter().all(|row| row.projection["state"] == "completed"));
         assert!(notes.iter().all(|row| row.projection["turn_id"] == journal.0.root.as_ref()));
+    }
+
+    #[tokio::test]
+    async fn a_public_tool_preface_followed_by_an_empty_final_step_is_not_a_delivered_answer() {
+        let (journal,pool)=test_fixture().await;
+        for event in [AgentEngineEvent::OutputTextDelta {step:1,text:"I will start working.".into()},
+            AgentEngineEvent::ModelStepStarted {step:2,operation_id:format!("{}:model:2",journal.0.operation.as_ref()).into(),correction_source:None}] {
+            journal.append(serde_json::to_string(&event).unwrap(),None,EngineJournalWrite::Progress).await.unwrap();
+        }
+        journal.append(json!({"event":"host_cleanup_proven"}).to_string(),None,EngineJournalWrite::Cleanup).await.unwrap();
+        journal.append(serde_json::to_string(&AgentEngineEvent::TurnCompleted {model_steps:2,
+            finish_reason:nomifun_chat_model_broker::ChatFinishReason::Completed}).unwrap(),None,EngineJournalWrite::Terminal).await.unwrap();
+        let store=AgentSessionStore::from_pool(pool).await.unwrap();
+        assert_eq!(store.turn_outcome(&journal.0.session,&journal.0.operation).await.unwrap(),Some(nomifun_agent_contracts::AgentTurnOutcome::Unavailable));
+        let history=store.message_history_before(&journal.0.session,None,50).await.unwrap().0;
+        let closing=canonical_assistant_step_message_id(journal.0.root.as_ref(),2).unwrap();
+        assert!(history.iter().any(|row|row.projection["correlation_id"]==closing&&row.projection["part_count"]==0));
+        assert!(history.iter().any(|row|row.projection["content"]=="I will start working."),"the preface remains process history, never the public result");
     }
 
     #[tokio::test]

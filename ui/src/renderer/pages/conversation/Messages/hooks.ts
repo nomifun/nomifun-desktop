@@ -26,6 +26,7 @@ import {
   mergeToolCallContent,
   mergeTextMessageContent,
   mergeAgentStatusContent,
+  mergeTipsContent,
   normalizeToolCallContent,
   normalizeToolGroupContent,
   normalizeWireAgentMessageMetadata,
@@ -40,6 +41,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { createContext } from '@renderer/utils/ui/createContext';
 import { addEventListener } from '@/renderer/utils/emitter';
 import { isAuthoritativeCompletionRuntimeIdle } from '../platforms/authoritativeTurnLifecyclePolicy';
+import { normalizeAgentTurnOutcome } from '@/common/chat/turnOutcome';
 
 const [useMessageList, MessageListProvider, useUpdateMessageList] = createContext<TMessage[]>(() => []);
 const [useMessageListLoading, MessageListLoadingProvider, useUpdateMessageListLoading] = createContext(() => false);
@@ -288,7 +290,8 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
       newList[existingIdx] = {
         ...existingMsg,
         ...message,
-        content: message.content,
+        content: existingMsg.type === 'tips' && message.type === 'tips'
+          ? mergeTipsContent(existingMsg.content, message.content) : message.content,
       } as TMessage;
       return newList;
     }
@@ -601,6 +604,7 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
   const recovery = normalizeTruncatedTurnRecovery(parsed.recovery);
   const notice = normalizeIdmmDecisionNotice(parsed.idmm_notice);
   const userInputRequest = tipType !== 'error' ? normalizeAgentUserInputRequest(parsed.user_input_request) : undefined;
+  const outcome = normalizeAgentTurnOutcome(parsed.turn_outcome);
   const agentTransition = tipType === 'success' ? normalizeAgentTransition(parsed.agent_transition) : undefined;
   const startedAtMs =
     typeof parsed.started_at_ms === 'number' && Number.isFinite(parsed.started_at_ms) && parsed.started_at_ms > 0
@@ -618,9 +622,11 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
       content: parsed.content,
       type: tipType,
       ...(structuredError ? { error: structuredError } : {}),
+      ...(tipType === 'error' && parsed.query_error === true ? { query_error: true as const } : {}),
       ...(recovery ? { recovery } : {}),
       ...(notice ? { idmm_notice: notice } : {}),
       ...(userInputRequest && turnId && (msg.message_id || msg.msg_id) ? { user_input_request: userInputRequest } : {}),
+      ...(outcome ? { turn_outcome: outcome } : {}),
       ...(agentTransition ? { agent_transition: agentTransition } : {}),
       ...(startedAtMs !== undefined ? { started_at_ms: startedAtMs } : {}),
       ...(finishedAtMs !== undefined ? { finished_at_ms: finishedAtMs } : {}),
@@ -637,6 +643,7 @@ const normalizeDecodedTextMetadata = (parsed: Record<string, unknown>): Partial<
       ? { display_at_ms: parsed.display_at_ms } : {}),
     ...(parsed.replace === true ? { replace: true } : {}),
     ...(parsed.agentMessage === true ? { agentMessage: true } : {}),
+    ...(parsed.standalone_projection === true ? { standalone_projection: true as const } : {}),
     ...(typeof parsed.senderName === 'string' ? { senderName: parsed.senderName } : {}),
     ...(typeof parsed.senderAgentType === 'string' ? { senderAgentType: parsed.senderAgentType } : {}),
   };
@@ -741,11 +748,6 @@ const getPersistedMessageId = (message: TMessage): MessageId => {
   }
   return message.message_id;
 };
-
-/** Keyset cursor for a persisted message: "<created_at_ms>:<message_id>" (see backend
- *  `parse_message_cursor` / `get_messages_keyset`). */
-const messageCursorOf = (message: TMessage): string =>
-  `${message.created_at ?? 0}:${getPersistedMessageId(message)}`;
 
 const getFetchedMergeKey = (message: TMessage): string | undefined => {
   if (!message.msg_id) return undefined;
@@ -879,7 +881,16 @@ export const mergeFetchedMessagesForConversation = (
     }
     if (dbMessage.type === 'agent_status' && streamMessage.type === 'agent_status'
       && dbMessage.content.turn_summary && streamMessage.content.turn_summary) {
-      return { ...dbMessage, content: mergeAgentStatusContent(streamMessage.content, dbMessage.content) };
+      const updatedDuringRead = queryStartByKey.get(key!) !== streamMessage;
+      return { ...dbMessage, content: updatedDuringRead
+        ? mergeAgentStatusContent(dbMessage.content, streamMessage.content)
+        : mergeAgentStatusContent(streamMessage.content, dbMessage.content) };
+    }
+    if (dbMessage.type === 'tips' && streamMessage.type === 'tips') {
+      const updatedDuringRead = queryStartByKey.get(key!) !== streamMessage;
+      return { ...dbMessage, content: updatedDuringRead
+        ? mergeTipsContent(dbMessage.content, streamMessage.content)
+        : mergeTipsContent(streamMessage.content, dbMessage.content) };
     }
     return dbMessage;
   });
@@ -968,17 +979,19 @@ export const useMessageLstCache = (key: ConversationId) => {
         if (!isCurrent()) return;
         const messages = result.items.map(normalizeDbMessage).sort(compareTranscriptOrder);
         newestWindow.push(...messages);
-        if (!cursor) needsCompleteRequest = hasProcessHistory(messages);
+        needsCompleteRequest ||= hasProcessHistory(messages);
         completeNewestRequest ||= messages.some(isVisibleUserRequest);
         if (turnStartReceiptSeen) pagesAfterTurnStartReceipt += 1;
         turnStartReceiptSeen ||= hasTurnStartReceipt(messages);
-        const oldest = messages[0];
-        const nextCursor = oldest ? messageCursorOf(oldest) : null;
-        scope.cursor = nextCursor;
+        const nextCursor = result.has_more ? result.next_cursor : null;
+        if (result.has_more && (!nextCursor || nextCursor === cursor)) {
+          throw new TypeError('Canonical history did not advance its raw projection cursor');
+        }
+        scope.cursor = nextCursor ?? null;
         scope.hasMore = Boolean(result.has_more) && nextCursor !== null;
         if (!scope.hasMore || !nextCursor || nextCursor === cursor) break;
         cursor = nextCursor;
-      } while (needsCompleteRequest && !completeNewestRequest && pagesAfterTurnStartReceipt === 0);
+      } while (!newestWindow.length || (needsCompleteRequest && !completeNewestRequest && pagesAfterTurnStartReceipt === 0));
       mergeIntoList(newestWindow, revision, queryStartList);
     } catch (error) {
       if (isCurrent()) {
@@ -1011,8 +1024,12 @@ export const useMessageLstCache = (key: ConversationId) => {
       });
       if (!isCurrent()) return false;
       const messages = result.items.map(normalizeDbMessage).sort(compareTranscriptOrder);
-      scope.hasMore = Boolean(result.has_more) && messages.length > 0;
-      if (messages.length) scope.cursor = messageCursorOf(messages[0]);
+      const nextCursor = result.has_more ? result.next_cursor : null;
+      if (result.has_more && (!nextCursor || nextCursor === requestedCursor)) {
+        throw new TypeError('Canonical history did not advance its raw projection cursor');
+      }
+      scope.hasMore = Boolean(result.has_more);
+      scope.cursor = nextCursor ?? null;
       // A refresh can leave previously loaded older pages in the list. Merge
       // chronologically instead of prepending a page into the wrong position.
       mergeIntoList(messages, revision, queryStartList);

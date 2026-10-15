@@ -1250,73 +1250,26 @@ mod tests {
     }
 
     #[test]
-    fn system_proxy_config_reads_current_detection_when_cache_ttl_is_zero() {
-        let _guard = test_system_proxy_lock();
-        clear_system_proxy_cache();
-        let first = SystemProxyConfig {
-            http_proxy: Some("http://127.0.0.1:7890".to_owned()),
-            https_proxy: Some("http://127.0.0.1:7890".to_owned()),
-            all_proxy: None,
-            no_proxy: None,
-        };
-        let second = SystemProxyConfig {
-            http_proxy: Some("http://127.0.0.1:7900".to_owned()),
-            https_proxy: Some("http://127.0.0.1:7900".to_owned()),
-            all_proxy: None,
-            no_proxy: None,
-        };
-
-        set_test_system_proxy_configs(vec![Some(first), Some(second)]);
-
-        let first_config =
-            system_proxy_config_with_cache_ttl(Duration::ZERO).expect("first proxy config");
-        assert_eq!(
-            first_config.http_proxy.as_deref(),
-            Some("http://127.0.0.1:7890")
-        );
-
-        let second_config =
-            system_proxy_config_with_cache_ttl(Duration::ZERO).expect("second proxy config");
-        assert_eq!(
-            second_config.http_proxy.as_deref(),
-            Some("http://127.0.0.1:7900")
-        );
-        clear_system_proxy_cache();
-    }
-
-    #[test]
-    fn system_proxy_config_reuses_detection_inside_cache_ttl() {
-        let _guard = test_system_proxy_lock();
-        clear_system_proxy_cache();
-        let first = SystemProxyConfig {
-            http_proxy: Some("http://127.0.0.1:7890".to_owned()),
-            https_proxy: Some("http://127.0.0.1:7890".to_owned()),
-            all_proxy: None,
-            no_proxy: None,
-        };
-        let second = SystemProxyConfig {
-            http_proxy: Some("http://127.0.0.1:7900".to_owned()),
-            https_proxy: Some("http://127.0.0.1:7900".to_owned()),
-            all_proxy: None,
-            no_proxy: None,
-        };
-
-        set_test_system_proxy_configs(vec![Some(first), Some(second)]);
-
-        let first_config = system_proxy_config_with_cache_ttl(Duration::from_secs(60))
-            .expect("first proxy config");
-        let cached_config = system_proxy_config_with_cache_ttl(Duration::from_secs(60))
-            .expect("cached proxy config");
-
-        assert_eq!(
-            first_config.http_proxy.as_deref(),
-            Some("http://127.0.0.1:7890")
-        );
-        assert_eq!(
-            cached_config.http_proxy.as_deref(),
-            Some("http://127.0.0.1:7890")
-        );
-        clear_system_proxy_cache();
+    fn system_proxy_config_respects_detection_cache_ttl() {
+        for (ttl, expected_second) in [
+            (Duration::ZERO, "http://127.0.0.1:7900"),
+            (Duration::from_secs(60), "http://127.0.0.1:7890"),
+        ] {
+            let _guard = test_system_proxy_lock();
+            clear_system_proxy_cache();
+            let config = |port| SystemProxyConfig {
+                http_proxy: Some(format!("http://127.0.0.1:{port}")),
+                https_proxy: Some(format!("http://127.0.0.1:{port}")),
+                all_proxy: None,
+                no_proxy: None,
+            };
+            set_test_system_proxy_configs(vec![Some(config(7890)), Some(config(7900))]);
+            let first = system_proxy_config_with_cache_ttl(ttl).expect("first proxy config");
+            let second = system_proxy_config_with_cache_ttl(ttl).expect("second proxy config");
+            assert_eq!(first.http_proxy.as_deref(), Some("http://127.0.0.1:7890"));
+            assert_eq!(second.http_proxy.as_deref(), Some(expected_second), "TTL: {ttl:?}");
+            clear_system_proxy_cache();
+        }
     }
 
     #[test]

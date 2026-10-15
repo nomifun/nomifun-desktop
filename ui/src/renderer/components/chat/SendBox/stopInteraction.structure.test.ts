@@ -39,7 +39,7 @@ describe('SendBox stop interaction', () => {
   test('checks authoritative start and completion generations before applying a stop result', () => {
     for (const platform of platformSendBoxes) {
       const stopResultIndex = platform.source.indexOf(
-        'const result = await stopConversationAndConfirmRelease(conversation_id,'
+        'const result = await stopConversationAndConfirmRelease(conversation_id'
       );
       const statusIndex = platform.source.indexOf(
         'const stopAttemptStatus = getStopAttemptStatus(stopAttempt);',

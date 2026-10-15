@@ -1,7 +1,9 @@
 # 配置参考
 
-NomiFun 读取的每一个参数与环境变量、它们的默认值，以及各自归属的文件。
-所有取值都直接来自源码——本页没有列出的设置就不存在。
+[English](configuration.md)
+
+本文列出常用运维参数、环境变量、默认值及所属源码。
+完整的当前配置面以可执行文件 `--help` 和链接模块为准。
 
 NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 `nomicore`），以及两个嵌入它的宿主：
@@ -24,9 +26,10 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 | `--port` | `NOMIFUN_WEB_PORT` | `8787` | TCP 端口。在同一个 socket 上提供 API、`/ws` WebSocket 与 SPA。 |
 | `--data-dir` | `NOMIFUN_DATA_DIR` | 按用户的应用数据目录 | 后端数据目录（SQLite 数据库、智能体状态、日志、受管 runtime 缓存）。默认是当前 channel 的宿主共享的按用户位置；stable 使用 `NomiFun`，dev 使用同级的 `NomiFun-dev`。可用本参数或 `NOMIFUN_DATA_DIR`（按字面值，不附加后缀）覆盖；生产环境请使用绝对路径。 |
 | `--dist` | `NOMIFUN_WEB_DIST` | `../../ui/dist` | 已构建 SPA 所在目录。在仓库之外部署时务必显式指定。 |
+| `--api-only` | — | `false` | 只提供后端，不挂 SPA fallback，供 Vite 代理的开发循环使用。 |
 | `--admin-user` | `NOMIFUN_ADMIN_USERNAME` | `admin` | 预置首位管理员时使用的用户名。管理员存在后将被忽略。 |
 | `--admin-password` | `NOMIFUN_ADMIN_PASSWORD` | — | 在启动时预置首位管理员密码，跳过交互式设置。管理员存在后将被忽略。 |
-| `--insecure-no-auth` | `NOMIFUN_WEB_INSECURE_NO_AUTH` | `false` | 危险。完全禁用鉴权（桌面式本地模式）。仅可用于 loopback 或完全受信任的私有网络。 |
+| `--insecure-no-auth` | `NOMIFUN_WEB_INSECURE_NO_AUTH` | `false` | 完全禁用鉴权，仅用于 loopback 或隔离可信私网。桌面使用本地信任。 |
 
 布尔环境变量接受 `1`、`true`、`yes`、`on`（不区分大小写）。
 
@@ -63,6 +66,8 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 | `remote turn <agent_session_id> <json-input>` | 在显式 Remote AgentSession 上启动一轮。 |
 | `remote observe <agent_session_id>` | 从 `--after-seq` 后读取 Remote Session Event/消息。 |
 | `remote cancel <agent_session_id>` | 取消显式 Session 的活动 Turn。 |
+| `backup --output <dir>` | 创建新的离线备份 bundle，目标目录必须不存在。 |
+| `restore --bundle <dir> --destination-data-dir <dir>` | 把兼容的离线 bundle 恢复到新数据目录；范围和排除项见 `--help`。 |
 
 ## 共享环境变量
 
@@ -79,14 +84,16 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 | `NOMIFUN_HTTPS` | `nomifun-auth::CookieConfig` | 取真值时，会话与 CSRF cookie 会带上 `Secure` 标记和 `SameSite=Strict`。当应用通过 HTTPS 暴露（TLS 反向代理等）时请打开。默认 `false` → 不带 `Secure` 标记，`SameSite=Lax`。 |
 | `SHELL` | 智能体引擎（Linux/macOS） | 智能体引擎派生子进程时使用的 shell。在 systemd 下的 Linux 服务器上请显式设置（系统账户通常没有 `$SHELL`）。 |
 | `NOMIFUN_URL` | `nomicore remote` | 使用 canonical Remote 操作时的运行中实例 base URL。 |
-| `NOMIFUN_ACCESS_TOKEN` | Fresh-v4 host、`nomicore remote` | `/mcp` 与 `/api/remote/*` 使用的安装级令牌；启动值会播种/轮换持久 verifier，且不绑定伙伴。 |
+| `NOMIFUN_ACCESS_TOKEN` | 后端启动、`nomicore remote` | `/mcp` 与 `/api/remote/*` 使用的安装级令牌；启动值会播种/轮换持久 verifier，且不绑定伙伴。 |
 
 代码库不集成 `SENTRY_DSN`：这个环境变量并未被读取。
 
 ## 后端常量
 
-来源：[`crates/backend/nomifun-common/src/constants.rs`](../../crates/backend/nomifun-common/src/constants.rs)。
-这些是编译期值，不是环境变量——列在这里只是为了让运维方了解相关上限。
+来源：[公共常量](../../crates/backend/nomifun-common/src/constants.rs)、
+[文件服务](../../crates/backend/nomifun-file/src/service.rs)与
+[实时类型](../../crates/backend/nomifun-realtime/src/types.rs)。
+这些是编译期值，不是环境变量。
 
 | 常量 | 取值 | 用途 |
 |---|---|---|
@@ -162,9 +169,8 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 NomiFun 自身不做 TLS 终止——请在前面放一个负责 TLS 终止的反向代理
 （Caddy、nginx 等）。届时：
 
-- 设置 `NOMIFUN_HTTPS=true`，使 cookie 带上 `Secure` 标记和
-  `SameSite=Strict`。否则浏览器会在 HTTPS 响应上拒收 `Secure` cookie，
-  登录看似会无声失败。
+- 设置 `NOMIFUN_HTTPS=true`，使 cookie 带上 `Secure` 和 `SameSite=Strict`。
+  Secure cookie 不通过普通 HTTP 发送；公开 origin 与反向代理协议应保持一致。
 - `/ws` 上的 WebSocket 升级无需额外的请求头即可穿过任何符合标准的
   代理；Caddy 开箱即用。
 
@@ -186,14 +192,14 @@ NomiFun 自身不做 TLS 终止——请在前面放一个负责 TLS 终止的�
   - `warn,nomifun_conversation=info,nomifun_terminal=debug` —— 整体
     更安静；会话引擎为 normal/info；终端为 debug。
 
-不存在另一套 `RUST_LOG` 通路——`--log-level`（或宿主中等价的环境驱动
-开关）是唯一的总开关。
+独立 `nomicore --log-level` 控制后端日志过滤。
+Web 宿主不暴露该参数，后端也不读取 `RUST_LOG` 或 `NOMIFUN_LOG_LEVEL`。
 
 ## 另见
 
-- [Web 服务部署](../guides/web-server-deployment.md) —— 用 Docker、
+- [Web 服务部署](../guides/web-server-deployment.zh.md) —— 用 Docker、
   systemd、Caddy 运行 `nomifun-web`。
-- [作为桌面应用运行 Nomi](../guides/desktop-app.md) —— 桌面端专属配置。
+- [桌面应用](../guides/desktop-app.zh.md) —— 桌面端专属配置。
 - [API 概览](./api-overview.zh.md) —— 配置完成并启动后，后端对外暴露
   了什么。
 - [疑难排查](./troubleshooting.zh.md) —— 配置在运行时出错时的症状与

@@ -172,7 +172,7 @@ impl AgentRuntimeState {
     /// after `cancel()` already finished the turn) is absorbed instead of
     /// leaking into the next turn's subscription.
     pub fn emit_finish_with_reason(&self, session_id: Option<String>, stop_reason: Option<TurnStopReason>) {
-        self.emit_terminal(None, AgentStreamEvent::Finish(FinishEventData {
+        self.emit_terminal(None, AgentStreamEvent::Finish(FinishEventData { turn_outcome: None,
             session_id,
             stop_reason,
         }));
@@ -187,7 +187,7 @@ impl AgentRuntimeState {
     ) -> bool {
         self.emit_terminal(
             Some(turn),
-            AgentStreamEvent::Finish(FinishEventData {
+            AgentStreamEvent::Finish(FinishEventData { turn_outcome: None,
                 session_id,
                 stop_reason,
             }),

@@ -1,264 +1,93 @@
 # API 概览
 
-NomiFun 的后端（`nomifun-app`，二进制 `nomicore`）对外暴露的是单一的
-axum HTTP 服务。SPA、桌面外壳，以及任何外部集成，与它沟通的方式都一样：
-HTTP 上的 JSON 用于命令/查询，WebSocket 用于流式事件。
+[English](api-overview.md)
 
-本页是一份**导览**，不是穷尽式的端点参考。完整的接口面位于
-`crates/backend/` 下的各路由模块；源码即权威参考。下方列出了各分组的
-基础路径与对应的路由 owner——请从那里开始查阅。
-
-> **Agent API 当前合同：**用户通过 `/agent` 工作台完成 Agent 设计和试用；机器资源
-> 使用 `/api/agent-presets/*`、`/api/agent-preset-templates/*`、
-> `/api/agent-sessions/*`、`/api/agent-bindings/*` 和 `/api/capabilities`。
-> 旧 `/api/presets` 已移除，不再是 canonical API。
+桌面壳与 Web 宿主内嵌同一个 `nomifun-app` HTTP/WebSocket 后端。
+本文用于定位契约，准确 method 和字段以路由声明、DTO 为准。
 
 ## Base URL
 
-| 宿主 | 默认 base URL | 备注 |
-|---|---|---|
-| `nomifun-desktop` | `http://127.0.0.1:<picked-port>` | 启动时挑选一个空闲的 localhost 端口。渲染端通过 IPC 获知端口号，并以此向 `/api` 与 `/ws` 发起调用。 |
-| `nomifun-web` | `http://<host>:<port>`（默认 `http://127.0.0.1:8787`） | 同一个后端，与 SPA 一并在同一个端口上提供。 |
-| `nomicore` 独立运行 | `http://127.0.0.1:25808` | 单独运行后端——便于调试。 |
+| 宿主 | 地址 |
+| --- | --- |
+| Desktop | `http://127.0.0.1:<picked-port>`；桌面壳注入端口和每次启动生成的本地信任密钥 |
+| `nomifun-web` | 默认 `http://127.0.0.1:8787`，同端口提供 SPA/API |
+| 独立 `nomicore` | 默认 `http://127.0.0.1:25808` |
 
-SPA 使用**相对路径**（`/api/...`、`/ws`）。客户端不需要指向另一台 API
-服务——SPA 与 API 同址。
+Web 渲染器使用同源 `/api` 和 `/ws`，桌面 adapter 解析内嵌后端地址。
 
 ## 鉴权模型
 
-NomiFun 启动时进入三种鉴权策略之一：
+- **Web 默认鉴权模式：** 登录设置 HttpOnly 的 `nomifun-session` cookie，
+  并返回 JWT。请求可使用 cookie 或 Bearer token。
+  通过 cookie 鉴权的写操作使用 `nomifun-csrf-token` cookie 和
+  `x-csrf-token` header 双提交；公开 setup/login 路由有单独豁免和限流。
+- **桌面本地信任：** `AuthPolicy::TrustLocalToken` 接受桌面壳每次启动的密钥。
+  其他本机/网络客户端仍需正常鉴权。会展示宿主 UI 的变更可能同时要求安装 owner
+  和本地产品信任。
+- **明确关闭鉴权的开发模式：** `nomicore --local` 或
+  `nomifun-web --insecure-no-auth` 关闭鉴权与 CSRF，只用于 loopback 或隔离可信网络。
+- **外部集成：** `/mcp` 和 `/api/remote/*` 使用安装级 access token，
+  详见[公开能力](../guides/remote-capability-api.zh.md)。
 
-### 已鉴权模式（`nomifun-web` 默认）
+Owner 鉴权不自动授予所有原生桌面操作；需阅读路由的本地信任及所有权检查。
 
-- 通过 `POST /login` 登录，返回一个会话 JWT，同时写入 cookie
-  （`nomifun-session`，`HttpOnly`）与 JSON body。后续请求依靠该 cookie
-  或 `Authorization: Bearer …` 请求头进行鉴权。
-- 状态变更类请求还必须附带 CSRF 请求头 `x-csrf-token`，其值需与
-  `nomifun-csrf-token` cookie 匹配（Double Submit Cookie 模式）。安全
-  方法（`GET`、`HEAD`、`OPTIONS`）跳过 CSRF；登录/设置/二维码登录端点
-  因尚无会话被豁免。
-- WebSocket 升级携带同一份 JWT——通常通过 `Sec-WebSocket-Protocol`
-  传输，可由 `GET /api/ws-token` 获取。`/ws` 路由对 CSRF 豁免（在
-  WebSocket 升级中无法做基于 cookie 的双提交），但仍需鉴权。
-- 限流器分别按客户端作用于登录尝试、一般 API 流量与已鉴权的状态变更
-  动作。
+## 路由职责
 
-### 桌面本地信任模式（`nomifun-desktop`）
+从[路由组装](../../crates/backend/nomifun-app/src/router/routes.rs)和
+[API 类型](../../crates/backend/nomifun-api-types/src)开始；
+[后端地图](../architecture/backend-crates.zh.md)描述各功能职责。
 
-- 嵌入式后端使用 `AuthPolicy::TrustLocalToken`。
-- 桌面 WebView 会得到每次启动生成的 secret（`window.__nomiLocalTrust`），并在 HTTP/WebSocket 请求中呈递它。
-- 其他客户端即使在同一台机器上，也不会因为来自 loopback 自动受信任；除非它拥有正常登录会话。这也是 WebUI 远程访问可以放在登录后的原因。
-
-### 无鉴权本地模式（`nomicore --local`，或 Web 宿主 `--insecure-no-auth`）
-
-- 鉴权与 CSRF 完全关闭。每个请求都以数据库中记录的安装所有者身份执行。
-- 加入一层宽松的 CORS，使桌面 WebView（以及工具）可以自由调用 API。
-- 仅本地可达的路由（如 `/api/webui/*`）变为
-  可达。
-
-本地模式下的信任边界是网络——只能将其暴露在 loopback 或完全受信任的
-私有网络上。Web 宿主在 `--insecure-no-auth` 与非 loopback 绑定同时使用
-时会大声地打印警告日志。
-
-## 请求体大小与上限
-
-- 请求体的默认大小上限是 **10 MiB**（`nomifun-common` 中的
-  `BODY_LIMIT`）。确实需要更大的路由（文件上传、ZIP 创建等）会安装自己
-  的更大限制——`/api/fs/upload` 接受最大 30 MiB。
-- 代用户下载的远程图片上限为 5 MiB，最多跟随 5 次重定向。
-
-## 路由分组
-
-每个分组归属一个特定的 crate。下表中的基础路径就是挂载到 app router 中
-的实际 URL 前缀；鉴权在已鉴权模式和桌面本地信任模式下生效。
-
-| 分组 | 基础路径 | 鉴权 | 归属 crate / 文件 |
-|---|---|---|---|
-| 健康检查 | `/health` | 公共 | [`router/health.rs`](../../crates/backend/nomifun-app/src/router/health.rs) |
-| 鉴权 —— 登录 / 设置 / 状态 / 刷新 | `/login`、`/logout`、`/api/auth/*`、`/api/ws-token`、`/qr-login` | 混合（登录/设置/qr-login：公共；其余：已鉴权） | [`nomifun-auth/src/routes.rs`](../../crates/backend/nomifun-auth/src/routes.rs) |
-| 鉴权 —— 仅本地 admin/internal | `/api/webui/*` | 仅本地模式 | 同上 |
-| Agent session 消息 | `/api/agent-sessions/{agent_session_id}/messages`、`/api/agent-session-messages/search` | 仅实例 owner | [`router/nomi_core_session.rs`](../../crates/backend/nomifun-app/src/router/nomi_core_session.rs) |
-| Agent 工作台控制平面 | `/api/agent-preset-templates`、`/api/agent-presets/*`、`/api/capabilities`、`/api/agent-catalog*`、`/api/agent-role-defaults*`、`/api/mcp-tool-mappings`、`/api/agent-bindings/*`、`/api/remote-bindings` | 仅实例 owner | [`nomifun-agent-control-plane/src/routes.rs`](../../crates/backend/nomifun-agent-control-plane/src/routes.rs) |
-| Agent Session | `/api/agent-sessions/*` | 仅实例 owner | [`router/nomi_core_session.rs`](../../crates/backend/nomifun-app/src/router/nomi_core_session.rs) |
-| 旧 Agent/模型信息查询 | `/api/agents/*` | 已鉴权 | [`nomifun-ai-agent/src/routes/agent.rs`](../../crates/backend/nomifun-ai-agent/src/routes/agent.rs)；不承担 AgentPreset authoring |
-| SSH 主机 | `/api/ssh-hosts/*` | 仅实例主人 | [`nomifun-ssh/src/routes.rs`](../../crates/backend/nomifun-ssh/src/routes.rs) |
-| MCP 服务 | `/api/mcp/*` | 已鉴权 | [`nomifun-mcp/src/routes.rs`](../../crates/backend/nomifun-mcp/src/routes.rs) |
-| 技能 | `/api/skills/*` | 已鉴权 | [`nomifun-skill-library/src/skill_routes.rs`](../../crates/backend/nomifun-skill-library/src/skill_routes.rs) |
-| 计划任务 | `/api/cron/*` | 已鉴权 | [`nomifun-cron/src/routes.rs`](../../crates/backend/nomifun-cron/src/routes.rs) |
-| 频道（IM 桥） | `/api/channel/*` | 已鉴权 | [`nomifun-channel/src/routes.rs`](../../crates/backend/nomifun-channel/src/routes.rs) |
-| Webhook + 标签设置 | `/api/webhooks/*`、`/api/tags/{tag}/settings` | 已鉴权 | [`nomifun-webhook/src/routes.rs`](../../crates/backend/nomifun-webhook/src/routes.rs) |
-| 需求（项目看板） | `/api/requirements/*` | 已鉴权 | [`nomifun-requirement/src/routes.rs`](../../crates/backend/nomifun-requirement/src/routes.rs) |
-| AutoWork | `/api/requirements/autowork*` | 已鉴权 | [`nomifun-requirement/src/routes.rs`](../../crates/backend/nomifun-requirement/src/routes.rs) |
-| IDMM（会话级监督） | `/api/agent-sessions/{agent_session_id}/idmm`、`/api/agent-sessions/{agent_session_id}/idmm/evaluate` | 仅实例 owner | [`router/idmm.rs`](../../crates/backend/nomifun-app/src/router/idmm.rs)（service：`nomifun-idmm`） |
-| Agent Execution | `/api/agent-executions/*` | 已鉴权 | [`nomifun-agent-execution/src/routes.rs`](../../crates/backend/nomifun-agent-execution/src/routes.rs) |
-| 终端 | `/api/terminals/*` | 已鉴权 | [`nomifun-terminal/src/routes.rs`](../../crates/backend/nomifun-terminal/src/routes.rs) |
-| 知识库 | `/api/knowledge/*` | 已鉴权 | [`nomifun-knowledge/src/routes.rs`](../../crates/backend/nomifun-knowledge/src/routes.rs) |
-| 创作管理与生成 | `/api/creative-studio/*` 管理分组：画布、素材、提示词、模板/运行/草稿、任务、Agent session 与集合 | 仅实例 owner | [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs)、[`nomifun-creation/src/routes.rs`](../../crates/backend/nomifun-creation/src/routes.rs) |
-| 创作媒体交付 | `GET /api/creative-studio/files/{asset_id}` | 公开的只读 capability URL；不提供列表或写操作 | [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs) |
-| 应用 | `/api/apps*`：当前记录、元数据、创建、导入、普通开发 Session、命令、状态、覆盖和删除；`/api/app-hosting/mcp-sources*`：只读来源与发现刷新 | 已认证实例 owner；托管后端自动复用 LocalTrust | [`router/app_hosting.rs`](../../crates/backend/nomifun-app/src/router/app_hosting.rs)、[`router/app_mcp_sources.rs`](../../crates/backend/nomifun-app/src/router/app_mcp_sources.rs) |
-| 伙伴 | `/api/companion/*` | 已鉴权 | [`nomifun-companion/src/routes.rs`](../../crates/backend/nomifun-companion/src/routes.rs) |
-| NomiFun Desktop 访问令牌 | `/api/webui/access-token` | 本地信任 / 安装 owner 流 | [`router/instance_token_routes.rs`](../../crates/backend/nomifun-app/src/router/instance_token_routes.rs) |
-| Agent session Browser Workspace | `/api/agent-sessions/{agent_session_id}/browser*` | 安装 owner + 本地产品信任；校验 agent session 所有权，并拒绝委派执行 step | [`router/browser_workspace.rs`](../../crates/backend/nomifun-app/src/router/browser_workspace.rs) |
-| Attached Chrome Provider | `GET|POST|DELETE /api/browser-providers/attached-chrome` | 安装 owner + 本地产品信任 | [`router/browser_workspace.rs`](../../crates/backend/nomifun-app/src/router/browser_workspace.rs) |
-| 文件系统 | `/api/fs/*` | 已鉴权 | [`nomifun-file/src/routes.rs`](../../crates/backend/nomifun-file/src/routes.rs) |
-| Office 预览与历史 | `/api/office-preview/start`、`/api/office-preview/status/{request_id}`、`/api/office-preview/stop`、`/api/preview-history/*` | 已鉴权；请求归属用户 | [`nomifun-office/src/routes.rs`](../../crates/backend/nomifun-office/src/routes.rs) |
-| 受管运行环境准备 | `GET /api/runtime-tools/{tool}`、`POST /api/runtime-tools/{tool}/prepare` | 安装 owner；固定组件 ID；非阻塞共享准备 | [`nomifun-app/src/router/runtime_tools.rs`](../../crates/backend/nomifun-app/src/router/runtime_tools.rs) |
-| Office HTML 产物 | `/api/office-preview-artifacts/{capability}/?request_id=...&nonce=...` | 活跃、匹配请求的 capability；UUIDv7 nonce；只读沙箱 HTML | 同上；[契约](../architecture/external-tools.zh.md) |
-| 设置 + 提供商 + 系统信息 | `/api/settings`、`/api/providers/*`、`/api/system/*` | 已鉴权 | [`nomifun-system/src/routes.rs`](../../crates/backend/nomifun-system/src/routes.rs) |
-| 宿主系统权限 | `GET /api/system/permissions` 读取麦克风、辅助功能与屏幕录制实时状态；`POST /api/system/permissions/{request,open-settings}` 请求授权或打开对应设置 | 读取仅限安装 owner；会弹出本机 UI 的写操作还要求本地产品信任 | [`router/computer_permissions.rs`](../../crates/backend/nomifun-app/src/router/computer_permissions.rs) |
-| 全局模型故障转移队列 | `/api/agent/model-failover` | 已鉴权 | [`router/model_failover.rs`](../../crates/backend/nomifun-app/src/router/model_failover.rs) |
-| 连接探测（Bedrock 等） | `/api/bedrock/test-connection` | 已鉴权 | [`nomifun-system/src/bedrock_probe/routes.rs`](../../crates/backend/nomifun-system/src/bedrock_probe/routes.rs) |
-| Shell 辅助 + STT | `/api/shell/*`、`/api/stt` | 已鉴权 | [`nomifun-shell/src/routes.rs`](../../crates/backend/nomifun-shell/src/routes.rs) |
-| 公共资源（logo） | `/api/assets/logos/*` | 公共 | [`nomifun-assets/src/routes.rs`](../../crates/backend/nomifun-assets/src/routes.rs) |
-| Canonical Remote MCP front door | `/mcp` | 安装令牌 | [`nomifun-public/src/canonical.rs`](../../crates/backend/nomifun-public/src/canonical.rs) |
-| Canonical Remote REST API | `/api/remote/open`、`/api/remote/turn`、`/api/remote/observe`、`/api/remote/cancel` | 外部安装令牌；托管后端可复用已验证 LocalTrust owner | [`router/nomi_core_session.rs`](../../crates/backend/nomifun-app/src/router/nomi_core_session.rs) |
-| 实时 WebSocket | `/ws` | 已鉴权（token 通过 `Sec-WebSocket-Protocol` 或查询串传递） | [`nomifun-realtime/src/handler.rs`](../../crates/backend/nomifun-realtime/src/handler.rs) |
-
-如需各路由具体支持的方法，请阅读对应的 `routes.rs` 文件——每个 router
-都在源文件内联声明自身的路由。
-
-### 当前应用与开发工作区
-
-应用 UI 与 Agent 工具调用同一个托管 owner。右侧手工导入和设置保存不要求模型；
-只有普通开发会话的创建需要可用模型。新记录不是草稿或版本，目录直接成为 canonical 工作区。
-
-| 方法 + 路径 | 用途 |
+| 能力 | 路由/源码入口 |
 | --- | --- |
-| `GET /api/apps` | 当前 `AppRecord` 列表，包含名称、说明、标签和运行状态，供搜索、分类与分页。 |
-| `POST /api/apps` | `{name?, description?, tags?}` 创建普通空 Source 应用及自有目录，缺省名称为“新应用”。 |
-| `POST /api/apps/import`、`/import-zip` | 从外部路径或 ZIP body 创建普通导入记录，保留原来源。 |
-| `GET /api/apps/{id}` | 读取当前应用及实际操作、输出。 |
-| `PUT /api/apps/{id}` | `{name, settings, description?, tags?, import_kind?}` 一次保存当前元数据与设置；省略新增字段保留原值，不允许作者开发会话或绑定引用。 |
-| `POST /api/apps/{id}/development-session` | `{model?, reasoning_effort?}` 验证并复用普通会话，或通过固定 `app.developer` 创建；返回 `{app, conversation}`，后者为同一 canonical Session 的普通投影。 |
-| `POST /api/apps/{id}/import`、`/import-zip` | 外部来源导入当前应用，保持 ID/目录/会话并重新识别命令；路径 body 为 `{source, name?, import_kind}`，ZIP 类型和名称用 query。 |
-| `POST /api/apps/{id}/overwrite`、`/overwrite-zip` | 覆盖当前文件、保留业务文件和当前设置；路径 body 为 `{source}`。 |
-| `POST /api/apps/{id}/operate` | `{operation: preview|use|start|stop|rebuild}` 使用唯一命令与进程 owner。 |
-| `POST /api/apps/environment` | 检测真实系统或指定的 Node、npm、Bun，不替换环境。 |
-| `DELETE /api/apps/{id}` | 停止并移除自有文件和记录，保留普通开发 Session 与合法历史。 |
+| 健康检查 | `/health`；[health router](../../crates/backend/nomifun-app/src/router/health.rs) |
+| 登录、首次设置、会话鉴权 | `/login`、`/logout`、`/api/auth/*`、`/api/ws-token`；[鉴权路由](../../crates/backend/nomifun-auth/src/routes.rs) |
+| Agent Session 与 Remote | `/api/agent-sessions/*`、`/api/remote/*`；[Session router](../../crates/backend/nomifun-app/src/router/nomi_core_session.rs) |
+| Agent 编排与能力目录 | [控制平面路由](../../crates/backend/nomifun-agent-control-plane/src/routes.rs) |
+| 原生 Browser 与附加 Chrome | [Browser Workspace router](../../crates/backend/nomifun-app/src/router/browser_workspace.rs) |
+| 应用和 MCP 来源 | [应用托管](../../crates/backend/nomifun-app/src/router/app_hosting.rs)、[来源观测](../../crates/backend/nomifun-app/src/router/app_mcp_sources.rs) |
+| 创作画布/资产/任务 | [workshop routes](../../crates/backend/nomifun-workshop/src/routes.rs)、[creation routes](../../crates/backend/nomifun-creation/src/routes.rs) |
+| 终端会话 | `/api/terminals/*`；[终端路由](../../crates/backend/nomifun-terminal/src/routes.rs) |
+| MCP 与 Skills | [MCP 路由](../../crates/backend/nomifun-mcp/src/routes.rs)、[技能路由](../../crates/backend/nomifun-skill-library/src/skill_routes.rs) |
+| 文件与 Office 预览 | [文件路由](../../crates/backend/nomifun-file/src/routes.rs)、[Office 路由](../../crates/backend/nomifun-office/src/routes.rs) |
+| 设置/提供商/系统 | [系统路由](../../crates/backend/nomifun-system/src/routes.rs) |
+| Canonical Remote MCP | `/mcp`；[公共 adapter](../../crates/backend/nomifun-public/src/canonical.rs) |
+| 实时通信 | `/ws`；[handler](../../crates/backend/nomifun-realtime/src/handler.rs) |
 
-`model` 只选择 provider/model，路由与凭据由 Host 解析。已有会话的模型和推理变更仍走普通专用 API，
-重开应用不自动改写 frozen binding。开发引用仅导航，重开校验 owner、普通用途、固定模板和确切工作区。
-手工导入、覆盖与删除复用 Session 准入围栏，并在应用 gate 内复核引用；活动 Turn、未结算/未知效果
-或仍存活的 native producer 返回冲突。读取、元数据保存和停止应用仍可用。
+功能文档不复制完整端点清单，应链接所属 router，仅解释必要的用户/集成契约。
 
-右侧 iframe 直接加载应用自己的 HTTP(S) 页面，不新增资产 Bridge 或预览代理 API；
-renderer 同源与远程不可达 loopback 由现役 UI 边界拒绝。托管后端使用运行时自动注入的 LocalTrust
-请求上述管理与既有 REST 接口；外部登录、CORS 和安装令牌流程保持原边界。
+Session 操作使用 canonical AgentSession 身份，会话消息是同一 Session 的投影，
+详见 [Agent Session](../architecture/agent-session.zh.md)。
+应用开发使用普通 Session，详见[应用托管](../architecture/app-hosting.zh.md)。
 
-### Agent 工作台控制平面
-
-Agent 工作台的请求顺序由服务端控制，而不是由客户端拼接 Snapshot：
-
-```text
-官方 seed / 用户 Draft
-  → /api/agent-presets/... Preview
-  → canonical Compiler
-  → immutable Revision + ContributionLock[]
-  → ResolvedSnapshot
-  → /api/agent-sessions
-```
-
-客户端不得提交 Snapshot digest、Mount ID、内部 Revision ID、完整 Binding 或裸
-canonical JSON 来驱动执行。`agent_snapshot` 是 Conversation、Cron、Agent
-Execution participant 和 Template participant 的统一持久化执行投影名称。
-
-### 选取的鉴权端点
-
-下面这些是客户端最常直接交互的鉴权端点：
-
-| 方法 + 路径 | 用途 |
-|---|---|
-| `POST /login` | 用户名 + 密码登录。返回 `{success, user, token}` 并设置会话 cookie。CSRF 豁免。带限流。 |
-| `POST /api/auth/setup` | 全新安装上的一次性首位管理员创建。原子操作；并发调用通过条件 UPDATE 竞争，只有一个会赢（其余得到 `409 Conflict`）。CSRF 豁免。 |
-| `POST /logout` | 将当前 token 加入黑名单；清除会话 cookie。 |
-| `GET  /api/auth/status` | 公共——返回 `{needs_setup, user_count, is_authenticated}`。可作为 liveness/health 探针。 |
-| `GET  /api/auth/user` | 返回当前 `{id, username}`。 |
-| `POST /api/auth/change-password` | 修改当前用户密码并轮换 JWT 密钥（使其他会话全部失效）。 |
-| `POST /api/auth/refresh` | 刷新仍然有效但接近过期的 token。 |
-| `GET  /api/ws-token` | 返回用于 WebSocket 升级的 token。 |
-| `POST /api/auth/qr-login` | 消费一次性的二维码登录 token（由 WebUI 远程访问流程下发）。 |
-| `GET  /qr-login` | 静态 HTML 页面，用于完成来自手机扫码的二维码登录跳转。 |
-
-### 浏览器平台端点
-
-交互式 Browser 是由单个 Agent session 持有的原生 Surface。HTTP API 服务于
-会话 UI；Agent 的观察和输入则通过当前 turn 冻结的 `Browser` Tool binding，
-而不是 HTTP 管理 API。两条路径操作的是同一组标签页和同一个 Profile。Agent
-run 活跃时，用户命令 fail closed；本轮结束后，用户可以直接操作同一页面。
-系统没有用户控制权转交状态。
-
-| 方法 + 路径 | 用途 |
-|---|---|
-| `GET /api/agent-sessions/{agent_session_id}/browser` | 读取 Browser Workspace snapshot，不创建 runtime。 |
-| `POST /api/agent-sessions/{agent_session_id}/browser` | 确保该 session 的原生 Browser Workspace 存在，并返回 snapshot。 |
-| `DELETE /api/agent-sessions/{agent_session_id}/browser` | 使用精确 `runtime_generation` 关闭 idle Browser Workspace；陈旧请求或活跃 run 会被拒绝。 |
-| `POST /api/agent-sessions/{agent_session_id}/browser/commands` | 在输入权属于用户时，对原生标签页执行一个类型化命令：创建/激活/关闭/导航/历史/刷新、关闭全部网页、打开下载目录、在系统浏览器打开当前 URL、取消受管下载、处理网站权限/对话框，或清除此 session 的站点数据。 |
-| `GET /api/browser-providers/attached-chrome` | 读取 Attached Chrome 连接状态。 |
-| `POST /api/browser-providers/attached-chrome` | 在用户已经开启 Chrome 远程调试后，附加到正在运行的 Chrome；NomiFun 不启动 Chrome，也不导入其 Profile。 |
-| `DELETE /api/browser-providers/attached-chrome` | 断开精确附加连接，不关闭 Chrome 或其中的标签页。 |
-
-这些路由只挂载在本地受信任的桌面产品中，并同时要求安装 owner 鉴权。响应不会
-包含原始协议 endpoint、调试端口、Profile 路径、Cookie 或凭据。Agent 持有
-session run 时，浏览器的可变操作不可用。
-
-`web.research` 能力模块没有 Browser 管理端点。它是独立可选的 Agent 能力，由
-隔离后台浏览器实现，不使用 session Profile。Attached Chrome Provider 同样是
-独立 Agent 能力；启用它不会顺带启用内嵌 Browser 或本地搜索。
+原生 Browser 管理由 Session 持有并要求本地信任，不创建 Agent 授权、不暴露原始
+调试端点，也不在 Agent 持有运行时接受人工变更。
+详见[浏览器平台](../architecture/browser-platform.zh.md)。
 
 ## WebSocket 事件模型
 
-`/ws` 是应用更新共用的 JSON 实时通道：智能体 token 流、终端输出、
-Browser inventory/生命周期事件，以及需求、计划任务和协作任务的状态
-变化。它仍是通用应用事件通道，不是 Browser 页面 Viewer 或输入通道。
+`/ws` 传递 JSON 应用事件，包括 Agent 流、终端、Browser 生命周期和
+计划任务/需求变更，不作为原生 Browser 网页查看或输入通道。
 
-- 鉴权：通过 `GET /api/ws-token` 获得的 JWT，放在 WebSocket 的
-  `Sec-WebSocket-Protocol` 请求头中（或 `Authorization`）。token 无效或
-  过期 → 服务端发出 `auth-expired` 事件并以 `1008` 关闭。完全没有
-  token → 以 `1008` 关闭，原因为 `"no token provided"`。
-- 升级成功后，每条消息都是带 `type` 与 `payload` 的 JSON 对象。当域内
-  事件发生时（新的智能体 token、一个终端字节、需求状态切换），由
-  服务端推送；客户端通常无需回送任何内容。服务端把单一的
-  `BroadcastEventBus` 多路复用给所有已连接客户端。
-- 心跳：每 30 秒 ping 一次，60 秒超时（`HEARTBEAT_INTERVAL` /
-  `HEARTBEAT_TIMEOUT`）。
-- 关闭码：`1000` 表示正常关闭；`1008` 表示策略违规（鉴权失败、token
-  无效）。
+Web 客户端通过 `GET /api/ws-token` 获取 token，通常经
+`Sec-WebSocket-Protocol` 提交到 upgrade；桌面使用本地信任路径。
+无效或过期鉴权以策略码 `1008` 关闭，正常关闭为 `1000`。
+心跳默认 30s/60s。
 
-`type` 取值集合是开放的——扩展与功能模块会发出各自的类型。请把未知
-类型当作向前兼容的：忽略它们即可。
+消息使用 `type` 和 `payload`，忽略未知事件类型。
+传输细节见[通信](../architecture/communication.zh.md)。
 
-## 响应包络
+## 响应与限制
 
-绝大多数 JSON 响应使用同一种形状（来自 `nomifun-api-types` 的
-`ApiResponse<T>`）：
+多数 handler 使用 `ApiResponse<T>`：
 
 ```json
-{ "success": true, "data": { ... } }
+{ "success": true, "data": {} }
 ```
 
-错误使用恰当的 HTTP 状态码返回，body 形如：
+失败返回对应 HTTP 状态及错误体。鉴权响应有独立类型，客户端应先核对 DTO。
 
-```json
-{ "success": false, "error": "Invalid username or password" }
-```
+公共请求体上限为 10 MiB，个别路由覆盖，如文件上传为 30 MiB。
+限制及 cookie/header 常量见[配置](configuration.zh.md)和可执行
+[常量定义](../../crates/backend/nomifun-common/src/constants.rs)。
 
-登录/设置/刷新这几个 handler 会返回略微富化的包络
-（`LoginResponse`、`RefreshResponse`）——它们会把 token 或 user 对象
-内联在响应中。
-
-## 真值来源指引
-
-上面的列表只是为了把你引导到对的模块。到达后请阅读源码——每个 router
-在一处声明全部路由，每个 handler 都在同一个文件或紧挨着的下一个文件
-里。Router 装配本身位于
-[`crates/backend/nomifun-app/src/router/routes.rs`](../../crates/backend/nomifun-app/src/router/routes.rs)；
-中间件栈（CSRF、安全响应头、请求体上限、可选的 CORS）也在那里。
-
-## 另见
-
-- [配置参考](./configuration.zh.md) —— 参数、环境变量、鉴权密钥解析顺序。
-- [浏览器平台架构](../architecture/browser-platform.zh.md) —— Agent session 原生 Browser Workspace、Attached Chrome Provider、隔离后台 runtime 与生命周期保证。
-- [疑难排查](./troubleshooting.zh.md) —— 常见的 API 与 WebSocket 故障
-  形态。
-- [Web 服务部署](../guides/web-server-deployment.md) —— 在 TLS 之后把
-  API 暴露到网络上。
+首次设置、鉴权及连接失败见[疑难排查](troubleshooting.zh.md)。

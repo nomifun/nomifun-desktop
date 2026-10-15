@@ -1036,9 +1036,10 @@ impl AgentControlPlane {
         Ok(replacement)
     }
 
-    /// Preserve the admitted immutable execution facts while giving a
-    /// different explicitly selected authored Agent a distinct target identity.
-    /// The caller must prove that its authorial selection changed.
+    /// Preserve admitted immutable execution facts and verified authoring
+    /// provenance while giving an explicit binding change a distinct identity.
+    /// The caller must prove a different authored selection or resolved resource
+    /// set before using the ordinary Session binding transition.
     pub async fn distinguish_agent_session_binding_identity(
         &self,
         owner: &UserId,
@@ -1055,8 +1056,8 @@ impl AgentControlPlane {
         let mut replacement = session_binding_from_stable_artifacts(reference.clone(), Some(revision.clone()), Some(snapshot.clone()))?;
         self.store.insert_preset_with_revision(StoredPreset {
             session_only: true,
-            preset: AgentPreset { preset_id, owner_user_id: Some(owner.clone()), source: AgentPresetSource::User,
-                display_name: target.preset.display_name, description: target.preset.description,
+            preset: AgentPreset { preset_id, owner_user_id: Some(owner.clone()), source: target.preset.source.clone(),
+                display_name: variant_display_name(&target), description: target.preset.description,
                 current_stable_revision: Some(reference) },
         }, revision, snapshot).await?;
         replacement.binding_version = binding.binding_version;
@@ -3983,6 +3984,64 @@ mod tests {
         without_additions.skill_bindings = original.skill_bindings.clone();
         assert_eq!(without_additions, original, "only capabilities and absent Skills may change");
         assert_eq!(add_recommended_capabilities(&mut document, &recommended), (vec![], vec![]));
+    }
+
+    #[tokio::test]
+    async fn companion_robot_recommendations_do_not_widen_saved_or_frozen_bindings() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let control = template_control_plane(store.clone(), OfficialPresetKey::CompanionDefault, false);
+        let created = control.create_from_template(&owner, "companion.default", official_launch_request(true)).await.unwrap();
+        let id = &created.preset.preset_id;
+        // An existing authored configuration can intentionally retain only
+        // vision. Publishing broader recommendations must not overwrite it.
+        let mut draft = created.draft;
+        draft.document.persona = "Keep my companion persona".into();
+        draft.document.instructions = "Keep my chosen robot behavior".into();
+        draft.document.enabled_capabilities.iter_mut().find(|selection| selection.capability.id == "robot")
+            .unwrap().action_allowlist = BTreeSet::from(["robot/vision".into()]);
+        control.save_revision(&owner, id, SaveAgentPresetRevisionRequest {
+            expected_current_revision: draft.current_revision.clone(), draft, reason: Some("Explicit vision-only choice".into()),
+        }).await.unwrap();
+        let frozen = control.resolve_agent_session_binding(&owner, id).await.unwrap();
+        let (_, old_revision, old_snapshot) = control.saved_binding_artifacts(&owner, &frozen).await.unwrap();
+        let before = control.editor(&owner, id, None).await.unwrap();
+
+        let restarted = template_control_plane(store.clone(), OfficialPresetKey::CompanionDefault, false);
+        let reopened = restarted.create_from_template(&owner, "companion.default", official_launch_request(true)).await.unwrap();
+        assert_eq!(reopened.draft.document, before.draft.document, "ordinary launch preserves the saved action subset");
+        assert_eq!(reopened.preset.current_stable_revision, before.preset.current_stable_revision);
+        let proposal = restarted.recommended_capabilities(&owner, id).await.unwrap();
+        assert_eq!(proposal.added_capabilities, vec![nomifun_api_types::CapabilitySelectionDto {
+            capability: nomifun_api_types::CapabilityRefDto { id: "robot".into() },
+            action_allowlist: BTreeSet::from(["robot/display".into(), "robot/motion".into(), "robot/device".into()]),
+        }]);
+        assert_eq!(proposal.draft.document.persona, before.draft.document.persona);
+        assert_eq!(proposal.draft.document.instructions, before.draft.document.instructions);
+        assert_eq!(proposal.draft.document.chat_route_records, before.draft.document.chat_route_records);
+        assert_eq!(restarted.editor(&owner, id, None).await.unwrap(), before, "recommendation inspection is read-only");
+        let (_, still_frozen_revision, still_frozen_snapshot) = restarted.saved_binding_artifacts(&owner, &frozen).await.unwrap();
+        assert_eq!(still_frozen_revision, old_revision);
+        assert_eq!(still_frozen_snapshot, old_snapshot);
+
+        let stale_draft = proposal.draft.clone();
+        let saved = restarted.save_revision(&owner, id, SaveAgentPresetRevisionRequest {
+            expected_current_revision: proposal.draft.current_revision.clone(), draft: proposal.draft,
+            reason: Some("Explicitly accept Robot recommendations".into()),
+        }).await.unwrap();
+        let actions = &saved.revision.document.enabled_capabilities.iter()
+            .find(|selection| selection.capability.id == "robot").unwrap().action_allowlist;
+        assert_eq!(actions, &BTreeSet::from([
+            "robot/vision".into(), "robot/display".into(), "robot/motion".into(), "robot/device".into(),
+        ]));
+        assert_eq!(restarted.save_revision(&owner, id, SaveAgentPresetRevisionRequest {
+            expected_current_revision: stale_draft.current_revision.clone(), draft: stale_draft, reason: None,
+        }).await.unwrap_err().code().as_ref(), "PRESET_REVISION_DIGEST_MISMATCH");
+        let latest = restarted.resolve_agent_session_binding(&owner, id).await.unwrap();
+        assert_ne!(latest.preset_revision_ref, frozen.preset_revision_ref, "only a new explicit binding can consume the saved additions");
+        let (_, unchanged_revision, unchanged_snapshot) = restarted.saved_binding_artifacts(&owner, &frozen).await.unwrap();
+        assert_eq!(unchanged_revision, old_revision, "saving recommendations cannot rewrite a frozen Revision");
+        assert_eq!(unchanged_snapshot, old_snapshot, "saving recommendations cannot rewrite a frozen Snapshot");
     }
 
     #[tokio::test]

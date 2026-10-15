@@ -4,7 +4,7 @@ import { Readable } from 'node:stream';
 import { createServer } from 'node:net';
 import { spawn } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runCargoArtifacts, runCommand } from './run-macos-dev-runner.mjs';
 
@@ -29,8 +29,8 @@ test('Cargo collector joins stdout EOF with exit, accepts split UTF-8 and the fi
   expect(settled).toBe(false);
   continueOutput();
   expect(await report).toEqual({
-    'nomifun-desktop': '/exact-workspace/target/中文/nomifun-desktop',
-    macos_application_controller: '/exact-workspace/target/debug/examples/macos_application_controller',
+    'nomifun-desktop': resolve('/exact-workspace', 'target/中文/nomifun-desktop'),
+    macos_application_controller: resolve('/exact-workspace', 'target/debug/examples/macos_application_controller'),
   });
 });
 

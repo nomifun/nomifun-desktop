@@ -31,6 +31,12 @@ use crate::{
 /// Session owner. They must not infer authority from user/model JSON.
 #[async_trait]
 pub trait UnifiedRuntimeHost: Send + Sync {
+    /// Recreate host-frozen transient resources at an accepted-Turn boundary
+    /// through the registry's existing teardown/join boundary. A pristine
+    /// warmup can be replaced before its first accepted input as well.
+    /// This is not a request to replace an active or paused Turn.
+    fn requires_turn_boundary_recycle(&self) -> bool { false }
+
     /// Validate a completed proposal against Host-owned delivery facts before
     /// the lifecycle SDK records success. It can only narrow completion.
     async fn completion_gate(
@@ -114,6 +120,7 @@ fn contract_error(error: AgentEngineError) -> AppError {
 
 pub struct UnifiedAgentRuntime {
     runtime: HostedAgentRuntime,
+    driver: Arc<UnifiedSessionDriver>,
 }
 
 struct UnifiedSessionDriver {
@@ -123,6 +130,8 @@ struct UnifiedSessionDriver {
     model: Arc<dyn AgentModelPort>,
     tools: Arc<dyn AgentToolInvoker>,
     host: Arc<dyn UnifiedRuntimeHost>,
+    started_turn: std::sync::atomic::AtomicBool,
+    closed_terminal: std::sync::atomic::AtomicBool,
 }
 
 impl UnifiedAgentRuntime {
@@ -143,8 +152,10 @@ impl UnifiedAgentRuntime {
             .map_err(contract_error)?;
         let driver = Arc::new(UnifiedSessionDriver {
             owner_id: options.user_id.clone(), engine, binding, model, tools, host,
+            started_turn: std::sync::atomic::AtomicBool::new(false),
+            closed_terminal: std::sync::atomic::AtomicBool::new(false),
         });
-        Ok(Self { runtime: HostedAgentRuntime::new(options, driver)? })
+        Ok(Self { runtime: HostedAgentRuntime::new(options, driver.clone())?, driver })
     }
 }
 
@@ -345,6 +356,8 @@ impl EngineSessionDriver for UnifiedSessionDriver {
         cancellation: CancellationToken,
         output: EngineTurnOutput,
     ) -> Result<EngineTurnOutcome, AppError> {
+        self.started_turn.store(true, std::sync::atomic::Ordering::Release);
+        self.closed_terminal.store(false, std::sync::atomic::Ordering::Release);
         let projection = Arc::new(TurnProjection {
             host: self.host.clone(), message: message.clone(), output,
             calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
@@ -422,10 +435,18 @@ impl EngineSessionDriver for UnifiedSessionDriver {
         self.host.cleanup_turn(message).await
     }
     async fn suspend_after_cleanup_failure(&self, message: &SendMessageData) -> Result<bool,AppError> {
+        self.closed_terminal.store(false, std::sync::atomic::Ordering::Release);
         self.host.suspend_after_cleanup_failure(message).await
     }
     async fn record_terminal(&self, message: &SendMessageData, outcome: &EngineTurnOutcome) -> Result<(), AppError> {
-        self.host.record_event(message, &runtime_terminal(outcome)).await.map(|_| ())
+        self.host.record_event(message, &runtime_terminal(outcome)).await?;
+        // SDK Finished also represents a resumable pause. Only a successfully
+        // committed closed terminal permits replacing this local driver.
+        // InputRequired closes this Turn and hands the next input to its own
+        // canonical admission; it does not retain a paused execution to resume.
+        self.closed_terminal.store(!matches!(outcome.terminal, EngineTurnTerminal::Paused { .. }),
+            std::sync::atomic::Ordering::Release);
+        Ok(())
     }
     async fn cleanup_session(&self) -> Result<(), AppError> { self.host.cleanup_session().await }
 }
@@ -478,6 +499,14 @@ impl AgentRuntimeControl for UnifiedAgentRuntime {
 
 #[async_trait]
 impl OfficialAgentRuntime for UnifiedAgentRuntime {
+    fn requires_turn_boundary_recycle(&self) -> bool {
+        let replaceable = match self.runtime.status() {
+            None => !self.driver.started_turn.load(std::sync::atomic::Ordering::Acquire),
+            Some(ConversationStatus::Finished) => self.driver.closed_terminal.load(std::sync::atomic::Ordering::Acquire),
+            _ => false,
+        };
+        replaceable && self.driver.host.requires_turn_boundary_recycle()
+    }
     fn supports_steering_context(&self) -> bool { self.runtime.supports_steering_context() }
     async fn steer_with_receipt(&self, delivery: crate::RuntimeSteerDelivery) -> Result<bool, AppError> {
         self.runtime.steer_with_receipt(delivery).await
@@ -615,6 +644,8 @@ mod tests {
     }
 
     struct Host {
+        recycle_completed_turns: AtomicBool,
+        prepared_inputs: Mutex<Vec<String>>,
         block_completion: AtomicBool,
         completion_checks: AtomicUsize,
         allow_user_input: AtomicBool,
@@ -635,6 +666,8 @@ mod tests {
     impl Host {
         fn new() -> Arc<Self> {
             Arc::new(Self {
+                recycle_completed_turns: AtomicBool::new(false),
+                prepared_inputs: Mutex::new(Vec::new()),
                 block_completion: AtomicBool::new(false),
                 completion_checks: AtomicUsize::new(0),
                 allow_user_input: AtomicBool::new(false),
@@ -656,6 +689,9 @@ mod tests {
 
     #[async_trait]
     impl UnifiedRuntimeHost for Host {
+        fn requires_turn_boundary_recycle(&self) -> bool {
+            self.recycle_completed_turns.load(Ordering::Acquire)
+        }
         async fn completion_gate(&self, _message: &SendMessageData) -> Result<Option<EngineTurnTerminal>,AppError> {
             self.completion_checks.fetch_add(1, Ordering::SeqCst);
             Ok(self.block_completion.load(Ordering::Acquire).then(|| EngineTurnTerminal::Paused {
@@ -673,6 +709,7 @@ mod tests {
             message: &SendMessageData,
             _cancellation: CancellationToken,
         ) -> Result<AgentTurnRequest, AppError> {
+            self.prepared_inputs.lock().unwrap().push(message.content.clone());
             self.entered.notify_one();
             if self.pending_preparation.load(Ordering::Acquire) {
                 return std::future::pending().await;
@@ -885,6 +922,7 @@ mod tests {
     #[tokio::test]
     async fn input_required_waits_for_cleanup_and_receipt_then_publishes_note_before_finish_without_success_gate() {
         let host = Host::new();
+        host.recycle_completed_turns.store(true, Ordering::Release);
         host.block_cleanup.store(true, Ordering::Release);
         let runtime = input_request_runtime(host.clone());
         let mut events = runtime.subscribe();
@@ -895,6 +933,7 @@ mod tests {
             assert!(!matches!(event, AgentStreamEvent::Finish(_) | AgentStreamEvent::Error(_)));
         }
         assert_eq!(runtime.status(), Some(ConversationStatus::Running));
+        assert!(!runtime.requires_turn_boundary_recycle(), "cleanup still owns the original Turn");
         assert!(runtime.send_message(message()).await.is_err(), "cleanup retains original ownership");
         assert!(!host.events.lock().unwrap().iter().any(|event| matches!(event, AgentEngineEvent::TurnInputRequired { .. })));
         host.cleanup_release.add_permits(1);
@@ -911,6 +950,7 @@ mod tests {
         drop(recorded);
         assert_eq!(host.completion_checks.load(Ordering::Acquire), 0);
         assert_eq!(runtime.status(), Some(ConversationStatus::Finished));
+        assert!(runtime.requires_turn_boundary_recycle(), "recorded InputRequired closes this Turn before the next input admission");
         runtime.kill_and_wait(None).await.unwrap();
     }
 
@@ -918,6 +958,7 @@ mod tests {
     async fn input_required_cleanup_or_terminal_record_failure_never_publishes_the_question_or_releases_input() {
         for fail_cleanup in [true, false] {
             let host = Host::new();
+            host.recycle_completed_turns.store(true, Ordering::Release);
             host.fail_cleanup.store(fail_cleanup, Ordering::Release);
             host.fail_terminal_record.store(!fail_cleanup, Ordering::Release);
             let runtime = input_request_runtime(host.clone());
@@ -928,6 +969,7 @@ mod tests {
             assert!(!received.iter().any(|event| matches!(event, AgentStreamEvent::Tips(data) if data.user_input_request.is_some())));
             assert!(!host.events.lock().unwrap().iter().any(|event| matches!(event, AgentEngineEvent::TurnInputRequired { .. })));
             assert!(!runtime.is_transport_healthy());
+            assert!(!runtime.requires_turn_boundary_recycle(), "unconfirmed cleanup or terminal receipt cannot permit a normal boundary recycle");
             assert!(runtime.send_message(message()).await.is_err());
             assert_eq!(host.completion_checks.load(Ordering::Acquire), 0);
             host.fail_cleanup.store(false, Ordering::Release);
@@ -1431,6 +1473,129 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn host_turn_boundary_recycle_rebuilds_only_selected_completed_runtimes() {
+        for recycle in [false, true] {
+            let hosts = Arc::new(Mutex::new(Vec::<Arc<Host>>::new()));
+            let built = hosts.clone();
+            let factory: OfficialRuntimeOpener = Arc::new(move |options| {
+                assert_eq!(options.conversation_id, SESSION);
+                assert_eq!(options.user_id, OWNER);
+                assert_eq!(options.extra["retained_choice"], "same-agent-and-resources");
+                let host = Host::new();
+                host.recycle_completed_turns.store(recycle, Ordering::Release);
+                built.lock().unwrap().push(host.clone());
+                Box::pin(async move {
+                    let runtime = UnifiedAgentRuntime::new(&options, engine(), binding(),
+                        model(false, false), Arc::new(NoTools), host)?;
+                    Ok(AgentRuntimeHandle::Official(Arc::new(runtime)))
+                })
+            });
+            let registry = InMemoryAgentRuntimeSessions::new(factory);
+            for generation in 1..=2 {
+                let mut launch = options();
+                launch.extra = serde_json::json!({"retained_choice":"same-agent-and-resources"});
+                let handle = registry.get_or_create_runtime_for_turn(SESSION, generation,
+                    CancellationToken::new(), launch).await.unwrap();
+                if generation == 1 {
+                    assert_eq!(handle.requires_turn_boundary_recycle(), recycle,
+                        "an unused device warmup can be replaced before a later admission");
+                }
+                assert_eq!(handle.conversation_id(), SESSION);
+                let mut events = handle.subscribe();
+                let mut input = message();
+                input.content = format!("same Session input {generation}");
+                input.msg_id = format!("message-{generation}");
+                input.source_message_id = Some(format!("root-{generation}"));
+                handle.send_message(input).await.unwrap();
+                assert!(matches!(terminal(&mut events).await, AgentStreamEvent::Finish(data)
+                    if data.stop_reason == Some(TurnStopReason::EndTurn)));
+                handle.cancel().await.unwrap();
+                assert_eq!(handle.requires_turn_boundary_recycle(), recycle);
+                if generation == 1 {
+                    let mut launch = options();
+                    launch.extra = serde_json::json!({"retained_choice":"same-agent-and-resources"});
+                    assert!(registry.get_or_create_runtime_for_turn(SESSION, 2,
+                        CancellationToken::new(), launch).await.is_err(),
+                        "a new generation must not replace the still-owned old Turn");
+                    assert_eq!(hosts.lock().unwrap().len(), 1);
+                }
+                registry.release_runtime_turn(SESSION, generation).await.unwrap();
+            }
+            let observed = hosts.lock().unwrap().clone();
+            assert_eq!(observed.len(), if recycle { 2 } else { 1 });
+            let inputs = observed.iter().flat_map(|host|
+                host.prepared_inputs.lock().unwrap().clone()).collect::<Vec<_>>();
+            assert_eq!(inputs, ["same Session input 1", "same Session input 2"]);
+            if recycle {
+                assert_eq!(observed[0].cleanup_sessions.load(Ordering::Acquire), 1,
+                    "the old owner must finish cleanup before the successor is built");
+            }
+            registry.terminate_and_wait_result(SESSION, None).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn host_turn_boundary_recycle_preserves_active_and_paused_turns() {
+        let host = Host::new();
+        host.recycle_completed_turns.store(true, Ordering::Release);
+        let pending_model = model(true, false);
+        let running_runtime = runtime(host, pending_model.clone());
+        let mut events = running_runtime.subscribe();
+        running_runtime.send_message(message()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), pending_model.opened.notified()).await.unwrap();
+        assert!(!running_runtime.requires_turn_boundary_recycle(), "an active Turn cannot be recycled");
+        running_runtime.cancel().await.unwrap();
+        assert!(matches!(terminal(&mut events).await, AgentStreamEvent::Finish(_)));
+        assert!(running_runtime.requires_turn_boundary_recycle());
+        running_runtime.kill_and_wait(None).await.unwrap();
+
+        let host = Host::new();
+        host.recycle_completed_turns.store(true, Ordering::Release);
+        host.block_completion.store(true, Ordering::Release);
+        let paused = runtime(host, model(false, false));
+        let mut events = paused.subscribe();
+        paused.send_message(message()).await.unwrap();
+        assert!(matches!(terminal(&mut events).await, AgentStreamEvent::Finish(data)
+            if data.stop_reason == Some(TurnStopReason::Paused)));
+        assert_eq!(paused.status(), Some(ConversationStatus::Finished));
+        assert!(!paused.requires_turn_boundary_recycle(), "a paused accepted operation must retain its resume boundary");
+        paused.kill_and_wait(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn host_turn_boundary_recycle_refreshes_an_unused_warmup_before_first_admission() {
+        let hosts = Arc::new(Mutex::new(Vec::<Arc<Host>>::new()));
+        let built = hosts.clone();
+        let factory: OfficialRuntimeOpener = Arc::new(move |options| {
+            let host = Host::new();
+            host.recycle_completed_turns.store(true, Ordering::Release);
+            built.lock().unwrap().push(host.clone());
+            Box::pin(async move {
+                Ok(AgentRuntimeHandle::Official(Arc::new(UnifiedAgentRuntime::new(
+                    &options, engine(), binding(), model(false, false), Arc::new(NoTools), host,
+                )?)))
+            })
+        });
+        let registry = InMemoryAgentRuntimeSessions::new(factory);
+        let warmup = registry.get_or_create_runtime(SESSION, options()).await.unwrap();
+        assert!(warmup.requires_turn_boundary_recycle());
+        registry.get_or_create_runtime(SESSION, options()).await.unwrap();
+        assert_eq!(hosts.lock().unwrap().len(), 1, "a read warmup must not rebuild another read warmup");
+        let current = registry.get_or_create_runtime_for_turn(SESSION, 1,
+            CancellationToken::new(), options()).await.unwrap();
+        assert_eq!(current.conversation_id(), SESSION);
+        registry.get_or_create_runtime_for_turn(SESSION, 1,
+            CancellationToken::new(), options()).await.unwrap();
+        let built = hosts.lock().unwrap().clone();
+        assert_eq!(built.len(), 2,
+            "the first admission refreshes warmup once; its reserved generation must retain the new slot before send");
+        assert_eq!(built[0].cleanup_sessions.load(Ordering::Acquire), 1);
+        assert_eq!(built[0].cleanup_turns.load(Ordering::Acquire), 0, "warmup never owned an accepted Turn");
+        registry.release_runtime_turn(SESSION, 1).await.unwrap();
+        registry.terminate_and_wait_result(SESSION, None).await.unwrap();
     }
 
     #[tokio::test]

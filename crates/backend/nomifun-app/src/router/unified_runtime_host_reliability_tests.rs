@@ -1268,6 +1268,12 @@ async fn installed_host_input_handoff_reopens_as_normal_history_and_the_human_st
     assert_eq!(note["type"], "tips");
     assert_eq!(note["content"]["type"], "warning");
     assert_eq!(note["content"]["user_input_request"], expected);
+    assert_eq!(note["content"]["turn_outcome"],json!({"kind":"input_required","request_id":"ask-report-path"}));
+    assert_ne!(note["msg_id"],super::super::engine_journal::canonical_assistant_message_id(
+        fixture.message.source_message_id.as_ref().unwrap()).unwrap());
+    assert!(!history["data"]["items"].as_array().unwrap().iter().any(|message|
+        message["type"]=="text" && message["position"]=="left"
+            && message["content"]["content"].as_str().is_none_or(|text|text.trim().is_empty())));
     assert_eq!(note["content"]["turn_id"], fixture.message.source_message_id.as_ref().unwrap().as_str());
     assert!(note["content"].get("error").is_none());
     let note_id = note["message_id"].clone();

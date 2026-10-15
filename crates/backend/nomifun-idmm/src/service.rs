@@ -40,6 +40,7 @@ pub struct ObservedTurn {
     pub state: ObservedTurnState,
     pub error: Option<String>,
     pub origin: Option<String>,
+    pub turn_outcome: Option<nomifun_agent_contracts::AgentTurnOutcome>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +56,7 @@ pub struct ObservedMessage {
     pub sequence: u64,
     pub role: ObservedMessageRole,
     pub content: String,
+    pub user_input_request: Option<nomifun_agent_contracts::AgentUserInputRequest>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -563,7 +565,29 @@ impl IdmmService {
         if latest.role != ObservedMessageRole::Assistant {
             return Ok(());
         }
-        let Some(prompt) = detect_decision(&latest.content) else {
+        let Some(prompt) = (match &latest.user_input_request {
+            Some(request) => {
+                request.validate().map_err(AppError::Conflict)?;
+                if !matches!(observation.latest_turn.as_ref().and_then(|turn| turn.turn_outcome.as_ref()),
+                    Some(nomifun_agent_contracts::AgentTurnOutcome::InputRequired { request_id })
+                        if request_id == request.request_id.as_ref()) {
+                    return Err(AppError::Conflict("IDMM question is not the latest canonical input handoff".into()));
+                }
+                crate::detector::detect_input_request(&request.question)
+            }
+            None => {
+                let Some(turn) = observation.latest_turn.as_ref() else { return Ok(()); };
+                // A sealed process message or preserved failure partial is
+                // inspectable history, not an outstanding public question.
+                if turn.state != ObservedTurnState::Completed
+                    || !matches!(turn.turn_outcome.as_ref(),
+                        Some(nomifun_agent_contracts::AgentTurnOutcome::Answered { message_ids })
+                            if message_ids.contains(&latest.message_id)) {
+                    return Ok(());
+                }
+                detect_decision(&latest.content)
+            }
+        }) else {
             return Ok(());
         };
         let fingerprint = digest(&format!(
@@ -586,6 +610,16 @@ impl IdmmService {
                     now,
                 )
                 .await;
+        }
+
+        // The primary Runtime explicitly lacks required user information.
+        // A sidecar cannot supply unknown personal facts or turn missing data
+        // into an inferred answer. Only explicit safe options may be decided
+        // under the owner's existing rule/model policy.
+        if latest.user_input_request.is_some() && prompt.class == DecisionClass::OpenQuestion {
+            return self.record_halt(record, fingerprint, IdmmInterventionKind::OpenQuestion,
+                "user_information_required",
+                DecisionCause::rule(question, "任务需要你补充信息，已停止自动回答。"), now).await;
         }
 
         let rule = record
@@ -1293,6 +1327,9 @@ mod tests {
                 state: ObservedTurnState::Completed,
                 error: None,
                 origin: None,
+                turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Answered {
+                    message_ids: vec!["0190f5fe-7c00-7a00-8000-000000000002".into()],
+                }),
             }),
             messages: vec![ObservedMessage {
                 message_id: "0190f5fe-7c00-7a00-8000-000000000002".into(),
@@ -1300,7 +1337,80 @@ mod tests {
                 sequence: 1,
                 role: ObservedMessageRole::Assistant,
                 content: content.into(),
+                user_input_request: None,
             }],
+        }
+    }
+
+    fn input_observation(question: &str) -> IdmmSessionObservation {
+        let mut data=observation("");
+        data.latest_turn.as_mut().unwrap().turn_outcome=Some(nomifun_agent_contracts::AgentTurnOutcome::InputRequired {request_id:"typed-question".into()});
+        data.messages[0].user_input_request=Some(nomifun_agent_contracts::AgentUserInputRequest {
+            request_id:"typed-question".into(),question:question.into(),remaining_work:"Complete the accepted task.".into(),
+        });
+        data
+    }
+
+    #[tokio::test]
+    async fn typed_input_without_body_is_detected_but_unknown_user_information_is_not_invented() {
+        for question in ["姓名和爱好", "请提供以下资料：\n1. 姓名\n2. 学校\n3. 爱好"] {
+            let (service,port)=setup(input_observation(question),
+                r#"{"action":"answer_text","option_index":null,"text":"invented identity","reason":"guess"}"#).await;
+            let config=IdmmConfig {mode:IdmmMode::RulePlusModel,min_interval_secs:0,
+                bypass_model:IdmmBypassModelRef {provider_id:Some("0190f5fe-7c00-7a00-8000-000000000001".into()),model:Some("sidecar".into())},
+                ..IdmmConfig::default()};
+            let id="0190f5fe-7c00-7a00-8000-000000000007";
+            service.set_config(id,config).await.unwrap();
+            service.evaluate_now(id).await.unwrap();
+            assert!(port.deliveries.lock().await.is_empty());
+            assert_eq!(port.sidecar_calls.load(Ordering::SeqCst),0);
+            let notices=port.notices.lock().await;
+            assert_eq!(notices.len(),1);
+            assert_eq!(notices[0].1.decision.reason_code,"user_information_required");
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_input_options_use_the_existing_safe_rule_and_require_matching_outcome() {
+        let (service,port)=setup(input_observation("请选择格式：\n1. Markdown\n2. HTML（推荐）"),r#"{"action":"halt"}"#).await;
+        let id="0190f5fe-7c00-7a00-8000-000000000007";
+        service.set_config(id,IdmmConfig {mode:IdmmMode::RuleOnly,min_interval_secs:0,..IdmmConfig::default()}).await.unwrap();
+        service.evaluate_now(id).await.unwrap();
+        assert_eq!(*port.deliveries.lock().await,vec!["2"]);
+        let mut invalid=input_observation("请选择格式：\n1. Markdown\n2. HTML（推荐）");
+        invalid.latest_turn.as_mut().unwrap().turn_outcome=Some(nomifun_agent_contracts::AgentTurnOutcome::InputRequired {request_id:"different-request".into()});
+        *port.observation.lock().await=Some(invalid);
+        assert!(matches!(service.evaluate_now(id).await,Err(AppError::Conflict(_))));
+    }
+
+    #[tokio::test]
+    async fn prose_decisions_require_the_exact_latest_completed_public_answer() {
+        use nomifun_agent_contracts::AgentTurnOutcome;
+        let message_ids = vec!["0190f5fe-7c00-7a00-8000-000000000002".into()];
+        for (state, outcome) in [
+            (ObservedTurnState::Failed, Some(AgentTurnOutcome::Failed { message_ids: message_ids.clone() })),
+            (ObservedTurnState::Cancelled, Some(AgentTurnOutcome::Cancelled { message_ids: message_ids.clone() })),
+            (ObservedTurnState::Completed, Some(AgentTurnOutcome::Unavailable)),
+            (ObservedTurnState::Completed, None),
+            (ObservedTurnState::Completed, Some(AgentTurnOutcome::Answered {
+                message_ids: vec!["0190f5fe-7c00-7a00-8000-000000000003".into()],
+            })),
+            (ObservedTurnState::Failed, Some(AgentTurnOutcome::Answered { message_ids })),
+        ] {
+            for content in ["请选择格式：\n1. Markdown\n2. HTML（推荐）", "你希望缓存策略怎么设计？"] {
+                let mut data = observation(content);
+                let turn = data.latest_turn.as_mut().unwrap();
+                turn.state = state;
+                turn.turn_outcome = outcome.clone();
+                let (service, port) = setup(data,
+                    r#"{"action":"answer_text","option_index":null,"text":"未经结果确认的回答","reason":"guess"}"#).await;
+                let session_id = "0190f5fe-7c00-7a00-8000-000000000007";
+                service.set_config(session_id, bypass_config()).await.unwrap();
+                service.evaluate_now(session_id).await.unwrap();
+                assert!(port.deliveries.lock().await.is_empty(), "{state:?}: {outcome:?}");
+                assert_eq!(port.sidecar_calls.load(Ordering::SeqCst), 0, "{state:?}: {outcome:?}");
+                assert!(port.notices.lock().await.is_empty(), "a process row cannot author a decision notice");
+            }
         }
     }
 
@@ -1446,6 +1556,7 @@ mod tests {
             state: ObservedTurnState::Failed,
             error: Some("provider returned 429 rate limit".into()),
             origin: None,
+            turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Failed { message_ids: vec![] }),
         });
         let (service, port) = setup(failed, r#"{"action":"halt"}"#).await;
         let config = IdmmConfig {
@@ -1479,6 +1590,7 @@ mod tests {
             state: ObservedTurnState::Running,
             error: None,
             origin: None,
+            turn_outcome: None,
         });
         let (service, port) = setup(running, r#"{"action":"halt"}"#).await;
         let session_id = "0190f5fe-7c00-7a00-8000-000000000007";
@@ -1574,6 +1686,9 @@ mod tests {
         }
         let mut next = observation("请输入另一项密码？");
         next.messages[0].message_id = "0190f5fe-7c00-7a00-8000-000000000003".into();
+        next.latest_turn.as_mut().unwrap().turn_outcome = Some(nomifun_agent_contracts::AgentTurnOutcome::Answered {
+            message_ids: vec![next.messages[0].message_id.clone()],
+        });
         next.messages[0].sequence = 2;
         next.messages[0].fingerprint = digest("message-2");
         *port.observation.lock().await = Some(next);
@@ -1705,6 +1820,7 @@ mod tests {
                 sequence: 1,
                 role: ObservedMessageRole::User,
                 content: "api_key=sk-proj-abcdefghijklmnop_1234567890 continue".into(),
+                user_input_request: None,
             }],
             2_000,
         );

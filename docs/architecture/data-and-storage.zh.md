@@ -297,10 +297,10 @@ runtime 二进制与 Office HTML 产物均为可丢弃缓存。供应、身份�
   `VACUUM INTO` 创建一致快照。不要直接复制
   `nomifun-backend.db`：WAL 数据可能仍在
   `nomifun-backend.db-wal` 中，裸复制可能得到不完整数据库。
-- **备份清单** —— 记录 v3 schema、storage-generation/dataset ID、创建时间
-  以及每个文件的校验和。Restore 保留稳定业务 UUIDv7；技术 `id` 在目标
-  数据集中重新分配，关系从 registry 登记的业务键、自然键、JSON 和
-  side-store 引用重建。
+- **备份清单** —— 记录当前 format version 3、generation-5 的备份合同、源
+  storage-generation、创建时间及每个文件的校验和。Restore 保留完整 SQLite
+  身份图，包括业务 UUIDv7、技术 `id` 与 canonical TEXT/复合主键；仅目标的
+  `storage-generation` 轮换。
 - **加密密钥** —— 离线 bundle 会在文件存在时纳入
   `<data_dir>/encryption_key`。缺少该文件时，provider API key、OAuth token、
   渠道 bot token 等加密列将无法解密。
@@ -333,9 +333,9 @@ reparse point、路径穿越、特殊文件、未声明的 payload 文件/目录
 超过 8 GiB、总计超过 64 GiB、文件超过 200,000 个或目录超过 200,000 个的
 bundle；JSON 清单本身上限为 64 MiB。`restore` 在写入前验证整个 bundle，只接受不
 存在或空的目标目录，在目标旁边 staging 并验证所有文件，最后通过一次 rename
-安装完整数据目录；失败不会暴露部分目标。稳定业务 UUIDv7 保持不变；本地技术
-`id` 由目标数据集重新分配且不作为关系 locator，再对完整的已登记逻辑关联图
-执行 orphan audit。恢复会写入新的
+安装完整数据目录；失败不会暴露部分目标。恢复整体复制已验证的 WAL 安全 SQLite
+快照，保留精确身份及关联图，不重排技术行或重建事实，并验证 schema/data 完整性及
+已登记引用。恢复会写入新的
 `storage-generation`，避免源数据集浏览器缓存污染恢复后的数据。来自源自定义
 work-dir 的托管工作区统一落到
 `<destination-data-dir>/conversations`；自定义外部工作区必须由其所有者另行
@@ -349,10 +349,10 @@ bundle 含数据库加密密钥和加密凭据，整个目录都必须按敏感�
 下。若要改用独立 work root，应先移动恢复出的托管目录，并在服务首次启动前
 设置常规 work-dir override；绝不能把 restore 目标指向已有外部项目。
 
-这些命令实现 v3 离线 Backup/Restore，不提供历史数据 Merge/Migration。Clone
-保留输入中的业务 UUIDv7，不会 mint 或隐式重写；目标已有同一业务 ID 时必须
-fail-closed，不能留下部分写入。技术 `id` 在目标中重建，关系从可移植的业务
-键、自然键和外部 ID 重建；源数据集的自增 `id` 绝不是可移植身份。
+这些命令实现当前 generation-5 离线 Backup/Restore，不迁移历史数据或合并
+数据集，也不获得启动协调器的重建权限。lineage 不受支持、schema/data 损坏和
+I/O 失败均 fail closed。完整 SQLite 快照保留技术 `id`，不使这些整数成为
+可移植的产品身份。
 
 干净卸载因此是删除数据目录、（如果单独设置过）工作目录与 OS 缓存目录。
 

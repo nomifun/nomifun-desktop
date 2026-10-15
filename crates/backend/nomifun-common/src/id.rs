@@ -490,9 +490,11 @@ mod tests {
     #[test]
     fn generated_uuid_v7_ids_sort_by_later_millisecond() {
         let earlier = generate_id();
+        let next = generate_id();
+        assert!(next >= earlier, "consecutive UUIDv7 IDs should be time-ordered");
         std::thread::sleep(std::time::Duration::from_millis(2));
         let later = generate_id();
-        assert!(later > earlier, "{later} should sort after {earlier}");
+        assert!(later > next, "{later} should sort after {next}");
     }
 
     #[test]

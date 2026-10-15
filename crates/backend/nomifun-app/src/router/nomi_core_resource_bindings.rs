@@ -1770,6 +1770,25 @@ mod tests {
     const MCP_SERVER_B: &str = "0195f7c0-7b6a-7c21-8f4a-1234567890ac";
 
     #[tokio::test]
+    async fn robot_resource_operations_follow_exact_action_grants_without_inventing_vision() {
+        for (actions, expected) in [
+            (vec!["robot/vision"], vec!["vision"]),
+            (vec!["robot/display"], vec!["display"]),
+            (vec!["robot/motion"], vec!["motion"]),
+            (vec!["robot/device"], vec!["device"]),
+            (vec!["robot/display", "robot/device"], vec!["display", "device"]),
+        ] {
+            let grants = BTreeMap::from([("robot".to_owned(), actions.into_iter().map(ActionId::from).collect())]);
+            let bindings = registry("robot", &["vision", "display", "motion", "device"])
+                .resolve_selected("owner-1", &[AgentResourceSelectionDto {
+                    resource_kind: "robot".into(), resource_id: "robot-1".into(),
+                }], &BTreeSet::from(["robot".into()]), &grants, &[]).await.unwrap();
+            assert_eq!(bindings.len(), 1);
+            assert_eq!(bindings[0].operations, expected.into_iter().map(str::to_owned).collect());
+        }
+    }
+
+    #[tokio::test]
     async fn context_and_execution_slots_without_actions_receive_no_operations() {
         for (module, kind) in [("knowledge", "knowledge_base"), ("workspace.files", "workspace")] {
             let modules = BTreeSet::from([module.to_owned()]);

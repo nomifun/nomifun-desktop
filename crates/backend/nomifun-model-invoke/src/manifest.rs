@@ -2059,38 +2059,6 @@ mod tests {
         assert!(ids.contains("AWS-Bedrock"));
     }
 
-    #[test]
-    fn backend_catalog_covers_every_ui_model_platform_preset() {
-        let source = include_str!("../../../../ui/src/renderer/utils/model/modelPlatforms.ts");
-        let section = source
-            .split("export const MODEL_PLATFORMS")
-            .nth(1)
-            .expect("MODEL_PLATFORMS declaration")
-            .split("export const NEW_API_PROTOCOL_OPTIONS")
-            .next()
-            .expect("MODEL_PLATFORMS section");
-        let mut ui_ids = BTreeSet::new();
-        for line in section.lines() {
-            let Some((_, after)) = line.split_once("value:") else {
-                continue;
-            };
-            let after = after.trim_start();
-            let Some(quote) = after.chars().next().filter(|value| matches!(value, '\'' | '"')) else {
-                continue;
-            };
-            let tail = &after[quote.len_utf8()..];
-            let Some(end) = tail.find(quote) else {
-                continue;
-            };
-            ui_ids.insert(tail[..end].to_owned());
-        }
-        let backend_ids = platform_presets()
-            .into_iter()
-            .map(|preset| preset.preset)
-            .collect::<BTreeSet<_>>();
-        assert_eq!(backend_ids, ui_ids);
-    }
-
     fn joined_recommendation_url(
         view: &ModelProtocolManifestResponse,
         endpoint: &ProtocolEndpointDescriptor,

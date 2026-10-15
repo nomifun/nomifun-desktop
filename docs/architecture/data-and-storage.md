@@ -471,11 +471,11 @@ non-loopback bind address.
   or `VACUUM INTO` while the database is open. Do **not** copy
   `nomifun-backend.db` directly: WAL data may still be in
   `nomifun-backend.db-wal`, and a raw file copy can be incomplete.
-- **Bundle manifest** — record the v3 schema, storage-generation/dataset ID,
-  creation time, and checksums for every included file. Restore preserves
-  stable business UUIDv7 values; technical `id` values are rebuilt in the
-  destination dataset, and relationships are reconstructed from registered
-  business, natural, JSON, and side-store references.
+- **Bundle manifest** — record the current version-3, generation-5 backup
+  contract, source storage-generation, creation time, and checksums for every
+  included file. Restore preserves the complete SQLite identity graph, including
+  business UUIDv7 values, technical `id` values and canonical TEXT/composite keys.
+  Only the destination `storage-generation` is rotated.
 - **Encryption key** — the offline bundle includes
   `<data_dir>/encryption_key` when present. Without this file, provider API
   keys, OAuth tokens, channel bot tokens, and other encrypted columns cannot
@@ -515,10 +515,10 @@ and bundles above 8 GiB per file, 64 GiB total, 200,000 files, or 200,000
 directories; the JSON manifest itself is capped at 64 MiB. `restore` verifies the complete bundle
 before writing, accepts only an absent or empty destination, stages and
 validates all files beside the destination, and installs the data directory
-with one rename. A failure leaves no partial destination. Stable business
-UUIDv7 values are preserved, while local technical `id` values are reassigned
-without being used as relationship locators; the complete registered logical
-reference graph is then audited. A new `storage-generation` is written so
+with one rename. A failure leaves no partial destination. The validated WAL-safe
+SQLite snapshot is copied as one authority, preserving its exact identity and
+relationship graph rather than remapping technical rows or reconstructing facts;
+schema/data integrity and registered references are validated. A new `storage-generation` is written so
 browser caches from the source dataset cannot be mistaken for restored state.
 Managed workspaces
 from a source custom work directory are intentionally rebased to
@@ -537,13 +537,11 @@ separate work root, move that restored managed tree and set the normal
 work-directory override before the first server boot; never point restore at
 an existing external project.
 
-These commands implement v3 offline backup/restore. They do not migrate
-historical data or provide a historical Merge operation. Clone preserves the
-supplied business UUIDv7 values; it does not mint or implicitly rewrite them.
-Any target business-ID collision fails closed without partial insertion.
-Technical `id` values are rebuilt, while relationships are reconstructed from
-portable business/natural/external references; source auto-increment values
-are never portable identity.
+These commands implement current generation-5 offline backup/restore. They do
+not migrate historical data or merge datasets, and never receive the startup
+coordinator's rebuild authority. Unsupported lineage, schema/data damage and
+I/O failures fail closed. Preserving technical `id` values within a complete
+SQLite snapshot does not make those integers portable product identities.
 
 A clean uninstall therefore deletes the data dir, the work dir (if set
 separately), and the OS cache dir.

@@ -55,8 +55,8 @@ const MAX_CDP_WS_FRAME_BYTES: usize = MAX_CDP_MESSAGE_BYTES;
 type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, WsMessage>;
 
 /// 运输写半边：CDP 协议不变,只是底层是 WS 帧还是 `--remote-debugging-pipe` 的 NUL 分隔字节流。
-/// Unix 生产走 `Pipe`（浏览器在父死/管道 EOF 时自退,免疫 SIGKILL——见
-/// docs/superpowers/specs/browser-use/2026-06-19-macos-pdeath-pipe-transport-design.md）;
+/// Unix 生产走 `Pipe`，浏览器通过管道 EOF 退出；启动与清理归属见
+/// [`crate::launch::LaunchTransport`]。
 /// Windows 的显式运行时/授权连接走 `Ws`。
 enum TransportSink {
     Ws(WsSink),
@@ -582,7 +582,7 @@ impl Connection {
         //    session**上设了 setAutoAttach 才会自动 attach——browser-root 级 setAutoAttach 只覆盖顶层
         //    page,不覆盖其跨进程子帧（实测：headful + site-isolation 下 Chrome 确建了 type=="iframe"
         //    target,但缺本级联时引擎收不到它的 attachedToTarget → `spawn_oopif_arm_loop` 永不 arm →
-        //    OOPIF 内容不缝合。见 docs/.../PLATFORM-VERIFICATION.md「macOS 校验结果」OOPIF 段）。
+        //    OOPIF 内容不缝合）。
         //    须在 runIfWaitingForDebugger 放行**前**设,否则帧恢复后加载 OOPIF 时可能漏 attach。
         //    best-effort（page 可能已 detach;缺失退化为不缝该 OOPIF,不阻断主流程）。iframe 也级联以
         //    覆盖嵌套 OOPIF。

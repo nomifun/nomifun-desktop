@@ -37,8 +37,9 @@ SQLite 内部表、migration metadata 和临时表不属于产品表。
 - 内部存储键和主索引入口；
 - repository/storage 代码内部的 `i64`；
 - 允许有间隔，绝不能假设连续；
-- restore、clone 或 hard reset 时重新分配；
+- 当前代精确 SQLite 备份/恢复快照内部保持原值；hard reset 创建新数据集，不导入旧行；
 - 禁止作为产品 API、事件、文件、manifest、backup graph 或跨数据集 locator。
+  不透明数据库快照可将其保留为存储数据，不作为可移植关系键。
 
 不要把该列改名为 `row_id`、`table_id` 或其他变体，也不要把某张表的技术
 `id` 复制到另一张表。
@@ -135,7 +136,7 @@ JSON/side-store 关联在内，至少登记：
 - 必需索引；
 - 删除策略：`RESTRICT`、应用层 `CASCADE`、`SET_NULL` 或
   `KEEP_HISTORY`；
-- restore/clone 重建策略；
+- backup/restore 保留策略及明确支持的 import 策略；
 - orphan audit 策略/查询。
 
 Repository/Service 是正常写入的唯一边界。它们必须校验父项、执行聚合所有权
@@ -148,9 +149,14 @@ restore/import 后必须对数据库和受管 side-store 执行完整 orphan aud
 
 ## 5. 数据集 lineage 与 hard reset
 
-v3 与历史产品数据集有意不兼容。启动时必须在打开产品数据库之前识别数据集
-lineage/generation。不存在数据集时初始化 v3；历史或不兼容的受管数据集整体
-退役/quarantine，并创建全新的空 v3 数据集。
+当前 baseline 与历史产品数据集有意不兼容。启动识别 lineage 和确切 canonical
+migration chain 兼容性；没有数据集时初始化当前 baseline。只有应用启动的
+dataset coordinator 可以整体退役可读但不兼容的受管 lineage，创建全新的当前
+空数据集，不转换或导入历史行。
+
+数据库 I/O 失败及受支持 schema/data 的损坏必须 fail-closed，保留源数据。
+跨破坏性 baseline 时，迁移条数不代表应用版本先后。Backup、restore 和独立
+数据库初始化不继承启动重建权限。
 
 禁止以下兼容行为：
 
@@ -162,22 +168,28 @@ lineage/generation。不存在数据集时初始化 v3；历史或不兼容的�
 
 重置范围包括 SQLite 数据库及其 WAL/SHM sidecar，以及全部受管 side-store。
 必须在对外服务前写入并完成 generation/reset receipt。reset 失败必须
-fail-closed。用户自有的外部 workspace 不删除，但其历史数据库引用不导入 v3。
+fail-closed。用户自有的外部 workspace 不删除，但其历史数据库引用不导入。
+Agent clean cut 是独立操作：清除 Agent 数据，同时保留非 Agent 配置。
 
 ## 6. Backup、restore 与 clone
 
-备份和恢复把 v3 受管数据集作为一个整体处理：
+当前 generation-5 离线 bundle 只接受精确支持的 `uarc-generation-5` schema
+和 lineage，实现见
+[`backup_bundle.rs`](../../crates/backend/nomifun-db/src/backup_bundle.rs)。
 
-- 只接受 v3 manifest 和 lineage；
-- 保留稳定业务 UUIDv7；
-- 在目标数据集中重新分配技术 `id`；
-- 从 registry 登记的业务 ID、自然键、外部 ID、JSON 和 side-store 引用重建
-  逻辑关联；
-- 拒绝业务 ID 冲突和部分安装；
-- 安装后运行完整 orphan audit。
+- 把 WAL-safe SQLite 快照与声明的受管文件作为一个整体备份。
+- 恢复已验证快照，保留同一 SQLite 权威，包括 canonical TEXT/复合键、
+  Agent Store 物理引用、Session/Event/Payload/Effect 事实、稳定业务 UUIDv7
+  和技术行 `id`。
+- 不做 row remap、不重新生成 ID，也不重建第二套逻辑图。
+- 只轮换目标 `storage-generation` 命名空间，业务和 canonical 身份保留。
+  托管工作区路径遵循现有可移植恢复规则，不导入外部用户项目。
+- 拒绝不兼容历史 bundle、无效数据和部分安装；发布 staging 目标前验证
+  schema/data 及全部已登记引用审计。
 
-源数据集技术行 ID 不是可移植 graph identity。Clone 保留输入中的业务 ID，不
-静默 mint 或改写。
+这是恢复快照到新目标，不是 row merge/import 或历史迁移。
+复制/clone 不得静默生成业务 ID，也不获得启动重建权限。
+保留的技术 ID 仍是内部存储数据，不是可移植产品 graph locator。
 
 ## 7. 边界与类型规则
 
@@ -225,7 +237,8 @@ git diff --check
 4. 将每个 `_id` 字段分类为业务、自然、外部、token、文档身份或逻辑关联。
 5. 删除技术行 ID 传播、物理 FK 和 trigger 设计。
 6. 登记每条逻辑关系、索引、生命周期策略、重建策略和 orphan audit。
-7. 技术 ID 不得进入任何 wire、事件、文件和 backup 契约。
+7. 技术 ID 不作为 wire/事件/产品 locator；精确数据库备份快照保留存储 ID，
+   不对外提供可移植 row-ID 契约。
 8. 增加 schema、repository、边界、reset 或 restore 聚焦测试。
 9. 审查完整受管数据集的重置影响。
 10. 保持中英文文档同步。

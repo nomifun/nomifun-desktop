@@ -196,7 +196,9 @@ impl EngineToolInvoker for SessionTools {
             || !active.active.contains(&module_capability_id())
             || invocation.binding.action_id != *expected_action
             || invocation.call.name != invocation.binding.model_name
-            || self.frozen.plan.binding(&invocation.call.name) != Some(&invocation.binding)
+            || super::engine_kernel_session::frozen_tool_binding(
+                &self.frozen.plan, &invocation.call.name, &invocation.binding,
+            ).is_none()
         {
             return Err(rejected("invocation differs from frozen Session authority"));
         }

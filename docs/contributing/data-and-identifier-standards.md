@@ -43,9 +43,11 @@ The technical `id` is local to one table and one active dataset. It is:
 - an internal storage key and primary-index entry;
 - represented as `i64` inside repository/storage code;
 - allowed to have gaps and never assumed to be contiguous;
-- regenerated on restore, clone, or hard reset;
+- preserved inside an exact current-generation SQLite backup/restore snapshot;
+  a hard reset creates a new dataset without importing old rows;
 - forbidden as a product API, event, file, manifest, backup-graph, or
-  cross-dataset locator.
+  cross-dataset locator. Opaque database snapshots may retain it as storage data,
+  never as a portable relationship key.
 
 Do not rename this column to `row_id`, `table_id`, or another variant. Do not
 copy one table's technical `id` into another table.
@@ -156,7 +158,7 @@ where applicable) with:
 - required index;
 - delete policy: `RESTRICT`, application-level `CASCADE`, `SET_NULL`, or
   `KEEP_HISTORY`;
-- restore/clone rebuild policy;
+- backup/restore preservation and any explicitly supported import policy;
 - orphan-audit policy/query.
 
 Repositories and services are the only normal write path. They must validate
@@ -171,11 +173,17 @@ accept unchecked orphan rows.
 
 ## 5. Dataset lineage and hard reset
 
-v3 is intentionally incompatible with historical product datasets. Startup
-must identify dataset lineage/generation before opening the product database.
-An absent dataset initializes as v3; a historical or incompatible managed
-dataset is retired/quarantined as a whole and replaced with a new empty v3
-dataset.
+The current baseline is intentionally incompatible with historical product
+datasets. Startup identifies lineage and exact canonical migration-chain
+compatibility. An absent dataset initializes the current baseline. Only the
+application startup dataset coordinator may retire a readable incompatible
+managed lineage and replace it with an empty current dataset. It does not
+convert or import historical rows.
+
+Database I/O failures and damage to a supported schema/data fail closed and
+preserve the source. Migration-row counts do not establish application-version
+ordering across destructive baselines. Backup, restore and standalone database
+initialization do not inherit startup rebuild authority.
 
 Forbidden compatibility behavior:
 
@@ -189,22 +197,31 @@ The reset scope includes the SQLite database and its WAL/SHM sidecars plus all
 managed side stores. Reset writes and finalizes the generation/reset receipt
 before serving requests. A reset failure is fail-closed. External
 user-owned workspaces are not deleted, but their historical database
-references are not imported into v3.
+references are not imported. Agent clean cut is a distinct operation: it clears
+Agent data while preserving non-Agent configuration.
 
 ## 6. Backup, restore, and clone
 
-Backups and restores operate on the v3 managed dataset as one unit:
+The current generation-5 offline bundle accepts only the exact supported
+`uarc-generation-5` schema and lineage. The implementation is
+[`backup_bundle.rs`](../../crates/backend/nomifun-db/src/backup_bundle.rs).
 
-- accept only v3 manifests and lineage;
-- preserve stable business UUIDv7 values;
-- rebuild technical `id` values in the destination;
-- reconstruct logical references from registered business IDs, natural keys,
-  external IDs, JSON, and side-store references;
-- reject business-ID collisions and partial installs;
-- run the complete orphan audit after installation.
+- Back up a WAL-safe SQLite snapshot and the declared managed files as one unit.
+- Restore the validated database snapshot as the same SQLite authority, retaining
+  canonical TEXT/composite keys, physical Agent Store references, Session/Event/
+  Payload/Effect facts, stable business UUIDv7 values and technical row `id`s.
+- Do not remap rows, regenerate IDs or reconstruct a second logical graph.
+- Rotate only the destination `storage-generation` namespace; preserve business
+  and canonical identities. Managed workspace paths follow the existing portable
+  restore policy, without importing external user projects.
+- Reject incompatible historical bundles, invalid data and partial installs;
+  validate the schema/data and complete registered reference audits before
+  publishing the staged destination.
 
-Source technical row IDs are never portable graph identity. Clone preserves the
-supplied business IDs; it does not silently mint or rewrite them.
+This is snapshot restoration into a new destination, not row merge/import or a
+historical migration. A copy/clone cannot silently mint business IDs or acquire
+startup rebuild authority. Retained technical IDs remain internal storage data,
+not portable product graph locators.
 
 ## 7. Boundary and type rules
 
@@ -261,7 +278,8 @@ Before opening a review:
 5. Remove technical row-ID propagation and physical FK/trigger designs.
 6. Register every logical relation, index, lifecycle policy, rebuild policy,
    and orphan audit.
-7. Keep technical IDs out of all wire, event, file, and backup contracts.
+7. Keep technical IDs out of wire/event/product locators; exact database backup
+   snapshots preserve storage IDs without exposing a portable row-ID contract.
 8. Add focused schema, repository, boundary, reset, or restore tests.
 9. Review the complete managed-data reset impact.
 10. Keep English and Simplified Chinese documentation synchronized.

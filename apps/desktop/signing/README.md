@@ -1,147 +1,47 @@
-# NomiFun 桌面 macOS 代码签名 + 公证(Gatekeeper)
+# macOS 代码签名与公证
 
-> 解决「把安装包发给别人,对方打开提示**已损坏,无法打开**」的问题。
->
-> 这跟 `updater/`(自动更新签名)是**两套完全不同的密钥**,别混。本目录只管
-> Apple 的 **Developer ID 签名 + 公证(notarization)**,让 App 在任何 Mac 上双击即开。
+本目录负责仓库的 macOS 签名配置。完整构建与发版步骤见
+[构建与打包](../../../docs/contributing/building-and-packaging.zh.md)和[发版流程](../../../RELEASING.zh-CN.md)。
+[Updater 签名](../updater/README.zh-CN.md)使用独立密钥，不代替系统代码签名或公证。
 
-## 发布责任边界
+## 本地配置
 
-本仓库只提供签名脚本和无密钥模板。正式发布必须使用发布方自己的 Apple
-Developer 账号、Developer ID 证书、App Store Connect API Key，以及独立的
-自动更新签名密钥。不要把 fork、本地开发机或历史测试密钥当成官方发布凭据。
-
-## 为什么会「已损坏」
-
-默认 `bun run build` 产出的 App 只是 **ad-hoc 签名**(`Signature=adhoc`,无
-`TeamIdentifier`)。别人下载/传输后,文件被打上 `com.apple.quarantine` 隔离标记;在
-Apple 芯片 Mac 上,被隔离 + 未正规签名公证的 App,Gatekeeper 直接判为「已损坏」。
-
-**根治办法只有一个**:用 **Developer ID Application** 证书签名 → 提交 Apple **公证** →
-**staple** 把公证票据钉进 App。之后任何人下载双击即开,无任何提示。
-
-## 密钥绝不入库(本仓库的约定)
-
-| 东西 | 放哪 | 是否入库 |
-|---|---|---|
-| 模板 `.env.signing.example` | 本目录 | ✅ 入库(无密钥) |
-| 真实 `.env.signing`(身份名 / Key ID / 路径) | 本目录 | ❌ 已 gitignore |
-| App Store Connect API Key `AuthKey_*.p8` | `apps/desktop/.tauri/` 或仓库外 | ❌ 已 gitignore |
-| Developer ID 证书私钥 | macOS **登录钥匙串**(不是文件) | ❌ 不在仓库里 |
-
-`build:signed` 与 `build:mac --signed` 使用同一流程，运行时读取本地
-`.env.signing`。签名最终 App 和随附原生库后，再执行已配置的公证。
-支持分别构建 Apple Silicon arm64 和 Intel x86_64；浏览器使用系统 WKWebView，
-不下载或打包浏览器 framework、helper 或系统 WebKit.framework。
-
-`apps/desktop/entitlements.plist` 只声明既有语音输入和浏览器媒体捕获需要的
-`com.apple.security.device.audio-input` 与 `com.apple.security.device.camera`。
-Tauri 配置、最终 App 签名以及开发包增量重新封装使用同一份文件，随附 ONNX 库不携带
-这两项 App 资源声明。修改该文件会使已完成的开发包缓存重新签名。
-Apple 的 [Hardened Runtime 资源访问说明](https://developer.apple.com/documentation/xcode/configuring-the-hardened-runtime)
-要求这些声明；`Info.plist` 的用途说明、系统用户授权和浏览器站点授权仍分别适用。
-
----
-
-## 一次性准备(在 Apple 侧)
-
-### 1. 生成 Developer ID Application 证书并装进钥匙串
-- 最简单:用 **Xcode**(Settings → Accounts → 选中团队 → Manage Certificates → `+` →
-  **Developer ID Application**),它会自动装进登录钥匙串。
-- 或 developer.apple.com → Certificates → `+` → **Developer ID Application** → 按引导用
-  CSR 生成 → 下载 `.cer` 双击导入钥匙串。
-- 验证已就位:
-  ```bash
-  security find-identity -v -p codesigning
-  # 应能看到:  "Developer ID Application: Your Name (TEAMID1234)"
-  ```
-  把引号里的**全名**填到 `.env.signing` 的 `APPLE_SIGNING_IDENTITY`。
-
-### 2. 生成 App Store Connect API Key(用于公证,推荐)
-- App Store Connect → **Users and Access** → **Integrations** → **Keys** → 生成一个
-  **Developer** 角色的 Key。
-- 下载 `AuthKey_XXXX.p8`(**只能下载一次**),放到 `apps/desktop/.tauri/`(已 gitignore)
-  或仓库外的安全目录。
-- 记下两个值填进 `.env.signing`:
-  - **Issuer ID** = keys 表格**上方**那串 UUID → `APPLE_API_ISSUER`
-  - **Key ID** = 表格 "Key ID" 列 → `APPLE_API_KEY`
-  - `.p8` 路径 → `APPLE_API_KEY_PATH`
-
-> 不想用 API Key 也可用 Apple ID 方式:`APPLE_ID` + `APPLE_PASSWORD`(App 专用密码,
-> 在 appleid.apple.com 生成)+ `APPLE_TEAM_ID`。三选一组,二者填其一即可。
-
----
-
-## 本地配置 + 构建
+在 macOS 构建机复制无密钥模板，填写发布方自己的凭据：
 
 ```bash
-# 1. 复制模板(真实文件不入库)
 cp apps/desktop/signing/.env.signing.example apps/desktop/signing/.env.signing
-
-# 2. 按上面拿到的值填写 .env.signing,并把 AuthKey_*.p8 放到对应路径
-
-# 3. 出带签名 + 公证的安装包(公证联网,首次几分钟,耐心等)
-bun run build:signed
+security find-identity -v -p codesigning
 ```
 
-产物在 `target/aarch64-apple-darwin/release/bundle/{macos,dmg}/`，DMG 同时汇总到
-`dist/desktop/`。脚本先公证并 staple 最终 `.app`，由这份 App 生成 DMG 和可选 updater
-`.app.tar.gz`，随后公证并 staple DMG。updater 包另需 Tauri updater 私钥生成 `.sig`。
-最终 App 签名要求钥匙串中已安装 `APPLE_SIGNING_IDENTITY`；仅配置 `.p12` 内容不够。
+当前最终 App 签名流程要求钥匙串中已安装的 `APPLE_SIGNING_IDENTITY`，身份类型为
+`Developer ID Application`。仅提供 `APPLE_CERTIFICATE` 不满足当前最终 App 的签名检查。
+配置读取与公证探测见 [mac-signing.sh](../../../scripts/lib/mac-signing.sh)，最终产物流程见
+[desktop-build-mac.sh](../../../scripts/desktop-build-mac.sh)。
 
-## 开发签名
+| 配置 | 用途 |
+| --- | --- |
+| `APPLE_SIGNING_IDENTITY` | 已安装的 Developer ID Application 完整身份名称 |
+| `APPLE_API_ISSUER`、`APPLE_API_KEY`、`APPLE_API_KEY_PATH` | App Store Connect API 公证凭据；路径可相对仓库根，脚本转换为绝对路径 |
+| `APPLE_ID`、`APPLE_PASSWORD`、`APPLE_TEAM_ID` | 未配置 API 三元组时使用的另一组公证凭据 |
 
-`bun run dev` 和 `bun run build:fast` 默认使用 ad-hoc 签名。需要在本机使用稳定的已安装签名身份时，
-可显式配置名称或证书哈希：
+`.env.signing`、`.p8`、证书私钥及 updater 私钥不入库，不复制到公开报告。
+无密钥的 [.env.signing.example](.env.signing.example) 可以提交。
+普通开发包不读本地签名配置；签名成功和公证成功分别记录，未配置公证时不宣称已公证。
+
+## 构建与核对
 
 ```bash
-NOMIFUN_MACOS_DEV_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" bun run dev
-NOMIFUN_MACOS_DEV_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" bun run build:fast
+bun run build:mac --signed
+# Intel 独立构建：
+bun run build:mac intel --signed
 ```
 
-开发装配会以同一身份签名主 App 和随附原生库；Rust 增量重建继续以同一身份封装主 App。
-开发缓存包含身份，换身份不会复用另一身份的签名组件。配置不触发证书自动查找、生成或导入，也不修改钥匙串 ACL。
-未配置时仍能生成完整 App，并提示当前使用 ad-hoc 签名。
-WKWebView 的网页存储由系统管理；应用不访问 Chromium Safe Storage 钥匙串项。
-系统权限提示仍需用户处理；Agent Browser grant 不授予系统权限。
+`bun run build:signed` 进入相同的最终 App 流程。脚本先处理最终 App 及原生库签名，
+再按已配置的公证方式提交并 staple，之后生成发行产物。打包不携带浏览器 framework、helper
+或系统 WebKit.framework，浏览器使用系统 WKWebView。
 
-正式发行保持相同 Team、Bundle ID 和嵌套签名链，让更新继续满足原 Designated Requirement。
-这有助于保持已授予的访问权限，首次访问仍由 macOS 请求用户授权。Keychain 的身份跟踪规则见
-[Apple TN2206](https://developer.apple.com/library/archive/technotes/tn2206/_index.html)。
+[entitlements.plist](../entitlements.plist) 是 App 的音频输入与相机资源声明，供正式包和开发包重新封装共用；
+随附 ONNX 库不携带这些 App 资源声明。用途说明、系统用户授权和网页权限仍各自适用。
 
-## 验证(发出去前自检)
-
-```bash
-APP=target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app
-NOMIFUN_VERSION=$(bun -e 'console.log(require("./package.json").version)')
-DMG="dist/desktop/NomiFun_${NOMIFUN_VERSION}_aarch64.dmg"
-
-codesign -dvv "$APP"                       # 期望: Authority=Developer ID Application: ...
-codesign --verify --deep --strict -v "$APP"  # 期望: valid on disk / satisfies Designated Requirement
-codesign --display --entitlements - --xml "$APP"  # 核对 audio-input / camera 均为 true
-xcrun stapler validate "$APP"              # 期望: The validate action worked!
-spctl -a -vvv "$APP"                       # 期望: source=Notarized Developer ID  → accepted
-
-codesign --verify --strict -v "$DMG"        # 期望: valid on disk / satisfies Designated Requirement
-xcrun stapler validate "$DMG"              # 期望: The validate action worked!
-spctl -a -vvv -t open --context context:primary-signature "$DMG"  # 期望: accepted
-```
-
-这些验证全过,就可以放心分发 DMG——别人下载双击即开,不再报「已损坏」。
-
-## 常见报错
-
-- **`The binary is not signed with a valid Developer ID certificate`**:钥匙串里没有
-  Developer ID Application 证书,或 `APPLE_SIGNING_IDENTITY` 名字写错。重看准备步骤 1。
-- **`ambiguous (matches ... login.keychain-db and ... System.keychain)`**:同名
-  Developer ID Application 证书同时存在于多个钥匙串。删除多余副本,或把
-  `security find-identity -v -p codesigning` 输出中的 SHA-1 哈希填入
-  `APPLE_SIGNING_IDENTITY`。
-- **`APPLE_API_KEY_PATH 必须指向 AuthKey_*.p8`**:`APPLE_API_KEY_PATH` 是 App Store
-  Connect API Key 路径,不要填 Developer ID `.p12` 证书路径。
-- **公证被拒 / `Invalid` 状态**:多为「未启用 hardened runtime」或缺 entitlements。
-  最终 App 签名启用 hardened runtime。WKWebView 使用系统 WebContent 进程，
-  本应用无需浏览器 `allow-jit` entitlement。
-  App 的 audio-input / camera 声明由最终装配签名显式传入，不依赖中间包保留旧签名。
-  查看具体原因:`xcrun notarytool log <submission-id> --key ... --key-id ... --issuer ...`。
-- **只签名没公证**:别人会看到「无法验证开发者」(不是「已损坏」)。补上公证变量即可。
+开发包 ad-hoc 签名、本地严格签名检查、Apple Silicon 实机运行、Intel 实机运行、Developer ID
+和公证发行分别报告。不得由其中一项通过推导其他系统、机器或分发渠道全部可用。

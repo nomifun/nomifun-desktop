@@ -48,45 +48,21 @@ describe('Agent conversation action', () => {
     return within(result.container);
   };
 
-  test('is disabled when the preset has no saved stable revision', () => {
+  test.each([
+    { hasStableRevision: false, dirty: false, enabled: false },
+    { hasStableRevision: true, dirty: true, enabled: false },
+    { hasStableRevision: true, dirty: false, enabled: true },
+  ])('requires a saved clean preset (stable=$hasStableRevision, dirty=$dirty)', ({ hasStableRevision, dirty, enabled }) => {
     let calls = 0;
     const page = renderAction({
-      hasStableRevision: false,
-      dirty: false,
+      hasStableRevision,
+      dirty,
       onClick: () => calls += 1,
     });
 
     const button = page.getByRole('button', { name: 'Start conversation' });
-    expect(button.hasAttribute('disabled')).toBe(true);
+    expect(button.hasAttribute('disabled')).toBe(!enabled);
     fireEvent.click(button);
-    expect(calls).toBe(0);
-  });
-
-  test('is disabled when the saved preset has dirty draft changes', () => {
-    let calls = 0;
-    const page = renderAction({
-      hasStableRevision: true,
-      dirty: true,
-      onClick: () => calls += 1,
-    });
-
-    const button = page.getByRole('button', { name: 'Start conversation' });
-    expect(button.hasAttribute('disabled')).toBe(true);
-    fireEvent.click(button);
-    expect(calls).toBe(0);
-  });
-
-  test('invokes the action once when the saved draft is clean', () => {
-    let calls = 0;
-    const page = renderAction({
-      hasStableRevision: true,
-      dirty: false,
-      onClick: () => calls += 1,
-    });
-
-    const button = page.getByRole('button', { name: 'Start conversation' });
-    expect(button.hasAttribute('disabled')).toBe(false);
-    fireEvent.click(button);
-    expect(calls).toBe(1);
+    expect(calls).toBe(enabled ? 1 : 0);
   });
 });

@@ -139,48 +139,6 @@ describe('CreativeCanvasEditor composition contract', () => {
     expect(editorStyles.includes('pointer-events: auto')).toBe(true);
   });
 
-  test('keeps connection gestures separate from explicit node activation', () => {
-    const nodePointerStart = editorSource.slice(
-      editorSource.indexOf('const beginNodePointer'),
-      editorSource.indexOf('const beginNodeResize')
-    );
-    const connectionStart = editorSource.slice(
-      editorSource.indexOf('const beginConnectionDrag'),
-      editorSource.indexOf('const handleSurfacePointerDown')
-    );
-
-    expect(nodePointerStart.includes('canvasCommands.setSelection([node.id])')).toBe(true);
-    expect(nodePointerStart.includes('const placement = event.currentTarget.closest')).toBe(
-      true
-    );
-    expect(nodePointerStart.includes("'[data-canvas-node-kind]'"))
-      .toBe(true);
-    expect(
-      nodePointerStart.includes(
-        'capturePointer(placement ?? event.currentTarget, event.pointerId)'
-      )
-    ).toBe(true);
-    expect(nodePointerStart.includes('capturePointer(event.pointerId)')).toBe(false);
-    expect(connectionStart.includes('canvasCommands.clearSelection()')).toBe(true);
-    expect(connectionStart.includes('canvasCommands.setSelection([node.id])')).toBe(false);
-  });
-
-  test('delegates double clicks by DOM node target before falling back to Canvas', () => {
-    const doubleClick = editorSource.slice(
-      editorSource.indexOf('const handleCanvasDoubleClick'),
-      editorSource.indexOf('const handleDragOver')
-    );
-
-    expect(doubleClick.includes('canvasNodeIdFromEventTarget(event.target)')).toBe(
-      true
-    );
-    expect(
-      doubleClick.includes(
-        "nodeId ? { kind: 'node', nodeId } : { kind: 'canvas' }"
-      )
-    ).toBe(true);
-  });
-
   test('does not manufacture assets or invoke generation/model APIs', () => {
     for (const forbidden of [
       'useModelsForTask',

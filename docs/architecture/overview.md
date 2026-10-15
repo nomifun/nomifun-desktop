@@ -9,8 +9,9 @@ custom protocol.
 
 This document is the map. The sibling documents drill into the parts:
 
-- [`backend-crates.md`](backend-crates.md) — the 54 `nomifun-*` backend crates.
-- [`agent-engine.md`](agent-engine.md) — the 11 `nomi-*` agent crates.
+- [`backend-crates.md`](backend-crates.md) — the `nomifun-*` backend crates.
+- [`agent-engine.md`](agent-engine.md) — the `nomi-*` Agent crates.
+- [Agent Session](agent-session.md) — canonical facts, model/Agent transitions and safe recovery.
 - [`agent-execution.zh.md`](agent-execution.zh.md) — the unified persistent AgentExecution model.
 - [`frontend.md`](frontend.md) — the React SPA, adapter layer, routing.
 - [`communication.md`](communication.md) — HTTP / WebSocket / Tauri IPC / MCP.
@@ -125,13 +126,12 @@ nomifun-desktop/
 │   ├─ desktop/   nomifun-desktop  (Tauri 2 shell, this is "NomiFun" the product)
 │   └─ web/       nomifun-web      (standalone server: /api + SPA on one port)
 ├─ crates/
-│   ├─ agent/     11 nomi-* crates  → see agent-engine.md
-│   ├─ backend/   54 nomifun-* crates → see backend-crates.md
-│   └─ shared/    5 shared crates
+│   ├─ agent/     nomi-* crates  → see agent-engine.md
+│   ├─ backend/   nomifun-* crates → see backend-crates.md
+│   └─ shared/    shared runtimes
 ├─ ui/            React 19 + Vite 6 + Arco + UnoCSS  → see frontend.md
 └─ docs/
-    ├─ architecture/   (this folder)
-    └─ specs/          dated engineering design specs
+    └─ architecture/   (this folder; navigation: docs/README)
 ```
 
 ## Brand and identifiers

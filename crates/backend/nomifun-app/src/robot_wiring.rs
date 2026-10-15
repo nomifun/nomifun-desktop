@@ -434,7 +434,7 @@ pub(crate) struct AppRobotBackend {
     queues: Arc<Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>>,
 }
 
-fn snapshot_authorizes_robot_binding(
+fn snapshot_authorizes_companion_voice_input(
     snapshot: Option<&nomifun_api_types::AgentResolvedSnapshot>,
     owner_id: &str,
     request: &nomifun_robot::services::RobotTurnRequest,
@@ -442,24 +442,32 @@ fn snapshot_authorizes_robot_binding(
     let Some(snapshot) = snapshot else {
         return false;
     };
-    if !snapshot
-        .enabled_capability_actions
-        .get(nomifun_robot::capability::ROBOT_MODULE_ID)
-        .is_some_and(|actions| {
-            actions.contains(nomifun_robot::capability::ROBOT_VISION_ACTION_ID)
-        })
-    {
-        return false;
-    }
     let Some(binding_value) = snapshot.canonical_binding.as_ref() else {
         return false;
     };
+    let mut companions = binding_value
+        .typed_resource_bindings
+        .iter()
+        .filter(|binding| binding.resource_kind == "companion");
+    let Some(companion) = companions.next() else {
+        return false;
+    };
+    if companions.next().is_some()
+        || companion.owner_id != owner_id
+        || companion.resource_id != request.companion_id
+    {
+        return false;
+    }
+    // The paired microphone is an input surface of this Companion's existing
+    // Session. It does not need camera authority or grant device tools. Those
+    // still require an explicitly selected resource and the normal Turn,
+    // connection and permission fences. Do not change the Session binding here.
     let mut robot_bindings = binding_value
         .typed_resource_bindings
         .iter()
         .filter(|binding| binding.resource_kind == "robot");
     let Some(binding) = robot_bindings.next() else {
-        return false;
+        return true;
     };
     robot_bindings.next().is_none()
         && binding.owner_id == owner_id
@@ -545,12 +553,12 @@ impl AppRobotBackend {
             {
                 anyhow::bail!("robot binding or connection changed");
             }
-            if !snapshot_authorizes_robot_binding(
+            if !snapshot_authorizes_companion_voice_input(
                 conversation.agent_snapshot.as_ref(),
                 &self.owner_user_id,
                 request,
             ) {
-                anyhow::bail!("the AgentSession has no exact owner-scoped robot resource binding");
+                anyhow::bail!("the AgentSession does not authorize input for this Companion and device");
             }
             let key = robot_turn_idempotency_key(request);
             let message = SendMessageRequest {
@@ -694,6 +702,10 @@ fn completed_robot_delivery_events(
 ) -> Vec<TurnEvent> {
     if delivery.user_input_request.is_some() {
         return vec![robot_stream_failure("The non-interactive robot invocation requires user input")];
+    }
+    if delivery.result_ok == Some(true) && !matches!(delivery.turn_outcome,
+        Some(nomifun_agent_contracts::AgentTurnOutcome::Answered { .. })) {
+        return vec![robot_stream_failure("The canonical robot turn has no public answer")];
     }
     match delivery.result_ok {
         Some(true) => {
@@ -981,6 +993,101 @@ pub(crate) fn mount(
 
 #[cfg(test)]
 mod tests {
+    fn companion_voice_request() -> nomifun_robot::services::RobotTurnRequest {
+        nomifun_robot::services::RobotTurnRequest {
+            robot_id: "robot-1".into(),
+            companion_id: "companion-1".into(),
+            conversation_id: "session-1".into(),
+            connection_id: "connection-1".into(),
+            request_id: "utterance-1".into(),
+            text: "你好".into(),
+        }
+    }
+
+    fn companion_voice_snapshot() -> nomifun_api_types::AgentResolvedSnapshot {
+        serde_json::from_value(serde_json::json!({
+            "preset_id": "0190f5fe-7c00-7a00-8000-0000000000aa",
+            "preset_revision": 1,
+            "preset_name": "Companion",
+            "canonical_binding": {
+                "preset_revision_ref": {
+                    "preset_id": "0190f5fe-7c00-7a00-8000-0000000000aa",
+                    "revision": 1, "revision_digest": "revision"
+                },
+                "resolved_snapshot_ref": {"snapshot_id": "snapshot", "snapshot_digest": "digest"},
+                "typed_resource_bindings": [{
+                    "binding_id": "companion", "resource_kind": "companion",
+                    "resource_id": "companion-1", "owner_id": "owner-1", "operations": []
+                }],
+                "binding_version": 1
+            }
+        })).unwrap()
+    }
+
+    #[test]
+    fn companion_voice_input_accepts_the_existing_session_without_device_or_vision_grants() {
+        let snapshot = companion_voice_snapshot();
+        let saved = snapshot.clone();
+        assert!(snapshot.enabled_capability_actions.is_empty());
+        assert!(snapshot_authorizes_companion_voice_input(
+            Some(&snapshot), "owner-1", &companion_voice_request()
+        ));
+        assert_eq!(snapshot, saved, "accepting voice must not expand the frozen binding");
+    }
+
+    #[test]
+    fn companion_voice_input_rejects_missing_foreign_and_ambiguous_companion_authority() {
+        let request = companion_voice_request();
+        assert!(!snapshot_authorizes_companion_voice_input(None, "owner-1", &request));
+        for variant in 0..5 {
+            let mut snapshot = companion_voice_snapshot();
+            if variant == 0 {
+                snapshot.canonical_binding = None;
+            } else {
+                let resources = &mut snapshot.canonical_binding.as_mut().unwrap().typed_resource_bindings;
+                match variant {
+                    1 => resources.clear(),
+                    2 => resources[0].owner_id = "other-owner".into(),
+                    3 => resources[0].resource_id = "other-companion".into(),
+                    4 => resources.push(resources[0].clone()),
+                    _ => unreachable!(),
+                }
+            }
+            assert!(!snapshot_authorizes_companion_voice_input(
+                Some(&snapshot), "owner-1", &request
+            ), "variant {variant}");
+        }
+    }
+
+    #[test]
+    fn companion_voice_input_preserves_the_explicit_device_target() {
+        let request = companion_voice_request();
+        let mut snapshot = companion_voice_snapshot();
+        let resources = &mut snapshot.canonical_binding.as_mut().unwrap().typed_resource_bindings;
+        resources.push(nomifun_api_types::TypedResourceBindingDto {
+            binding_id: "robot".into(), resource_kind: "robot".into(),
+            resource_id: request.robot_id.clone(), owner_id: "owner-1".into(),
+            operations: Default::default(), connection_config_ref: None,
+            typed_parameters: [("companion_id".into(), request.companion_id.clone())].into(),
+        });
+        assert!(snapshot_authorizes_companion_voice_input(Some(&snapshot), "owner-1", &request));
+        for variant in 0..5 {
+            let mut changed = snapshot.clone();
+            let resources = &mut changed.canonical_binding.as_mut().unwrap().typed_resource_bindings;
+            match variant {
+                0 => resources[1].resource_id = "other-robot".into(),
+                1 => resources[1].owner_id = "other-owner".into(),
+                2 => { resources[1].typed_parameters.insert("companion_id".into(), "other-companion".into()); }
+                3 => resources[1].typed_parameters.clear(),
+                4 => resources.push(resources[1].clone()),
+                _ => unreachable!(),
+            }
+            assert!(!snapshot_authorizes_companion_voice_input(
+                Some(&changed), "owner-1", &request
+            ), "variant {variant}");
+        }
+    }
+
     #[tokio::test]
     async fn bridge_shutdown_keeps_worker_owned_after_waiter_drop() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -1129,7 +1236,7 @@ mod tests {
                     .is_empty()
             );
 
-            let reduced = reducer.push(AgentStreamEvent::Finish(FinishEventData {
+            let reduced = reducer.push(AgentStreamEvent::Finish(FinishEventData { turn_outcome: None,
                 session_id: None,
                 stop_reason: Some(stop_reason),
             }));

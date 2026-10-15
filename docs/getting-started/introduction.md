@@ -59,6 +59,9 @@ nomifun-web
   axum server -> /api + /ws + static ui/dist on one port (default 8787)
 ```
 
+The shared renderer targets desktop windows and desktop-class browsers at
+880×600 or larger. Phones use a separate client.
+
 For implementation details, see [Architecture Overview](../architecture/overview.md).
 
 ## Main Surfaces
@@ -66,9 +69,9 @@ For implementation details, see [Architecture Overview](../architecture/overview
 - **Home & conversations** (`/guid`): start and continue AI sessions.
 - **Terminals**: PTY-backed agent or shell sessions inside the app.
 - **Models**: providers, extensible model catalog, task capabilities,
-  context/output limits, and global IDMM/failover settings.
-- **Agent workbench** (`/agent`): author Agents from seeds with capabilities,
-  skills, and model routing; sessions run at `/agent-sessions/:id`.
+  context/output limits, and model failover settings.
+- **Agent workbench** (`/agent`): edit official or personal Agents, capabilities
+  and runtime defaults; sessions run at `/agent-sessions/:id`.
 - **Creation**: infinite Canvases (`/nomi/canvases`), plus materials, prompts,
   and private templates in the asset library (`/asset-library/*`).
 - **Skills** (`/skills`): focused capability management.
@@ -83,12 +86,6 @@ For implementation details, see [Architecture Overview](../architecture/overview
 
 The current frontend route source is
 `ui/src/renderer/components/layout/Router.tsx`.
-
-## Project Status
-
-NomiFun is in active development. [STATUS.md](../../STATUS.md) is the compact
-current-state snapshot. Design and audit history is not kept in the repo; consult
-git history for past decisions.
 
 ## License
 

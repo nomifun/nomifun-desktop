@@ -8,22 +8,11 @@ use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+mod support;
+use support::collect_events;
+
 fn minimal_request() -> LlmRequest {
-    LlmRequest {
-        model: "gemini-3.6-flash".to_owned(),
-        system: "You are helpful.".to_owned(),
-        messages: vec![Message::new(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: "Hello".to_owned(),
-            }],
-        )],
-        tools: Vec::new(),
-        max_tokens: Some(512),
-        thinking: None,
-        reasoning_effort: None,
-        retain_provider_round: false,
-    }
+    support::request("gemini-3.6-flash", "You are helpful.", "Hello", 512)
 }
 
 fn text_sse() -> String {
@@ -58,14 +47,6 @@ fn text_sse() -> String {
         }
     });
     format!("data: {first}\n\ndata: {final_frame}\n\n")
-}
-
-async fn collect_events(mut receiver: tokio::sync::mpsc::Receiver<LlmEvent>) -> Vec<LlmEvent> {
-    let mut events = Vec::new();
-    while let Some(event) = receiver.recv().await {
-        events.push(event);
-    }
-    events
 }
 
 fn contains_schema_reference_keyword(value: &Value) -> bool {

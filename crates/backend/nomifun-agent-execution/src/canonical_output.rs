@@ -44,12 +44,8 @@ struct TerminalError { code: Option<String>, message: Option<String>, retryable:
 struct TerminalPayload {
     message: Option<String>, code: Option<String>, error: Option<TerminalError>,
     user_input_request: Option<AgentUserInputRequest>,
+    finish_reason: Option<nomifun_agent_contracts::chat_model::ChatFinishReason>,
 }
-#[derive(Deserialize)]
-struct AssistantPart { content: String, turn_id: String }
-#[derive(Deserialize)]
-struct AssistantCompleted { part_count: u64, content_digest: String }
-
 fn boundaries<'a>(facts: &ChatCausalityFacts, receipt: &'a TurnReceipt)
     -> Result<(&'a SessionEventRecord, Option<&'a SessionEventRecord>), AppError> {
     if receipt.agent_session_id != facts.session.agent_session_id {
@@ -87,10 +83,18 @@ pub fn canonical_turn_delivery(
 ) -> Result<AgentExecutionDelivery, AppError> {
     let (start, terminal) = boundaries(facts, receipt)?;
     let start_payload: TurnStart = decode(payload(facts, start)?)?;
+    let public_result = nomifun_agent_session::canonical_turn_public_result(facts, receipt)
+        .map_err(|error| invalid(error.to_string()))?;
+    // Interrupted partials remain public display references, never completed
+    // delivery text. Domain output must not promote an unsealed fragment.
+    let result_text = matches!(public_result.turn_outcome,
+        Some(nomifun_agent_contracts::AgentTurnOutcome::Answered { .. }))
+        .then_some(public_result.result_text).flatten();
     let mut delivery = AgentExecutionDelivery {
         message_id: start_payload.source_message_id.clone(), replayed,
+        turn_outcome: public_result.turn_outcome,
         completed: terminal.is_some(), user_input_request: None, paused_reason: None,
-        result_ok: None, result_text: None, result_error: None,
+        result_ok: None, result_text, result_error: None,
         result_error_code: None, result_error_retryable: None,
     };
     let Some(terminal) = terminal else { return Ok(delivery); };
@@ -102,44 +106,29 @@ pub fn canonical_turn_delivery(
         }
         delivery.user_input_request = Some(request);
     }
-    let mut parts: HashMap<String, (String, u64)> = HashMap::new();
-    let mut latest_completed: Option<(u64, String)> = None;
-    for event in facts.events.iter().filter(|event| event.seq > start.seq && event.seq < terminal.seq) {
-        match event.kind.0.as_str() {
-            "message/content-part" => {
-                let part: AssistantPart = decode(payload(facts, event)?)?;
-                if part.turn_id != start_payload.source_message_id { continue; }
-                let current = parts.entry(event.correlation_id.as_ref().to_owned()).or_default();
-                if current.0.len().saturating_add(part.content.len()) > 8 * 1024 * 1024 {
-                    return Err(invalid("assistant output exceeds the canonical content budget"));
-                }
-                current.0.push_str(&part.content);
-                current.1 += 1;
-            }
-            "message/completed" => {
-                let completed: AssistantCompleted = decode(payload(facts, event)?)?;
-                let content = match parts.remove(event.correlation_id.as_ref()) {
-                    Some((text, count)) if count == completed.part_count
-                        && digest_bytes(text.as_bytes()).as_ref() == completed.content_digest => text,
-                    None if completed.part_count == 0
-                        && digest_bytes(b"").as_ref() == completed.content_digest => String::new(),
-                    None => continue, // Another Turn's message cannot supply output.
-                    _ => return Err(invalid("assistant completion differs from its content parts")),
-                };
-                if latest_completed.as_ref().is_none_or(|(seq, _)| *seq < event.seq) {
-                    latest_completed = Some((event.seq, content));
-                }
-            }
-            _ => {}
-        }
-    }
-    if !parts.is_empty() && receipt.status == TurnReceiptStatus::Completed {
-        return Err(invalid("completed Turn has unfinished assistant content"));
-    }
-    delivery.result_text = latest_completed.map(|(_, text)| text).filter(|text| !text.trim().is_empty());
     delivery.result_error_retryable = Some(false);
     match receipt.status {
-        TurnReceiptStatus::Completed => delivery.result_ok = Some(true),
+        TurnReceiptStatus::Completed => {
+            use nomifun_agent_contracts::chat_model::ChatFinishReason;
+            match terminal_payload.finish_reason.unwrap_or(ChatFinishReason::Completed) {
+                ChatFinishReason::Completed => delivery.result_ok = Some(true),
+                reason => {
+                    if delivery.user_input_request.is_some() {
+                        return Err(invalid("input handoff has a non-normal finish reason"));
+                    }
+                    let code = match reason {
+                        ChatFinishReason::Refusal => "model_refusal",
+                        ChatFinishReason::MaxOutputTokens => "model_output_truncated",
+                        ChatFinishReason::ToolCalls => "model_request_limit",
+                        ChatFinishReason::Cancelled => "cancelled",
+                        ChatFinishReason::Completed => unreachable!(),
+                    };
+                    delivery.result_ok = Some(false);
+                    delivery.result_error = Some(format!("The Agent reply ended with {code}; task delivery was not accepted"));
+                    delivery.result_error_code = Some(code.into());
+                }
+            }
+        },
         TurnReceiptStatus::Failed => {
             let error = terminal_payload.error.unwrap_or_default();
             delivery.result_ok = Some(false);
@@ -417,7 +406,7 @@ mod tests {
             let start = fixture.push("turn/started", TURN, None, json!({"source_message_id":ROOT}));
             fixture.receipt.started_event = Some(start);
             fixture.next = 1000;
-            let terminal = fixture.push("turn/completed", TURN, None, json!({"model_steps":1,"finish_reason":"stop"}));
+            let terminal = fixture.push("turn/completed", TURN, None, json!({"model_steps":1,"finish_reason":"completed"}));
             fixture.receipt.terminal_event = Some(terminal);
             fixture.next = 2;
             fixture
@@ -475,7 +464,18 @@ mod tests {
             }));
         }
         fn assistant(&mut self, root: &str, text: &str) {
-            let message = format!("assistant:{}", self.next);
+            let step = u16::try_from(self.next).unwrap();
+            let belongs_to_turn = root == ROOT && self.next < self.receipt.terminal_event.as_ref().unwrap().seq;
+            let message = if root == ROOT {
+                nomifun_agent_contracts::canonical_assistant_step_message_id(ROOT, step).unwrap()
+            } else { nomifun_common::generate_id() };
+            if belongs_to_turn {
+                self.runtime(AgentEngineEvent::ModelStepStarted {
+                    step, operation_id: format!("{TURN}:model:{step}").into(), correction_source: None,
+                });
+                let terminal = self.receipt.terminal_event.as_ref().unwrap().event_id.as_ref();
+                self.facts.event_payloads.get_mut(terminal).unwrap()["model_steps"] = json!(step);
+            }
             self.push("message/content-part", &message, None, json!({"turn_id":root,"content":text}));
             self.push("message/completed", &message, None, json!({"part_count":1,"content_digest":digest_bytes(text.as_bytes())}));
         }
@@ -595,9 +595,12 @@ mod tests {
         let result = canonical_turn_delivery(&fixture.facts, &fixture.receipt, true).unwrap();
         assert_eq!(result.result_text.as_deref(), Some("final answer"));
         assert_eq!(result.result_ok, Some(true));
+        assert!(matches!(result.turn_outcome, Some(nomifun_agent_contracts::AgentTurnOutcome::Answered { .. })));
         let mut reasoning = Fixture::new();
         reasoning.push("thinking/content-part", "thinking", None, json!({"turn_id":ROOT,"content":"reasoning only"}));
-        assert!(canonical_turn_delivery(&reasoning.facts, &reasoning.receipt, true).unwrap().result_text.is_none());
+        let empty = canonical_turn_delivery(&reasoning.facts, &reasoning.receipt, true).unwrap();
+        assert!(empty.result_text.is_none());
+        assert_eq!(empty.turn_outcome, Some(nomifun_agent_contracts::AgentTurnOutcome::Unavailable));
     }
 
     #[test]
@@ -613,14 +616,35 @@ mod tests {
         let handoff = canonical_turn_delivery(&fixture.facts, &fixture.receipt, true).unwrap();
         assert!(handoff.completed);
         assert_eq!(handoff.result_ok, Some(true));
+        assert_eq!(handoff.turn_outcome, Some(nomifun_agent_contracts::AgentTurnOutcome::InputRequired {
+            request_id: request.request_id.as_ref().to_owned(),
+        }));
         assert_eq!(handoff.user_input_request, Some(request));
-        assert_eq!(handoff.result_text, ordinary.result_text);
+        assert!(handoff.result_text.is_none());
         fixture.facts.event_payloads.get_mut(&terminal).unwrap()["user_input_request"]["question"] = json!(" ");
         assert!(canonical_turn_delivery(&fixture.facts, &fixture.receipt, true).is_err());
         fixture.facts.event_payloads.get_mut(&terminal).unwrap()["user_input_request"] = json!({
             "request_id":"ask-name","question":"姓名？","remaining_work":"PPT","answer":"invented"
         });
         assert!(canonical_turn_delivery(&fixture.facts, &fixture.receipt, true).is_err());
+    }
+
+    #[test]
+    fn a_public_reply_with_an_unsuccessful_finish_reason_is_not_task_success() {
+        use nomifun_agent_contracts::chat_model::ChatFinishReason;
+        for reason in [ChatFinishReason::Refusal, ChatFinishReason::MaxOutputTokens,
+            ChatFinishReason::ToolCalls, ChatFinishReason::Cancelled] {
+            let mut fixture = Fixture::new();
+            fixture.assistant(ROOT, "A visible reply can explain why work did not finish.");
+            let terminal = fixture.receipt.terminal_event.as_ref().unwrap().event_id.as_ref();
+            fixture.facts.event_payloads.get_mut(terminal).unwrap()["finish_reason"] = json!(reason);
+            let delivery = canonical_turn_delivery(&fixture.facts, &fixture.receipt, true).unwrap();
+            assert!(matches!(delivery.turn_outcome, Some(nomifun_agent_contracts::AgentTurnOutcome::Answered { .. })));
+            assert!(delivery.result_text.is_some());
+            assert_eq!(delivery.result_ok, Some(false));
+            assert!(delivery.result_error_code.is_some());
+            assert_eq!(delivery.result_error_retryable, Some(false));
+        }
     }
 
     #[test]
@@ -685,7 +709,7 @@ mod tests {
     #[test]
     fn cancelled_receipt_does_not_promote_unfinished_assistant_parts_to_output() {
         let mut fixture = Fixture::new();
-        fixture.push("message/content-part", "unfinished", None, json!({"turn_id":ROOT,"content":"unfinished answer"}));
+        fixture.push("message/content-part", &nomifun_common::generate_id(), None, json!({"turn_id":ROOT,"content":"unfinished answer"}));
         fixture.receipt.status = TurnReceiptStatus::Cancelled;
         fixture.receipt.terminal_event.as_mut().unwrap().kind = SessionEventKind("turn/cancelled".into());
         let delivery = canonical_turn_delivery(&fixture.facts, &fixture.receipt, true).unwrap();

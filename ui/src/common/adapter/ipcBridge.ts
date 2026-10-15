@@ -938,7 +938,7 @@ const requireConversationIdempotencyKey = (value: unknown): string => {
   return value;
 };
 
-const fromApiResponseMessage = (message: IResponseMessage): IResponseMessage => ({
+export const fromApiResponseMessage = (message: IResponseMessage): IResponseMessage => ({
   ...message,
   msg_id: parseMessageId(message.msg_id),
   turn_id: message.turn_id == null ? undefined : parseMessageId(message.turn_id),
@@ -4548,9 +4548,9 @@ export interface ICompanionThread {
   updated_at: number;
 }
 
-// ── Multi-companion (spec docs/superpowers/specs/2026-06-11-unified-memory-knowledge-design.md §4.3/§4.7/§4.8) ──
+// ── Multi-companion (current ownership: docs/architecture/agent-session.md) ──
 
-/** Persona of one companion (same shape as the legacy single-companion config persona). */
+/** Persona configuration for one companion. */
 export interface ICompanionPersona {
   preset: string;
   custom: string;

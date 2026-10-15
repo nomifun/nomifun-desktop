@@ -4,17 +4,6 @@
 //! perspective: default values, full TOML override, and partial override.
 
 use nomi_config::config::ConfigFile;
-use nomi_config::plan::PlanConfig;
-
-/// TC-3.2-01: PlanConfig default values.
-/// Input: no `[plan]` section in config.
-/// Expected: enabled = true, plan_directory = ".nomi/plans".
-#[test]
-fn tc_3_2_01_plan_config_defaults() {
-    let cfg = PlanConfig::default();
-    assert!(cfg.enabled);
-    assert_eq!(cfg.plan_directory, ".nomi/plans");
-}
 
 /// TC-3.2-01 (variant): absent [plan] section in ConfigFile yields defaults.
 #[test]

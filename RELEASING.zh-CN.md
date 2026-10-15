@@ -1,433 +1,104 @@
-# NomiFun 发版手册
+# NomiFun 发布手册
 
-本文面向实际发版操作。需要英文维护说明时看 `RELEASING.md`；日常发桌面版优先按本文执行。
+[English](RELEASING.md)
 
-## 核心概念
+本文描述维护者的发布顺序。本地构建见[构建与打包](docs/contributing/building-and-packaging.zh.md)；
+签名与更新器细节由所属目录维护：
+[签名](apps/desktop/signing/README.md)和
+[Updater](apps/desktop/updater/README.zh-CN.md)。
 
-桌面发版有两类产物：
+## 准备
 
-- **手动安装包**：优先由 CrabNebula Cloud 分发，GitHub Releases 作为备用和历史归档，例如 macOS `.dmg`、Windows `.exe` / `.msi`、Linux `.AppImage` / `.deb` / `.rpm`。
-- **自动更新产物**：Tauri updater 使用的包、对应 `.sig` 签名、以及合并后的 `latest.json`。
+1. 使用经过审查的目标提交，保持工作树干净。
+2. 更新 `CHANGELOG.md`，准备发布说明文件，对照发布行为核对文档和安装/部署指南。
+3. 运行覆盖改动范围和目标平台打包的检查，确认许可证、署名及再分发权。
+4. 从发布密钥库取出现有 updater 私钥，必须匹配
+   [tauri.conf.json](apps/desktop/tauri.conf.json) 中的
+   `plugins.updater.pubkey`。凭据保存在被忽略的
+   `apps/desktop/signing/.env.release`，使用贡献者配置的 Git 身份。
 
-自动更新签名和系统代码签名不是一回事：
+破坏性数据变更必须在实际发给 GitHub 和 updater 的发布说明开头明确警告，
+说明损失及升级前用户需要做什么。仅写 changelog 不够：
+更新器展示 manifest 的 `notes`，回退生成会跳过 `Unreleased`。
 
-- `TAURI_SIGNING_PRIVATE_KEY` 只用于 Tauri updater 验签，证明自动更新包没有被篡改。
-- macOS Developer ID / 公证、Windows Authenticode 用于系统信任，影响 Gatekeeper、SmartScreen、未知发布者提示。
-- Windows 当前没有 Authenticode 签名时，自动更新验签仍可工作，但手动安装包会有未知发布者 / SmartScreen 风险。
+版本真值是 `Cargo.toml [workspace.package].version`。
+`bun run bump 1.2.3` 同步 lock/package 元数据；
+`--tag` 还会提交并创建 `v1.2.3`。
+发布工具负责这些步骤时，不要重复 bump/tag。
 
-## 桌面分发策略
+## 桌面发布工具
 
-桌面端以 **CrabNebula Cloud 为更新与下载主源**，以 **GitHub Releases 为
-兜底和历史归档**。两边必须发布同一版本、相同安装包和相同 `.sig`。
+各工具在原生操作系统上运行，自动判断该版本的 GitHub Release 是否存在：
+不存在时创建版本/tag/Release；已存在则追加平台资产并合并 `latest.json`。
 
-多平台构建期间，CrabNebula Release 保持草稿状态：
+| 平台 | 预览 | 创建版本 | 追加当前版本 |
+| --- | --- | --- | --- |
+| macOS | `bun run release:mac -DryRun` | `bun run release:mac -Version 1.2.3 -NotesFile notes.md` | `bun run release:mac` |
+| Windows | `bun run release:win -DryRun -SkipPull` | `bun run release:win -Version 1.2.3 -NotesFile notes.md` | `bun run release:win` |
+| Linux | `bun run release:linux -DryRun` | `bun run release:linux -Version 1.2.3 -NotesFile notes.md` | `bun run release:linux` |
+
+首次创建必须提供发布说明，多行文本优先 `-NotesFile`。
+macOS 默认 Apple Silicon，用 `-Architecture intel` 追加独立 Intel 包。
+Windows 配置预期 Authenticode 签名；macOS 配置 Developer ID 和公证。
+
+Windows 只读预览需同时传 `-DryRun -SkipPull`：仅 `-DryRun` 仍会在预览分支前
+执行 `git pull --ff-only`。macOS/Linux 预览跳过 pull。
+`-NoPush` **不是**通用离线/预览开关，
+append 模式仍会上传资产。`-SkipPull` 跳过工具的 pull。
+使用前阅读平台脚本：
+[macOS](scripts/release-mac.sh)、[Windows](scripts/release-win.ps1)、
+[Linux](scripts/release-linux.sh)。
+
+## 分发与 manifest
+
+CrabNebula Cloud 为主更新/下载源，GitHub Releases 为回退及归档。
+两处保持同版本和逐字节相同的签名资产。
+所有计划平台完成上传前，Cloud release 保持 draft。
 
 ```bash
-bun run release:cloud -- draft --version "$VERSION" --notes-file notes.md
-bun run release:cloud -- upload --release-id <release-id>  # 每个平台构建机执行
+bun run release:cloud -- draft --version 1.2.3 --notes-file notes.md
+bun run release:cloud -- upload --release-id <release-id>
 bun run release:cloud -- publish --release-id <release-id>
 bun run release:cloud -- verify
 ```
 
-`CN_API_KEY`、`CN_APP` 和可选的 `CN_RELEASE_ID` 写入已被 gitignore 的
-`apps/desktop/signing/.env.release`。不要更换现有 Tauri updater 私钥。
-端点兜底、安装包重试和旧客户端迁移细节见
-`apps/desktop/updater/README.zh-CN.md`。
-
-## 版本号
-
-版本号的单一真源是根目录 `Cargo.toml` 的 `[workspace.package].version`。发版前只需要跑：
-
-```bash
-VERSION=1.2.3
-bun run bump "$VERSION"
-```
-
-脚本会同步：
-
-- `Cargo.toml`
-- `Cargo.lock`
-- 根 `package.json`
-- `ui/package.json`
-
-tag 统一使用 `vX.Y.Z`，例如 `v0.1.11`。
-
-## `nfagent` 运行时发布
-
-桌面安装包不再内置 `nfagent`。NomiRelay 首次配对、恢复或重启时，桌面端会按
-[`apps/desktop/nfagent-runtime.json`](apps/desktop/nfagent-runtime.json)
-中的固定 URL 下载目标平台资产并校验 SHA-256。因此，**必须先发布 `nfagent`
-资产，再分发引用该清单的桌面版本**。
-
-当前清单对应：
-
-- 运行时版本：`0.1.0`
-- GitHub Release tag：`nfagent-v0.1.0`
-- 源仓库：`nomifun/nomifun-net-infra`
-- 源提交：`3747c420f6895977edcac3614f5924d7fbdd367e`
-- 本地待上传目录：`dist/nfagent-runtime/`（已被 gitignore）
-
-必须上传以下六个固定名称的二进制，以及供人工核对的 `SHA256SUMS`：
-
-```text
-nfagent-windows-amd64.exe
-nfagent-windows-arm64.exe
-nfagent-darwin-amd64
-nfagent-darwin-arm64
-nfagent-linux-amd64
-nfagent-linux-arm64
-SHA256SUMS
-```
-
-### 重新构建
-
-未来升级时，先在同级 `../nomifun-net-infra` checkout 到准备发布的干净提交并跑该仓库
-要求的本地门禁。该仓库禁止 GitHub Actions，构建与验证必须在本机完成：
-
-```bash
-cd ../nomifun-net-infra
-VERSION=<新版本号>
-COMMIT=$(git rev-parse --short HEAD)
-make check
-make dist VERSION="$VERSION" COMMIT="$COMMIT"
-```
-
-`make dist` 会生成更多 NomiRelay 平台产物；桌面清单当前只引用上面列出的六个
-`nfagent` 目标。将它们复制到本仓库的 `dist/nfagent-runtime/`，重新生成
-`SHA256SUMS`，再把新的完整 SHA-256 写入 `nfagent-runtime.json`。不要只改 URL
-而沿用旧 hash。
-
-### 用浏览器手动上传 GitHub
-
-该流程完全由维护者在浏览器中手动执行，不依赖 GitHub Actions 或 `gh`：
-
-1. 打开 `https://github.com/nomifun/nomifun-net-infra/releases/new`。
-2. 在 **Choose a tag** 中输入 `nfagent-v0.1.0` 并创建新 tag；目标提交选择
-   `3747c420f6895977edcac3614f5924d7fbdd367e`。
-3. Release title 建议填写 `nfagent v0.1.0`；说明中记录源提交与
-   `SHA256SUMS`。
-4. 把 `dist/nfagent-runtime/` 中上述七个文件拖入资产区。文件名必须原样保留。
-5. 发布为正式 Release，不能只保存成 draft。
-6. 发布后逐项确认资产存在，并核对固定 URL 形状：
-
-   ```text
-   https://github.com/nomifun/nomifun-net-infra/releases/download/nfagent-v0.1.0/<文件名>
-   ```
-
-7. 在分发桌面安装包前，至少从 Release 重新下载当前平台资产，核对
-   `SHA256SUMS`，并运行：
-
-   ```powershell
-   .\nfagent-windows-amd64.exe -version
-   ```
-
-发布后不要覆盖同一 tag 下的二进制。任何字节变化都应使用新的运行时版本与 tag，
-重新计算 SHA-256、更新 `nfagent-runtime.json`，再发布新的桌面版本。清单 URL
-不得改用 `latest`、带查询参数的地址或会被替换的通用文件名。
-
-## macOS 发版
-
-必须在 Mac 上执行。一键脚本会自动判定两种场景：
-
-- **追加(APPEND)**：该版本的 GitHub Release 已存在（可能 Windows 侧先发过）——只补 macOS
-  所选架构产物、把 `darwin-aarch64` 或 `darwin-x86_64` 条目并进 `latest.json`（默认 Apple Silicon）。
-- **首发(CREATE)**：该版本还没有 Release（macOS 先发）——建 tag、建 Release（带 release
-  note）、上传 macOS 产物；可用 `-Version` 顺带打版本号。
-
-### 一键发版（推荐）
-
-一次性配置好后即可反复一键：
-
-1. 从密钥库拷入 updater 私钥 `apps/desktop/signing/nomifun-updater.key`（keyID
-   `F3AA272E60AA7952`，已被 gitignore，必须与 `tauri.conf.json` 内嵌 `pubkey` 匹配）。
-2. 配置 `apps/desktop/signing/.env.signing`，填好 Developer ID 签名与 Apple notarization 信息。
-3. 运行 `gh auth login`，或复制 `apps/desktop/signing/.env.release.example` 为 `.env.release`
-   并填入 `GH_TOKEN=...`。
-
-然后：
-
-```bash
-git pull
-
-# 追加（Windows 已先发，补 macOS）：
-bun run release:mac
-bun run release:mac -Architecture intel  # 追加独立 Intel 安装包与更新包
-
-# 首发（macOS 先发）：-Version 顺带 bump，-NotesFile/-Notes 提供 release note（首发必填）
-bun run release:mac -Version 0.1.14 -NotesFile notes.md
-bun run release:mac -Version 0.1.14 -Notes "- 修复若干问题"
-
-# 通用开关：
-bun run release:mac -DryRun     # 只读预检并打印计划（含判定出的模式），不 pull/bump/构建/上传/推送
-bun run release:mac -NoPush     # APPEND：仍上传但不提交推送；CREATE：只本地 bump/构建，不建 Release
-bun run release:mac -SkipPull   # 真实执行时跳过 git pull
-bun run release:mac --macos-arm64-only  # 显式停发 Intel，删除已有 Intel updater 条目
-```
-
-**版本号**：单一真源是根 `Cargo.toml [workspace.package].version`。追加模式用当前版本；首发
-时若带 `-Version X.Y.Z` 且与当前不同，脚本先跑 `bun run bump` 打版本号，再使用贡献者配置的
-Git 身份提交、打 tag、建 Release（不带 `-Version` 则按当前版本走）。
-
-**Release note（对 LLM 友好）**：走命令行、不与 CHANGELOG 耦合，且 **GitHub Release 正文与
-`latest.json` 的 `notes` 共用同一份**。多行说明建议先写到 `.md` 再用 `-NotesFile` 传入。
-**首发若既没 `-NotesFile` 也没 `-Notes`，脚本直接报错，不会建出空说明的 Release**；
-追加模式 note 可选。
-
-脚本自动完成：读 `.env.release` 的 `GH_TOKEN`（若存在）或沿用 `gh auth login`、加载 updater
-私钥、判定模式、执行 `build:mac --signed <arm|intel> --config apps/desktop/tauri.updater.conf.json`、校验
-staple / codesign / Gatekeeper、`make:latest` 合并 darwin 条目、上传（追加 `--clobber` / 首发
-`gh release create`）、使用配置的 Git 身份提交 `latest.json`（首发含 bump）回 `main`、拉取 updater
-端点校验。任何一步失败都会明确报错并中断。
-
-同版本追加会保留另一种 Mac 架构和其他平台已有的 updater 条目。只有显式传入
-`--macos-arm64-only` 才删除 Intel 条目，该开关不能与 `-Architecture intel` 同用。
-Intel 产物发布前需要 Intel Mac 原生运行验收；Apple Silicon 上的 Rosetta 运行不能替代。
-
-### 手动分步（等价于一键脚本内部流程）
-
-下面命令会同时产出：
-
-- 手动安装包：`dist/desktop/NomiFun_<version>_aarch64.dmg`
-- 自动更新包：`target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz`
-- 自动更新签名：`target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz.sig`
-
-```bash
-export TAURI_SIGNING_PRIVATE_KEY="$(cat apps/desktop/signing/nomifun-updater.key)"
-export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
-
-bun run build:mac --config apps/desktop/tauri.updater.conf.json
-bun run make:latest
-```
-
-如果是公开分发，建议配置 `apps/desktop/signing/.env.signing` 后使用 Developer ID 签名和公证：
-
-```bash
-export TAURI_SIGNING_PRIVATE_KEY="$(cat apps/desktop/signing/nomifun-updater.key)"
-export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
-
-bun run build:mac --signed --config apps/desktop/tauri.updater.conf.json
-bun run make:latest
-```
-
-`bun run make:latest` 会把当前目标的 macOS 条目写入 `apps/desktop/updater/latest.json`。
-双架构发布时，先提交版本和源码改动，让 release lock 对应干净的源码提交；
-分别构建，并将清单收集到不被 Git 跟踪的产物目录：
-
-```bash
-export TAURI_SIGNING_PRIVATE_KEY_PATH="$PWD/apps/desktop/signing/nomifun-updater.key"
-export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
-bun run build:mac --signed arm --config apps/desktop/tauri.updater.conf.json
-bun run make:latest --out dist/desktop/latest.json --collect --notes-file notes.md
-bun run build:mac --signed intel --config apps/desktop/tauri.updater.conf.json
-bun run make:latest --out dist/desktop/latest.json --collect --notes-file notes.md
-```
-
-两种架构均使用 macOS 14+ 系统 WKWebView，不下载或打包浏览器 framework/helper。
-打包验证主程序架构，并拒绝附带浏览器运行时或系统 WebKit.framework。
-Intel 更新包命名为 `NomiFun_<version>_x64.app.tar.gz`，Apple Silicon 保留
-`NomiFun.app.tar.gz`。将 `dist/desktop/` 收集的同一批产物上传到两处分发服务。
-Rosetta 运行不等同于 Intel 实机验收。
-两套构建结束后，再将合并清单写回 `apps/desktop/updater/latest.json`，提交、打 tag
-并发布。Intel 打包会自动下载 SHA-256 固定的官方 ONNX Runtime 1.23.2，使用匹配的
-API 23，并在 App 内签名其 x86_64 运行库；其他目标保持 API 27。
-
-## Windows 发版
-
-必须在 Windows 机器上执行。一键脚本会自动判定两种场景：
-
-- **追加(APPEND)**：该版本的 GitHub Release 已存在（通常 macOS 侧先发过）——只补 Windows
-  产物、把 windows 条目并进 `latest.json`。
-- **首发(CREATE)**：该版本还没有 Release（Windows 先发）——建 tag、建 Release（带 release
-  note）、上传 Windows 产物；可用 `-Version` 顺带打版本号。
-
-### 一键发版（推荐）
-
-一次性配置好后即可反复一键：
-
-1. 从密钥库拷入 updater 私钥 `apps/desktop/signing/nomifun-updater.key`（keyID
-   `F3AA272E60AA7952`，已被 gitignore，必须与 `tauri.conf.json` 内嵌 `pubkey` 匹配）。
-2. 复制 `apps/desktop/signing/.env.release.example` 为 `.env.release`（已被 gitignore），
-   填入 `GH_TOKEN=...`（`repo` 权限的经典 PAT，或对本仓库 Contents:read/write 的细粒度 PAT）。
-
-然后：
-
-```powershell
-git pull
-
-# 追加（macOS 已先发，补 Windows）：
-bun run release:win
-
-# 首发（Windows 先发）：-Version 顺带 bump，-NotesFile/-Notes 提供 release note（首发必填）
-bun run release:win -Version 0.1.14 -NotesFile notes.md
-bun run release:win -Version 0.1.14 -Notes "- 修复若干问题"
-
-# 通用开关：
-bun run release:win -DryRun     # 只读预检并打印计划（含判定出的模式），不 bump/构建/上传/推送
-bun run release:win -NoPush     # APPEND：仍上传但不提交推送；CREATE：只本地 bump/构建，不建 Release
-bun run release:win -SkipPull   # 跳过 git pull
-```
-
-**版本号**：单一真源是根 `Cargo.toml [workspace.package].version`。追加模式用当前版本；首发
-时若带 `-Version X.Y.Z` 且与当前不同，脚本先跑 `bun run bump` 打版本号，再以 `nomifun`
-署名提交、打 tag、建 Release（不带 `-Version` 则按当前版本走）。
-
-**Release note（对 LLM 友好）**：走命令行、不与 CHANGELOG 耦合，且 **GitHub Release 正文与
-`latest.json` 的 `notes` 共用同一份**。多行说明建议先写到 `.md` 再用 `-NotesFile` 传入
-（PowerShell 传多行参数不稳，脚本内部也用文件中转）。**首发若既没 `-NotesFile` 也没
-`-Notes`，脚本直接报错，不会建出空说明的 Release**；追加模式 note 可选（不传则沿用既有，
-`latest.json notes` 由 CHANGELOG 当前版本小节兜底）。
-
-脚本自动完成：读 `.env.release` 的 `GH_TOKEN` 注入 `gh`、加载签名私钥、判定模式、清理旧版本
-残留 NSIS 产物、构建更新产物、`make:latest` 合并 windows 条目、上传（追加 `--clobber` / 首发
-`gh release create`）、以 `nomifun` 提交 `latest.json`（首发含 bump）回 `main`、拉取 updater
-端点校验。任何一步失败都会明确报错并中断。
-
-> 未启用 Authenticode 时，手动安装包仍可能触发 SmartScreen / 未知发布者提示；自动更新验签
-> 走 Tauri updater 的 minisign 签名，与 Authenticode 无关，一键脚本已覆盖。
-
-### 手动分步（等价于一键脚本内部流程）
-
-先拉到与当前 Release 一致的代码：
-
-```powershell
-git pull
-git checkout main
-```
-
-如果是在已经发布 macOS 后补 Windows，确认 `Cargo.toml` 版本号与现有 GitHub Release 一致。
-
-> updater 私钥 `apps/desktop/signing/nomifun-updater.key` 已被 gitignore、只存在于密钥库。
-> 这台 Windows 构建前需先从密钥库把它拷过来，且必须与 `tauri.conf.json` 内嵌的 `pubkey`
-> 匹配（keyID `F3AA272E60AA7952`），否则已安装的客户端会拒绝更新。叠加 `createUpdaterArtifacts`
-> 用的是仓库内的 `apps/desktop/tauri.updater.conf.json`，以 `--config <文件路径>` 传入——
-> **不要内联 JSON**，PowerShell 5.1 会把内联 `--config '{...}'` 的双引号剥掉变成非法 JSON。
-
-### 当前无 Authenticode 签名的做法
-
-```powershell
-$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content apps/desktop/signing/nomifun-updater.key -Raw
-$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
-
-bun run build:win --config apps/desktop/tauri.updater.conf.json
-bun run make:latest
-```
-
-这会生成 Windows 自动更新产物和 `.sig`。这种模式下：
-
-- 自动更新验签可以工作。
-- 手动安装包不是系统代码签名包，用户可能看到 SmartScreen / 未知发布者提示。
-- 适合内部测试或临时发布，不等同于公开可信 Windows 安装包。
-
-### 以后补 Authenticode 签名
-
-拿到 Windows 代码签名证书后，先把证书导入当前用户证书库，再设置证书指纹（`--signed`
-注入指纹仍走内联 JSON，需在 pwsh 7+ 下运行）：
-
-```powershell
-$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content apps/desktop/signing/nomifun-updater.key -Raw
-$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
-$env:WINDOWS_CERTIFICATE_THUMBPRINT = "A1B2C3..."
-
-bun run build:win --signed --config apps/desktop/tauri.updater.conf.json
-bun run make:latest
-```
-
-这才是更接近 macOS Developer ID 签名 / 公证的公开分发状态。
-
-## Linux 发版
-
-如果发布 Linux，必须在 Linux 机器上执行：
-
-```bash
-sudo apt-get install -y pkg-config libgbm-dev libayatana-appindicator3-dev librsvg2-dev
-```
-
-`build:linux` 会在构建前检查 `gbm`、AppIndicator 与 `librsvg-2.0` 的 `pkg-config`
-条目，并设置 `APPIMAGE_EXTRACT_AND_RUN=1`，避免构建机缺 FUSE2 时无法运行
-`linuxdeploy` AppImage。
-
-```bash
-export TAURI_SIGNING_PRIVATE_KEY="$(cat apps/desktop/signing/nomifun-updater.key)"
-export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
-
-bun run build:linux --config apps/desktop/tauri.updater.conf.json
-bun run make:latest
-```
-
-Linux 不走 macOS 公证或 Windows Authenticode，但仍需要 Tauri updater `.sig`。
-Linux 发布会上传 `.AppImage`、`.deb`、`.rpm`；其中 `latest.json` 的 updater
-条目应指向 `.AppImage`，`bun run make:latest` 会在多个签名 Linux 包里显式选择它。
-
-## 合并 latest.json
-
-`bun run make:latest` 的逻辑是：
-
-- 扫描当前机器生成的 updater 产物和 `.sig`。
-- 写入当前平台对应的 `platforms[...]` 条目。
-- 保留已有的真实平台条目。
-
-因此多平台发版时，要让 `apps/desktop/updater/latest.json` 在各平台之间传递或提交回仓库。缺失某个平台条目时，该平台用户不会收到自动更新。
-
-典型顺序：
-
-1. Mac 生成 macOS 条目。
-2. Windows 拉取包含 macOS 条目的 `latest.json`。
-3. Windows 跑 `bun run make:latest` 后补 Windows 条目。
-4. 把最终 `latest.json` 上传到 GitHub Release，并提交回 `main`。
-
-## 创建 GitHub Release
-
-如果是首次创建某个版本：
-
-```bash
-git add Cargo.toml Cargo.lock package.json ui/package.json apps/desktop/updater/latest.json
-git commit -m "chore(release): v$VERSION"
-git tag "v$VERSION"
-git push origin main "v$VERSION"
-
-gh release create "v$VERSION" \
-  target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz \
-  target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz.sig \
-  dist/desktop/NomiFun_${VERSION}_aarch64.dmg \
-  apps/desktop/updater/latest.json \
-  --title "v$VERSION" \
-  --notes "发布说明"
-```
-
-如果 Release 已存在，只是补传 Windows 或 Linux 资产：
-
-```bash
-gh release upload "v$VERSION" <new-assets...>
-gh release upload "v$VERSION" apps/desktop/updater/latest.json --clobber
-```
-
-`--clobber` 用于替换已有的 `latest.json`，确保 GitHub Release 上的清单包含最新平台条目。
-
-## 上传哪些文件
-
-macOS 至少上传：
-
-```text
-dist/desktop/NomiFun_<version>_aarch64.dmg
-target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz
-target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz.sig
-apps/desktop/updater/latest.json
-```
-
-Windows 上传 `bun run make:latest` 打印的 updater 包、`.sig`、`latest.json`。如果 `dist/desktop/` 里还有未包含的手动安装包，例如 `.msi`，也一起上传。
-
-Linux 上传对应安装包、`.sig`、`latest.json`。
-
-## 发布后验证
-
-```bash
-gh release view "v$VERSION" --json tagName,assets,url
-curl -fsSL https://github.com/nomifun/nomifun-desktop/releases/latest/download/latest.json
-```
-
-确认：
-
-- GitHub Release 资产里包含手动安装包、updater 包、`.sig`、`latest.json`。
-- `latest.json` 的 `version` 等于本次版本。
-- 每个已发布平台都有 `platforms[...]` 条目。
-- 每个 URL 都指向同一个 `v$VERSION` Release。
+按需在各平台执行 upload。手动构建时，
+`bun run make:latest --collect` 扫描签名资产，合并平台条目到
+`apps/desktop/updater/latest.json`，并收集至 `dist/desktop/`。
+跨构建机传递与合并 manifest 时保留已有平台条目。
+
+发布前确认：
+
+- 计划支持的每个 OS/架构都有正确版本、URL 和签名。
+- 手动安装包与 updater 包齐全。macOS 手动安装用 DMG、更新用
+  `.app.tar.gz`；Linux updater 用 AppImage，deb/rpm 用于手动安装。
+- Updater archive 来自最终签名/公证 App，且通过解包校验。
+- 发布 URL 返回准确签名字节。从上一受支持版本验证检查、下载、安装及重启。
+- 破坏性变更警告出现在 updater 的发布说明中。
+
+## 更新 NomiRelay 连接组件
+
+桌面安装包不内嵌 `nfagent`。恢复/重启复用有效本地文件；
+下载缺失或变化的组件需要用户明确选择。
+批准版本、不可变 URL 及完整 SHA-256 在
+[nfagent-runtime.json](apps/desktop/nfagent-runtime.json)。
+
+更新组件时：
+
+1. 在 `nomifun-net-infra` 的目标干净提交构建，遵循该仓库当前验证/发布说明。
+2. 发布不可变版本 Release，包含 manifest 的六个目标：
+   `nfagent-{windows,darwin,linux}-{amd64,arm64}`
+   （Windows 文件名以 `.exe` 结尾），另附 `SHA256SUMS`。
+3. 同时更新 manifest 的版本、URL 和完整 hash。不得覆盖已发布 tag 下的字节；
+   字节变化必须使用新版本/tag。
+4. 确认所有 URL 公开可下载，不使用 `latest`、query 或 fragment。
+   至少回下载当前平台资产，核对 hash 并运行 `-version`。
+5. 完成后才分发引用新 manifest 的桌面版本。
+
+## 服务端发布与后续检查
+
+按维护中的[部署指南](docs/guides/web-server-deployment.zh.md)构建/推送 Web 镜像。
+发布对应版本 tag，需要可复现时使用明确 tag/digest。
+
+发布后验证下载链接、首次设置、登录和 WebSocket；
+在每个发布平台从旧安装检查更新。记录已知限制，只宣布实际可用的产物。

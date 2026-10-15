@@ -155,49 +155,15 @@ mod tests {
     // --- Role serialization / deserialization ---
 
     #[test]
-    fn test_role_serialization_user() {
-        // arrange
-        let role = Role::User;
-        // act
-        let json = serde_json::to_string(&role).unwrap();
-        // assert
-        assert_eq!(json, "\"user\"");
-    }
-
-    #[test]
-    fn test_role_serialization_assistant() {
-        let role = Role::Assistant;
-        let json = serde_json::to_string(&role).unwrap();
-        assert_eq!(json, "\"assistant\"");
-    }
-
-    #[test]
-    fn test_role_serialization_system() {
-        let role = Role::System;
-        let json = serde_json::to_string(&role).unwrap();
-        assert_eq!(json, "\"system\"");
-    }
-
-    #[test]
-    fn test_role_serialization_tool() {
-        let role = Role::Tool;
-        let json = serde_json::to_string(&role).unwrap();
-        assert_eq!(json, "\"tool\"");
-    }
-
-    #[test]
-    fn test_role_deserialization_roundtrip() {
-        // arrange
-        let variants = [
+    fn role_wire_values_serialize_and_deserialize() {
+        for (role, wire) in [
             (Role::User, "\"user\""),
             (Role::Assistant, "\"assistant\""),
             (Role::System, "\"system\""),
             (Role::Tool, "\"tool\""),
-        ];
-        // act + assert
-        for (expected, raw) in &variants {
-            let deserialized: Role = serde_json::from_str(raw).unwrap();
-            assert_eq!(&deserialized, expected);
+        ] {
+            assert_eq!(serde_json::to_string(&role).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<Role>(wire).unwrap(), role);
         }
     }
 

@@ -3,7 +3,7 @@
 //! Agent authority is one Module plus an exact Action allowlist. Pairing and a
 //! live device connection are resource facts, while the voice/audio loop is a
 //! Robot domain service; neither is an authorable capability. Device tool
-//! discovery is frozen per AgentSession and every physical dispatch rechecks
+//! discovery is frozen per live Session Runtime and every physical dispatch rechecks
 //! the mutable device permission and pairing boundaries.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -320,11 +320,12 @@ impl RobotModuleOwner {
         }
         let robot = self.load_bound_robot(binding).await?;
         if !robot.permissions.allows_action(RobotAction::Vision) {
-            return Err(RobotModuleError::new(
-                ROBOT_PERMISSION_DENIED,
-                "Camera access is disabled for the bound robot; enable it in Device settings.",
-                false,
-            ));
+            // This is an optional read of an existing observation, not a
+            // request to capture an image. A paired voice/display device must
+            // remain usable with camera access disabled. Do not expose a
+            // previously cached observation after that permission is revoked.
+            // Explicit camera tools retain their dispatch-time permission gate.
+            return Ok(None);
         }
         let companion_id = robot
             .companion_id
@@ -958,6 +959,12 @@ mod tests {
                         description: "Take a photo".to_owned(),
                         input_schema: serde_json::json!({"type":"object"}),
                     },
+                    RobotToolDescriptor {
+                        device_name: "self.extension.read".to_owned(),
+                        exposed_name: "robot_extension_read".to_owned(),
+                        description: "Read device extension status".to_owned(),
+                        input_schema: serde_json::json!({"type":"object"}),
+                    },
                 ],
             )
             .await;
@@ -1043,6 +1050,74 @@ mod tests {
                 | nomifun_robot::capability::ROBOT_MOTION_ACTION_ID
         )));
         assert_eq!(module_capability_id().as_ref(), ROBOT_MODULE_ID);
+    }
+
+    #[tokio::test]
+    async fn disabled_optional_vision_does_not_block_display_and_device_tools() {
+        let mut permitted = permissions();
+        permitted.vision = false;
+        permitted.motion = false;
+        let fixture = fixture(permitted).await;
+        let actions = RobotAction::ALL.into_iter().map(|action| ActionId::from(action.id())).collect();
+        assert!(fixture.owner.vision_context("owner", &fixture.binding, &actions).await.unwrap().is_none());
+        let tools = fixture.owner.resolve_session_tools(
+            &principal(), &AgentSessionId::from("session-1"), &fixture.binding, &actions,
+        ).await.unwrap();
+        let names = tools.descriptors.iter().map(|tool| tool.provider_name.as_str()).collect::<BTreeSet<_>>();
+        assert_eq!(names, BTreeSet::from(["robot_display_text", "robot_extension_read"]));
+        for (name, key) in [("robot_display_text", "display"), ("robot_extension_read", "device")] {
+            let mut request = invocation(name, key);
+            request.arguments = StrictJsonValue(serde_json::json!({}));
+            tools.invoker.invoke(request).await.unwrap();
+        }
+        let denied = tools.invoker.invoke(invocation("robot_camera_take_photo", "camera")).await.unwrap_err();
+        assert_eq!(denied.code.as_ref(), "ROBOT_SESSION_TOOL_NOT_BOUND");
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn revoked_vision_omits_cached_context_but_still_denies_explicit_camera_dispatch() {
+        let fixture = fixture(permissions()).await;
+        let actions = BTreeSet::from([ActionId::from(RobotAction::Vision.id())]);
+        let tools = fixture.owner.resolve_session_tools(
+            &principal(), &AgentSessionId::from("session-1"), &fixture.binding, &actions,
+        ).await.unwrap();
+        fixture.owner.observations.record(nomifun_robot::vision::RobotVisionObservation {
+            source: nomifun_robot::vision::RobotVisionSource {
+                companion_id: "companion-1".into(), conversation_id: "session-1".into(),
+                connection_id: "socket-1".into(), request_id: "observation-1".into(),
+            },
+            robot_id: "robot-1".into(), companion_id: "companion-1".into(),
+            question: "What is visible?".into(), answer: "Private observation".into(), observed_at_ms: now_ms(),
+        }).await;
+        assert!(fixture.owner.vision_context("owner", &fixture.binding, &actions).await.unwrap().is_some());
+        let mut permitted = permissions();
+        permitted.vision = false;
+        fixture.owner.registry.set_permissions("robot-1", permitted).await.unwrap();
+        assert!(fixture.owner.vision_context("owner", &fixture.binding, &actions).await.unwrap().is_none());
+        let mut request = invocation("robot_camera_take_photo", "after-revoke");
+        request.arguments = StrictJsonValue(serde_json::json!({}));
+        let denied = tools.invoker.invoke(request).await.unwrap_err();
+        assert_eq!(denied.code.as_ref(), ROBOT_PERMISSION_DENIED);
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn disabled_vision_still_rejects_invalid_owner_companion_and_action_authority() {
+        let mut permitted = permissions();
+        permitted.vision = false;
+        let fixture = fixture(permitted).await;
+        let actions = BTreeSet::from([ActionId::from(RobotAction::Vision.id())]);
+        assert!(fixture.owner.vision_context("other-owner", &fixture.binding, &actions).await.is_err());
+        let mut forged = fixture.binding.clone();
+        forged.owner_id = "other-owner".into();
+        assert!(fixture.owner.vision_context("owner", &forged, &actions).await.is_err());
+        let mut forged = fixture.binding.clone();
+        forged.typed_parameters.insert("companion_id".into(), "other-companion".into());
+        assert!(fixture.owner.vision_context("owner", &forged, &actions).await.is_err());
+        let ungranted = fixture.owner.vision_context("owner", &fixture.binding, &BTreeSet::new()).await.unwrap_err();
+        assert_eq!(ungranted.code.as_str(), ROBOT_ACTION_NOT_GRANTED);
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -1143,6 +1218,32 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code.as_ref(), ROBOT_OFFLINE);
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+
+        let descriptors = fixture.owner.tools.tools("robot-1").await;
+        let (tx, mut rx) = mpsc::channel(8);
+        let client = Arc::new(RobotMcpClient::new(tx, "socket-2".to_owned()));
+        let responder = client.clone();
+        let recorded = fixture.calls.clone();
+        tokio::spawn(async move {
+            while let Some(Frame::Text(frame)) = rx.recv().await {
+                recorded.fetch_add(1, Ordering::SeqCst);
+                let value: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                responder.handle_incoming(serde_json::json!({
+                    "id":value["payload"]["id"],
+                    "result":{"content":[{"type":"text","text":"new connection"}],"isError":false}
+                })).await;
+            }
+        });
+        fixture.owner.tools.attach("robot-1", client, descriptors).await;
+        let refreshed = fixture.owner.resolve_session_tools(
+            &principal(), &AgentSessionId::from("session-1"), &fixture.binding,
+            &BTreeSet::from([ActionId::from(RobotAction::Motion.id())]),
+        ).await.unwrap();
+        let old = tools.invoker.invoke(invocation("robot_gimbal_look", "still-old")).await.unwrap_err();
+        assert_eq!(old.code.as_ref(), ROBOT_OFFLINE, "a fresh owner must not redirect the old invoker");
+        let current = refreshed.invoker.invoke(invocation("robot_gimbal_look", "fresh-connection")).await.unwrap();
+        assert_eq!(current.0["result"], "new connection");
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

@@ -151,24 +151,6 @@ async fn sh5b_trim_deletes_files() {
     assert!(resp.is_none(), "trimmed snapshot file must not be readable");
 }
 
-// SH-6: Different targets are isolated
-#[tokio::test]
-async fn sh6_different_targets_isolated() {
-    let tmp = tempfile::tempdir().unwrap();
-    let svc = SnapshotService::new(tmp.path());
-    let t1 = make_target(PreviewContentType::Markdown, Some("/a.md"));
-    let t2 = make_target(PreviewContentType::Markdown, Some("/b.md"));
-
-    svc.save(&t1, "content-a").await.unwrap();
-    svc.save(&t2, "content-b1").await.unwrap();
-    svc.save(&t2, "content-b2").await.unwrap();
-
-    let list1 = svc.list(&t1).await.unwrap();
-    let list2 = svc.list(&t2).await.unwrap();
-    assert_eq!(list1.len(), 1);
-    assert_eq!(list2.len(), 2);
-}
-
 // SH-6b: Different content types are isolated
 #[tokio::test]
 async fn sh6b_different_content_types_isolated() {

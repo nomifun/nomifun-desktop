@@ -15792,14 +15792,8 @@ mod tests {
         assert!(service.search_cache_len() >= 1);
 
         let request = RelocateTreeEntryRequest {
-            source_path: "source".into(),
-            destination_parent_path: "archive".into(),
             new_name: Some("moved".into()),
-            request_id: "relocate-directory-once".into(),
-            conflict_policy: RelocateConflictPolicy::Reject,
-            entry_id: None,
-            destination_parent_id: None,
-            expected_revision: None,
+            ..relocation_request("relocate-directory-once", "source", "archive")
         };
         let first = service
             .relocate_tree_entry(&info.knowledge_base_id, request.clone())
@@ -15846,16 +15840,7 @@ mod tests {
         let mismatched_replay = service
             .relocate_tree_entry(
                 &info.knowledge_base_id,
-                RelocateTreeEntryRequest {
-                    source_path: "archive/moved".into(),
-                    destination_parent_path: "".into(),
-                    new_name: None,
-                    request_id: "relocate-directory-once".into(),
-                    conflict_policy: RelocateConflictPolicy::Reject,
-                    entry_id: None,
-                    destination_parent_id: None,
-                    expected_revision: None,
-                },
+                relocation_request("relocate-directory-once", "archive/moved", ""),
             )
             .await
             .unwrap_err();
@@ -15889,16 +15874,7 @@ mod tests {
             .entry_id
             .clone()
             .unwrap();
-        let request = RelocateTreeEntryRequest {
-            request_id: "sqlite-crash-after-rename".into(),
-            source_path: "docs/note.md".into(),
-            destination_parent_path: "archive".into(),
-            new_name: None,
-            conflict_policy: RelocateConflictPolicy::Reject,
-            entry_id: None,
-            destination_parent_id: None,
-            expected_revision: None,
-        };
+        let request = relocation_request("sqlite-crash-after-rename", "docs/note.md", "archive");
         let prepared = operation_repository
             .prepare_operation(&PrepareKnowledgeTreeOperationParams {
                 knowledge_base_id: info.knowledge_base_id.clone(),
@@ -16110,14 +16086,8 @@ mod tests {
             .await
             .unwrap();
         let request = RelocateTreeEntryRequest {
-            request_id: "sqlite-case-temp-crash".into(),
-            source_path: "Note.md".into(),
-            destination_parent_path: "".into(),
             new_name: Some("note.md".into()),
-            conflict_policy: RelocateConflictPolicy::Reject,
-            entry_id: None,
-            destination_parent_id: None,
-            expected_revision: None,
+            ..relocation_request("sqlite-case-temp-crash", "Note.md", "")
         };
         let prepared = operation_repository
             .prepare_operation(&PrepareKnowledgeTreeOperationParams {
@@ -16185,16 +16155,7 @@ mod tests {
             .list_tree(info.knowledge_base_id.as_str(), "")
             .await
             .unwrap();
-        let marker_request = RelocateTreeEntryRequest {
-            request_id: "sqlite-filesystem-marker-crash".into(),
-            source_path: "second.md".into(),
-            destination_parent_path: "archive".into(),
-            new_name: None,
-            conflict_policy: RelocateConflictPolicy::Reject,
-            entry_id: None,
-            destination_parent_id: None,
-            expected_revision: None,
-        };
+        let marker_request = relocation_request("sqlite-filesystem-marker-crash", "second.md", "archive");
         let marker = recovered_operations
             .prepare_operation(&PrepareKnowledgeTreeOperationParams {
                 knowledge_base_id: info.knowledge_base_id.clone(),
@@ -16399,16 +16360,7 @@ mod tests {
             .create_base("retry", "", Some(vault.to_str().unwrap()), None)
             .await
             .unwrap();
-        let request = RelocateTreeEntryRequest {
-            request_id: "durable-safe-retry".into(),
-            source_path: "note.md".into(),
-            destination_parent_path: "archive".into(),
-            new_name: None,
-            conflict_policy: RelocateConflictPolicy::Reject,
-            entry_id: None,
-            destination_parent_id: None,
-            expected_revision: None,
-        };
+        let request = relocation_request("durable-safe-retry", "note.md", "archive");
         let first_error = service
             .relocate_tree_entry(info.knowledge_base_id.as_str(), request.clone())
             .await
@@ -16431,16 +16383,7 @@ mod tests {
         assert!(vault.join("archive/note.md").is_file());
         assert!(!vault.join("note.md").exists());
 
-        let no_op_request = RelocateTreeEntryRequest {
-            request_id: "durable-exact-no-op".into(),
-            source_path: "archive/note.md".into(),
-            destination_parent_path: "archive".into(),
-            new_name: None,
-            conflict_policy: RelocateConflictPolicy::Reject,
-            entry_id: None,
-            destination_parent_id: None,
-            expected_revision: None,
-        };
+        let no_op_request = relocation_request("durable-exact-no-op", "archive/note.md", "archive");
         let no_op = service
             .relocate_tree_entry(
                 info.knowledge_base_id.as_str(),
@@ -16552,14 +16495,11 @@ mod tests {
                 RelocateTreeEntryRequest {
                     // Stable identities win over stale path locators. Legacy
                     // and projection-degraded callers continue using paths.
-                    source_path: "stale/docs".into(),
-                    destination_parent_path: "stale/archive".into(),
                     new_name: Some("moved".into()),
-                    request_id: "projected-relocate".into(),
-                    conflict_policy: RelocateConflictPolicy::Reject,
                     entry_id: Some(docs_id.clone()),
                     destination_parent_id: Some(archive_id.clone()),
                     expected_revision: Some(docs_revision),
+                    ..relocation_request("projected-relocate", "stale/docs", "stale/archive")
                 },
             )
             .await
@@ -16637,14 +16577,9 @@ mod tests {
             .relocate_tree_entry(
                 info.knowledge_base_id.as_str(),
                 RelocateTreeEntryRequest {
-                    source_path: "archive/external-rename".into(),
-                    destination_parent_path: "".into(),
-                    new_name: None,
-                    request_id: "projected-stale-revision".into(),
-                    conflict_policy: RelocateConflictPolicy::Reject,
                     entry_id: Some(docs_id),
-                    destination_parent_id: None,
                     expected_revision: Some(moved_revision),
+                    ..relocation_request("projected-stale-revision", "archive/external-rename", "")
                 },
             )
             .await
@@ -16742,14 +16677,9 @@ mod tests {
             .relocate_tree_entry(
                 info.knowledge_base_id.as_str(),
                 RelocateTreeEntryRequest {
-                    source_path: "docs".into(),
-                    destination_parent_path: "archive".into(),
-                    new_name: None,
-                    request_id: "projection-cas-recovery".into(),
-                    conflict_policy: RelocateConflictPolicy::Reject,
                     entry_id: Some(docs_id.clone()),
-                    destination_parent_id: None,
                     expected_revision: Some(docs_revision),
+                    ..relocation_request("projection-cas-recovery", "docs", "archive")
                 },
             )
             .await
@@ -16887,16 +16817,7 @@ mod tests {
             let error = service
                 .relocate_tree_entry(
                     &info.knowledge_base_id,
-                    RelocateTreeEntryRequest {
-                        source_path: source.into(),
-                        destination_parent_path: destination.into(),
-                        new_name: None,
-                        request_id: request_id.into(),
-                        conflict_policy: RelocateConflictPolicy::Reject,
-                        entry_id: None,
-                        destination_parent_id: None,
-                        expected_revision: None,
-                    },
+                    relocation_request(request_id, source, destination),
                 )
                 .await
                 .unwrap_err();
@@ -16929,16 +16850,7 @@ mod tests {
         let error = service
             .relocate_tree_entry(
                 &info.knowledge_base_id,
-                RelocateTreeEntryRequest {
-                    source_path: "docs".into(),
-                    destination_parent_path: "target".into(),
-                    new_name: None,
-                    request_id: "reject-linked-tree".into(),
-                    conflict_policy: RelocateConflictPolicy::Reject,
-                    entry_id: None,
-                    destination_parent_id: None,
-                    expected_revision: None,
-                },
+                relocation_request("reject-linked-tree", "docs", "target"),
             )
             .await
             .unwrap_err();
@@ -16979,16 +16891,7 @@ mod tests {
         let moved = service
             .relocate_tree_entry(
                 &info.knowledge_base_id,
-                RelocateTreeEntryRequest {
-                    source_path: "snapshots/page.md".into(),
-                    destination_parent_path: "".into(),
-                    new_name: None,
-                    request_id: "managed-snapshot".into(),
-                    conflict_policy: RelocateConflictPolicy::Reject,
-                    entry_id: None,
-                    destination_parent_id: None,
-                    expected_revision: None,
-                },
+                relocation_request("managed-snapshot", "snapshots/page.md", ""),
             )
             .await
             .unwrap();
@@ -17711,14 +17614,9 @@ mod tests {
             .relocate_tree_entry(
                 info.knowledge_base_id.as_str(),
                 RelocateTreeEntryRequest {
-                    request_id: generate_id(),
-                    source_path: managed.rel_path.clone(),
-                    destination_parent_path: "category".into(),
                     entry_id: managed.entry_id.clone(),
-                    destination_parent_id: None,
-                    new_name: None,
                     expected_revision: managed.revision,
-                    conflict_policy: RelocateConflictPolicy::Reject,
+                    ..relocation_request(generate_id(), managed.rel_path.clone(), "category")
                 },
             )
             .await
@@ -17730,16 +17628,7 @@ mod tests {
         service
             .relocate_tree_entry(
                 info.knowledge_base_id.as_str(),
-                RelocateTreeEntryRequest {
-                    request_id: generate_id(),
-                    source_path: "category".into(),
-                    destination_parent_path: "archive".into(),
-                    entry_id: None,
-                    destination_parent_id: None,
-                    new_name: None,
-                    expected_revision: None,
-                    conflict_policy: RelocateConflictPolicy::Reject,
-                },
+                relocation_request(generate_id(), "category", "archive"),
             )
             .await
             .unwrap();
@@ -18345,14 +18234,9 @@ mod tests {
             .relocate_tree_entry(
                 info.knowledge_base_id.as_str(),
                 RelocateTreeEntryRequest {
-                    request_id: generate_id(),
-                    source_path: captured.rel_path,
-                    destination_parent_path: String::new(),
                     entry_id: captured.entry_id,
-                    destination_parent_id: None,
-                    new_name: None,
                     expected_revision: captured.revision,
-                    conflict_policy: RelocateConflictPolicy::Reject,
+                    ..relocation_request(generate_id(), captured.rel_path, String::new())
                 },
             )
             .await
@@ -18808,14 +18692,10 @@ mod tests {
             .relocate_tree_entry(
                 kb.knowledge_base_id.as_str(),
                 RelocateTreeEntryRequest {
-                    request_id: "editor-identity-move".into(),
-                    source_path: "draft.md".into(),
-                    destination_parent_path: "archive".into(),
                     entry_id: draft.entry_id.clone(),
                     destination_parent_id: archive.entry_id.clone(),
-                    new_name: None,
                     expected_revision: draft.revision,
-                    conflict_policy: RelocateConflictPolicy::Reject,
+                    ..relocation_request("editor-identity-move", "draft.md", "archive")
                 },
             )
             .await
@@ -21584,6 +21464,55 @@ mod tests {
         KnowledgeBinding { enabled: true, writeback, ..Default::default() }
     }
 
+    fn relocation_request(
+        request_id: impl Into<String>,
+        source_path: impl Into<String>,
+        destination_parent_path: impl Into<String>,
+    ) -> RelocateTreeEntryRequest {
+        RelocateTreeEntryRequest {
+            request_id: request_id.into(),
+            source_path: source_path.into(),
+            destination_parent_path: destination_parent_path.into(),
+            new_name: None,
+            conflict_policy: RelocateConflictPolicy::Reject,
+            entry_id: None,
+            destination_parent_id: None,
+            expected_revision: None,
+        }
+    }
+
+    fn writeback_binding(kb_id: &KnowledgeBaseId) -> KnowledgeBinding {
+        KnowledgeBinding {
+            kb_ids: vec![kb_id.clone()],
+            ..wb_binding(true)
+        }
+    }
+
+    fn writeback_mount(kb_id: &KnowledgeBaseId) -> KnowledgeMountInfo {
+        KnowledgeMountInfo {
+            knowledge_base_id: kb_id.clone(),
+            name: "领域库".into(),
+            description: String::new(),
+            rel_path: ".nomi/knowledge/领域库".into(),
+            toc: Vec::new(),
+            summary: None,
+            live_sources: Vec::new(),
+        }
+    }
+
+    fn writeback_request(kb_id: &KnowledgeBaseId) -> TurnWritebackRequest {
+        TurnWritebackRequest {
+            mounts: vec![writeback_mount(kb_id)],
+            binding: writeback_binding(kb_id),
+            surface: WriteSurface::RegularChat,
+            user_text: "u".into(),
+            assistant_text: "a".into(),
+            model: None,
+            captured_configuration: None,
+            cancellation: None,
+        }
+    }
+
     #[tokio::test]
     async fn search_cache_serves_unchanged_and_invalidates_on_edit() {
         let (svc, kb_id, _dir) = test_service_with_file("doc.md", "# 标题\n市盈率 PER 内容").await;
@@ -21696,11 +21625,8 @@ mod tests {
                 "terminal",
                 TEST_SESSION_ID,
                 KnowledgeBinding {
-                    enabled: true,
-                    writeback: true,
                     writeback_eagerness: "conservative".into(),
-                    kb_ids: vec![kb_id],
-                    ..Default::default()
+                    ..writeback_binding(&kb_id)
                 },
             )
             .await
@@ -21916,9 +21842,14 @@ mod tests {
         let token = CancellationToken::new();
         let request = TurnWritebackRequest {
             mounts: service.mount_info_for_bases(std::slice::from_ref(&id)).await.unwrap(),
-            binding: KnowledgeBinding { enabled:true,writeback:true,writeback_eagerness:"auto".into(),kb_ids:vec![id],..Default::default() },
-            surface:WriteSurface::RegularChat,user_text:"Remember this lesson".into(),assistant_text:"A durable lesson".into(),
-            model:None,captured_configuration:None,cancellation:Some(token.clone()),
+            binding: KnowledgeBinding {
+                writeback_eagerness: "auto".into(),
+                ..writeback_binding(&id)
+            },
+            user_text: "Remember this lesson".into(),
+            assistant_text: "A durable lesson".into(),
+            cancellation: Some(token.clone()),
+            ..writeback_request(&id)
         };
         let owner = service.clone();
         let task = tokio::spawn(async move { owner.finalize_turn_writeback(request).await });
@@ -21966,27 +21897,18 @@ mod tests {
 
         let report = tokio::time::timeout(Duration::from_secs(10), svc.finalize_turn_writeback(TurnWritebackRequest {
             mounts: vec![KnowledgeMountInfo {
-                knowledge_base_id: kb_id.clone(),
                 name: "writeback".into(),
-                description: String::new(),
                 rel_path: ".nomi/knowledge/writeback".into(),
                 toc: vec!["README.md — Existing index".into()],
-                summary: None,
-                live_sources: Vec::new(),
+                ..writeback_mount(&kb_id)
             }],
             binding: KnowledgeBinding {
-                enabled: true,
-                writeback: true,
                 writeback_eagerness: "auto".into(),
-                kb_ids: vec![kb_id.clone()],
-                ..Default::default()
+                ..writeback_binding(&kb_id)
             },
-            surface: WriteSurface::RegularChat,
             user_text: "Remember this durable lesson.".into(),
             assistant_text: "Preserve the index and add the new note.".into(),
-            model: None,
-            captured_configuration: None,
-            cancellation: None,
+            ..writeback_request(&kb_id)
         })).await.expect("a prior candidate must not make the next update refresh under a tree reader");
 
         assert_eq!(report.status, TurnWritebackStatus::Written, "{report:?}");
@@ -22157,27 +22079,17 @@ mod tests {
         let report = svc
             .finalize_turn_writeback(TurnWritebackRequest {
                 mounts: vec![KnowledgeMountInfo {
-                    knowledge_base_id: KnowledgeBaseId::parse(kb_id.clone()).unwrap(),
-                    name: "领域库".into(),
                     description: "项目复用知识".into(),
-                    rel_path: ".nomi/knowledge/领域库".into(),
                     toc: vec!["terms.md — 术语表".into()],
-                    summary: None,
-                    live_sources: Vec::new(),
+                    ..writeback_mount(&kb_id)
                 }],
                 binding: KnowledgeBinding {
-                    enabled: true,
-                    writeback: true,
                     writeback_eagerness: "auto".into(),
-                    kb_ids: vec![KnowledgeBaseId::parse(kb_id.clone()).unwrap()],
-                    ..Default::default()
+                    ..writeback_binding(&kb_id)
                 },
-                surface: WriteSurface::RegularChat,
                 user_text: "请分析为什么回写没有产出。".into(),
                 assistant_text: "结论：触发时机应放在最终答复之后。".into(),
-                model: None,
-                captured_configuration: None,
-                cancellation: None,
+                ..writeback_request(&kb_id)
             })
             .await;
 
@@ -22214,31 +22126,12 @@ mod tests {
 
         let report = svc
             .finalize_turn_writeback(TurnWritebackRequest {
-                mounts: vec![KnowledgeMountInfo {
-                    knowledge_base_id: kb_id.clone(),
-                    name: "领域库".into(),
-                    description: String::new(),
-                    rel_path: ".nomi/knowledge/领域库".into(),
-                    toc: Vec::new(),
-                    summary: None,
-                    live_sources: Vec::new(),
-                }],
-                binding: KnowledgeBinding {
-                    enabled: true,
-                    writeback: true,
-                    kb_ids: vec![kb_id],
-                    ..Default::default()
-                },
-                surface: WriteSurface::RegularChat,
-                user_text: "u".into(),
-                assistant_text: "a".into(),
                 model: Some(ProviderWithModel {
                     provider_id: TEST_PROVIDER_ID_2.to_owned(),
                     model: "configured-name".into(),
                     use_model: Some("effective-name".into()),
                 }),
-                captured_configuration: None,
-                cancellation: None,
+                ..writeback_request(&kb_id)
             })
             .await;
 
@@ -22268,29 +22161,7 @@ mod tests {
         svc.set_completer(completer.clone());
 
         let report = svc
-            .finalize_turn_writeback(TurnWritebackRequest {
-                mounts: vec![KnowledgeMountInfo {
-                    knowledge_base_id: kb_id.clone(),
-                    name: "领域库".into(),
-                    description: String::new(),
-                    rel_path: ".nomi/knowledge/领域库".into(),
-                    toc: Vec::new(),
-                    summary: None,
-                    live_sources: Vec::new(),
-                }],
-                binding: KnowledgeBinding {
-                    enabled: true,
-                    writeback: true,
-                    kb_ids: vec![kb_id.clone()],
-                    ..Default::default()
-                },
-                surface: WriteSurface::RegularChat,
-                user_text: "u".into(),
-                assistant_text: "a".into(),
-                model: None,
-                captured_configuration: None,
-                cancellation: None,
-            })
+            .finalize_turn_writeback(writeback_request(&kb_id))
             .await;
 
         assert_eq!(report.status, TurnWritebackStatus::Failed);
@@ -22317,29 +22188,7 @@ mod tests {
         svc.set_completer(completer.clone());
 
         let report = svc
-            .finalize_turn_writeback(TurnWritebackRequest {
-                mounts: vec![KnowledgeMountInfo {
-                    knowledge_base_id: kb_id.clone(),
-                    name: "领域库".into(),
-                    description: String::new(),
-                    rel_path: ".nomi/knowledge/领域库".into(),
-                    toc: Vec::new(),
-                    summary: None,
-                    live_sources: Vec::new(),
-                }],
-                binding: KnowledgeBinding {
-                    enabled: true,
-                    writeback: true,
-                    kb_ids: vec![kb_id],
-                    ..Default::default()
-                },
-                surface: WriteSurface::RegularChat,
-                user_text: "u".into(),
-                assistant_text: "a".into(),
-                model: None,
-                captured_configuration: None,
-                cancellation: None,
-            })
+            .finalize_turn_writeback(writeback_request(&kb_id))
             .await;
 
         assert_eq!(report.status, TurnWritebackStatus::Failed);
@@ -22364,28 +22213,12 @@ mod tests {
 
         let report = svc
             .finalize_turn_writeback(TurnWritebackRequest {
-                mounts: vec![KnowledgeMountInfo {
-                    knowledge_base_id: KnowledgeBaseId::parse(kb_id.clone()).unwrap(),
-                    name: "领域库".into(),
-                    description: String::new(),
-                    rel_path: ".nomi/knowledge/领域库".into(),
-                    toc: Vec::new(),
-                    summary: None,
-                    live_sources: Vec::new(),
-                }],
                 binding: KnowledgeBinding {
-                    enabled: true,
                     writeback: false,
                     writeback_eagerness: "auto".into(),
-                    kb_ids: vec![KnowledgeBaseId::parse(kb_id).unwrap()],
-                    ..Default::default()
+                    ..writeback_binding(&kb_id)
                 },
-                surface: WriteSurface::RegularChat,
-                user_text: "u".into(),
-                assistant_text: "a".into(),
-                model: None,
-                captured_configuration: None,
-                cancellation: None,
+                ..writeback_request(&kb_id)
             })
             .await;
 
@@ -22409,29 +22242,7 @@ mod tests {
         svc.set_completer(ScriptedCompleter::new(&[&reply]));
 
         let report = svc
-            .finalize_turn_writeback(TurnWritebackRequest {
-                mounts: vec![KnowledgeMountInfo {
-                    knowledge_base_id: KnowledgeBaseId::parse(kb_id.clone()).unwrap(),
-                    name: "领域库".into(),
-                    description: String::new(),
-                    rel_path: ".nomi/knowledge/领域库".into(),
-                    toc: Vec::new(),
-                    summary: None,
-                    live_sources: Vec::new(),
-                }],
-                binding: KnowledgeBinding {
-                    enabled: true,
-                    writeback: true,
-                    kb_ids: vec![KnowledgeBaseId::parse(kb_id).unwrap()],
-                    ..Default::default()
-                },
-                surface: WriteSurface::RegularChat,
-                user_text: "u".into(),
-                assistant_text: "a".into(),
-                model: None,
-                captured_configuration: None,
-                cancellation: None,
-            })
+            .finalize_turn_writeback(writeback_request(&kb_id))
             .await;
 
         assert_eq!(report.status, TurnWritebackStatus::Failed);
@@ -22463,27 +22274,16 @@ mod tests {
         let report = svc
             .finalize_turn_writeback(TurnWritebackRequest {
                 mounts: vec![KnowledgeMountInfo {
-                    knowledge_base_id: KnowledgeBaseId::parse(kb_id.clone()).unwrap(),
-                    name: "领域库".into(),
-                    description: String::new(),
-                    rel_path: ".nomi/knowledge/领域库".into(),
                     toc: vec!["patterns/safe.md — Safe".into()],
-                    summary: None,
-                    live_sources: Vec::new(),
+                    ..writeback_mount(&kb_id)
                 }],
                 binding: KnowledgeBinding {
-                    enabled: true,
-                    writeback: true,
                     writeback_eagerness: "auto".into(),
-                    kb_ids: vec![KnowledgeBaseId::parse(kb_id.clone()).unwrap()],
-                    ..Default::default()
+                    ..writeback_binding(&kb_id)
                 },
-                surface: WriteSurface::RegularChat,
                 user_text: "请补充这个经验。".into(),
                 assistant_text: "结论：应保留旧内容并追加新经验。".into(),
-                model: None,
-                captured_configuration: None,
-                cancellation: None,
+                ..writeback_request(&kb_id)
             })
             .await;
 
@@ -22508,27 +22308,16 @@ mod tests {
 
         let request = |user_text: &str| TurnWritebackRequest {
             mounts: vec![KnowledgeMountInfo {
-                knowledge_base_id: KnowledgeBaseId::parse(kb_id.clone()).unwrap(),
-                name: "领域库".into(),
-                description: String::new(),
-                rel_path: ".nomi/knowledge/领域库".into(),
                 toc: vec!["patterns/shared.md — Shared".into()],
-                summary: None,
-                live_sources: Vec::new(),
+                ..writeback_mount(&kb_id)
             }],
             binding: KnowledgeBinding {
-                enabled: true,
-                writeback: true,
                 writeback_eagerness: "auto".into(),
-                kb_ids: vec![KnowledgeBaseId::parse(kb_id.clone()).unwrap()],
-                ..Default::default()
+                ..writeback_binding(&kb_id)
             },
-            surface: WriteSurface::RegularChat,
             user_text: user_text.into(),
             assistant_text: "final durable answer".into(),
-            model: None,
-            captured_configuration: None,
-            cancellation: None,
+            ..writeback_request(&kb_id)
         };
 
         let (alpha, beta) = tokio::join!(
@@ -22571,27 +22360,17 @@ mod tests {
 
         let request = |user_text: &str| TurnWritebackRequest {
             mounts: vec![KnowledgeMountInfo {
-                knowledge_base_id: kb_id.clone(),
                 name: "Shared".into(),
-                description: String::new(),
                 rel_path: ".nomi/knowledge/Shared".into(),
-                toc: Vec::new(),
-                summary: None,
-                live_sources: Vec::new(),
+                ..writeback_mount(&kb_id)
             }],
             binding: KnowledgeBinding {
-                enabled: true,
-                writeback: true,
                 writeback_eagerness: "auto".into(),
-                kb_ids: vec![kb_id.clone()],
-                ..Default::default()
+                ..writeback_binding(&kb_id)
             },
-            surface: WriteSurface::RegularChat,
             user_text: user_text.into(),
             assistant_text: "final durable answer".into(),
-            model: None,
-            captured_configuration: None,
-            cancellation: None,
+            ..writeback_request(&kb_id)
         };
 
         let (alpha, beta) = tokio::join!(
@@ -22638,29 +22417,7 @@ mod tests {
         svc.set_completer(ScriptedCompleter::new(&[&reply]));
 
         let report = svc
-            .finalize_turn_writeback(TurnWritebackRequest {
-                mounts: vec![KnowledgeMountInfo {
-                    knowledge_base_id: KnowledgeBaseId::parse(kb_id.clone()).unwrap(),
-                    name: "领域库".into(),
-                    description: String::new(),
-                    rel_path: ".nomi/knowledge/领域库".into(),
-                    toc: Vec::new(),
-                    summary: None,
-                    live_sources: Vec::new(),
-                }],
-                binding: KnowledgeBinding {
-                    enabled: true,
-                    writeback: true,
-                    kb_ids: vec![KnowledgeBaseId::parse(kb_id.clone()).unwrap()],
-                    ..Default::default()
-                },
-                surface: WriteSurface::RegularChat,
-                user_text: "u".into(),
-                assistant_text: "a".into(),
-                model: None,
-                captured_configuration: None,
-                cancellation: None,
-            })
+            .finalize_turn_writeback(writeback_request(&kb_id))
             .await;
 
         assert_eq!(report.status, TurnWritebackStatus::NoCandidate, "{report:?}");

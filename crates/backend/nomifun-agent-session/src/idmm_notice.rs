@@ -69,8 +69,9 @@ impl AgentSessionStore {
     }
 }
 
-/// Only presentation metadata is compared here. Runtime context still reads
-/// canonical events, and notices never modify this source message projection.
+/// The exact closed question may be a public assistant message or a typed
+/// input handoff. Rebuild the latter from its original Turn facts in this same
+/// transaction; a renderer projection cannot create an answer authority.
 pub(super) async fn question_is_current_tx(
     tx: &mut Transaction<'_, Sqlite>,
     session_id: &AgentSessionId,
@@ -92,6 +93,33 @@ pub(super) async fn question_is_current_tx(
     if boundary_changed {
         return Ok(false);
     }
+    let turn = sqlx::query_as::<_, StoredTurnHistoryRow>(
+        "SELECT session_id,turn_id,source_message_id,state,result_json,error_json,started_event_id,accepted_at,started_at,finished_at \
+         FROM agent_turns WHERE session_id=? ORDER BY accepted_at DESC LIMIT 1")
+        .bind(session_id.as_ref()).fetch_optional(&mut **tx).await?;
+    let Some(turn)=turn else {return Ok(false);};
+    if turn.state!="completed" {return Ok(false);}
+    let operation=OperationId::from(turn.turn_id.clone());
+    if turn.started_event_id == question.message_id {
+        let row=turn;
+        let Some(summary) = turn_history_projection_from_row(row)? else { return Ok(false); };
+        let mut summaries = [summary];
+        history_turn_outcome::hydrate(tx, session_id, &mut summaries).await?;
+        knowledge_writeback::hydrate(tx, session_id, &mut summaries).await?;
+        let summary = &summaries[0];
+        let outcome: Option<nomifun_agent_contracts::AgentTurnOutcome> = summary.projection.get("turn_outcome")
+            .cloned().map(serde_json::from_value).transpose()?;
+        let Some(nomifun_agent_contracts::AgentTurnOutcome::InputRequired { request_id }) = outcome else { return Ok(false); };
+        let request: nomifun_agent_contracts::AgentUserInputRequest = serde_json::from_value(
+            summary.projection.get("user_input_request").cloned()
+                .ok_or_else(|| SessionStoreError::InvalidPayload("IDMM handoff has no canonical question".into()))?)?;
+        request.validate().map_err(SessionStoreError::InvalidPayload)?;
+        return Ok(summary.last_seq == question.sequence && summary.semantic_digest == question.fingerprint
+            && request.request_id.as_ref() == request_id);
+    }
+    let Some(nomifun_agent_contracts::AgentTurnOutcome::Answered {message_ids})=
+        history_turn_outcome::read(tx,session_id,&operation).await?.turn_outcome else {return Ok(false);};
+    if !message_ids.iter().any(|id|id==&question.message_id) {return Ok(false);}
     let latest: Option<(String, i64, String, String)> = sqlx::query_as(
         "SELECT projection_id, last_seq, semantic_digest, projection_json FROM agent_messages \
          WHERE session_id = ? AND presentation_intent = 'message' ORDER BY last_seq DESC LIMIT 1",

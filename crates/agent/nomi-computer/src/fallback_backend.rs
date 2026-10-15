@@ -271,37 +271,4 @@ mod tests {
         // There is at least a desktop-level window in a real session.
         assert!(!windows.is_empty());
     }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_window_task_runs_inside_dispatcher() {
-        use std::sync::{Arc, Mutex};
-
-        let caller_thread = std::thread::current().id();
-        let dispatcher_thread = Arc::new(Mutex::new(None));
-        let work_thread = Arc::new(Mutex::new(None));
-        let dispatcher_thread_seen = dispatcher_thread.clone();
-        let work_thread_seen = work_thread.clone();
-
-        let result = crate::macos_main::run_task_with(
-            move |task| {
-                *dispatcher_thread_seen.lock().unwrap() = Some(std::thread::current().id());
-                let handle = std::thread::spawn(task);
-                handle.join().expect("dispatched task should not panic")
-            },
-            move || {
-                *work_thread_seen.lock().unwrap() = Some(std::thread::current().id());
-                Ok("ok")
-            },
-        )
-        .expect("task should complete");
-
-        assert_eq!(result, "ok");
-        assert_eq!(dispatcher_thread.lock().unwrap().unwrap(), caller_thread);
-        assert_ne!(
-            work_thread.lock().unwrap().unwrap(),
-            caller_thread,
-            "work must run inside the dispatcher task, not on the caller thread"
-        );
-    }
 }

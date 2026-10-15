@@ -33,7 +33,7 @@ After auth, the app opens `/guid`. This is the default session start surface.
 You can choose:
 
 - a model/provider,
-- a reusable preset,
+- an official or personal Agent,
 - skills or MCP tools,
 - a workspace path,
 - and the first prompt.
@@ -43,8 +43,8 @@ You can choose:
 ## 3. Configure A Model
 
 Open **Models** (`/models`) and configure at least one provider. The page owns
-provider credentials, the model catalog, and global reliability settings such as
-IDMM and model failover.
+provider credentials, the model catalog, and model failover settings. Configure
+Intelligent Decision in Agent runtime defaults or the current Session.
 
 ![Model settings](../images/gs-06-quickstart-model-settings.png)
 

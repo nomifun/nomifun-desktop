@@ -4,8 +4,9 @@ NomiFun 围绕一个核心原则构建：**一份 Rust 后端、两种宿主形�
 
 本文档是这张地图的总图。配套文档分别深入介绍各个部分：
 
-- [`backend-crates.md`](backend-crates.zh.md) —— 54 个 `nomifun-*` crate。
-- [`agent-engine.md`](agent-engine.zh.md) —— 11 个 `nomi-*` crate（AI 引擎）。
+- [`backend-crates.md`](backend-crates.zh.md) —— `nomifun-*` 后端 crate。
+- [`agent-engine.md`](agent-engine.zh.md) —— `nomi-*` Agent 引擎 crate。
+- [Agent Session](agent-session.zh.md) —— canonical 事实、模型/Agent 切换与恢复安全。
 - [`agent-execution.zh.md`](agent-execution.zh.md) —— 统一的持久化 AgentExecution 模型。
 - [`frontend.md`](frontend.zh.md) —— React SPA、适配层、路由。
 - [`communication.md`](communication.zh.md) —— HTTP / WebSocket / Tauri IPC / MCP。
@@ -110,13 +111,12 @@ nomifun-desktop/
 │   ├─ desktop/   nomifun-desktop  (Tauri 2 shell, this is "NomiFun" the product)
 │   └─ web/       nomifun-web      (standalone server: /api + SPA on one port)
 ├─ crates/
-│   ├─ agent/     11 nomi-*  crates  → see agent-engine.md
-│   ├─ backend/   54 nomifun-* crates → see backend-crates.md
-│   └─ shared/    3 shared crates
+│   ├─ agent/     nomi-* crates  → see agent-engine.md
+│   ├─ backend/   nomifun-* crates → see backend-crates.md
+│   └─ shared/    shared runtimes
 ├─ ui/            React 19 + Vite 6 + Arco + UnoCSS  → see frontend.md
 └─ docs/
-    ├─ architecture/   (this folder)
-    └─ specs/          dated engineering design specs
+    └─ architecture/   (this folder; navigation: docs/README)
 ```
 
 ## 品牌与标识

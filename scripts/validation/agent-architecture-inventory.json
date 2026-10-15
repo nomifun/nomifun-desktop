@@ -385,7 +385,7 @@
         "2026-10-13, current worktree on arm64 macOS 26.6.2: actual Tauri UI selected High; sole canonical reasoning_effort persisted as high and restored after a normal quit and cold restart.",
         "Actual desktop input executed a production canonical Turn with localhost mock model; write_file receipt, 73-byte managed-workspace artifact and SHA matched, terminal event persisted, and cold UI restored history, tool details and artifact.",
         "Two exact nomifun-app Channel owner/binding checks passed on macOS using real SQLite and ChannelManager with RecordingPlugin/controlled SessionPort; external IM delivery and model reasoning wire behavior were not tested.",
-        "Both actual Command-Q exits had cleanup_verified=true, exact kernel exit 0 and controller final_verified=true; detailed commands, limitations and first failures are in docs/reports/2026-10-13-macos-compatibility-todo.zh.md."
+        "Both actual Command-Q exits had cleanup_verified=true, exact kernel exit 0 and controller final_verified=true; historical commands, limitations and first failures are preserved in Git (252a5279d:docs/reports/2026-10-13-macos-compatibility-todo.zh.md). This is historical evidence, not acceptance for later source; current browser validation is documented in docs/validation/browser-platform.md."
       ]
     }
   ]

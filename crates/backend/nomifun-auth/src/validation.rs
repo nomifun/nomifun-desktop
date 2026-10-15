@@ -71,116 +71,50 @@ pub fn validate_username(username: &str) -> Result<(), AuthError> {
 mod tests {
     use super::*;
 
-    // --- Password validation ---
-
     #[test]
-    fn valid_password() {
-        assert!(validate_password("StrongP@ss1").is_ok());
-    }
-
-    #[test]
-    fn password_exactly_min_length_valid() {
-        assert!(validate_password("abcDEF12").is_ok());
-    }
-
-    #[test]
-    fn password_exactly_max_length() {
+    fn valid_passwords_include_length_boundaries() {
         let max = "a".repeat(128);
-        assert!(validate_password(&max).is_ok());
-    }
-
-    #[test]
-    fn password_too_short() {
-        assert!(matches!(validate_password("short"), Err(AuthError::WeakPassword(_))));
-    }
-
-    #[test]
-    fn password_too_long() {
-        let long = "a".repeat(129);
-        assert!(matches!(validate_password(&long), Err(AuthError::WeakPassword(_))));
-    }
-
-    #[test]
-    fn weak_password_rejected() {
-        for &weak in WEAK_PASSWORDS {
-            assert!(validate_password(weak).is_err(), "expected rejection for: {weak}");
+        for password in ["StrongP@ss1", "StrongP@ss123", "abcDEF12", &max] {
+            assert!(validate_password(password).is_ok(), "rejected {password:?}");
         }
     }
 
     #[test]
-    fn weak_password_case_insensitive() {
-        assert!(validate_password("PASSWORD").is_err());
-        assert!(validate_password("Password").is_err());
-    }
-
-    // --- Username validation ---
-
-    #[test]
-    fn valid_username() {
-        assert!(validate_username("test_user-1").is_ok());
-    }
-
-    #[test]
-    fn username_alphanumeric_only() {
-        assert!(validate_username("abc123").is_ok());
+    fn password_length_and_weak_passwords_are_rejected() {
+        let long = "a".repeat(129);
+        for password in ["short", &long, "PASSWORD", "Password"]
+            .into_iter()
+            .chain(WEAK_PASSWORDS.iter().copied())
+        {
+            assert!(
+                matches!(validate_password(password), Err(AuthError::WeakPassword(_))),
+                "accepted {password:?}"
+            );
+        }
     }
 
     #[test]
-    fn username_exactly_min_length() {
-        assert!(validate_username("abc").is_ok());
-    }
-
-    #[test]
-    fn username_exactly_max_length() {
+    fn valid_usernames_include_length_boundaries_and_allowed_characters() {
         let max = "a".repeat(32);
-        assert!(validate_username(&max).is_ok());
+        for username in [
+            "test_user-1", "admin123", "abc123", "TestUser", "abc", "test-user", "test_user", &max,
+        ] {
+            assert!(validate_username(username).is_ok(), "rejected {username:?}");
+        }
     }
 
     #[test]
-    fn username_too_short() {
-        assert!(matches!(validate_username("ab"), Err(AuthError::InvalidUsername(_))));
-    }
-
-    #[test]
-    fn username_too_long() {
+    fn invalid_usernames_cover_length_characters_and_edge_separators() {
         let long = "a".repeat(33);
-        assert!(matches!(validate_username(&long), Err(AuthError::InvalidUsername(_))));
-    }
-
-    #[test]
-    fn username_invalid_chars() {
-        assert!(validate_username("test@user").is_err());
-        assert!(validate_username("test user").is_err());
-        assert!(validate_username("test.user").is_err());
-    }
-
-    #[test]
-    fn username_starts_with_hyphen() {
-        assert!(validate_username("-test").is_err());
-    }
-
-    #[test]
-    fn username_starts_with_underscore() {
-        assert!(validate_username("_test").is_err());
-    }
-
-    #[test]
-    fn username_ends_with_hyphen() {
-        assert!(validate_username("test-").is_err());
-    }
-
-    #[test]
-    fn username_ends_with_underscore() {
-        assert!(validate_username("test_").is_err());
-    }
-
-    #[test]
-    fn username_hyphen_in_middle() {
-        assert!(validate_username("test-user").is_ok());
-    }
-
-    #[test]
-    fn username_underscore_in_middle() {
-        assert!(validate_username("test_user").is_ok());
+        let longer = "a".repeat(100);
+        for username in [
+            "ab", "a", "", &long, &longer, "test@user", "test user", "test.user", "test/user",
+            "-test", "_test", "test-", "test_",
+        ] {
+            assert!(
+                matches!(validate_username(username), Err(AuthError::InvalidUsername(_))),
+                "accepted {username:?}"
+            );
+        }
     }
 }

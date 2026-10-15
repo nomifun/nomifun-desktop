@@ -12,8 +12,6 @@ NomiFun 只提供一个安装 owner 级 Remote 入口，并同时投影为 MCP �
 安装令牌只回答“调用者是谁”，不会选择伙伴、模型、profile、domain、workspace
 或最近 Session。
 
-可复制命令见 [Canonical Remote 对接示例](./remote-capability-api-examples.zh.md)。
-
 ## 安全模型
 
 安装令牌是高权限凭据：
@@ -128,6 +126,67 @@ AgentSession identity。
 和 `recovery: "host_restart_reconcile"`。不要另建 Session 或盲目重复启动
 sidecar；应保留该 ID，并先恢复数据库/Host。
 
+## REST 对接流程
+
+先设置 shell 变量；后续操作始终使用同一个 Session：
+
+```bash
+export HOST=127.0.0.1:25808
+export TOKEN=<installation-access-token>
+export BINDING_ID=<remote-binding-id>
+```
+
+### REST：open
+
+```bash
+curl -s -X POST "http://$HOST/api/remote/open" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"binding_id\":\"$BINDING_ID\",
+    \"idempotency_key\":\"open-1\",
+    \"initial_input\":{\"text\":\"你好\"}
+  }"
+```
+
+保存响应中的 `agent_session_id` 和 cursor，并将返回的会话 ID 设置为 `SESSION_ID` 后继续。
+
+### REST：observe
+
+```bash
+curl -s "http://$HOST/api/remote/observe?agent_session_id=$SESSION_ID&after_seq=0&limit=100" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+后续使用返回的 `next_cursor.seq`；`after_seq` 是 exclusive cursor。
+
+### REST：turn
+
+仅在 observe 已证明 Session ready 后调用：
+
+```bash
+curl -s -X POST "http://$HOST/api/remote/turn" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"agent_session_id\":\"$SESSION_ID\",
+    \"input\":{\"text\":\"继续\"},
+    \"idempotency_key\":\"turn-1\"
+  }"
+```
+
+### REST：cancel
+
+```bash
+curl -s -X POST "http://$HOST/api/remote/cancel" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"agent_session_id\":\"$SESSION_ID\",
+    \"idempotency_key\":\"cancel-1\"
+  }"
+```
+
 ## Canonical CLI
 
 `nomicore` 直接映射四个 REST 操作：
@@ -170,7 +229,6 @@ nomicore remote cancel <agent_session_id> \
 
 ## 相关文档
 
-- [Canonical Remote 对接示例](./remote-capability-api-examples.zh.md)
 - [WebUI 远程访问](./webui-remote-access.zh.md)
 - [Web 服务部署](./web-server-deployment.zh.md)
 - [Computer Use 与 Browser Use](./computer-browser-use.zh.md)

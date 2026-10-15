@@ -1,72 +1,90 @@
-# NomiFun Documentation
+# NomiFun documentation
 
-This folder contains the current technical, operator, and contributor
-documentation for **NomiFun**. Normative current behavior lives under
-`architecture/` and `contributing/`. The `specs/` area keeps dated design
-contracts whose decisions are still load-bearing — a few are referenced
-directly from source — while dated status, progress, and review snapshots are
-not retained; use Git history.
+[简体中文](README.zh.md) · [Project README](../README.md) · [Published mirror](https://www.nomifun.com/docs/)
 
-> New to the project? Start with
-> [Getting Started -> Introduction](getting-started/introduction.md).
-> Chinese docs start at [README.zh.md](README.zh.md).
+This is the maintained documentation for the current Desktop product and its desktop-class WebUI. Start with a task below. Product guides live here; NomiFun Portal publishes a mirror. Implementation facts belong to the current source and stable architecture pages.
 
-## Start Here
+## Get started
 
-| Need | Read |
-| --- | --- |
-| Understand what NomiFun is | [getting-started/introduction.md](getting-started/introduction.md) |
-| Install or run locally | [getting-started/installation.md](getting-started/installation.md) |
-| Try the app quickly | [getting-started/quick-start.md](getting-started/quick-start.md) |
-| Connect providers, local models, and configure failover | [guides/model-routing.md](guides/model-routing.md) |
-| Create with the infinite canvas, assets, prompts, and templates | [guides/creative-studio.md](guides/creative-studio.md) |
-| Host your own programs | [guides/app-hosting.md](guides/app-hosting.md) |
-| Connect a XiaoZhi ESP32 robot | [guides/xiaozhi-robot.md](guides/xiaozhi-robot.md) |
-| Understand the current architecture | [architecture/overview.md](architecture/overview.md) |
-| Understand managed tools and attachment previews | [architecture/external-tools.md](architecture/external-tools.md) |
-| Build or package the project | [contributing/building-and-packaging.md](contributing/building-and-packaging.md) |
-| Look up flags, env vars, or API groups | [reference/](reference/) |
-| Contribute to the project | [../CONTRIBUTING.md](../CONTRIBUTING.md) |
-| Change database schema or identifiers | [contributing/data-and-identifier-standards.md](contributing/data-and-identifier-standards.md) |
-| Community expectations | [../CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) |
-| Report a security issue | [../SECURITY.md](../SECURITY.md) |
-| Release notes and release process | [../CHANGELOG.md](../CHANGELOG.md), [../RELEASING.md](../RELEASING.md) |
-| Understand Agent sessions, logs and content | [Current Agent Session architecture](architecture/agent-session.md) |
+- [Introduction](getting-started/introduction.md)
+- [Installation](getting-started/installation.md)
+- [Quick start](getting-started/quick-start.md)
+- [Product ecosystem](architecture/product-ecosystem.md)
 
-## Current Documentation
+## Use and operate the product
 
-```text
-docs/
-├── getting-started/      introduction, installation, quick start
-├── guides/               current product/operator guides
-├── architecture/         current system architecture and implementation map
-├── reference/            configuration, API overview, troubleshooting, FAQ
-├── contributing/         development, project structure, data/ID standards, build/package notes
-├── specs/                dated design contracts with still-load-bearing decisions
-├── skills/               exported skill docs for external agents
-└── images/               screenshot manifest and referenced images
-```
+- [Desktop app](guides/desktop-app.md)
+- [Models and routing](guides/model-routing.md)
+- [Agents and presets](guides/presets.md)
+- [Creative Studio](guides/creative-studio.md)
+- [Application hosting](guides/app-hosting.md)
+- [Companions](guides/companions.md)
+- [XiaoZhi robot](guides/xiaozhi-robot.md)
+- [MCP and Skills](guides/mcp-and-skills.md)
+- [Computer / Browser Use](guides/computer-browser-use.md)
+- [Terminal](guides/terminal.md)
+- [SSH sessions](guides/ssh-sessions.md)
+- [Requirements / AutoWork](guides/autowork-requirements.md)
+- [Intelligent decision (IDMM)](guides/intelligent-decision.md)
+- [Scheduled tasks](guides/scheduled-tasks.md)
+- [Channels](guides/channels.md)
+- [WebUI remote access](guides/webui-remote-access.md)
+- [Remote capability API](guides/remote-capability-api.md)
+- [Web server deployment](guides/web-server-deployment.md)
 
-Current top-level user surfaces include conversations, terminals, extensible
-model management, Creation (Canvas + asset library), the Agent workbench,
-skills, MCP, open capabilities, requirements/AutoWork, scheduled tasks,
-companions, knowledge, SSH hosts, and application hosting. The
-frontend source of truth is
-`ui/src/renderer/components/layout/Router.tsx`.
+## Understand the architecture
 
-## Documentation scope
+- [System overview](architecture/overview.md)
+- [Backend crates](architecture/backend-crates.md)
+- [Frontend](architecture/frontend.md)
+- [Agent engine](architecture/agent-engine.md)
+- [Canonical Agent Session](architecture/agent-session.md)
+- [Agent execution (Chinese)](architecture/agent-execution.zh.md)
+- [Model providers](architecture/model-providers.md)
+- [Voice](architecture/voice.md)
+- [Communication](architecture/communication.md)
+- [Channel admission](architecture/channels.md)
+- [Browser platform](architecture/browser-platform.md)
+- [Application hosting](architecture/app-hosting.md)
+- [Data and storage](architecture/data-and-storage.md)
+- [ID system](architecture/id-system.md)
+- [External tools](architecture/external-tools.md)
+- [External knowledge MCP (Chinese)](architecture/external-knowledge-mcp.zh.md)
 
-Temporary implementation plans and superseded design drafts are intentionally not kept under `docs/`; use Git history when implementation archaeology is required.
+## Develop, validate and release
 
-## Editing Rules
+- [Contributing](../CONTRIBUTING.md)
+- [Repository instructions](../AGENTS.md)
+- [Project structure](contributing/project-structure.md)
+- [Development and checks](contributing/development.md)
+- [Styling contract](contributing/styling.md)
+- [Data and identifier standards](contributing/data-and-identifier-standards.md)
+- [Building and packaging](contributing/building-and-packaging.md)
+- [Release process](../RELEASING.md)
+- [Signing (Chinese)](../apps/desktop/signing/README.md)
+- [Updater](../apps/desktop/updater/README.md)
+- [Linux service deployment (Chinese)](../packaging/linux/README.md)
+- [Browser validation](validation/browser-platform.md)
+- [Connectivity stack (Chinese)](validation/connectivity-stack.md)
+- [Screenshot manifest](images/SCREENSHOTS.md)
+- [External agent integration Skill](skills/drive-nomifun/SKILL.md)
 
-- Keep English and Simplified Chinese siblings in sync when both exist.
-- Prefer linking to source files for implementation facts rather than repeating
-  fragile line-by-line state.
-- Do not document redirected legacy UI paths as primary navigation.
-- When a feature is not surfaced in `Router.tsx`, do not present it as an active
-  user feature even if backend routes still exist.
-- For scripts, use `package.json` and `bun run help` as the source of truth.
-- For database and identifier work, use
-  [Data and Identifier Standards](contributing/data-and-identifier-standards.md)
-  and the linked executable schema/registry as the source of truth.
+## Look up a detail
+
+- [Configuration](reference/configuration.md)
+- [API overview](reference/api-overview.md)
+- [Troubleshooting](reference/troubleshooting.md)
+- [FAQ](reference/faq.md)
+- [Changelog](../CHANGELOG.md)
+- [Security](../SECURITY.md)
+- [Code of conduct](../CODE_OF_CONDUCT.md)
+
+## Maintain these docs
+
+- Keep user procedures in `guides/`, current contracts in `architecture/`, configuration/API references in `reference/`, contributor workflows in `contributing/`, and repeatable acceptance methods with explicit coverage gaps in `validation/`. Extend the existing owner page first.
+- Update English and Simplified Chinese siblings together. Chinese-only technical pages are marked in this index; do not link missing translations.
+- Link source entry points instead of copying crate counts, route inventories or generated schemas. Routes come from [Router.tsx](../ui/src/renderer/components/layout/Router.tsx); commands come from [package.json](../package.json) and `bun run help`.
+- The shared Desktop renderer supports Tauri and desktop browsers with an **880×600** minimum. The separate Mobile client and its wire contracts do not define renderer layouts.
+- When retiring a design, merge its still-valid decisions into the owner page, repair consumers and remove plans, reports and unused assets together. Runtime-embedded guidance, shipped Skills, fixtures, vendor documents and license notices have separate consumers; inspect them before changing Markdown files.
+- Retain historical plans, handoffs, status snapshots and per-attempt evidence in **Git history**. Use `git log --all -- <path>` and `git show <commit>:<path>` to retrieve them. Do not create an archive tree that can be mistaken for current requirements. Keep actionable unresolved items in their current owner or validation page with accurate evidence limits.
+- Run `bun run check:docs` for local links, images and Markdown anchors, then `git diff --check`. Documentation-only edits do not require a full build; code or contract changes require the affected checks from [AGENTS.md](../AGENTS.md).

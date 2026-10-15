@@ -12,12 +12,13 @@
 //! Its error objects also omit JSON-RPC's mandatory `code`, so this module
 //! carries a tolerant response type.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, timeout};
 
@@ -31,6 +32,8 @@ pub const TOOL_CALL_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_STACK: u64 = 6_144;
 /// Stack for tools that encode JPEG and open TLS.
 const CAMERA_STACK: u64 = 32_768;
+const MAX_TOOL_LIST_PAGES: usize = 16;
+const MAX_EXPOSED_TOOL_NAME_BYTES: usize = 64;
 
 /// A device tool, with both its on-device name and the name models see.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +71,8 @@ impl std::fmt::Display for ToolCallError {
 
 /// Turn `self.gimbal.look` into `robot_gimbal_look`: dots and spaces are not
 /// valid in tool names for most providers, and the `self.` prefix carries no
-/// meaning once the tool is namespaced to this robot.
+/// meaning once the tool is namespaced to this robot. Long aliases retain a
+/// hash of the exact device name within the provider's 64-byte ceiling.
 pub fn exposed_tool_name(device_name: &str) -> String {
     let trimmed = device_name.strip_prefix("self.").unwrap_or(device_name);
     let sanitized: String = trimmed
@@ -81,7 +85,16 @@ pub fn exposed_tool_name(device_name: &str) -> String {
             }
         })
         .collect();
-    format!("robot_{sanitized}")
+    let mut name = format!("robot_{sanitized}");
+    if name.len() > MAX_EXPOSED_TOOL_NAME_BYTES {
+        // Bind the suffix to the complete device identity, not its lossy
+        // provider alias. The sanitized prefix contains ASCII only.
+        let hash = format!("{:x}", Sha256::digest(device_name.as_bytes()));
+        name.truncate(MAX_EXPOSED_TOOL_NAME_BYTES - 1 - 20);
+        name.push('_');
+        name.push_str(&hash[..20]);
+    }
+    name
 }
 
 /// Tolerant JSON-RPC response: `code` is optional because the firmware omits it.
@@ -239,12 +252,16 @@ impl RobotMcpClient {
     }
 
     /// Full toolset, following `nextCursor` until the device stops paging.
+    /// Incomplete or ambiguous catalogs are errors and must not be published.
     pub async fn list_tools(&self) -> anyhow::Result<Vec<RobotToolDescriptor>> {
         let mut out = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut seen_cursors = HashSet::new();
+        let mut seen_device_names = HashSet::new();
+        let mut seen_exposed_names = HashSet::new();
         // A cursor loop needs a bound: a firmware bug repeating one cursor
         // forever must not spin this task.
-        for _ in 0..16 {
+        for _ in 0..MAX_TOOL_LIST_PAGES {
             let params = match &cursor {
                 Some(c) => json!({ "cursor": c }),
                 None => json!({}),
@@ -255,20 +272,38 @@ impl RobotMcpClient {
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             let page: ToolsListPage = serde_json::from_value(result)?;
             for entry in page.tools {
+                if !seen_device_names.insert(entry.name.clone()) {
+                    anyhow::bail!("robot: tools/list repeated device tool {:?}", entry.name);
+                }
+                let exposed_name = exposed_tool_name(&entry.name);
+                // Dispatch resolves the provider name to exactly one device
+                // name. Publishing aliases that collide would silently send
+                // the second tool's call to the first device-side handler.
+                if !seen_exposed_names.insert(exposed_name.clone()) {
+                    anyhow::bail!(
+                        "robot: tools/list tools collide at exposed name {exposed_name:?}"
+                    );
+                }
                 out.push(RobotToolDescriptor {
-                    exposed_name: exposed_tool_name(&entry.name),
+                    exposed_name,
                     device_name: entry.name,
                     description: entry.description,
                     input_schema: entry.input_schema,
                 });
             }
             match page.next_cursor {
-                Some(next) if Some(&next) != cursor.as_ref() => cursor = Some(next),
-                _ => return Ok(out),
+                Some(next) => {
+                    if !seen_cursors.insert(next.clone()) {
+                        anyhow::bail!("robot: tools/list repeated cursor {next:?}");
+                    }
+                    cursor = Some(next);
+                }
+                None => return Ok(out),
             }
         }
-        tracing::warn!("robot: tools/list paging did not terminate; using what we have");
-        Ok(out)
+        anyhow::bail!(
+            "robot: tools/list did not finish within {MAX_TOOL_LIST_PAGES} pages"
+        )
     }
 
     /// Invoke a device tool by its on-device name.
@@ -284,7 +319,7 @@ impl RobotMcpClient {
                 json!({ "name": device_name, "arguments": args, "stackSize": stack }),
             )
             .await?;
-        let text = result
+        let mut text = result
             .get("content")
             .and_then(|c| c.as_array())
             .map(|blocks| {
@@ -295,6 +330,20 @@ impl RobotMcpClient {
                     .join("\n")
             })
             .unwrap_or_default();
+        if let Some(structured) = result.get("structuredContent") {
+            // Structured MCP output can contain data absent from a text
+            // summary. Older firmware supplies text only; newer endpoints may supply
+            // both a human summary and structured data, or structured data
+            // alone. Preserve both without duplicating its usual JSON mirror.
+            let mirrors_structured = serde_json::from_str::<Value>(&text)
+                .is_ok_and(|value| &value == structured);
+            if !mirrors_structured {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&structured.to_string());
+            }
+        }
         if result
             .get("isError")
             .and_then(|v| v.as_bool())
@@ -355,6 +404,18 @@ mod tests {
             "robot_camera_take_photo"
         );
         assert_eq!(exposed_tool_name("weird name"), "robot_weird_name");
+    }
+
+    #[test]
+    fn long_device_names_keep_a_bounded_ascii_alias_bound_to_the_full_identity() {
+        let prefix = format!("self.{}", "设备_status.".repeat(20));
+        let first = exposed_tool_name(&format!("{prefix}read"));
+        let second = exposed_tool_name(&format!("{prefix}write"));
+        assert_eq!(first.len(), 64);
+        assert!(first.starts_with("robot_"));
+        assert!(first.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'));
+        assert_eq!(first, exposed_tool_name(&format!("{prefix}read")));
+        assert_ne!(first, second, "a truncated prefix must retain exact device identity");
     }
 
     #[tokio::test]
@@ -456,6 +517,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_discovery_accepts_a_complete_sixteenth_page() {
+        let client = device(|method, id, params| {
+            assert_eq!(method, "tools/list");
+            let page = params["cursor"].as_str().unwrap_or("0").parse::<usize>().unwrap();
+            let mut result = json!({
+                "tools": [{ "name": format!("self.extension.tool_{page}"), "inputSchema": {} }]
+            });
+            if page < MAX_TOOL_LIST_PAGES - 1 {
+                result["nextCursor"] = json!((page + 1).to_string());
+            }
+            Some(json!({ "id": id, "result": result }))
+        });
+        let tools = client.list_tools().await.unwrap();
+        assert_eq!(tools.len(), MAX_TOOL_LIST_PAGES);
+        assert_eq!(tools.last().unwrap().device_name, "self.extension.tool_15");
+    }
+
+    #[tokio::test]
+    async fn tool_discovery_rejects_a_catalog_that_needs_a_seventeenth_page() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = calls.clone();
+        let client = device(move |method, id, params| {
+            assert_eq!(method, "tools/list");
+            observed.fetch_add(1, Ordering::SeqCst);
+            let page = params["cursor"].as_str().unwrap_or("0").parse::<usize>().unwrap();
+            Some(json!({ "id": id, "result": {
+                "tools": [{ "name": format!("self.extension.tool_{page}") }],
+                "nextCursor": (page + 1).to_string()
+            } }))
+        });
+        let error = client.list_tools().await.expect_err("partial catalogs must not be published");
+        assert!(error.to_string().contains("did not finish within 16 pages"));
+        assert_eq!(calls.load(Ordering::SeqCst), MAX_TOOL_LIST_PAGES);
+    }
+
+    #[tokio::test]
+    async fn tool_discovery_rejects_immediate_and_multi_page_cursor_cycles() {
+        for multi_page in [false, true] {
+            let client = device(move |method, id, params| {
+                assert_eq!(method, "tools/list");
+                let next = match (multi_page, params["cursor"].as_str()) {
+                    (true, Some("A")) => "B",
+                    _ => "A",
+                };
+                Some(json!({ "id": id, "result": { "tools": [], "nextCursor": next } }))
+            });
+            let error = client.list_tools().await.expect_err("a cursor cycle is not completion");
+            assert!(error.to_string().contains("repeated cursor"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_discovery_rejects_ambiguous_provider_aliases() {
+        let client = device(|method, id, _params| {
+            assert_eq!(method, "tools/list");
+            Some(json!({ "id": id, "result": { "tools": [
+                { "name": "self.extension.a.b" },
+                { "name": "self.extension.a_b" }
+            ] } }))
+        });
+        let error = client.list_tools().await.expect_err("dispatch must have one exact target");
+        assert!(error.to_string().contains("collide at exposed name"));
+    }
+
+    #[tokio::test]
+    async fn tool_discovery_rejects_repeated_device_names_across_pages() {
+        let client = device(|method, id, params| {
+            assert_eq!(method, "tools/list");
+            let mut result = json!({ "tools": [{ "name": "self.extension.read" }] });
+            if params.get("cursor").is_none() {
+                result["nextCursor"] = json!("next");
+            }
+            Some(json!({ "id": id, "result": result }))
+        });
+        let error = client.list_tools().await.expect_err("a device name must be unique");
+        assert!(error.to_string().contains("repeated device tool"));
+    }
+
+    #[tokio::test]
     async fn call_tool_returns_the_text_content() {
         let client = device(|method, id, params| {
             if method != "tools/call" {
@@ -478,6 +618,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(text, "{\"pan\":100,\"tilt\":90}");
+    }
+
+    #[tokio::test]
+    async fn structured_tool_output_is_preserved_alone_and_beside_human_text() {
+        for human_text in [None, Some("Ready"), Some("{\"ready\":true}")] {
+            let client = device(move |method, id, _params| {
+                assert_eq!(method, "tools/call");
+                let content = human_text
+                    .map(|text| vec![json!({ "type": "text", "text": text })])
+                    .unwrap_or_default();
+                Some(json!({ "id": id, "result": {
+                    "content": content,
+                    "structuredContent": { "ready": true },
+                    "isError": false
+                } }))
+            });
+            let output = client.call_tool("self.extension.read", json!({})).await.unwrap();
+            match human_text {
+                Some("Ready") => assert_eq!(output, "Ready\n{\"ready\":true}"),
+                _ => assert_eq!(serde_json::from_str::<Value>(&output).unwrap(), json!({"ready": true})),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_error_output_remains_a_failed_tool_call() {
+        let client = device(|method, id, _params| {
+            assert_eq!(method, "tools/call");
+            Some(json!({ "id": id, "result": {
+                "content": [],
+                "structuredContent": { "reason": "busy", "retryable": false },
+                "isError": true
+            } }))
+        });
+        let error = client.call_tool("self.extension.read", json!({})).await.unwrap_err();
+        let ToolCallError::Failed(output) = error else { panic!("isError must remain a failure") };
+        assert_eq!(serde_json::from_str::<Value>(&output).unwrap(), json!({"reason":"busy","retryable":false}));
     }
 
     #[tokio::test]

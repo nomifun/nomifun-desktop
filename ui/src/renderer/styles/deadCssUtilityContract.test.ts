@@ -12,15 +12,14 @@
  *  - the unreachable `borderColors` theme block in uno.config.ts (UnoCSS eats
  *    `-b-` as the bottom direction before consulting the theme, so its keys
  *    could never be reached),
- *  - MIGRATION.md recommending `border-b-base` / `border-b-light` as the "base
- *    border" utilities, which is how the existing occurrences got written,
- *  - colors.ts recommending the doubled-prefix classes (`bg-bg-0` and friends),
- *    which is where all 87 `bg-bg-N` usages came from, and
+ *  - documentation recommending `border-b-base` / `border-b-light` as base
+ *    border utilities instead of explaining the direction trap,
+ *  - colors.ts recommending doubled-prefix classes (`bg-bg-0` and friends), and
  *  - a global `* { border-width: 0; border-style: solid }` reset sneaking into
  *    uno.config.ts's preflights. That reset would make form 7 (border width +
  *    colour with no border-style) impossible to write — and would also strip the
- *    default borders off every native form control in the app. It was evaluated
- *    and rejected; MIGRATION.md records why, and this test keeps it out.
+ *    default borders off native form controls. The maintained styling guide
+ *    records that constraint, and this test keeps the reset out.
  */
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -31,7 +30,10 @@ const stylesDir = dirname(fileURLToPath(import.meta.url));
 const uiRoot = resolve(stylesDir, '../../..');
 
 const unoConfig = readFileSync(join(uiRoot, 'uno.config.ts'), 'utf8');
-const migrationGuide = readFileSync(join(stylesDir, 'MIGRATION.md'), 'utf8');
+const stylingGuide = readFileSync(
+  resolve(uiRoot, '../docs/contributing/styling.md'),
+  'utf8',
+);
 const colorsModule = readFileSync(join(stylesDir, 'colors.ts'), 'utf8');
 
 describe('dead border utility root causes', () => {
@@ -46,27 +48,17 @@ describe('dead border utility root causes', () => {
     expect(unoConfig.includes('rgb(var(--${color}-${d}))')).toBe(true);
   });
 
-  test('MIGRATION.md documents the -b- direction trap instead of recommending it', () => {
-    expect(migrationGuide.includes('border-[var(--border-base)]')).toBe(true);
-    expect(migrationGuide.includes('-b- 方向陷阱')).toBe(true);
-    expect(migrationGuide.includes('check:dead-css')).toBe(true);
+  test('styling guide documents the direction trap and valid border color', () => {
+    expect(stylingGuide.includes('border-[var(--border-base)]')).toBe(true);
+    expect(stylingGuide.includes('direction trap')).toBe(true);
+    expect(stylingGuide.includes('check:dead-css')).toBe(true);
   });
 
-  test('MIGRATION.md quick reference no longer offers the dead border utilities', () => {
-    const quickRefBorderLine =
-      migrationGuide.split('\n').find((line) => line.startsWith('- **边框**:')) ?? '';
-
-    expect(quickRefBorderLine.length > 0).toBe(true);
-    expect(quickRefBorderLine.includes('border-[var(--border-base)]')).toBe(true);
-    expect(quickRefBorderLine.includes('`border-b-base`')).toBe(false);
-    expect(quickRefBorderLine.includes('`border-b-light`')).toBe(false);
-  });
-
-  test('MIGRATION.md documents the slash-alpha ramp trap and its replacement', () => {
-    expect(migrationGuide.includes('text-[rgb(var(--danger-6))]')).toBe(true);
-    expect(migrationGuide.includes('text-danger-6')).toBe(true);
+  test('styling guide documents the slash-alpha ramp trap and its replacement', () => {
+    expect(stylingGuide.includes('text-[rgb(var(--danger-6))]')).toBe(true);
+    expect(stylingGuide.includes('text-danger-6')).toBe(true);
     // The explicit-alpha form is legal and must stay called out as such.
-    expect(migrationGuide.includes('rgba(var(--primary-6),0.12)')).toBe(true);
+    expect(stylingGuide.includes('rgba(var(--primary-6),0.12)')).toBe(true);
   });
 });
 
@@ -80,16 +72,16 @@ describe('doubled-prefix root cause', () => {
     expect(colorsModule.includes('ZERO CSS')).toBe(true);
   });
 
-  test('MIGRATION.md documents that bg-bg-N and bg-0 both emit nothing', () => {
-    expect(migrationGuide.includes('bg-bg-N')).toBe(true);
-    expect(migrationGuide.includes('`bg-0` **也是死的**')).toBe(true);
+  test('styling guide names both doubled-prefix and missing background keys', () => {
+    expect(stylingGuide.includes('bg-bg-N')).toBe(true);
+    expect(stylingGuide.includes('`bg-0`')).toBe(true);
   });
 });
 
 describe('no global border reset', () => {
   test('uno.config.ts preflights do not reset border-width or border-style', () => {
     // A `* { border-width: 0; border-style: solid }` preflight is the Tailwind cure
-    // for form 7, and it is deliberately absent — see MIGRATION.md for the reason.
+    // for form 7, and it is deliberately absent — see styling.md for the reason.
     // 只看 preflights 块本身：头注里提到这两个属性名是讲解，不是重置。
     const preflightBlock = unoConfig.slice(unoConfig.indexOf('preflights:'), unoConfig.indexOf('shortcuts:'));
     expect(preflightBlock.length > 0).toBe(true);
@@ -99,14 +91,13 @@ describe('no global border reset', () => {
     expect(offenders).toEqual([]);
   });
 
-  test('MIGRATION.md records that the global reset was considered and rejected', () => {
-    expect(migrationGuide.includes('为什么不加全局 border reset')).toBe(true);
-    expect(migrationGuide.includes('border-width: 0; border-style: solid;')).toBe(true);
-    expect(migrationGuide.includes('1000+')).toBe(true);
+  test('styling guide records the native-control reason to avoid a global reset', () => {
+    expect(stylingGuide.includes('border-width: 0; border-style: solid;')).toBe(true);
+    expect(stylingGuide.includes('native control borders')).toBe(true);
   });
 
-  test('MIGRATION.md spells out that directional widths need directional styles', () => {
-    expect(migrationGuide.includes('border-b border-b-solid')).toBe(true);
-    expect(migrationGuide.includes('border-width: medium')).toBe(true);
+  test('styling guide spells out that directional widths need directional styles', () => {
+    expect(stylingGuide.includes('border-b border-b-solid')).toBe(true);
+    expect(stylingGuide.includes('border-width: medium')).toBe(true);
   });
 });

@@ -1,6 +1,6 @@
 //! `ark.images` / `ark.video_jobs` — Volcengine Ark (方舟) image generation
-//! and asynchronous video tasks (protocol per
-//! `docs/specs/2026-07-28-provider-protocol-variance.zh.md` §3, Ark domain:
+//! and asynchronous video tasks (routing contract:
+//! `docs/architecture/model-providers.zh.md`; Ark domain:
 //! `ark.cn-beijing.volces.com`, Bearer ARK_API_KEY on the default connection).
 //!
 //! Ark lives under `/api/v3` rather than the OpenAI `/v1` convention. The

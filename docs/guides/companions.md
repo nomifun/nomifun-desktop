@@ -1,18 +1,6 @@
 # Companions
 
-Nomi's virtual companion has grown from "a single nomi" into a **multi-companion
-family**: you can create several companions, use them side by side, raise
-them separately, and give each its own name, character, persona, and
-chat model. Each companion can also be bound to its own **dedicated knowledge
-bases** (turning it into a finance companion, a literature companion, a coding companion,
-…), and **every memory belongs to exactly one companion** — what one companion
-learns is its own, and no other companion can see it. **Learning and skill
-evolution are per companion too**: each one has its own schedule, its own learn
-model, its own position in the event stream, and files everything it distills
-under itself. Only *collection* — which events this machine records at all —
-stays install-wide. Memories, companions, and knowledge bases can each be
-packed into a `.zip` bundle for export/import, making machine-to-machine
-migration painless.
+Create multiple companions with separate names, figures, personas, models and knowledge bindings. Each companion owns its memories, learning settings, skills, XP and mood. Collection settings apply to the installation. Memories, companions and knowledge bases support ZIP export/import.
 
 > The entry point is the **Desktop Companion** page in the sidebar (the `/nomi`
 > route); the right-click menu of any desktop companion window ("Open chat")
@@ -39,7 +27,8 @@ deep-links to Cohabit or Manage. It never appears in the work Session sidebar.
 
 The Cohabit page keeps its docked companion-info sidebar and top controls. The sidebar offers dropdown editing for desktop visibility, mood, Agent and model without opening Manage. Desktop visibility controls the native figure window and is editable in the desktop app. Mood follows learning automatically unless you select a manual emotion, which stays until you return to Automatic and resumes the latest learned mood. Agent and model changes require an idle conversation, apply from the next message and preserve the same Session and history; a failed default save has a separate retry.
 
-The sidebar hides when the available conversation workspace is narrower than 840px and returns at 872px, while respecting a manual close. The existing top sidebar button restores the same docked sidebar when there is enough room; otherwise it asks you to enlarge the window.
+The companion-info sidebar can hide when the conversation pane has insufficient room. Use the sidebar control to restore it after enlarging the pane.
+
 The collapsed figure exposes up to three alternative companions directly. If
 the target already has a visible desktop window it is brought forward; otherwise
 the target is created at the current position and replaces the current figure
@@ -56,8 +45,7 @@ inserts a companion row in the work Session tree.
 1. Click **New companion** on the switcher bar, pick a name and one of the
    six characters (mochi / ink / roux / pixel / bolt / boo).
 2. **The first companion automatically becomes the default companion** (its card
-   carries a "default" badge). The default companion is the fallback whenever
-   a channel has no explicit binding (see the channels section below).
+   carries a "default" badge). Channels still require an explicit binding and do not acquire the default companion automatically.
 3. In **Manage → Overview** you can rename it, swap its character, tune its
    persona, **pick its Agent and chat model**, and toggle the desktop window. Quiet hours
    and learning controls live under **Manage → Evolution**.
@@ -115,120 +103,26 @@ is recommended (each window is an independent WebView instance — the
 UI warns about performance beyond that but does not enforce a limit).
 Right-click any desktop companion to jump straight to its chat.
 
-## Memory ownership, collection, and learning
+## Memory, collection and learning
 
-**Every memory belongs to exactly one companion.** A companion's prompts are
-injected with its own memories and nothing else, its Memory tab lists its own
-rows only, and there is no way — in the UI or the API — to move a memory from one
-companion to another. What A learned, only A knows.
+Every memory belongs to one companion. Its Memory page and conversation context use only its own memories. Learning settings, generated skills, XP and mood also remain separate. Memories saved during chat belong to the companion participating in it.
 
-The *facilities* under `{data_dir}/companion/shared/` are still one per install
-(one collection config, one event tree, one `memory.db` file holding every
-companion's rows and runtime state side by side, each tagged with its owner) —
-but both the **settings** and the **output** are per companion:
+- **Collection** records enabled sources of your working data for learning. This raw event spool is separate from persistent conversation history; recording user input for learning does not remove replies from chat history.
+- **Retention** defaults to a 30-day target and a hard 64 MiB capacity. Expired data is removed after enabled consumers process it, but the capacity limit can evict the oldest unprocessed data. Data Sources shows usage and date range; configurable limits are 7–365 days and 16–512 MiB.
+- **Learning** is configured in each companion's Evolution page, including its interval and learning model. The learning model can differ from its chat model.
+- **Skill generation** can distill repeated work into that companion's skills. Review generated content and the conservative/aggressive setting before relying on it.
+- **Quiet hours** suspend that companion's learning, evolution and desktop bubbles. Incoming IM messages can still receive replies.
 
-- **Collection** — a single pipeline subscribes to the global event
-  bus, gathers your working data according to the collect switches,
-  and writes `shared/events/YYYYMMDD.jsonl`. Raw events default to a
-  **30-day target retention and a hard 64 MiB capacity**. Expired files are
-  removed after every enabled learning/evolution consumer has processed them;
-  the capacity boundary always wins and may evict the oldest unprocessed day.
-  Data Sources lets you configure 7–365 days and 16–512 MiB and shows current
-  usage plus the stored date range. There is no raw-row viewer or manual-clear
-  action. A memory bundle containing raw events must fit the current hard cap
-  before anything is imported; after a successful import, the same retention
-  cleanup runs immediately.
-- **Learning** — **each companion runs its own learner**, on its own interval,
-  with its own learn model (independent of that companion's chat model), from its
-  own position in the shared event stream. Everything a run distills — memories,
-  XP, mood — is filed under the companion whose settings drove it, so only that
-  companion will ever see it. Configure it in that companion's **Evolution** tab;
-  the settings you see there apply to nothing else. Memories saved during a chat
-  belong to the companion in that conversation, as before.
-- **Skill generation** — same shape: each companion mines its own repeated
-  multi-step work into its own skills, with its own 保守/激进 preference. The
-  pattern statistics and your accept/reject decisions behind it stay install-wide,
-  because a repeated tool sequence is a fact about how *you* work and a rejection
-  is your judgement about that pattern, not about a companion.
-- **Quiet hours** gate the two loops as well as the desktop bubbles: inside the
-  window that companion neither interrupts you nor spends tokens. Incoming IM
-  messages are still answered — going silent on a message would be a surprise.
-- **The event spool is shared, the cursors are not.** Every companion reads the
-  same `shared/events/*.jsonl`, each from its own cursor, so a companion you
-  enable later still sees the events its siblings have already consumed. Raw
-  events are only deleted once **every** companion with a consumer enabled has
-  read past them.
+Disabling collection does not delete existing long-term memories or skills. Raw events contain working content and are excluded from exports by default; a raw-event import must fit the current capacity limit.
 
-### XP and mood attribution
-
-| Source | Credited to |
-| --- | --- |
-| Learning-run output (scored by events processed + new memories) | Only the companion that ran (it owns the schedule that produced it) |
-| Companion chat turn (+2) | Only the companion in that conversation |
-| Memory saved during chat (+5) | Only that companion |
-
-**Mood is per companion too**: a learning run sets the mood of the companion that
-ran it. Nothing is pooled across the family any more — not memory, not XP, not
-mood, not the learning schedule. The only genuinely shared things left are the
-raw event recording itself (a property of the machine) and the mined-pattern
-statistics behind skill generation.
 
 ## Binding knowledge bases to a companion
 
-In a companion's **Model & Knowledge tab → Knowledge** section, use the binding
-control to mount one or more knowledge bases on that companion (the binding
-is `('companion', companionId)`). Scope of effect:
+In the companion's management page, use the knowledge binding controls to select its knowledge bases. Bindings belong to that companion; ordinary conversations keep their own selections. Knowledge supplements long-term memory and can be managed from **Knowledge** (`/knowledge`).
 
-- The companion's **companion chats** and the **channel conversations** it
-  greets (conversations carrying `extra.companionId`) mount that companion's bound
-  knowledge bases — searchable during the conversation. Regular
-  conversations without a companionId keep their conversation-level bindings;
-  the two are **not merged**.
-- **What the agent sees**: bases are mounted at
-  `{workspace}/.nomi/knowledge/`, and the injected context carries, per
-  base, the description + an AI digest + "when to consult" hints + a
-  budgeted table of contents (20 entries per base / 60 global,
-  directories aggregated beyond that), plus an explicit retrieval
-  protocol — the agent is told to look things up rather than answer
-  from memory.
-- **Write-back** has exactly one landing spot — the base's body — and an
-  update **appends** the new material to the existing document under
-  compare-and-swap, so a write-back can add to the text you curated but
-  never overwrite it. Whether it happens at all is the **write-back
-  disposition**, set per binding:
-  - **manual** (the default) — the companion writes back only when you
-    ask for it in the conversation; nothing is mined out of a turn
-    behind your back;
-  - **automatic** — the companion decides for itself, against a high
-    bar: only knowledge that is durable, reusable and clearly correct,
-    with trivia, transient state and duplicates filtered out.
-- **AI bootstrap**: the **AI generate** button on the knowledge page
-  (list edit modal and detail page) calls
-  `POST /api/knowledge/bases/{id}/autogen` to produce the base's
-  description and `README.md`; a `.zip` import auto-fills an empty
-  description. Requires a configured AI provider (`409` otherwise).
-- **URL sources**: a base can be created from up to 16 URLs.
-  *snapshot* mode fetches them at creation, converts each page to
-  markdown under the base's `snapshots/` (pages over 32 KB are
-  AI-compressed) and auto-generates the digest — refreshable from the
-  detail page; *live* mode lets the agent fetch at runtime (engines
-  without a web tool can call the gateway tool
-  `nomi_knowledge_fetch_url`). Only public `http/https` URLs are
-  accepted (SSRF guard).
-- The companion can also **grow its own libraries**: the platform Gateway
-  ships seven knowledge tools (list / bindings / create / write /
-  autogen / fetch-url), and knowledge-deposit tips are built into the
-  companion's system prompt — a companion or channel chat can create a base
-  and distill notes into it unprompted. When
-  `nomi_knowledge_create_base` is called with `urls`, the fetching runs
-  as a background job — the tool returns immediately, so the agent must
-  not create the base again just because the snapshots haven't appeared
-  yet; once the base's description shows up, the fetch + digest
-  pipeline has finished.
+Choose **manual** writeback to require an explicit request before adding knowledge, or **automatic** writeback for durable, reusable facts selected by the Agent. A knowledge base can be imported as a ZIP or created from public HTTP(S) URLs. Snapshot sources save a local copy that can be refreshed; live sources are retrieved when needed. AI descriptions and summaries require a configured model.
 
-Bind different bases to different companions and you get a "finance companion", a
-"literature companion", a "coding companion" — persona, model, knowledge, and
-memory are all per-companion.
+The selected Agent still needs the relevant capabilities and resources. A companion's name or a bound library does not grant new tool permissions.
 
 ## Binding a companion to a channel
 
@@ -272,10 +166,7 @@ Migration steps:
    the bundle, but if the new machine has no matching provider it shows
    as unconfigured — re-select in settings.
 
-> A memory bundle does not preserve the split between companions: the whole
-> pile arrives on one companion. Pick which one by making it the default
-> companion **before** importing. If the roster is still empty, the memories are
-> parked and land on the first companion you create (at a later launch).
+> On a new machine, memories whose original owner is absent are assigned to the local default companion, or the oldest companion. Set the intended default before importing. A companion bundle is the way to carry one companion's memories into its newly created identity.
 
 ### Privacy boundaries
 
@@ -289,80 +180,6 @@ Migration steps:
   export scope says so (记忆 is ticked by default, 技能 is not — skill bodies are
   executable, so exporting them is an explicit choice). The install-wide memory
   bundle remains the way to move every companion's memories at once.
-
-## Automatic migration of legacy data
-
-After upgrading from the single-companion version, the first boot detects the
-legacy layout `{data_dir}/companion/nomi/`: if it exists and `companion/shared/`
-does not, it is automatically migrated into the install-wide `shared/` files plus
-a first companion (default name **"Nomi"**, inheriting the existing XP /
-persona / character / model / desktop-companion position / companion
-threads). The migration is idempotent and re-entrant; on completion a
-`.migrated` marker is written into the legacy directory, which is kept
-around (to be cleaned up after one release cycle). No manual action is
-needed.
-
-### Upgrading from shared memory: memories get one owner
-
-Memory used to be shared by the whole family. On the first launch after this
-upgrade, every previously shared memory is **re-homed onto a single companion**:
-the explicit default companion if it is still in the roster, otherwise the oldest
-one. Nothing is deleted and nothing is duplicated — the rows keep their ids,
-content, timestamps, strength, and pinned/archived state.
-
-**But every other companion loses sight of them, and this cannot be undone.** A
-memory has no "share again" switch, and re-homing it to a different companion is
-not possible in the UI or the API. If you want a specific companion to inherit
-the family's history, make it the default companion **before** you launch the
-upgraded build. Companions created afterwards start with no memories at all.
-
-If the roster is empty at that launch, the rows are simply left as they are:
-they stay readable by every companion (there is none), and the re-homing runs at
-the first launch that has one.
-
-## Manual walkthrough checklist
-
-To verify a multi-companion setup end to end, walk through in order:
-
-1. **Create two companions**: create companions A and B, rename them, change
-   characters; confirm the first one carries the "default" badge.
-2. **Bind one base each**: bind knowledge base X to A and Y to B (companion
-   Model & Knowledge tab → Knowledge).
-3. **Retrieval isolation**: in A's and B's chats, ask about content
-   that only exists in X / Y respectively; confirm A only hits X and B
-   only hits Y.
-4. **Memory isolation**: in A's chat, have it remember
-   something (save a memory); switch to B's chat and ask about it — B must
-   **not** know it, and the memory must appear only in A's Memory tab.
-5. **Export/import roundtrip**: export the memory bundle + A's companion
-   bundle + base X's bundle; (on a new machine or after a wipe) import
-   in the order knowledge base → companion → memory; confirm the rebuilt A
-   has its binding restored automatically and memories merge without
-   duplicates — all of them under the local owner companion.
-6. **Channel companion switch**: on some channel platform, switch the greeter
-   companion from A to B; confirm the active sessions are reset and the next
-   remote message is greeted with B's persona and B's knowledge mounts.
-
-## Routes & API
-
-| What | Where |
-| --- | --- |
-| List / create companions | `GET/POST /api/companion/companions` |
-| Companion detail / update / delete | `GET/PATCH/DELETE /api/companion/companions/{companionId}` |
-| Companion Agent options / save and apply | `GET/PUT /api/product-agent-bindings/companion/{companionId}` |
-| Install-wide config (collect / learn / default companion) | `GET/PATCH /api/companion/config` |
-| One companion's memories / add a memory | `GET /api/companion/memories?companion_id={companionId}`, `POST /api/companion/memories` (`companion_id` = the owner; omitted lets the server resolve it) |
-| Edit a memory (content / pin / status only — never its owner) | `PUT /api/companion/memories/{memoryId}` (`companion_id` = the companion *asking*; another companion's memory is a 404) |
-| Delete a memory / batch op / merge | `DELETE /api/companion/memories/{memoryId}?companion_id={companionId}`, `POST /api/companion/memories/batch`, `POST /api/companion/memories/merge` (all require `companion_id`) |
-| Suspected-duplicate groups for one companion | `POST /api/companion/memories/merge-suggestions` (`{companion_id}` — the scan and the response are scoped to that companion) |
-| Per-companion companion threads | `GET /api/companion/companions/{companionId}/companion/threads`, `…/companion/active` |
-| A companion's chat-history day index | `GET /api/companion/companions/{companionId}/history/days` → `[{day, message_count, has_digest}]`, newest first (local days; read-only, never mints a session) |
-| One day of a session | `GET /api/agent-sessions/{agentSessionId}/messages?day=YYYYMMDD` (oldest-first, server-bounded) |
-| Export memory bundle | `POST /api/companion/export/memory` (`{dest_path, include_events}`) |
-| Export companion bundle | `POST /api/companion/export/companions/{companionId}` (`{dest_path, knowledge_names, include_memories = true, include_skills = false}`) |
-| Import memory / companion bundle | `POST /api/companion/import` (dispatched by manifest.kind) |
-| Export / import knowledge-base bundle | `POST /api/knowledge/bases/{id}/export`, `POST /api/knowledge/bases/import` |
-| Bind a companion to a channel | `POST /api/channel/settings/companion` |
 
 ## Related
 

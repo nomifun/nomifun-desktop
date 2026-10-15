@@ -1,67 +1,90 @@
 # NomiFun 文档
 
-本目录保存 **NomiFun** 当前的技术文档、运维文档与贡献者文档。当前规范性内容
-位于 `architecture/` 与 `contributing/`。`specs/` 保留仍然承重的带日期设计
-契约——少数直接被源码引用；带日期的状态、进度与评审快照不保留，追溯请使用
-Git 历史。
+[English](README.md) · [项目 README](../README.zh-CN.md) · [发布镜像](https://www.nomifun.com/zh/docs/)
 
-> 初次接触项目请从
-> [入门 -> 项目介绍](getting-started/introduction.zh.md) 开始。
-> English docs start at [README.md](README.md).
+这里维护当前 Desktop 产品及桌面级 WebUI 的文档。按下面的任务进入；产品指南保存在本仓库，NomiFun Portal 发布镜像。实现事实以当前源码和稳定的架构文档为准。
 
-## 从这里开始
+## 开始使用
 
-| 目标 | 阅读 |
-| --- | --- |
-| 了解 NomiFun 是什么 | [getting-started/introduction.zh.md](getting-started/introduction.zh.md) |
-| 安装或本地运行 | [getting-started/installation.zh.md](getting-started/installation.zh.md) |
-| 快速试用 | [getting-started/quick-start.zh.md](getting-started/quick-start.zh.md) |
-| 接入 provider、本地模型并配置故障转移 | [guides/model-routing.zh.md](guides/model-routing.zh.md) |
-| 使用无限画布、素材、提示词与模板创作 | [guides/creative-studio.zh.md](guides/creative-studio.zh.md) |
-| 托管自己的程序 | [guides/app-hosting.zh.md](guides/app-hosting.zh.md) |
-| 连接小智 ESP32 机器人 | [guides/xiaozhi-robot.zh.md](guides/xiaozhi-robot.zh.md) |
-| 理解 Agent 会话 日志和内容 | [Agent Session 当前架构](architecture/agent-session.zh.md) |
-| 理解当前架构 | [architecture/overview.zh.md](architecture/overview.zh.md) |
-| 理解受管工具与附件预览 | [architecture/external-tools.zh.md](architecture/external-tools.zh.md) |
-| 构建或打包项目 | [contributing/building-and-packaging.zh.md](contributing/building-and-packaging.zh.md) |
-| 查询参数、环境变量或 API 分组 | [reference/](reference/) |
-| 参与贡献 | [../CONTRIBUTING.zh-CN.md](../CONTRIBUTING.zh-CN.md)、[../CONTRIBUTING.md](../CONTRIBUTING.md) |
-| 修改数据库 schema 或 ID | [contributing/data-and-identifier-standards.zh.md](contributing/data-and-identifier-standards.zh.md) |
-| 社区行为准则 | [../CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) |
-| 报告安全问题 | [../SECURITY.md](../SECURITY.md) |
-| 版本记录与发布流程 | [../CHANGELOG.md](../CHANGELOG.md)、[../RELEASING.md](../RELEASING.md) |
+- [项目介绍](getting-started/introduction.zh.md)
+- [安装](getting-started/installation.zh.md)
+- [快速开始](getting-started/quick-start.zh.md)
+- [产品生态](architecture/product-ecosystem.zh.md)
 
-## 当前文档
+## 使用与部署
 
-```text
-docs/
-├── getting-started/      介绍、安装、快速开始
-├── guides/               当前产品与运维指南
-├── architecture/         当前系统架构与实现地图
-├── reference/            配置、API 概览、排障、FAQ
-├── contributing/         开发、项目结构、数据/ID 规范、构建与打包
-├── specs/                仍然承重的带日期设计契约
-├── skills/               面向外部 agent 的 skill 文档
-└── images/               截图清单与图片资源
-```
+- [桌面应用](guides/desktop-app.zh.md)
+- [模型与路由](guides/model-routing.zh.md)
+- [Agent 与预设](guides/presets.zh.md)
+- [创意工坊](guides/creative-studio.zh.md)
+- [应用托管](guides/app-hosting.zh.md)
+- [伙伴](guides/companions.zh.md)
+- [小智机器人](guides/xiaozhi-robot.zh.md)
+- [MCP 与技能](guides/mcp-and-skills.zh.md)
+- [Computer / Browser Use](guides/computer-browser-use.zh.md)
+- [终端](guides/terminal.zh.md)
+- [SSH 会话](guides/ssh-sessions.zh.md)
+- [需求 / AutoWork](guides/autowork-requirements.zh.md)
+- [智能决策（IDMM）](guides/intelligent-decision.zh.md)
+- [定时任务](guides/scheduled-tasks.zh.md)
+- [渠道](guides/channels.zh.md)
+- [WebUI 远程访问](guides/webui-remote-access.zh.md)
+- [远程能力 API](guides/remote-capability-api.zh.md)
+- [Web 服务器部署](guides/web-server-deployment.zh.md)
 
-当前顶层用户界面包括会话、终端、可扩展模型管理、创作（Canvas + 素材库）、
-Agent 工作台、技能、MCP、连接与设备、需求/AutoWork、定时任务、伙伴、知识库、
-SSH 主机和应用托管。前端路由真相来源是
-`ui/src/renderer/components/layout/Router.tsx`。
+## 理解架构
 
-## 文档范围
+- [系统总览](architecture/overview.zh.md)
+- [后端 crate](architecture/backend-crates.zh.md)
+- [前端](architecture/frontend.zh.md)
+- [Agent 引擎](architecture/agent-engine.zh.md)
+- [Canonical Agent Session](architecture/agent-session.zh.md)
+- [Agent 执行](architecture/agent-execution.zh.md)
+- [模型供应商](architecture/model-providers.zh.md)
+- [语音](architecture/voice.zh.md)
+- [通信](architecture/communication.zh.md)
+- [渠道准入](architecture/channels.zh.md)
+- [浏览器平台](architecture/browser-platform.zh.md)
+- [应用托管](architecture/app-hosting.zh.md)
+- [数据与存储](architecture/data-and-storage.zh.md)
+- [ID 系统](architecture/id-system.zh.md)
+- [外部工具](architecture/external-tools.zh.md)
+- [外部知识 MCP](architecture/external-knowledge-mcp.zh.md)
 
-临时实施计划和已被替代的设计草稿不再保留在 `docs/` 中；确需追溯实施过程时使用 Git 历史。
+## 开发、验收与发布
 
-## 编辑规则
+- [贡献约定与流程](../CONTRIBUTING.zh-CN.md)
+- [仓库指令](../AGENTS.md)
+- [项目结构](contributing/project-structure.zh.md)
+- [开发与检查](contributing/development.zh.md)
+- [样式合同](contributing/styling.zh.md)
+- [数据与标识符规范](contributing/data-and-identifier-standards.zh.md)
+- [构建与打包](contributing/building-and-packaging.zh.md)
+- [发版流程](../RELEASING.zh-CN.md)
+- [签名](../apps/desktop/signing/README.md)
+- [更新器](../apps/desktop/updater/README.zh-CN.md)
+- [Linux 打包](../packaging/linux/README.md)
+- [浏览器验收](validation/browser-platform.zh.md)
+- [连接链路验收](validation/connectivity-stack.md)
+- [截图清单](images/SCREENSHOTS.md)
+- [外部 Agent 接入 Skill](skills/drive-nomifun/SKILL.md)
 
-- 有中英文兄弟文件时，保持两者同步。
-- 实现事实优先链接源码，不重复容易漂移的细节。
-- 不把已重定向的旧 UI 路径写成主导航。
-- 如果某功能没有出现在 `Router.tsx` 的当前产品路由中，即使后端仍有
-  route，也不要把它写成活跃用户功能。
-- 脚本说明以 `package.json` 和 `bun run help` 为准。
-- 数据库和 ID 改动以
-  [数据与标识符规范](contributing/data-and-identifier-standards.zh.md)
-  以及其链接的可执行 schema/registry 为准。
+## 查询细节
+
+- [配置](reference/configuration.zh.md)
+- [API 概览](reference/api-overview.zh.md)
+- [故障排除](reference/troubleshooting.zh.md)
+- [FAQ](reference/faq.zh.md)
+- [变更记录](../CHANGELOG.md)
+- [安全](../SECURITY.md)
+- [行为准则](../CODE_OF_CONDUCT.md)
+
+## 维护规则
+
+- 用户步骤放在 `guides/`，当前合同放在 `architecture/`，配置/API 查询放在 `reference/`，贡献者流程放在 `contributing/`，可复用的验收方法与明确的覆盖缺口放在 `validation/`。优先更新已有归属页。
+- 有中英文兄弟文件时同步修改。仅有中文的技术页在英文索引明确标注，不链接不存在的译文。
+- 实现细节链接源码入口，不重复 crate 数量、路由清单或生成 schema。路由以 [Router.tsx](../ui/src/renderer/components/layout/Router.tsx) 为准，命令以 [package.json](../package.json) 和 `bun run help` 为准。
+- 共享 Desktop renderer 支持 Tauri 与桌面浏览器，最低 **880×600**。独立 Mobile 客户端及其 wire 合同不决定 renderer 布局。
+- 退休设计时，将仍有效的决定合入归属页，修复消费者，同时删除旧计划、报告与无用素材。运行时嵌入指南、随产品分发的 Skill、测试夹具、vendor 文档和许可证通知各有消费者，不能只因扩展名是 Markdown 就删除。
+- 历史计划、交接单、状态快照与逐次验收证据由 **Git 历史**保留。使用 `git log --all -- <path>` 和 `git show <commit>:<path>` 追溯，不新建容易被误读为现役要求的归档树。仍需执行的问题放回现役归属页或验收页，并准确保留证据边界。
+- 运行 `bun run check:docs` 检查本地链接、图片与 Markdown 锚点，再运行 `git diff --check`。纯文档编辑不需要全量构建；代码或合同改动按 [AGENTS.md](../AGENTS.md) 运行相关检查。

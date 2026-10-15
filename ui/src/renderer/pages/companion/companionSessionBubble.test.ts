@@ -171,3 +171,56 @@ describe('canonical companion Turn bubble presentation', () => {
     }
   });
 });
+
+test('canonical handoff replaces process narration and survives an empty text sharing the old stream id', () => {
+  const outcome = { kind: 'input_required' as const, request_id: request.request_id };
+  const note = frame('', { type: 'tips', stream_complete: true,
+    data: { type: 'warning', content: '', user_input_request: request, turn_outcome: outcome } });
+  let state = stream(stream(running(), frame('Process preamble')), note);
+  expect(state.bubble).toBe(questionText);
+  state = settleCompanionSessionBubble(state, root, 'Done');
+  const row = { id: 'handoff', message_id: secondSegment, msg_id: segment, conversation_id: conversationId, turn_id: root,
+    type: 'tips', position: 'center', created_at: 5, content: { content: '', type: 'warning', user_input_request: request, turn_outcome: outcome } } as TMessage;
+  const empty = { ...row, id: 'empty', message_id: segment, type: 'text', position: 'left', created_at: 85, content: { content: '' } } as TMessage;
+  state = hydrateCompanionSessionBubble(state, [row, empty], state);
+  expect(state.bubble).toBe(questionText);
+  expect(state.loading).toBe(false);
+  const successor = beginCompanionSessionBubble(state, nextRoot, 'running');
+  expect(stream(successor, note)).toBe(successor);
+});
+
+test('canonical answered and failed bubbles retain only committed public message references', () => {
+  for (const kind of ['answered', 'failed'] as const) {
+    let state = stream(running(), frame('Process preamble'));
+    state = stream(state, frame('Actual public reply', { msg_id: secondSegment }));
+    state = stream(state, frame('', { type: 'agent_status', stream_complete: true,
+      data: { backend: 'nomi', status: 'prepared', turn_outcome: { kind, message_ids: [secondSegment] } } }));
+    expect(state.bubble).toBe('Actual public reply');
+    state = stream(state, frame('Late unreferenced output'));
+    expect(state.bubble).toBe('Actual public reply');
+  }
+});
+
+test('a result-read failure remains visible through settlement and a later canonical receipt repairs it', () => {
+  let state = stream(running(), frame('Process preamble'));
+  state = streamCompanionSessionBubble(state, frame('', { type: 'tips', stream_complete: true,
+    data: { type: 'error', query_error: true, content: 'Read failed' } }), 'Tools', 'Reopen this conversation');
+  state = settleCompanionSessionBubble(state, root, 'Done');
+  expect(state.bubble).toBe('Reopen this conversation');
+  state = stream(state, frame('', { type: 'tips', data: { type: 'warning', content: '', user_input_request: request,
+    turn_outcome: { kind: 'input_required', request_id: request.request_id } } }));
+  expect(state.bubble).toBe(questionText);
+});
+
+test('late paused stream and history receipts cannot retract an already committed handoff', () => {
+  let state = stream(running(), frame('', { type: 'tips', data: { type: 'warning', content: '', user_input_request: request,
+    turn_outcome: { kind: 'input_required', request_id: request.request_id } } }));
+  const paused = frame('', { type: 'agent_status', stream_complete: true,
+    data: { backend: 'nomi', status: 'prepared', turn_outcome: { kind: 'paused', message_ids: [] } } });
+  state = stream(state, paused);
+  expect(state.bubble).toBe(questionText);
+  const history = { id: 'paused', msg_id: segment, message_id: segment, conversation_id: conversationId, turn_id: root,
+    type: 'agent_status', content: paused.data } as TMessage;
+  state = hydrateCompanionSessionBubble(state, [history], state);
+  expect(state.bubble).toBe(questionText);
+});

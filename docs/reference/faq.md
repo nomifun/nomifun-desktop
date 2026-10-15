@@ -1,161 +1,97 @@
 # FAQ
 
-Honest, short answers to questions that come up over and over. For deeper explanations follow the links.
+[简体中文](faq.zh.md)
 
-## What is the difference between NomiFun and nomifun?
+## What runs locally?
 
-**NomiFun** is the open-source project and the user-facing product name: the desktop app, WebUI surface, codebase, workspace, GitHub repository, and brand all use this spelling.
+The desktop app and its embedded backend run on your machine. A dedicated
+`nomifun-web` deployment runs tools and Agent turns on its server.
+Configured model services, MCP servers, channels, updates and optional downloads
+can make network requests. A selected provider or gateway has its own data and
+billing policies.
 
-In this codebase the lowercase form `nomifun` shows up only as a literal technical identifier — package names (`nomifun-app`, `nomifun-web`, …), the desktop bundle id `com.nomifun.desktop`, environment variables prefixed `NOMIFUN_`, repository directories. Anywhere it is shown to a human as the app or project brand, use "NomiFun".
+NomiFun is self-hosted software. An optional independently operated model gateway
+is a provider choice, not a hosted NomiFun workspace or central account.
+See [model routing](../guides/model-routing.md).
 
-## Is there a hosted version?
+## Does Desktop require login?
 
-No. NomiFun is a self-host project. There is no SaaS instance, no managed login at a `nomifun.com` URL, no central account system to sign up for. The two ways to use it are:
+The desktop WebView uses a per-boot trust secret and opens without a login screen.
+Other browsers require authentication. Dedicated `nomifun-web` also requires
+login by default. See [Connections & Devices](../guides/webui-remote-access.md).
 
-- Install the desktop app and run it locally — `nomifun-desktop`.
-- Deploy `nomifun-web` on a server you control. See [Web Server Deployment](../guides/web-server-deployment.md).
+## Where is my data?
 
-You can expose your desktop install temporarily to other devices (your phone, your laptop) using [WebUI Remote Access](../guides/webui-remote-access.md), but that is a per-instance feature, not a hosted service.
+Stable defaults are `%LOCALAPPDATA%\NomiFun` on Windows,
+`~/Library/Application Support/NomiFun` on macOS and
+`$XDG_DATA_HOME/NomiFun` (or `~/.local/share/NomiFun`) on Linux.
+Explicit `NOMIFUN_DATA_DIR` / `--data-dir` values are used literally.
+Docker uses its mounted data volume; development channels use separate roots.
 
-## Does the optional model gateway mean NomiFun operates a paid service?
+Only one running backend can hold a data root. For work-directory precedence,
+storage relocation and backup behavior, read
+[configuration](configuration.md) and [data/storage](../architecture/data-and-storage.md).
+Superseded Agent datasets are not imported into the current canonical lineage.
 
-No. NomiFun provides open-source gateway software and a public protocol. A gateway
-can be self-hosted or independently operated by a community member. It is an
-optional model provider you choose, not a hosted NomiFun workspace or account.
-The official project conducts no commercial operations, never charges for any
-project feature, and does not operate any paid services. Model-token charges are
-paid directly to the model service you choose; that service sets its own billing
-and data policies.
+## Which Agent and providers are supported?
 
-Desktop remains usable with your existing providers and keys. To connect a
-gateway, enter its runtime URL and your key in the [gateway setup flow](../guides/model-routing.md#connect-an-optional-model-gateway).
-Provider website, key-management, recharge, and billing links open as HTTPS
-pages in your system browser. They do not sign you into Desktop, and keys are
-not imported through deep links.
+Conversations use the built-in `nomi` runtime. Configure model providers and
+keys in the application; keys are encrypted at rest.
+Third-party Agent CLIs remain separate programs usable through
+[in-app terminals](../guides/terminal.md), with their own authentication and
+approval flows. `nomicore doctor` reports detected terminal CLIs.
 
-## Does the desktop app require login?
+## What runs applications and skills?
 
-No. The desktop WebView is trusted through a per-boot local trust token injected
-by the Tauri shell. There is no login screen for the desktop window, but the
-embedded backend is not a blanket no-auth localhost server.
+Application hosting owns foreground processes in managed application directories.
+Skills supply instructions to Agent context. They do not own application
+processes. See [application hosting](../guides/app-hosting.md).
 
-The web host is the opposite: it requires login by default. Mixing the two is
-intentional — the desktop shell can trust its own WebView, while a
-network-reachable host needs an actual auth boundary.
+Release builds embed OfficeCLI. Node/Bun preparation is explicit and verified;
+backend startup does not download them. Application hosting uses system or
+user-configured Node. See [external tools](../architecture/external-tools.md).
 
-## Where is my data stored?
+## Can I use another computer or a phone?
 
-In the **data directory**. Its location depends on which host you are running:
+Use a desktop browser against a dedicated Web host or Desktop's WebUI.
+The shared renderer supports desktop-class viewports of at least 880x600.
+Phones use the separate NomiFun Mobile client. Pairing and optional relay
+transport are described in [Connections & Devices](../guides/webui-remote-access.md).
 
-- **Desktop**: defaults to the **per-user application-data dir** — `%LOCALAPPDATA%\NomiFun` on Windows, `~/Library/Application Support/NomiFun` on macOS, `$XDG_DATA_HOME/NomiFun` (usually `~/.local/share/NomiFun`) on Linux. Set `NOMIFUN_DATA_DIR=<absolute path>` and that path **is** the data dir — the value is taken literally on every host, no `/Nomi` suffix. Older builds stored data under `NomiFun/Nomi` (and before that `<system temp>/nomifun-data/Nomi`); an existing legacy dataset is migrated to the new location automatically on the first boot after upgrading (one-shot, crash-safe, resumed next boot if interrupted).
-- **Web (`nomifun-web`)**: whatever you pass to `--data-dir` (or `NOMIFUN_DATA_DIR`), taken literally. With neither set it defaults to the **same per-user dir as the desktop app**, so a dev `bun run serve:web` and the installed app see one shared state.
-- **Docker**: the named volume you mount to `/data` (for example `nomifun-data:/data`).
+## How do I install or update?
 
-The data directory contains the SQLite database (`nomifun-backend.db*`), per-agent state, the managed runtime cache, log files, and any embedded extension data. Back it up like a database. Because every host defaults to the same directory, the backend guards it with an exclusive `server.lock` — a second backend instance on the same data dir fails fast instead of corrupting state.
+Use [installation](../getting-started/installation.md), the current download
+links in the [project README](../../README.md), or the
+[Web deployment guide](../guides/web-server-deployment.md).
+Desktop uses signed updater packages; see
+[desktop updates](../guides/desktop-app.md#updates).
+The official Web image is `nomifun/nomifun-web`; pin a version or digest for
+repeatable deployment.
 
-For the full lifecycle and `work-dir` semantics, see [Configuration Reference](./configuration.md#data-directory-and-work-directory-semantics).
+A server build consists of the Rust binary and its built SPA directory
+(or a build configured to embed it). Desktop distribution uses platform packages.
+See [building and packaging](../contributing/building-and-packaging.md).
 
-## Which agents and providers are supported?
+## I forgot the administrator password
 
-There is exactly one agent: the built-in **`nomi`** engine. It ships with the
-binary, needs no separate install, and is the only engine that can run a
-conversation. Earlier releases also ran external agent CLIs as conversation
-backends; that was removed (see the `Unreleased` section of
-[CHANGELOG.md](../../CHANGELOG.md)).
+For Desktop WebUI, use the trusted in-app account/password controls in
+**Connections & Devices → Other computer browsers**.
+A loopback browser request does not gain desktop local trust.
+Changing startup `NOMIFUN_ADMIN_PASSWORD` does not replace an existing account.
 
-Third-party CLIs — `claude`, `codex`, `gemini` and friends — are still fully
-usable through [in-app terminals](../guides/terminal.md): a real PTY, the CLI's
-own auth and approval prompts, with NomiFun capabilities injected through the
-CLI's own native config. Install the CLI yourself and make sure it is on `PATH`.
-Run `nomicore doctor` to see what your install detects.
+For a dedicated host, preserve its data directory and consult
+[authentication troubleshooting](troubleshooting.md).
+Do not clear password hashes or expose a no-auth listener as a recovery shortcut.
 
-For raw model access (e.g. provider keys, custom OpenAI-compatible endpoints), the system supports configurable providers via `/api/providers/*` and the in-app settings UI. You bring the API keys; NomiFun stores them encrypted at rest in the data directory.
+## What is the name and license?
 
-The built-in agent uses only the model provider configuration you select. An
-optional, independently operated model gateway is another provider choice; it
-does not create an official hosted NomiFun service.
+Use **NomiFun** for the product. Lowercase `nomifun` remains in technical
+identifiers such as crate names and environment variables.
+The project is [Apache-2.0](../../LICENSE); preserve its license and notices
+when redistributing.
 
-## Is NomiFun really local-only?
+## Further reference
 
-The application logic and your workspace data are local. Requests to the model
-services you configure can leave the machine, including model invocation, model
-catalogs, and quota queries. A chosen cloud service or independently operated
-gateway processes those requests under its own data and billing policies.
-
-What NomiFun itself does over the network:
-
-- Optional update checks (system info / check-update endpoint).
-- Requests to your configured model services, including model invocation,
-  model catalogs, and quota queries. Gateway metadata is fetched during the
-  setup flow; account queries use that gateway's key.
-- The Creation prompt catalog syncs from a fixed allow-list of upstream prompt
-  repositories when you trigger it.
-
-There is no telemetry pipeline, no analytics SDK, no `SENTRY_DSN` integration in the binary. The backend does not phone home on its own.
-
-## What runs hosted applications and skills?
-
-Application hosting runs ordinary foreground commands in a managed copy.
-Applications keep their own stack and data and can receive automatic local
-Host access. Optional MCP tools require explicit Agent/session selection.
-Skills provide instructions and workflows to Agent context; they do not own
-application processes. See [application hosting](../guides/app-hosting.md).
-
-Third-party Agent CLIs remain programs you install and use in an
-[in-app terminal](../guides/terminal.md).
-
-## Can I run agents on a different machine from the UI?
-
-Yes — that is exactly what `nomifun-web` is for. Deploy the web host on the machine where you want the agent turns, the terminals, and their network access to live, and access the SPA from any browser. See [Web Server Deployment](../guides/web-server-deployment.md).
-
-For lighter-weight remote access from a phone or another laptop without spinning up a separate server, [WebUI Remote Access](../guides/webui-remote-access.md) exposes an existing desktop install over the LAN.
-
-## What is the licence?
-
-**Apache-2.0**, declared in the workspace `Cargo.toml`. You can use, modify, redistribute, and bundle the code under the standard Apache-2.0 terms — including in commercial products — provided you keep the licence and notice intact.
-
-## Are there prebuilt installers?
-
-Desktop bundles can be built locally, macOS Developer ID signing is scripted
-through `bun run build:signed`, and updater artifacts can be generated with
-`bun run build:updater`. For the Web server, the official Docker Hub image is
-available as
-[`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web).
-The supported install paths are:
-
-- **Desktop**: `bun install && bun run build:ui && cargo run -p nomifun-desktop` (or `cargo build --release -p nomifun-desktop`).
-- **Server**: run `nomifun/nomifun-web:latest` (the stable rolling tag), build
-  from source (`cargo build --release -p nomifun-web`), or build locally with
-  `docker compose up -d --build`. Pin an explicit version or image digest when
-  reproducibility is required.
-
-Published artifacts are linked from the project README and the [getting-started guide](../getting-started/).
-
-## I lost my admin password
-
-On `nomifun-web`, the in-band recovery flow is the local-only WebUI route (`POST /api/webui/reset-password`) — you can hit it from the same machine the server runs on, and it generates a fresh random password and prints it. From a remote machine you cannot recover the password through the API.
-
-The fallback is to stop the server, resolve the installation owner through
-`installation_identity.owner_user_id`, edit that user's `password_hash`, and
-restart. The simplest reset is to set the hash to an empty string — the next
-boot then treats the install as needing first-run setup again, and the next
-visitor can claim the admin.
-
-For desktop installs there is no password for the local WebView. WebUI remote
-access has its own admin password because it is reachable from another browser.
-
-## Is there a "single binary" build?
-
-Yes for the server: `nomifun-web` is one statically-linked Rust binary plus the `ui/dist/` directory it serves. SQLite is statically linked, TLS uses rustls — there is no `libsqlite`, no `openssl` dependency at runtime. Build with `cargo build --release -p nomifun-web`.
-
-Release binaries embed OfficeCLI; backend startup needs no Node/Bun preparation or download. Terminal and MCP commands prefer system Bun/`bunx`, then a verified existing managed Bun cache. If neither is available, the user chooses whether to download the approved component. Ordinary resolution and diagnostics never start or wait for downloads. App Hosting uses system or user-configured Node. Existing approved components are reused offline while their identity is unchanged. Debug builds can embed OfficeCLI with `NOMIFUN_EMBED_OFFICECLI=1` or use validated explicit development overrides. See [External tools](../architecture/external-tools.md).
-
-The desktop shell also produces a single binary (`nomifun-desktop`), but for distribution you typically want the platform-native packaging via `bun run build` once installer signing is set up.
-
-## See also
-
-- [Configuration Reference](./configuration.md)
-- [API Overview](./api-overview.md)
-- [Troubleshooting](./troubleshooting.md)
-- [Web Server Deployment](../guides/web-server-deployment.md)
-- [Running NomiFun as a Desktop App](../guides/desktop-app.md)
+- [Configuration](configuration.md)
+- [API overview](api-overview.md)
+- [Troubleshooting](troubleshooting.md)

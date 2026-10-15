@@ -5504,7 +5504,6 @@ dependencies = [
  "jsonschema",
  "rusqlite",
  "schemars 1.2.1",
- "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -5519,13 +5518,11 @@ version = "0.8.8"
 dependencies = [
  "async-trait",
  "axum",
- "http-body-util",
  "nomifun-agent-contracts",
  "nomifun-agent-kernel",
  "nomifun-api-types",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tower",
@@ -5549,11 +5546,9 @@ name = "nomifun-agent-domain-wave1"
 version = "0.8.8"
 dependencies = [
  "async-trait",
- "jsonschema",
  "nomifun-agent-contracts",
  "nomifun-agent-kernel",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -5598,7 +5593,6 @@ dependencies = [
  "nomifun-agent-contracts",
  "nomifun-agent-kernel",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -5659,7 +5653,6 @@ dependencies = [
  "nomifun-engine-core",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
@@ -5709,7 +5702,6 @@ dependencies = [
  "nomifun-agent-runtime",
  "nomifun-api-types",
  "nomifun-auth",
- "nomifun-browser-platform",
  "nomifun-chat-model-broker",
  "nomifun-common",
  "nomifun-db",
@@ -5769,7 +5761,6 @@ dependencies = [
  "fs2",
  "futures-util",
  "git2",
- "hex",
  "http-body-util",
  "if-addrs",
  "image",
@@ -5855,7 +5846,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
- "walkdir",
  "windows-sys 0.61.2",
  "wiremock",
  "zeroize",
@@ -6136,7 +6126,6 @@ dependencies = [
  "cron",
  "dashmap",
  "nomifun-agent-contracts",
- "nomifun-ai-agent",
  "nomifun-api-types",
  "nomifun-auth",
  "nomifun-common",
@@ -6470,7 +6459,6 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tokio-tungstenite 0.26.2",

@@ -1,199 +1,84 @@
 # 常见问题
 
-针对反复被问到的问题给出直白、简短的回答。如需更深入的解释，请顺着
-链接前往对应文档。
+[English](faq.md)
 
-## NomiFun 与 nomifun 有什么区别？
+## 哪些内容在本地运行？
 
-**NomiFun** 是这个开源项目与面向用户的产品名：桌面应用、WebUI 界面、
-代码库、工作区、GitHub 仓库和品牌都使用这个写法。
+桌面应用及内嵌后端在本机运行，独立 `nomifun-web` 在部署服务器执行工具和 Agent。
+配置的模型服务、MCP、渠道、更新及可选下载可以发起网络请求。
+所选提供商或网关拥有自己的数据与计费政策。
 
-在本代码库里，小写形式 `nomifun` 仅作为字面意义上的技术标识符出现
-——包名（`nomifun-app`、`nomifun-web` 等）、桌面 bundle id
-`com.nomifun.desktop`、以 `NOMIFUN_` 为前缀的环境变量、仓库目录。
-任何作为应用或项目品牌展示给人看的地方，都使用 "NomiFun"。
-
-## 有托管版本吗？
-
-没有。NomiFun 是一个自托管项目。不存在 SaaS 实例、不存在
-`nomifun.com` 上的托管登录、不存在你可以注册的中心账户系统。使用它的
-两种方式是：
-
-- 安装桌面应用并在本地运行——`nomifun-desktop`。
-- 在你自己控制的服务器上部署 `nomifun-web`。参见
-  [Web 服务部署](../guides/web-server-deployment.md)。
-
-你可以使用 [WebUI 远程访问](../guides/webui-remote-access.md) 把桌面
-安装临时暴露给其他设备（手机、笔记本），但这是一项按实例的功能，
-不是托管服务。
-
-## 可选的模型网关是否意味着 NomiFun 运营付费服务？
-
-不是。NomiFun 提供开源的网关软件与公开协议。网关可以自托管，也可以由
-社区成员独立运营。它是你自主选择的一个可选模型 provider，而不是托管的
-NomiFun 工作区或账户。官方项目不进行任何商业运营，任何项目功能都不收费，
-也不运营任何付费服务。模型 token 费用直接支付给你选择的模型服务方；计费
-与数据策略由该服务方自行制定。
-
-Desktop 可以继续使用你现有的 provider 与密钥。要连接网关，在
-[网关接入流程](../guides/model-routing.zh.md#接入可选模型网关) 中输入其
-运行时地址与你的密钥即可。提供商官网、密钥管理、充值与计费链接都以 HTTPS
-页面在你的系统浏览器中打开。它们不会让你登录 Desktop，密钥也不会通过
-deep link 导入。
+NomiFun 是自托管软件。可选的独立运营模型网关属于提供商选择，
+不代表托管的 NomiFun 工作区或中央账号，详见[模型路由](../guides/model-routing.zh.md)。
 
 ## 桌面应用需要登录吗？
 
-不需要。桌面 WebView 通过 Tauri 外壳注入的每启动本地信任 token 被信任。
-桌面窗口没有登录界面，但嵌入式后端并不是一个对所有 localhost 调用者都无鉴权
-开放的服务。
+桌面 WebView 通过每次启动的信任密钥直接打开，不展示登录页。
+其他浏览器需要鉴权，独立 `nomifun-web` 也默认需要登录。
+详见[连接与设备](../guides/webui-remote-access.zh.md)。
 
-Web 宿主与之相反：默认要求登录。两者的差异是有意的——桌面外壳可以信任
-自己的 WebView，但网络可达的宿主必须有真正的鉴权边界。
+## 数据在哪里？
 
-## 我的数据存在哪里？
+Stable 默认目录：Windows 为 `%LOCALAPPDATA%\NomiFun`，
+macOS 为 `~/Library/Application Support/NomiFun`，
+Linux 为 `$XDG_DATA_HOME/NomiFun` 或 `~/.local/share/NomiFun`。
+显式 `NOMIFUN_DATA_DIR` / `--data-dir` 按字面值使用。
+Docker 使用挂载数据卷，开发通道使用独立数据根。
 
-存在**数据目录**里。具体位置取决于你运行的是哪种宿主：
+同一数据根只能由一个运行中的后端占用。工作目录优先级、存储迁移和备份行为见
+[配置](configuration.zh.md)与[数据存储](../architecture/data-and-storage.zh.md)。
+被替代的 Agent 数据集不导入当前 canonical lineage。
 
-- **桌面端**：默认在**按用户的应用数据目录**——Windows 上是
-  `%LOCALAPPDATA%\NomiFun`，macOS 上是
-  `~/Library/Application Support/NomiFun`，Linux 上是
-  `$XDG_DATA_HOME/NomiFun`（通常为 `~/.local/share/NomiFun`）。
-  设置 `NOMIFUN_DATA_DIR=<absolute path>` 后，该路径**就是**数据
-  目录——所有宿主都按字面值使用，不附加 `/Nomi` 后缀。旧版构建把
-  数据存在 `NomiFun/Nomi`（更早为 `<system temp>/nomifun-data/Nomi`）
-  下；若存在这样的遗留数据集，升级后首次启动时会自动迁移到新位置
-  （一次性、抗崩溃，中断后下次启动续跑）。
-- **Web（`nomifun-web`）**：你传给 `--data-dir`（或
-  `NOMIFUN_DATA_DIR`）的任何位置，按字面值生效。两者都未设置时，
-  默认与桌面应用是**同一个按用户目录**，因此开发中的
-  `bun run serve:web` 与已安装的应用看到的是同一份状态。
-- **Docker**：你挂载到 `/data` 的命名卷（例如 `nomifun-data:/data`）。
+## 支持什么 Agent 和提供商？
 
-数据目录里有 SQLite 数据库（`nomifun-backend.db*`）、各智能体状态、
-受管 runtime 缓存、日志文件，以及任何嵌入式扩展数据。请像对待数据库一样备份
-它。由于所有宿主默认指向同一个目录，后端用一把排他的 `server.lock`
-守住它——同一数据目录上的第二个后端实例会快速失败，而不是悄悄破坏
-状态。
+会话使用内置 `nomi` runtime。模型提供商和密钥在应用中配置，密钥静态加密。
+第三方 Agent CLI 是独立程序，可在[内置终端](../guides/terminal.zh.md)
+使用自己的鉴权及审批流程。`nomicore doctor` 显示检测到的终端 CLI。
 
-完整生命周期与 `work-dir` 语义请参见
-[配置参考](./configuration.zh.md#数据目录与工作目录的语义)。
+## 应用和技能由谁运行？
 
-## 支持哪些智能体与提供商？
+应用托管在受管应用目录中持有前台进程。技能向 Agent 上下文提供指令，
+不持有应用进程。详见[应用托管](../guides/app-hosting.zh.md)。
 
-只有一个智能体：内置的 **`nomi`** 引擎。它随二进制一起发布，无需单独
-安装，也是唯一能运行会话的引擎。早期版本还能把外部智能体 CLI 当作会话
-后端运行，该能力已被移除（见 [CHANGELOG.md](../../CHANGELOG.md) 的
-`Unreleased` 小节）。
+发布构建内嵌 OfficeCLI，Node/Bun 准备需要明确选择并验证，
+后端启动不下载它们。应用托管使用系统或用户配置的 Node。
+详见[外部工具](../architecture/external-tools.zh.md)。
 
-第三方 CLI —— `claude`、`codex`、`gemini` 等 —— 仍可通过
-[应用内终端](../guides/terminal.zh.md)完整使用：真实的 PTY、CLI 自己的
-登录与审批提示，NomiFun 的能力经该 CLI 自己的原生配置注入。CLI 需要你
-自己安装并确保它在 `PATH` 上。运行 `nomicore doctor` 即可看到你的安装能
-识别到哪些。
+## 可以从其他电脑或手机使用吗？
 
-至于裸模型访问（例如提供商密钥、自定义的 OpenAI 兼容端点），系统
-通过 `/api/providers/*` 与应用内的设置 UI 支持可配置的提供商。API
-密钥由你提供；NomiFun 会以静态加密的方式把它们存到数据目录。
+桌面浏览器可访问独立 Web 宿主或 Desktop WebUI。
+共享渲染器支持至少 880x600 的桌面级视口；
+手机使用独立 NomiFun Mobile 客户端。
+配对和可选 relay 传输见[连接与设备](../guides/webui-remote-access.zh.md)。
 
-内置智能体只使用你选择的模型 provider 配置。一个可选的、独立运营的
-模型网关也只是又一个 provider 选项；它不构成官方托管的 NomiFun 服务。
+## 如何安装和更新？
 
-## NomiFun 真的纯本地吗？
+使用[安装指南](../getting-started/installation.zh.md)、
+[项目 README](../../README.zh-CN.md) 中的当前下载入口，或
+[Web 部署指南](../guides/web-server-deployment.zh.md)。
+桌面使用签名更新包，见[桌面更新](../guides/desktop-app.zh.md#更新)。
+官方 Web 镜像为 `nomifun/nomifun-web`，需要可复现时固定版本或 digest。
 
-应用逻辑与你的数据是本地的。但你配置的模型提供商不是——一次会话回合
-会向你选定的提供商（Anthropic、OpenAI、Google 等）发起出站调用。那
-是你与该提供商之间的事；所选云服务或独立运营的网关按它自己的数据与
-计费策略处理这些请求。
+服务端由 Rust binary 和构建后的 SPA 目录组成，也可选择内嵌 SPA 的构建。
+桌面分发使用平台包，详见[构建与打包](../contributing/building-and-packaging.zh.md)。
 
-NomiFun 自身在网络上做的事：
+## 忘记管理员密码怎么办？
 
-- 可选的更新检查（system info / check-update 端点）。
-- 你已配置的提供商所做的——通常是去 LLM 提供商的 API 调用；网关元数据
-  在接入流程中获取，账户查询使用该网关的密钥。
-- 创作提示词目录在你主动触发时，从固定的上游提示词仓库白名单同步。
+Desktop WebUI 使用应用内可信的
+**连接与设备 → 其他电脑浏览器**账号/密码入口。
+Loopback 浏览器请求不会获得桌面本地信任。
+修改启动环境变量 `NOMIFUN_ADMIN_PASSWORD` 不会替换已有账号。
 
-二进制中没有遥测管道、没有 analytics SDK，也没有 `SENTRY_DSN` 集成。
-后端不会自行回传任何数据。
+独立宿主应保留数据目录，参阅[鉴权排查](troubleshooting.zh.md)。
+不要通过清空密码 hash 或暴露无鉴权监听器来恢复。
 
-## 托管应用与技能由谁运行？
+## 名称和许可证是什么？
 
-应用托管在自有副本里执行普通前台命令。应用保留自己的技术栈和数据，并自动获得
-本机 Host 连接；可选 MCP 工具由 Agent/会话显式选择。技能向 Agent 上下文提供
-指令和工作流，不管理应用进程。详见[应用托管](../guides/app-hosting.zh.md)。
+产品名使用 **NomiFun**；小写 `nomifun` 保留在 crate、环境变量等技术标识中。
+项目采用 [Apache-2.0](../../LICENSE)，再分发时保留许可证与 notices。
 
-第三方 Agent CLI 仍是用户自行安装、在[应用内终端](../guides/terminal.zh.md)中使用的程序。
+## 其他参考
 
-## 我能在与 UI 不同的机器上跑智能体吗？
-
-可以——这正是 `nomifun-web` 的用途。把 Web 宿主部署到你希望会话回合、
-终端及其网络访问所在的机器上，然后从任何浏览器访问
-SPA。参见 [Web 服务部署](../guides/web-server-deployment.md)。
-
-如果只是想从手机或另一台笔记本做更轻量的远程访问，又不想另起一台
-服务，[WebUI 远程访问](../guides/webui-remote-access.md) 可以把
-现有的桌面安装暴露到 LAN 上。
-
-## 许可证是什么？
-
-**Apache-2.0**，在工作区 `Cargo.toml` 中声明。你可以在标准的
-Apache-2.0 条款下使用、修改、再分发，并将代码打包——包括用于商业
-产品——只要保留许可证与声明完整即可。
-
-## 有预构建安装包吗？
-
-桌面包可以本地构建，macOS Developer ID 签名已通过 `bun run build:signed`
-脚本接好，updater 产物可用 `bun run build:updater` 生成。Web 服务已提供
-官方 Docker Hub 镜像
-[`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web)。
-当前受支持的安装路径是：
-
-- **桌面端**：`bun install && bun run build:ui && cargo run -p
-  nomifun-desktop`（或 `cargo build --release -p nomifun-desktop`）。
-- **服务端**：运行稳定滚动标签 `nomifun/nomifun-web:latest`、从源码构建
-  （`cargo build --release -p nomifun-web`），或用
-  `docker compose up -d --build` 本地构建。如需可复现部署，请固定明确版本或镜像
-  digest。
-
-已发布的制品会从项目 README 与 [新手入门指南](../getting-started/) 链接出来。
-
-## 我把管理员密码搞丢了
-
-在 `nomifun-web` 上，带内的恢复流程是仅本地的 WebUI 路由
-（`POST /api/webui/reset-password`）——你可以从运行该服务的同一台
-机器上调用它，它会生成一个全新的随机密码并打印出来。从远程机器
-无法通过 API 恢复密码。
-
-兜底方案是停止服务、通过 `installation_identity.owner_user_id` 找到安装
-所有者，直接编辑该用户的 `password_hash` 列，然后重启。最简单的重置
-就是把哈希设为空字符串——下次启动
-就会把当前安装当作需要重新进行首次启动设置，下一个访问者就可以
-认领管理员。
-
-桌面本地 WebView 没有密码。WebUI 远程访问有自己的管理员密码，因为它会被其他
-浏览器访问。
-
-## 有"单二进制"构建吗？
-
-服务端有：`nomifun-web` 是一个静态链接的 Rust 二进制，再加上它要
-提供的 `ui/dist/` 目录。SQLite 是静态链接的，TLS 用的是 rustls——
-运行时没有 `libsqlite`、也没有 `openssl` 依赖。用
-`cargo build --release -p nomifun-web` 即可构建。
-
-Release 二进制内嵌 OfficeCLI；后端启动无需准备或下载 Node/Bun。终端与 MCP
-命令优先使用系统 Bun／`bunx`，其次是有效的既有受管 Bun 缓存。两者都缺失时，
-由用户选择是否下载批准组件。普通解析与诊断不发起或等待下载。应用托管使用
-系统或用户指定的 Node；批准组件身份不变时，既有缓存可离线复用。
-Debug 构建可用 `NOMIFUN_EMBED_OFFICECLI=1` 内嵌 OfficeCLI，
-或使用经验证的显式开发路径覆盖。参见[外部工具](../architecture/external-tools.zh.md)。
-
-桌面外壳同样可以产出单一二进制（`nomifun-desktop`），但用于分发时，
-通常你想要的是 `bun run build` 通过平台原生打包流程产出的
-产物（前提是安装包签名已配置好）。
-
-## 另见
-
-- [配置参考](./configuration.zh.md)
-- [API 概览](./api-overview.zh.md)
-- [疑难排查](./troubleshooting.zh.md)
-- [Web 服务部署](../guides/web-server-deployment.zh.md)
-- [作为桌面应用运行 NomiFun](../guides/desktop-app.zh.md)
+- [配置](configuration.zh.md)
+- [API 概览](api-overview.zh.md)
+- [疑难排查](troubleshooting.zh.md)

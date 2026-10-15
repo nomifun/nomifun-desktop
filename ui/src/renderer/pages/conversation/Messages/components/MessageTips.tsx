@@ -120,6 +120,10 @@ const MessageTips: React.FC<{ message: IMessageTips; compactError?: boolean }> =
     </button>
   ) : null;
 
+  if (message.content.query_error) return <div role='alert' data-testid='turn-outcome-read-error' className='text-t-secondary text-13px'>
+    {t('messages.turnOutcomeReadFailed')}
+  </div>;
+
   const displayContent = json ? '' : content;
   if (type !== 'error' && message.content.user_input_request) return <UserInputRequestNote message={message} />;
   if (message.content.idmm_notice) return <IdmmDecisionNotice message={message} />;

@@ -15,6 +15,8 @@ mod projector;
 mod registry;
 mod store;
 mod types;
+mod turn_outcome;
+pub use turn_outcome::{CanonicalTurnPublicResult, canonical_turn_outcome, canonical_turn_public_result};
 
 pub use snapshot_compatibility::evaluate_snapshot_compatibility;
 pub use context_snapshot::{CanonicalContextMessage, CanonicalContextRole, ForkContextSnapshot, canonical_context_messages};

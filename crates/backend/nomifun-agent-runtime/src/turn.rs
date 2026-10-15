@@ -658,7 +658,7 @@ pub(crate) async fn run_turn(
     // A pure host-delivery exit retains the authorization and terminal-input
     // fence. A newly accepted input keeps this same Turn executing.
     macro_rules! settle_host_delivery {
-        ($work:expr, $state:expr) => {{
+        ($work:expr) => {{
             let candidate = AgentTurnResult {
                 agent_session_id: agent_session_id.clone(), turn_operation_id: turn_operation_id.clone(),
                 model_steps, output_text: output_text.clone(), reasoning_text: reasoning_text.clone(),
@@ -673,12 +673,17 @@ pub(crate) async fn run_turn(
                 HostDeliverySettlement::Inputs(inputs) => {
                     crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs,
                         &mut steering_receipts, &mut steering_receipt_order)?;
+                    protocol_recovery.observe_new_input();
                     control_rejections.reset();
                     completion_review_used = false;
-                    if let Some(state) = $state {
-                        state.execution_plan.needs_replan = true;
-                        state.completion.invalidate();
-                    }
+                    adaptive.activate(crate::adaptive::LONG_HORIZON_MODULES,
+                        crate::AgentRuntimeActivationReason::Steering, event_sink.as_ref()).await?;
+                    tool_archive.get_or_insert_with(|| {
+                        crate::tool_archive::ToolArchive::new(tool_archive_scope.clone())
+                    });
+                    let state = long_horizon.get_or_insert_with(LongHorizonState::default);
+                    state.execution_plan.needs_replan = true;
+                    state.completion.invalidate();
                     continue 'model_steps;
                 }
             }
@@ -1348,6 +1353,9 @@ pub(crate) async fn run_turn(
                     &mut steering_receipts, &mut steering_receipt_order)?;
                 adaptive.activate(crate::adaptive::LONG_HORIZON_MODULES,
                     crate::AgentRuntimeActivationReason::Steering, event_sink.as_ref()).await?;
+                tool_archive.get_or_insert_with(|| {
+                    crate::tool_archive::ToolArchive::new(tool_archive_scope.clone())
+                });
                 let state = long_horizon.get_or_insert_with(LongHorizonState::default);
                 state.execution_plan.needs_replan = true;
                 state.completion.invalidate();
@@ -1498,28 +1506,13 @@ pub(crate) async fn run_turn(
         }
         output_limit_recovery.observe_complete_step();
         step.finalize()?;
-        // A terminal answer with no public text and no native call is not a
-        // closing response once the turn has done tool work, and a private
-        // pseudo tool call (`<tool_call>` markup inside the reasoning channel)
-        // is never execution or evidence. Reject either carrier for one bounded
-        // correction; a genuinely empty plain-chat response still completes.
-        // The broader carriers (tool-loop work, pseudo-call markup) apply only
-        // while the host reports an actionable delivery gap for this accepted
-        // request; a dormant check (no host-owned gap, or a pending safe-point
-        // pause) keeps the original ledger-only rule.
-        let empty_terminal = matches!(finish_reason, ChatFinishReason::Completed)
+        // Provider stop is not public delivery, including on a fresh chat
+        // turn. A native input handoff/report has its own checked path below;
+        // private thinking and earlier progress cannot replace a closing reply.
+        let empty_task_response = matches!(finish_reason, ChatFinishReason::Completed)
             && !step.has_tool_calls()
             && !step.assistant_content.iter().any(|part|
                 matches!(part, ChatContentPart::Text { text } if !text.trim().is_empty()));
-        let empty_task_response = empty_terminal
-            && (adaptive.task_ledger()
-                || ((adaptive.tool_loop()
-                        || step.assistant_content.iter().any(|part|
-                            matches!(part, ChatContentPart::Reasoning { text, .. }
-                                if text.contains(crate::public_output::TOOL_TAG)
-                                    || text.contains(crate::public_output::FUNCTION_TAG))))
-                    && crate::completion_check::actionable_gap(
-                        request.completion_check_port.as_ref(), &model_request.causality).await?));
         if delivery_review_step && !step.has_tool_calls() {
             return fail_turn(&event_sink, model_steps,
                 "the single delivery review did not submit its final report; the candidate was not delivered").await;
@@ -1569,6 +1562,7 @@ pub(crate) async fn run_turn(
                         content: vec![ChatContentPart::ToolResult { call_id: result.call_id, output: result.output, is_error: result.is_error }], provider_round_id: None });
                 }
                 crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts, &mut steering_receipt_order)?;
+                protocol_recovery.observe_new_input();
                 control_rejections.reset();
                 state.execution_plan.needs_replan = true;
                 state.completion.invalidate();
@@ -2105,6 +2099,7 @@ pub(crate) async fn run_turn(
                     &mut steering_receipts,
                     &mut steering_receipt_order,
                 )?;
+                protocol_recovery.observe_new_input();
                 control_rejections.reset();
                 completion_review_used = false;
                 adaptive
@@ -2122,7 +2117,7 @@ pub(crate) async fn run_turn(
                 // host delivery for a task with no ledger-requiring work.
                 // Its rejected reports remain recorded as errors; they are
                 // never promoted into a successful completion account.
-                settle_host_delivery!(Some(&state.work_status), Some(state));
+                settle_host_delivery!(Some(&state.work_status));
                 return fail_turn(&event_sink, model_steps,
                     format!("engine control made no progress; {reason}")).await;
             }
@@ -2151,6 +2146,14 @@ pub(crate) async fn run_turn(
             return fail_turn(&event_sink, model_steps, "failed patch targets have not been re-observed; task completion was not accepted").await;
         }
         if empty_task_response {
+            // A host may have an independently verified delivery (for example
+            // a background domain result). Keep its original receipt/input
+            // fence; an ordinary Settle verdict is not delivery evidence.
+            if let Some(state) = long_horizon.as_mut() {
+                settle_host_delivery!(Some(&state.work_status));
+            } else {
+                settle_host_delivery!(None);
+            }
             // Private reasoning (or no content) is not a public closing answer.
             // Keep the already-advertised action surface for unfinished work;
             // correction is bounded by the existing protocol and turn budgets.
@@ -2292,6 +2295,7 @@ pub(crate) async fn run_turn(
             crate::completion_check::observe_inputs(request.completion_check_port.as_ref(), &inputs)?;
             if crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts, &mut steering_receipt_order)? {
                 completion_review_used = false;
+                protocol_recovery.observe_new_input();
                 control_rejections.reset();
                 adaptive
                     .activate(
@@ -7010,8 +7014,8 @@ mod tests {
     }
 
     /// A pseudo tool call emitted only inside the reasoning channel after real
-    /// tool work is a rejected step, never a silent closing answer — and only
-    /// while the host check reports an actionable gap.
+    /// tool work is a rejected step, never a silent closing answer. A host's
+    /// separate delivery gap must still be settled after the public correction.
     #[tokio::test]
     async fn reasoning_only_terminal_after_tool_use_is_rejected_not_completed() {
         #[derive(Debug)]
@@ -7050,6 +7054,7 @@ mod tests {
                 Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::Completed}),
             ],
             text_step("Done"),
+            text_step("The delivery gap is resolved."),
         ])});
         let tools=Arc::new(Tools::default());
         let sink=Arc::new(Sink::default());
@@ -7059,13 +7064,13 @@ mod tests {
                 .with_completion_check_port(port.clone()),
             AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
         assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
-        assert_eq!(result.output_text,"Done");
-        assert_eq!(model.requests.lock().unwrap().len(),3);
+        assert_eq!(result.output_text,"DoneThe delivery gap is resolved.");
+        assert_eq!(model.requests.lock().unwrap().len(),4);
         assert_eq!(port.0.load(Ordering::SeqCst),2,
-            "the gap probe runs once for the empty carrier and the check once at settlement");
-        assert!(!sink.0.lock().unwrap().iter().any(|event|
-            matches!(event,AgentEngineEvent::CompletionCheckRejected {..})),
-            "the empty-terminal correction is not a settlement rejection");
+            "the real host rejection is relayed at settlement, not consumed by an empty-output probe");
+        assert!(sink.0.lock().unwrap().iter().any(|event|
+            matches!(event,AgentEngineEvent::CompletionCheckRejected {step:3,..})),
+            "the host delivery gap remains separate from empty-terminal protocol correction");
         assert!(sink.0.lock().unwrap().iter().any(|event|
             matches!(event,AgentEngineEvent::ModelResponseRejected {step:2,..})),
             "a reasoning-only pseudo call after tool work is rejected, not completion");
@@ -7075,11 +7080,9 @@ mod tests {
             "the rejected private call is not replayed as factual context");
     }
 
-    /// The broader empty-terminal correction is scoped to host-checked
-    /// settlement turns: without a host completion check the same reasoning
-    /// pseudo-call step still completes as before.
+    /// A public reply is required even without a domain completion port.
     #[tokio::test]
-    async fn without_a_host_check_an_empty_terminal_after_tool_use_still_completes() {
+    async fn empty_terminal_after_tool_use_requires_a_public_reply_without_a_host_check() {
         #[derive(Default)]
         struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
         #[async_trait]
@@ -7095,23 +7098,25 @@ mod tests {
                     "PRIVATE <tool_call><function=read_file><parameter=path>b</parameter></function></tool_call>".into()}),
                 Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::Completed}),
             ],
+            text_step("The observed file is ready."),
         ])});
         let sink=Arc::new(Sink::default());
         let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),sink.clone(),
             AgentTurnRequest::new(request(),tool_plan(),principal(),0),
             AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
         assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
-        assert_eq!(model.requests.lock().unwrap().len(),2);
-        assert!(!sink.0.lock().unwrap().iter().any(|event|
-            matches!(event,AgentEngineEvent::ModelResponseRejected {..})),
-            "an unchecked plain turn is not held to the host-check carriers");
+        assert_eq!(model.requests.lock().unwrap().len(),3);
+        assert_eq!(result.output_text,"The observed file is ready.");
+        assert!(sink.0.lock().unwrap().iter().any(|event|
+            matches!(event,AgentEngineEvent::ModelResponseRejected {step:2,..})));
+        assert_eq!(sink.0.lock().unwrap().iter().filter(|event|
+            matches!(event,AgentEngineEvent::ToolCompleted {step:1,..})).count(),1,
+            "correcting the reply must not repeat settled tool work");
     }
 
-    /// A dormant host check (no actionable gap: Settle, or a pending
-    /// safe-point HostPause) must not reclassify an unrelated empty terminal:
-    /// the broader carriers apply only while a gap is actionable.
+    /// A non-delivery host verdict cannot turn missing public output into success.
     #[tokio::test]
-    async fn dormant_host_check_keeps_an_empty_terminal_after_tool_use_completing() {
+    async fn dormant_host_check_does_not_waive_the_public_reply() {
         #[derive(Debug)]
         struct Port(crate::AgentCompletionCheck);
         #[async_trait]
@@ -7136,6 +7141,7 @@ mod tests {
                         "PRIVATE <tool_call><function=read_file><parameter=path>b</parameter></function></tool_call>".into()}),
                     Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::Completed}),
                 ],
+                text_step("The file observation is complete."),
             ])});
             let sink=Arc::new(Sink::default());
             let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),sink.clone(),
@@ -7143,28 +7149,173 @@ mod tests {
                     .with_completion_check_port(Arc::new(Port(check))),
                 AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
             assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
-            assert_eq!(model.requests.lock().unwrap().len(),2);
-            assert!(!sink.0.lock().unwrap().iter().any(|event|
-                matches!(event,AgentEngineEvent::ModelResponseRejected {..})),
-                "a dormant host check does not reject an unrelated empty terminal");
+            assert_eq!(model.requests.lock().unwrap().len(),3);
+            assert_eq!(result.output_text,"The file observation is complete.");
+            assert!(sink.0.lock().unwrap().iter().any(|event|
+                matches!(event,AgentEngineEvent::ModelResponseRejected {step:2,..})));
         }
     }
 
-    /// A plain reasoning-only terminal on a fresh turn with no tool work still
-    /// completes; only tool-loop turns and pseudo-call carriers are rejected.
     #[tokio::test]
-    async fn plain_reasoning_only_terminal_without_tool_use_still_completes() {
+    async fn empty_plain_chat_is_corrected_with_text_without_forcing_tools() {
+        for empty in [vec![], vec![Ok(ChatModelEvent::ReasoningDelta {text:"private thinking".into()})],
+            vec![Ok(ChatModelEvent::OutputTextDelta {text:" \n".into()})]] {
+            let mut initial=empty;
+            initial.push(Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::Completed}));
+            let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![initial,text_step("Here is the answer.")])});
+            let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),Arc::new(NoopAgentEventSink),
+                AgentTurnRequest::new(request(),tool_plan(),principal(),0),
+                AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
+            assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+            assert_eq!(result.output_text.trim(),"Here is the answer.");
+            let requests=model.requests.lock().unwrap();
+            assert_eq!(requests.len(),2);
+            assert_eq!(requests[1].input.tool_choice,ChatToolChoice::Auto);
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_empty_plain_chat_fails_after_the_existing_correction_budget() {
+        let empty=||vec![Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::Completed})];
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![empty(),empty(),empty()])});
+        let error=run_turn(binding(),model.clone(),Arc::new(EchoTool),Arc::new(NoopAgentEventSink),
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0),
+            AgentContextBudget::default(),CancellationToken::new()).await.unwrap_err();
+        assert!(matches!(error,AgentEngineError::TurnFailed(ref message) if message.contains("after bounded correction")));
+        assert_eq!(model.requests.lock().unwrap().len(),3);
+    }
+
+    #[tokio::test]
+    async fn independently_verified_host_delivery_can_close_without_assistant_text() {
+        #[derive(Debug)] struct Delivered;
+        #[async_trait]
+        impl crate::AgentCompletionCheckPort for Delivered {
+            async fn check(&self,_:&ChatCausality)->Result<crate::AgentCompletionCheck,AgentEngineError> {
+                Ok(crate::AgentCompletionCheck::Delivered)
+            }
+        }
         let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
-            vec![
-                Ok(ChatModelEvent::ReasoningDelta {text:"private thinking with no tool markup".into()}),
-                Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::Completed}),
-            ],
+            vec![Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::Completed})],
         ])});
         let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),Arc::new(NoopAgentEventSink),
-            AgentTurnRequest::new(request(),tool_plan(),principal(),0),
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0).with_completion_check_port(Arc::new(Delivered)),
             AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
         assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert!(result.output_text.is_empty());
         assert_eq!(model.requests.lock().unwrap().len(),1);
+    }
+
+    #[tokio::test]
+    async fn host_delivery_fence_steering_releases_empty_reply_constraints_without_resetting_the_turn() {
+        #[derive(Debug)] struct Port(AtomicUsize);
+        #[async_trait]
+        impl crate::AgentCompletionCheckPort for Port {
+            async fn check(&self,_:&ChatCausality)->Result<crate::AgentCompletionCheck,AgentEngineError> {
+                Ok(if self.0.fetch_add(1,Ordering::SeqCst)==0 {crate::AgentCompletionCheck::Settle}
+                    else {crate::AgentCompletionCheck::Delivered})
+            }
+        }
+        #[derive(Default)] struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self,event:AgentEngineEvent)->Result<(),AgentEngineError> {
+                self.0.lock().unwrap().push(event);Ok(())
+            }
+        }
+        let empty=||vec![Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::Completed})];
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            empty(),empty(),
+            control_step("replan","update_plan",json!({"explanation":"Incorporate the accepted correction.",
+                "plan":[{"step":"response","status":"completed"}],"requirements":[
+                    {"id":"original","description":"Inspect","source":{"input":0,"quote":"inspect"}},
+                    {"id":"steer","description":"Explain","source":{"input":1,"quote":"also explain"}}]})),
+            control_step("report","report_completion",json!({"summary":"The accepted correction was incorporated.",
+                "criteria":[{"step":"response","requirement_ids":["original","steer"],"disposition":"unverified",
+                    "evidence_call_ids":[],"rationale":"No further external observation was required."}]})),
+        ])});
+        let inputs=Arc::new(TerminalFenceSteer {input:std::sync::Mutex::new(Some(crate::AgentSteeringInput {
+            receipt_operation_id:"steer-at-host-delivery".into(),message_id:"host-delivery-steer".into(),text:"also explain".into(),
+            files:vec![],inject_skills:vec![],image_count:0,prepared_images:vec![],prepared_skill_instructions:vec![],
+        }))});
+        let sink=Arc::new(Sink::default());
+        let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),sink.clone(),
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0).with_completion_check_port(Arc::new(Port(AtomicUsize::new(0))))
+                .with_input_port(inputs),AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert_eq!(model.requests.lock().unwrap().len(),4);
+        let events=sink.0.lock().unwrap();
+        assert!(events.iter().any(|event|matches!(event,AgentEngineEvent::ModelStepStarted {step:3,correction_source:None,..})));
+        assert!(events.iter().any(|event|matches!(event,AgentEngineEvent::RuntimeModulesActivated {
+            reason:crate::AgentRuntimeActivationReason::Steering,modules} if modules.contains(&crate::AgentRuntimeModule::TaskLedger))));
+    }
+
+    #[tokio::test]
+    async fn steering_during_an_empty_correction_keeps_live_and_replayed_protocol_sources_equal() {
+        #[derive(Debug,Default)]
+        struct Journal {
+            events:std::sync::Mutex<Vec<AgentEngineEvent>>,
+            reducer:std::sync::Mutex<crate::protocol_recovery::ProtocolRecovery>,
+        }
+        #[async_trait]
+        impl AgentEventSink for Journal {
+            async fn emit(&self,event:AgentEngineEvent)->Result<(),AgentEngineError> {
+                // The host commits its canonical input event before returning
+                // it to Runtime; this reducer enforces that same live journal.
+                self.reducer.lock().unwrap().observe(&event)?;
+                self.events.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+        #[derive(Debug)]
+        struct DuringSecondResponse {
+            input:std::sync::Mutex<Option<crate::AgentSteeringInput>>,
+            journal:Arc<Journal>,
+            close_at_terminal:bool,
+        }
+        #[async_trait]
+        impl crate::AgentInputPort for DuringSecondResponse {
+            async fn take(&self,causality:&ChatCausality,close_if_empty:bool)->Result<Vec<crate::AgentSteeringInput>,AgentEngineError> {
+                if close_if_empty != self.close_at_terminal || !causality.operation_id.as_ref().ends_with(":model:2") {return Ok(vec![]);}
+                let input={self.input.lock().unwrap().take()};
+                let Some(input)=input else {return Ok(vec![]);};
+                self.journal.emit(AgentEngineEvent::SteeringInputs {inputs:vec![input.journal_record()]}).await?;
+                Ok(vec![input])
+            }
+            async fn has_pending(&self,_:&ChatCausality)->Result<bool,AgentEngineError> {Ok(false)}
+        }
+        for (finish_reason,close_at_terminal) in [(ChatFinishReason::Completed,false),(ChatFinishReason::Refusal,true)] {
+        let empty=||vec![Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::Completed})];
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            empty(),vec![Ok(ChatModelEvent::Completed {finish_reason})],
+            control_step("replan-during-correction","update_plan",json!({"explanation":"Incorporate the accepted correction.",
+                "plan":[{"step":"response","status":"completed"}],"requirements":[
+                    {"id":"original","description":"Inspect","source":{"input":0,"quote":"inspect"}},
+                    {"id":"steer","description":"Explain","source":{"input":1,"quote":"also explain"}}]})),
+            control_step("report-during-correction","report_completion",json!({"summary":"The accepted correction was incorporated.",
+                "criteria":[{"step":"response","requirement_ids":["original","steer"],"disposition":"unverified",
+                    "evidence_call_ids":[],"rationale":"No further external observation was required."}]})),
+        ])});
+        let journal=Arc::new(Journal::default());
+        let inputs=Arc::new(DuringSecondResponse {journal:journal.clone(),close_at_terminal,input:std::sync::Mutex::new(Some(crate::AgentSteeringInput {
+            receipt_operation_id:"steer-during-correction".into(),message_id:"correction-steer".into(),text:"also explain".into(),
+            files:vec![],inject_skills:vec![],image_count:0,prepared_images:vec![],prepared_skill_instructions:vec![],
+        }))});
+        let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),journal.clone(),
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0).with_input_port(inputs),
+            AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert_eq!(model.requests.lock().unwrap().len(),4);
+        let events=journal.events.lock().unwrap();
+        assert!(events.iter().any(|event|matches!(event,AgentEngineEvent::ModelResponseRejected {
+            step:1,continuation:true,rejection:Some(AgentModelResponseRejection::EmptyTaskTerminal),..})));
+        assert!(events.iter().any(|event|matches!(event,AgentEngineEvent::ModelStepStarted {step:2,correction_source:Some(1),..})));
+        assert!(events.iter().any(|event|matches!(event,AgentEngineEvent::ModelStepStarted {step:3,correction_source:None,..})));
+        assert!(!events.iter().any(|event|matches!(event,AgentEngineEvent::ModelResponseRejected {step:2,..})),
+            "the accepted steering replaces the second empty carrier before it can consume another correction");
+        let mut restored=crate::protocol_recovery::ProtocolRecovery::default();
+        restored.restore(events.iter()).unwrap();
+        assert_eq!(restored,*journal.reducer.lock().unwrap());
+        }
     }
 
     /// A host settlement check relays actionable feedback into the same turn:
@@ -7249,8 +7400,6 @@ mod tests {
         for can_relay in [true,false] {
             assert!(matches!(settle(Some(&delivered),&causality,can_relay).await.unwrap(),HostSettlement::Delivered));
         }
-        assert!(!crate::completion_check::actionable_gap(Some(&delivered),&causality).await.unwrap(),
-            "a proven result is not an actionable gap");
     }
 
     /// Consecutive answers without intervening authorized work relay the same

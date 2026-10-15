@@ -10,29 +10,18 @@ use nomi_config::compat::ProviderCompat;
 use nomi_providers::anthropic::AnthropicProvider;
 use nomi_providers::{LlmProvider, ProviderError};
 use nomi_types::llm::{LlmEvent, LlmRequest, ThinkingConfig};
-use nomi_types::message::{ContentBlock, Message, Role, StopReason};
+use nomi_types::message::StopReason;
 use nomi_types::tool::ToolDef;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
+mod support;
+use support::collect_events;
+
 fn minimal_request() -> LlmRequest {
-    LlmRequest {
-        model: "claude-3-5-sonnet-20241022".to_string(),
-        system: "You are helpful.".to_string(),
-        messages: vec![Message::new(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: "Hello".to_string(),
-            }],
-        )],
-        tools: vec![],
-        max_tokens: Some(1024),
-        thinking: None,
-        reasoning_effort: None,
-        retain_provider_round: false,
-    }
+    support::request("claude-3-5-sonnet-20241022", "You are helpful.", "Hello", 1024)
 }
 
 #[tokio::test]
@@ -66,15 +55,6 @@ fn text_sse_body(text: &str) -> String {
          event: message_stop\n\
          data: {{\"type\":\"message_stop\"}}\n\n"
     )
-}
-
-/// Collect all events from a receiver into a Vec, draining until closed.
-async fn collect_events(mut rx: tokio::sync::mpsc::Receiver<LlmEvent>) -> Vec<LlmEvent> {
-    let mut events = Vec::new();
-    while let Some(ev) = rx.recv().await {
-        events.push(ev);
-    }
-    events
 }
 
 #[derive(Clone)]

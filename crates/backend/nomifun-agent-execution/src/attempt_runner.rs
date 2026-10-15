@@ -777,6 +777,21 @@ fn completed_delivery_outcome(
     tokens: Option<i64>,
 ) -> AttemptOutcome {
     let mut receipt = output.delivery;
+    use nomifun_agent_contracts::AgentTurnOutcome;
+    let public_result_valid = match receipt.turn_outcome.as_ref() {
+        Some(AgentTurnOutcome::Answered { message_ids }) => !message_ids.is_empty() && receipt.user_input_request.is_none(),
+        Some(AgentTurnOutcome::InputRequired { request_id }) => receipt.user_input_request.as_ref()
+            .is_some_and(|request| request.request_id.as_ref() == request_id && request.validate().is_ok()),
+        // Verified domain artifacts remain valid output even without a chat
+        // answer. Only the existing canonical file receipts prove delivery.
+        Some(AgentTurnOutcome::Unavailable) => !output.output_files.is_empty(),
+        _ => false,
+    };
+    if receipt.result_ok == Some(true) && !public_result_valid {
+        receipt.result_error = Some("Agent turn closed without an authoritative public result or verified artifact".into());
+        receipt.result_error_code = Some("agent_turn_result_unavailable".into());
+        receipt.result_error_retryable = Some(false);
+    }
     if receipt.result_ok == Some(true) && !output.integrity_ok {
         // The Turn already completed. Verification failure cannot authorize
         // replaying successful external effects in a new Attempt.
@@ -791,7 +806,7 @@ fn completed_delivery_outcome(
         conversation_id: conversation_id.to_owned(),
         text: receipt.result_text,
         output_files: output.output_files,
-        ok: receipt.result_ok.unwrap_or(false) && output.integrity_ok,
+        ok: receipt.result_ok.unwrap_or(false) && output.integrity_ok && public_result_valid,
         tokens,
         error: receipt.result_error,
         error_code: receipt.result_error_code,
@@ -1007,6 +1022,7 @@ mod tests {
     #[tokio::test]
     async fn canonical_pause_stops_receipt_wait_without_claiming_completion_or_retry() {
         let receipt = AgentExecutionDelivery {
+            turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Paused { message_ids: vec![] }),
             user_input_request: None,
             message_id: CURRENT_USER_TURN_ID.into(), replayed: true, completed: false,
             paused_reason: Some("EXECUTION_MODEL_INVALID_REQUEST".into()),
@@ -1200,6 +1216,7 @@ mod tests {
         let output = AgentExecutionTurnOutput {
             canonical_operation_id:"original-operation".into(), terminal_event_id:Some("original-terminal".into()),
             delivery:AgentExecutionDelivery {
+                turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::InputRequired { request_id: request.request_id.as_ref().to_owned() }),
                 message_id:CURRENT_USER_TURN_ID.into(), replayed:true, completed:true,
                 user_input_request:Some(request.clone()), paused_reason:None,
                 result_ok:Some(true), result_text:Some("请补充姓名。".into()),
@@ -1218,6 +1235,7 @@ mod tests {
         let output = AgentExecutionTurnOutput {
             canonical_operation_id: "operation".into(), terminal_event_id: Some("terminal".into()),
             delivery: AgentExecutionDelivery {
+                turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Answered { message_ids: vec!["answer".into()] }),
                 user_input_request: None,
                 message_id: CURRENT_USER_TURN_ID.into(), replayed: true, completed: true,
                 paused_reason: None, result_ok: Some(true), result_text: Some("done".into()),
@@ -1230,5 +1248,24 @@ mod tests {
         assert_eq!(outcome.error_code.as_deref(), Some("agent_artifact_verification_failed"));
         assert_eq!(outcome.error_retryable, Some(false));
         assert_eq!(outcome.tokens, Some(7));
+    }
+
+    #[test]
+    fn lifecycle_success_without_a_public_result_cannot_complete_or_retry_an_attempt() {
+        let output = AgentExecutionTurnOutput {
+            canonical_operation_id: "operation".into(), terminal_event_id: Some("terminal".into()),
+            delivery: AgentExecutionDelivery {
+                message_id: CURRENT_USER_TURN_ID.into(), replayed: true, completed: true,
+                turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Unavailable),
+                user_input_request: None, paused_reason: None, result_ok: Some(true),
+                result_text: Some("Earlier progress is not a final result".into()),
+                result_error: None, result_error_code: None, result_error_retryable: Some(false),
+            }, output_files: vec![], integrity_ok: true,
+        };
+        let outcome = completed_delivery_outcome(CONVERSATION_ID, output, None);
+        assert!(!outcome.ok);
+        assert!(!crate::scheduler::agent_outcome_can_complete(&outcome));
+        assert_eq!(outcome.error_code.as_deref(), Some("agent_turn_result_unavailable"));
+        assert_eq!(outcome.error_retryable, Some(false));
     }
 }

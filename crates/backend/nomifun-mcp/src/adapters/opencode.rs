@@ -210,6 +210,12 @@ fn parse_headers(config: &serde_json::Value) -> HashMap<String, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn trait_is_object_safe_and_preserves_source() {
+        let adapter: Box<dyn McpAgentAdapter> = Box::new(OpencodeAdapter);
+        assert_eq!(adapter.source(), McpSource::OpenCode);
+    }
+
 
     // -- JSONC comments -------------------------------------------------------
 

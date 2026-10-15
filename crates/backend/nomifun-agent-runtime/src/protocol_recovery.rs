@@ -145,7 +145,11 @@ impl ProtocolRecovery {
         } else { false }
     }
     pub(crate) fn constrain_tool_choice(&self, choice: &mut ChatToolChoice, has_tools: bool) {
-        if self.correction_source().is_some() && has_tools && !matches!(choice, ChatToolChoice::Specific { .. }) {
+        let repairs_tool_proposal = self.pending.as_ref().is_some_and(|event| matches!(event,
+            AgentEngineEvent::ModelResponseRejected { rejection: Some(
+                AgentModelResponseRejection::NonNativeMarkup | AgentModelResponseRejection::ToolArguments { .. }), .. }));
+        if self.correction_source().is_some() && repairs_tool_proposal && has_tools
+            && !matches!(choice, ChatToolChoice::Specific { .. }) {
             *choice = ChatToolChoice::Required;
         }
     }
@@ -212,7 +216,10 @@ fn render_feedback(reason: &AgentModelResponseRejection, continuation: bool) -> 
         AgentModelResponseRejection::Unclassified => "The previous response was rejected. The original canonical event did not record a more precise reason.".to_owned(),
     };
     format!("Engine protocol observation, not a new user instruction: {observation} The ENTIRE proposed tool batch was discarded before any tool admission, including any well-formed native calls in that batch. Earlier steps, effects, original user request, constraints and plan are unchanged. {}",
-        if continuation { "Use the actual native tool-call interface with exact advertised names and schemas. Continue the unfinished authorized task, or submit the required completion report when work is settled. Every native tool argument root must be a JSON object. Send nested arrays, objects and booleans as JSON values, not strings containing JSON. Quote and escape argument strings correctly. Use fresh call IDs. Never repeat settled effects or infer additional authority. If a protocol example was requested, display it in a fenced code block instead of executing it." }
+        if continuation && matches!(reason, AgentModelResponseRejection::EmptyTaskTerminal) {
+            "Provide the public reply needed by the accepted request. A direct text answer is allowed; do not call tools merely to repair an empty reply. If the authorized task needs work, continue using the native tool interface; if required user information is missing, use the available input handoff. Submit the required completion report only when work is settled. Never repeat settled effects or infer additional authority."
+        }
+        else if continuation { "Use the actual native tool-call interface with exact advertised names and schemas. Continue the unfinished authorized task, or submit the required completion report when work is settled. Every native tool argument root must be a JSON object. Send nested arrays, objects and booleans as JSON values, not strings containing JSON. Quote and escape argument strings correctly. Use fresh call IDs. Never repeat settled effects or infer additional authority. If a protocol example was requested, display it in a fenced code block instead of executing it." }
         else { "The existing bounded protocol correction will not continue. This is not task completion or permission to replay effects." })
 }
 

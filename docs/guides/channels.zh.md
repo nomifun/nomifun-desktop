@@ -24,27 +24,6 @@ Channel 适用于以下场景：
 
 企业微信和 QQ Bot 都是可运行的内置适配器，不是占位卡片。企业微信使用智能机器人的长连接协议；QQ Bot 使用官方 Gateway WebSocket 与 REST API。
 
-## channel 是怎么工作的
-
-```
-external IM ──▶ plugin (long-poll / WebSocket)
-                    │
-                    ▼
-             chat scope + 结构化 @ 检查
-                    │
-                    ▼
-            ChannelManager  ◀─▶  PairingService
-                    │
-                    ▼
-              SessionManager  ──▶  agent / conversation
-```
-
-- **Plugin** 持有平台特定连接（Telegram 长轮询；飞书、钉钉、企业微信和 QQ Bot 使用 WebSocket；微信使用 QR-code 登录）。
-- **范围检查**先区分私聊与群聊；群消息还必须带平台提供的真实 `@` 结构，并在配对或创建 session 之前套用该机器人的群聊访问模式。
-- **PairingService** 把首次联系变成由你在桌面 UI 中批准的请求。私聊保留既有 6 位验证码流程；群聊的部分成员模式复用同一套 Pending 与 Authorised user 记录。
-- **SessionManager** 让后续消息稳定落到同一上下文，同时把每个群与私聊、负责人的桌面对话以及其他群隔离开。
-- **消息循环**把入站消息接到智能体流并送回回复；平台支持时会编辑进行中的消息，微信、企业微信等适配器则回退为追加回复。
-
 ## 私聊与群聊访问
 
 群聊访问按机器人保存到 `group_access_mode`，不是整个平台共用一个开关。例如，同一个 NomiFun 实例上的两套飞书应用可以绑定不同伙伴并分别设置。
@@ -55,7 +34,7 @@ external IM ──▶ plugin (long-poll / WebSocket)
 | **对群部分成员开放** | `allowlist` | 只有该机器人的 Authorised users 可以使用；其他成员有效 `@` 机器人时，会创建或复用一条 Pending 请求，等待负责人批准。 |
 | **禁止群聊** | `disabled` | 忽略所有群消息，包括负责人和已授权用户发出的消息；私聊不受影响。 |
 
-新建的伙伴机器人默认使用 `allowlist`；已有的非客服机器人升级时也回填为 `allowlist`，维持最基本的安全边界。客服机器人默认使用 `all_members`，已有客服机器人升级时也回填为这个值，以免群服务突然停用；负责人之后仍可自行修改。
+新伙伴机器人默认使用 `allowlist`，客服机器人默认使用 `all_members`。负责人可分别修改每个机器人的模式。
 
 任何被接受的群消息都必须包含平台事件里**对当前机器人的结构化 `@`**。正文里仅仅写了类似 `@bot` 的文字、引用内容以及未提及机器人的普通群消息都不算；系统会在创建配对请求或 session 之前直接忽略。若平台没有提供可靠的聊天类型、发送者或 mention 数据，同样按拒绝处理。
 
@@ -126,67 +105,11 @@ external IM ──▶ plugin (long-poll / WebSocket)
 
 ## 渠道 Agent 接入
 
-渠道消息与桌面端共用同一套 Agent 和 Conversation runtime，它不是额外的 Agent 类型，也不是可切换的模式。对于绑定伙伴并使用 Nomi 的机器人，已授权私聊继续沿用既有的私有 Conversation 行为；通过检查的群消息则进入独立的群 session。`allowlist` 中由负责人明确批准的成员保留既有渠道能力；`all_members` 自动准入但未获批准的访客只获得模型回复，不加载负责人的私有伙伴上下文，也不会追加到负责人或任何成员的私聊记录中。
+在目标伙伴的**渠道与机器人**中连接机器人；用于客服时，在**客服**入口绑定。一个机器人对应一份归属。改绑会重置受影响的活跃渠道会话，下一条消息采用新伙伴或客服。没有有效绑定时，渠道保持未绑定，不会自动取得默认伙伴身份。
 
-负责人权限绝不写入 Conversation 元数据；Agent factory 校验本机实例所有者后，只注入由进程私有根签发、带作用域和有效期的平台 Gateway 能力声明。群聊准入——即使是 `all_members`——也不等于负责人授权，绝不会把发送者提升为私聊授权用户。`auto_group` 的 Nomi runtime 被强制限制为只用模型回复；经 `allowlist` 明确批准的 `approved` 用户则保留既有的已授权渠道能力。
+连接表单管理传输凭据与归属，Agent 和模型在伙伴或客服页面配置。实际可用工具取决于已保存 Agent、资源与渠道访问策略，不能假定桌面中的所有能力都可从 IM 使用。
 
-机器人的启停开关与 `group_access_mode` 是两件事：禁用机器人会断开整个连接，而群聊模式 `disabled` 只停止处理群消息。若机器人绑定的是客服（在「服务 → 客服」中绑定），也要先经过同一套群聊检查；通过检查的消息仍整体移交客服域处理，完全不进入伙伴 Conversation。客服使用一次性引擎会话作答，工具注册面固定为三个只读工具（知识检索 / 知识阅读 / 客服笔记检索），并且永远不会获得平台 Gateway 能力声明。客服私聊继续沿用既有的自动服务语义。
-
-当负责人已授权的 Nomi 渠道上下文获得网关工具时，这些统一前缀为 `nomi_*` 的工具（目前共 32 个）能替你做以下事情：
-
-- **会话**——列出所有会话及其运行态，查看单个会话（状态 + 最近消息，
-  含进行中的流式回复），向任意会话注入消息或任务 prompt，新建会话，
-  修改与删除旧会话（`nomi_list_conversations`、`nomi_conversation_status`、
-  `nomi_send_to_conversation`、`nomi_create_conversation`、
-  `nomi_update_conversation`、`nomi_delete_conversation`）。
-- **定时任务**——列出 / 创建 / 修改 / 删除 cron 任务
-  （`nomi_cron_list`、`nomi_cron_create`、`nomi_cron_update`、
-  `nomi_cron_delete`）。
-- **长期记忆**——读写伙伴的全局记忆库（`nomi_memory_list`、
-  `nomi_memory_save`、`nomi_memory_update`、`nomi_memory_delete`）。
-- **需求平台**——浏览与管理需求平台（`nomi_requirement_list`、
-  `nomi_requirement_create`、`nomi_requirement_update`、
-  `nomi_requirement_delete`）。
-- **终端与监督**——列出终端会话、创建新终端（可经 `knowledge_base_ids`
-  顺带绑定知识库），以及读取 / 切换某个终端的 AutoWork 绑定与 IDMM
-  监督（`nomi_list_terminals`、`nomi_create_terminal`、
-  `nomi_get_autowork`、`nomi_set_autowork`、`nomi_get_idmm`、
-  `nomi_set_idmm`）。
-- **知识库**——浏览知识库与绑定关系，改绑会话 / 终端 / 伙伴，新建
-  知识库，向库内写 markdown 文件，触发 AI 梗概生成，或把一个 URL
-  抓取为 markdown——伙伴可以自主沉淀知识
-  （`nomi_knowledge_list_bases`、`nomi_knowledge_get_binding`、
-  `nomi_knowledge_set_binding`、`nomi_knowledge_create_base`、
-  `nomi_knowledge_write_file`、`nomi_knowledge_autogen`、
-  `nomi_knowledge_fetch_url`）。`nomi_knowledge_create_base` 带
-  `urls` 时抓取为后台异步——工具立即返回，等待期间勿重复建库；
-  库描述（description）出现即代表抓取与梗概流水线已完成。
-- **Provider**——列出已配置的 LLM provider（`nomi_list_providers`）。
-
-于是"把我的日报 cron 改到早上 9 点，再说说现在桌面上有什么在跑"
-只需要一条飞书消息。
-
-**选择由哪只伙伴接待。** 有了[多伙伴](./companions.zh.md)之后，机器人按
-**渠道行**绑定伙伴：`channel_plugins` 每行代表一个机器人（同一平台
-可以接入多个机器人，比如飞书上为每只伙伴各开一个企业自建应用），行上
-的 `companion_id` 决定由哪只伙伴接待，`UNIQUE(type, bot_key)` 唯一约束从结构
-上保证**同一个机器人永远不会被绑到第二只伙伴**（bot 身份：飞书
-`app_id`、Telegram bot id、钉钉 `client_id`……）。绑定 / 解绑走
-`POST /api/channel/settings/companion`（带 `plugin_id`），一步完成持久化与
-**该渠道** session 的重置——下一条进来的消息由新宠的人格、模型与知识
-库挂载接待（会话带 `extra.companionId`）。在伙伴面板的 **渠道与机器人** tab 里
-为某只伙伴连接机器人，就是「新建渠道行 + 绑定该宠」一步完成。未绑定
-伙伴的渠道行回退到平台级偏好 `channels.<platform>.companionId`。系统不会
-隐式回退默认伙伴：若两级绑定都未解析到存活伙伴，该渠道保持未绑定，
-也不注入伙伴人格。绑定变更会重置受影响的 session，确保下一轮从新归属
-干净启动。
-
-**Agent 与模型解析。** 渠道连接表单只配置传输凭据和归属绑定，不再引入
-另一套 Agent 或模型选择器。绑定桌面伙伴的 Nomi 机器人以伙伴 profile
-中的模型为权威值，仅在该模型缺失时回退部署配置
-`channels.<platform>.defaultModel`。绑定客服的机器人使用该客服在
-「服务 → 客服」中配置的模型。未绑定渠道使用 Nomi —— 它是唯一的引擎。平台级配置发生变化后，调用
-`POST /api/channel/settings/sync` 会清理该平台 session，使下一轮按新配置解析。
+群聊按机器人与群分别保存会话。自动准入的访客只获得模型回复，不获得负责人的私有上下文或管理工具。私聊授权、群聊准入和整个机器人的启停是独立控制。
 
 ## 从 IM 端能做什么
 
@@ -203,34 +126,9 @@ external IM ──▶ plugin (long-poll / WebSocket)
 - 超出平台插件原生能力的文件上传；
 - per-user 工作区选择——智能体的工作区就是它路由到的会话上设的那个。
 
-## 路由与 API
-
-| 用途                            | 位置                                                       |
-| ------------------------------- | ---------------------------------------------------------- |
-| Channels UI                     | `/nomi?companion=<id>&tab=remote`                          |
-| 列出插件 / 状态                 | `GET /api/channel/plugins`                                 |
-| 启用 / 禁用                     | `POST /api/channel/plugins/enable`、`…/disable`            |
-| 测试凭证                        | `POST /api/channel/plugins/test`                           |
-| 群聊访问                        | `POST /api/channel/settings/group-access`                  |
-| 待处理配对                      | `GET /api/channel/pairings`                                |
-| 批准 / 拒绝配对                 | `POST /api/channel/pairings/approve`、`…/reject`           |
-| 已授权用户                      | `GET /api/channel/users`、`POST .../users/revoke`          |
-| 活跃 session                    | `GET /api/channel/sessions`                                |
-| 同步（变更时清掉 session）      | `POST /api/channel/settings/sync`                          |
-| 绑定渠道伙伴                    | `POST /api/channel/settings/companion`                     |
-| 微信 QR 登录启动                | `POST /api/channel/weixin/login/start`                     |
-
-## 注记
-
-- 插件生命周期是一个状态机——`Created → Initializing → Ready → Starting → Running → Stopping → Stopped`，每一步都可能转到 `Error`。UI 上的状态药丸就是这个枚举。
-- 撤销用户时，session 会先于该 user row 被拆掉。该用户下一次私聊伙伴机器人时会重新触发配对；群消息则按当前群聊模式处理。
-- 修改群聊访问模式时，模式更新与群聊 / 未知范围 session、待处理队列的清理在同一事务内完成，私聊 session 保留。接口返回后新消息只按新模式准入；已经完成持久化准入的单次回复可以正常收尾。
-- 私聊配对码为 6 位，由 `getrandom` 生成，TTL 10 分钟。配对服务会周期清理已过期的 Pending 记录。
-- 各适配器都受 feature gate 控制。自定义 `--no-default-features` 构建需要显式启用准备暴露的每个连接器。
-
 ## 相关
 
-- [渠道群聊访问策略](../specs/2026-08-13-channel-group-access.zh.md)——per-bot 策略、身份能力上限、迁移与适配器能力矩阵的规范说明。
+- [渠道架构](../architecture/channels.zh.md)——per-bot 策略、身份能力上限、迁移与适配器能力矩阵的规范说明。
 - [伙伴（Companions）](./companions.zh.md)——多伙伴管理、按伙伴独立的记忆，以及搭载在渠道会话上的每宠知识库绑定。
 - [AutoWork & Requirements](./autowork-requirements.zh.md)——从聊天里登记一条需求，再用 webhook 卡片把通知打回飞书。
 - [Web Server Deployment](./web-server-deployment.zh.md)——当你在服务器上自托管后端时同样能暴露这些 channel。

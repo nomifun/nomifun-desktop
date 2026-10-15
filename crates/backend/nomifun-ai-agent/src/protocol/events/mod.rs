@@ -109,6 +109,10 @@ pub struct FinishEventData {
     /// its goal. AutoWork consults this instead of treating any Finish as done.
     #[serde(default)]
     pub stop_reason: Option<TurnStopReason>,
+    /// Canonical result, attached only after the exact Turn has committed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub turn_outcome: Option<nomifun_agent_contracts::AgentTurnOutcome>,
 }
 
 /// Data for the `TurnCompleted` event — aggregate metrics for one turn.
@@ -200,6 +204,7 @@ mod tests {
     #[test]
     fn export_protocol_bindings() {
         export_binding_if_changed::<nomifun_agent_contracts::AgentUserInputRequest>("AgentUserInputRequest.ts");
+        export_binding_if_changed::<nomifun_agent_contracts::AgentTurnOutcome>("AgentTurnOutcome.ts");
         export_binding_if_changed::<StartEventData>("StartEventData.ts");
         export_binding_if_changed::<OutputDiscardedEventData>("OutputDiscardedEventData.ts");
         export_binding_if_changed::<SessionAssignedEventData>("SessionAssignedEventData.ts");
@@ -369,6 +374,7 @@ mod tests {
         let event = AgentStreamEvent::Finish(FinishEventData {
             session_id: Some("sess-abc".into()),
             stop_reason: None,
+            turn_outcome: None,
         });
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "finish");
@@ -381,6 +387,7 @@ mod tests {
         let event = AgentStreamEvent::Finish(FinishEventData {
             session_id: None,
             stop_reason: Some(TurnStopReason::MaxTurnRequests),
+            turn_outcome: None,
         });
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["data"]["stop_reason"], "max_turn_requests");

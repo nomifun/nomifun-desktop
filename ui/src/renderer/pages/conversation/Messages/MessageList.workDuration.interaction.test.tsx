@@ -35,7 +35,6 @@ const messageId = (wall: number, index: number) => {
 };
 const root = messageId(WALL, 1);
 const olderRoot = messageId(CURSOR, 2);
-const products: Array<'companion' | 'nomi'> = ['companion', 'nomi'];
 
 beforeEach(() => {
   spyOn(ipcBridge.conversation.turnFiles, 'invoke').mockResolvedValue([]);
@@ -51,21 +50,19 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); mock.restore(); });
 
-function harness(product: typeof products[number], initial: TMessage[], context: ConversationContextValue) {
+function harness(initial: TMessage[], context: ConversationContextValue) {
   let update!: ReturnType<typeof useUpdateMessageList>;
   const Controls = () => {
     const updateMessages = useUpdateMessageList();
     useLayoutEffect(() => { update = updateMessages; }, [updateMessages]);
     return null;
   };
-  // Both actual product entrypoints mount NomiChat and this same typed context;
-  // Companion is a product surface, not a second ConversationContext type.
   const view = (value = context, messages = initial) => <MemoryRouter>
     <I18nextProvider i18n={i18n}>
-      <PreviewProvider persistNamespace={`work-duration-${product}`} subscribeGlobalOpen={false}>
+      <PreviewProvider persistNamespace='work-duration-test' subscribeGlobalOpen={false}>
         <ConversationProvider value={value}>
           <MessageListProvider initialValue={messages}>
-            <div data-product-surface={product}><MessageList /><Controls /></div>
+            <MessageList /><Controls />
           </MessageListProvider>
         </ConversationProvider>
       </PreviewProvider>
@@ -78,7 +75,7 @@ function currentLabel(container: HTMLElement) {
   return container.querySelector(`#message-turn-disclosure-${root} .turn-process-disclosure__label`)?.textContent;
 }
 
-test.each(products)('%s: first accepted paint, start, stream, settlement and cold history share the wall clock', (product) => {
+test('first accepted paint, start, stream, settlement and cold history share the wall clock', () => {
   let now = WALL;
   spyOn(Date, 'now').mockImplementation(() => now);
   let intervalId = 0;
@@ -89,16 +86,14 @@ test.each(products)('%s: first accepted paint, start, stream, settlement and col
     return id;
   }) as typeof window.setInterval);
   spyOn(window, 'clearInterval').mockImplementation(id => { ticks.delete(Number(id)); });
-  const conversationId = parseConversationId(product === 'companion'
-    ? '0190f5fe-7c00-7a00-8000-000000001201'
-    : '0190f5fe-7c00-7a00-8000-000000001202');
+  const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000001201');
   const accepted = transformUserCreatedEvent({ conversation_id: conversationId, msg_id: root,
     content: 'Explain Java variables', position: 'right', status: 'finish', hidden: false,
     created_at: CURSOR + 1, display_at_ms: WALL }, conversationId)!;
   let messages: TMessage[] = [accepted];
   let context: ConversationContextValue = { conversation_id: conversationId, type: 'nomi', readOnly: true,
     isProcessing: true, isTurnStateHydrated: true, activeRequestMessageId: root };
-  const timeline = harness(product, messages, context);
+  const timeline = harness(messages, context);
   const page = render(timeline.view());
   // This assertion is deliberately before any runtime/start/history promise or
   // timer callback. The accepted notification already has the real wall time;
@@ -165,35 +160,31 @@ test.each(products)('%s: first accepted paint, start, stream, settlement and col
     type: message.type, position: message.position, status: 'finish', hidden: false,
     created_at: message.created_at, content: { ...message.content, turn_id: message.turn_id },
   }));
-  const cold = render(harness(product, stored, context).view());
+  const cold = render(harness(stored, context).view());
   expect(currentLabel(cold.container)).toBe('Worked for 5s');
   expect(cold.container.querySelector('.turn-process-disclosure--live')).toBeNull();
 });
 
-test.each(products)('%s: a partial active history window uses the canonical start outside its page', (product) => {
+test('a partial active history window uses the canonical start outside its page', () => {
   spyOn(Date, 'now').mockReturnValue(WALL);
-  const conversationId = parseConversationId(product === 'companion'
-    ? '0190f5fe-7c00-7a00-8000-000000001211'
-    : '0190f5fe-7c00-7a00-8000-000000001212');
+  const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000001211');
   const context: ConversationContextValue = { conversation_id: conversationId, type: 'nomi', readOnly: true,
     isProcessing: true, isTurnStateHydrated: true, activeTurnId: root, activeTurnStartedAt: WALL - 5000 };
   const messages: TMessage[] = [{ id: 'windowed-thinking', msg_id: messageId(WALL, 7), turn_id: root,
     conversation_id: conversationId, position: 'left', type: 'thinking', created_at: CURSOR + 7,
     content: { content: 'The accepted row and canonical start are outside this page.', status: 'thinking' } }];
-  const page = render(harness(product, messages, context).view());
+  const page = render(harness(messages, context).view());
   expect(currentLabel(page.container)).toBe('Worked for 5s');
 });
 
-test.each(products)('%s: public text before runtime start uses its display wall time without a user row', (product) => {
+test('public text before runtime start uses its display wall time without a user row', () => {
   spyOn(Date, 'now').mockReturnValue(WALL);
-  const conversationId = parseConversationId(product === 'companion'
-    ? '0190f5fe-7c00-7a00-8000-000000001221'
-    : '0190f5fe-7c00-7a00-8000-000000001222');
+  const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000001221');
   const context: ConversationContextValue = { conversation_id: conversationId, type: 'nomi', readOnly: true,
     isProcessing: true, isTurnStateHydrated: false };
   const messages: TMessage[] = [{ id: 'early-public-text', msg_id: messageId(WALL, 8), turn_id: root,
     conversation_id: conversationId, position: 'left', type: 'text', created_at: CURSOR + 8,
     content: { content: 'I will explain the declaration.', display_at_ms: WALL } }];
-  const page = render(harness(product, messages, context).view());
+  const page = render(harness(messages, context).view());
   expect(currentLabel(page.container)).toBe('Worked for 0s');
 });

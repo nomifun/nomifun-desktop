@@ -41,7 +41,7 @@ describe('Agent Workbench user preset deletion', () => {
   test('does not preserve a selection that disappeared from the reloaded library', () => {
     const controller = sourceFile('useAgentSettingsController.ts');
 
-    expect(controller.includes('nextLibrary.user_presets.find')).toBe(true);
+    expect(controller.includes('[...nextLibrary.user_presets, ...Object.values(nextLibrary.official_presets)].find')).toBe(true);
     expect(controller.includes('nextLibrary.official_templates.find')).toBe(true);
     expect(controller.includes('if (current) return current')).toBe(false);
   });

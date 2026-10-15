@@ -3154,6 +3154,20 @@ mod tests {
             .expect("canonical Agent Session Store")
     }
 
+    /// Each call opens a distinct SQLite pool, including when a test mounts two
+    /// hosts on one file. Callers retain explicit drop/close/reopen boundaries.
+    async fn open_effect_host(
+        database_path: &Path,
+        workspace: &Path,
+    ) -> (nomifun_db::Database, nomifun_agent_session::AgentSessionStore, Wave2ApplicationHost) {
+        let database = nomifun_db::init_database(database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+            .await.unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(workspace)
+            .with_effect_store(store.clone());
+        (database, store, host)
+    }
+
     async fn test_host(root: &Path) -> Wave2ApplicationHost {
         Wave2ApplicationHost::for_workspace_root(root)
             .with_effect_store(test_effect_store().await)
@@ -3531,18 +3545,8 @@ mod tests {
         let database_path = directory.path().join("agent.db");
         std::fs::create_dir(&workspace).unwrap();
         std::fs::write(workspace.join("shared.txt"),b"base\n").unwrap();
-        let left_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let right_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let left_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            left_database.pool().clone(),
-        ).await.unwrap();
-        let right_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            right_database.pool().clone(),
-        ).await.unwrap();
-        let left_host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(left_store.clone());
-        let right_host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(right_store.clone());
+        let (left_database, left_store, left_host) = open_effect_host(&database_path, &workspace).await;
+        let (right_database, right_store, right_host) = open_effect_host(&database_path, &workspace).await;
         let mut left = context(&workspace);
         left.capability_id = CapabilityId::from("workspace.files");
         left.action_id = ActionId::from("workspace.files/patch");
@@ -3598,12 +3602,7 @@ mod tests {
         left_database.close().await;
         right_database.close().await;
 
-        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            reopened_database.pool().clone(),
-        ).await.unwrap();
-        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(reopened_store.clone());
+        let (reopened_database, reopened_store, restarted) = open_effect_host(&database_path, &workspace).await;
         let mut later = context(&workspace);
         later.capability_id = CapabilityId::from("workspace.files");
         later.action_id = ActionId::from("workspace.files/write");
@@ -3624,18 +3623,8 @@ mod tests {
         let workspace = directory.path().join("workspace");
         let database_path = directory.path().join("agent.db");
         std::fs::create_dir(&workspace).unwrap();
-        let left_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let right_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let left_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            left_database.pool().clone(),
-        ).await.unwrap();
-        let right_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            right_database.pool().clone(),
-        ).await.unwrap();
-        let left_host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(left_store.clone());
-        let right_host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(right_store.clone());
+        let (left_database, left_store, left_host) = open_effect_host(&database_path, &workspace).await;
+        let (right_database, right_store, right_host) = open_effect_host(&database_path, &workspace).await;
         let mut left = context(&workspace);
         left.capability_id = CapabilityId::from("workspace.files");
         left.action_id = ActionId::from("workspace.files/write");
@@ -3685,12 +3674,7 @@ mod tests {
         left_database.close().await;
         right_database.close().await;
 
-        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            reopened_database.pool().clone(),
-        ).await.unwrap();
-        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(reopened_store.clone());
+        let (reopened_database, reopened_store, restarted) = open_effect_host(&database_path, &workspace).await;
         let mut later = context(&workspace);
         later.capability_id = CapabilityId::from("workspace.files");
         later.action_id = ActionId::from("workspace.files/write");
@@ -3710,18 +3694,8 @@ mod tests {
         let database_path = directory.path().join("agent.db");
         std::fs::create_dir(&workspace).unwrap();
         std::fs::write(workspace.join("shared.txt"),b"base\n").unwrap();
-        let write_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let delete_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let write_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            write_database.pool().clone(),
-        ).await.unwrap();
-        let delete_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            delete_database.pool().clone(),
-        ).await.unwrap();
-        let write_host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(write_store.clone());
-        let delete_host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(delete_store.clone());
+        let (write_database, write_store, write_host) = open_effect_host(&database_path, &workspace).await;
+        let (delete_database, delete_store, delete_host) = open_effect_host(&database_path, &workspace).await;
         let mut write = context(&workspace);
         write.capability_id = CapabilityId::from("workspace.files");
         write.action_id = ActionId::from("workspace.files/write");
@@ -3775,12 +3749,7 @@ mod tests {
         write_database.close().await;
         delete_database.close().await;
 
-        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            reopened_database.pool().clone(),
-        ).await.unwrap();
-        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(reopened_store.clone());
+        let (reopened_database, reopened_store, restarted) = open_effect_host(&database_path, &workspace).await;
         let mut later = context(&workspace);
         later.capability_id = CapabilityId::from("workspace.files");
         later.action_id = ActionId::from("workspace.files/write");
@@ -3836,12 +3805,7 @@ mod tests {
         let database_path = directory.path().join("agent.db");
         std::fs::create_dir(&workspace).unwrap();
         std::fs::write(workspace.join("result.txt"),b"original artifact").unwrap();
-        let database = nomifun_db::init_database(&database_path).await.unwrap();
-        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
-            .await
-            .unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(store.clone());
+        let (database, store, host) = open_effect_host(&database_path, &workspace).await;
         let mut pending = context(&workspace);
         pending.capability_id = CapabilityId::from("workspace.artifacts");
         pending.action_id = ActionId::from("workspace.artifacts/publish");
@@ -3868,12 +3832,7 @@ mod tests {
 
         std::fs::write(workspace.join("result.txt"),b"later source").unwrap();
         let later_artifact_id = nomifun_agent_contracts::digest_bytes(b"later source");
-        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            reopened_database.pool().clone(),
-        ).await.unwrap();
-        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(reopened_store.clone());
+        let (reopened_database, reopened_store, restarted) = open_effect_host(&database_path, &workspace).await;
 
         let same_key = invoke(&restarted,pending.clone(),"workspace.artifacts/publish",input.0.clone())
             .await.unwrap_err();
@@ -3915,18 +3874,8 @@ mod tests {
         std::fs::create_dir(&workspace).unwrap();
         std::fs::write(workspace.join("shared.txt"),b"shared artifact").unwrap();
         let expected = nomifun_agent_contracts::digest_bytes(b"shared artifact");
-        let left_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let right_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let left_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            left_database.pool().clone(),
-        ).await.unwrap();
-        let right_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            right_database.pool().clone(),
-        ).await.unwrap();
-        let left_host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(left_store.clone());
-        let right_host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(right_store.clone());
+        let (left_database, left_store, left_host) = open_effect_host(&database_path, &workspace).await;
+        let (right_database, right_store, right_host) = open_effect_host(&database_path, &workspace).await;
         let mut left = context(&workspace);
         left.capability_id = CapabilityId::from("workspace.artifacts");
         left.action_id = ActionId::from("workspace.artifacts/publish");
@@ -3988,12 +3937,7 @@ mod tests {
         left_database.close().await;
         right_database.close().await;
 
-        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            reopened_database.pool().clone(),
-        ).await.unwrap();
-        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(reopened_store.clone());
+        let (reopened_database, reopened_store, restarted) = open_effect_host(&database_path, &workspace).await;
         let read = invoke(&restarted,context(&workspace),"workspace.artifacts/read",json!({
             "artifact_id":expected.as_ref(),"offset":0,"limit":1024
         })).await.unwrap();
@@ -4019,9 +3963,7 @@ mod tests {
         std::fs::hard_link(&foreign_path, evidence.join("retained-foreign")).unwrap();
         let foreign = std::fs::File::open(&foreign_path).unwrap();
         let original_identity = artifact_fence_fixture_identity(&foreign);
-        let database = nomifun_db::init_database(&database_path).await.unwrap();
-        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone()).await.unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(&workspace).with_effect_store(store.clone());
+        let (database, store, host) = open_effect_host(&database_path, &workspace).await;
         let mut pending = context(&workspace);
         pending.capability_id = CapabilityId::from("workspace.artifacts");
         pending.action_id = ActionId::from("workspace.artifacts/publish");
@@ -4045,9 +3987,7 @@ mod tests {
 
         std::fs::write(workspace.join("result.txt"), b"later source").unwrap();
         let later_digest = nomifun_agent_contracts::digest_bytes(b"later source");
-        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(reopened_database.pool().clone()).await.unwrap();
-        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace).with_effect_store(reopened_store.clone());
+        let (reopened_database, reopened_store, restarted) = open_effect_host(&database_path, &workspace).await;
         let mut later = pending.clone();
         later.idempotency_key = IdempotencyKey::from("artifact-cleanup-different-key");
         later.operation_id = OperationId::from("artifact-cleanup-different-operation");
@@ -4152,18 +4092,8 @@ mod tests {
         std::fs::write(workspace.join("right.txt"),b"right artifact").unwrap();
         let left_digest = nomifun_agent_contracts::digest_bytes(b"left artifact");
         let right_digest = nomifun_agent_contracts::digest_bytes(b"right artifact");
-        let left_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let right_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let left_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            left_database.pool().clone(),
-        ).await.unwrap();
-        let right_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            right_database.pool().clone(),
-        ).await.unwrap();
-        let left_host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(left_store.clone());
-        let right_host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(right_store.clone());
+        let (left_database, left_store, left_host) = open_effect_host(&database_path, &workspace).await;
+        let (right_database, right_store, right_host) = open_effect_host(&database_path, &workspace).await;
         let mut left = context(&workspace);
         left.capability_id = CapabilityId::from("workspace.artifacts");
         left.action_id = ActionId::from("workspace.artifacts/publish");
@@ -4228,12 +4158,7 @@ mod tests {
         left_database.close().await;
         right_database.close().await;
 
-        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            reopened_database.pool().clone(),
-        ).await.unwrap();
-        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(reopened_store.clone());
+        let (reopened_database, reopened_store, restarted) = open_effect_host(&database_path, &workspace).await;
         let artifact_owner = restarted.artifacts.as_ref().unwrap();
         for id in &published {
             let read = artifact_owner.read(id,0,1024).unwrap();
@@ -4887,12 +4812,7 @@ mod tests {
         let workspace = directory.path().join("workspace");
         let database_path = directory.path().join("agent.db");
         std::fs::create_dir(&workspace).unwrap();
-        let database = nomifun_db::init_database(&database_path).await.unwrap();
-        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
-            .await
-            .unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(store.clone());
+        let (database, store, host) = open_effect_host(&database_path, &workspace).await;
         let mut first = context(&workspace);
         first.capability_id = CapabilityId::from("workspace.files");
         first.action_id = ActionId::from("workspace.files/write");
@@ -4915,12 +4835,7 @@ mod tests {
         drop(store);
         database.close().await;
 
-        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            reopened_database.pool().clone(),
-        ).await.unwrap();
-        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(reopened_store.clone());
+        let (reopened_database, reopened_store, restarted) = open_effect_host(&database_path, &workspace).await;
         let mut second = context(&workspace);
         second.capability_id = CapabilityId::from("workspace.files");
         second.action_id = ActionId::from("workspace.files/write");
@@ -4950,18 +4865,8 @@ mod tests {
         let workspace = directory.path().join("workspace");
         let database_path = directory.path().join("agent.db");
         std::fs::create_dir(&workspace).unwrap();
-        let left_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let right_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let left_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            left_database.pool().clone(),
-        ).await.unwrap();
-        let right_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            right_database.pool().clone(),
-        ).await.unwrap();
-        let left_host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(left_store.clone());
-        let right_host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(right_store.clone());
+        let (left_database, left_store, left_host) = open_effect_host(&database_path, &workspace).await;
+        let (right_database, right_store, right_host) = open_effect_host(&database_path, &workspace).await;
         let mut left = context(&workspace);
         left.capability_id = CapabilityId::from("workspace.files");
         left.action_id = ActionId::from("workspace.files/write");
@@ -5017,12 +4922,7 @@ mod tests {
         left_database.close().await;
         right_database.close().await;
 
-        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            reopened_database.pool().clone(),
-        ).await.unwrap();
-        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(reopened_store.clone());
+        let (reopened_database, reopened_store, restarted) = open_effect_host(&database_path, &workspace).await;
         let blocked = invoke(&restarted,loser_context.clone(),"workspace.files/write",json!({
             "path":loser_path,"content":"must not run after reopen"
         })).await.unwrap_err();
@@ -5048,18 +4948,8 @@ mod tests {
         let initial_commit = repository.head().unwrap().target().unwrap();
         std::fs::write(workspace.join("tracked.txt"),b"stage candidate\n").unwrap();
         drop(repository);
-        let file_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let vcs_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let file_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            file_database.pool().clone(),
-        ).await.unwrap();
-        let vcs_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            vcs_database.pool().clone(),
-        ).await.unwrap();
-        let file_host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(file_store.clone());
-        let vcs_host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(vcs_store.clone());
+        let (file_database, file_store, file_host) = open_effect_host(&database_path, &workspace).await;
+        let (vcs_database, vcs_store, vcs_host) = open_effect_host(&database_path, &workspace).await;
         let mut file = context(&workspace);
         file.capability_id = CapabilityId::from("workspace.files");
         file.action_id = ActionId::from("workspace.files/write");
@@ -5114,12 +5004,7 @@ mod tests {
         file_database.close().await;
         vcs_database.close().await;
 
-        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            reopened_database.pool().clone(),
-        ).await.unwrap();
-        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(reopened_store.clone());
+        let (reopened_database, reopened_store, restarted) = open_effect_host(&database_path, &workspace).await;
         let blocked = if file_won {
             invoke(&restarted,vcs.clone(),"workspace.vcs/stage",vcs_input.0.clone()).await
         } else {
@@ -5247,12 +5132,7 @@ mod tests {
         let workspace = directory.path().join("workspace");
         let database_path = directory.path().join("agent.db");
         std::fs::create_dir(&workspace).unwrap();
-        let database = nomifun_db::init_database(&database_path).await.unwrap();
-        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
-            .await
-            .unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(store.clone());
+        let (database, store, host) = open_effect_host(&database_path, &workspace).await;
         let mut pending = context(&workspace);
         pending.capability_id = CapabilityId::from("workspace.files");
         pending.action_id = ActionId::from("workspace.files/write");
@@ -5282,12 +5162,7 @@ mod tests {
         database.close().await;
 
         std::fs::write(workspace.join("result.txt"),b"user edit after lost receipt").unwrap();
-        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            reopened_database.pool().clone(),
-        ).await.unwrap();
-        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(reopened_store.clone());
+        let (reopened_database, reopened_store, restarted) = open_effect_host(&database_path, &workspace).await;
 
         let same_key = invoke(&restarted, pending.clone(), "workspace.files/write",
             json!({"path": "result.txt", "content": "published"})).await.unwrap_err();
@@ -5497,12 +5372,7 @@ mod tests {
         database.close().await;
         lock_database.close().await;
 
-        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            reopened_database.pool().clone(),
-        ).await.unwrap();
-        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(reopened_store.clone());
+        let (reopened_database, reopened_store, restarted) = open_effect_host(&database_path, &workspace).await;
         let same_key = invoke(&restarted,pending.clone(),"workspace.files/write",json!({
             "path":"result.txt","content":"published before terminal lock"
         })).await.unwrap_err();
@@ -5592,12 +5462,7 @@ mod tests {
         database.close().await;
         lock_database.close().await;
 
-        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            reopened_database.pool().clone(),
-        ).await.unwrap();
-        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(reopened_store.clone());
+        let (reopened_database, reopened_store, restarted) = open_effect_host(&database_path, &workspace).await;
         let same_key = invoke(&restarted,pending.clone(),"workspace.files/write",json!({
             "path":"result.txt","content":"published before terminal cancellation"
         })).await.unwrap_err();
@@ -5624,12 +5489,7 @@ mod tests {
         let workspace = directory.path().join("workspace");
         let database_path = directory.path().join("agent.db");
         std::fs::create_dir(&workspace).unwrap();
-        let database = nomifun_db::init_database(&database_path).await.unwrap();
-        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
-            .await
-            .unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(store.clone());
+        let (database, store, host) = open_effect_host(&database_path, &workspace).await;
         let mut pending = context(&workspace);
         pending.capability_id = CapabilityId::from("workspace.files");
         pending.action_id = ActionId::from("workspace.files/write");
@@ -5699,12 +5559,7 @@ mod tests {
         let workspace = directory.path().join("workspace");
         let database_path = directory.path().join("agent.db");
         std::fs::create_dir(&workspace).unwrap();
-        let database = nomifun_db::init_database(&database_path).await.unwrap();
-        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
-            .await
-            .unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(store.clone());
+        let (database, store, host) = open_effect_host(&database_path, &workspace).await;
         let mut call = context(&workspace);
         call.capability_id = CapabilityId::from("workspace.files");
         call.action_id = ActionId::from("workspace.files/write");
@@ -5975,12 +5830,7 @@ mod tests {
         database.close().await;
         lock_database.close().await;
 
-        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            reopened_database.pool().clone(),
-        ).await.unwrap();
-        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(reopened_store.clone());
+        let (reopened_database, reopened_store, restarted) = open_effect_host(&database_path, &workspace).await;
         let same_key = invoke(&restarted,call.clone(),"workspace.files/write",input.0).await.unwrap_err();
         assert!(same_key.message.contains("durable pending"),"{same_key:?}");
         let mut different = call.clone();
@@ -6408,12 +6258,7 @@ mod tests {
         database.close().await;
         lock_database.close().await;
 
-        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            reopened_database.pool().clone(),
-        ).await.unwrap();
-        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(reopened_store.clone());
+        let (reopened_database, reopened_store, restarted) = open_effect_host(&database_path, &workspace).await;
         let same_owner_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let same_called = Arc::clone(&same_owner_called);
         let same_error = restarted.invoke_managed_effect(
@@ -7608,12 +7453,7 @@ mod tests {
         std::fs::create_dir(&workspace).unwrap();
         std::fs::write(workspace.join("first.txt"),b"alpha\n").unwrap();
         std::fs::write(workspace.join("second.txt"),b"beta\n").unwrap();
-        let database = nomifun_db::init_database(&database_path).await.unwrap();
-        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
-            .await
-            .unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(store.clone());
+        let (database, store, host) = open_effect_host(&database_path, &workspace).await;
         let mut pending = context(&workspace);
         pending.capability_id = CapabilityId::from("workspace.files");
         pending.action_id = ActionId::from("workspace.files/patch");
@@ -7651,12 +7491,7 @@ mod tests {
 
         std::fs::write(workspace.join("first.txt"),b"user first\n").unwrap();
         std::fs::write(workspace.join("second.txt"),b"user second\n").unwrap();
-        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            reopened_database.pool().clone(),
-        ).await.unwrap();
-        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(reopened_store.clone());
+        let (reopened_database, reopened_store, restarted) = open_effect_host(&database_path, &workspace).await;
 
         let same_key = invoke(&restarted,pending.clone(),"workspace.files/patch",input.0.clone())
             .await.unwrap_err();
@@ -7690,12 +7525,7 @@ mod tests {
         let database_path = directory.path().join("agent.db");
         std::fs::create_dir(&workspace).unwrap();
         std::fs::write(workspace.join("victim.txt"),b"original\n").unwrap();
-        let database = nomifun_db::init_database(&database_path).await.unwrap();
-        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
-            .await
-            .unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(store.clone());
+        let (database, store, host) = open_effect_host(&database_path, &workspace).await;
         let mut pending = context(&workspace);
         pending.capability_id = CapabilityId::from("workspace.files");
         pending.action_id = ActionId::from("workspace.files/delete");
@@ -7720,12 +7550,7 @@ mod tests {
         database.close().await;
 
         std::fs::write(workspace.join("victim.txt"),b"user recreated\n").unwrap();
-        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            reopened_database.pool().clone(),
-        ).await.unwrap();
-        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(reopened_store.clone());
+        let (reopened_database, reopened_store, restarted) = open_effect_host(&database_path, &workspace).await;
 
         let same_key = invoke(&restarted,pending.clone(),"workspace.files/delete",input.0.clone())
             .await.unwrap_err();
@@ -7757,12 +7582,7 @@ mod tests {
         let database_path = directory.path().join("agent.db");
         std::fs::create_dir_all(workspace.join("tree/nested")).unwrap();
         std::fs::write(workspace.join("tree/nested/old.txt"),b"old tree\n").unwrap();
-        let database = nomifun_db::init_database(&database_path).await.unwrap();
-        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
-            .await
-            .unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(store.clone());
+        let (database, store, host) = open_effect_host(&database_path, &workspace).await;
         let mut pending = context(&workspace);
         pending.capability_id = CapabilityId::from("workspace.files");
         pending.action_id = ActionId::from("workspace.files/delete");
@@ -7787,12 +7607,7 @@ mod tests {
 
         std::fs::create_dir_all(workspace.join("tree/recreated")).unwrap();
         std::fs::write(workspace.join("tree/recreated/user.txt"),b"user tree\n").unwrap();
-        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            reopened_database.pool().clone(),
-        ).await.unwrap();
-        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(reopened_store.clone());
+        let (reopened_database, reopened_store, restarted) = open_effect_host(&database_path, &workspace).await;
 
         let same_key = invoke(&restarted,pending.clone(),"workspace.files/delete",input.0.clone())
             .await.unwrap_err();
@@ -8040,12 +7855,7 @@ mod tests {
         let initial_commit = repository.head().unwrap().target().unwrap();
         std::fs::write(workspace.join("tracked.txt"),b"staged before receipt\n").unwrap();
 
-        let database = nomifun_db::init_database(&database_path).await.unwrap();
-        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
-            .await
-            .unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(store.clone());
+        let (database, store, host) = open_effect_host(&database_path, &workspace).await;
         let mut pending = context(&workspace);
         pending.capability_id = CapabilityId::from("workspace.vcs");
         pending.action_id = ActionId::from("workspace.vcs/stage");
@@ -8084,12 +7894,7 @@ mod tests {
         drop(index);
         drop(tree);
         drop(head);
-        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            reopened_database.pool().clone(),
-        ).await.unwrap();
-        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(reopened_store.clone());
+        let (reopened_database, reopened_store, restarted) = open_effect_host(&database_path, &workspace).await;
 
         let same_key = invoke(&restarted,pending.clone(),"workspace.vcs/stage",input.0.clone())
             .await.unwrap_err();
@@ -8877,12 +8682,7 @@ mod tests {
         index.write().unwrap();
         drop(index);
 
-        let database = nomifun_db::init_database(&database_path).await.unwrap();
-        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
-            .await
-            .unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(store.clone());
+        let (database, store, host) = open_effect_host(&database_path, &workspace).await;
         let mut pending = context(&workspace);
         pending.capability_id = CapabilityId::from("workspace.vcs");
         pending.action_id = ActionId::from("workspace.vcs/commit");
@@ -8915,12 +8715,7 @@ mod tests {
         index.add_path(Path::new("tracked.txt")).unwrap();
         index.write().unwrap();
         drop(index);
-        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
-        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
-            reopened_database.pool().clone(),
-        ).await.unwrap();
-        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
-            .with_effect_store(reopened_store.clone());
+        let (reopened_database, reopened_store, restarted) = open_effect_host(&database_path, &workspace).await;
 
         let same_key = invoke(&restarted,pending.clone(),"workspace.vcs/commit",input.0.clone())
             .await.unwrap_err();

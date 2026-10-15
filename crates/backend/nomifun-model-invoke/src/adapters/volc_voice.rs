@@ -1,6 +1,6 @@
 //! `volc.asr_file` / `volc.tts_v3` — Volcengine speech domain (openspeech)
-//! file ASR and v3 大模型 TTS (protocol per
-//! `docs/specs/2026-07-28-provider-protocol-variance.zh.md` §3,
+//! file ASR and v3 大模型 TTS (routing contract:
+//! `docs/architecture/model-providers.zh.md`,
 //! voice domain: `openspeech.bytedance.com`, credentials fully independent of
 //! the Ark API key — these protocols always ride the `"voice"` connection
 //! profile with the `volc_voice` multi-header auth scheme).

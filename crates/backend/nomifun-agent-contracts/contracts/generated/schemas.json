@@ -3649,6 +3649,125 @@
     "title": "AgentStoreSchemaManifestPayload",
     "type": "object"
   },
+  "agent_turn_outcome": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "description": "Exact, nonempty, sealed public messages; never reasoning or tool output.",
+        "properties": {
+          "kind": {
+            "const": "answered",
+            "type": "string"
+          },
+          "message_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "message_ids"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "The question remains in the original typed user-input request.",
+        "properties": {
+          "kind": {
+            "const": "input_required",
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "request_id"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "failed",
+            "type": "string"
+          },
+          "message_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "message_ids"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "cancelled",
+            "type": "string"
+          },
+          "message_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "message_ids"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "paused",
+            "type": "string"
+          },
+          "message_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "message_ids"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Closed history without a provable public answer or input handoff.",
+        "properties": {
+          "kind": {
+            "const": "unavailable",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "AgentTurnOutcome"
+  },
   "canonical_error_registry": {
     "$defs": {
       "CanonicalErrorClass": {

@@ -267,20 +267,25 @@ v3 hard reset 不迁移历史数据集。
 3. 校验精确 baseline checksum、完整 ID schema registry、所有物理列/登记的
    JSON 路径 ID、逻辑引用 orphan audit，以及 Workshop/Companion 等受管
    side-store 的 ID 与文件索引完整性；全部通过才视为当前 v3；
-4. 历史或不兼容数据集整体移动到 retired/quarantine 位置；
+4. 仅对可读且 lineage 不兼容的历史数据库，将完整受管数据集移动到
+   retired/quarantine 位置；
 5. 创建全新的空 v3 数据集和 baseline schema；
 6. 写入并完成 reset receipt 后，才允许对外服务。
 
-禁止逐表转换、dual-read、alias 列、legacy-ID 映射或选择性复制业务数据。
+数据库 I/O 失败及现役 schema/data 损坏必须 fail closed，不进入重建路径；迁移条数
+不能证明应用版本的新旧。禁止逐表转换、dual-read、alias 列、legacy-ID 映射或选择性复制业务数据。
 Reset 失败必须终止启动，不能在新旧状态混合时继续运行。用户自有的外部
 workspace 不删除，但 v3 不延续其历史数据库引用。
 
-v3 restore 只接受 v3 backup manifest。Restore 保留全部稳定业务 UUIDv7 并
-重建技术 `id`；逻辑关系从业务 UUIDv7、自然键、外部 ID 和登记的 JSON/
-side-store 引用重建，不读取源库行号。Clone 同样保留输入中的业务 UUIDv7，
-不会 mint 或隐式重写业务 UUID；如果与目标已有业务 UUID 冲突，必须
-fail-closed，不能留下部分写入。技术 `id` 只属于当前数据集，绝不能作为
-portable graph identity。
+Restore 只接受当前 format version 3、generation-5 的备份合同及通过验证的
+canonical lineage。恢复整体复制 WAL 安全的 SQLite 快照，保留业务 UUIDv7、
+技术 `id`、canonical TEXT/复合主键及精确关联图，不重排行号或重建 canonical 事实。
+目标使用新的 `storage-generation`，隔离恢复后的浏览器/缓存身份，数据库身份保持不变。
+
+备份与恢复不获得 startup rebuild 权限；lineage 不受支持、schema/data 损坏和
+I/O 失败均拒绝操作，不导入历史行。恢复先验证 bundle 与数据库，再安装到不存在或空的
+目标目录，不合并、不留下部分安装。完整 SQLite 快照保留技术 `id`，不使其成为
+portable graph identity；它仍只属于当前数据集。
 
 ## 新增带 ID 的实体
 

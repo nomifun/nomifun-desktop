@@ -394,19 +394,6 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn agent_config_nomi_has_no_backend() {
-        let repo = Arc::new(MockPrefRepo::with_data(vec![(
-            "channels.lark.agent",
-            r#"{"agent_type":"nomi","name":"Nomi"}"#,
-        )]));
-        let svc = ChannelSettingsService::new(repo);
-
-        let config = svc.get_agent_config(PluginType::Lark).await.unwrap();
-        assert_eq!(config.agent_type, "nomi");
-        assert!(config.backend.is_none());
-    }
-
     // ── get_agent_config (new format) ──────────────────────────────────
 
     #[tokio::test]

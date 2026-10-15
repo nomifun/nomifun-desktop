@@ -211,11 +211,11 @@ describe('macOS cargo runner', () => {
     expect(compiler.environment.ORT_LIB_PATH).toBe('/owned/onnx/lib');
     expect(compiler.environment.ORT_PREFER_DYNAMIC_LINK).toBe('1');
     expect(compiler.environment.RUSTFLAGS).toBe('-C debuginfo=1 -C link-arg=-Wl,-rpath,@executable_path/../Frameworks');
-    expect(compiler.bundleConfig).toBe('/owned/onnx/tauri.conf.json');
+    expect(compiler.bundleConfig).toBe(join('/owned/onnx', 'tauri.conf.json'));
     expect(compiler.bundleFiles).toEqual({
-      [`Frameworks/${INTEL_ONNX_RUNTIME.library}`]: `/owned/onnx/lib/${INTEL_ONNX_RUNTIME.library}`,
-      'Resources/onnxruntime-LICENSE': '/owned/onnx/LICENSE',
-      'Resources/onnxruntime-ThirdPartyNotices.txt': '/owned/onnx/ThirdPartyNotices.txt',
+      [`Frameworks/${INTEL_ONNX_RUNTIME.library}`]: join('/owned/onnx/lib', INTEL_ONNX_RUNTIME.library),
+      'Resources/onnxruntime-LICENSE': join('/owned/onnx', 'LICENSE'),
+      'Resources/onnxruntime-ThirdPartyNotices.txt': join('/owned/onnx', 'ThirdPartyNotices.txt'),
     });
     const encoded = await prepareMacosBuildEnvironment({ architecture: 'arm64', environment: {
       CARGO_BUILD_TARGET: 'x86_64-apple-darwin', CARGO_ENCODED_RUSTFLAGS: '-C\x1fdebuginfo=1',

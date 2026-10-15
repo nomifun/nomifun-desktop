@@ -115,6 +115,11 @@ mod tests {
         assert!(resp.success);
         assert_eq!(resp.data, Some("data"));
         assert_eq!(resp.message.as_deref(), Some("Created"));
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"success": true, "data": "data", "message": "Created"})
+        );
     }
 
     #[test]
@@ -135,10 +140,18 @@ mod tests {
 
     #[test]
     fn test_api_response_serialization_with_data() {
-        let resp = ApiResponse::ok("hello");
+        #[derive(serde::Serialize)]
+        struct UserData {
+            id: String,
+            name: String,
+        }
+        let resp = ApiResponse::ok(UserData {
+            id: "u1".into(),
+            name: "Alice".into(),
+        });
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["success"], true);
-        assert_eq!(json["data"], "hello");
+        assert_eq!(json["data"], serde_json::json!({"id": "u1", "name": "Alice"}));
         assert!(json.get("message").is_none());
     }
 
@@ -180,22 +193,30 @@ mod tests {
     }
 
     #[test]
-    fn test_error_response_from_app_error() {
-        let err = AppError::Unauthorized("invalid token".into());
-        let resp = ErrorResponse::from(err);
-        assert!(!resp.success);
-        assert_eq!(resp.error, "Unauthorized: invalid token");
-        assert_eq!(resp.code, "UNAUTHORIZED");
-        assert!(resp.details.is_none());
-    }
-
-    #[test]
-    fn test_error_response_from_rate_limited() {
-        let resp = ErrorResponse::from(AppError::RateLimited);
-        assert!(!resp.success);
-        assert_eq!(resp.error, "Rate limited");
-        assert_eq!(resp.code, "RATE_LIMITED");
-        assert!(resp.details.is_none());
+    fn test_error_response_from_app_errors() {
+        for (err, code, message) in [
+            (AppError::NotFound("user 42".into()), "NOT_FOUND", "Not found: user 42"),
+            (
+                AppError::BadRequest("missing field: username".into()),
+                "BAD_REQUEST", "Bad request: missing field: username",
+            ),
+            (AppError::Unauthorized("invalid token".into()), "UNAUTHORIZED", "Unauthorized: invalid token"),
+            (AppError::Forbidden("access denied".into()), "FORBIDDEN", "Forbidden: access denied"),
+            (AppError::Conflict("username taken".into()), "CONFLICT", "Conflict: username taken"),
+            (AppError::RateLimited, "RATE_LIMITED", "Rate limited"),
+            (
+                AppError::Internal("db connection lost".into()),
+                "INTERNAL_ERROR", "Internal error: db connection lost",
+            ),
+            (AppError::BadGateway("upstream timeout".into()), "BAD_GATEWAY", "Bad gateway: upstream timeout"),
+            (AppError::Timeout("request timed out".into()), "TIMEOUT", "Request timeout: request timed out"),
+        ] {
+            let resp = ErrorResponse::from(err);
+            assert!(!resp.success);
+            assert_eq!(resp.error, message);
+            assert_eq!(resp.code, code);
+            assert!(resp.details.is_none());
+        }
     }
 
     #[test]
@@ -229,6 +250,7 @@ mod tests {
                 .and_then(|details| details.get("operation")),
             Some(&serde_json::json!("create"))
         );
+        assert_eq!(resp.details.as_ref().unwrap()["offending_segments"], serde_json::json!(["Archive "]));
     }
 
     #[test]
@@ -252,6 +274,7 @@ mod tests {
                 .and_then(|details| details.get("operation")),
             Some(&serde_json::json!("runtime"))
         );
+        assert_eq!(resp.details.as_ref().unwrap()["offending_segments"], serde_json::json!(["Archive "]));
     }
 
     #[test]
