@@ -5,6 +5,22 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.9 - 2026-10-15
+
+- Add scoped attachment drag and drop to conversations; unify commands and
+  canonical context clearing; unify scrollbars and compact the companion
+  UI.
+- Unify canonical turn results; derive agent tools from canonical schemas
+  with typed guidance; settle continuations and user input handoffs
+  safely.
+- Harden the embedded browser: fence macOS popup admission and history
+  navigation, and stabilize the embedded identity and navigation
+  lifecycle.
+- Revamp the template workspace: move task history into a compact popover,
+  compact workspace cards with pagination, and refine the editor layout
+  and controls.
+- Preserve robot session bindings and device reconnects.
+
 ## v0.8.8 - 2026-10-14
 
 - Recover agent capability loading: capability lists recover correctly
