@@ -142,15 +142,11 @@ Canvas 导出使用 archive v3 writer，并继续保留 archive v1/v2 reader。
 - **React Context** 承载不属于 SWR 的应用形态状态：认证（`AuthProvider`）、主题（`ThemeProvider`）、反馈 toast（`FeedbackProvider`）、文件预览（`PreviewProvider`），以及对话历史列表（`ConversationHistoryProvider`）。
 - **`configService`**（`ui/src/common/config/configService.ts`）缓存后端设置；[`main.tsx`](../../ui/src/renderer/main.tsx) 中的入口点会在 i18n / theme 代码加载前启动 `configService.initialize()`，因此这些子系统在首次渲染时读到的是权威设置。
 
-## 主题
+## 主题与国际化
 
-Arco 的 `ConfigProvider` 在根处包裹应用，主色为 `primaryColor: '#4E5969'`，并按当前语言提供 locale（`enUS`、`zhCN`）。主题（`light`、`dark`、品牌变体）以纯 CSS 文件叠在 `ui/src/renderer/styles/themes/index.css` 中，通过 `ThemeProvider` 切换。
+`useTheme` 选择亮暗模式，`useColorScheme` 选择品牌方案，默认方案为 `default`。组件优先使用 semantic token；预设 CSS 由 `AppThemeRuntime` 与 `applyCustomCss` 注入并自动处理 `!important`。亮暗 token 完整对称，选择器覆盖 `:root`/`body`，Arco RGB scale 使用逗号三元组。宽泛选择器、布局属性及外联资源不进入主题；popover alpha 至少 .86，反馈/tooltip 使用实体色，不装饰 `.message-item` 外层。具体作者合同见 [样式规范](../contributing/styling.zh.md)。
 
-UnoCSS 与 Arco 并行提供 utility 类 —— 其配置位于 `ui/uno.config.ts`。Arco 的自定义覆盖位于 `ui/src/renderer/styles/arco-override.css`。
-
-## 国际化
-
-[`ui/src/renderer/services/i18n`](../../ui/src/renderer/services/) 用 `zh-CN` 与 `en-US` 两种语言初始化 `i18next`。字符串按功能组织，解析后的语言通过 `main.tsx` 中的 `arcoLocales` map 流入 Arco。切换语言无需重新加载 —— i18next 与 Arco 都会按新语言重新计算。
+i18next 使用 `zh-CN`/`en-US` 静态语言 bundle，共享 [common/config/i18n.ts](../../ui/src/common/config/i18n.ts) 的语言规范化。后端设置是语言真值，localStorage 只提示首帧；通过现役 `changeLanguage`/语言偏好 helper 同步主窗、伙伴及其他 surface，不各自修改实例。复数键由 [localeKeyParity.ts](../../ui/src/renderer/services/i18n/localeKeyParity.ts) 按语言类别验证，不能要求所有语言具有相同复数后缀。
 
 ## 一点平台特定的 UX
 

@@ -1,5 +1,5 @@
-//! `minimax.t2a` — MiniMax synchronous text-to-speech (protocol per
-//! `docs/specs/2026-07-28-provider-protocol-variance.zh.md` §5: domain
+//! `minimax.t2a` — MiniMax synchronous text-to-speech (routing contract:
+//! `docs/architecture/model-providers.zh.md`; domain
 //! `api.minimaxi.com` (国内) / `api.minimax.io` (国际) — the two platforms'
 //! keys are NOT interchangeable; the connection's base_url picks the platform).
 //!

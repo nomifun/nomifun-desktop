@@ -44,6 +44,16 @@ provider 凭据保存在本地配置中。任何云端 provider 仍会按自己�
 配置。模型别名和描述由各用途共用；凭据和模型的完整调用接口集合仍可在
 **供应商与密钥**中管理。
 
+## 在会话中录入模型
+
+先准备一个可以正常对话和调用工具的模型，再请通用 Agent 添加提供商或模型。也可在模型管理点击**在会话中添加 · 通用 Agent**，补全预填请求后发送。
+
+> 请给已有的“公司模型网关”添加 example-chat，使用 OpenAI Chat Completions 协议。沿用现有地址和密钥，不切换默认模型。
+
+新增提供商时提供名称、服务地址、精确模型 ID、用途及认证要求。Agent 会先检查已有配置与支持的协议；缺少信息时需要补充。录入不会自动切换默认模型、删除已有模型或执行付费调用检查。
+
+粘贴到聊天中的内容会交给当前模型处理，并按普通会话历史规则保存。不想把密钥放进会话时，先在模型管理录入提供商与密钥，再请 Agent 复用。个人 Agent 需明确启用**模型管理**能力及相关动作；已有冻结会话不会自动获得新能力。
+
 ## 接入可选模型网关
 
 **NomiFun 模型网关**供应商预设可以连接你自托管的网关，也可以连接社区成员
@@ -166,49 +176,10 @@ Chat 不需要用户勾选识图、视频理解、音频输入、工具调用、
 创作会把精确的 `{ providerId, model, task, capability }` 身份随每次已接纳
 的媒体操作持久化。复用同一个幂等任务重试时，不能更换这些事实。
 
-## 模型故障转移队列
+## 故障转移与自动化
 
-故障转移功能是一条有序的可靠性队列，不是多凭据轮询池。
+在**模型管理 → 故障转移**中配置有序备用模型队列。新 AgentSession 会将队列冻结进模型路由，由 Broker 在单次模型调用内执行有限重试与切换；修改全局队列不会暗改已有会话。需要应用新队列时，新建或 fork 会话。
 
-它会：
+[智能决策](intelligent-decision.zh.md)负责未解决问题、静默与符合条件的失败回合，不替代 Broker，也不保证自动恢复每种原生供应商暂停。[AutoWork](autowork-requirements.zh.md)负责推进需求队列，结果不确定时暂停并等待人工检查。终端里的第三方 CLI 使用自己的供应商配置与恢复方式。
 
-- 把全局默认队列存储在 `agent.model_failover`；
-- 允许单个会话通过 `extra.model_failover` 覆盖；
-- 在该会话启用故障转移时被 IDMM 故障值守使用；
-- 不会在 API Key 之间分摊负载。
-
-常见队列：
-
-```text
-主模型 -> 便宜备用模型 -> 更强备用模型 -> 人工检查
-```
-
-当前运行时允许整条队列最多切换四次。如果所有 provider 都不可用、所需任务没有
-被支持，或 prompt/tool 状态本身无效，故障转移也无法让这一轮成功。
-
-## 与 IDMM、AutoWork 的关系
-
-IDMM 有独立的故障值守与决策停滞值守。模型故障转移属于故障侧：当 provider
-故障被判定为可恢复、且会话启用了故障转移时，IDMM 可以让会话运行时按配置队列
-重试。
-
-AutoWork 位于更上一层：它负责让带标签的需求队列继续认领和推进，而 IDMM 与
-模型故障转移负责尽量让每个已认领回合活下来。
-
-外部 ACP/CLI Agent 不参与 Nomi 引擎故障转移队列；它们的 provider 调用发生在
-各自运行时内部。
-
-## 真相来源
-
-- provider 与模型设置 UI：
-  `ui/src/renderer/pages/modelHub/`
-- 共享模型存储类型：
-  `ui/src/common/config/storage.ts`
-- 模型故障转移：
-  `crates/backend/nomifun-conversation/src/model_failover.rs`
-- 故障转移 API：
-  `crates/backend/nomifun-app/src/router/model_failover.rs`
-- IDMM 监督服务：
-  `crates/backend/nomifun-idmm/src/service.rs`
-- 创作模型目录：
-  `ui/src/renderer/pages/creativeStudio/models/catalog.ts`
+协议、连接与目录的实现合同见[模型提供商架构](../architecture/model-providers.zh.md)。

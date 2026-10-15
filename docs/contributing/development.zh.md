@@ -1,43 +1,19 @@
 # 开发
 
-本页面向修改 **NomiFun** 仓库本身的人：React SPA、Rust 后端、agent 引擎或
-Tauri 桌面壳。如果只是安装或部署，请先看
-[`../getting-started/installation.zh.md`](../getting-started/installation.zh.md)
-或 [`../guides/web-server-deployment.zh.md`](../guides/web-server-deployment.zh.md)。
+[English](development.md)
 
-当前仓库已经是活跃的 Tauri monorepo。旧 Electron 迁移阶段的计划、审计与设计稿
-不在仓库中保留；需要这些背景时请查阅 git 历史。
+安装或使用产品请看[安装](../getting-started/installation.zh.md)与
+[Web 服务部署](../guides/web-server-deployment.zh.md)。
 
 ## 前置工具
 
-| 工具 | 最低要求 | 用途 |
-| --- | --- | --- |
-| Rust | stable，edition 2024 | Workspace 使用 resolver `3` 和 edition `2024`。 |
-| Bun | >= 1.3.13 | 前端包管理与 Vite runner；应用为明确需要 Bun 的功能供应独立的批准组件。 |
-| Tauri CLI v2 | 来自 `devDependencies` | 通过 `bun run dev` / `bun run build` 调用，无需全局安装。 |
-| Git | 较新版本 | 开发流程和部分内置工具需要。 |
-| CMake | >= 3.16 | `opusic-sys` 在干净构建时现场编译内置的 libopus（约 25 秒）。 |
-| 原生编译工具 | 按平台 | SQLite、TLS、libgit2、WebKit/WebView 与原生 crate 需要。 |
+- 支持 edition 2024、resolver 3 的稳定 Rust。
+- Bun >= 1.3.13、Git、CMake >= 3.16 和原生 C/C++ 工具链。
+- Windows：MSVC 构建工具与 WebView2。macOS：Xcode Command Line Tools。
+  Linux：遵循维护中的[系统依赖清单](../getting-started/installation.zh.md#前置条件)。
 
-平台提示：
-
-- Windows：MSVC C++ Build Tools 与 WebView2 runtime。
-- macOS：Xcode Command Line Tools。
-- Linux：`build-essential cmake pkg-config git`，再加上桌面壳及其截屏栈需要链接的
-  系统库。Debian/Ubuntu 上经过验证的 `apt install` 命令在
-  [Linux 系统包 (Debian/Ubuntu)](../guides/desktop-app.zh.md#linux-系统包-debianubuntu)，
-  请以那一节为唯一来源，不要把清单复制到别处。
-
-CMake 与 C 编译器在任何平台都是必需的：机器人网关的 Opus 编解码从源码构建并
-静态链接，因此任何机器都不需要预装 libopus，发布产物也不必附带额外文件。
-
-### 首次构建需要访问 pyke 的 CDN
-
-机器人网关的 Silero 语音活动检测跑在 ONNX Runtime 上，`ort-sys` 会在首次构建时
-从 pyke 的 CDN 下载预编译的静态 `libonnxruntime.a`（约 101 MB），缓存在
-`~/.cache/ort.pyke.io`。之后的构建——包括完全离线的机器——直接复用该缓存。由于
-运行时是静态链接的，不需要分发任何 dylib；而完全无法访问该 CDN 的机器会在构建
-阶段失败，而不是在运行时才暴露问题。
+首次原生构建可能下载 ONNX Runtime 等第三方构建依赖。
+离线重建需保留依赖缓存。平台构建细节见[构建与打包](building-and-packaging.zh.md)。
 
 ## 安装依赖
 
@@ -45,143 +21,78 @@ CMake 与 C 编译器在任何平台都是必需的：机器人网关的 Opus �
 git clone <repo-url> nomifun-desktop
 cd nomifun-desktop
 bun install
-cargo check --workspace
 ```
 
-根 `package.json` 只有一个 Bun workspace：`ui/`。Rust crate 由根 `Cargo.toml`
-管理。
+Rust workspace 以 [Cargo.toml](../../Cargo.toml) 为准，Bun workspace
+包含 `ui/`。根脚本在 [package.json](../../package.json)，运行
+`bun run help` 查看入口。
 
 ## 开发循环
 
-| 命令 | 适用场景 | 实际运行内容 |
-| --- | --- | --- |
-| `bun run dev:ui` | 纯 UI 工作，可接受 API 请求失败 | Vite on `http://localhost:5173`，不启动后端。 |
-| `bun run dev:web` | 浏览器 + 后端联调，关闭登录 | `NOMI_CHANNEL=dev` 的 `nomifun-web --port 8787 --api-only --insecure-no-auth` 加 Vite。 |
-| `bun run serve:web` | 从源码跑生产形态 Web host | `nomifun-web` on `http://127.0.0.1:8787`，服务 `ui/dist`，默认开启登录。 |
-| `bun run dev` | 桌面/Tauri 开发 | `NOMI_CHANNEL=dev` 的 Tauri shell、Vite、桌面本地信任策略下的嵌入式后端。 |
-
-`serve:web` 需要先构建 SPA：
-
-```bash
-bun run build:ui
-bun run serve:web
-```
-
-`dev:web` 会同时启动 API 与 UI，并使用 `--insecure-no-auth`，只适合 localhost
-或隔离网络。
-
-带 Rust 后端的开发入口（`dev`、`dev:web`、`build:fast`）统一使用 `dev`
-构建 channel。桌面 `bun run dev` 未指定数据根时，启动器根据当前 canonical baseline
-派生 `NomiFun-dev-schema-<fingerprint>`，复用同一 schema 的开发数据，并保留原有目录。
-开发根位于 stable 根之外，永远不嵌套在其内部。生产形态的 `serve:web` 和
-release 构建仍使用 stable 的 `NomiFun` 目录。需要隔离复现时显式设置
-`NOMIFUN_DATA_DIR` 或 `--data-dir`；开发启动不会导入 stable 的历史 Agent 状态。
-
-macOS 开发启动器给每一代 App 进程传入 `-ApplePersistenceIgnoreState YES`，
-避免上一次崩溃的系统窗口恢复提示阻塞 Tauri 启动及后端监听。该设置只作用于当前进程，
-不写入用户偏好，不删除系统保存状态，也不改变正式发布 App 的窗口恢复行为。
-
-桌面循环已经不是旧 Electron 模型。Tauri shell 直接链接 `nomifun-app`，在进程内
-启动后端，选择一个空闲 localhost 端口，注入 `window.__backendPort` 与
-`window.__nomiLocalTrust`，renderer 每次请求都会带上这个本次启动生成的信任
-secret。
-
-## 验证命令
-
-| 命令 | 覆盖范围 |
+| 命令 | 行为 |
 | --- | --- |
-| `cargo check --workspace` | 所有 Rust crate 和 app host 编译。 |
-| `cargo test -p <crate>` | 单个 crate 的 Rust 测试。 |
-| `bun run test:crate <crate> [cargo 参数]` | 带构建缓存清理保护的单 crate 聚焦测试。 |
-| `bun run test:core` | 不启用 desktop-only feature 的 workspace 回归。 |
-| `bun run test:desktop` | 不监听 `ui/dist` 资源的桌面壳测试。 |
-| `bun run test` | 包含 desktop feature 与 doctest 的全量回归。 |
-| `bun run typecheck` | Renderer TypeScript。 |
-| `bun run check:i18n` | i18n key 类型生成是否最新。 |
-| `bun run check:theme` | 主题 token 契约。 |
-| `bun run help --check` | 根脚本帮助文本。 |
-| `bun run build:ui` | 生产 Vite 构建。 |
-| `bun run build` | 当前 OS 的 Tauri 桌面包。 |
+| `bun run dev:ui` | 5173 端口的 Vite，不启动后端，API 调用可能失败。 |
+| `bun run dev:web` | Vite 加 8787 端口的 API-only `nomifun-web`，关闭鉴权供本地迭代。 |
+| `bun run serve:web` | 构建 SPA，并从源码启动默认鉴权的 Web 宿主。 |
+| `bun run dev` | Tauri、Vite 与桌面本地信任策略下的内嵌后端。 |
 
-提交前常用组合：
+关闭鉴权的开发宿主仅绑定 loopback 或隔离的可信网络。
+桌面请求使用每次启动生成的本地信任密钥，后端在宿主进程内运行。
 
-```bash
-cargo check --workspace
-bun run typecheck
-bun run check:i18n
-bun run check:theme
-bun run help --check
-```
+开发命令选择 dev 构建通道。桌面 dev 启动器使用按 schema 指纹区分的同级目录
+`NomiFun-dev-schema-<fingerprint>`，保留以往目录。
+`serve:web` 与发布构建使用 stable 通道。
+隔离实例时显式设置绝对路径 `NOMIFUN_DATA_DIR`，按字面值使用。
+两个后端不能同时占用同一数据目录。
 
-## 后端 CLI
-
-`nomifun-app` 仍然提供独立 `nomicore` binary。app host 不会 spawn 它，但诊断、
-stdio MCP bridge 和公开能力调用仍会用到。
-
-当前子命令：
-
-- `mcp-requirement-stdio`
-- `mcp-knowledge-stdio`
-- `mcp-gateway-stdio`
-- `mcp-open-stdio`
-- `terminal-hook --event <kind>`
-- `doctor`
-- `remote open|turn|observe|cancel` —— canonical Remote API 客户端
-- `backup --output <dir>`
-- `restore --bundle <dir> --destination-data-dir <dir>`
-
-agent 无法启动时，先跑：
-
-```bash
-cargo run -p nomifun-app --bin nomicore -- doctor
-```
-
-它会按后端看到的 PATH 探测各个 agent CLI，并把结果打印到 stdout。
-
-## 数据目录与工作目录
-
-所有 host 未显式覆盖时共享同一个默认数据目录：
-
-- Windows：`%LOCALAPPDATA%\NomiFun`
-- macOS：`~/Library/Application Support/NomiFun`
-- Linux：`$XDG_DATA_HOME/NomiFun` 或 `~/.local/share/NomiFun`
-
-数据目录包含 SQLite、日志、managed runtime cache、extension 数据和 agent 状态。
-后端启动时会先拿 `{data_dir}/server.lock` 独占锁，避免两个活跃后端同时写同一
-目录。
-
-隔离开发环境时显式指定：
+数据/工作目录优先级、通道默认值和日志见[配置参考](../reference/configuration.zh.md)。
+POSIX shell 示例：
 
 ```bash
 NOMIFUN_DATA_DIR=/tmp/nomifun-dev bun run serve:web
-NOMIFUN_DATA_DIR=/tmp/nomifun-dev bun run dev
 ```
 
-所有 host——桌面、Web、`nomicore`——都按 env 值字面使用，作为最终数据根
-（不再追加 channel 对应的叶目录）；未设置时 dev 默认是同级的
-`NomiFun-dev`。自动化脚本依赖这个行为前，请先读
-[`../reference/configuration.zh.md`](../reference/configuration.zh.md)。
+## 验证命令
 
-`NOMIFUN_WORK_DIR` 控制会话工作区位置。它的优先级低于 UI 中选择并持久化在
-`dir-config.json` 的工作区；继承到的值若指向默认数据根位置或已不存在的目录
-会被忽略。未设置时回退到数据目录。
+选择直接覆盖改动文件与行为的检查。纯文档改动不需要编译；
+跨模块改动和发布使用更广的检查。
 
-## 日志
+| 改动 | 检查 |
+| --- | --- |
+| 文档 | `bun run check:docs` 和 `git diff --check` |
+| 脚本注册/帮助 | `bun run help --check` |
+| Renderer 类型 | `bun run typecheck` |
+| Renderer/UI 规则 | `bun run check:desktop-ui-boundary` 及定向 UI 测试 |
+| Locale JSON/类型 | `bun run gen:i18n`，再运行 `bun run check:i18n` |
+| 样式/预设 | `bun run check:theme`、`bun run check:dead-css`；见[样式规范](styling.zh.md) |
+| Rust 编译路径 | `cargo check -p <crate>` |
+| Rust 行为 | `bun run test:crate <crate> [cargo 参数]` 或定向 `cargo test -p <crate>` |
+| Canonical Agent 存储/内容 | 先读 [Agent Session](../architecture/agent-session.zh.md)，运行 `bun run check:agent-session-boundary` 及受影响的历史/reset/consumer 测试 |
+| Schema/ID/reset/restore | 遵循[数据规范](data-and-identifier-standards.zh.md)，运行受影响的 repository/schema 测试 |
+| 广泛回归 | `bun run check`、`cargo check --workspace` 及相关 Rust/UI 测试 |
 
-日志同时写 stdout 和 `<data-dir>/logs/nomicore.log`。示例：
+`bun run test:core`、`bun run test:desktop` 和 `bun run test`
+提供更广的 Rust 回归层级。`bun run test:ui` 运行 UI 测试；局部修复使用文件筛选。
+记录实际执行的命令，并说明不能运行的平台检查。
+
+## 诊断
+
+`nomicore` 可独立于应用宿主运行：
 
 ```bash
-NOMIFUN_LOG_LEVEL='info,nomifun_mcp=trace' bun run serve:web
+cargo run -p nomifun-app --bin nomicore -- doctor
+cargo run -p nomifun-app --bin nomicore -- tool-doctor
 ```
 
-也可以把 `--log-level` 直接传给 `nomicore` / `nomifun-web`。该值是
-`tracing_subscriber::EnvFilter` 语法。
+`doctor` 报告终端 Agent CLI 检测结果。`tool-doctor` 读取组件/许可证目录；
+`--verify` 才会明确解包并探测工具。
+Remote、stdio bridge、backup/restore 命令详见
+[CLI 配置](../reference/configuration.zh.md#nomicore后端参数)与可执行文件 `--help`。
 
 ## 继续阅读
 
-- [`project-structure.zh.md`](project-structure.zh.md)
-- 修改数据库 schema、ID、逻辑关联、reset 行为或 backup/restore 契约前，
-  阅读 [`data-and-identifier-standards.zh.md`](data-and-identifier-standards.zh.md)。
-- [`../architecture/backend-crates.md`](../architecture/backend-crates.md)
-- [`../architecture/frontend.md`](../architecture/frontend.md)
-- [`building-and-packaging.zh.md`](building-and-packaging.zh.md)
+- [项目结构](project-structure.zh.md)
+- [后端职责](../architecture/backend-crates.zh.md)
+- [前端](../architecture/frontend.zh.md)
+- [构建与打包](building-and-packaging.zh.md)
+- [疑难排查](../reference/troubleshooting.zh.md)

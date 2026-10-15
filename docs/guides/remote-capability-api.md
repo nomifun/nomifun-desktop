@@ -12,9 +12,6 @@ is a transport, not an Agent type or a capability profile:
 The installation token authenticates the owner only. It never selects a
 companion, model, profile, domain list, workspace, or recent Session.
 
-See [Canonical Remote examples](./remote-capability-api-examples.md) for
-copy-ready commands.
-
 ## Security model
 
 The installation token is a high-privilege credential:
@@ -137,6 +134,67 @@ error retains `agent_session_id`, cursor, and
 `recovery: "host_restart_reconcile"`. Do not create a replacement Session or
 blindly retry sidecar launch; preserve the ID and restore the database/host.
 
+## REST walkthrough
+
+Set these shell variables, then use the same Session for every operation:
+
+```bash
+export HOST=127.0.0.1:25808
+export TOKEN=<installation-access-token>
+export BINDING_ID=<remote-binding-id>
+```
+
+### REST: open
+
+```bash
+curl -s -X POST "http://$HOST/api/remote/open" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"binding_id\":\"$BINDING_ID\",
+    \"idempotency_key\":\"open-1\",
+    \"initial_input\":{\"text\":\"hello\"}
+  }"
+```
+
+Save both `agent_session_id` and `cursor` from the response; set `SESSION_ID` to the returned Session ID before continuing.
+
+### REST: observe
+
+```bash
+curl -s "http://$HOST/api/remote/observe?agent_session_id=$SESSION_ID&after_seq=0&limit=100" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Advance with the returned `next_cursor.seq`. `after_seq` is exclusive.
+
+### REST: turn
+
+Run this only after observation shows the Session is ready:
+
+```bash
+curl -s -X POST "http://$HOST/api/remote/turn" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"agent_session_id\":\"$SESSION_ID\",
+    \"input\":{\"text\":\"continue\"},
+    \"idempotency_key\":\"turn-1\"
+  }"
+```
+
+### REST: cancel
+
+```bash
+curl -s -X POST "http://$HOST/api/remote/cancel" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"agent_session_id\":\"$SESSION_ID\",
+    \"idempotency_key\":\"cancel-1\"
+  }"
+```
+
 ## Canonical CLI
 
 `nomicore` mirrors the same four REST operations:
@@ -179,7 +237,6 @@ Reuse the printed key after an ambiguous network failure.
 
 ## Related docs
 
-- [Canonical Remote examples](./remote-capability-api-examples.md)
 - [WebUI Remote Access](./webui-remote-access.md)
 - [Web Server Deployment](./web-server-deployment.md)
 - [Computer Use And Browser Use](./computer-browser-use.md)

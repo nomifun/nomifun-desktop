@@ -225,7 +225,7 @@ const isPaletteSelector = (selector: string): boolean =>
     .every((part) => PALETTE_SELECTOR.test(part));
 
 /**
- * 按主题契约（presets/README.md）取出亮/暗两套变量：亮块是不含 dark 标记的根/body 块，
+ * 按主题契约（docs/contributing/styling.md）取出亮/暗两套变量：亮块是不含 dark 标记的根/body 块，
  * 暗块是带 `[data-theme='dark']` 的块。同一模式下的多个块按出现顺序合并，后者覆盖前者。
  */
 const paletteOf = (css: string, mode: 'light' | 'dark'): Map<string, string> => {

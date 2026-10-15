@@ -1,49 +1,22 @@
 # Development
 
-This page is for people changing **NomiFun** itself: the React SPA, the Rust
-backend, the agent engine, or the Tauri shell. If you only want to install or
-operate the product, start with
-[`../getting-started/installation.md`](../getting-started/installation.md) or
-[`../guides/web-server-deployment.md`](../guides/web-server-deployment.md).
+[简体中文](development.zh.md)
 
-The current repository is the active Tauri monorepo. Earlier Electron-era phase
-plans and audits are not kept in the repo; consult git history if you need that
-background.
+For installing or operating NomiFun, use
+[installation](../getting-started/installation.md) or
+[Web server deployment](../guides/web-server-deployment.md).
 
 ## Prerequisites
 
-| Tool | Minimum | Why |
-| --- | --- | --- |
-| Rust | stable, edition 2024 | Workspace uses resolver `3` and edition `2024`. |
-| Bun | >= 1.3.13 | Frontend package manager and Vite runner; the application supplies its own approved Bun for features explicitly requiring it. |
-| Tauri CLI v2 | from `devDependencies` | Invoked through `bun run dev`, `bun run build`, and related scripts. |
-| Git | recent | Required by development workflows and several built-in tools. |
-| CMake | >= 3.16 | `opusic-sys` compiles a vendored libopus during a clean build (~25 s). |
-| Native build tools | platform-specific | Needed for SQLite, TLS, libgit2, WebKit/WebView dependencies, and bundled native crates. |
+- Stable Rust supporting edition 2024 and resolver 3.
+- Bun >= 1.3.13, Git, CMake >= 3.16 and a native C/C++ toolchain.
+- Windows: MSVC build tools and WebView2. macOS: Xcode Command Line Tools.
+  Linux: follow the maintained
+  [system package list](../getting-started/installation.md#prerequisites).
 
-Platform notes:
-
-- Windows: MSVC C++ build tools and WebView2 runtime.
-- macOS: Xcode Command Line Tools.
-- Linux: `build-essential cmake pkg-config git`, plus the system libraries the
-  desktop shell and its screen-capture stack link against. The verified
-  `apt install` line for Debian/Ubuntu lives in
-  [Linux system packages](../guides/desktop-app.md#linux-system-packages-debianubuntu)
-  — treat that block as the single source of truth instead of copying the list
-  around.
-
-CMake and a C compiler are not optional on any platform: the robot gateway's
-Opus codec is built from source and linked statically, so no machine needs a
-preinstalled libopus and nothing extra ships beside the binary.
-
-### First build needs network access to pyke
-
-The robot gateway's Silero voice-activity detector runs on ONNX Runtime, and
-`ort-sys` downloads a prebuilt static `libonnxruntime.a` (~101 MB) from pyke's
-CDN on the first build, caching it in `~/.cache/ort.pyke.io`. Later builds — and
-a fully offline machine — reuse that cache. Because the runtime is linked
-statically there is no dylib to distribute, and a machine that cannot reach the
-CDN at all fails at build time rather than at runtime.
+Clean native builds may download third-party build dependencies, including ONNX
+Runtime. Preserve dependency caches for offline rebuilds. Platform build details
+belong in [building and packaging](building-and-packaging.md).
 
 ## Install
 
@@ -51,153 +24,83 @@ CDN at all fails at build time rather than at runtime.
 git clone <repo-url> nomifun-desktop
 cd nomifun-desktop
 bun install
-cargo check --workspace
 ```
 
-The root `package.json` has one Bun workspace: `ui/`. Rust crates are resolved by
-the root `Cargo.toml`.
+Rust workspace membership is in [Cargo.toml](../../Cargo.toml); the Bun
+workspace contains `ui/`. Root scripts are declared in
+[package.json](../../package.json); run `bun run help` to discover commands.
 
-## Development Loops
+## Development loops
 
-| Command | Use when | What runs |
-| --- | --- | --- |
-| `bun run dev:ui` | UI-only work that can tolerate missing API calls | Vite on `http://localhost:5173`; no backend. |
-| `bun run dev:web` | Browser + backend iteration with auth disabled | `NOMI_CHANNEL=dev` `nomifun-web --port 8787 --api-only --insecure-no-auth` plus Vite dev server. |
-| `bun run serve:web` | Running the production-style web host from source | `nomifun-web` on `http://127.0.0.1:8787`; serves built `ui/dist`; auth on by default. |
-| `bun run dev` | Desktop/Tauri work | `NOMI_CHANNEL=dev` Tauri shell, Vite, and embedded backend under the desktop local-trust policy. |
-
-`serve:web` expects a built SPA:
-
-```bash
-bun run build:ui
-bun run serve:web
-```
-
-`dev:web` is a convenience loop that starts API and UI together. It uses
-`--insecure-no-auth`, so keep it on localhost or an isolated network.
-
-The Rust-backed development loops (`dev`, `dev:web`, and `build:fast`) use the
-`dev` build channel. Without an explicit data root, the desktop `bun run dev`
-launcher derives `NomiFun-dev-schema-<fingerprint>` from the current canonical
-baseline, reuses development data for that schema, and preserves former directories.
-Development roots stay outside the stable root and are never nested inside it.
-Production-style `serve:web` and release builds remain on the stable `NomiFun`
-directory. Use `NOMIFUN_DATA_DIR` or `--data-dir` for an explicit isolated root;
-development startup does not import historical Agent state from stable.
-
-On macOS, the development runner passes `-ApplePersistenceIgnoreState YES` to
-each App generation so a previous crash's system window-restoration prompt cannot
-block Tauri startup and backend listening. This setting applies only to that
-process; it does not write user preferences, delete saved state, or change the
-published App's restoration behavior.
-
-The desktop loop does **not** use the old Electron process model. The Tauri
-shell links `nomifun-app`, starts the backend in-process on a free localhost
-port, injects `window.__backendPort` and `window.__nomiLocalTrust`, and the
-renderer presents that per-boot trust secret on every request.
-
-## Verification
-
-| Command | Coverage |
+| Command | Behavior |
 | --- | --- |
-| `cargo check --workspace` | All Rust crates and app hosts compile. |
-| `cargo test -p <crate>` | Focused Rust tests for one crate. |
-| `bun run test:crate <crate> [cargo args]` | Focused crate tests with the build-cache guard. |
-| `bun run test:core` | Workspace regression without desktop-only features. |
-| `bun run test:desktop` | Desktop shell tests without watching `ui/dist` resources. |
-| `bun run test` | Full regression including desktop features and doctests. |
-| `bun run typecheck` | Renderer TypeScript. |
-| `bun run check:i18n` | Generated i18n key types are up to date. |
-| `bun run check:theme` | Theme token contract. |
-| `bun run help --check` | Root script help output is current. |
-| `bun run build:ui` | Production Vite build. |
-| `bun run build` | Tauri desktop release bundle for the current OS. |
+| `bun run dev:ui` | Vite on port 5173 without a backend; API calls may fail. |
+| `bun run dev:web` | Vite plus API-only `nomifun-web` on port 8787 with authentication disabled for local iteration. |
+| `bun run serve:web` | Builds the SPA and starts the authenticated Web host from source. |
+| `bun run dev` | Tauri, Vite and an embedded backend under desktop local trust. |
 
-For a broad pre-PR check, run:
+Keep the no-auth development host on loopback or an isolated trusted network.
+Desktop requests use a per-boot local trust secret; the desktop host embeds
+the backend in process.
 
-```bash
-cargo check --workspace
-bun run typecheck
-bun run check:i18n
-bun run check:theme
-bun run help --check
-```
+Development commands select the dev build channel. The desktop dev runner
+derives a schema-specific sibling data directory
+`NomiFun-dev-schema-<fingerprint>` and preserves prior directories.
+`serve:web` and release builds use the stable channel.
+To isolate an instance, set an explicit absolute `NOMIFUN_DATA_DIR`;
+its value is used literally. Two backends cannot hold the same data directory.
 
-## Backend CLI
-
-`nomifun-app` still ships a standalone `nomicore` binary. The app hosts do not
-spawn it, but it is useful for diagnostics, stdio MCP bridges, and public
-capability calls.
-
-Current subcommands:
-
-- `mcp-requirement-stdio`
-- `mcp-knowledge-stdio`
-- `mcp-gateway-stdio`
-- `mcp-open-stdio`
-- `terminal-hook --event <kind>`
-- `doctor`
-- `remote open|turn|observe|cancel` — canonical Remote API client
-- `backup --output <dir>`
-- `restore --bundle <dir> --destination-data-dir <dir>`
-
-When agents fail to launch, start with:
-
-```bash
-cargo run -p nomifun-app --bin nomicore -- doctor
-```
-
-It probes installed agent CLIs from the same PATH shape the backend uses and
-prints a table to stdout.
-
-## Data and Work Directories
-
-All hosts share the same unset default data directory:
-
-- Windows: `%LOCALAPPDATA%\NomiFun`
-- macOS: `~/Library/Application Support/NomiFun`
-- Linux: `$XDG_DATA_HOME/NomiFun` or `~/.local/share/NomiFun`
-
-The data dir contains SQLite state, logs, managed runtime cache, extension data,
-agent state, and other persistent local state. The backend takes an exclusive
-`server.lock` before opening the database, so two live backends cannot use the
-same data directory at the same time.
-
-For isolated development, set an explicit directory:
+See [configuration](../reference/configuration.md) for data/work directory
+precedence, channel defaults and logging. For example, in a POSIX shell:
 
 ```bash
 NOMIFUN_DATA_DIR=/tmp/nomifun-dev bun run serve:web
-NOMIFUN_DATA_DIR=/tmp/nomifun-dev bun run dev
 ```
 
-Every host — desktop, web, and `nomicore` — takes the env value literally as
-the final data root (no channel leaf is appended); the unset dev default is
-the `NomiFun-dev` sibling directory. See
-[`../reference/configuration.md`](../reference/configuration.md) before relying
-on this in automation.
+## Verification
 
-`NOMIFUN_WORK_DIR` controls where conversation workspaces are created. It ranks
-below the UI-selected workspace persisted in `dir-config.json`; inherited values
-that name a default data-root location or a directory that no longer exists are
-ignored. If unset, the backend falls back to the data dir.
+Choose checks that directly cover the changed files and behavior.
+Documentation-only changes do not require compilation. Broad checks are useful
+for cross-cutting changes and releases.
 
-## Logs
+| Change | Check |
+| --- | --- |
+| Documentation | `bun run check:docs` and `git diff --check` |
+| Script registry/help | `bun run help --check` |
+| Renderer types | `bun run typecheck` |
+| Renderer/UI rules | `bun run check:desktop-ui-boundary` plus focused UI tests |
+| Locale JSON/types | `bun run gen:i18n`, then `bun run check:i18n` |
+| Styles/presets | `bun run check:theme`, `bun run check:dead-css`; see [styling](styling.md) |
+| Rust compile path | `cargo check -p <crate>` |
+| Rust behavior | `bun run test:crate <crate> [cargo args]` or focused `cargo test -p <crate>` |
+| Canonical Agent storage/content | Read [Agent Session](../architecture/agent-session.md), run `bun run check:agent-session-boundary` and affected history/reset/consumer tests |
+| Schema/IDs/reset/restore | Follow [data standards](data-and-identifier-standards.md) and affected repository/schema tests |
+| Broad regression | `bun run check`, `cargo check --workspace`, and relevant Rust/UI tests |
 
-Logs go to stdout and to `<data-dir>/logs/nomicore.log`. Use:
+`bun run test:core`, `bun run test:desktop` and `bun run test` provide
+broader Rust regression levels. `bun run test:ui` runs UI tests; use a file
+filter for a local fix. Record commands actually run and explain unavailable
+platform checks.
+
+## Diagnostics
+
+`nomicore` remains available independently of the application hosts:
 
 ```bash
-NOMIFUN_LOG_LEVEL='info,nomifun_mcp=trace' bun run serve:web
+cargo run -p nomifun-app --bin nomicore -- doctor
+cargo run -p nomifun-app --bin nomicore -- tool-doctor
 ```
 
-or pass `--log-level` to `nomicore` / `nomifun-web` directly. The value is a
-`tracing_subscriber::EnvFilter` directive.
+`doctor` reports detected terminal Agent CLIs. `tool-doctor` reads the
+component/notice catalogue; `--verify` explicitly extracts and probes tools.
+For Remote operations, stdio bridges and backup/restore commands, read
+[CLI configuration](../reference/configuration.md#nomicore-backend-flags)
+and the executable `--help`.
 
-## Where to Read Next
+## Further reading
 
-- [`project-structure.md`](project-structure.md) for the repo map.
-- [`data-and-identifier-standards.md`](data-and-identifier-standards.md) before
-  changing database schema, IDs, logical references, reset behavior, or
-  backup/restore contracts.
-- [`../architecture/backend-crates.md`](../architecture/backend-crates.md) for crate ownership.
-- [`../architecture/frontend.md`](../architecture/frontend.md) for routes and host adapters.
-- [`building-and-packaging.md`](building-and-packaging.md) for release artifacts.
+- [Project structure](project-structure.md)
+- [Backend ownership](../architecture/backend-crates.md)
+- [Frontend](../architecture/frontend.md)
+- [Building and packaging](building-and-packaging.md)
+- [Troubleshooting](../reference/troubleshooting.md)

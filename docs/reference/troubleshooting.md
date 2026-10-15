@@ -1,226 +1,145 @@
 # Troubleshooting
 
-Symptoms you might hit running NomiFun, and the actual mechanism behind each one. If you find a problem that is not on this list, the source is the fastest reference — every behaviour described below is grounded in a specific file in `crates/backend/`.
+[简体中文](troubleshooting.zh.md)
 
-## Backend port / connection problems
+Start with the actual process logs, selected data directory and host mode.
+[Configuration](configuration.md) describes flags and directory precedence;
+[API overview](api-overview.md) locates the owning route.
 
-### `nomifun-web: invalid --host '<value>'`
+## Network and ports
 
-The host argument must parse as an IP address (`127.0.0.1`, `0.0.0.0`, an explicit interface IP). Hostnames like `localhost` are not parsed — `nomifun-web` fails fast with this message rather than producing a cryptic socket error later. Pass an IP literal.
+| Symptom | Check |
+| --- | --- |
+| `invalid --host` | Use an IP literal such as `127.0.0.1` or `0.0.0.0`; hostnames are not accepted. |
+| `address already in use` | Find the listener with `lsof -i :8787` (Unix) or `Get-NetTCPConnection -LocalPort 8787` (PowerShell); stop the intended process or select another port. |
+| Another computer cannot connect | The Web host defaults to loopback. Check the intended bind address, firewall, reverse proxy and actual published port. Complete owner setup before broad exposure. |
+| Desktop remote address is unavailable | Use the address and state shown in [Connections & Devices](../guides/webui-remote-access.md); LAN and relay access have independent controls. |
 
-### `address already in use` on the configured port
+## Authentication and CSRF
 
-Another process is bound to the same port. The web host uses `8787` by default (`NOMIFUN_WEB_PORT`). The desktop shell does not have this problem because it asks the OS for a free localhost port at startup and then tells the renderer over IPC.
+`GET /api/auth/status` returning `needs_setup: true` is expected for a fresh
+dedicated Web host without pre-seeded credentials. Complete first-run setup
+before exposing it. `409` on setup means an owner already exists.
+Startup admin environment variables do not replace an existing account.
 
-To find the offender on Linux/macOS: `lsof -i :8787`. On Windows: `Get-NetTCPConnection -LocalPort 8787`. Either kill it, or change `--port` / `NOMIFUN_WEB_PORT`.
+For repeated `401` after login, inspect the request and response in browser
+developer tools:
 
-### Browser cannot reach the server on a non-loopback address
+- Confirm the expected cookie/Bearer token reaches the same deployment origin.
+- Confirm the proxy preserves cookies and authentication headers.
+- For HTTPS deployments set `NOMIFUN_HTTPS=true`; this sets `Secure` and
+  `SameSite=Strict`. A Secure cookie is not sent over ordinary HTTP.
+- Check the server clock and whether a password change invalidated the session.
 
-`nomifun-web` defaults to binding `127.0.0.1`. To accept LAN/VPN traffic, either pass `--host 0.0.0.0` or set `NOMIFUN_WEB_HOST=0.0.0.0`. Pre-seed the admin or complete first-run setup before doing this on a broadly reachable host. On Windows / macOS hosts also check the firewall — the OS may silently drop the connection.
+For `403 CSRF token validation failed`, the `nomifun-csrf-token` cookie and
+`x-csrf-token` header must match. Check origin/cookie policy and proxy rewrites.
+Public login/setup routes are exempt; post-login mutations follow the active
+auth policy. Desktop uses the injected local-trust path.
 
-If the goal is remote access from a phone or another device on the LAN, [WebUI Remote Access](../guides/webui-remote-access.md) usually wants less configuration than full server deployment.
-
-## First-run admin and login problems
-
-### `GET /api/auth/status` returns `needs_setup: true` after I started the server
-
-This is the expected state on a fresh install when `NOMIFUN_ADMIN_PASSWORD` is not set. The first browser visitor's username + password become the admin via `POST /api/auth/setup`. Open the URL, fill in the form, and you are logged in.
-
-If you want to close this window before the server is publicly reachable, set `NOMIFUN_ADMIN_PASSWORD` (and optionally `NOMIFUN_ADMIN_USERNAME`) before the first boot.
-
-### `409 Conflict` on `/api/auth/setup`
-
-An admin already exists. The setup endpoint is one-time only. Use `POST /login` instead, or — if the password has been lost on a self-hosted instance — recover via the local-only WebUI flow described in [WebUI Remote Access](../guides/webui-remote-access.md).
-
-### Login appears to succeed but the next request gets `401`
-
-Almost always a cookie problem behind a TLS proxy. The `Secure` flag is added to cookies only when `NOMIFUN_HTTPS=true`. On HTTPS responses without that flag, browsers reject the cookie outright and the next request has no session. Set `NOMIFUN_HTTPS=true` and reload.
-
-A second cause: clock skew on the server. If the system clock is far off, the JWT may be considered expired by the same server that signed it. Make sure NTP is running.
-
-### `Current password is incorrect` on change-password despite a correct password
-
-The endpoint runs a constant-time bcrypt compare against the stored hash. If
-you suspect data corruption: stop the server, back up the data dir, resolve the
-installation owner through `installation_identity.owner_user_id`, and inspect
-that user's `password_hash`. A surgical fix is possible
-(`POST /api/webui/reset-password` in local mode) but the easiest path is
-to restore from backup or re-bootstrap.
-
-### "Username/password rejected" with a vaguely worded validation error
-
-The validators reject a small set of obvious patterns — passwords under 8 characters, common dictionary entries, usernames outside `[a-zA-Z0-9_-]` or starting/ending with `-`/`_`. Pick something else.
-
-## CSRF errors
-
-### `403 CSRF token validation failed` on a POST/PUT/PATCH/DELETE
-
-The `nomifun-csrf-token` cookie value must match the `x-csrf-token` request header. The middleware sets the cookie automatically on the first response that does not have one, so a freshly-loaded SPA acquires it on its first GET. This usually breaks for one of these reasons:
-
-- The client assumes no-auth local mode while the server is running in authenticated mode (or vice versa). `nomicore --local` and `nomifun-web --insecure-no-auth` skip CSRF; normal `nomifun-web` requires it. The desktop shell uses `TrustLocalToken`, so its own WebView should not see CSRF failures unless the injected trust header/cookie flow is broken.
-- A reverse proxy is stripping cookies or rewriting `Set-Cookie`. The standard Caddy/nginx configurations leave them alone; custom rewrite rules can break them.
-- The browser has third-party cookie blocking that affects the deployment domain.
-
-`/login`, `/api/auth/setup`, and `/api/auth/qr-login` are CSRF-exempt; CSRF only applies to the *post-login* state-changing routes.
+If a password is forgotten, the trusted Desktop app can manage its WebUI
+account from **Connections & Devices → Other computer browsers**.
+A loopback browser or dedicated-host connection does not acquire desktop trust.
+For a dedicated host, preserve its data and collect the auth error/logs for
+maintainer-assisted recovery. Do not clear password hashes, delete the database,
+or expose no-auth mode to regain access.
 
 ## WebSocket disconnects
 
-### Connection closes immediately with code 1008
+Policy close code `1008` commonly means no token or an expired token.
+Obtain a fresh `GET /api/ws-token`, then reconnect. Verify that the proxy
+preserves the upgrade and selected authentication transport.
+The normal close code is `1000`.
 
-Code 1008 is "policy violation" — the server uses it for two specific cases:
+The server heartbeat defaults to 30s with a 60s timeout. Check proxy idle
+timeouts and network changes if a connection stops receiving events.
+Custom clients should reconnect with backoff and ignore unknown event types.
 
-- "no token provided" — the WebSocket upgrade request did not carry a JWT.
-- An `auth-expired` event followed by close — the token was present but invalid or expired.
+## Agent CLI and managed components
 
-Both are usually caused by a stale token. Refresh the token via `GET /api/ws-token` and reconnect. If you see this immediately after login, check that cookies are flowing correctly (see the cookies-don't-stick case above) and that `Sec-WebSocket-Protocol` (or whichever header you use) is reaching the server unmodified.
-
-### WebSocket connects then quietly stops receiving events
-
-The server pings every 30 s and considers a client dead at 60 s. If the network drops a connection silently (mobile NAT, captive portals, a flaky proxy), the client side still appears connected until the server prunes it. The client is expected to reconnect; the SPA does this automatically. If you wrote a custom client, implement an exponential-backoff reconnect on the close event.
-
-## "Agent CLI not found" and bun problems
-
-### A terminal preset fails immediately with "command not found"
-
-Terminal agent presets (`claude`, `codex`, `gemini`) launch a third-party CLI you
-installed yourself, and it must be on the **process** `PATH`. The process PATH is
-enhanced at startup (`nomifun_runtime::enhance_process_path`) but if the binary lives somewhere unusual it can still be missed.
-
-Run the doctor:
+Conversations run the built-in `nomi` runtime. A terminal preset such as
+`claude`, `codex` or `gemini` instead launches a separately installed CLI.
 
 ```bash
 nomicore doctor
+nomicore tool-doctor
 ```
 
-This probes every known agent CLI on `$PATH` and prints a per-agent availability
-table. Run it from the same shell that launched the app to see exactly what the
-app sees. If a CLI is missing, install it or add its bin directory to `PATH` and
-restart. Note that conversations do not depend on any of this — the built-in
-`nomi` engine is compiled into the binary.
+Run diagnostics under the same user, PATH and data root as the application.
+Install missing third-party CLIs or correct PATH, then restart.
+`tool-doctor` reads the component catalogue. `tool-doctor --verify` explicitly
+extracts/probes available components without opening the database or downloading
+Node/Bun. The Web host executable does not expose these subcommands; build the
+diagnostic binary with `cargo build --release -p nomifun-app --bin nomicore`.
 
-### Managed tools under systemd
+Release builds embed OfficeCLI. Commands prefer system Bun/`bunx`, then a
+verified existing managed cache; missing components need the user's download
+choice. Application hosting uses system or configured Node.
+For systemd, verify service-account cache read/execute permissions and set
+`SHELL` if required. See [external tools](../architecture/external-tools.md).
 
-Release binaries embed OfficeCLI; backend startup needs no Node/Bun preparation
-or download. User commands prefer the service account's system Bun/`bunx`, then a
-verified existing managed Bun cache. If both are absent, terminal or MCP actions
-offer the user an explicit download choice. App Hosting uses system or
-user-configured Node. Managed artifacts are reused offline under the configured
-data directory with verified absolute paths. Check data-directory access and
-available components as the service user:
-
-Use the optional `nomicore` diagnostic binary built from `nomifun-app`
-(`cargo build --release -p nomifun-app --bin nomicore`). The WebUI host CLI
-does not accept `tool-doctor`; see the [deployment recipe](../guides/web-server-deployment.md#managed-execution-components).
-
-```bash
-sudo -u nomifun /opt/nomifun/nomicore --data-dir /var/lib/nomifun tool-doctor --verify
-```
-
-`tool-doctor` without `--verify` only prints the supply catalogue. Verification
-checks available local artifacts, may extract embedded OfficeCLI, and runs private
-probes, but never opens the database or starts or waits for Node/Bun downloads.
-Check runtime cache access/execute permissions; missing optional components remain
-unavailable until the user chooses to install them. Debug builds without OfficeCLI embedded need its
-validated explicit development override.
-See [External tools](../architecture/external-tools.md).
+NomiRelay restore/restart also reuse approved local `nfagent` bytes.
+A missing or changed component requires the user's explicit download choice;
+an offline `NOMIFUN_NFAGENT_PATH` override still needs the manifest's hash.
 
 ## Office preview
 
-### Word/Excel/PPT cannot be previewed
+Run `tool-doctor --verify` for the same data root when component admission fails.
+Invalid/encrypted documents, unsupported formats, resource limits and unstable
+writes have separate errors. An early process exit is a render failure.
+Use the displayed retry when available; system-open and download remain useful.
 
-All three formats use `/api/office-preview/*` and the managed
-`iOfficeAI/OfficeCLI` component. Run `tool-doctor --verify` against the same data
-root to inspect the actual executable, version, digest, and capability error.
-Repair or update the application if component admission fails. Debug overrides
-must be absolute paths satisfying the manifest's development requirements.
+For a blank artifact frame, preserve the full
+`/api/office-preview-artifacts/{capability}/` path and query through the proxy.
+Request identity, capability and nonce must match the active preview.
+Do not weaken CSP or exempt arbitrary API routes. HTTP readiness and iframe
+load alone do not prove display success. See
+[Office artifact contracts](../architecture/external-tools.md).
 
-The UI separates preparation, rendering, and display. An early process exit is
-a render failure, not a port-ready timeout. Unsupported formats,
-invalid/encrypted documents, resource limits, and unstable writes have distinct
-errors. Retry appears only for recoverable failures. Failed refreshes retain
-the previous preview; system-open and download remain available.
+## Data directory and database
 
-### Artifact frame is blocked or blank
+For `unable to open database file`, check directory ownership, available space
+and mount permissions for the actual service account. Docker bind mounts must
+be writable by the container UID; a named volume can simplify ownership.
+Preserve deployment hardening while granting the intended data path access.
 
-The active request returns `/api/office-preview-artifacts/{capability}/`.
-The iframe adds its UUIDv7 request ID and nonce as query parameters. Preserve
-that full path and query through your reverse proxy. Artifact access uses a
-random revocable capability; start/status/stop remain authenticated. Do not
-exempt arbitrary `/api/*` endpoints or weaken the artifact CSP/sandbox.
+For `data directory ... is already in use`, close the named holder or use a
+different `NOMIFUN_DATA_DIR` / `--data-dir`.
+Do not delete `server.lock` to bypass a live holder. The OS releases the lock
+on exit; a leftover file is harmless. Hosts on the same channel share defaults;
+development scripts select separate roots.
 
-HTTP ready and iframe load alone do not establish display success. The frame
-must report first-screen readiness with matching source, opaque origin, request
-ID, capability, and nonce. Check browser policy/transport diagnostics and the
-backend's bounded generation diagnostics. See
-[External tools and Office artifacts](../architecture/external-tools.md).
+Incompatible readable database lineages may be rebuilt by the startup dataset
+coordinator according to the current destructive baseline. Supported-schema
+damage and I/O failures fail closed; restore does not gain rebuild authority.
+Do not interpret schema migration counts as application version ordering.
+See [data/storage](../architecture/data-and-storage.md).
 
-## Data directory permissions
+## Docker build and startup
 
-### Server starts but database writes fail / "unable to open database file"
+Read `docker compose logs nomifun` and `docker compose ps`.
+Check port mapping, the built SPA path and data-volume permissions.
+A missing admin password leaves first-run setup available; it is not a startup
+crash.
 
-The configured data directory must be writable by the process. Common cases:
+Identify the failing network stage before selecting a mirror:
 
-- Running under systemd with `User=nomifun` but a data dir owned by another user. Fix: `chown -R nomifun:nomifun /var/lib/nomifun`.
-- A read-only mount (`RootDirectory=`, `ProtectHome=yes`, …) covering the data path. Drop the over-broad sandbox; keep the moderate hardening from the shipped unit (`NoNewPrivileges=yes`, `PrivateTmp=yes`).
-- On Docker, mounting a host directory whose UID does not match the container's. Use a named volume instead, or `chown` the host directory to the right UID.
+| Stage | Operator setting |
+| --- | --- |
+| Base image metadata / TLS timeout | Docker registry configuration or trusted `BUN_IMAGE`, `RUST_IMAGE`, `RUNTIME_IMAGE` |
+| apt packages | `APT_MIRROR` |
+| JS packages | `BUN_REGISTRY` |
+| crates.io | `CARGO_REGISTRY_MIRROR` |
 
-The desktop shell's default data dir is the **per-user application-data location** (`%LOCALAPPDATA%\NomiFun` on Windows, `~/Library/Application Support/NomiFun` on macOS, `$XDG_DATA_HOME/NomiFun` on Linux), which is writable by the launching user by construction. Set `NOMIFUN_DATA_DIR=<absolute path>` and that path is used literally as the data root — no `/Nomi` suffix, on any host. Legacy installs under `NomiFun/Nomi` (or the older `<system temp>/nomifun-data/Nomi`) are migrated to the new default automatically on the first boot after upgrading; the migration is crash-safe and resumes on the next boot if it cannot complete (and is deferred to the next launch if the old app instance is still running).
+Use trusted compatible mirrors. See the
+[deployment guide](../guides/web-server-deployment.md).
 
-### `data directory ... is already in use by another running NomiFun backend`
+## Logs and issue reports
 
-Every host (desktop shell, `nomifun-web`, the `nomicore` binary) defaults to the **same** per-user data directory, and the backend takes an OS-level exclusive lock on `{data_dir}/server.lock` at startup — a second backend on the same directory fails fast with this message instead of silently corrupting shared state. The classic trigger: the desktop app is still running and you start `bun run serve:web` / `dev:web` (or vice versa). Two ways out: close the other instance (the message names the holder's pid and executable), or give the new one its own directory via `NOMIFUN_DATA_DIR` / `--data-dir`. The lock is released by the OS when the holder exits or crashes; a leftover `server.lock` file is harmless. `nomicore doctor` and the `mcp-*` stdio subcommands do not take the lock, so they are unaffected.
+Logs go to stdout and daily files under `<data-dir>/logs` unless overridden.
+Inspect `docker compose logs nomifun`, `journalctl -u nomifun-web` or the
+local `nomicore.log`. For focused tracing, pass
+`--log-level info,nomifun_mcp=trace` to `nomicore`.
 
-## Docker specifics
-
-### `docker compose up` builds, starts, then exits immediately
-
-Read the logs (`docker compose logs nomifun`). The most common causes are:
-
-- The data volume is empty *and* `NOMIFUN_ADMIN_PASSWORD` is missing — the server runs fine, but you have no way in until you complete first-run setup over HTTP. This is not actually a failure; it is a state.
-- The `--dist` directory inside the image points at the wrong path. The shipped Dockerfile copies `ui/dist` to `/opt/nomifun/web` and the `CMD` references that — only an issue if you have customised the Dockerfile.
-- A bind-mounted data dir that the container user cannot write to.
-
-### Logs say `nomifun-web: embedded backend + SPA on one port` but the browser cannot connect
-
-Confirm the port mapping (`docker compose ps`). The default compose file publishes `8787:8787`; if you put Caddy in front, it should be `expose: ["8787"]` instead. Connecting to the wrong port is the usual culprit.
-
-### Build is slow or fails on a constrained network
-
-Identify the stage that failed first:
-
-- `load metadata for docker.io/...` / `TLS handshake timeout`: no base image
-  was pulled. Configure a Docker daemon registry mirror, or set `BUN_IMAGE`,
-  `RUST_IMAGE`, and `RUNTIME_IMAGE` to trusted compatible image references.
-- `apt-get` / `bun install` / `Updating crates.io index`: set `APT_MIRROR`,
-  `BUN_REGISTRY`, or `CARGO_REGISTRY_MIRROR`, respectively.
-
-Compose accepts all package-layer settings together:
-
-```bash
-APT_MIRROR=<trusted-debian-mirror> \
-CARGO_REGISTRY_MIRROR=<trusted-sparse-cargo-index> \
-BUN_REGISTRY=<trusted-npm-registry> \
-docker compose up -d --build
-```
-
-The Dockerfile retries apt and Cargo downloads and uses the smaller Rust slim
-base image; all mirror values must still be trusted and reachable by the
-operator.
-
-## Logging
-
-The backend writes to **both** stdout and a daily-rolling file at `<log-dir>/nomicore.log` (default `<data-dir>/logs`). When something is going wrong:
-
-- The `journalctl -u nomifun-web` / `docker compose logs nomifun` view shows the last few minutes.
-- The rotating file under `<log-dir>` keeps history.
-- Crank up the level for the affected module: `--log-level info,nomifun_mcp=trace` for MCP issues, `info,nomifun_terminal=debug` for terminals, `info,nomifun_conversation=debug` for agent conversations.
-
-## When all else fails
-
-Read the source. Every route handler is in the `routes.rs` (or `routes/`) file of its owning crate; the assembly is in `crates/backend/nomifun-app/src/router/routes.rs`. The error messages thrown by handlers are the literal strings that appear in HTTP responses, so a quick `grep` for the exact message usually lands you on the offending check in seconds.
-
-## See also
-
-- [Configuration Reference](./configuration.md) — every flag and env var.
-- [API Overview](./api-overview.md) — orientation to routes, auth, and the WebSocket model.
-- [FAQ](./faq.md) — short answers to the most common "is X true?" questions.
+Include the application version, OS, host mode, exact error, reproduction and
+relevant redacted log excerpt. Keep credentials, private prompts and tokens out
+of reports. Search an exact backend error with `rg` to find its owning check.

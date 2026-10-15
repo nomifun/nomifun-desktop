@@ -55,6 +55,16 @@ preserves the latest configuration for other tasks. Model aliases and
 descriptions are shared across tasks. Use **Providers & keys** to manage
 credentials or the model's complete set of invocation routes.
 
+## Add models from a conversation
+
+With an existing model that supports chat and tools, ask the general-purpose Agent to add a provider or model. You can also choose **Add in conversation · General Agent** from Model Management to prepare the request.
+
+> Add example-chat to the existing Company Gateway provider using OpenAI Chat Completions. Reuse its address and credentials, and keep my default model unchanged.
+
+For a new provider, include its name, service URL, exact model ID, intended task and authentication requirements. The Agent checks existing settings and supported protocols before saving; missing details require your input. Adding a model does not change defaults, delete existing models or test a paid request automatically.
+
+Anything pasted into chat is processed by the current model and saved under the conversation's normal history rules. To keep a key out of chat, save the provider and key in Model Management first, then ask the Agent to reuse that provider. Personal Agents need the **Model Management** capability and relevant actions; existing frozen sessions do not gain it automatically.
+
 ## Connect an optional model gateway
 
 The **NomiFun Model Gateway** provider preset connects to gateway software you
@@ -214,52 +224,10 @@ Creation persists the exact `{ providerId, model, task, capability }`
 identity with each admitted media operation. Retrying the same idempotent task
 cannot change those facts.
 
-## Model Failover Queue
+## Model failover and automation
 
-The failover feature is an ordered reliability queue, not a credential
-round-robin pool.
+Configure an ordered backup-model queue in **Models → Failover**. A new AgentSession freezes that queue into its model route. The Broker performs bounded retries and switches within a model call; changing the global queue does not silently change existing sessions. Create or fork a Session to use a new queue.
 
-It:
+[Intelligent Decision](intelligent-decision.md) supervises unresolved questions, silence and eligible failed turns. It does not replace the Broker or automatically resume every native provider checkpoint. [AutoWork](autowork-requirements.md) advances a requirements queue and pauses for human review when an outcome is uncertain. Third-party CLIs in terminals keep their own provider and recovery behavior.
 
-- stores a global default queue under `agent.model_failover`;
-- allows per-conversation overrides under `extra.model_failover`;
-- can be used by IDMM fault-watch when that session has failover enabled;
-- does not distribute load across API keys.
-
-A typical queue is:
-
-```text
-primary model -> inexpensive backup -> stronger backup -> manual review
-```
-
-The current runtime permits up to four switches across the queue. If every
-configured provider is down, the required task is unsupported, or the
-prompt/tool state is invalid, failover cannot make the turn succeed.
-
-## How it relates to IDMM and AutoWork
-
-IDMM has separate fault and decision watches. Model failover belongs to the
-fault side: when a provider fault is classified as recoverable and failover is
-enabled, IDMM can ask the conversation runtime to retry through the configured
-queue.
-
-AutoWork sits one layer above both features. It keeps a tagged requirement queue
-moving, while IDMM and model failover try to keep each claimed turn alive.
-
-External ACP/CLI agents do not participate in the Nomi engine failover queue;
-their provider calls happen inside their own runtime.
-
-## Source of truth
-
-- Provider and model settings UI:
-  `ui/src/renderer/pages/modelHub/`
-- Shared model storage types:
-  `ui/src/common/config/storage.ts`
-- Model failover:
-  `crates/backend/nomifun-conversation/src/model_failover.rs`
-- Failover API:
-  `crates/backend/nomifun-app/src/router/model_failover.rs`
-- IDMM supervision service:
-  `crates/backend/nomifun-idmm/src/service.rs`
-- Creation model catalog:
-  `ui/src/renderer/pages/creativeStudio/models/catalog.ts`
+For protocol, connection and catalog implementation contracts, see [Model providers](../architecture/model-providers.md).

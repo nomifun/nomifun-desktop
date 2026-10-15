@@ -1,209 +1,91 @@
 # 构建与打包
 
-本页说明当前 **NomiFun** monorepo 能产出的发布物：React SPA、`nomifun-web`、
-Tauri 桌面包、updater 产物、Docker 镜像和 Linux systemd 部署文件。
+[English](building-and-packaging.md)
 
-日常开发循环见 [`development.zh.md`](development.zh.md)。部署运行见
-[`../guides/web-server-deployment.zh.md`](../guides/web-server-deployment.zh.md)。
+本地开发看[开发](development.zh.md)，公开发布操作看
+[RELEASING.zh-CN.md](../../RELEASING.zh-CN.md)。桌面包在目标操作系统构建。
 
-## 当前状态
+## 构建目标
 
-| 产物 | 当前状态 |
-| --- | --- |
-| SPA (`ui/dist`) | `bun run build:ui` 构建；桌面和 Web host 都使用它。 |
-| `nomifun-web` | 支持的自托管 binary；默认开启鉴权。 |
-| Tauri 桌面包 | `bun run build` 为当前 OS 构建。 |
-| macOS Developer ID 签名 + 公证 | 已有 `bun run build:signed` 包装脚本；需要本机 Apple 签名配置。 |
-| Tauri updater 产物 | `bun run build:updater` 会生成 updater `.sig`；生产 endpoint/key 管理仍需发布配置。 |
-| Docker / Compose | 已提供官方 Docker Hub 镜像 [`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web)；本地镜像与 compose 构建仍受支持。 |
-| Native Linux + systemd | `packaging/linux/` 提供 unit 和说明。 |
-| Windows 签名 | 需要外部代码签名证书；仓库内未配置。 |
+| 目标 | 命令 | 输出 |
+| --- | --- | --- |
+| 共享 SPA | `bun run build:ui` | `ui/dist/` |
+| Web 服务 | `cargo build --release -p nomifun-web` | `target/release/nomifun-web` |
+| 桌面 | `bun run build` | `target/` 下的平台包 |
+| macOS arm64 / Intel | `bun run build:mac` / `bun run build:mac intel` | 原生架构包 |
+| Windows | `bun run build:win` | NSIS/MSI 产物 |
+| Linux | `bun run build:linux` | AppImage/deb/rpm 产物 |
+| Updater | `bun run build:updater` | 可更新包与 `.sig` |
 
-## SPA
+[tauri.conf.json](../../apps/desktop/tauri.conf.json) 持有产品标识、
+平台要求和 `frontendDist`；workspace 版本来自
+[Cargo.toml](../../Cargo.toml)。
 
-```bash
-bun run build:ui
-```
+## Web 部署产物
 
-输出目录是 `ui/dist/`。
-
-桌面构建通过 `apps/desktop/tauri.conf.json` 的 `frontendDist` 打包该目录。
-桌面窗口和生产局域网 WebUI 使用同一份内嵌资源，桌面安装包不再携带单独的
-`webui-dist` 副本。显式 `NOMIFUN_WEBUI_DIST` 目录仍保留优先级，并必须与桌面
-前端的构建身份一致。
-`nomifun-web` 通过 `--dist` / `NOMIFUN_WEB_DIST` 服务它；从仓库内运行时，
-默认路径相对 `apps/web` 指向 `../../ui/dist`。
-
-## Web Binary
+运行未内嵌 SPA 的 Web 宿主前先构建前端：
 
 ```bash
 bun run build:ui
 cargo build --release -p nomifun-web
-```
-
-运行要求：
-
-- 已构建的 SPA 目录；
-- 可写数据目录；
-- release 自动内嵌 OfficeCLI；启动无需下载 Node/Bun；用户命令优先使用系统 Bun／`bunx`，其次是有效的既有缓存，缺失时由用户选择下载；受管 runtime 缓存须可写、可执行（见[组件契约](../architecture/external-tools.zh.md)）；
-- 默认鉴权/admin 初始化流程，或仅在可信本地开发中显式使用 `--insecure-no-auth`。
-
-示例：
-
-```bash
 target/release/nomifun-web --host 127.0.0.1 --port 8787 --dist ui/dist
 ```
 
-未预置 `NOMIFUN_ADMIN_USERNAME` / `NOMIFUN_ADMIN_PASSWORD` 时，首次浏览器访问会创建管理员。
+宿主需要可写数据目录，默认开启鉴权。没有预置凭据时，首次设置创建 owner。
+容器可用 `docker compose up -d --build` 或已发布镜像。
+Docker、反向代理、volume 和原生 systemd 操作集中在
+[Web 服务部署](../guides/web-server-deployment.zh.md)和
+[packaging/linux](../../packaging/linux/README.md)。
 
-## 桌面包
+桌面包与其生产 WebUI 共用同一份内嵌前端。显式设置
+`NOMIFUN_WEBUI_DIST` 时必须匹配构建身份。
 
-```bash
-bun run build
-```
+## 桌面运行时组件
 
-该命令调用 Tauri build，先构建 SPA，再在 `target/release/bundle/` 下生成当前
-OS 的安装包/应用包。
+发布 binary 内嵌 OfficeCLI。Node/Bun 属于明确按需准备的受管组件；
+后端启动不下载它们。命令解析可复用已验证缓存。
+应用托管使用系统或用户配置的 Node。准入、缓存及离线行为见
+[外部工具](../architecture/external-tools.zh.md)。
 
-产品身份来自 `apps/desktop/tauri.conf.json`：
+桌面安装包不内嵌 NomiRelay 的 `nfagent`，恢复连接和重启只复用批准的本地缓存。
+缺失或版本变化时，用户明确选择下载连接组件。
+每个平台固定的不可变 URL 和 SHA-256 在
+[nfagent-runtime.json](../../apps/desktop/nfagent-runtime.json)。
+下载有大小上限，先写暂存文件，验证后原子发布。
 
-- `productName: "NomiFun"`
-- `identifier: "com.nomifun.desktop"`
-- 版本来自 workspace package metadata
-- dev URL `http://localhost:5173`
-- bundled frontend `../../ui/dist`
+离线诊断可用 `NOMIFUN_NFAGENT_PATH` 指向现有绝对路径；
+仍须匹配当前平台批准的 SHA-256。分发引用新 manifest 的桌面包前，
+先发布所有对应资产，更新步骤见 [RELEASING.zh-CN.md](../../RELEASING.zh-CN.md)。
 
-桌面包应在目标 OS 上构建。跨 OS 桌面打包不是当前支持流程。
+## 签名与更新包
 
-## `nfagent` 按需运行时
+Updater 签名与操作系统代码签名用途不同。使用发布密钥库中的现有
+updater 私钥，不为已有安装生成替代密钥。
 
-桌面安装包**不内置** `nfagent`。NomiRelay 自动恢复和普通 agent 重启只使用
-有效的既有缓存。制品缺失或批准版本变化时，需要用户明确选择“下载连接组件并连接”，
-桌面端才按当前 OS/架构从
-[`apps/desktop/nfagent-runtime.json`](../../apps/desktop/nfagent-runtime.json)
-指定的不可变 HTTPS URL 下载对应二进制。这样普通用户不使用 NomiRelay 时，
-安装包不会额外携带约 6–7 MiB 的 agent。
-
-受管理的运行时安装具有以下约束：
-
-- 每次使用前都校验完整 SHA-256；缓存损坏时会删除，再次下载仍需用户明确选择。
-- 下载体限制为 32 MiB，先写入临时文件，校验成功后再原子发布。
-- 缓存位置为
-  `<data-dir>/runtime/nfagent/<version>/<sha256-prefix>/<asset-name>`，
-  后续启动复用同一份已验证文件。
-- 用户选择下载后，首次配对先完成运行时下载和校验，再消费一次性 Relay 邀请，
-  避免网络下载失败使邀请白白失效。
-- 运行时 URL 不允许使用 `latest`、查询参数或 fragment；发布文件名必须与目标平台
-  的固定名称一致。
-
-本地开发或离线调试可以在启动桌面应用前设置：
-
-```text
-NOMIFUN_NFAGENT_PATH=<已存在的 nfagent 绝对路径>
-```
-
-该覆盖路径被视为开发者明确提供的可信文件，不走受管理下载及清单 SHA-256 校验，
-因此不要把它作为普通用户的安装方式。
-
-更新 `nfagent` 时，必须先在 `nomifun-net-infra` 发布新的、不可变的版本化资产，
-再更新 `nfagent-runtime.json` 中的版本、URL 和 SHA-256。所有清单 URL 真正可下载
-之前，不得分发引用它们的桌面安装包。具体手动上传流程见根目录
-[`RELEASING.zh-CN.md`](../../RELEASING.zh-CN.md)。
-
-## macOS 签名与公证
-
-完整 macOS 包支持 Apple Silicon arm64 与 Intel x64，均使用系统 WKWebView，
-明确拒绝混合架构 Universal。`bun run build:mac` 默认生成 arm64 包；
-`bun run build:mac intel` 生成 Intel 包，并包含校验过的 ONNX Runtime 与许可证。
-两种原生架构的内置浏览器均沿用 macOS 14+ 的既有目标。DMG 默认使用 ULMO/LZMA 压缩，要求
-挂载系统为 macOS 10.15+。需要 UDZO 兼容格式时，使用 zlib level 9：
-
-```bash
-NOMIFUN_MACOS_DMG_FORMAT=UDZO bun run build:mac
-```
-
-该设置也适用于 `build:signed` 和 `build:updater`。压缩策略不修改 App 最低
-系统 macOS 14+ 声明。签名发布构建配置公证时，最终 App 在生成
-DMG/updater 字节之前完成签名、公证与装订票据；DMG 创建后再执行自身的签名与公证。
-
-不下载或打包浏览器运行时、helper、语言包或系统 WebKit.framework，打包检查会拒绝
-这些浏览器组件。Intel ONNX Runtime、rpath 和许可证继续作为独立应用依赖保留。
-updater 仍使用 `.app.tar.gz`，压缩等级为 gzip level 9；实际解压后核对全部文件字节、
-权限和符号链接目标与最终 App 一致。
-
-ad-hoc 签名产物只适合本地测试，不适合发给别人。生成 Developer ID 签名并公证的 DMG：
+macOS Developer ID 签名与公证：
 
 ```bash
 cp apps/desktop/signing/.env.signing.example apps/desktop/signing/.env.signing
-# 填写本机 Apple 签名/公证信息
 bun run build:signed
 ```
 
-真实 `.env.signing` 与 Apple 私钥不会入库。包装脚本在
-[`scripts/desktop-build-signed.sh`](../../scripts/desktop-build-signed.sh)，详细配置见
-[`apps/desktop/signing/README.md`](../../apps/desktop/signing/README.md)。
+构建前填写本机签名值，真实环境文件和密钥不提交。
+密钥加载、Windows Authenticode、包校验和 manifest 生成见
+[签名设置](../../apps/desktop/signing/README.md)与
+[Updater 操作](../../apps/desktop/updater/README.md)。
 
-## Updater 产物
+macOS 使用系统 WKWebView，支持原生 arm64 和 Intel 包，拒绝 Universal。
+内嵌 Browser 目标为 macOS 14+。最终 App 签名、公证完成后才生成 DMG/updater 字节。
+包校验检查解包字节、权限和符号链接，并拒绝打包浏览器 runtime。
+Intel ONNX 资源和许可证仍为必要项。
 
-```bash
-bun run build:updater
-```
+`bun run build:updater` 使用已提交的
+[updater overlay](../../apps/desktop/tauri.updater.conf.json)。
+CrabNebula Cloud 是主分发源，GitHub Releases 是回退源。发布前阅读发布手册。
 
-该命令启用 Tauri `createUpdaterArtifacts`，在安装包旁生成 `.sig`。这些签名只给
-Tauri updater 使用，不等于 OS 信任：macOS 仍需要 Developer ID 签名/公证；
-Windows 仍需要代码签名证书。
+## 验证
 
-生产发布仍需补齐：
-
-- 生产 updater 密钥管理；
-- 托管 `latest.json` endpoint；
-- 发布 channel 策略；
-- renderer 中下载、应用、重启的完整流程。
-
-见 [`apps/desktop/updater/README.md`](../../apps/desktop/updater/README.md)。
-
-## Docker
-
-已发布的运行时镜像：
-[`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web)。
-下面的命令会从当前 checkout 本地构建镜像。
-
-```bash
-docker compose up -d --build
-```
-
-根 `Dockerfile` 用 Bun 构建 SPA，用 Cargo 构建 release `nomifun-web`，再把 binary
-和 `ui/dist` 复制到 slim runtime image。Compose 启动一个 `nomifun` 服务，
-端口 `8787`，`/data` 作为 `NOMIFUN_DATA_DIR`。
-
-启动后访问 `http://<server>:8787`。如果没有预置管理员，第一个能访问到的浏览器
-会看到首次管理员设置页。
-
-`docker-compose.yml` 中的 Caddy 服务默认注释。需要 TLS 时可启用它或使用其他反向代理；
-浏览器通过 HTTPS 访问时设置 `NOMIFUN_HTTPS=true`。
-
-## Native Linux + systemd
-
-见 [`packaging/linux/README.md`](../../packaging/linux/README.md)。基本形态：
-
-```bash
-bun install
-bun run build:ui
-cargo build --release -p nomifun-web
-sudo cp target/release/nomifun-web /opt/nomifun/
-sudo cp -r ui/dist/. /opt/nomifun/web/
-sudo cp packaging/linux/nomifun-web.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now nomifun-web
-```
-
-systemd 环境中，如果 agent 子进程需要 shell，请显式设置 `SHELL`；nologin 服务用户
-通常没有可用 shell。
-
-## 分发前检查
-
-- `cargo check --workspace`
-- `bun run build:ui`
-- 桌面包在目标 OS 上构建并 smoke test 启动。
-- macOS 分发前验证 `codesign`、`spctl`、`xcrun stapler`。
-- Web/Docker 验证首次管理员设置、登录、`/health` 和目标反向代理下的 WebSocket。
+运行相关打包测试，并在目标系统构建。冒烟检查启动、本地鉴权及受影响的运行时组件。
+公开 macOS 产物验证 `codesign`、`spctl` 和 `xcrun stapler`；
+Web 部署通过实际反向代理验证首次设置/登录、`/health` 和 WebSocket。
+记录无法运行的平台检查。

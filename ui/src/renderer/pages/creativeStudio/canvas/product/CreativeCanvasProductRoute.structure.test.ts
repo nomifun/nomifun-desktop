@@ -15,7 +15,6 @@ const chromeSource = readFileSync(
   new URL('../chrome/CreativeCanvasChrome.tsx', import.meta.url),
   'utf8'
 );
-const wiring = readFileSync(new URL('./WIRING.md', import.meta.url), 'utf8');
 const style = readFileSync(
   new URL('./CreativeCanvasProductRoute.module.css', import.meta.url),
   'utf8'
@@ -212,26 +211,6 @@ describe('Creative Canvas product route composition', () => {
     expect(
       editorStyle.includes('[data-canvas-audio-composer]')
     ).toBe(true);
-  });
-
-  test('documents the exact lazy Router handoff without modifying Router here', () => {
-    expect(
-      wiring.includes("import('@renderer/pages/creativeStudio/canvas/product')")
-    ).toBe(true);
-    expect(wiring.includes("CANVAS_PATTERN = '/nomi/canvases/:canvasId'")).toBe(true);
-    expect(wiring.includes('path="canvas/:projectId"')).toBe(false);
-    expect(wiring.includes('/nomi/canvases')).toBe(true);
-    expect(wiring.includes('/api/creative-studio/canvases/{canvasId}/agent-ops')).toBe(
-      true
-    );
-    expect(wiring.includes('CanvasNode { canvasId, nodeId }')).toBe(true);
-    expect(wiring.includes('canvas_id, node_id')).toBe(true);
-    expect(wiring.includes('## Compatibility only')).toBe(true);
-    expect(wiring.includes('image_edit` / `i2i')).toBe(true);
-    expect(wiring.includes('authoritative 404')).toBe(true);
-    expect(wiring.includes('nomifun.creative-studio.canvas-ops/v1')).toBe(true);
-    expect(wiring.includes('应用到画布')).toBe(true);
-    expect(wiring.includes('automatically retries a response-loss mutation')).toBe(true);
   });
 
   test('derives the focused canvas palette from the active app theme', () => {

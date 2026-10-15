@@ -46,7 +46,7 @@ export const getCssThemeDisplayName = (
 /**
  * 预设 CSS 主题列表 / Preset CSS themes list
  * 这些主题是内置的，用户可以直接选择使用 / These themes are built-in and can be directly used by users
- * 新增主题请遵循 presets/README.md 的主题契约 / New themes must follow the contract in presets/README.md
+ * 新增主题请遵循 docs/contributing/styling.md 的主题契约 / New themes must follow the contract in docs/contributing/styling.md
  * 数组顺序 = 卡片展示顺序：系统默认主题「律动暗黑」置首。
  * Array order = card display order: the system default "Rhythm Dark" first.
  */

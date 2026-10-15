@@ -1,6 +1,9 @@
 # Configuration Reference
 
-Every flag and environment variable NomiFun reads, with defaults and the file that owns each one. Values are taken from the source — if a setting is not in this page it does not exist.
+[简体中文](configuration.zh.md)
+
+Common operator flags and environment variables, their defaults and owning source.
+Use the executable's `--help` and linked modules for the complete current surface.
 
 NomiFun ships **one** Rust backend (`nomifun-app`, binary `nomicore`) and two hosts that embed it:
 
@@ -19,9 +22,10 @@ Source: [`apps/web/src/main.rs`](../../apps/web/src/main.rs).
 | `--port` | `NOMIFUN_WEB_PORT` | `8787` | TCP port. Serves the API, the WebSocket at `/ws`, and the SPA from one socket. |
 | `--data-dir` | `NOMIFUN_DATA_DIR` | per-user app-data dir | Backend data directory (SQLite database, agent state, logs, managed runtime cache). Defaults to the active channel's per-user location shared by every host; stable uses `NomiFun`, while dev uses the `NomiFun-dev` sibling. Override with the flag or `NOMIFUN_DATA_DIR` (taken literally, no suffix); use an absolute path in production. |
 | `--dist` | `NOMIFUN_WEB_DIST` | `../../ui/dist` | Directory containing the built SPA. Set this explicitly when deploying outside the repo. |
+| `--api-only` | — | `false` | Serve the backend without a SPA fallback; used by the Vite-proxied development loop. |
 | `--admin-user` | `NOMIFUN_ADMIN_USERNAME` | `admin` | Username used when pre-seeding the first admin. Ignored once an admin exists. |
 | `--admin-password` | `NOMIFUN_ADMIN_PASSWORD` | — | Pre-seeds the first admin password at boot, skipping interactive setup. Ignored once an admin exists. |
-| `--insecure-no-auth` | `NOMIFUN_WEB_INSECURE_NO_AUTH` | `false` | DANGER. Disables authentication entirely (desktop-style local mode). Only use on loopback or a fully trusted private network. |
+| `--insecure-no-auth` | `NOMIFUN_WEB_INSECURE_NO_AUTH` | `false` | Disables authentication entirely. Only use on loopback or an isolated trusted private network. Desktop uses local trust instead. |
 
 Boolean envs accept `1`, `true`, `yes`, `on` (case-insensitive).
 
@@ -57,6 +61,8 @@ These are the flags exposed by the standalone `nomicore` binary. The two hosts c
 | `remote turn <agent_session_id> <json-input>` | Start a turn on an explicit Remote AgentSession. |
 | `remote observe <agent_session_id>` | Read Remote Session events/messages after `--after-seq`. |
 | `remote cancel <agent_session_id>` | Cancel the explicit Session's active turn. |
+| `backup --output <dir>` | Create a new offline backup bundle; the destination must not exist. |
+| `restore --bundle <dir> --destination-data-dir <dir>` | Restore a compatible offline bundle into a new data directory. Read `--help` for scope and exclusions. |
 
 ## Shared environment variables
 
@@ -73,13 +79,16 @@ These are read by the backend regardless of which host embeds it.
 | `NOMIFUN_HTTPS` | `nomifun-auth::CookieConfig` | When truthy, session and CSRF cookies get the `Secure` flag and `SameSite=Strict`. Set it whenever the app is reached over HTTPS (TLS reverse proxy, etc.). Default is `false` → no `Secure` flag, `SameSite=Lax`. |
 | `SHELL` | agent engine (Linux/macOS) | Shell used when the agent engine spawns child processes. On Linux servers under systemd, set this explicitly (the system account often has no `$SHELL`). |
 | `NOMIFUN_URL` | `nomicore remote` | Base URL for a running instance when using canonical Remote operations. |
-| `NOMIFUN_ACCESS_TOKEN` | Fresh-v4 host, `nomicore remote` | Installation-scoped token for `/mcp` and `/api/remote/*`; startup values seed/rotate the stored verifier and never bind a companion. |
+| `NOMIFUN_ACCESS_TOKEN` | backend startup, `nomicore remote` | Installation-scoped token for `/mcp` and `/api/remote/*`; startup values seed/rotate the stored verifier and never bind a companion. |
 
 There is no `SENTRY_DSN` integration: the codebase does not read that environment variable.
 
 ## Backend constants
 
-Source: [`crates/backend/nomifun-common/src/constants.rs`](../../crates/backend/nomifun-common/src/constants.rs). These are compile-time values, not environment variables — they are listed here so operators know the limits.
+Sources: [common constants](../../crates/backend/nomifun-common/src/constants.rs),
+[file service](../../crates/backend/nomifun-file/src/service.rs) and
+[realtime types](../../crates/backend/nomifun-realtime/src/types.rs).
+These are compile-time values, not environment variables.
 
 | Constant | Value | Used for |
 |---|---|---|
@@ -121,7 +130,9 @@ On older installs where that file does not exist yet, startup seeds it from the 
 
 NomiFun does not terminate TLS itself — put a TLS-terminating reverse proxy (Caddy, nginx, …) in front. When you do:
 
-- Set `NOMIFUN_HTTPS=true` so cookies are flagged `Secure` and `SameSite=Strict`. Without this, browsers reject `Secure` cookies on HTTPS responses, and login appears to silently fail.
+- Set `NOMIFUN_HTTPS=true` so cookies are flagged `Secure` and `SameSite=Strict`.
+  Secure cookies are not sent over ordinary HTTP; keep the public origin and
+  reverse-proxy scheme consistent.
 - The WebSocket upgrade at `/ws` passes through any standards-compliant proxy without extra headers; Caddy handles it out of the box.
 
 See [`guides/web-server-deployment.md`](../guides/web-server-deployment.md) for a worked Caddy + Docker setup.
@@ -138,7 +149,9 @@ See [`guides/web-server-deployment.md`](../guides/web-server-deployment.md) for 
   - `info,nomifun_mcp=trace` — info everywhere, trace for the MCP module.
   - `warn,nomifun_conversation=info,nomifun_terminal=debug` — quieter overall, normal for the conversation engine, debug for terminals.
 
-There is no separate `RUST_LOG` plumbing — `--log-level` (or its env-driven equivalent in the running host) is the single switch.
+The standalone `nomicore --log-level` flag controls the backend filter.
+The Web host does not expose this flag, and the backend does not read
+`RUST_LOG` or `NOMIFUN_LOG_LEVEL`.
 
 ## See also
 

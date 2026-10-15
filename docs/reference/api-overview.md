@@ -1,217 +1,107 @@
 # API Overview
 
-NomiFun's backend (`nomifun-app`, binary `nomicore`) exposes a single axum HTTP server. The SPA, the desktop shell, and any external integration all talk to it the same way: JSON over HTTP for command/query, WebSocket for streaming events.
+[简体中文](api-overview.zh.md)
 
-This page is an **orientation**, not an exhaustive endpoint reference. The full surface lives in the route modules under `crates/backend/`; the source is the canonical reference. Group base paths and the routers that own each one are listed below — start there.
+The desktop shell and Web host embed the same `nomifun-app` HTTP/WebSocket
+backend. This page locates contracts; route declarations and DTOs remain the
+reference for exact methods and fields.
 
 ## Base URL
 
-| Host | Default base URL | Notes |
-|---|---|---|
-| `nomifun-desktop` | `http://127.0.0.1:<picked-port>` | Picks a free localhost port at startup. The renderer learns the port over IPC and uses `/api` and `/ws` against it. |
-| `nomifun-web` | `http://<host>:<port>` (`http://127.0.0.1:8787` by default) | Same backend, served alongside the SPA on one port. |
-| `nomicore` standalone | `http://127.0.0.1:25808` | Backend run on its own — useful for debugging. |
+| Host | Address |
+| --- | --- |
+| Desktop | `http://127.0.0.1:<picked-port>`; the shell injects the port and per-boot local trust secret |
+| `nomifun-web` | `http://127.0.0.1:8787` by default, with SPA/API on one port |
+| Standalone `nomicore` | `http://127.0.0.1:25808` by default |
 
-The SPA uses **relative paths** (`/api/...`, `/ws`). There is no separate API server to point clients at — the SPA and the API are co-located.
+The Web renderer uses same-origin `/api` and `/ws`; desktop adapters resolve
+the embedded backend URL.
 
 ## Authentication model
 
-NomiFun runs under one of three auth policies, decided at startup:
+- **Authenticated Web mode:** login sets an HttpOnly `nomifun-session` cookie
+  and returns a JWT. Requests may use the cookie or a Bearer token.
+  State-changing cookie-authenticated operations use the double-submit
+  `nomifun-csrf-token` cookie and `x-csrf-token` header. Public
+  setup/login routes have their own exemptions and rate limits.
+- **Desktop local trust:** `AuthPolicy::TrustLocalToken` accepts the shell's
+  per-boot trust secret. Other local/network clients still need normal
+  authentication. Host-UI mutations can require both installation ownership
+  and local product trust.
+- **Explicit no-auth development:** `nomicore --local` or
+  `nomifun-web --insecure-no-auth` disables authentication and CSRF.
+  Keep this mode on loopback or an isolated trusted network.
+- **Remote integrations:** `/mcp` and `/api/remote/*` use installation
+  access tokens. See [public capabilities](../guides/remote-capability-api.md).
 
-### Authenticated mode (default for `nomifun-web`)
+Owner authentication alone does not grant access to every native desktop
+operation. Read the route's local-trust and ownership checks.
 
-- Login via `POST /login` returns a session JWT in both a cookie (`nomifun-session`, `HttpOnly`) and the JSON body. Subsequent requests authenticate via the cookie or an `Authorization: Bearer …` header.
-- State-changing requests must additionally include the CSRF header `x-csrf-token` matching the `nomifun-csrf-token` cookie (Double Submit Cookie pattern). Safe methods (`GET`, `HEAD`, `OPTIONS`) bypass CSRF; the login/setup/qr-login endpoints are exempt because they have no session yet.
-- WebSocket upgrades carry the same JWT — typically via `Sec-WebSocket-Protocol`, fetched from `GET /api/ws-token`. The `/ws` route is exempt from CSRF (no cookie-based double-submit on a WebSocket upgrade) but is otherwise authenticated.
-- Rate limiters apply per-client to login attempts, general API traffic, and authenticated state-changing actions.
+## Route ownership
 
-### Desktop local-trust mode (`nomifun-desktop`)
+Start with [router assembly](../../crates/backend/nomifun-app/src/router/routes.rs)
+and [API types](../../crates/backend/nomifun-api-types/src).
+The maintained [backend map](../architecture/backend-crates.md) describes
+feature ownership.
 
-- The embedded backend uses `AuthPolicy::TrustLocalToken`.
-- The desktop WebView receives a per-boot secret (`window.__nomiLocalTrust`) and
-  presents it on HTTP/WebSocket requests.
-- Other clients, even on the same machine, are not trusted unless they have a
-  normal authenticated session. This is what makes WebUI remote access safe to
-  expose behind login.
-
-### No-auth local mode (`--local` on `nomicore`, or `--insecure-no-auth` on the web host)
-
-- Authentication and CSRF are turned off entirely. Every request acts as the
-  installation owner recorded in the database.
-- A permissive CORS layer is added so the desktop WebView (and tooling) can call the API freely.
-- Local-only routes such as `/api/webui/*` become reachable.
-
-The trust boundary in local mode is the network — only ever expose it on loopback or a fully trusted private network. The web host loudly logs a warning if `--insecure-no-auth` is combined with a non-loopback bind.
-
-## Body size and limits
-
-- The default request body limit is **10 MiB** (`BODY_LIMIT` in `nomifun-common`). Routes that legitimately need more (file upload, ZIP creation, …) install their own larger limit — `/api/fs/upload` accepts up to 30 MiB.
-- Remote images downloaded on behalf of the user are capped at 5 MiB and follow at most 5 redirects.
-
-## Route groups
-
-Each group is owned by a specific crate. The base path is the actual URL prefix mounted into the app router; auth applies in authenticated mode and desktop local-trust mode.
-
-| Group | Base path | Auth | Owning crate / file |
-|---|---|---|---|
-| Health | `/health` | public | [`router/health.rs`](../../crates/backend/nomifun-app/src/router/health.rs) |
-| Auth — login / setup / status / refresh | `/login`, `/logout`, `/api/auth/*`, `/api/ws-token`, `/qr-login` | mixed (login/setup/qr-login: public; rest: authenticated) | [`nomifun-auth/src/routes.rs`](../../crates/backend/nomifun-auth/src/routes.rs) |
-| Auth — local-only admin/internal | `/api/webui/*` | local mode only | same as above |
-| Agent session messages | `/api/agent-sessions/{agent_session_id}/messages`, `/api/agent-session-messages/search` | instance owner | [`router/nomi_core_session.rs`](../../crates/backend/nomifun-app/src/router/nomi_core_session.rs) |
-| Agents | `/api/agents/*` | authenticated | [`nomifun-ai-agent/src/routes/agent.rs`](../../crates/backend/nomifun-ai-agent/src/routes/agent.rs) |
-| SSH hosts | `/api/ssh-hosts/*` | instance owner only | [`nomifun-ssh/src/routes.rs`](../../crates/backend/nomifun-ssh/src/routes.rs) |
-| Agent workbench (AgentPreset authoring + capability catalog) | `/api/agent-preset-templates`, `/api/agent-presets/*`, `/api/capabilities`, `/api/agent-catalog*`, `/api/agent-role-defaults*`, `/api/agent-bindings/*`, `/api/remote-bindings`, `/api/mcp-tool-mappings` | instance owner | [`nomifun-agent-control-plane/src/routes.rs`](../../crates/backend/nomifun-agent-control-plane/src/routes.rs) |
-| Agent Sessions | `/api/agent-sessions/*` | instance owner | [`router/nomi_core_session.rs`](../../crates/backend/nomifun-app/src/router/nomi_core_session.rs) |
-| MCP servers | `/api/mcp/*` | authenticated | [`nomifun-mcp/src/routes.rs`](../../crates/backend/nomifun-mcp/src/routes.rs) |
-| Skills | `/api/skills/*` | authenticated | [`nomifun-skill-library/src/skill_routes.rs`](../../crates/backend/nomifun-skill-library/src/skill_routes.rs) |
-| Cron jobs | `/api/cron/*` | authenticated | [`nomifun-cron/src/routes.rs`](../../crates/backend/nomifun-cron/src/routes.rs) |
-| Channels (IM bridges) | `/api/channel/*` | authenticated | [`nomifun-channel/src/routes.rs`](../../crates/backend/nomifun-channel/src/routes.rs) |
-| Webhooks + tag settings | `/api/webhooks/*`, `/api/tags/{tag}/settings` | authenticated | [`nomifun-webhook/src/routes.rs`](../../crates/backend/nomifun-webhook/src/routes.rs) |
-| Requirements (project board) | `/api/requirements/*` | authenticated | [`nomifun-requirement/src/routes.rs`](../../crates/backend/nomifun-requirement/src/routes.rs) |
-| AutoWork | `/api/requirements/autowork*` | authenticated | [`nomifun-requirement/src/routes.rs`](../../crates/backend/nomifun-requirement/src/routes.rs) |
-| IDMM (session-scoped supervision) | `/api/agent-sessions/{agent_session_id}/idmm`, `/api/agent-sessions/{agent_session_id}/idmm/evaluate` | instance owner | [`router/idmm.rs`](../../crates/backend/nomifun-app/src/router/idmm.rs) (service: `nomifun-idmm`) |
-| Agent executions | `/api/agent-executions/*` | authenticated | [`nomifun-agent-execution/src/routes.rs`](../../crates/backend/nomifun-agent-execution/src/routes.rs) |
-| Terminals | `/api/terminals/*` | authenticated | [`nomifun-terminal/src/routes.rs`](../../crates/backend/nomifun-terminal/src/routes.rs) |
-| Knowledge bases | `/api/knowledge/*` | authenticated | [`nomifun-knowledge/src/routes.rs`](../../crates/backend/nomifun-knowledge/src/routes.rs) |
-| Creation management and generation | `/api/creative-studio/*` management families: canvases, assets, prompts, templates/runs/drafts, tasks, agent sessions, and collections | instance owner only | [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs), [`nomifun-creation/src/routes.rs`](../../crates/backend/nomifun-creation/src/routes.rs) |
-| Creation media delivery | `GET /api/creative-studio/files/{asset_id}` | public read-only capability URL; no list or mutation surface | [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs) |
-| Applications | `/api/apps*`: current records, metadata, creation, imports, ordinary development Sessions, commands, state, overwrite and deletion; `/api/app-hosting/mcp-sources*`: source observations and refresh | authenticated installation owner; managed backends automatically reuse LocalTrust | [`router/app_hosting.rs`](../../crates/backend/nomifun-app/src/router/app_hosting.rs), [`router/app_mcp_sources.rs`](../../crates/backend/nomifun-app/src/router/app_mcp_sources.rs) |
-| Companion | `/api/companion/*` | authenticated | [`nomifun-companion/src/routes.rs`](../../crates/backend/nomifun-companion/src/routes.rs) |
-| NomiFun Desktop access token | `/api/webui/access-token` | local-trust installation-owner flow | [`router/instance_token_routes.rs`](../../crates/backend/nomifun-app/src/router/instance_token_routes.rs) |
-| Agent-session Browser Workspace | `/api/agent-sessions/{agent_session_id}/browser*` | installation owner with local product trust; agent-session ownership is checked and delegated execution steps are rejected | [`router/browser_workspace.rs`](../../crates/backend/nomifun-app/src/router/browser_workspace.rs) |
-| Attached Chrome provider | `GET|POST|DELETE /api/browser-providers/attached-chrome` | installation owner with local product trust | [`router/browser_workspace.rs`](../../crates/backend/nomifun-app/src/router/browser_workspace.rs) |
-| Filesystem | `/api/fs/*` | authenticated | [`nomifun-file/src/routes.rs`](../../crates/backend/nomifun-file/src/routes.rs) |
-| Office preview and history | `/api/office-preview/start`, `/api/office-preview/status/{request_id}`, `/api/office-preview/stop`, `/api/preview-history/*` | authenticated; owner-scoped requests | [`nomifun-office/src/routes.rs`](../../crates/backend/nomifun-office/src/routes.rs) |
-| Managed runtime preparation | `GET /api/runtime-tools/{tool}`, `POST /api/runtime-tools/{tool}/prepare` | installation owner; fixed component IDs; shared nonblocking preparation | [`nomifun-app/src/router/runtime_tools.rs`](../../crates/backend/nomifun-app/src/router/runtime_tools.rs) |
-| Office HTML artifacts | `/api/office-preview-artifacts/{capability}/?request_id=...&nonce=...` | active request-matching capability; UUIDv7 nonce; read-only sandbox HTML | same; [contract](../architecture/external-tools.md) |
-| Settings + providers + system info | `/api/settings`, `/api/providers/*`, `/api/system/*` | authenticated | [`nomifun-system/src/routes.rs`](../../crates/backend/nomifun-system/src/routes.rs) |
-| Host system permissions | `GET /api/system/permissions` reads live Microphone, Accessibility, and Screen Recording state; `POST /api/system/permissions/{request,open-settings}` requests access or opens the matching pane | installation owner for reads; mutations that display host UI additionally require local product trust | [`router/computer_permissions.rs`](../../crates/backend/nomifun-app/src/router/computer_permissions.rs) |
-| Global model failover queue | `/api/agent/model-failover` | authenticated | [`router/model_failover.rs`](../../crates/backend/nomifun-app/src/router/model_failover.rs) |
-| Connection probes (Bedrock, …) | `/api/bedrock/test-connection` | authenticated | [`nomifun-system/src/bedrock_probe/routes.rs`](../../crates/backend/nomifun-system/src/bedrock_probe/routes.rs) |
-| Shell helpers + STT | `/api/shell/*`, `/api/stt` | authenticated | [`nomifun-shell/src/routes.rs`](../../crates/backend/nomifun-shell/src/routes.rs) |
-| Public assets (logos) | `/api/assets/logos/*` | public | [`nomifun-assets/src/routes.rs`](../../crates/backend/nomifun-assets/src/routes.rs) |
-| Canonical Remote MCP front door | `/mcp` | installation token | [`nomifun-public/src/canonical.rs`](../../crates/backend/nomifun-public/src/canonical.rs) |
-| Canonical Remote REST API | `/api/remote/open`, `/api/remote/turn`, `/api/remote/observe`, `/api/remote/cancel` | external installation token; managed backends can reuse a verified LocalTrust owner | [`router/nomi_core_session.rs`](../../crates/backend/nomifun-app/src/router/nomi_core_session.rs) |
-| Realtime WebSocket | `/ws` | authenticated (token in `Sec-WebSocket-Protocol` or query) | [`nomifun-realtime/src/handler.rs`](../../crates/backend/nomifun-realtime/src/handler.rs) |
-
-For the exact set of methods on each route, read the corresponding `routes.rs` file — every router declares its routes inline.
-
-### Current applications and development workspaces
-
-The application UI and Agent tools share one hosting owner. Manual import and
-settings need no model. Development opens an ordinary Session using a usable
-model; the current application directory is its canonical workspace, not a draft.
-
-| Method + path | Purpose |
+| Surface | Route/source entry |
 | --- | --- |
-| `GET /api/apps` | Current records, including searchable descriptions/tags and actual runtime state. |
-| `POST /api/apps` | `{name?, description?, tags?}` creates an empty Source record and owned directory. |
-| `POST /api/apps/import`, `/import-zip` | Create an imported application from an external path or ZIP body, preserving originals. |
-| `GET /api/apps/{id}` | Read current settings, operations and output. |
-| `PUT /api/apps/{id}` | Atomically save `{name, settings, description?, tags?, import_kind?}`; omitted new fields retain values. Clients cannot author Session or binding references. |
-| `POST /api/apps/{id}/development-session` | `{model?, reasoning_effort?}` verifies/reuses a regular Session or opens one with fixed `app.developer`; returns `{app, conversation}`, the same canonical Session projection. |
-| `POST /api/apps/{id}/import`, `/import-zip` | Import into this ID/directory/Session and detect commands again. Path body is `{source, name?, import_kind}`; ZIP name/type use query parameters. |
-| `POST /api/apps/{id}/overwrite`, `/overwrite-zip` | Replace current files while preserving business files and settings. Path body is `{source}`. |
-| `POST /api/apps/{id}/operate` | `{operation: preview|use|start|stop|rebuild}` uses the single command/process owner. |
-| `POST /api/apps/environment` | Detect actual system/custom Node, npm and Bun without replacing the environment. |
-| `DELETE /api/apps/{id}` | Stop and remove owned files/registration; preserve ordinary development Sessions and valid history. |
+| Health | `/health`; [health router](../../crates/backend/nomifun-app/src/router/health.rs) |
+| Login, setup, session auth | `/login`, `/logout`, `/api/auth/*`, `/api/ws-token`; [auth routes](../../crates/backend/nomifun-auth/src/routes.rs) |
+| Agent Sessions and Remote | `/api/agent-sessions/*`, `/api/remote/*`; [Session router](../../crates/backend/nomifun-app/src/router/nomi_core_session.rs) |
+| Agent authoring and capability catalog | [control-plane routes](../../crates/backend/nomifun-agent-control-plane/src/routes.rs) |
+| Native Browser and attached Chrome | [Browser Workspace router](../../crates/backend/nomifun-app/src/router/browser_workspace.rs) |
+| Applications and MCP sources | [app hosting](../../crates/backend/nomifun-app/src/router/app_hosting.rs), [source observations](../../crates/backend/nomifun-app/src/router/app_mcp_sources.rs) |
+| Creation canvases/assets/tasks | [workshop routes](../../crates/backend/nomifun-workshop/src/routes.rs), [creation routes](../../crates/backend/nomifun-creation/src/routes.rs) |
+| Terminal sessions | `/api/terminals/*`; [terminal routes](../../crates/backend/nomifun-terminal/src/routes.rs) |
+| MCP and Skills | [MCP routes](../../crates/backend/nomifun-mcp/src/routes.rs), [skill routes](../../crates/backend/nomifun-skill-library/src/skill_routes.rs) |
+| Files and Office preview | [file routes](../../crates/backend/nomifun-file/src/routes.rs), [Office routes](../../crates/backend/nomifun-office/src/routes.rs) |
+| Settings/providers/system | [system routes](../../crates/backend/nomifun-system/src/routes.rs) |
+| Canonical Remote MCP | `/mcp`; [public adapter](../../crates/backend/nomifun-public/src/canonical.rs) |
+| Realtime | `/ws`; [handler](../../crates/backend/nomifun-realtime/src/handler.rs) |
 
-Model choices contain provider/model only; the Host resolves routes and credentials.
-Existing Session model/reasoning changes use their ordinary APIs. Reopening does
-not rewrite a frozen binding. Development references are navigation only and are
-verified against owner, purpose, fixed template and exact workspace. Manual imports,
-overwrites and deletion use the existing admission fence, recheck references under
-the application gate, and reject active Turns or unsettled/unknown effects. Reads,
-metadata saves and application stop remain available.
+Do not copy complete endpoint lists into feature docs. Link the owning router
+and explain only the user/integration contract needed there.
 
-The preview iframe loads the application's HTTP(S) page directly, with no asset
-Bridge or proxy API. Renderer-origin pages and unreachable remote loopback URLs
-are rejected by UI policy. Managed backends use injected LocalTrust for existing
-HTTP operations; external authentication, CORS and installation tokens stay intact.
+Session operations address the canonical AgentSession identity; conversation
+messages are projections of that same Session. See
+[Agent Session](../architecture/agent-session.md). Application development uses
+ordinary Sessions; see [application hosting](../architecture/app-hosting.md).
 
-### Selected auth endpoints
-
-These are the auth endpoints clients are most likely to interact with directly:
-
-| Method + path | Purpose |
-|---|---|
-| `POST /login` | Username + password login. Returns `{success, user, token}` and sets the session cookie. CSRF-exempt. Rate-limited. |
-| `POST /api/auth/setup` | One-time first-run admin creation on a fresh install. Atomic; concurrent callers race on a conditional UPDATE so only one wins (the others get `409 Conflict`). CSRF-exempt. |
-| `POST /logout` | Blacklists the current token; clears the session cookie. |
-| `GET  /api/auth/status` | Public — reports `{needs_setup, user_count, is_authenticated}`. Useful as a liveness/health probe. |
-| `GET  /api/auth/user` | Returns the current `{id, username}`. |
-| `POST /api/auth/change-password` | Changes the current user's password and rotates the JWT secret (invalidating every other session). |
-| `POST /api/auth/refresh` | Refreshes a token that is still valid but near expiry. |
-| `GET  /api/ws-token` | Returns the token to use for the WebSocket upgrade. |
-| `POST /api/auth/qr-login` | Consume a one-shot QR-login token (issued via the WebUI remote-access flow). |
-| `GET  /qr-login` | Static HTML page that completes a QR login redirect from a phone scanner. |
-
-### Browser platform endpoints
-
-The interactive Browser is a native surface owned by one Agent session. Its HTTP
-API supports the session UI; Agent observation and input use the frozen
-`Browser` tool binding for the active turn rather than an HTTP management API.
-Both paths address the same tabs and profile. While an Agent run is active,
-human commands fail closed; after the turn ends, the user can operate the same
-page. There is no user-control transfer state.
-
-| Method + path | Purpose |
-|---|---|
-| `GET /api/agent-sessions/{agent_session_id}/browser` | Read the Browser Workspace snapshot without creating a runtime. |
-| `POST /api/agent-sessions/{agent_session_id}/browser` | Ensure the session's native Browser Workspace and return its snapshot. |
-| `DELETE /api/agent-sessions/{agent_session_id}/browser` | Close an idle Browser Workspace using its exact `runtime_generation`; stale or active requests are rejected. |
-| `POST /api/agent-sessions/{agent_session_id}/browser/commands` | Run one typed user command against the native tabs while input is user-owned: create/activate/close/navigate/history/reload, close all pages, open Downloads or the current URL externally, cancel an owned download, answer a website permission/dialog, or clear this session's site data. |
-| `GET /api/agent-sessions/{agent_session_id}/browser/diagnostics?tab_id=…&runtime_generation=…&document_generation=…` | Read bounded, sanitized main-document navigation diagnostics for an existing owned tab; never creates a runtime or Agent grant. Coverage and unknown response association are explicit. |
-| `GET /api/browser-providers/attached-chrome` | Read the attached-Chrome connection state. |
-| `POST /api/browser-providers/attached-chrome` | Attach to an already-running Chrome instance after the user enabled Chrome remote debugging. NomiFun does not launch Chrome or import its profile. |
-| `DELETE /api/browser-providers/attached-chrome` | Disconnect the exact attachment without closing Chrome or its tabs. |
-
-These routes are mounted only for the locally trusted desktop product and are
-also protected by installation-owner authentication. They never return raw
-protocol endpoints, debugging ports, profile paths, cookies, or credentials.
-Mutable browser operations are unavailable while the Agent owns the
-session run.
-
-The `web.research` capability module has no Browser-management endpoint. It is
-an independently selectable Agent capability backed by an isolated background
-browser and does not use the session profile. Likewise, the attached-Chrome provider is an independent
-Agent capability; enabling it does not enable the embedded Browser or local
-search.
+Native Browser management is Session-owned and locally trusted. It does not
+create an Agent grant, expose raw debug endpoints, or accept human mutations
+while the Agent owns the run. See
+[Browser platform](../architecture/browser-platform.md).
 
 ## WebSocket event model
 
-`/ws` is the shared JSON realtime channel for application updates: agent token streams, terminal output, Browser inventory/lifecycle events, and requirement / scheduled-task / collaboration state changes. It remains the general application event channel; it is not a Browser page viewer or input channel.
+`/ws` carries JSON application events, including Agent streams, terminals,
+Browser lifecycle and scheduled/requirement changes. It is not a native Browser
+page viewer or input transport.
 
-- Authentication: a JWT obtained from `GET /api/ws-token`, sent in the WebSocket `Sec-WebSocket-Protocol` header (or `Authorization`). Invalid or expired token → server sends an `auth-expired` event and closes with code `1008`. No token at all → close with `1008`, reason `"no token provided"`.
-- After a successful upgrade, every message is a JSON object with a `type` and a `payload`. Messages are pushed by the server when domain events occur (a new agent token, a terminal byte, a requirement transition); clients usually do not need to send anything back. The server multiplexes a single `BroadcastEventBus` to every connected client.
-- Heartbeats: ping every 30s, timeout at 60s (`HEARTBEAT_INTERVAL` / `HEARTBEAT_TIMEOUT` in `nomifun-realtime`).
-- Close codes: `1000` for a normal close, `1008` for policy violations (auth failure, invalid token).
+The Web client obtains a token from `GET /api/ws-token` and presents it on
+upgrade, normally using `Sec-WebSocket-Protocol`. Desktop uses its local-trust
+path. Invalid/expired authentication closes with policy code `1008`;
+normal closure uses `1000`. Heartbeat defaults are 30s/60s.
 
-The set of `type` values is open-ended — extensions and feature modules emit their own. Treat unknown types as forward-compatible: ignore them.
+Messages use `type` and `payload`; ignore unknown event types.
+Read [communication](../architecture/communication.md) for transport details.
 
-## Response envelope
+## Responses and limits
 
-Most JSON responses use the same shape (`ApiResponse<T>` from `nomifun-api-types`):
-
-```json
-{ "success": true, "data": { ... } }
-```
-
-Errors are returned with the appropriate HTTP status and a body like:
+Most handlers use `ApiResponse<T>`:
 
 ```json
-{ "success": false, "error": "Invalid username or password" }
+{ "success": true, "data": {} }
 ```
 
-The login/setup/refresh handlers return slightly enriched envelopes (`LoginResponse`, `RefreshResponse`) — they include the token or user object inline.
+Errors carry an appropriate HTTP status and error body. Auth responses use
+their own typed envelopes; consult DTOs before implementing a client.
 
-## Source-of-truth pointers
+The common body limit is 10 MiB; selected routes override it, such as the
+30 MiB file upload. Limits and cookie/header constants are maintained in
+[configuration](configuration.md) and the executable
+[constants](../../crates/backend/nomifun-common/src/constants.rs).
 
-The list above is meant to get you to the right module. From there, read the source — every router declares its routes in one place, and every handler is in the same file or the next one over. The router assembly itself is in [`crates/backend/nomifun-app/src/router/routes.rs`](../../crates/backend/nomifun-app/src/router/routes.rs); the middleware stack (CSRF, security headers, body limit, optional CORS) is also there.
-
-## See also
-
-- [Configuration Reference](./configuration.md) — flags, env vars, the auth secret resolution order.
-- [Browser Platform Architecture](../architecture/browser-platform.md) — the native Agent-session Browser Workspace, the attached-Chrome provider, isolated background runtimes, and lifecycle guarantees.
-- [Troubleshooting](./troubleshooting.md) — common API and WebSocket failure modes.
-- [Web Server Deployment](../guides/web-server-deployment.md) — exposing the API over the network behind TLS.
+For setup, authentication and connection failures, see
+[troubleshooting](troubleshooting.md).

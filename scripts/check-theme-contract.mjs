@@ -2,7 +2,7 @@
 /**
  * 预设 CSS 主题契约校验 / Preset CSS theme contract checker
  * 校验 ui/src/renderer/pages/settings/DisplaySettings/presets/*.css（default.css 除外）
- * 是否符合 presets/README.md 的主题契约：
+ * 是否符合 docs/contributing/styling.md 的主题契约：
  *  - 双块结构（:root,body 亮块 + [data-theme='dark'],[data-theme='dark'] body 暗块，暗块在后）
  *  - A 表 + B 表变量全量覆盖，且亮/暗两块变量集合对称
  *  - --primary-rgb / --primary-1..7 为 RGB 三元组

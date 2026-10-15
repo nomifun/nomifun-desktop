@@ -1,0 +1,9 @@
+---
+description: Follow the shared repository instructions
+alwaysApply: true
+---
+
+Read and follow `AGENTS.md` at the repository root before making changes.
+Use `docs/README.md` for current documentation and
+`docs/contributing/development.md` for targeted validation. Preserve unrelated
+work and use the contributor's configured Git identity.

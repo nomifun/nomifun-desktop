@@ -1,83 +1,43 @@
-# Screenshot Manifest
+# Screenshot manifest
 
-The Desktop README screenshots were refreshed on **October 8, 2026** for
-**NomiFun Desktop 0.8.0**. English and Simplified Chinese each have 13 captures.
-The two README header images were supplied by the user; the remaining captures
-were collected from the current source with an isolated temporary data root.
+The README images were captured or supplied for **NomiFun Desktop 0.8.0 on October 8, 2026**.
+They illustrate example workflows; they are not a current feature inventory or acceptance
+proof for later source. Product procedures live in the [documentation index](../README.md).
 
-## Ownership and storage
+## Current README images
 
-- README screenshots stay in this repository so the pages remain readable offline.
-- The user-supplied header images retain their original **2560×1664** pixels
-  and lossless PNG format. They appear only at the top of each README.
-- The remaining shared-renderer screenshots were captured from the running Vite + Rust WebUI development
-  environment at a desktop viewport of **1440×900**.
-- The native companion captures come from the Tauri development
-  app using the same isolated example data.
-- Browser captures are JPEG. Native captures trim transparent whitespace around the actual figure and reply,
-  and are encoded as JPEG for storage.
-  Replaced PNGs, unused companion exports, and retired Image/Video Workbench
-  captures are deleted; no historical copies or aliases are retained here.
-- Technical-guide screenshots outside these two galleries remain where the
-  guides still reference them.
-
-## README showcase
-
-| File under `readme/en/` and `readme/zh/` | Surface and example |
+| Files under `docs/images/` | Purpose |
 | --- | --- |
-| `home.png` | User-supplied Desktop home with two custom companions; README header |
-| `workspace.jpg` | Current session workspace with a completed coffee-brand visual brief and color table |
-| `models.jpg` | Providers & keys, with StepFun Step Plan and Agnes models expanded; credentials remain hidden |
-| `companions.jpg` | Companion cohabit workspace with a completed creative conversation |
-| `skills.jpg` | Skills Hub with current built-in Creative Studio and Office packages |
+| `readme/en/home.png`, `readme/zh/home.png` | User-supplied header images, preserved at their original 2560×1664 resolution |
+| `readme/en/workspace.jpg`, `readme/zh/workspace.jpg` | Conversation workspace with a completed coffee-brand brief and color table |
+| `creative-studio/en-US/02-canvas-workspace.jpg`, `creative-studio/zh-CN/02-canvas-workspace.jpg` | Canvas workspace with the brief and three generated images |
 
-## Creative Studio gallery
+Both README languages use the same three subjects. Shared-renderer captures use a 1440×900
+desktop viewport and JPEG storage; the supplied headers remain lossless PNG. Technical-guide
+images stay under this directory while their guides reference them. Replaced captures and
+unused gallery images are retired together with their references; Git history preserves them.
 
-English captures live under `creative-studio/en-US/`; Chinese captures live
-under `creative-studio/zh-CN/`.
+## Provenance
 
-| File | Route / subject |
-| --- | --- |
-| `01-canvas-library.jpg` | `#/nomi/canvases` · three populated example canvases |
-| `02-canvas-workspace.jpg` | `#/nomi/canvases/{canvas_id}` · Autumn Atelier brand brief and three generated images |
-| `05-prompt-center.jpg` | `#/asset-library/prompts` · product-photography examples from the synchronized prompt catalog |
-| `06-asset-library.jpg` | `#/asset-library/materials` · generated images, reusable prompts, and a brand brief |
-| `07-template-studio.jpg` | `#/asset-library/templates` · four private templates, including a three-image campaign |
-| `08-template-editor.jpg` | Template Editor · subject variable, reusable prompt, model, aspect ratio, and resolution |
-| `11-companion-settings.jpg` | `#/nomi?mode=manage&tab=overview` · figure, persona, model, and desktop visibility |
-| `12-native-companion.jpg` | Native desktop companion window with a real generated brand tagline |
+- **Autumn Atelier** is a fictional coffee brand. Conversations, assets, preferences and
+  canvases use isolated example data rather than production user data.
+- The captured conversation used `step-3.7-flash`. Canvas images were generated through the
+  creation-task API with `step-image-edit-2` on StepFun Step Plan, then saved through current
+  product APIs. These names describe the capture, not today's recommended models.
+- The user-supplied headers have separate provenance. The remaining captures use a running
+  WebUI and Rust backend rather than a mock renderer or fabricated replies.
+- Credentials, runtime databases, temporary scripts and raw generation media are not gallery
+  assets. Keep them out of the repository.
 
-## Examples and provenance
+## Refresh procedure
 
-- **Autumn Atelier** is a fictional boutique coffee brand used only for these
-  captures. Its brief, preferences, assets, templates, and canvases are example data.
-- The ordinary session and companion replies were generated by `step-3.7-flash`.
-  The three images were generated through the product's current creation-task API
-  using `step-image-edit-2` on StepFun Step Plan, then saved into the Canvas and
-  asset library through current APIs.
-- `agnes-image-2.1-flash` was configured for the model-management example. Its
-  image requests encountered a TLS connection failure, so the pictured outputs
-  were generated by StepFun.
-- Prompt-library covers and text come from the product's synchronized catalog;
-  their source attribution stays available in the running product.
-- The example captures collected for this gallery use no mock renderer,
-  fabricated model replies, database injection, or production user data. The
-  user-supplied headers are separate from that isolated example data. API keys,
-  temporary scripts, raw media, and runtime data are excluded from the repository.
-
-## Capture recipe
-
-1. Create an empty temporary data directory and set `NOMIFUN_DATA_DIR` to it.
-   Run the current Rust backend and Vite `dev:web` frontend on free localhost
-   ports; set `NOMIFUN_WEB_PORT` to the chosen API port.
-2. Configure the intended models in that isolated environment. Create examples
-   through current UI/API surfaces; send real model requests for the conversations
-   and images. Keep credentials closed during capture.
-3. Capture both interface languages at 1440×900. Wait for content, images, saved
-   state, and completed replies; dismiss language menus and transient notices.
-4. Stop the Web host before starting the Tauri dev host on the same data root.
-   Enable the example companion's desktop visibility, send a short example
-   request, and capture its native figure and reply. Trim only empty transparency.
-5. Resolve every README image reference, inspect the final images, confirm old
-   files are gone, and run `git diff --check`. Stop the capture hosts and remove
-   the temporary credential and runtime files afterward.
+1. Create an isolated data root with `NOMIFUN_DATA_DIR`. Start the current Rust backend and
+   Vite frontend on free loopback ports; use `NOMIFUN_WEB_PORT` for the API port.
+2. Configure intended models, create examples through normal product surfaces and wait for
+   real replies, media, saved state and completed work. Keep credentials hidden.
+3. Capture matching English and Chinese subjects at 1440×900. The shared renderer supports
+   desktop viewports only, with a minimum of 880×600.
+4. Inspect the final images and their context. Update both README references and this manifest
+   together, recording the new version, date and provenance accurately.
+5. Remove unused captures, run `bun run check:docs` and `git diff --check`, then stop the hosts
+   and remove this run's temporary credentials and data.

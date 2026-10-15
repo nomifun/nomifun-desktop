@@ -55,7 +55,7 @@
  *    样式，还会把同级的 `border-primary` 覆盖掉。选中态下划线因此整个不存在。
  *    ✅ 宽度写 `border-b-2px`，样式写 `border-b-solid`，颜色单独写。
  *    ⚠️ 不带方向的 `border-2` 同样是颜色（`border-color: var(--bg-2)`），但它是本仓库
- *       **文档化过的合法颜色写法**（MIGRATION.md 推荐 `border border-3`），所以本条只
+ *       **合法颜色写法**（docs/contributing/styling.zh.md 说明数字键为颜色），所以本条只
  *       拦带方向的形式。`border-b-0` 之类的 0 值是真的宽度（`border-bottom-width:0px`），
  *       不在禁令内。
  *
@@ -81,7 +81,7 @@
  *
  * 扫描范围：ui/src 下的 .ts/.tsx/.css，排除 *.test.ts(x) 与 *.d.ts —— 测试文件里
  * 这些字符串是「断言源码里不含/曾含某写法」的字面量，不会渲染成 CSS。.md 同理不扫，
- * 迁移指南 ui/src/renderer/styles/MIGRATION.md 需要把错误写法作为反例展示。
+ * 样式规范 docs/contributing/styling.zh.md 需要把错误写法作为反例展示。
  *
  * 第八层：生成器兜底 / The generator backstop
  *   上面七条各对着一个**已知**的族，而这些族全是机械扫描才找出来的，有几个已经活了
@@ -701,7 +701,7 @@ if (dead.length) {
 }
 
 if (errors.length) {
-  console.error(`\n❌ 死 CSS 工具类检查未通过（详见 ${SELF} 头注 / ui/src/renderer/styles/MIGRATION.md）:\n`);
+  console.error(`\n❌ 死 CSS 工具类检查未通过（详见 ${SELF} 头注 / docs/contributing/styling.zh.md）:\n`);
   for (const e of errors) console.error(`  ${e}`);
   console.error('\n  有效替代 / Valid replacements:');
   for (const [form, { label, fix }] of Object.entries(FORMS)) {

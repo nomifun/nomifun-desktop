@@ -2116,9 +2116,9 @@ async fn retry_dropped_uncommitted_stable_browser_cleanup(
     false
 }
 
-/// CDP 连接运输。**Unix 生产用 `--remote-debugging-pipe`**（fd3/fd4；浏览器在本进程死亡——含
-/// SIGKILL——时,内核关闭继承的 fd → Chromium 自行退出,跨平台父死自清的最优解,见
-/// docs/superpowers/specs/browser-use/2026-06-19-macos-pdeath-pipe-transport-design.md）。
+/// CDP 连接运输。**Unix 生产用 `--remote-debugging-pipe`**（fd3/fd4；父进程退出后
+/// 管道关闭，Chromium 通过 EOF 退出）。实机清理的证明边界见
+/// docs/validation/browser-platform.zh.md，不能仅由构建通过推断。
 /// **Windows 生产用 ws url**（port + DevToolsActivePort + Job Object 清理；pipe 在 Windows 走继承
 /// HANDLE,复杂且 Job Object 已内核级清理,故不转）。
 pub enum LaunchTransport {
@@ -2211,8 +2211,8 @@ pub fn build_chrome_args_for_mode(
     // delegate.cc）；且 DevToolsActivePort 在 socket bind 成功即写、与有无 window 无关（见
     // content/browser/devtools/devtools_http_handler.cc）→ launch_chrome 的端口轮询不受影响。
     // 平台无关的 Chromium 通用开关（keep-alive 逻辑同源、仅排除 ChromeOS，本仓不支持）。
-    // TODO(verify-macos/linux): mac/linux 真机各冒烟一次确认（本机仅 Windows 已验），见
-    // docs/superpowers/specs/browser-use/PLATFORM-VERIFICATION.md。
+    // macOS/Linux 实机验证需确认无窗口启动和退出；原生面板验收不替代后台引擎验收，
+    // 证据边界见 docs/validation/browser-platform.zh.md。
     args.push("--no-startup-window".into());
 
     args

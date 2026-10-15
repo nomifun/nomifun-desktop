@@ -30,6 +30,10 @@
     }
   ],
   "scripts": {
+    "check:docs": {
+      "group": "check",
+      "desc": "检查现役文档的本地链接、Markdown 锚点与图片路径"
+    },
     "check:windows-installer": {
       "group": "check",
       "desc": "校验 Windows NSIS 程序/数据目录分离、锁定模板、第三方归属与安全卸载合同"

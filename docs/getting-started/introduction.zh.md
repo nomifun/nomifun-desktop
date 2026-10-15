@@ -45,6 +45,8 @@ NomiFun 更适合已经在用 agent 做真实工作的用户。它要求你理�
 每次启动生成的本地信任 token 让 WebView 免登录访问。WebUI 远程访问打开后，
 额外的 LAN 监听器仍然要求远程浏览器登录。
 
+共享 UI 面向桌面外壳与桌面级浏览器，最低视口为 880×600。手机使用独立客户端。
+
 `nomifun-web` 则在一个端口上同时提供 SPA 与 API，默认端口是 `8787`。Docker
 和 systemd 部署都走这条路径。
 
@@ -53,7 +55,7 @@ NomiFun 更适合已经在用 agent 做真实工作的用户。它要求你理�
 - **会话与工作区**：`/guid` 创建会话，`/conversation/:id` 运行会话。
 - **模型配置**：`/models` 管理 provider、可扩展模型目录、任务能力、
   上下文/输出限制和全局故障转移队列。
-- **Agent 工作台**：`/agent` 从种子创建 Agent，配置能力、技能与模型路由；
+- **Agent 工作台**：`/agent` 编辑官方或个人 Agent，配置能力与运行策略；
   会话在 `/agent-sessions/:id` 运行。
 - **创作**：`/nomi/canvases` 管理无限 Canvas；`/asset-library/*` 管理
   素材、提示词与私有模板。
@@ -67,13 +69,6 @@ NomiFun 更适合已经在用 agent 做真实工作的用户。它要求你理�
 
 更多内部结构见 [`../architecture/`](../architecture/)，用户指南见
 [`../guides/`](../guides/)。
-
-## 项目状态
-
-NomiFun 仍在活跃开发中，但已经不是旧的 Electron 多仓迁移状态。当前仓库是
-Rust workspace + Tauri desktop + Web host 的单仓结构。顶层
-[`../../STATUS.md`](../../STATUS.md) 记录当前状态；历史设计稿与审计记录不在
-仓库中保留，需要时请查阅 git 历史。
 
 ## 接下来
 

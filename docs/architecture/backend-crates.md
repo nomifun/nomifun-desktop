@@ -47,8 +47,7 @@ All backend crates follow the v3 data contract:
   outside the Agent Store exception group contains no
   physical `FOREIGN KEY`, `REFERENCES`, `ON DELETE`, or `ON UPDATE` clauses,
   beyond the registered guard triggers shipped in the baseline;
-- v3 startup resets/quarantines an incompatible managed dataset as a whole
-  instead of migrating historical rows.
+- Destructive-release startup rebuilds readable incompatible historical lineages without importing rows. Database I/O failure or damage to a supported schema/data fails closed; backup/restore has no startup rebuild authority. See [Agent Session](agent-session.md) for the exact contract.
 
 The technical `id` is dataset-local and must not be treated as an API or
 inter-table identity. Stable UUIDv7 fields are strings; external protocol

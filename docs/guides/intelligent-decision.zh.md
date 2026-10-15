@@ -11,9 +11,6 @@ AgentPreset Revision。新 AgentSession 创建时复制一次该 Revision 的默
 
 IDMM 不属于 Capability Catalog，也不会给模型增加 Tool、Context、资源或系统权限。
 
-开发环境可运行 [StepFun Coding Plan 整体流程 Demo](intelligent-decision-demo.zh.md)，
-验收后台触发、规则选择、旁路回答、敏感问题停止推进、供应商暂停边界和静默恢复。
-
 ## 两种模式
 
 ### 规则值守
@@ -88,3 +85,13 @@ IDMM 在整个回合仍然失败后负责重新唤醒任务。
 - `POST /api/agent-sessions/{id}/idmm/evaluate`：立即执行一次检查。
 
 三个接口都要求安装所有者身份，并再次校验目标 AgentSession 的 owner。
+
+## 开发环境冒烟
+
+`bun run demo:idmm` 在独立临时数据目录运行真实 StepFun Coding Plan 流程。仅在当前进程设置 `NOMIFUN_LIVE_STEPFUN_API_KEY`；运行会请求真实供应商，不读取或清空桌面数据集。不带凭据只检查编译可运行：
+
+```bash
+bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --idmm-smoke --compile-only
+```
+
+默认报告为 `.tmp-idmm-demo-report.json`。以命令退出码与本次新生成的报告为准，旧报告不能证明一次失败运行通过。供应商暂停场景仍需要显式原生恢复，报告将其作为限制，不代表 IDMM 已自动恢复。维护中的场景位于 `crates/backend/nomifun-app/tests/support/live_idmm_demo.rs`。

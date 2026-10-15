@@ -36,8 +36,7 @@
 - Repository/Service 维护带索引的逻辑关联；上述 Agent Store 例外之外的产品 DDL
   不包含物理 `FOREIGN KEY`、`REFERENCES`、`ON DELETE` 或 `ON UPDATE`，
   除基线已注册的 guard trigger 外不新增数据库触发器；
-- v3 启动时发现不兼容的受管数据集，会整体 reset/quarantine，而不是迁移
-  历史行。
+- 破坏性版本启动只对可读且不兼容的历史 lineage 整体重建，不迁移历史行。数据库 I/O 失败或现役 schema/data 损坏必须 fail closed；备份/恢复没有启动重建权限。精确合同见 [Agent Session](agent-session.zh.md)。
 
 技术 `id` 只属于当前数据集，不得当作 API 或跨表身份。稳定 UUIDv7 在边界上
 是字符串，外部协议标识保持不透明。

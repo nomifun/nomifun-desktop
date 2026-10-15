@@ -1,314 +1,88 @@
 # 安装
 
-NomiFun 有两种宿主模式，共享同一个 Rust 后端（参见
-[简介](introduction.zh.md)）。本页覆盖目前可行的全部三种安装方式：
-
-- [从源码构建桌面应用](#从源码构建桌面应用) —— `nomifun-desktop`
-  （Tauri 外壳），桌面本地信任，单用户。
-- [从源码构建 Web 服务](#从源码构建-web-服务) —— `nomifun-web`，
-  带鉴权，自托管。
-- [Docker / Docker Compose](#docker--docker-compose) —— 同一个 Web 服务
-  的容器化方案。
-
-> **桌面与 native service 打包仍取决于发布渠道。** Web 服务可以从源码构建，
-> 也可以直接使用官方 Docker 镜像
-> [`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web)。
-> 当前打包说明见
-> [`../contributing/building-and-packaging.zh.md`](../contributing/building-and-packaging.zh.md)。
+NomiFun 可运行在 Tauri 桌面外壳或独立 Web 服务中，两者共享后端与桌面级 UI，最低支持视口为 880×600。本页负责源码环境和首次启动，长期运行配置集中在[Web 服务部署](../guides/web-server-deployment.zh.md)。
 
 ## 前置条件
 
-无论你选择哪种模式，都需要一套可工作的构建工具链。具体要求如下：
+从源码构建需要：
 
-| 工具 | 最低版本 | 用途 | 备注 |
-| --- | --- | --- | --- |
-| **Rust** | stable，edition 2024 | 编译后端（桌面端还需编译 Tauri 外壳）。 | 通过 [`rustup`](https://rustup.rs/) 安装。工作区固定使用 `edition = "2024"` 与 `resolver = "3"`。 |
-| **Bun** | **≥ 1.3.13** | 前端包管理器与构建工具；应用中的用户命令优先使用系统环境，缺失时由用户选择下载。 | `1.1.38` 存在 stdin 缺陷——请勿使用。 |
-| **Tauri CLI** | v2 | 构建桌面外壳。 | 作为 `devDependency` 引入；无需全局安装。 |
-| **Git** | 任何近期版本 | 克隆仓库，以及技能发现与若干内置工具会用到。 | |
-| **C/C++ 构建工具** | 因平台而异 | `rusqlite`（bundled）、`aws-lc-rs`、`libgit2-sys` 需要。 | Windows：MSVC + WebView2 运行时。macOS：Xcode CLT。Linux：`build-essential cmake clang pkg-config perl`。 |
+| 工具 | 要求 |
+| --- | --- |
+| Rust | stable，支持工作区的 edition 2024 |
+| Bun | ≥1.3.13，用于工作区依赖和前端构建 |
+| Git、CMake | 获取源码及编译原生依赖 |
+| Windows | MSVC 构建工具与 WebView2 |
+| macOS | Xcode Command Line Tools；当前桌面包要求 macOS 14.0+ |
+| Linux | C/C++ 工具链、pkg-config、Perl 与下列开发包 |
 
-在运行 NomiFun 的宿主上推荐安装（构建机不需要）：
+Tauri CLI 已作为仓库开发依赖安装，不需要全局安装。Debian/Ubuntu 源码构建常用包：
 
-- **`ripgrep`** —— 代码搜索后端；不可用时回退到 `grep`。
-- **`node` / `npm` / `npx`** —— 许多用户安装的 MCP stdio 服务通过
-  `npx -y …` 启动。
+```bash
+sudo apt install build-essential cmake pkg-config git perl \
+  libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+  libpipewire-0.3-dev libgbm-dev libclang-dev
+```
 
-### 克隆仓库
+Linux AppImage 打包还需 `librsvg2-dev` 与 `xdg-utils`。`libgbm-dev` 提供链接所需的 `libgbm.so`；`libpipewire-0.3-dev` 及其依赖提供截屏栈需要的 pkg-config 文件，`libclang-dev` 供绑定生成使用。首次构建需要下载 Rust、JS 和部分原生组件依赖，网络问题见[开发环境](../contributing/development.zh.md)。
+
+运行用户命令时，宿主还可能需要 `ripgrep`、Node/npm、Python/uv 或第三方 CLI。按实际使用的工具安装；MCP 配置导入不会替你安装这些工具。
+
+## 获取源码
 
 ```bash
 git clone <your-fork-or-mirror>/nomifun-desktop.git
 cd nomifun-desktop
-```
-
-本页其余内容均假设你的工作目录为仓库根目录。
-
-### 安装 JS 依赖
-
-```bash
 bun install
 ```
 
-这会为整个工作区与 `ui/` 填充 `node_modules/`。每当 `package.json` 或
-`ui/package.json` 发生改变时都需重新执行。
+以下命令都从仓库根目录执行。
 
-## 从源码构建桌面应用
-
-桌面应用是一个 Tauri 2 外壳（`apps/desktop`，二进制
-`nomifun-desktop`），它在进程内链接后端，并在一个空闲 localhost 端口上以
-桌面 `TrustLocalToken` 策略启动后端。自己的 WebView 会收到每次启动生成的
-本地信任 secret，因此桌面窗口没有登录界面。
-
-### 在开发模式下运行
+## 桌面开发与构建
 
 ```bash
 bun run dev
 ```
 
-完整流程如下：
+该命令启动 Vite、编译并打开 Tauri 外壳。后端在桌面进程内启动，选择空闲 localhost 端口，WebView 自动携带本地信任凭据，无需登录。
 
-1. Tauri 的 `beforeDevCommand` 执行 `bun run --filter=./ui dev`，启动
-   Vite 开发服务器在 `http://localhost:5173`。
-2. `cargo` 编译 `nomifun-desktop`（以及它依赖的整个工作区）。
-3. 外壳启动，挑选一个空闲端口，派生嵌入式后端，并加载 Vite 开发地址。
-   渲染端支持热重载；后端只在其 Rust 代码变更时才会重启。
+![NomiFun 桌面工作台](../images/desktop-01-main-window.png)
 
-你会在控制台中看到类似 `Server listening on 127.0.0.1:54760` 的 tracing
-日志——这就是嵌入式后端。渲染端会读取 `window.__backendPort`（由 Tauri
-外壳作为 init script 注入），因此 SPA 始终知道 `/api` 该往哪里调用。
-
-![NomiFun 桌面工作台](../images/getting-started/zh/desktop-home.png)
-
-### 构建 Release 二进制
+构建当前平台的发布包：
 
 ```bash
-bun run build:ui         # 将 SPA 构建到 ui/dist
-bun run build    # tauri build → 安装包 + 独立二进制
+bun run build
 ```
 
-`tauri build` 会产出：
+产物位于 `target/release/bundle/`。分发签名、Updater、平台差异与发布检查统一见[构建与打包](../contributing/building-and-packaging.zh.md)。日常窗口、更新和故障排查见[桌面应用](../guides/desktop-app.zh.md)。
 
-- 位于 `target/release/nomifun-desktop`（Windows 上为 `.exe`）的独立可
-  执行文件。
-- 位于 `target/release/bundle/` 下的平台安装包——`.exe`（NSIS，
-  Windows）、`.dmg`/`.app`（macOS）、`.deb`/`.AppImage`（Linux）。
+## Web 服务
 
-`bun run build` 产物适合本地测试。要分发 macOS 构建，请配置
-`apps/desktop/signing/.env.signing` 并使用 `bun run build:signed`。Windows
-签名仍需要外部证书。若要测试 updater 骨架，可使用 `bun run build:updater`，
-它会把 `bundle.createUpdaterArtifacts` 设为 true。发布任何更新前，必须替换
-`apps/desktop/tauri.conf.json` 中的 updater endpoint 与公钥。
-
-### 数据存放位置（桌面端）
-
-桌面应用把数据库与运行时文件存放在按用户区分的应用数据目录下：
-
-| 操作系统 | 默认路径 |
-| --- | --- |
-| Windows | `%LOCALAPPDATA%\NomiFun`（例如 `C:\Users\<you>\AppData\Local\NomiFun`） |
-| macOS | `~/Library/Application Support/NomiFun` |
-| Linux | `$XDG_DATA_HOME/NomiFun`（通常为 `~/.local/share/NomiFun`） |
-
-启动前可通过 `NOMIFUN_DATA_DIR=<absolute path>` 覆盖——所有宿主都
-按字面值把它当作数据根（不再附加 `/Nomi`）。
-
-> 旧版本把数据存在 `NomiFun/Nomi` 下（更早为
-> `<system temp>/nomifun-data/Nomi`，操作系统的临时目录清理可能在
-> 那里销毁用户数据）。升级后首次启动时，一次性的自动迁移会把这类
-> 遗留数据集搬入新的数据根：迁移是抗崩溃的，数据库内的绝对路径会在
-> 搬迁后一次性改写；若迁移无法完成，会在下次启动时续跑（旧应用实例
-> 仍在运行时则推迟到下次启动）。
-
-> 提示：应用对用户呈现的名称统一为 `NomiFun`——bundle 产品名
-> （`apps/desktop/tauri.conf.json`）、运行时窗口标题、发布产物与
-> 数据文件夹都用 `NomiFun`。内部标识符按设计仍保留旧的 `nomifun` 名
-> （crate、`NOMIFUN_*` 环境变量、`com.nomifun.*` bundle 标识符）。
-
-## 从源码构建 Web 服务
-
-`nomifun-web` 是一个 axum 服务，**既**在进程内挂载同一个后端，**又**在
-同一个端口（默认 `8787`）上提供已构建的 SPA。它适合在 LAN、VPN 或
-VPS 上自托管。
-
-### 构建并运行
+首次体验可运行：
 
 ```bash
-bun install
-bun run build:ui       # ui/dist —— 在非开发模式下提供服务前必须先构建
-bun run serve:web            # = cargo run -p nomifun-web
+bun run serve:web
 ```
 
-默认情况下，服务绑定在 `127.0.0.1:8787`，并使用与桌面应用相同的按用户
-数据目录（参见[数据存放位置（桌面端）](#数据存放位置桌面端)）：
+脚本会构建前端并运行 `nomifun-web`，默认访问 `http://127.0.0.1:8787`。首次使用创建管理员账号，此后需要登录。非本机部署应预置管理员后再开放监听；详见[Web 服务部署](../guides/web-server-deployment.zh.md)。
 
-```text
-nomifun-web: embedded backend + SPA on one port
-listening on 127.0.0.1:8787  auth=required  dist=../../ui/dist
-```
-
-在同时装有桌面应用的机器上，直接裸跑 `nomifun-web` 会打开桌面应用的
-数据——排他的 `server.lock` 保证两个后端不会同时运行在该目录上。
-
-在浏览器中打开 `http://127.0.0.1:8787`。首次访问会被引导到设置页——
-你输入的用户名与密码**将成为初始管理员账户**。此后所有人都需要登录。
-
-![当前 WebUI 认证入口](../images/gs-03-web-first-run-setup.png)
-
-### 常用参数
-
-`nomifun-web`（定义在 `apps/web/src/main.rs` 中）同时接受 CLI 参数与
-环境变量：
-
-| 参数 | 环境变量 | 默认值 | 含义 |
-| --- | --- | --- | --- |
-| `--host` | `NOMIFUN_WEB_HOST` | `127.0.0.1` | 绑定地址。仅在确实需要 LAN/VPN/公网访问时使用 `0.0.0.0`；请先预置或完成管理员设置。 |
-| `--port` | `NOMIFUN_WEB_PORT` | `8787` | `/api` 与 SPA 共用的端口。 |
-| `--data-dir` | `NOMIFUN_DATA_DIR` | _按用户应用数据目录，与[桌面端默认](#数据存放位置桌面端)相同_ | 后端数据目录（数据库 / 日志 / runtime 缓存 / 智能体状态）。环境变量取字面值（不附加 `/Nomi`）。生产环境请使用绝对路径。 |
-| `--dist` | `NOMIFUN_WEB_DIST` | `../../ui/dist` | SPA 静态目录。**在仓库根目录之外运行时务必显式指定。** |
-| `--admin-user` | `NOMIFUN_ADMIN_USERNAME` | `admin` | 预置管理员的用户名（仅在管理员尚未存在时生效）。 |
-| `--admin-password` | `NOMIFUN_ADMIN_PASSWORD` | _（无 —— 交互式首次设置）_ | 预置管理员密码并跳过交互式首次启动。 |
-| `--insecure-no-auth` | `NOMIFUN_WEB_INSECURE_NO_AUTH` | `false` | **危险。** 完全禁用鉴权（桌面式本地模式）。仅限 loopback / 受信任的私有网络。 |
-| _（仅环境变量）_ | `NOMIFUN_HTTPS` | `false` | 当前面有 TLS 终止时设为 `true`，使 cookie 获得 `Secure` 标记。 |
-
-例：将其开放到 LAN，并预置管理员：
+需要独立二进制时：
 
 ```bash
-nomifun-web \
-  --host 0.0.0.0 --port 8787 \
-  --data-dir /var/lib/nomifun \
-  --dist /opt/nomifun/web \
-  --admin-user admin \
-  --admin-password "change-me-to-something-strong"
+bun run build:ui
+cargo build --release -p nomifun-web --features static-webui
+./target/release/nomifun-web --dist ui/dist --data-dir /absolute/path/to/nomifun-data
 ```
 
-完整的部署指南——systemd unit、反向代理与安全注意事项——请参见
-[`../guides/web-server-deployment.md`](../guides/web-server-deployment.md)。
+Windows 将最后一行替换为对应的 `nomifun-web.exe` 路径，并使用本机绝对数据路径。`--dist` 必须指向实际构建的 UI。CLI 参数、Docker/Compose、TLS、systemd 与机器人网络配置均在[部署指南](../guides/web-server-deployment.zh.md)，不在此重复维护。
 
-## Docker / Docker Compose
+## 数据与检查
 
-官方 Docker Hub 镜像是
-[`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web)。
-它是一个**无 GUI**镜像：在 `debian:trixie-slim` 上的 SPA + `nomifun-web` +
-`bun`。仓库也附带一份多阶段 `Dockerfile` 与一份 `docker-compose.yml`，
-用于从源码本地构建。下面示例使用 Docker Hub 发布的稳定滚动标签 `latest`。
-如需可复现部署，请固定明确版本或镜像 digest。
+stable 默认数据根为 Windows `%LOCALAPPDATA%\NomiFun`、macOS `~/Library/Application Support/NomiFun`、Linux `$XDG_DATA_HOME/NomiFun`。开发脚本使用独立目录。`NOMIFUN_DATA_DIR` 或 Web 的 `--data-dir` 可覆盖数据根，同一根目录只允许一个后端运行。
 
-### 使用官方镜像快速上手
+在桌面确认工作台能显示；在 Web 确认登录、首页与 API 可达：
 
 ```bash
-docker run -d \
-  --name nomifun-web \
-  --restart unless-stopped \
-  -p 8787:8787 \
-  -v nomifun-data:/data \
-  nomifun/nomifun-web:latest
-# 然后访问 http://<server-ip>:8787
+curl http://127.0.0.1:8787/api/auth/status
 ```
 
-如果要在服务可访问前关闭首次设置窗口，请预置首位管理员：
-
-```bash
-docker run -d \
-  --name nomifun-web \
-  --restart unless-stopped \
-  -p 8787:8787 \
-  -v nomifun-data:/data \
-  -e NOMIFUN_ADMIN_USERNAME=admin \
-  -e NOMIFUN_ADMIN_PASSWORD='change-me-to-something-strong' \
-  nomifun/nomifun-web:latest
-```
-
-### 用 Compose 从源码本地构建
-
-在仓库根目录：
-
-```bash
-docker compose up -d --build
-# 然后访问 http://<server-ip>:8787
-```
-
-服务配置了 `restart: unless-stopped`，所以**安装即等同于开机自启**。
-持久化状态（SQLite 数据库、日志、runtime 缓存、智能体状态）存放在挂载到容器
-内 `/data` 的命名卷 `nomifun-data` 中。
-
-镜像默认值已针对容器生命周期进行了调优：
-
-```text
-NOMIFUN_WEB_HOST=0.0.0.0
-NOMIFUN_WEB_PORT=8787
-NOMIFUN_DATA_DIR=/data
-NOMIFUN_WEB_DIST=/opt/nomifun/web
-SHELL=/bin/bash
-```
-
-鉴权已开启，但首次设置可被第一个访问到服务的浏览器认领。请先预置
-管理员或在受信网络完成 setup，再大范围发布 `8787`。对于公网可达的部署，
-请在前面加一层 TLS——附带的 `Caddyfile` 与 `docker-compose.yml` 中被注释掉的
-`caddy` 服务即是推荐做法。届时记得把 `nomifun` 服务的 `NOMIFUN_HTTPS=true`
-打开，让会话 cookie 获得 `Secure` 标记。
-
-### 预置管理员（推荐用于非交互式部署）
-
-否则首次访问浏览器的人会获得管理员账号；预置管理员可以关闭这个竞态
-窗口：
-
-```yaml
-# docker-compose.yml —— 在 services.nomifun 下
-environment:
-  NOMIFUN_ADMIN_USERNAME: admin
-  NOMIFUN_ADMIN_PASSWORD: "change-me-to-something-strong"
-  NOMIFUN_HTTPS: "true"   # 仅当部署在 TLS 反向代理之后时
-```
-
-### 网络受限环境
-
-Rust 阶段使用了 BuildKit cache mounts（`/usr/local/cargo/registry` 与
-`/src/target`），所以一行源代码改动只需几秒就能重新编译。首次安装还会
-访问 Docker Hub、npm、Debian apt 与 crates.io；任一网络源超时都可能让构建
-失败。Compose 已透传各层的镜像参数，例如：
-
-```bash
-APT_MIRROR=http://mirrors.aliyun.com \
-CARGO_REGISTRY_MIRROR=https://rsproxy.cn/index/ \
-BUN_REGISTRY=<可用的-npm-镜像地址> \
-docker compose up -d --build
-```
-
-若错误发生在 `load metadata for docker.io/...`，构建尚未进入 apt/cargo
-阶段。请配置 Docker daemon 的 registry mirror，或通过 `BUN_IMAGE`、
-`RUST_IMAGE`、`RUNTIME_IMAGE` 指向你所信任的兼容镜像。默认 Rust 构建层使用
-`rust:1-slim-trixie`，运行时层使用 `debian:trixie-slim`；apt/cargo 下载也已
-启用重试与长超时。
-
-完整的部署指南（TLS、反向代理模式、systemd unit、安全注意事项）请参见
-[`../guides/web-server-deployment.md`](../guides/web-server-deployment.md)。
-
-## 验证你的安装
-
-无论走哪条路径，都可以做一次 30 秒的快速检验：
-
-```bash
-# Rust 工作区编译干净
-cargo check --workspace
-
-# 三个二进制都能构建
-cargo build --workspace --bins
-# → target/(debug|release)/{nomicore, nomifun-web, nomifun-desktop}
-
-# Web 主机响应 SPA + 鉴权状态
-curl -sS http://127.0.0.1:8787/                | head -c 200
-curl -sS http://127.0.0.1:8787/api/auth/status
-# → 200 {"success":true,"needs_setup":..., "user_count":...}
-```
-
-如果你在日志中看到 `nomifun-web: embedded backend + SPA on one port`，
-并且 `/api/auth/status` 返回了 JSON，则后端已启动，并且 SPA 在同一个
-端口上提供服务。
-
-## 接下来
-
-- [快速上手](quick-start.zh.md) —— 你在 NomiFun 中的第一段会话。
-- [`../guides/web-server-deployment.md`](../guides/web-server-deployment.md)
-  —— Web 主机的生产环境加固。
-- [`../contributing/development.zh.md`](../contributing/development.zh.md)
-  —— 搭建开发环路（渲染端热重载、后端重建、调试工具）。
+源码能启动并不代表已经配置模型；下一步按[快速上手](quick-start.zh.md)添加提供商并发送第一条消息。数据兼容性与备份边界见[数据与存储](../architecture/data-and-storage.zh.md)。

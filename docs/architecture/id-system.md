@@ -302,25 +302,32 @@ At startup, before opening the product database:
    physical/registered JSON ID value, the logical-reference orphan audit, and
    managed side-store ID/filesystem indexes such as Workshop and Companion to
    pass before accepting the dataset as current v3;
-4. if it is historical or incompatible, move the complete managed dataset to
-   a retired/quarantine location;
+4. only for a readable database with an incompatible historical lineage, move
+   the complete managed dataset to a retired/quarantine location;
 5. create a new empty v3 dataset and baseline schema;
 6. write and finalize a reset receipt before serving requests.
 
-No table-by-table conversion, dual-read, alias column, legacy-ID mapping, or
+Database I/O errors and damage to a supported schema/data fail closed without
+entering the rebuild path. Migration counts do not establish application-version
+ordering. No table-by-table conversion, dual-read, alias column, legacy-ID mapping, or
 selective business-data copy is permitted. A reset failure is fatal; the
 application must not continue with mixed old and new state. External
 user-owned workspaces are not deleted, but v3 does not carry their historical
 database references forward.
 
-Only v3 backup manifests are accepted by v3 restore. Restore preserves every
-stable business UUIDv7 and rebuilds technical `id` values. Logical relations
-are reconstructed from business UUIDv7 values, natural keys, external IDs, and
-registered JSON/side-store references rather than source row IDs. Clone also
-preserves the supplied business UUIDv7; it does not mint or implicitly rewrite
-business UUIDs. If a clone would collide with an existing business UUID, it
-fails closed without a partial write. Technical `id` values are dataset-local
-and are never treated as portable graph identity.
+Restore accepts only the current version-3, generation-5 backup contract and
+validated canonical lineage. It copies the WAL-safe SQLite snapshot as one
+authority, preserving business UUIDv7 values, technical `id` values, canonical
+TEXT/composite keys and the exact relationship graph. It does not remap rows or
+reconstruct canonical facts. The destination `storage-generation` is new; this
+separates restored browser/cache identity without changing database identities.
+
+Backup and restore never receive startup rebuild authority: unsupported lineage,
+schema/data damage and I/O failures reject the operation without importing
+historical rows. Restore validates the bundle and database before installing into
+an absent or empty destination, with no merge or partial install. Technical `id`
+values remain dataset-local and gain no portable graph-identity semantics merely
+because a complete SQLite snapshot preserves them.
 
 ## Adding an identifier-bearing entity
 

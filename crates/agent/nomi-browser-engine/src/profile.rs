@@ -1,25 +1,8 @@
-//! 脏 profile 崩溃标记 scrub：每次 spawn chrome **前**，把专属 user-data-dir 的
-//! `<profile>/Default/Preferences` 里 chromium 记录的「上次崩溃/被杀」标记改回干净，
-//! 根治非优雅退出（TerminateProcess / Job Object 硬杀 / app crash / 断电）后下次启动弹
-//! 「Chrome 未正确关闭 / 恢复页面?」气泡 + 跑会话恢复。
-//!
-//! ## 为什么这是 keystone（唯一在所有退出路径都生效的层）
-//! 本引擎的 chrome 进程**永远是被硬杀**的（`launch.rs` 的 `kill_on_drop` + Windows Job
-//! Object `KILL_ON_JOB_CLOSE`），且 app 退出时后端线程被同步 `exit(0)` 硬杀、跑不到任何
-//! 异步优雅关闭。优雅 `Browser.close`（写回干净退出）在当前架构下**无可达调用点**，故
-//! 真正的根治是：承认「下次必是脏 profile」，在**下次 launch 前**把崩溃标记洗干净。
-//!
-//! ## 权威来源（Chromium 源码核实，见 docs/superpowers/specs/browser-use）
-//! - 键 `profile.exit_type`（C++ 常量 `prefs::kSessionExitType`，`chrome/common/pref_names.h`）。
-//!   取值 `"Normal"`（干净）/ `"Crashed"`（崩溃被杀）/ `"SessionEnded"`（系统强退），见
-//!   `chrome/browser/sessions/exit_type_service.cc`。
-//! - **时序**：chromium 启动时**立即把 `exit_type` 写成 `"Crashed"`**，只有走完整干净关闭
-//!   才回写 `"Normal"`——故被硬杀必留 `"Crashed"`。下次启动 `HasPendingUncleanExit()`
-//!   （`startup_browser_creator.cc`）见 `exit_type==Crashed` 即武装气泡。把它改回 `"Normal"`
-//!   → 气泡闸门不触发 + 不跑会话恢复。
-//! - **无可靠命令行开关**：`--disable-session-crashed-bubble` 已从源码树删除；
-//!   `--hide-crash-restore-bubble` 仅 ChromeOS full-restore 生效（桌面 Windows no-op）。
-//!   故唯一权威手段是改 `exit_type`（等价 ChromeDriver `PrepareUserDataDir` 种子化）。
+//! 启动前清理引擎专属 Profile 的崩溃标记，避免异常退出后恢复上一次页面。
+//! 操作目标是 `<profile>/Default/Preferences` 中的 `profile.exit_type`；
+//! 具体解析预算与异常处理由下方实现约束，不依赖已退休的研究或验收快照。
+//! 该清理不是进程退出证明，原生生命周期的证据边界见
+//! docs/validation/browser-platform.zh.md。
 //!
 //! ## 红线
 //! 只动 `profile.exit_type` 这**一个**键，绝不动其它 pref（cookie / localStorage 等登录态
@@ -170,8 +153,7 @@ fn read_preferences_bounded(source: &mut std::fs::File) -> std::io::Result<Optio
 /// 边角才阻塞——我们用专属本机 dir，删它纯属兜底。
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn clear_stale_singleton(user_data_dir: &Path) {
-    // TODO(verify-macos/linux)：本机仅 Windows；mac/linux 上的 stale lock 行为待实机核对，
-    // 见 docs/superpowers/specs/browser-use/PLATFORM-VERIFICATION.md。
+    // stale lock 行为需对应平台的实机验证；验证范围见 docs/validation/browser-platform.zh.md。
     for name in ["SingletonLock", "SingletonSocket", "SingletonCookie"] {
         let _ = std::fs::remove_file(user_data_dir.join(name));
     }

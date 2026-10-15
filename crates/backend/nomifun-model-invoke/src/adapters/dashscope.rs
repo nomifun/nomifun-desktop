@@ -1,6 +1,6 @@
 //! `dashscope.images` / `dashscope.embeddings` — Alibaba DashScope (百炼)
-//! native protocols (per
-//! `docs/specs/2026-07-28-provider-protocol-variance.zh.md` §4, single domain
+//! native protocols (routing contract:
+//! `docs/architecture/model-providers.zh.md`; single domain
 //! `dashscope.aliyuncs.com`, single Bearer key on the default connection, but
 //! the body rides DashScope's own `input`/`parameters` wrapper — not the
 //! OpenAI shape).

@@ -1,340 +1,88 @@
 # Installation
 
-NomiFun has two host modes that share one Rust backend (see
-[Introduction](introduction.md)). This page covers all three ways to install
-it today:
-
-- [Desktop app from source](#desktop-app-from-source) — `nomifun-desktop`
-  (Tauri shell), desktop local-trust, single-user.
-- [Web server from source](#web-server-from-source) — `nomifun-web`,
-  authenticated, self-hosted.
-- [Docker / Docker Compose](#docker--docker-compose) — the same web server,
-  containerised.
-
-> **Desktop and native service packaging still depends on the release channel.**
-> The Web server can be built from source, and the official Docker image is
-> published as
-> [`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web).
-> See
-> [`../contributing/building-and-packaging.md`](../contributing/building-and-packaging.md)
-> for the current packaging notes.
+NomiFun runs in a Tauri desktop shell or as an independent Web host. Both share the backend and desktop-class UI, with a minimum supported viewport of 880×600. This page covers source prerequisites and first launch; persistent hosting configuration lives in [Web Server Deployment](../guides/web-server-deployment.md).
 
 ## Prerequisites
 
-You need a working build toolchain regardless of which mode you target. The
-exact requirements:
+Building from source requires:
 
-| Tool | Minimum | Why | Notes |
-| --- | --- | --- | --- |
-| **Rust** | stable, edition 2024 | Compile the backend (and the Tauri shell, for desktop). | Install via [`rustup`](https://rustup.rs/). The workspace pins `edition = "2024"` and `resolver = "3"`. |
-| **Bun** | **≥ 1.3.13** | Frontend package manager and build runner; user commands in the application prefer system tools, with downloads offered only when the user chooses them. | `1.1.38` has a stdin bug — do not use it. |
-| **Tauri CLI** | v2 | Build the desktop shell. | Pulled in as a `devDependency`; no global install needed. |
-| **Git** | any recent | Clone, plus skill discovery and some built-in tools. | |
-| **C/C++ build tools** | platform-specific | `rusqlite` (bundled), `aws-lc-rs`, `libgit2-sys`. | Windows: MSVC + WebView2 runtime. macOS: Xcode CLT. Linux: `build-essential cmake clang pkg-config perl`. |
+| Tool or platform | Requirement |
+| --- | --- |
+| Rust | Stable toolchain supporting the workspace's edition 2024 |
+| Bun | ≥1.3.13 for workspace dependencies and frontend builds |
+| Git, CMake | Source checkout and native dependencies |
+| Windows | MSVC build tools and WebView2 |
+| macOS | Xcode Command Line Tools; current desktop bundles require macOS 14.0+ |
+| Linux | C/C++ toolchain, pkg-config, Perl and the development packages below |
 
-Optional but recommended on the host that runs Nomi (not for building):
+Tauri CLI is a repository development dependency; no global installation is needed. Typical Debian/Ubuntu source-build packages:
 
-- **`ripgrep`** — code-search backend; falls back to `grep` if missing.
-- **`node` / `npm` / `npx`** — many user-installed MCP stdio servers launch
-  via `npx -y …`.
+```bash
+sudo apt install build-essential cmake pkg-config git perl \
+  libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+  libpipewire-0.3-dev libgbm-dev libclang-dev
+```
 
-### Clone the repo
+Linux AppImage packaging also needs `librsvg2-dev` and `xdg-utils`. `libgbm-dev` supplies the link-time `libgbm.so`; PipeWire development files support the capture stack, and `libclang-dev` supports binding generation. Initial builds download Rust, JS and some native components. See [Development](../contributing/development.md) for network troubleshooting.
+
+User commands may additionally need ripgrep, Node/npm, Python/uv or third-party CLIs on the host. Install what the selected tools require; importing MCP configuration does not install their runtimes.
+
+## Get the source
 
 ```bash
 git clone <your-fork-or-mirror>/nomifun-desktop.git
 cd nomifun-desktop
-```
-
-The rest of this page assumes the repository root is your working directory.
-
-### Install JS dependencies
-
-```bash
 bun install
 ```
 
-This populates `node_modules/` for the workspace and `ui/`. Re-run it any
-time `package.json` or `ui/package.json` changes.
+Run the remaining commands from the repository root.
 
-## Desktop app from source
-
-The desktop app is a Tauri 2 shell (`apps/desktop`, binary
-`nomifun-desktop`) that links the backend in-process and starts it on a free
-localhost port under the desktop `TrustLocalToken` policy. Its own WebView
-receives a per-boot local trust secret, so there is no login screen in the
-desktop window.
-
-### Run in development
+## Desktop development and bundles
 
 ```bash
 bun run dev
 ```
 
-What this does, end-to-end:
+The command starts Vite, builds and opens the Tauri shell. The backend starts in-process on an available localhost port. The WebView supplies local trust credentials and does not require login.
 
-1. Tauri's `beforeDevCommand` runs `bun run --filter=./ui dev` to start the
-   Vite dev server on `http://localhost:5173`.
-2. `cargo` compiles `nomifun-desktop` (and the workspace it depends on).
-3. The shell starts, picks a free port, spawns the embedded backend, and
-   loads the Vite dev URL. Hot-reload works on the renderer side; the backend
-   restarts only when its Rust code changes.
+![NomiFun desktop workstation](../images/desktop-01-main-window.png)
 
-You will see a tracing line like `Server listening on 127.0.0.1:54760` in the
-console — that is the embedded backend. The renderer reads
-`window.__backendPort` (injected by the Tauri shell as an init script) so the
-SPA always knows where to call `/api`.
-
-![NomiFun desktop workspace](../images/getting-started/en/desktop-home.png)
-
-### Build a release binary
+Build a release bundle for the current platform:
 
 ```bash
-bun run build:ui         # build the SPA into ui/dist
-bun run build    # tauri build → installers + standalone binary
+bun run build
 ```
 
-`tauri build` produces:
+Bundles appear under `target/release/bundle/`. Distribution signing, Updater artifacts, platform differences and release validation are maintained in [Building and Packaging](../contributing/building-and-packaging.md). See [Desktop Application](../guides/desktop-app.md) for everyday operation and troubleshooting.
 
-- A standalone executable under
-  `target/release/nomifun-desktop` (`.exe` on Windows).
-- Platform installers under `target/release/bundle/` — `.exe` (NSIS,
-  Windows), `.dmg`/`.app` (macOS), `.deb`/`.AppImage` (Linux).
+## Web host
 
-`bun run build` artifacts are suitable for local testing. For distributable
-macOS builds, configure `apps/desktop/signing/.env.signing` and use
-`bun run build:signed`. Windows signing still requires an external certificate.
-To test the updater scaffold, use `bun run build:updater`, which sets
-`bundle.createUpdaterArtifacts` to true. The updater endpoint and public key in
-`apps/desktop/tauri.conf.json` must be replaced before shipping any update.
-
-### Where data lives (desktop)
-
-The desktop app stores its database and runtime files under the per-user
-application-data directory:
-
-| OS | Default path |
-| --- | --- |
-| Windows | `%LOCALAPPDATA%\NomiFun` (e.g. `C:\Users\<you>\AppData\Local\NomiFun`) |
-| macOS | `~/Library/Application Support/NomiFun` |
-| Linux | `$XDG_DATA_HOME/NomiFun` (usually `~/.local/share/NomiFun`) |
-
-Override with `NOMIFUN_DATA_DIR=<absolute path>` before launching — the
-value is taken literally as the data root on every host (no `/Nomi`
-suffix appended).
-
-> Older builds stored data under `NomiFun/Nomi` (and, before that, under
-> `<system temp>/nomifun-data/Nomi`, where OS temp cleanup could destroy
-> user data). On the first boot after upgrading, a one-shot automatic
-> migration moves such a legacy dataset into the new root: the migration
-> is crash-safe, absolute paths inside the database are rewritten once
-> after the move, and if it cannot complete it resumes on the next launch
-> (it is deferred to the next launch if the old app instance is still
-> running).
-
-> Note: the app's user-facing name is `NomiFun` everywhere — the bundle
-> product name (`apps/desktop/tauri.conf.json`), the runtime window title,
-> release artifacts, and the data folder. Internal identifiers keep the legacy `nomifun`
-> name by design (crates, `NOMIFUN_*` env vars, the `com.nomifun.*`
-> bundle identifier).
-
-## Web server from source
-
-`nomifun-web` is an axum server that mounts the same backend in-process
-**and** serves the built SPA on the same port (default `8787`). It is the
-right path for self-hosting on a LAN, VPN, or VPS.
-
-### Build and run
+For a first run:
 
 ```bash
-bun install
-bun run build:ui       # ui/dist — required before serving in non-dev mode
-bun run serve:web            # = cargo run -p nomifun-web
+bun run serve:web
 ```
 
-By default the server binds `127.0.0.1:8787` and uses the same per-user
-data directory as the desktop app (see
-[Where data lives (desktop)](#where-data-lives-desktop)):
+The script builds the UI and runs `nomifun-web` at `http://127.0.0.1:8787`. Create an administrator on first use, then log in. Provision the administrator before opening a non-local listener; see [Web Server Deployment](../guides/web-server-deployment.md).
 
-```text
-nomifun-web: embedded backend + SPA on one port
-listening on 127.0.0.1:8787  auth=required  dist=../../ui/dist
-```
-
-On a machine that also has the desktop app installed, a bare `nomifun-web`
-run opens the desktop app's data directly — an exclusive `server.lock`
-guarantees the two backends never run on that directory at the same time.
-
-Open `http://127.0.0.1:8787` in a browser. On the very first visit you will
-be sent to a setup screen — the username and password you type **become the
-initial admin account**. After that, login is required for everyone.
-
-![Current WebUI authentication screen](../images/gs-03-web-first-run-setup.png)
-
-### Common flags
-
-`nomifun-web` (defined in `apps/web/src/main.rs`) accepts both CLI flags and
-environment variables:
-
-| Flag | Env var | Default | Meaning |
-| --- | --- | --- | --- |
-| `--host` | `NOMIFUN_WEB_HOST` | `127.0.0.1` | Bind address. Use `0.0.0.0` only when you intend LAN/VPN/public access; pre-seed or complete admin setup first. |
-| `--port` | `NOMIFUN_WEB_PORT` | `8787` | Port for both `/api` and the SPA. |
-| `--data-dir` | `NOMIFUN_DATA_DIR` | _per-user app-data dir, same as the [desktop default](#where-data-lives-desktop)_ | Backend data dir (db / logs / runtime cache / agent state). The env value is taken literally (no `/Nomi` suffix). Use an absolute path in production. |
-| `--dist` | `NOMIFUN_WEB_DIST` | `../../ui/dist` | SPA static directory. **Set this explicitly when running outside the repo root.** |
-| `--admin-user` | `NOMIFUN_ADMIN_USERNAME` | `admin` | Username for pre-seeded admin (only honoured before the admin exists). |
-| `--admin-password` | `NOMIFUN_ADMIN_PASSWORD` | _(none — interactive first-run setup)_ | Pre-seed the admin password and skip interactive first-run. |
-| `--insecure-no-auth` | `NOMIFUN_WEB_INSECURE_NO_AUTH` | `false` | **Danger.** Disable authentication entirely (desktop-style local mode). Loopback / trusted private network only. |
-| _(env only)_ | `NOMIFUN_HTTPS` | `false` | Set to `true` when fronted by TLS so cookies get the `Secure` flag. |
-
-Example, opening it up to the LAN with a pre-seeded admin:
+For an independent binary:
 
 ```bash
-nomifun-web \
-  --host 0.0.0.0 --port 8787 \
-  --data-dir /var/lib/nomifun \
-  --dist /opt/nomifun/web \
-  --admin-user admin \
-  --admin-password "change-me-to-something-strong"
+bun run build:ui
+cargo build --release -p nomifun-web --features static-webui
+./target/release/nomifun-web --dist ui/dist --data-dir /absolute/path/to/nomifun-data
 ```
 
-For full deployment guidance — systemd unit, reverse-proxy, and security
-notes — see
-[`../guides/web-server-deployment.md`](../guides/web-server-deployment.md).
+On Windows use the corresponding `nomifun-web.exe` path and a local absolute data path. `--dist` must point to the built UI. CLI flags, Docker/Compose, TLS, systemd and robot networking are maintained in the [Deployment guide](../guides/web-server-deployment.md).
 
-## Docker / Docker Compose
+## Data and verification
 
-The official Docker Hub image is
-[`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web).
-It is a **headless** (no GUI) image: SPA + `nomifun-web` + `bun` on
-`debian:trixie-slim`. The repository also ships a multi-stage `Dockerfile`
-and a `docker-compose.yml` for local source builds. The examples below use
-`latest`, the stable rolling tag published on Docker Hub. For reproducible
-deployments, pin an explicit version or image digest.
+Stable data roots default to `%LOCALAPPDATA%\NomiFun` on Windows, `~/Library/Application Support/NomiFun` on macOS, and `$XDG_DATA_HOME/NomiFun` on Linux. Development scripts use a separate root. Override it with `NOMIFUN_DATA_DIR` or the Web host's `--data-dir`. Only one backend can run against a root at a time.
 
-### Quick start with the official image
+Confirm the desktop workstation opens. On Web, check login, the home page and API reachability:
 
 ```bash
-docker run -d \
-  --name nomifun-web \
-  --restart unless-stopped \
-  -p 8787:8787 \
-  -v nomifun-data:/data \
-  nomifun/nomifun-web:latest
-# then open http://<server-ip>:8787
+curl http://127.0.0.1:8787/api/auth/status
 ```
 
-To close the first-run setup window before the service is reachable, pre-seed
-the first admin:
-
-```bash
-docker run -d \
-  --name nomifun-web \
-  --restart unless-stopped \
-  -p 8787:8787 \
-  -v nomifun-data:/data \
-  -e NOMIFUN_ADMIN_USERNAME=admin \
-  -e NOMIFUN_ADMIN_PASSWORD='change-me-to-something-strong' \
-  nomifun/nomifun-web:latest
-```
-
-### Build locally with Compose
-
-From the repo root:
-
-```bash
-docker compose up -d --build
-# then open http://<server-ip>:8787
-```
-
-The service is configured with `restart: unless-stopped` so installing it
-**is** enabling it on boot. Persistent state (SQLite database, logs, bun
-cache, agent state) lives in the named volume `nomifun-data` mounted at
-`/data` inside the container.
-
-The image's defaults are tuned for container life:
-
-```text
-NOMIFUN_WEB_HOST=0.0.0.0
-NOMIFUN_WEB_PORT=8787
-NOMIFUN_DATA_DIR=/data
-NOMIFUN_WEB_DIST=/opt/nomifun/web
-SHELL=/bin/bash
-```
-
-Authentication is on, but first-run setup can be claimed by the first browser
-that reaches the service. Pre-seed the admin or complete setup on a trusted
-network before publishing port `8787` broadly. For anything reachable from the
-internet, put TLS in front of it — the bundled `Caddyfile` and the
-commented-out `caddy` service in `docker-compose.yml` are the recommended path.
-Set
-`NOMIFUN_HTTPS=true` on the `nomifun` service when you do, so the session
-cookie gains the `Secure` flag.
-
-### Pre-seed the admin (recommended for non-interactive setup)
-
-The first browser visit otherwise wins the admin account; pre-seeding closes
-that race window:
-
-```yaml
-# docker-compose.yml — under services.nomifun
-environment:
-  NOMIFUN_ADMIN_USERNAME: admin
-  NOMIFUN_ADMIN_PASSWORD: "change-me-to-something-strong"
-  NOMIFUN_HTTPS: "true"   # only when behind a TLS proxy
-```
-
-### Constrained networks
-
-The Rust stage uses BuildKit cache mounts (`/usr/local/cargo/registry` and
-`/src/target`), so a one-line source change recompiles in seconds. A first
-install still reaches Docker Hub, npm, Debian apt, and crates.io; a timeout at
-any one of those sources can fail the build. Compose forwards a separate mirror
-setting for each package layer, for example:
-
-```bash
-APT_MIRROR=<trusted-debian-mirror> \
-CARGO_REGISTRY_MIRROR=<trusted-sparse-cargo-index> \
-BUN_REGISTRY=<trusted-npm-registry> \
-docker compose up -d --build
-```
-
-If the error occurs at `load metadata for docker.io/...`, the build has not
-reached apt or Cargo yet. Configure a Docker daemon registry mirror, or point
-`BUN_IMAGE`, `RUST_IMAGE`, and `RUNTIME_IMAGE` at trusted compatible images.
-The default Rust build stage uses `rust:1-slim-trixie` and the runtime stage
-uses `debian:trixie-slim`; apt/Cargo downloads have retries and extended
-timeouts.
-
-For the long-form deployment guide (TLS, reverse-proxy patterns, systemd
-unit, security caveats) see
-[`../guides/web-server-deployment.md`](../guides/web-server-deployment.md).
-
-## Verifying your install
-
-A 30-second smoke test you can run after either path:
-
-```bash
-# Rust workspace compiles cleanly
-cargo check --workspace
-
-# All three binaries build
-cargo build --workspace --bins
-# → target/(debug|release)/{nomicore, nomifun-web, nomifun-desktop}
-
-# Web host responds with the SPA + auth status
-curl -sS http://127.0.0.1:8787/                | head -c 200
-curl -sS http://127.0.0.1:8787/api/auth/status
-# → 200 {"success":true,"needs_setup":..., "user_count":...}
-```
-
-If you see `nomifun-web: embedded backend + SPA on one port` in the logs and
-`/api/auth/status` returns JSON, the backend is up and the SPA is being
-served from the same port.
-
-## What's next
-
-- [Quick Start](quick-start.md) — your first conversation in Nomi.
-- [`../guides/web-server-deployment.md`](../guides/web-server-deployment.md)
-  — production hardening for the web host.
-- [`../contributing/development.md`](../contributing/development.md)
-  — set up a developer loop (renderer hot-reload, backend rebuild, debug tools).
+A successful launch does not configure a model. Follow [Quick Start](quick-start.md) to add a provider and send the first message. See [Data and Storage](../architecture/data-and-storage.md) for compatibility and backups.

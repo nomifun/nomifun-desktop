@@ -108,7 +108,7 @@ keep their own data and business architecture; optional platform access uses
 automatic local trust, and MCP tools require explicit Agent/session selection.
 See [application hosting architecture](app-hosting.md).
 
-## What is distinctive about the architecture
+## Capabilities across entry points
 
 ### One capability graph, many entry points
 
@@ -152,34 +152,6 @@ hosted account. See [Companions](../guides/companions.md).
 The companion IM gateway connects external chat channels to the same
 authenticated companion and Agent runtime. It does not silently create a new
 identity, memory silo, or ungoverned capability set for each channel.
-
-## Product innovation milestones
-
-The dates below record when capabilities first reached internal users or the
-released product. They are product-availability milestones, not inferred source
-commit dates.
-
-### Implemented in-house and used by internal users in 2025
-
-1. Native computer use and browser use for the xiaozhiAI Agent runtime.
-2. An automated requirements-management platform and continuous loops for
-   Claude and Codex Agents.
-3. A three-party Agent system separating decision, implementation, and
-   supervision, with intelligent-decision recovery (IDMM).
-4. Hardware multimodal access for companions.
-5. Knowledge bases as durable working context for Agent reasoning workflows.
-6. Self-evolution and migration of companion memory, Skills, and settings.
-
-### Innovations launched in early 2026
-
-1. Desktop local software creation and hosting, now exposed as application hosting.
-2. A security-controlled customer-service cluster system.
-3. NomiFun Mobile directly connected to Desktop with no NomiFun cloud relay on
-   the LAN path.
-4. NomiFun's original multi-Agent collaboration interaction model, represented
-   by the single auditable `AgentExecution` aggregate.
-5. The super Desktop-companion Agent IM-channel gateway.
-6. Additional unreleased capabilities remain confidential.
 
 ## Related guides
 

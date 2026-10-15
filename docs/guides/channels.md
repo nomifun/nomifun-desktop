@@ -42,36 +42,6 @@ WeCom and QQ Bot are runnable built-in adapters, not placeholder cards. WeCom
 uses the Intelligent Bot long-connection protocol; QQ Bot uses the official
 Gateway WebSocket and REST API.
 
-## How a channel works
-
-```
-external IM ──▶ plugin (long-poll / WebSocket)
-                    │
-                    ▼
-          chat scope + structured @ gate
-                    │
-                    ▼
-            ChannelManager  ◀─▶  PairingService
-                    │
-                    ▼
-              SessionManager  ──▶  agent / conversation
-```
-
-- **Plugin** owns the platform-specific connection (Telegram long-poll;
-  Feishu, DingTalk, WeCom, and QQ Bot WebSocket; WeChat QR-code login).
-- **Scope gate** classifies the event as direct or group, verifies a real
-  platform `@` mention for group messages, and applies that bot's group access
-  mode before pairing or session creation.
-- **PairingService** turns a first contact into a request that you approve from
-  the desktop UI. Direct messages keep the existing 6-digit-code flow; group
-  allowlists reuse the same Pending and Authorised user records.
-- **SessionManager** keeps follow-up messages stable while isolating each group
-  from private chats, the owner's desktop transcript, and other groups.
-- **Message loop** plumbs incoming messages into the agent stream and
-  the agent's replies back out. It edits the in-flight message where the
-  platform supports editing; adapters such as WeChat and WeCom fall back to
-  follow-up replies.
-
 ## Private chat and group access
 
 Group access is stored on each bot row as `group_access_mode`; it is not a
@@ -84,11 +54,7 @@ same NomiFun instance are bound to different companions.
 | **Selected members** | `allowlist` | Only this bot's Authorised users may use it. A structured mention from somebody else creates or reuses a Pending request for the owner to approve. |
 | **Disable group chat** | `disabled` | Ignore every group message, including messages from the owner and already-authorised users. Direct messages are unchanged. |
 
-`allowlist` is the safe default for new companion bots and the migration value
-for existing non-customer-service bots. Customer-service bots default to
-`all_members`, and existing customer-service rows are backfilled to that value,
-so an upgrade does not silently stop serving their groups. Owners can change
-the mode afterwards.
+New companion bots default to `allowlist`; customer-service bots default to `all_members`. Owners can change each bot's mode.
 
 Every accepted group message must contain the platform's **structured mention
 of this bot**. Text that merely looks like `@bot`, quoted content, and ordinary
@@ -220,106 +186,11 @@ access then follows the bot's current `group_access_mode`.
 
 ## Channel Agent integration
 
-Channel messaging uses the same Agent and Conversation runtime as the desktop;
-it is not a separate Agent type or a switchable mode. For a companion-bound
-Nomi bot, an authorised direct turn keeps the existing private Conversation
-behaviour. An admitted group turn instead uses a dedicated group-scoped
-session. An explicitly approved `allowlist` member keeps the existing
-authorised channel capabilities. An automatically admitted but unapproved
-`all_members` guest gets model-only replies without loading the owner's private
-companion context, and no group turn is appended to the owner's or any member's
-private transcript.
+Connect each bot from the intended companion's **Channels & Robots** tab, or bind it from **Customer Service** when it serves customers. One bot has one owner binding. Changing the binding resets the affected active channel sessions, so the next message resolves the new companion or service. If no saved binding resolves to a live companion, the channel remains unbound.
 
-Conversation metadata never stores owner authority. After validating the local
-instance owner, the Agent factory injects any platform Gateway capability as a
-scoped, expiring claim signed by a process-private root. Group admission — even
-under `all_members` — is not owner authorisation and never promotes the sender
-to private-message access. An `auto_group` Nomi runtime is forcibly model-only;
-an explicitly `approved` allowlist user keeps the capabilities already provided
-to authorised channel users.
+The connection form owns transport credentials and the binding. Configure the Agent and model on the companion or customer-service page. Available tools depend on that saved Agent, its resources and channel access policy; do not assume every desktop capability is available in IM.
 
-The bot lifecycle enable/disable switch and `group_access_mode` are separate:
-disabling the bot stops its connection, while `disabled` as a group mode only
-turns off group processing. A bot bound to a customer-service agent still runs
-the group gate first. Admitted messages remain entirely in the
-customer-service domain (no companion Conversation) and are answered by a
-disposable one-shot engine session whose tool table is fixed at construction
-to three read-only tools (knowledge search, knowledge read, and customer-service
-note search). It never receives the platform Gateway claim. Direct messages
-retain the existing customer-service auto-service semantics.
-
-When an owner-authorised Nomi channel context receives the gateway tools (all
-prefixed `nomi_*`, 32 of them today), they let the companion do the
-following on your behalf:
-
-- **Conversations** — list every conversation with its runtime state,
-  inspect one (status plus the latest messages, including an in-flight
-  streaming reply), send a message or task prompt into any
-  conversation, create new ones, update or delete old ones
-  (`nomi_list_conversations`, `nomi_conversation_status`,
-  `nomi_send_to_conversation`, `nomi_create_conversation`,
-  `nomi_update_conversation`, `nomi_delete_conversation`).
-- **Scheduled tasks** — list / create / update / delete cron jobs
-  (`nomi_cron_list`, `nomi_cron_create`, `nomi_cron_update`,
-  `nomi_cron_delete`).
-- **Long-term memory** — read and write the companion's global memory bank
-  (`nomi_memory_list`, `nomi_memory_save`, `nomi_memory_update`,
-  `nomi_memory_delete`).
-- **Requirements** — browse and manage the requirements platform
-  (`nomi_requirement_list`, `nomi_requirement_create`,
-  `nomi_requirement_update`, `nomi_requirement_delete`).
-- **Terminals & supervision** — list terminal sessions, create new ones
-  (optionally binding knowledge bases via `knowledge_base_ids`), and
-  read / toggle a terminal's AutoWork binding and IDMM supervision
-  (`nomi_list_terminals`, `nomi_create_terminal`, `nomi_get_autowork`,
-  `nomi_set_autowork`, `nomi_get_idmm`, `nomi_set_idmm`).
-- **Knowledge bases** — browse bases and bindings, rebind a
-  conversation / terminal / companion, create a new base, write markdown
-  files into one, trigger the AI digest, or fetch a URL as markdown —
-  so the companion can deposit knowledge on its own
-  (`nomi_knowledge_list_bases`, `nomi_knowledge_get_binding`,
-  `nomi_knowledge_set_binding`, `nomi_knowledge_create_base`,
-  `nomi_knowledge_write_file`, `nomi_knowledge_autogen`,
-  `nomi_knowledge_fetch_url`). `nomi_knowledge_create_base` with
-  `urls` fetches in the background — the call returns immediately, so
-  don't create the base a second time while waiting; the base's
-  description appearing means the fetch + digest pipeline is done.
-- **Providers** — list the configured LLM providers
-  (`nomi_list_providers`).
-
-So *"move my daily-report cron to 9 am and tell me what's running
-right now"* can be a single Feishu message from an appropriately authorised
-context.
-
-**Choosing which companion greets the channel.** With [multiple companions](./companions.md),
-bots are bound to companions **per channel row**: each row of
-`channel_plugins` is one bot (the same platform can host several —
-e.g. one Feishu in-house app per companion), its `companion_id` decides which companion
-answers, and the `UNIQUE(type, bot_key)` constraint structurally
-guarantees **one bot is never bound to two companions** (bot identity: Feishu
-`app_id`, the Telegram bot id, DingTalk `client_id`, …). Binding or
-unbinding calls `POST /api/channel/settings/companion` with a `plugin_id`,
-which persists the row and resets **that channel's** active sessions in
-one step — the next inbound message is greeted by the new companion's persona,
-model, and knowledge mounts (the conversation carries `extra.companionId`).
-Connecting a bot from a companion's **Channels & Robots** tab creates the channel row and
-binds it to that companion in one go. A row without a companion binding falls back
-to the per-platform preference `channels.<platform>.companionId`. There is no
-implicit default-companion fallback: if neither binding resolves to a live
-companion, the channel remains unbound and receives no companion persona. A
-binding change resets the affected sessions so the next turn resolves the new
-owner cleanly.
-
-**Agent and model resolution.** Channel connection forms configure transport
-credentials and owner bindings; they do not introduce another Agent or model
-picker. A companion-bound Nomi bot uses the companion profile's model as the
-authoritative value, with a provisioned `channels.<platform>.defaultModel` only
-as fallback. A customer-service-bound bot uses that agent's own configured
-provider/model from the customer-service console. An unbound channel uses Nomi,
-which is the only engine.
-After changing a platform-level provisioning preference, calling
-`POST /api/channel/settings/sync` clears that platform's sessions so the next
-turn resolves the new configuration.
+Group chats use a separate Session for each bot and group. Automatically admitted guests receive model-only replies and do not gain the owner's private context or management tools. Private access, group admission and bot enable/disable remain separate controls.
 
 ## What works from the IM side
 
@@ -345,45 +216,9 @@ What you don't get from the IM side (yet):
 - per-user workspace selection — the agent's workspace is the one set
   on the conversation it routed to.
 
-## Routes & API
-
-| What                            | Where                                                   |
-| ------------------------------- | ------------------------------------------------------- |
-| Channels UI                     | `/nomi?companion=<id>&tab=remote`                       |
-| List plugins / status           | `GET /api/channel/plugins`                              |
-| Enable / disable                | `POST /api/channel/plugins/enable`, `…/disable`         |
-| Test credentials                | `POST /api/channel/plugins/test`                        |
-| Group access                    | `POST /api/channel/settings/group-access`               |
-| Pending pairings                | `GET /api/channel/pairings`                             |
-| Approve / reject pairing        | `POST /api/channel/pairings/approve`, `…/reject`        |
-| Authorised users                | `GET /api/channel/users`, `POST .../users/revoke`       |
-| Active sessions                 | `GET /api/channel/sessions`                             |
-| Sync (clear sessions on change) | `POST /api/channel/settings/sync`                       |
-| Bind channel companion          | `POST /api/channel/settings/companion`                  |
-| WeChat QR login SSE             | `POST /api/channel/weixin/login/start`                  |
-
-## Notes
-
-- Plugin lifecycle is a state machine —
-  `Created → Initializing → Ready → Starting → Running → Stopping → Stopped`,
-  with any step able to transition to `Error`. The status pill in the
-  UI is this enum.
-- A revoked user's session is torn down before the user row is deleted. Their
-  next companion-bot direct message triggers pairing again; group messages
-  follow the bot's current group mode.
-- Changing group access atomically updates the mode and retires group/unknown
-  sessions plus their pending queue while preserving direct sessions. New
-  messages use the new mode after the API returns; a turn that already reached
-  durable admission may finish its one reply.
-- Pairing codes are 6 digits, generated with `getrandom`, with a
-  10-minute TTL. The pairing service runs a periodic sweep that
-  expires pending codes whose TTL has passed.
-- Adapters are feature-gated. A custom `--no-default-features` build must
-  explicitly enable every connector it intends to expose.
-
 ## Related
 
-- [Channel group access contract](../specs/2026-08-13-channel-group-access.zh.md) —
+- [Channel architecture](../architecture/channels.md) —
   the normative per-bot policy, identity ceiling, migration, and adapter
   capability matrix (Chinese).
 - [Companions](./companions.md) — multi-companion management, per-companion

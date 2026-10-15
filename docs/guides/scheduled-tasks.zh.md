@@ -7,7 +7,7 @@ NomiFun 中的一个定时任务是一个在你选择的时间触发的循环 (�
 技能在聊天中让任何 agent 帮你管理任务。
 
 > 找的是应该尽快运行的一次性异步工作，而不是按时钟来的？参见
-> [AutoWork & Requirements](./autowork-requirements.md)。需要一个
+> [AutoWork & Requirements](./autowork-requirements.zh.md)。需要一个
 > 实时 shell？参见 [应用内终端](./terminal.zh.md)。
 
 ![定时任务列表](../images/cron-01-list.png)

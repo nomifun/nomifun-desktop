@@ -85,7 +85,7 @@ Thumbs.db
 # Isolated agent development worktrees
 .worktrees/
 
-# Repository policy: GitHub Actions workflows are forbidden. Keep these
-# ignored as an additional guard against accidental `git add` operations.
+# Workflow files are ignored by default. AGENTS.md allows maintainable
+# workflows when useful; add an intentional workflow explicitly with git add -f.
 /.github/workflows/*.yml
 /.github/workflows/*.yaml

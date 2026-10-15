@@ -39,7 +39,7 @@ const semanticColors = {
 //    named "bg-1", finds nothing, and emits ZERO CSS. `bg-0` is dead too (no `0` key).
 // ⚠️ 数字键还会劫持带方向的边框类：`border-b-2` 不是「下边框 2px」，而是
 //    `border-bottom-color: var(--bg-2)`（方向解析先发生，再拿 `2` 查到这里）。
-//    宽度要写 `border-b-2px`。详见 ui/src/renderer/styles/MIGRATION.md 第 6 条。
+//    宽度要写 `border-b-2px`。详见 docs/contributing/styling.zh.md 的宽度规则。
 const backgroundColors = {
   base: 'var(--bg-base)', // bg-base, border-base - 主背景
   1: 'var(--bg-1)', // bg-1, border-1 - 次级背景
@@ -60,8 +60,7 @@ const backgroundColors = {
 //    它永远不可达。UnoCSS 解析 `border-b-*` 时先吃掉 `-b-`（bottom 方向），再去
 //    theme.colors 里查剩下的键，所以 `border-b-base` 命中的是 backgroundColors.base，
 //    输出 `border-bottom-color: var(--bg-base)`，而不是 `var(--border-base)`。
-//    删除前后整站产出 CSS 逐字节相同（见 ui/src/renderer/styles/MIGRATION.md 的
-//    「-b- 方向陷阱」一节）。
+//    颜色与方向规则见 docs/contributing/styling.zh.md。
 // ⚠️ A borderColors block used to live here and was deleted: it was unreachable.
 //    UnoCSS consumes `-b-` as the bottom direction before looking the remainder up
 //    in theme.colors, so `border-b-base` resolves against backgroundColors.base.
@@ -156,7 +155,7 @@ export default defineConfig({
   //    无方向的 `border-solid` 会让没有宽度类的另外三边回落到 medium≈3px）。
   //    加全局 reset 的方案评估过并否决：那条 `*` 规则会抹掉原生表单控件的默认边框，
   //    影响面覆盖 1000+ 文件且无法逐一回归。理由与替代方案见
-  //    ui/src/renderer/styles/MIGRATION.md 的「为什么不加全局 border reset」。
+  //    docs/contributing/styling.zh.md 的 UnoCSS 工具类说明。
   // ⚠️ Intentionally the only preflight: no Tailwind reset, so `border-style` stays at
   //    its initial `none`. Width + colour without a style class paints nothing.
   preflights: [

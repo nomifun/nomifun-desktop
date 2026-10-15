@@ -61,3 +61,13 @@ a configured bypass provider is deleted, the Session is downgraded to rule-only.
 - `GET /api/agent-sessions/{id}/idmm`
 - `PUT /api/agent-sessions/{id}/idmm`
 - `POST /api/agent-sessions/{id}/idmm/evaluate`
+
+## Development smoke test
+
+`bun run demo:idmm` runs the live StepFun Coding Plan flow in an isolated temporary data directory. Set `NOMIFUN_LIVE_STEPFUN_API_KEY` only for the current process; the run makes real provider requests. It does not use or clear the desktop dataset. For a credential-free compile check, run:
+
+```bash
+bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --idmm-smoke --compile-only
+```
+
+The default report is `.tmp-idmm-demo-report.json`. Check the command's exit code and the newly written report; a previous report is not evidence for a failed run. The provider-pause scenario requires an explicit native resume and is reported as a limitation, not automatic IDMM recovery. The maintained scenarios live in `crates/backend/nomifun-app/tests/support/live_idmm_demo.rs`.
