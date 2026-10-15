@@ -48,6 +48,9 @@ ui/dist/
 apps/desktop/gen/
 apps/desktop/target/
 
+# Gradle local build cache
+.gradle/
+
 # Tauri updater signing keys — NEVER commit private keys
 apps/desktop/.tauri/
 *.key
