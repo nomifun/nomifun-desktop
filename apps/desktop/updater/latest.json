@@ -1,19 +1,11 @@
 {
-  "version": "0.8.8",
-  "notes": "- Recover agent capability loading: capability lists recover correctly\n  after load failures, and guided-page preset capabilities and agent\n  binding selection no longer stall on errors.\n- Make session binding evolution safe: the binding evolution path gains\n  safety checks and recovery logic, and session configuration errors\n  surface readable diagnostics to the frontend.",
-  "pub_date": "2026-10-14T06:00:23.552Z",
+  "version": "0.8.9",
+  "notes": "- Add scoped attachment drag and drop to conversations; unify commands and\n  canonical context clearing; unify scrollbars and compact the companion\n  UI.\n- Unify canonical turn results; derive agent tools from canonical schemas\n  with typed guidance; settle continuations and user input handoffs\n  safely.\n- Harden the embedded browser: fence macOS popup admission and history\n  navigation, and stabilize the embedded identity and navigation\n  lifecycle.\n- Revamp the template workspace: move task history into a compact popover,\n  compact workspace cards with pagination, and refine the editor layout\n  and controls.\n- Preserve robot session bindings and device reconnects.",
+  "pub_date": "2026-10-15T13:09:59.882Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHp5Y2IxT1RTZ0dJYVAwdThtLzh3bURvNjUwU2ZDMHJ4bmk3UTVrQVNtOGloUTRwbXZndWJrekQ0K1RnaXQ5b2hnbzlSVDJ1THkwTndrRzRhVmQ1RHdZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxOTUwNzQ4CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6Ck9hd1ljUG1WRTk2aTU3SFRKVkJqZWVxdUJjWW5LdzdURWcrV3VJeitGWE9YWFVKMytRZnloR21ISVQ3eXhMNWZZUytOL3ZwOVlDY2FLNDlqdDVzOUNnPT0K",
-      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.8/NomiFun.app.tar.gz"
-    },
-    "darwin-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOCtRN2NsUUlYZVpBR3FvK2orSWkxbElsTytEaGlCTGdWblNxM2JBUEFIM09GemR6K3Q4dm1ONm1KQ0dQc1psN2hBVDIyNTgzdXlsMDdid3pTZjlwN2dZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxOTUxODk1CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6Cnh5SG1JQnhmNXkwQXRUZXc1N2NvdHhDWDBOemdpREVyRkFTZzYwQkttRksxcjJ2SDc5MXlBbGV2SE0zTmNMVWMySXM4bVNjSDh1U3NoS3JVWHdCbURnPT0K",
-      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.8/NomiFun_0.8.8_x64.app.tar.gz"
-    },
-    "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODBrR2c3VnR0cW1yWmFadGVua0J2dzV6RUVabTJJYjhJT0xNMHB4ZzVuSlFTV2VuV2pGWE5TRkRhTHNVUTRNMWEvRzBuRkk4MTU4cS9DMHVzeXRWNndVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxOTU3MzI3CWZpbGU6Tm9taUZ1bl8wLjguOF94NjQtc2V0dXAuZXhlCnNRcHc5Nm4zTEwva0NHdzNrWTM2Q0p2dDBoaGthdFJ0NUFVVzhGZVN2QjJzd2dlOGlKaU1ISms0d2RVYjEzT3VJN3piK0FrQlpxbWVhejFTMGtSSENRPT0K",
-      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.8/NomiFun_0.8.8_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODMxV2wwTlM5dk5ab3I3aVErU3dJUFM4RkxZMmIvQURrRjlIbTRjWHJEMWRGVytzbGhQMVFOYnpBK0xNTVcxdU5lM2x3Y0NSUUFyVmtGaFEzOHBzVXc4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDY5NzM4CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CmQ1anVCcU9UeW83RmhNdCtvVVlQaUdMa0xoOTV4R08vYmR1MTJBYXlEUkJLeW9RNndTZUZKZDdsdEZnV1BhRDZlQ1N4VU80YkIwZmFxS2draGVEZ0RnPT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.9/NomiFun.app.tar.gz"
     }
   }
 }
