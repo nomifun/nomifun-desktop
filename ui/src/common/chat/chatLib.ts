@@ -29,6 +29,8 @@ import { normalizeKnowledgeWritebackDiagnostic, type KnowledgeWritebackDiagnosti
 import { isAbsoluteLocalPath, isFileUri } from '../utils/localPath';
 import { computerPermissionKindsForOperation } from './computerPermissionContract';
 import type { AgentUserInputRequest } from '../protocolBindings/AgentUserInputRequest';
+import type { AgentTurnOutcome } from '../protocolBindings/AgentTurnOutcome';
+import { normalizeAgentTurnOutcome, mergeAgentTurnOutcome } from './turnOutcome';
 
 export { joinLocalPath as joinPath } from '../utils/localPath';
 
@@ -129,6 +131,8 @@ export type IMessageText = IMessage<
     idmm_decision?: IdmmDecisionExplanation;
     /** Canonical typed output-limit continuation, never inferred from text. */
     continuation_of_message_id?: MessageId;
+    /** Explicit complete projection without a Runtime Turn (for example AgentExecution synthesis). */
+    standalone_projection?: true;
     interaction?: {
       kind: 'robot' | 'desktop'; robot_id: string; connection_id: string; request_id: string;
       input_modality: 'speech' | 'text'; output_mode: 'spoken' | 'desktop';
@@ -212,12 +216,15 @@ export type IMessageTips = IMessage<
     content: string;
     type: 'error' | 'success' | 'warning';
     error?: AgentStreamErrorInfo;
+    /** Read/presentation failure; this notice does not rewrite the Turn terminal. */
+    query_error?: true;
     /** Presentation of a verified active pause; never a terminal receipt. */
     execution_pause?: { reason?: string; cleanupProven: boolean };
     recovery?: TruncatedTurnRecovery;
     idmm_notice?: IdmmDecisionNotice;
     /** Host-authored input handoff from the exact completed Turn. */
     user_input_request?: AgentUserInputRequest;
+    turn_outcome?: AgentTurnOutcome;
     agent_transition?: {
       transition_id: string;
       previous_agent_label: string;
@@ -355,6 +362,7 @@ export type IMessageAgentStatus = IMessage<
     has_active_session?: boolean;
     /** Durable, renderer-facing lifecycle receipt derived from the canonical Turn. */
     turn_summary?: boolean;
+    turn_outcome?: AgentTurnOutcome;
     /** Display-only write-back progress/results belonging to this canonical Turn. */
     knowledge_writeback?: KnowledgeWritebackState;
     turn_state?: 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
@@ -477,8 +485,19 @@ export const mergeAgentStatusContent = (
   incoming: IMessageAgentStatus['content'],
 ): IMessageAgentStatus['content'] => {
   const knowledgeWriteback = preferKnowledgeWritebackState(existing.knowledge_writeback, incoming.knowledge_writeback);
-  return { ...incoming, ...(knowledgeWriteback ? { knowledge_writeback: knowledgeWriteback } : {}) };
+  const stale = retainsCommittedTurnOutcome(existing.turn_outcome, incoming.turn_outcome);
+  const outcome = mergeAgentTurnOutcome(existing.turn_outcome, incoming.turn_outcome);
+  const receipt = stale ? existing : incoming;
+  return { ...receipt, ...(outcome ? { turn_outcome: outcome } : {}),
+    ...(knowledgeWriteback ? { knowledge_writeback: knowledgeWriteback } : {}) };
 };
+
+/** A transport error frame can follow the committed public terminal receipt. */
+export const mergeTipsContent = (existing: IMessageTips['content'], incoming: IMessageTips['content']): IMessageTips['content'] =>
+  retainsCommittedTurnOutcome(existing.turn_outcome, incoming.turn_outcome) ? existing : incoming;
+
+const retainsCommittedTurnOutcome = (existing: AgentTurnOutcome | undefined, incoming: AgentTurnOutcome | undefined): boolean =>
+  existing !== undefined && incoming !== existing && mergeAgentTurnOutcome(existing, incoming) === existing;
 
 /** Post-Turn write-back updates carry presentation facts, never activity authority. */
 export const isKnowledgeWritebackPresentation = (message: IResponseMessage): boolean => {
@@ -511,6 +530,15 @@ export const isUserInputRequestPresentation = (message: IResponseMessage): messa
 } =>
   message.type === 'tips' && !!message.turn_id && !!message.msg_id && isObject(message.data)
   && message.data.type !== 'error' && normalizeAgentUserInputRequest(message.data.user_input_request) !== undefined;
+
+/** The same host-derived result receipt is delivered live and by history. */
+export const isTurnOutcomePresentation = (message: IResponseMessage): boolean =>
+  !!message.turn_id && !!message.msg_id && (message.type === 'tips' || message.type === 'agent_status')
+  && isObject(message.data) && normalizeAgentTurnOutcome(message.data.turn_outcome) !== undefined;
+
+export const isTurnReadErrorPresentation = (message: IResponseMessage): boolean =>
+  !!message.turn_id && !!message.msg_id && (message.type === 'tips' || message.type === 'error')
+  && isObject(message.data) && message.data.query_error === true;
 
 const isResponseTextData = (data: unknown): data is ResponseTextData =>
   typeof data === 'object' &&
@@ -884,6 +912,7 @@ export const normalizeToolCallContent = (
 
 export const normalizeAgentStatusContent = (value: unknown): IMessageAgentStatus['content'] => {
   const data = isObject(value) ? value : {};
+  const outcome = normalizeAgentTurnOutcome(data.turn_outcome);
   const knowledgeWriteback = data.turn_summary === true ? normalizeKnowledgeWritebackState(data.knowledge_writeback) : undefined;
   const status =
     data.status === 'connecting' ||
@@ -905,6 +934,7 @@ export const normalizeAgentStatusContent = (value: unknown): IMessageAgentStatus
     ...(typeof data.is_connected === 'boolean' ? { is_connected: data.is_connected } : {}),
     ...(typeof data.has_active_session === 'boolean' ? { has_active_session: data.has_active_session } : {}),
     ...(data.turn_summary === true ? { turn_summary: true } : {}),
+    ...(outcome ? { turn_outcome: outcome } : {}),
     ...(knowledgeWriteback ? { knowledge_writeback: knowledgeWriteback } : {}),
     ...(data.turn_summary === true &&
       ['running', 'completed', 'failed', 'cancelled', 'interrupted'].includes(data.turn_state as string)
@@ -950,6 +980,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
           content: errorText,
           type: 'error',
           ...(structuredError ? { error: structuredError } : {}),
+          ...(isObject(errorData) && errorData.query_error === true ? { query_error: true as const } : {}),
           ...(recovery ? { recovery } : {}),
           ...(notice ? { idmm_notice: notice } : {}),
         },
@@ -966,6 +997,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
       const recovery = normalizeTruncatedTurnRecovery(data.recovery);
       const notice = normalizeIdmmDecisionNotice(data.idmm_notice);
       const userInputRequest = tipType !== 'error' ? normalizeAgentUserInputRequest(data.user_input_request) : undefined;
+      const outcome = normalizeAgentTurnOutcome(data.turn_outcome);
       const startedAtMs = finiteNumber(data.started_at_ms);
       const finishedAtMs = finiteNumber(data.finished_at_ms);
       return {
@@ -980,9 +1012,11 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
           content,
           type: tipType,
           ...(structuredError ? { error: structuredError } : {}),
+          ...(tipType === 'error' && data.query_error === true ? { query_error: true as const } : {}),
           ...(recovery ? { recovery } : {}),
           ...(notice ? { idmm_notice: notice } : {}),
           ...(userInputRequest && message.turn_id && message.msg_id ? { user_input_request: userInputRequest } : {}),
+          ...(outcome ? { turn_outcome: outcome } : {}),
           ...(startedAtMs !== undefined && startedAtMs > 0 ? { started_at_ms: startedAtMs } : {}),
           ...(finishedAtMs !== undefined && finishedAtMs > 0 ? { finished_at_ms: finishedAtMs } : {}),
         },
@@ -1010,10 +1044,12 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
               ...(shouldReplace ? { replace: true } : {}),
               ...(decision ? { idmm_decision: decision } : {}),
               ...normalizeTextContinuation(data),
+              ...(message.stream_complete && !message.turn_id ? { standalone_projection: true as const } : {}),
               ...normalizeWireAgentMessageMetadata(data as Record<string, unknown>),
             }
           : {
               content: toDisplayText(data),
+              ...(message.stream_complete && !message.turn_id ? { standalone_projection: true as const } : {}),
               ...(shouldReplace ? { replace: true } : {}),
             },
         ...(message.hidden && { hidden: true }),
@@ -1254,6 +1290,9 @@ export const composeMessage = (
   }
   if (message.type === 'text' && last.type === 'text') {
     message.content = mergeTextMessageContent(last.content, message.content);
+  }
+  if (message.type === 'tips' && last.type === 'tips') {
+    message.content = mergeTipsContent(last.content, message.content);
   }
   return updateMessage(list.length - 1, Object.assign({}, last, message));
 };

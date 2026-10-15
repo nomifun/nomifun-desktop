@@ -31,6 +31,7 @@ const messageId = (index: number) => parseMessageId(`0190f5fe-7c00-7a00-8000-${S
 
 let restoreListeners = () => {};
 beforeEach(() => {
+  const agentChanged = spyOn(ipcBridge.agentPlatform.sessions.onAgentChanged, 'on').mockReturnValue(() => {});
   const turnFiles = spyOn(ipcBridge.conversation.turnFiles, 'invoke').mockResolvedValue([]);
   const completed = spyOn(ipcBridge.conversation.turnCompleted, 'on').mockReturnValue(() => {});
   const reconnected = spyOn(ipcBridge.conversation.reconnected, 'on').mockReturnValue(() => {});
@@ -46,7 +47,7 @@ beforeEach(() => {
   const watchFiles = spyOn(ipcBridge.workspaceOfficeWatch.fileAdded, 'on').mockImplementation(() => () => {});
   const files = spyOn(ipcBridge.fs.listWorkspaceFiles, 'invoke').mockResolvedValue([]);
   restoreListeners = () => {
-    turnFiles.mockRestore(); completed.mockRestore(); reconnected.mockRestore();
+    agentChanged.mockRestore(); turnFiles.mockRestore(); completed.mockRestore(); reconnected.mockRestore();
     content.mockRestore(); tree.mockRestore(); entry.mockRestore(); metadata.mockRestore(); image.mockRestore();
     watchStart.mockRestore(); watchStop.mockRestore(); watchFiles.mockRestore(); files.mockRestore();
   };
@@ -171,6 +172,7 @@ test('a restored automatic write-back notice sits under its answer and before th
       { id: 'knowledge-terminal', msg_id: messageId(202), turn_id: turnId, type: 'agent_status', position: 'center',
         conversation_id: conversationId, created_at: 3, content: { backend: 'nomi', status: 'prepared',
           turn_summary: true, turn_state: 'completed', started_at_ms: 1000, finished_at_ms: 3000,
+          turn_outcome: { kind: 'answered', message_ids: [messageId(201)] },
           knowledge_writeback: { status: 'written', written: [{ kb_id: kb, rel_path: 'notes/loops.md' }] } } },
     ];
     const page = render(<MemoryRouter><I18nextProvider i18n={i18n}><ThemeProvider>
@@ -198,6 +200,7 @@ test('independent write-back stays under the completed answer while the next Tur
     id: 'independent-summary', msg_id: messageId(202), turn_id: turnId, type: 'agent_status', position: 'center',
     conversation_id: conversationId, created_at: 3, content: { backend: 'nomi', status: 'prepared',
       turn_summary: true, turn_state: 'completed', started_at_ms: 1000, finished_at_ms: 3000,
+      turn_outcome: { kind: 'answered', message_ids: [messageId(201)] },
       knowledge_writeback: { status, event_seq, written: status === 'written' ? [{ kb_id: kb, rel_path: 'notes/loops.md' }] : [] } },
   });
   function Updates() {
@@ -328,7 +331,7 @@ test('a failed question history page stops automatic loading and a second click 
   const completed = spyOn(ipcBridge.conversation.turnCompleted, 'on').mockImplementation(() => () => {});
   const reconnect = spyOn(ipcBridge.conversation.reconnected, 'on').mockImplementation(() => () => {});
   const history = spyOn(ipcBridge.database.getConversationMessages, 'invoke').mockImplementation(async query => {
-    if (!query.cursor) return { items: [reply], has_more: true, total: 2 };
+    if (!query.cursor) return { items: [reply], has_more: true, total: 2, next_cursor: `${reply.created_at}:${reply.message_id}` };
     olderRequests++;
     if (olderRequests === 1) throw new Error('fixture page unavailable');
     return { items: [question], has_more: false, total: 2 };
@@ -487,7 +490,8 @@ test('canonical terminal metadata closes stale thinking while the session still 
     { ...base, id: 'stale-thought', msg_id: messageId(2), type: 'thinking', created_at: 2, content: { content: 'The source inspection reasoning.', status: 'thinking' } },
     { ...base, id: 'final', msg_id: messageId(3), type: 'text', created_at: 3, content: { content: 'The inspection is complete.' } },
     { ...base, id: 'terminal-metadata', msg_id: messageId(4), type: 'agent_status', created_at: 4,
-      content: { backend: 'nomi', status: 'prepared', turn_summary: true, turn_state: 'completed', started_at_ms: 1, finished_at_ms: 3 } },
+      content: { backend: 'nomi', status: 'prepared', turn_summary: true, turn_state: 'completed', started_at_ms: 1, finished_at_ms: 3,
+        turn_outcome: { kind: 'answered', message_ids: [messageId(3)] } } },
   ];
   const page = render(<MemoryRouter><I18nextProvider i18n={i18n}>
     <PreviewProvider persistNamespace='terminal-thought-status-test' subscribeGlobalOpen={false}>
@@ -562,6 +566,8 @@ test('a completed journal defaults closed and expands its full reasoning and cal
     { ...base, id: 'thought-2', msg_id: messageId(5), type: 'thinking', created_at: 5, content: { content: 'Second reasoning', status: 'done' } },
     retry,
     { ...base, id: 'final', msg_id: messageId(7), type: 'text', created_at: 7, content: { content: 'The inspection is complete.' } },
+    { ...base, id: 'terminal', msg_id: messageId(8), type: 'agent_status', created_at: 8, content: { backend: 'nomi',
+      status: 'prepared', turn_summary: true, turn_state: 'completed', turn_outcome: { kind: 'answered', message_ids: [messageId(7)] } } },
   ];
   const view = (running: boolean) => <MemoryRouter><I18nextProvider i18n={i18n}>
     <PreviewProvider persistNamespace='process-flow-test' subscribeGlobalOpen={false}>
@@ -672,10 +678,15 @@ test.each(['completed', 'failed', 'canceled'] as const)('canonical file list sur
   ];
   if (outcome === 'failed') initial.push({ id: 'terminal-file-error', type: 'tips', conversation_id: conversationId,
     message_id: messageId(501), msg_id: messageId(501), turn_id: turnId, created_at: 300,
-    content: { type: 'error', content: 'Execution failed', finished_at_ms: 300 } });
+    content: { type: 'error', content: 'Execution failed', finished_at_ms: 300,
+      turn_outcome: { kind: 'failed', message_ids: [messageId(500)] } } });
   if (outcome === 'canceled') initial.push({ id: 'terminal-file-canceled', type: 'agent_status', conversation_id: conversationId,
     message_id: messageId(501), msg_id: messageId(501), turn_id: turnId, created_at: 300,
-    content: { backend: 'nomi', status: 'prepared', turn_summary: true, turn_state: 'cancelled', started_at_ms: 100, finished_at_ms: 300 } });
+    content: { backend: 'nomi', status: 'prepared', turn_summary: true, turn_state: 'cancelled', started_at_ms: 100, finished_at_ms: 300,
+      turn_outcome: { kind: 'cancelled', message_ids: [messageId(500)] } } });
+  if (outcome === 'completed') initial.push({ id: 'file-completion', msg_id: messageId(502), turn_id: turnId,
+    conversation_id: conversationId, type: 'agent_status', created_at: 300, content: { backend: 'nomi', status: 'prepared',
+      turn_summary: true, turn_outcome: { kind: 'answered', message_ids: [messageId(500)] } } });
   const page = render(<MemoryRouter><I18nextProvider i18n={i18n}><ThemeProvider>
     <PreviewProvider persistNamespace='canonical-turn-files-test' subscribeGlobalOpen={false}>
       <ConversationProvider value={{ conversation_id: conversationId, workspace: '/workspace', type: 'nomi', readOnly: true,
@@ -707,6 +718,9 @@ test('a closed Turn distinguishes unknown empty file coverage from pending and c
       created_at: 100, content: { content: 'Check the workspace' } },
     { id: 'empty-file-answer', type: 'text', position: 'left', conversation_id: conversationId, message_id: messageId(510), msg_id: messageId(510),
       turn_id: turnId, created_at: 200, content: { content: 'The task has ended.' } },
+    { id: 'empty-file-completion', msg_id: messageId(511), turn_id: turnId, conversation_id: conversationId,
+      type: 'agent_status', created_at: 300, content: { backend: 'nomi', status: 'prepared', turn_summary: true,
+        turn_outcome: { kind: 'answered', message_ids: [messageId(510)] } } },
   ];
   const page = render(<MemoryRouter><I18nextProvider i18n={i18n}>
     <PreviewProvider persistNamespace='empty-canonical-turn-files-test' subscribeGlobalOpen={false}>

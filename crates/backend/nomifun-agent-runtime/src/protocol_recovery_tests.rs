@@ -151,3 +151,21 @@ fn constraints_are_advisory_and_release_after_committed_validation() {
     recovery.observe(&AgentEngineEvent::ModelResponseValidated { step: 2 }).unwrap();
     let mut choice = ChatToolChoice::Auto; recovery.constrain_tool_choice(&mut choice, true); assert_eq!(choice, ChatToolChoice::Auto);
 }
+
+#[test]
+fn empty_reply_correction_allows_text_and_replays_the_same_constraint() {
+    let mut live = ProtocolRecovery::default();
+    let prepared = live.prepare_rejection(1, vec![], AgentModelResponseRejection::EmptyTaskTerminal, None, true).unwrap();
+    let event = prepared.event().clone();
+    let feedback = live.commit_rejection(prepared).unwrap();
+    assert!(serde_json::to_string(&feedback).unwrap().contains("A direct text answer is allowed"));
+    let mut replay = ProtocolRecovery::default();
+    replay.restore([&event].into_iter()).unwrap();
+    for state in [&live, &replay] {
+        for original in [ChatToolChoice::Auto, ChatToolChoice::None] {
+            let mut choice = original.clone();
+            state.constrain_tool_choice(&mut choice, true);
+            assert_eq!(choice, original, "missing text does not require a tool effect");
+        }
+    }
+}

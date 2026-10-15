@@ -49,7 +49,7 @@ describe('turn process continuous work journal layout', () => {
   });
 
   test('marks the current running turn as live', () => {
-    expect(disclosureSource.includes("item.running && 'turn-process-disclosure--live'")).toBe(true);
+    expect(disclosureSource.includes("running && 'turn-process-disclosure--live'")).toBe(true);
   });
 
   test('opens the running journal and collapses it after completion', () => {

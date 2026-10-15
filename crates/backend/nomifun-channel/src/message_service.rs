@@ -1625,7 +1625,7 @@ mod tests {
         });
         assert!(matches!(ChannelMessageService::process_stream_event(&event),
             Some(StreamAction::UserInputRequest(recorded)) if recorded == request));
-        assert!(matches!(ChannelMessageService::process_stream_event(&AgentStreamEvent::Finish(FinishEventData {
+        assert!(matches!(ChannelMessageService::process_stream_event(&AgentStreamEvent::Finish(FinishEventData { turn_outcome: None,
             session_id: None, stop_reason: Some(nomifun_ai_agent::protocol::events::TurnStopReason::InputRequired),
         })), Some(StreamAction::FinishInputRequired)));
         assert_eq!(channel_reply_text(None, Some(&request)).as_deref(),
@@ -1643,7 +1643,7 @@ mod tests {
 
     #[test]
     fn finish_event_produces_finish() {
-        let event = AgentStreamEvent::Finish(FinishEventData { session_id: None, stop_reason: None });
+        let event = AgentStreamEvent::Finish(FinishEventData { turn_outcome: None, session_id: None, stop_reason: None });
         let action = ChannelMessageService::process_stream_event(&event);
         assert!(matches!(action, Some(StreamAction::Finish)));
     }
@@ -1659,7 +1659,7 @@ mod tests {
             TurnStopReason::Cancelled,
             TurnStopReason::Paused,
         ] {
-            let event = AgentStreamEvent::Finish(FinishEventData {
+            let event = AgentStreamEvent::Finish(FinishEventData { turn_outcome: None,
                 session_id: None,
                 stop_reason: Some(stop_reason),
             });
@@ -1672,7 +1672,7 @@ mod tests {
             );
         }
 
-        let normal = AgentStreamEvent::Finish(FinishEventData {
+        let normal = AgentStreamEvent::Finish(FinishEventData { turn_outcome: None,
             session_id: None,
             stop_reason: Some(TurnStopReason::EndTurn),
         });

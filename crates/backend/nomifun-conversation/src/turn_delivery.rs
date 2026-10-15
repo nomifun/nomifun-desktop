@@ -5,6 +5,7 @@ pub struct IdempotentMessageDelivery {
     pub message_id: String,
     pub replayed: bool,
     pub completed: bool,
+    pub turn_outcome: Option<nomifun_agent_contracts::AgentTurnOutcome>,
     pub result_ok: Option<bool>,
     pub result_text: Option<String>,
     pub result_error: Option<String>,

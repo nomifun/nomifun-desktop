@@ -429,6 +429,9 @@ describe('mergeFetchedMessagesForConversation', () => {
             : 'process' as const,
         turnId: message.position === 'right' ? message.msg_id : message.turn_id,
         createdAt: message.created_at ?? 0,
+        publicText: message.type === 'text' && message.position === 'left',
+        sourceMessageIds: message.message_id ? [message.message_id] : [],
+        ...(message.id === finalId ? { turnOutcome: { kind: 'answered' as const, message_ids: [message.message_id!] } } : {}),
       }))
     );
     const display = buildTurnDisclosureItems(grouped, { tailClosed: true });
@@ -1685,4 +1688,33 @@ describe('mergeThinkingStreamContent', () => {
     expect(error).toBeUndefined();
     expect(result.includes('"incoming": true')).toBe(true);
   });
+});
+
+test('a paused history snapshot cannot retract a terminal result received while the query was in flight', () => {
+  const turn = messageId('resume-same-turn');
+  const finalId = messageId('resume-final-message');
+  const before = baseMessage({ id: 'resume-summary', msg_id: 'resume-summary-stream', turn_id: turn, type: 'agent_status',
+    content: { backend: 'nomi', status: 'prepared', turn_summary: true,
+      turn_outcome: { kind: 'paused', message_ids: [] } } });
+  const staleHistory = fetchedMessage(before);
+  const live = { ...before, content: { ...before.content,
+    turn_outcome: { kind: 'answered', message_ids: [finalId] } } } as TMessage;
+  const result = mergeFetchedMessagesForConversation([live], [staleHistory], before.conversation_id, [before]);
+  expect(result[0]).toMatchObject({ content: { turn_outcome: { kind: 'answered', message_ids: [finalId] } } });
+  // A later explicit pause cannot absorb an already committed terminal either.
+  const replay = composeMessageForTest(before, result);
+  expect(replay[0]).toMatchObject({ content: { turn_outcome: { kind: 'answered', message_ids: [finalId] } } });
+});
+
+test('a newer live pause revision retains its exact public partial references over an older in-flight snapshot', () => {
+  const turn = messageId('pause-same-turn');
+  const oldPartial = messageId('pause-old-partial');
+  const newPartial = messageId('pause-new-partial');
+  const before = baseMessage({ id: 'pause-summary', msg_id: 'pause-summary-stream', turn_id: turn, type: 'agent_status',
+    content: { backend: 'nomi', status: 'prepared', turn_summary: true,
+      turn_outcome: { kind: 'paused', message_ids: [oldPartial] } } });
+  const live = { ...before, content: { ...before.content,
+    turn_outcome: { kind: 'paused', message_ids: [newPartial] } } } as TMessage;
+  const result = mergeFetchedMessagesForConversation([live], [fetchedMessage(before)], before.conversation_id, [before]);
+  expect(result[0]).toMatchObject({ content: { turn_outcome: { kind: 'paused', message_ids: [newPartial] } } });
 });

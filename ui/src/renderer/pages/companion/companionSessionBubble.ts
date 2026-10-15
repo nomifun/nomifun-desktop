@@ -7,6 +7,8 @@
 import type { IResponseMessage } from '@/common/adapter/ipcBridge';
 import { extractResponseTextChunk } from '@/common/chat/displayText';
 import { agentUserInputRequestText, isUserInputRequestPresentation, type TMessage } from '@/common/chat/chatLib';
+import { normalizeAgentTurnOutcome, mergeAgentTurnOutcome } from '@/common/chat/turnOutcome';
+import type { AgentTurnOutcome } from '@/common/protocolBindings/AgentTurnOutcome';
 import type { ConversationId, MessageId } from '@/common/types/ids';
 
 export type CompanionBubblePhase = 'idle' | 'accepted' | 'running' | 'paused' | 'settled';
@@ -25,23 +27,35 @@ export interface CompanionSessionBubbleState {
   segmentRevisions: ReadonlyMap<MessageId, number>;
   order: readonly MessageId[];
   hint: string;
+  outcome: AgentTurnOutcome | null;
+  handoff: { requestId: string; text: string } | null;
+  readError: string | null;
 }
 
 export const emptyCompanionSessionBubble = (conversationId: ConversationId | null): CompanionSessionBubbleState => ({
   conversationId, turnId: null, phase: 'idle', bubble: '', loading: false,
   dismissed: false, interrupted: false, remoteHeader: null,
-  segments: new Map(), segmentRevisions: new Map(), order: [], hint: '',
+  segments: new Map(), segmentRevisions: new Map(), order: [], hint: '', outcome: null, handoff: null, readError: null,
 });
 
-const joinedText = (state: CompanionSessionBubbleState): string =>
-  state.order.map(id => state.segments.get(id) ?? '').filter(Boolean).join('\n\n').trim();
+const joinedText = (state: CompanionSessionBubbleState): string => {
+  if (state.readError) return state.readError;
+  if (state.outcome?.kind === 'input_required') {
+    return state.handoff?.requestId === state.outcome.request_id ? state.handoff.text : '';
+  }
+  if (state.outcome?.kind === 'unavailable') return '';
+  const ids = state.outcome && 'message_ids' in state.outcome ? state.outcome.message_ids : state.order;
+  const text = ids.map(id => state.segments.get(id as MessageId) ?? '').filter(Boolean).join('\n\n').trim();
+  return !state.outcome && state.handoff ? [text, state.handoff.text].filter(Boolean).join('\n\n') : text;
+};
 
 export const beginCompanionSessionBubble = (
   state: CompanionSessionBubbleState, turnId: MessageId, phase: 'accepted' | 'running'
 ): CompanionSessionBubbleState => {
   if (state.turnId === turnId) {
     if (state.phase === 'settled' || ((state.phase === 'running' || state.phase === 'paused') && phase === 'accepted')) return state;
-    return state.phase === phase ? state : { ...state, phase };
+    return state.phase === phase ? state : { ...state, phase,
+      ...(state.phase === 'paused' && phase === 'running' ? { outcome: null, handoff: null } : {}) };
   }
   return { ...emptyCompanionSessionBubble(state.conversationId), turnId, phase, bubble: '…', loading: true };
 };
@@ -50,14 +64,22 @@ export const beginCompanionSessionBubble = (
 export const hydrateCompanionSessionBubble = (
   state: CompanionSessionBubbleState,
   messages: readonly TMessage[],
-  observed: Pick<CompanionSessionBubbleState, 'segments' | 'segmentRevisions'>
+  observed: Pick<CompanionSessionBubbleState, 'segments' | 'segmentRevisions'>,
+  unavailableHint = ''
 ): CompanionSessionBubbleState => {
   if (!state.turnId || state.dismissed || state.interrupted) return state;
+  let outcome = state.outcome;
+  let handoff = state.handoff;
   const owned = messages.flatMap(message => {
     if (message.conversation_id !== state.conversationId || message.turn_id !== state.turnId) return [];
-    const text = message.type === 'text' && message.position === 'left' ? extractResponseTextChunk(message.content)
-      : message.type === 'tips' && message.content.type !== 'error'
-        ? agentUserInputRequestText(message.content.user_input_request) : undefined;
+    if (message.type === 'tips' || message.type === 'agent_status') {
+      outcome = mergeAgentTurnOutcome(outcome ?? undefined, normalizeAgentTurnOutcome(message.content.turn_outcome)) ?? null;
+      if (message.type === 'tips' && message.content.type !== 'error') {
+        const text = agentUserInputRequestText(message.content.user_input_request);
+        if (text && message.content.user_input_request) handoff = { requestId: message.content.user_input_request.request_id, text };
+      }
+    }
+    const text = message.type === 'text' && message.position === 'left' ? extractResponseTextChunk(message.content) : undefined;
     return text === undefined ? [] : [{ message, text }];
   }).sort((left, right) => (left.message.created_at ?? 0) - (right.message.created_at ?? 0));
   const segments = new Map(state.segments);
@@ -82,22 +104,36 @@ export const hydrateCompanionSessionBubble = (
     if (following) order.splice(order.indexOf(following), 0, id);
     else order.push(id);
   });
-  const next = { ...state, segments, order };
+  const next = { ...state, segments, order, outcome, handoff, readError: outcome ? null : state.readError,
+    hint: outcome?.kind === 'unavailable' ? unavailableHint : state.hint };
   const text = joinedText(next);
-  if (!owned.length) return state;
-  return { ...next, bubble: text || state.hint || (state.phase === 'settled' ? '' : '…'),
-    loading: !text && !state.hint && state.phase !== 'settled' };
+  if (!owned.length && outcome === state.outcome && handoff === state.handoff) return state;
+  return { ...next, bubble: text || next.hint || (state.phase === 'settled' ? '' : '…'),
+    loading: !text && !next.hint && state.phase !== 'settled' };
 };
 
 export const streamCompanionSessionBubble = (
   state: CompanionSessionBubbleState,
   message: IResponseMessage,
   toolHint: string,
-  errorHint: string
+  errorHint: string,
+  unavailableHint = ''
 ): CompanionSessionBubbleState => {
   const inputRequest = isUserInputRequestPresentation(message) ? agentUserInputRequestText(message.data.user_input_request) : undefined;
+  const data = message.data && typeof message.data === 'object' && !Array.isArray(message.data) ? message.data as Record<string, unknown> : undefined;
+  const outcome = normalizeAgentTurnOutcome(data?.turn_outcome);
   if (message.conversation_id !== state.conversationId || !message.turn_id || message.turn_id !== state.turnId
-    || (message.stream_complete && !inputRequest) || state.dismissed || state.interrupted) return state;
+    || (message.stream_complete && !inputRequest && !outcome && data?.query_error !== true) || state.dismissed || state.interrupted) return state;
+  if (data?.query_error === true) return { ...state, readError: errorHint, bubble: errorHint, loading: false };
+  if (outcome || inputRequest) {
+    const request = isUserInputRequestPresentation(message) ? message.data.user_input_request : undefined;
+    const next = { ...state, outcome: mergeAgentTurnOutcome(state.outcome ?? undefined, outcome) ?? null, readError: null,
+      handoff: inputRequest && request ? { requestId: request.request_id, text: inputRequest } : state.handoff,
+      hint: outcome?.kind === 'unavailable' ? unavailableHint : state.hint,
+    };
+    const text = joinedText(next);
+    return { ...next, bubble: text || next.hint || (state.phase === 'settled' ? '' : '…'), loading: !text && !next.hint && state.phase !== 'settled' };
+  }
   if (message.hidden) {
     const segments = new Map(state.segments);
     segments.delete(message.msg_id);
@@ -107,14 +143,14 @@ export const streamCompanionSessionBubble = (
     const text = joinedText(next);
     return { ...next, bubble: text || state.hint || (state.phase === 'settled' ? '' : '…'), loading: !text && !state.hint };
   }
-  if (message.type === 'content' || message.type === 'text' || inputRequest) {
-    const chunk = inputRequest ?? extractResponseTextChunk(message.data);
+  if (message.type === 'content' || message.type === 'text') {
+    const chunk = extractResponseTextChunk(message.data);
     if ((!chunk && !message.replace) || !message.msg_id) return state;
     const segments = new Map(state.segments);
     const segmentRevisions = new Map(state.segmentRevisions);
     segmentRevisions.set(message.msg_id, (segmentRevisions.get(message.msg_id) ?? 0) + 1);
     const order = segments.has(message.msg_id) ? state.order : [...state.order, message.msg_id];
-    segments.set(message.msg_id, message.replace || inputRequest ? chunk : (segments.get(message.msg_id) ?? '') + chunk);
+    segments.set(message.msg_id, message.replace ? chunk : (segments.get(message.msg_id) ?? '') + chunk);
     const next = { ...state, segments, segmentRevisions, order };
     const text = joinedText(next);
     return { ...next, bubble: text || (state.phase === 'settled' ? '' : '…'), loading: !text && state.phase !== 'settled' };

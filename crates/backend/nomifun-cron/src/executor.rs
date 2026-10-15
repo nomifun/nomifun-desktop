@@ -1149,16 +1149,11 @@ fn replayed_delivery_result(
             ),
         };
     }
-    match delivery.result_ok {
-        Some(true) => ExecutionResult::Success {
+    match delivery.terminal_result() {
+        Some(Ok(())) => ExecutionResult::Success {
             conversation_id: conversation_id.to_owned(),
         },
-        Some(false) => ExecutionResult::Error {
-            message: delivery
-                .result_error
-                .or(delivery.result_text)
-                .unwrap_or_else(|| format!("cron run {run_id} completed with an error")),
-        },
+        Some(Err(message)) => ExecutionResult::Error { message },
         None => ExecutionResult::Quarantined {
             message: format!(
                 "cron run {run_id} completed without an exact durable terminal result"
@@ -1356,5 +1351,34 @@ mod model_only_binding_tests {
             Some("0190f5fe-7c00-7a00-8000-000000000104".to_owned());
         let error = cron_session_agent_binding(&job).unwrap_err();
         assert!(error.to_string().contains("frozen Agent binding"));
+    }
+}
+
+#[cfg(test)]
+mod public_delivery_tests {
+    use super::*;
+    use nomifun_agent_contracts::{AgentTurnOutcome, AgentUserInputRequest};
+
+    fn delivery(outcome: AgentTurnOutcome) -> CronTurnDelivery {
+        CronTurnDelivery { message_id:"input".into(),replayed:true,completed:true,
+            turn_outcome:Some(outcome),user_input_request:None,result_ok:Some(true),result_text:None,
+            result_error:None,result_error_code:None,result_error_retryable:Some(false) }
+    }
+
+    #[test]
+    fn scheduled_input_handoff_and_missing_public_result_cannot_become_success() {
+        let mut question=delivery(AgentTurnOutcome::InputRequired {request_id:"ask-name".into()});
+        question.user_input_request=Some(AgentUserInputRequest {request_id:"ask-name".into(),
+            question:"请提供姓名。".into(),remaining_work:"生成 PPT。".into()});
+        assert!(matches!(replayed_delivery_result("run","session",question.clone()),
+            ExecutionResult::Error {message} if message.contains("CRON_USER_INPUT_REQUIRED") && message.contains("请提供姓名")));
+        question.user_input_request.as_mut().unwrap().request_id="different-question".into();
+        assert!(matches!(replayed_delivery_result("run","session",question),ExecutionResult::Error {..}));
+        for outcome in [AgentTurnOutcome::Unavailable,AgentTurnOutcome::Failed {message_ids:vec![]},
+            AgentTurnOutcome::Cancelled {message_ids:vec![]}] {
+            assert!(matches!(replayed_delivery_result("run","session",delivery(outcome)),ExecutionResult::Error {..}));
+        }
+        assert!(matches!(replayed_delivery_result("run","session",delivery(AgentTurnOutcome::Paused {message_ids:vec![]})),ExecutionResult::Quarantined {..}));
+        assert!(matches!(replayed_delivery_result("run","session",delivery(AgentTurnOutcome::Answered {message_ids:vec!["answer".into()]})),ExecutionResult::Success {..}));
     }
 }

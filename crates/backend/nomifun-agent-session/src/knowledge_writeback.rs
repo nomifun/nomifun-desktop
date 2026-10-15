@@ -133,6 +133,7 @@ impl AgentSessionStore {
              FROM agent_turns WHERE session_id=? AND operation_id=? AND source_message_id IS NOT NULL",
         ).bind(session.as_ref()).bind(operation.as_ref()).fetch_optional(&mut *tx).await?;
         let mut summaries = row.map(turn_history_projection_from_row).transpose()?.flatten().into_iter().collect::<Vec<_>>();
+        history_turn_outcome::hydrate(&mut tx, session, &mut summaries).await?;
         hydrate(&mut tx, session, &mut summaries).await?;
         tx.commit().await?;
         Ok(summaries.pop())

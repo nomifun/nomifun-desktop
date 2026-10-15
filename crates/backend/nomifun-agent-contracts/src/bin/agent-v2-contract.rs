@@ -7,7 +7,7 @@ use nomifun_agent_contracts::{
     AgentBindingChangedPayloadV1, AgentBindingValue, AgentPresetRevision, AgentPresetRevisionDigestInput,
     AgentPresetRevisionPayload, AgentSessionAggregate, ArtifactEnvelope,
     AgentStoreSchemaManifestPayload,
-    IdmmDecisionExplanation, IdmmDecisionNotice,
+    IdmmDecisionExplanation, IdmmDecisionNotice, AgentTurnOutcome,
     TurnWorkspaceFilesObservedV1, KnowledgeWritebackStartedV1, KnowledgeWritebackSettledV1,
     CanonicalAgentStoreSchemaManifestPayload, CanonicalApiInventoryPayload, CanonicalHttpMethod,
     CanonicalErrorRegistryPayload,
@@ -574,6 +574,7 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
     add_schema::<AgentSessionAggregate>(&mut schemas, "agent_session")?;
     add_schema::<IdmmDecisionExplanation>(&mut schemas, "idmm_decision_explanation")?;
     add_schema::<IdmmDecisionNotice>(&mut schemas, "idmm_decision_notice")?;
+    add_schema::<AgentTurnOutcome>(&mut schemas, "agent_turn_outcome")?;
     add_schema::<AgentStoreSchemaManifestPayload>(&mut schemas, "agent_store_schema_manifest")?;
     add_schema::<SessionEventRegistryPayload>(&mut schemas, "session_event_registry")?;
     add_schema::<TurnWorkspaceFilesObservedV1>(&mut schemas, "turn_workspace_files_observed")?;

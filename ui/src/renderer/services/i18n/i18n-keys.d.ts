@@ -4553,6 +4553,8 @@ export type I18nKey =
   | 'messages.turnDurationUnits.minute'
   | 'messages.turnDurationUnits.second'
   | 'messages.turnDurationUnknown'
+  | 'messages.turnOutcomeReadFailed'
+  | 'messages.turnOutcomeUnavailable'
   | 'messages.turnProcess.collapse'
   | 'messages.turnProcess.expand'
   | 'messages.turnProcess.interruptedReply'

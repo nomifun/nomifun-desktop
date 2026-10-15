@@ -126,11 +126,39 @@ pub struct CronTurnDelivery {
     pub message_id: String,
     pub replayed: bool,
     pub completed: bool,
+    pub turn_outcome: Option<nomifun_agent_contracts::AgentTurnOutcome>,
+    pub user_input_request: Option<nomifun_agent_contracts::AgentUserInputRequest>,
     pub result_ok: Option<bool>,
     pub result_text: Option<String>,
     pub result_error: Option<String>,
     pub result_error_code: Option<String>,
     pub result_error_retryable: Option<bool>,
+}
+
+impl CronTurnDelivery {
+    /// A closed execution is not necessarily a delivered scheduled result.
+    /// Missing/paused facts stay quarantined; a question or unavailable result
+    /// is explicit attention, never permission to replay the original effects.
+    pub(crate) fn terminal_result(&self) -> Option<Result<(), String>> {
+        use nomifun_agent_contracts::AgentTurnOutcome;
+        if !self.completed { return None; }
+        let outcome = self.turn_outcome.as_ref()?;
+        let failure = || self.result_error.clone().or_else(|| self.result_text.clone())
+            .unwrap_or_else(|| "The scheduled Agent turn ended without a successful public delivery".into());
+        match outcome {
+            AgentTurnOutcome::InputRequired { request_id } => Some(Err(match &self.user_input_request {
+                Some(request) if request.request_id.as_ref() == request_id && request.validate().is_ok() =>
+                    format!("CRON_USER_INPUT_REQUIRED: {}", request.question),
+                _ => "The scheduled Agent input handoff has no matching canonical question".into(),
+            })),
+            AgentTurnOutcome::Answered { .. } if self.user_input_request.is_none() =>
+                self.result_ok.map(|ok| if ok { Ok(()) } else { Err(failure()) }),
+            AgentTurnOutcome::Unavailable => Some(Err(
+                "The scheduled Agent turn closed without a public answer or input handoff; its effects will not be replayed".into())),
+            AgentTurnOutcome::Paused { .. } => None,
+            _ => Some(Err(failure())),
+        }
+    }
 }
 
 /// Result of the host-owned preparation gate.

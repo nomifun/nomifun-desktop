@@ -17,6 +17,7 @@ pub struct ChannelTurnDeliveryReceipt {
     pub message_id: String,
     pub replayed: bool,
     pub completed: bool,
+    pub turn_outcome: Option<nomifun_agent_contracts::AgentTurnOutcome>,
     pub result_ok: Option<bool>,
     pub result_text: Option<String>,
     pub result_error: Option<String>,
@@ -39,11 +40,23 @@ pub struct ChannelTurnDelivery {
 pub struct ChannelCompletedTurnReceipt {
     pub message_id: String,
     pub replayed: bool,
+    pub turn_outcome: Option<nomifun_agent_contracts::AgentTurnOutcome>,
     pub result_ok: Option<bool>,
     pub result_text: Option<String>,
     pub result_error: Option<String>,
     pub result_error_code: Option<String>,
     pub result_error_retryable: Option<bool>,
+}
+
+impl ChannelCompletedTurnReceipt {
+    /// A question is a valid channel reply, not completion of the user's task.
+    pub fn has_public_reply(&self) -> bool {
+        self.result_ok == Some(true)
+            && matches!(self.turn_outcome,
+                Some(nomifun_agent_contracts::AgentTurnOutcome::Answered { .. }
+                    | nomifun_agent_contracts::AgentTurnOutcome::InputRequired { .. }))
+            && self.result_text.as_ref().is_some_and(|text| !text.trim().is_empty())
+    }
 }
 
 /// Read-only receipt state used by Channel delivery code.
@@ -113,8 +126,27 @@ pub trait ChannelSessionPort: Send + Sync {
 mod tests {
     use super::*;
 
+    #[test]
+    fn closed_channel_turn_requires_a_public_reply_and_preserves_questions() {
+        let mut receipt = ChannelCompletedTurnReceipt {
+            message_id: "input".into(), replayed: true,
+            turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::InputRequired { request_id: "ask".into() }),
+            result_ok: Some(true), result_text: Some("请提供姓名。".into()),
+            result_error: None, result_error_code: None, result_error_retryable: Some(false),
+        };
+        assert!(receipt.has_public_reply());
+        receipt.result_text = None;
+        assert!(!receipt.has_public_reply());
+        receipt.result_text = Some("earlier progress".into());
+        receipt.turn_outcome = Some(nomifun_agent_contracts::AgentTurnOutcome::Unavailable);
+        assert!(!receipt.has_public_reply());
+        receipt.turn_outcome = None;
+        assert!(!receipt.has_public_reply());
+    }
+
     fn completed_delivery() -> ChannelTurnDeliveryReceipt {
         ChannelTurnDeliveryReceipt {
+            turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Failed { message_ids: vec![] }),
             message_id: "message-1".to_owned(),
             replayed: true,
             completed: true,
@@ -130,6 +162,7 @@ mod tests {
     fn receipt_projection_preserves_completed_delivery_facts() {
         let delivery = completed_delivery();
         let projected = ChannelTurnReceiptState::Completed(ChannelCompletedTurnReceipt {
+            turn_outcome: delivery.turn_outcome.clone(),
             message_id: delivery.message_id.clone(),
             replayed: delivery.replayed,
             result_ok: delivery.result_ok,
@@ -143,6 +176,7 @@ mod tests {
         assert_eq!(
             projected,
             ChannelTurnReceiptState::Completed(ChannelCompletedTurnReceipt {
+                turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Failed { message_ids: vec![] }),
                 message_id: "message-1".to_owned(),
                 replayed: true,
                 result_ok: Some(false),

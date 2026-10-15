@@ -1588,6 +1588,7 @@ impl NomiCoreSessionOwner {
             .await.map_err(agent_session_store_error)?;
         let delivery = nomifun_agent_execution::canonical_turn_delivery(&facts, &receipt, replayed)?;
         Ok(PublicTurnDeliveryState::Completed(IdempotentMessageDelivery {
+            turn_outcome: delivery.turn_outcome,
             message_id: delivery.message_id,
             replayed: delivery.replayed,
             completed: delivery.completed,
@@ -1712,6 +1713,9 @@ impl NomiCoreSessionOwner {
         assistant_message_id: &str,
         event: &AgentStreamEvent,
     ) -> Option<WebSocketMessage<Value>> {
+        // The canonical terminal summary publishes a handoff once, using the
+        // same identity as history. The SDK's tip is not a second UI message.
+        if matches!(event,AgentStreamEvent::Tips(data) if data.user_input_request.is_some()) {return None;}
         let mut event_data = serde_json::to_value(event).ok()?;
         normalize_keys_to_snake_case(&mut event_data);
         if let AgentStreamEvent::Error(error) = event {
@@ -1786,6 +1790,31 @@ impl NomiCoreSessionOwner {
         })))
     }
 
+    /// Publish the same committed terminal projection used by history before
+    /// closing the live stream. The renderer never has to guess the result
+    /// from whichever assistant fragment happened to arrive last.
+    fn canonical_terminal_summary_wire_event(session_id: &AgentSessionId, message: MessageResponse)
+        -> Option<WebSocketMessage<Value>> {
+        if message.conversation_id != session_id.as_ref() || message.content.get("turn_outcome").is_none() { return None; }
+        let kind=match message.r#type {MessageType::AgentStatus=>"agent_status",MessageType::Tips=>"tips",_=>return None};
+        let root=message.content.get("turn_id").and_then(Value::as_str)?.to_owned();
+        Some(WebSocketMessage::new("message.stream",json!({
+            "conversation_id":session_id,"msg_id":message.msg_id?,"turn_id":root,
+            "type":kind,"data":message.content,"hidden":false,"stream_complete":true,"created_at":message.created_at,
+        })))
+    }
+
+    /// A failed display query is a visible, retryable notice, not a rewritten
+    /// Agent terminal or an invented public result.
+    fn canonical_result_read_error_wire_event(session_id: &AgentSessionId, root: &str) -> WebSocketMessage<Value> {
+        WebSocketMessage::new("message.stream",json!({
+            "conversation_id":session_id,"msg_id":Uuid::now_v7().to_string(),"turn_id":root,
+            "type":"tips","data":{"content":"The turn result could not be displayed. Reopen this conversation to retry.",
+                "type":"error","query_error":true,"turn_id":root},
+            "hidden":false,"stream_complete":true,"created_at":now_ms(),
+        }))
+    }
+
     pub(super) async fn publish_knowledge_writeback_summary(
         &self,
         session_id: &AgentSessionId,
@@ -1840,6 +1869,7 @@ impl NomiCoreSessionOwner {
             AgentStreamEvent::Finish(data) => data.stop_reason,
             _ => None,
         };
+        let turn_outcome=match terminal {AgentStreamEvent::Finish(data)=>data.turn_outcome.as_ref(),_=>None};
         WebSocketMessage::new(
             "turn.completed",
             json!({
@@ -1849,6 +1879,7 @@ impl NomiCoreSessionOwner {
                 "state": state,
                 "detail": detail,
                 "stop_reason": stop_reason,
+                "turn_outcome": turn_outcome,
                 "can_send_message": true,
                 "runtime": {
                     "state": "idle",
@@ -1967,6 +1998,35 @@ impl NomiCoreSessionOwner {
                         // The canonical terminal contains the captured Agent,
                         // model and workspace, shared by realtime and history.
                         event = AgentStreamEvent::Error(error);
+                    }
+                    let summary = async {
+                        let created_at=store.session_created_at(&session_id).await.map_err(agent_session_store_error)?;
+                        let mut summaries=store.turn_history_for_sources(&session_id,std::slice::from_ref(&root_message_id))
+                            .await.map_err(agent_session_store_error)?;
+                        let summary=summaries.pop().ok_or_else(||NomiCoreApiError::new(StatusCode::CONFLICT,
+                            "AGENT_SESSION_TURN_RESULT_MISSING","The exact Turn has no committed result projection"))?;
+                        canonical_message_response(&session_id,created_at,summary)
+                    }.await;
+                    match summary {
+                        Ok(Some(summary))=>{
+                            if let AgentStreamEvent::Finish(data)=&mut event {
+                                data.turn_outcome=summary.content.get("turn_outcome").filter(|value|!value.is_null())
+                                    .cloned().map(serde_json::from_value).transpose().unwrap_or_else(|error| {
+                                        tracing::warn!(?error,"canonical terminal outcome is invalid");None
+                                    });
+                            }
+                            if let Some(wire)=Self::canonical_terminal_summary_wire_event(&session_id,summary) {
+                                sink.send_to_user(&owner_id,wire);
+                            }
+                        },
+                        Ok(None)=>{
+                            tracing::warn!(agent_session_id=session_id.as_ref(),"canonical terminal result has no public projection");
+                            sink.send_to_user(&owner_id,Self::canonical_result_read_error_wire_event(&session_id,&root_message_id));
+                        },
+                        Err(error)=>{
+                            tracing::warn!(agent_session_id=session_id.as_ref(),?error,"canonical terminal result could not be read");
+                            sink.send_to_user(&owner_id,Self::canonical_result_read_error_wire_event(&session_id,&root_message_id));
+                        },
                     }
                 }
                 if let Some(message) = Self::canonical_stream_wire_event(
@@ -2100,6 +2160,7 @@ impl NomiCoreSessionOwner {
         if receipt.duplicate {
             return match state {
                 PublicTurnDeliveryState::Accepted { message_id } => Ok(IdempotentMessageDelivery {
+                    turn_outcome: None,
                     message_id,
                     replayed: true,
                     completed: false,
@@ -2251,6 +2312,7 @@ impl NomiCoreSessionOwner {
             } else { AppError::BadGateway(detail) });
         }
         Ok(IdempotentMessageDelivery {
+                    turn_outcome: None,
             message_id: root_message_id,
             replayed: false,
             completed: false,
@@ -3506,6 +3568,7 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
             PublicTurnDeliveryState::Missing => None,
             PublicTurnDeliveryState::Accepted { message_id } => {
                 Some(cron_delivery_from_conversation(IdempotentMessageDelivery {
+                    turn_outcome: None,
                     message_id,
                     replayed: true,
                     completed: false,
@@ -4199,6 +4262,7 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
             PublicTurnDeliveryState::Missing => None,
             PublicTurnDeliveryState::Accepted { message_id } => {
                 let mut delivery = agent_execution_delivery_from_conversation(IdempotentMessageDelivery {
+                    turn_outcome: None,
                     message_id,
                     replayed: true,
                     completed: false,
@@ -4215,6 +4279,12 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
                     &AgentSessionId::from(conversation_id.to_owned()),
                     &Self::turn_operation_id(owner_id, conversation_id, operation_id),
                 ).await.map_err(agent_session_store_error)?.map(|pause| pause.reason);
+                if delivery.paused_reason.is_some() {
+                    delivery.turn_outcome=self.canonical.store().turn_outcome(
+                        &AgentSessionId::from(conversation_id.to_owned()),
+                        &Self::turn_operation_id(owner_id,conversation_id,operation_id),
+                    ).await.map_err(agent_session_store_error)?;
+                }
                 Some(delivery)
             },
             PublicTurnDeliveryState::Completed(delivery) => {
@@ -4460,6 +4530,7 @@ fn agent_execution_delivery_from_conversation(
     delivery: IdempotentMessageDelivery,
 ) -> nomifun_agent_execution::AgentExecutionDelivery {
     nomifun_agent_execution::AgentExecutionDelivery {
+        turn_outcome: delivery.turn_outcome,
         message_id: delivery.message_id,
         replayed: delivery.replayed,
         completed: delivery.completed,
@@ -4479,6 +4550,7 @@ fn channel_delivery_from_conversation(
     let text = nomifun_channel::message_service::channel_reply_text(
         delivery.result_text.as_deref(), delivery.user_input_request.as_ref());
     nomifun_channel::ChannelTurnDeliveryReceipt {
+        turn_outcome: delivery.turn_outcome,
         message_id: delivery.message_id,
         replayed: delivery.replayed,
         completed: delivery.completed,
@@ -4499,12 +4571,15 @@ fn channel_turn_receipt_state_from_conversation(
             nomifun_channel::ChannelTurnReceiptState::Accepted { message_id }
         }
         PublicTurnDeliveryState::Completed(delivery) => {
+            let text=nomifun_channel::message_service::channel_reply_text(
+                delivery.result_text.as_deref(),delivery.user_input_request.as_ref());
             nomifun_channel::ChannelTurnReceiptState::Completed(
                 nomifun_channel::ChannelCompletedTurnReceipt {
+                    turn_outcome: delivery.turn_outcome,
                     message_id: delivery.message_id,
                     replayed: delivery.replayed,
                     result_ok: delivery.result_ok,
-                    result_text: delivery.result_text,
+                    result_text: text,
                     result_error: delivery.result_error,
                     result_error_code: delivery.result_error_code,
                     result_error_retryable: delivery.result_error_retryable,
@@ -4531,6 +4606,8 @@ fn cron_delivery_from_conversation(
     delivery: IdempotentMessageDelivery,
 ) -> nomifun_cron::CronTurnDelivery {
     nomifun_cron::CronTurnDelivery {
+        turn_outcome: delivery.turn_outcome,
+        user_input_request: delivery.user_input_request,
         message_id: delivery.message_id,
         replayed: delivery.replayed,
         completed: delivery.completed,
@@ -5996,6 +6073,45 @@ mod session_boundary_tests {
     }
 
     #[test]
+    fn input_handoff_uses_one_committed_result_for_history_and_live_without_an_empty_text_collision() {
+        let session=AgentSessionId::from(SESSION_ID);
+        let root="0190f5fe-7c00-7a00-8abc-012345678911";
+        let summary_id="0190f5fe-7c00-7a00-8abc-012345678912";
+        let outcome=json!({"kind":"input_required","request_id":"ask-name"});
+        let request=json!({"request_id":"ask-name","question":"姓名？","remaining_work":"生成5页PPT"});
+        let projection=MessageProjection {session_id:session.clone(),projection_id:"turn_summary:start".into(),first_seq:2,last_seq:9,
+            presentation_intent:"turn_summary".into(),message_type:None,message_status:None,semantic_digest:"derived".into(),
+            projection:json!({"correlation_id":summary_id,"source_message_id":root,"state":"completed",
+                "turn_outcome":outcome,"user_input_request":request,"started_at_ms":1,"finished_at_ms":2})};
+        let history=canonical_message_response(&session,1000,projection).unwrap().unwrap();
+        assert_eq!(history.content["turn_outcome"],outcome);
+        assert_eq!(history.content["user_input_request"],request);
+        assert_eq!(history.content["content"],"");
+        assert_eq!(history.msg_id.as_deref(),Some(summary_id));
+        let live=NomiCoreSessionOwner::canonical_terminal_summary_wire_event(&session,history.clone()).unwrap();
+        assert_eq!(live.data["data"],history.content);
+        assert_eq!(live.data["msg_id"],summary_id);
+        assert_eq!(live.data["type"],"tips");
+        assert_eq!(live.data["stream_complete"],true);
+        let assistant=super::super::engine_journal::canonical_assistant_message_id(root).unwrap();
+        assert_ne!(assistant,summary_id);
+        let provisional:AgentStreamEvent=serde_json::from_value(json!({"type":"tips","data":{
+            "content":"","type":"warning","user_input_request":request}})).unwrap();
+        assert!(NomiCoreSessionOwner::canonical_stream_wire_event(&session,root,&assistant,&provisional).is_none(),
+            "the SDK handoff cannot create a second provisional question identity");
+        let empty=MessageProjection {session_id:session.clone(),projection_id:format!("message:{assistant}"),first_seq:8,last_seq:8,
+            presentation_intent:"message".into(),message_type:None,message_status:None,semantic_digest:"old".into(),
+            projection:json!({"correlation_id":assistant,"state":"completed","part_count":0})};
+        assert!(canonical_message_response(&session,1000,empty).unwrap().is_none());
+        let failure=NomiCoreSessionOwner::canonical_result_read_error_wire_event(&session,root);
+        assert_eq!(failure.data["data"]["query_error"],true);
+        assert!(failure.data["data"].get("turn_outcome").is_none());
+        assert_eq!(failure.data["data"]["type"],"error");
+        assert_ne!(failure.data["msg_id"],live.data["msg_id"]);
+        assert_eq!(uuid::Uuid::parse_str(failure.data["msg_id"].as_str().unwrap()).unwrap().get_version_num(),7);
+    }
+
+    #[test]
     fn failed_turn_summary_rehydrates_as_the_same_compact_error_message() {
         let session_id = AgentSessionId::from(SESSION_ID);
         let root_message_id = "0190f5fe-7c00-7a00-8abc-012345678911";
@@ -6596,33 +6712,24 @@ mod session_boundary_tests {
     #[test]
     fn canonical_agent_session_handlers_do_not_reenter_legacy_conversation_authority() {
         let source = include_str!("nomi_core_session.rs");
-        let handlers = source
-            .rsplit_once("async fn create_nomi_core_agent_session(")
-            .unwrap()
-            .1
-            .split_once("async fn open_nomi_core_remote(")
-            .unwrap()
-            .0;
-        for retired in [
-            "create_session_idempotent",
-            "load_owned_nomi_core_session",
-            "load_session_from_owner",
-            ".service()",
-            "request.extra",
-        ] {
-            assert!(
-                !handlers.contains(retired),
-                "canonical AgentSession handlers still reach {retired}"
-            );
-        }
+        // Inspect the actual HTTP handlers, rather than every application
+        // helper physically located between the local and remote routes.
         for handler in [
+            "create_nomi_core_agent_session",
             "start_nomi_core_agent_session_turn",
             "steer_nomi_core_agent_session_turn",
             "cancel_nomi_core_agent_session_turn",
             "fork_nomi_core_agent_session",
             "delete_nomi_core_agent_session",
         ] {
-            assert!(handlers.contains(handler), "missing canonical handler {handler}");
+            let signature = format!("async fn {handler}(");
+            let body = source.rsplit_once(&signature)
+                .unwrap_or_else(|| panic!("missing canonical handler {handler}"))
+                .1.split_once("\n}\n").expect("top-level handler boundary").0;
+            for retired in ["create_session_idempotent", "load_owned_nomi_core_session",
+                "load_session_from_owner", ".service()", "request.extra"] {
+                assert!(!body.contains(retired), "canonical handler {handler} still reaches {retired}");
+            }
         }
     }
 
@@ -10199,6 +10306,7 @@ async fn execute_initial_remote_turn(
                         session_id,
                         &initial_key,
                         &IdempotentMessageDelivery {
+                    turn_outcome: None,
                             message_id,
                             replayed: true,
                             completed: false,
@@ -14474,9 +14582,10 @@ fn canonical_message_response_with_observation(
             request.validate().map_err(AppError::Conflict)?;
             return Ok(Some(MessageResponse {
                 message_id: summary_message_id.to_owned(), conversation_id: session_id.as_ref().to_owned(),
-                msg_id: Some(stream_message_id), r#type: MessageType::Tips,
+                msg_id: Some(summary_message_id.to_owned()), r#type: MessageType::Tips,
                 content: json!({ "content":"", "type":"warning", "user_input_request":request,
-                    "turn_id":root_message_id, "started_at_ms":started_at_ms, "finished_at_ms":finished_at_ms }),
+                    "turn_outcome":document.get("turn_outcome"), "turn_id":root_message_id,
+                    "started_at_ms":started_at_ms, "finished_at_ms":finished_at_ms }),
                 position: Some(MessagePosition::Center), status: Some(MessageStatus::Finish), hidden:false,
                 created_at:created_at.saturating_add(i64::try_from(projection.first_seq).unwrap_or(i64::MAX)),
             }));
@@ -14511,6 +14620,7 @@ fn canonical_message_response_with_observation(
                     "turn_id": root_message_id,
                     "started_at_ms": started_at_ms,
                     "finished_at_ms": finished_at_ms,
+                    "turn_outcome": document.get("turn_outcome"),
                 }),
                 position: Some(MessagePosition::Center),
                 status: Some(MessageStatus::Error),
@@ -14532,6 +14642,7 @@ fn canonical_message_response_with_observation(
             "started_seq": document.get("started_seq").cloned().unwrap_or(Value::Null),
             "finished_seq": document.get("finished_seq").cloned().unwrap_or(Value::Null),
             "started_at_ms": started_at_ms, "finished_at_ms": finished_at_ms,
+            "turn_outcome": document.get("turn_outcome"),
         });
         if let Some(notice) = document.get("knowledge_writeback").filter(|value| !value.is_null()) {
             summary_content["knowledge_writeback"] = notice.clone();
@@ -14571,11 +14682,13 @@ fn canonical_message_response_with_observation(
         return Ok(None);
     }
     let (message_type, content, position) = match projection.presentation_intent.as_str() {
+        "message" if state != "accepted" && document.get("content").and_then(Value::as_str).is_none_or(|text|text.trim().is_empty()) => return Ok(None),
         "message" => (
             MessageType::Text,
             json!({
                 "content": document.get("content").and_then(Value::as_str).unwrap_or_default(),
                 "turn_id": document.get("turn_id"),
+                "standalone_projection": document.get("standalone_projection"),
                 "idmm_decision": idmm_decision,
                 "display_at_ms": document.get("display_at_ms").and_then(Value::as_i64).unwrap_or_else(|| {
                     // created_at remains the stable keyset/order cursor. The
@@ -14881,20 +14994,19 @@ async fn get_nomi_core_agent_session_message_history(
             })
         })
         .transpose()?;
-    let (mut projections, has_more, total) = state
+    let (mut projections, has_more, total, raw_next_before_seq) = state
         .session_owner
         .canonical()
         .store()
-        .message_history_before(&session_id, before_seq, page_size)
+        .message_history_with_turns_before(&session_id, before_seq, page_size)
         .await
         .map_err(agent_session_store_error)?;
     // The UUID is an opaque marker; the backward reader uses the sequence
     // encoded in the timestamp. Anchor to the last raw projection before any
     // presentation filtering, including pages with no visible messages.
-    let next_cursor = has_more.then(|| {
-        let oldest = projections.last().expect("a nonterminal history page has projections");
+    let next_cursor = raw_next_before_seq.map(|oldest| {
         format!("{}:{}", created_at.saturating_add(
-            i64::try_from(oldest.first_seq).unwrap_or(i64::MAX),
+            i64::try_from(oldest).unwrap_or(i64::MAX),
         ), session_id.as_ref())
     });
     super::history_thinking_display::hydrate_thinking_lifecycle(&state.session_owner.pool, &session_id, &mut projections).await?;
@@ -14986,6 +15098,8 @@ async fn get_nomi_core_agent_session_message(
     super::history_thinking_display::hydrate_thinking_lifecycle(
         &state.session_owner.pool, &session_id, std::slice::from_mut(&mut projection),
     ).await?;
+    state.session_owner.canonical().store().hydrate_message_history_metadata(&session_id,std::slice::from_mut(&mut projection))
+        .await.map_err(agent_session_store_error)?;
     let observations = load_historical_tool_observations(
         &state.session_owner.pool, &session_id, std::slice::from_ref(&projection),
     ).await?;

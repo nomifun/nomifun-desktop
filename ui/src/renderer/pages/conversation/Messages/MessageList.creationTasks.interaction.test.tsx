@@ -66,16 +66,24 @@ beforeEach(() => {
   const watchFiles = spyOn(ipcBridge.workspaceOfficeWatch.fileAdded, 'on').mockImplementation(() => () => {});
   const files = spyOn(ipcBridge.fs.listWorkspaceFiles, 'invoke').mockResolvedValue([]);
   const completed = spyOn(ipcBridge.conversation.turnCompleted, 'on').mockImplementation(() => () => {});
+  const reconnect = spyOn(ipcBridge.conversation.reconnected, 'on').mockReturnValue(() => {});
+  const turnFiles = spyOn(ipcBridge.conversation.turnFiles, 'invoke').mockResolvedValue([]);
   const tasks = spyOn(creationClient, 'listCreationTasks').mockResolvedValue([task()]);
   const result = spyOn(creativeAssetClient, 'get').mockResolvedValue(asset);
   restoreMocks = () => {
     content.mockRestore(); tree.mockRestore(); entry.mockRestore(); watchStart.mockRestore(); watchStop.mockRestore();
-    watchFiles.mockRestore(); files.mockRestore(); completed.mockRestore(); tasks.mockRestore(); result.mockRestore();
+    watchFiles.mockRestore(); files.mockRestore(); completed.mockRestore(); reconnect.mockRestore(); turnFiles.mockRestore(); tasks.mockRestore(); result.mockRestore();
   };
 });
 afterEach(() => { cleanup(); restoreMocks(); });
 
 function timeline(messages: TMessage[], { readOnly = false }: { readOnly?: boolean } = {}) {
+  if (messages.some(message => message.msg_id === replyId)) messages = [...messages, {
+    id: 'public-receipt', msg_id: parseMessageId('0190f5fe-7c00-7a00-8000-000000000310'), turn_id: requestId,
+    conversation_id: conversationId, type: 'agent_status', created_at: createdAt + 2000,
+    content: { backend: 'nomi', status: 'prepared', turn_summary: true,
+      turn_outcome: { kind: 'answered', message_ids: [replyId] } },
+  }];
   const cache = new Map();
   return (running: boolean) => <MemoryRouter><I18nextProvider i18n={i18n}>
     <SWRConfig value={{ provider: () => cache, shouldRetryOnError: false }}>
@@ -118,6 +126,9 @@ test('media from a completed turn appears after its reply and before the only re
 });
 
 test('mixed file deliverables and multiple media tasks share one footer in a read-only historical turn', async () => {
+  spyOn(ipcBridge.conversation.turnFiles, 'invoke').mockResolvedValue([{ turn_id: requestId, complete: true, files: [
+    { identity: 'workspace:report', relative_path: 'outputs/report.txt', file_name: 'report.txt', path: `${workspace}/outputs/report.txt`, operation: 'create', size_bytes: 42 },
+  ] }]);
   spyOn(creationClient, 'listCreationTasks').mockResolvedValue([
     task(), task({ creation_task_id: '0190f5fe-7c00-7a00-8000-000000000307', status: 'queued', result_asset_ids: [], finished_at: null }),
   ]);

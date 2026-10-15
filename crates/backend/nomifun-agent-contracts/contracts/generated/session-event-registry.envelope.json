@@ -288,7 +288,8 @@
           "mode": "any_of",
           "kinds": [
             "message/completed",
-            "message/assistant-projected"
+            "message/assistant-projected",
+            "turn/completed"
           ]
         },
         "correlation": "message",
@@ -1201,5 +1202,5 @@
       }
     ]
   },
-  "payload_digest": "2ce23718ed9aefc6e20383d245af3e087c611feb5eef6410af0a6b974e7e2e6c"
+  "payload_digest": "a903b61dedcf9f76082d3250aeff265f1ce69e4238c8057ad33ca0eace15d050"
 }

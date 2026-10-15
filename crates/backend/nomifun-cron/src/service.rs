@@ -1622,8 +1622,8 @@ impl CronService {
                 );
                 None
             }
-            CronTurnReceiptState::Completed(delivery) => match delivery.result_ok {
-                Some(true) => {
+            CronTurnReceiptState::Completed(delivery) => match delivery.terminal_result() {
+                Some(Ok(())) => {
                     let (status, result_error, projection) =
                         match self.success_run_projection(job, conversation_id).await {
                             Ok(projection) => ("ok", None, projection),
@@ -1643,14 +1643,7 @@ impl CronService {
                     .await
                     .then_some((status, result_error))
                 }
-                Some(false) => {
-                    let message = delivery
-                        .result_error
-                        .or(delivery.result_text)
-                        .unwrap_or_else(|| {
-                            "the exact Conversation turn completed with an unknown error"
-                                .to_owned()
-                        });
+                Some(Err(message)) => {
                     self.finalize_run_once(
                         job,
                         &reservation.cron_job_run_id,

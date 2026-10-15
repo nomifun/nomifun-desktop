@@ -69,6 +69,10 @@ mod turn_files;
 
 #[path = "history_transition_projection.rs"]
 mod history_transition_projection;
+#[path = "history_turn_outcome.rs"]
+mod history_turn_outcome;
+#[path = "history_standalone_projection.rs"]
+mod history_standalone_projection;
 
 #[path = "knowledge_writeback.rs"]
 mod knowledge_writeback;
@@ -2437,6 +2441,17 @@ impl AgentSessionStore {
         })
     }
 
+    /// Derive the exact Turn's public result in one read-only snapshot. The
+    /// result is never persisted as a second completion or input ledger.
+    pub async fn turn_outcome(&self, session_id: &AgentSessionId, operation_id: &OperationId)
+        -> Result<Option<nomifun_agent_contracts::AgentTurnOutcome>, SessionStoreError> {
+        let mut tx=self.pool.begin().await?;
+        require_live_session_tx(&mut tx,session_id.as_ref()).await?;
+        let result=history_turn_outcome::read(&mut tx,session_id,operation_id).await?;
+        tx.commit().await?;
+        Ok(result.turn_outcome)
+    }
+
     pub async fn read_effect(
         &self,
         session_id: &AgentSessionId,
@@ -2932,6 +2947,7 @@ impl AgentSessionStore {
                 history.push(summary);
             }
         }
+        history_turn_outcome::hydrate(&mut tx, session_id, &mut history).await?;
         knowledge_writeback::hydrate(&mut tx, session_id, &mut history).await?;
         tx.commit().await?;
         Ok(history)
@@ -2949,6 +2965,15 @@ impl AgentSessionStore {
         Ok(projection)
     }
 
+    pub async fn hydrate_message_history_metadata(&self,session:&AgentSessionId,rows:&mut [MessageProjection])
+        ->Result<(),SessionStoreError> {
+        let mut tx=self.pool.begin().await?;
+        require_live_session_tx(&mut tx,session.as_ref()).await?;
+        history_standalone_projection::hydrate(&mut tx,session,rows).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Read the renderer-facing conversation history. In addition to canonical
     /// message/tool/thinking projections, expose one derived lifecycle summary for every
     /// durable Turn. The summary is reconstructed from `agent_turns` in the
@@ -2959,6 +2984,20 @@ impl AgentSessionStore {
         before_seq: Option<u64>,
         limit: u32,
     ) -> Result<(Vec<MessageProjection>, bool, u64), SessionStoreError> {
+        let (items,has_more,total,_)=self.read_message_history_before(session_id,before_seq,limit,false).await?;
+        Ok((items,has_more,total))
+    }
+
+    /// Attach the exact lifecycle/result summary for every Turn represented
+    /// in this raw page. Associated summaries consume no pagination slots;
+    /// the fourth value retains the original raw window's cursor boundary.
+    pub async fn message_history_with_turns_before(&self, session_id: &AgentSessionId, before_seq: Option<u64>, limit: u32)
+        -> Result<(Vec<MessageProjection>,bool,u64,Option<u64>),SessionStoreError> {
+        self.read_message_history_before(session_id,before_seq,limit,true).await
+    }
+
+    async fn read_message_history_before(&self, session_id: &AgentSessionId, before_seq: Option<u64>, limit: u32, attach_turns: bool)
+        -> Result<(Vec<MessageProjection>,bool,u64,Option<u64>),SessionStoreError> {
         if limit == 0 || limit > MAX_EVENT_PAGE_SIZE {
             return Err(SessionStoreError::InvalidEvent(format!(
                 "message history page limit must be between 1 and {MAX_EVENT_PAGE_SIZE}",
@@ -3023,8 +3062,12 @@ impl AgentSessionStore {
         });
         let has_more = history.len() > limit as usize;
         history.truncate(limit as usize);
+        let raw_next_before_seq=has_more.then(||history.last().expect("nonterminal raw window").first_seq);
+        if attach_turns { history_turn_outcome::attach_for_page(&mut tx,session_id,head.last_seq,&mut history).await?; }
+        history_turn_outcome::hydrate(&mut tx, session_id, &mut history).await?;
         knowledge_writeback::hydrate(&mut tx, session_id, &mut history).await?;
         history_transition_projection::hydrate(&mut tx, session_id, &mut history).await?;
+        history_standalone_projection::hydrate(&mut tx, session_id, &mut history).await?;
 
         let message_total = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM agent_messages WHERE session_id = ? \
@@ -3043,7 +3086,7 @@ impl AgentSessionStore {
             SessionStoreError::InvalidSession("message history total overflowed".to_owned())
         })?;
         tx.commit().await?;
-        Ok((history, has_more, as_u64(total, "message history total")?))
+        Ok((history, has_more, as_u64(total, "message history total")?,raw_next_before_seq))
     }
 
     async fn messages_after_tx(

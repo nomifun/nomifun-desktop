@@ -5,6 +5,8 @@
  */
 
 import type { MessageId } from '@/common/types/ids';
+import type { AgentTurnOutcome } from '@/common/protocolBindings/AgentTurnOutcome';
+import { mergeAgentTurnOutcome } from '@/common/chat/turnOutcome';
 
 export type TurnDisclosureRole = 'user' | 'assistant' | 'process' | 'process_content' | 'metadata' | 'other';
 export type TurnDisclosureProcessState = 'completed' | 'running' | 'failed' | 'canceled';
@@ -26,8 +28,12 @@ export interface TurnDisclosureInputItem {
   terminal?: boolean;
   running?: boolean;
   sourceMessageIds?: MessageId[];
-  continuationOfMessageId?: MessageId;
   publicText?: boolean;
+  /** Host-derived public delivery receipt, never inferred from text order. */
+  turnOutcome?: AgentTurnOutcome;
+  userInputRequestId?: string;
+  /** Explicit non-Runtime projection; absence of a canonical receipt is not this marker. */
+  standalonePublic?: boolean;
 }
 
 export type TurnDisclosureOutputItem =
@@ -73,20 +79,39 @@ const unique = <T extends string>(values: T[]): T[] => Array.from(new Set(values
 const isTurnTimestamp = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value);
 
-export function collectPublicContinuationIds(
-  items: TurnDisclosureInputItem[], final: TurnDisclosureInputItem | undefined
-): ReadonlySet<string> {
-  const visible = new Set<string>();
-  if (!final?.turnId || final.role !== 'assistant' || final.terminal || final.publicText !== true) return visible;
-  const bySource = new Map<MessageId, TurnDisclosureInputItem>();
-  for (const entry of items) {
-    if (entry.turnId !== final.turnId || entry.role !== 'assistant' || entry.terminal || entry.publicText !== true) continue;
-    for (const source of entry.sourceMessageIds ?? []) bySource.set(source, entry);
+/** Public result membership is owned by the canonical Turn receipt. Unscoped
+ * local projections keep their public content; they do not elect a final row. */
+export function selectTurnPublicResultIds(items: TurnDisclosureInputItem[]): ReadonlySet<string> {
+  const outcomes = new Map<MessageId, AgentTurnOutcome>();
+  for (const item of items) if (item.turnId && item.turnOutcome) {
+    outcomes.set(item.turnId, mergeAgentTurnOutcome(outcomes.get(item.turnId), item.turnOutcome)!);
   }
-  let current: TurnDisclosureInputItem | undefined = final;
-  while (current && !visible.has(current.id)) {
-    visible.add(current.id);
-    current = current.continuationOfMessageId ? bySource.get(current.continuationOfMessageId) : undefined;
+  const visible = new Set<string>();
+  for (const item of items) {
+    if (item.role !== 'assistant') continue;
+    const outcome = item.turnId ? outcomes.get(item.turnId) : undefined;
+    if (!outcome) {
+      if (item.standalonePublic || item.terminal || item.userInputRequestId) visible.add(item.id);
+      continue;
+    }
+    switch (outcome.kind) {
+      case 'answered':
+        if (item.publicText && item.sourceMessageIds?.some(id => outcome.message_ids.includes(id))) visible.add(item.id);
+        break;
+      case 'input_required':
+        if (item.userInputRequestId === outcome.request_id) visible.add(item.id);
+        break;
+      case 'unavailable':
+        if (item.turnOutcome?.kind === 'unavailable') visible.add(item.id);
+        break;
+      case 'failed':
+      case 'cancelled':
+      case 'paused':
+        // Partial output is also selected by exact committed identities. A
+        // late transient row cannot replace the preserved failure result.
+        if (item.terminal || (item.publicText && item.sourceMessageIds?.some(id => outcome.message_ids.includes(id)))) visible.add(item.id);
+        break;
+    }
   }
   return visible;
 }
@@ -153,7 +178,7 @@ export function assignTurnIdsFromUserRequests(
       continue;
     }
 
-    if (!currentTurnId) {
+    if (entry.role === 'other' || !currentTurnId) {
       output.push({ ...entry, turnId: undefined });
       continue;
     }
@@ -239,13 +264,13 @@ const buildEmptyRunningSegmentOutput = (
 const buildEmptyClosedSegmentOutput = (
   turnId: MessageId,
   segment: TurnDisclosureInputItem[],
-  finalAssistantForTurn: TurnDisclosureInputItem | undefined,
+  resultAnchor: TurnDisclosureInputItem | undefined,
   turnStartedAt: number,
   turnEndedAt: number
 ): TurnDisclosureOutputItem[] => {
-  const state = finalAssistantForTurn?.processState === 'failed'
+  const state = resultAnchor?.processState === 'failed'
     ? 'failed'
-    : finalAssistantForTurn?.processState === 'canceled'
+    : resultAnchor?.processState === 'canceled'
       ? 'canceled'
       : 'completed';
   const disclosure: TurnDisclosureOutputItem = {
@@ -265,7 +290,7 @@ const buildEmptyClosedSegmentOutput = (
   let inserted = false;
   for (const entry of segment) {
     if (entry.role === 'metadata') continue;
-    if (entry === finalAssistantForTurn && !inserted) {
+    if (entry === resultAnchor && !inserted) {
       output.push(disclosure);
       inserted = true;
     }
@@ -278,29 +303,17 @@ const buildEmptyClosedSegmentOutput = (
 function buildSegmentOutput(
   segment: TurnDisclosureInputItem[],
   isClosed: boolean,
-  finalAssistantForTurn?: TurnDisclosureInputItem,
+  resultAnchor?: TurnDisclosureInputItem,
   turnStartedAt?: number,
   turnEndedAt?: number,
-  resultBeforeFailure?: TurnDisclosureInputItem,
-  publicContinuationIds: ReadonlySet<string> = new Set()
+  publicResultIds: ReadonlySet<string> = new Set()
 ): TurnDisclosureOutputItem[] {
   const turnId = segment[0]?.turnId;
   if (!turnId) return segment.map((entry) => ({ type: 'item', id: entry.id }));
 
-  // A delayed event from another turn can split one logical turn into several
-  // segments. Only the last assistant row across the whole turn is final
-  // answer content; earlier assistant rows remain part of the process trace.
-  // A streaming assistant row is still provisional. A later tool call or
-  // model step can replace it, so keep it in the work journal
-  // until the turn actually closes.
-  const finalAssistantIndex = isClosed && finalAssistantForTurn
-    ? segment.findIndex((entry) => entry === finalAssistantForTurn)
-    : -1;
-  const resultBeforeFailureIndex = isClosed && resultBeforeFailure
-    ? segment.findIndex((entry) => entry === resultBeforeFailure)
-    : -1;
-  const isVisibleAssistant = (index: number) => index === finalAssistantIndex || index === resultBeforeFailureIndex
-    || (isClosed && publicContinuationIds.has(segment[index].id));
+  // A result receipt may precede its message rows in history. Membership is
+  // exact and independent of arrival order, timestamps, or an empty tail row.
+  const isVisibleAssistant = (index: number) => isClosed && publicResultIds.has(segment[index].id);
   const stateOptions = { isClosed };
 
   const processItems = segment.filter((entry, index) => {
@@ -316,16 +329,16 @@ function buildSegmentOutput(
     const fallbackStart = visibleEntries.length
       ? Math.min(...visibleEntries.map(getProcessStartAt))
       : 0;
-    const fallbackEnd = finalAssistantForTurn
-      ? getProcessEndAt(finalAssistantForTurn)
+    const fallbackEnd = resultAnchor
+      ? getProcessEndAt(resultAnchor)
       : visibleEntries.length
         ? Math.max(...visibleEntries.map(getProcessEndAt))
         : fallbackStart;
-    if (finalAssistantForTurn || turnEndedAt !== undefined) {
+    if (resultAnchor || turnEndedAt !== undefined) {
       return buildEmptyClosedSegmentOutput(
         turnId,
         segment,
-        finalAssistantForTurn,
+        resultAnchor,
         turnStartedAt ?? fallbackStart,
         turnEndedAt ?? fallbackEnd
       );
@@ -334,8 +347,8 @@ function buildSegmentOutput(
   }
 
   const terminalProcessState = getEffectiveProcessState(processItems.at(-1)!, stateOptions);
-  const terminalState = finalAssistantForTurn
-    ? getEffectiveProcessState(finalAssistantForTurn, stateOptions)
+  const terminalState = resultAnchor
+    ? getEffectiveProcessState(resultAnchor, stateOptions)
     : terminalProcessState;
   // Intermediate failures remain visible in the expanded trace, while the
   // terminal answer/error owns the settled Turn outcome.
@@ -357,8 +370,8 @@ function buildSegmentOutput(
     startAt: turnStartedAt ?? Math.min(...processItems.map(getProcessStartAt)),
     // A final answer is the authoritative task boundary. Process intervals are
     // only a fallback for background/process-only turns with no final answer.
-    endAt: turnEndedAt ?? (finalAssistantForTurn
-      ? getProcessEndAt(finalAssistantForTurn)
+    endAt: turnEndedAt ?? (resultAnchor
+      ? getProcessEndAt(resultAnchor)
       : Math.max(...processItems.map(getProcessEndAt))),
     state,
     processItemStates: Object.fromEntries(
@@ -451,7 +464,7 @@ const coalesceTurnDisclosures = (
 const placeTurnDisclosuresAtTurnBoundary = (
   items: TurnDisclosureOutputItem[],
   requestByTurn: ReadonlyMap<MessageId, TurnDisclosureInputItem>,
-  finalAssistantByTurn: ReadonlyMap<MessageId, TurnDisclosureInputItem>
+  resultAnchorByTurn: ReadonlyMap<MessageId, TurnDisclosureInputItem>
 ): TurnDisclosureOutputItem[] => {
   const disclosureByTurn = new Map<MessageId, Extract<TurnDisclosureOutputItem, { type: 'turn_disclosure' }>>();
   for (const item of items) {
@@ -465,13 +478,13 @@ const placeTurnDisclosuresAtTurnBoundary = (
   }
   const requestAnchoredTurns = new Set(requestTurnByItemId.values());
 
-  const finalAssistantTurnByItemId = new Map<string, MessageId>();
-  for (const [turnId, finalAssistant] of finalAssistantByTurn) {
-    if (!requestAnchoredTurns.has(turnId) && visibleItemIds.has(finalAssistant.id)) {
-      finalAssistantTurnByItemId.set(finalAssistant.id, turnId);
+  const resultTurnByItemId = new Map<string, MessageId>();
+  for (const [turnId, resultAnchor] of resultAnchorByTurn) {
+    if (!requestAnchoredTurns.has(turnId) && visibleItemIds.has(resultAnchor.id)) {
+      resultTurnByItemId.set(resultAnchor.id, turnId);
     }
   }
-  const anchoredTurns = new Set([...requestAnchoredTurns, ...finalAssistantTurnByItemId.values()]);
+  const anchoredTurns = new Set([...requestAnchoredTurns, ...resultTurnByItemId.values()]);
 
   const output: TurnDisclosureOutputItem[] = [];
   for (const item of items) {
@@ -479,7 +492,7 @@ const placeTurnDisclosuresAtTurnBoundary = (
       continue;
     }
     if (item.type === 'item') {
-      const turnId = finalAssistantTurnByItemId.get(item.id);
+      const turnId = resultTurnByItemId.get(item.id);
       const disclosure = turnId ? disclosureByTurn.get(turnId) : undefined;
       if (disclosure) output.push(disclosure);
     }
@@ -527,7 +540,7 @@ export function buildTurnDisclosureItems(
   let segment: TurnDisclosureInputItem[] = [];
   const activeTurnId = options.tailClosed === true ? undefined : options.activeTurnId;
   const requestByTurn = new Map<MessageId, TurnDisclosureInputItem>();
-  const finalAssistantByTurn = new Map<MessageId, TurnDisclosureInputItem>();
+  const resultAnchorByTurn = new Map<MessageId, TurnDisclosureInputItem>();
   const turnStartedAtByTurn = new Map<MessageId, number>();
   const turnEndedAtByTurn = new Map<MessageId, number>();
   const terminalStateByTurn = new Map<MessageId, TurnDisclosureProcessState>();
@@ -563,46 +576,19 @@ export function buildTurnDisclosureItems(
         turnStartedAtByTurn.set(item.turnId, requestStartedAt);
       }
     }
-    if (item.turnId && item.role === 'assistant') {
-      const currentFinal = finalAssistantByTurn.get(item.turnId);
-      // Live rows are arrival-ordered and a delayed older text can be appended
-      // after the real final answer. Choose by authoritative message time;
-      // `>=` intentionally lets the later observation break timestamp ties.
-      if (
-        !currentFinal ||
-        (item.terminal === true && currentFinal.terminal !== true) ||
-        (item.terminal === currentFinal.terminal && item.createdAt >= currentFinal.createdAt)
-      ) {
-        finalAssistantByTurn.set(item.turnId, item);
-      }
-    }
     if (item.role !== 'user' && item.role !== 'metadata' && item.role !== 'other') {
       processObservedAtByItemId.set(item.id, getProcessEndAt(item));
     }
   }
 
-  // Keep the last result produced before an error next to that error. It can
-  // describe partial effects the user needs; older progress stays in the trace.
-  // Text arriving after the terminal timestamp cannot replace this result.
-  const resultBeforeFailureByTurn = new Map<MessageId, TurnDisclosureInputItem>();
+  const publicResultIds = selectTurnPublicResultIds(items);
+  // This anchor only places the disclosure. It never decides which content is
+  // public: every public member is already selected by the exact receipt.
   for (const item of items) {
-    if (!item.turnId || item.role !== 'assistant' || item.terminal) continue;
-    const terminal = finalAssistantByTurn.get(item.turnId);
-    if (!terminal?.terminal || terminal.processState !== 'failed') continue;
-    const usesWallTime = item.displayAt !== undefined && terminal.turnEndedAt !== undefined;
-    const contentTime = usesWallTime ? item.displayAt! : item.createdAt;
-    const terminalTime = usesWallTime ? terminal.turnEndedAt! : terminal.createdAt;
-    if (contentTime > terminalTime) continue;
-    const previous = resultBeforeFailureByTurn.get(item.turnId);
-    const latest = !previous || (item.displayAt !== undefined && previous.displayAt !== undefined
-      ? item.displayAt >= previous.displayAt
-      : item.createdAt >= previous.createdAt);
-    if (latest) resultBeforeFailureByTurn.set(item.turnId, item);
-  }
-
-  const publicContinuationIds = new Map<MessageId, ReadonlySet<string>>();
-  for (const [turn, final] of finalAssistantByTurn) {
-    publicContinuationIds.set(turn, collectPublicContinuationIds(items, final));
+    if (item.turnId && publicResultIds.has(item.id)) {
+      const current = resultAnchorByTurn.get(item.turnId);
+      if (!current?.terminal || item.terminal) resultAnchorByTurn.set(item.turnId, item);
+    }
   }
   const flush = (fallbackClosed: boolean) => {
     if (!segment.length) return;
@@ -613,11 +599,10 @@ export function buildTurnDisclosureItems(
       ...buildSegmentOutput(
         segment,
         isClosed,
-        segmentTurnId ? finalAssistantByTurn.get(segmentTurnId) : undefined,
+        segmentTurnId ? resultAnchorByTurn.get(segmentTurnId) : undefined,
         segmentTurnId ? turnStartedAtByTurn.get(segmentTurnId) : undefined,
         segmentTurnId ? turnEndedAtByTurn.get(segmentTurnId) : undefined,
-        segmentTurnId ? resultBeforeFailureByTurn.get(segmentTurnId) : undefined,
-        segmentTurnId ? publicContinuationIds.get(segmentTurnId) : undefined
+        publicResultIds
       )
     );
     segment = [];
@@ -649,7 +634,7 @@ export function buildTurnDisclosureItems(
   // leaving the synthetic header there stacks old "processed" rows below the
   // newest text.
   const coalesced = coalesceTurnDisclosures(output, processObservedAtByItemId);
-  const placed = placeTurnDisclosuresAtTurnBoundary(coalesced, requestByTurn, finalAssistantByTurn);
+  const placed = placeTurnDisclosuresAtTurnBoundary(coalesced, requestByTurn, resultAnchorByTurn);
   // Durable terminal metadata wins over partial text and stale live tool rows,
   // including after reload when the in-memory stop notice no longer exists.
   const authoritative = placed.map((item): TurnDisclosureOutputItem => {

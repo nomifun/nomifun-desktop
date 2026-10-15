@@ -1,6 +1,14 @@
 //! Actual model, managed tools, canonical input handoff and subsequent Turn.
 use super::*;
 
+async fn public_history(router: &Router, phase: &'static str, session: &str) -> Result<Vec<Value>, SmokeFailure> {
+    let response = successful_json(router, phase, Method::GET,
+        format!("/api/agent-sessions/{session}/message-history?page_size=100&content_mode=full"),
+        None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    envelope_data(phase, response)?.get("items").and_then(Value::as_array).cloned()
+        .ok_or_else(|| SmokeFailure::new(phase, "INPUT_RENDERER_HISTORY_MISSING", 502))
+}
+
 pub(super) async fn run(router: &Router, api_key: &str, model: &str, root: &Path) -> Result<(), SmokeFailure> {
     let provider = configure_stepfun(router, api_key, STEPFUN_PLAN_BASE_URL, model).await?;
     let (preset, _) = create_agent_preset(router, &provider, model,
@@ -30,6 +38,10 @@ pub(super) async fn run(router: &Router, api_key: &str, model: &str, root: &Path
         let (messages, _) = session_messages_after(router, "input.messages", &session, cursor).await?;
         if let Some(code) = first_durable_error_code(&messages) { return Err(SmokeFailure::new("input.messages", code, 422)); }
         let events = session_events(router, &session).await?;
+        if events.iter().any(|event| event["kind"] == "turn/failed"
+            && event["correlation_id"].as_str() == Some(operation.as_str())) {
+            return Err(SmokeFailure::new("input.provider", "INPUT_HANDOFF_TURN_FAILED", 422));
+        }
         if let Some(terminal) = events.iter().find(|event| event["kind"] == "turn/completed"
             && event["correlation_id"].as_str() == Some(operation.as_str())) {
             request = terminal.pointer("/payload/value/user_input_request").cloned()
@@ -86,6 +98,14 @@ pub(super) async fn run(router: &Router, api_key: &str, model: &str, root: &Path
                 eprintln!("NOMIFUN_INPUT_EVIDENCE started={} successful={successful} commands={}", starts.len(), json!(observations));
                 return Err(failure());
             }
+            let history = public_history(router, "input.public_result", &session).await?;
+            let note = history.iter().find(|message|
+                message.pointer("/content/turn_outcome/kind").and_then(Value::as_str) == Some("input_required"))
+                .ok_or_else(|| SmokeFailure::new("input.public_result", "INPUT_PUBLIC_RESULT_MISSING", 422))?;
+            if note.pointer("/content/user_input_request") != Some(&request)
+                || note.pointer("/content/turn_outcome/request_id") != request.get("request_id") {
+                return Err(SmokeFailure::new("input.public_result", "INPUT_PUBLIC_RESULT_DIFFERS", 422));
+            }
             break;
         }
         if tokio::time::Instant::now() >= deadline { return Err(SmokeFailure::new("input.wait", "INPUT_HANDOFF_DEADLINE", 504)); }
@@ -97,6 +117,18 @@ pub(super) async fn run(router: &Router, api_key: &str, model: &str, root: &Path
     if followup == operation { return Err(SmokeFailure::new("input.followup", "INPUT_HANDOFF_REOPENED_OLD_TURN", 422)); }
     wait_for_session_marker(router, "input.followup_reply", &session, cursor,
         "NOMIFUN_INPUT_FOLLOWUP_OK", TURN_RESULT_DEADLINE).await?;
+    let history = public_history(router, "input.followup_result", &session).await?;
+    let answer = history.iter().find(|message|
+        message.pointer("/content/turn_outcome/kind").and_then(Value::as_str) == Some("answered"))
+        .ok_or_else(|| SmokeFailure::new("input.followup_result", "INPUT_FOLLOWUP_RESULT_MISSING", 422))?;
+    let ids = answer.pointer("/content/turn_outcome/message_ids").and_then(Value::as_array)
+        .ok_or_else(|| SmokeFailure::new("input.followup_result", "INPUT_FOLLOWUP_RESULT_INVALID", 422))?;
+    if ids.is_empty() || !ids.iter().all(|id| history.iter().any(|message|
+        message.get("message_id") == Some(id)
+            && message.pointer("/content/content").and_then(Value::as_str)
+                .is_some_and(|text| text.contains("NOMIFUN_INPUT_FOLLOWUP_OK")))) {
+        return Err(SmokeFailure::new("input.followup_result", "INPUT_FOLLOWUP_ANSWER_NOT_REFERENCED", 422));
+    }
     assert_session_binding(router, "input.binding", &session, &binding).await?;
     let events = session_events(router, &session).await?;
     if events.iter().filter(|event| event["kind"] == "turn/completed"
@@ -105,6 +137,6 @@ pub(super) async fn run(router: &Router, api_key: &str, model: &str, root: &Path
         return Err(SmokeFailure::new("input.history", "INPUT_HANDOFF_HISTORY_CHANGED", 422));
     }
     pool.close().await;
-    eprintln!("NOMIFUN_USER_INPUT_HANDOFF_LIVE_OK model={model} commands=2 turns=2");
+    eprintln!("NOMIFUN_USER_INPUT_HANDOFF_LIVE_OK model={model} commands=2 turns=2 public_results=verified");
     Ok(())
 }

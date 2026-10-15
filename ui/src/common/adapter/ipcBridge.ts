@@ -938,7 +938,7 @@ const requireConversationIdempotencyKey = (value: unknown): string => {
   return value;
 };
 
-const fromApiResponseMessage = (message: IResponseMessage): IResponseMessage => ({
+export const fromApiResponseMessage = (message: IResponseMessage): IResponseMessage => ({
   ...message,
   msg_id: parseMessageId(message.msg_id),
   turn_id: message.turn_id == null ? undefined : parseMessageId(message.turn_id),

@@ -5,22 +5,37 @@ use nomifun_agent_contracts::{
 };
 
 async fn question_fixture(store: &AgentSessionStore, key: &str) -> (AgentSessionLiveRecord, IdmmQuestionRef) {
-    let (session, started) = create_turn(store, key, &format!("turn-{key}")).await;
-    let message_id = Uuid::now_v7().to_string();
-    let text = "你希望使用哪个方案？";
-    let part = append(&session.agent_session_id, &format!("part-{key}"), "runtime-supervisor", &format!("part-{key}"),
-        "message/content-part", &message_id, Some(started), json!({"content":text,"turn_id":format!("turn-{key}")}));
+    question_fixture_with_terminal(store,key,"turn/completed",1).await
+}
+
+async fn question_fixture_with_terminal(store:&AgentSessionStore,key:&str,terminal_kind:&str,final_step:u16)
+    ->(AgentSessionLiveRecord,IdmmQuestionRef) {
+    let (session,_)=create_ready(store,key).await;
+    let operation=OperationId::from(format!("turn-{key}"));
+    let (input,started)=store.start_turn(&session.agent_session_id,"session_api".into(),format!("input-{key}").into(),operation.clone(),
+        StrictJsonValue(json!({"content":"Choose a plan"}))).await.unwrap();
+    let root=input.ack.unwrap().event_id;
+    let started=started.ack.unwrap().event_id;
+    for step in 1..=final_step {
+        store.append_event(&append(&session.agent_session_id,&format!("model-{key}-{step}"),"runtime_supervisor",&format!("model-{key}-{step}"),
+            "runtime/progress-recorded",operation.as_ref(),Some(started.clone()),json!({"producer_seq":step,
+                "event":{"event":"model_step_started","step":step,"operation_id":format!("{}:model:{step}",operation.as_ref())}}))).await.unwrap();
+    }
+    let message_id=nomifun_agent_contracts::canonical_assistant_step_message_id(root.as_ref(),1).unwrap();
+    let text="你希望使用哪个方案？";
+    let part=append(&session.agent_session_id,&format!("part-{key}"),"runtime-supervisor",&format!("part-{key}"),
+        "message/content-part",&message_id,Some(started),json!({"content":text,"turn_id":root}));
     store.append_event(&part).await.unwrap();
-    let completed = append(&session.agent_session_id, &format!("message-completed-{key}"), "runtime-supervisor", &format!("message-completed-{key}"),
-        "message/completed", &message_id, Some(part.event_id), json!({"part_count":1,"content_digest":digest_bytes(text.as_bytes())}));
+    let completed=append(&session.agent_session_id,&format!("message-completed-{key}"),"runtime-supervisor",&format!("message-completed-{key}"),
+        "message/completed",&message_id,Some(part.event_id),json!({"part_count":1,"content_digest":digest_bytes(text.as_bytes())}));
     store.append_event(&completed).await.unwrap();
-    let terminal = append(&session.agent_session_id, &format!("terminal-{key}"), "runtime-supervisor", &format!("terminal-{key}"),
-        "turn/completed", &format!("turn-{key}"), Some(completed.event_id), json!({}));
+    let terminal=append(&session.agent_session_id,&format!("terminal-{key}"),"runtime-supervisor",&format!("terminal-{key}"),
+        terminal_kind,operation.as_ref(),Some(completed.event_id),json!({"model_steps":final_step}));
     store.append_event(&terminal).await.unwrap();
-    let projection = store.messages_after(&session.agent_session_id, 0).await.unwrap().into_iter()
-        .find(|message| message.projection_id == format!("message:{message_id}")).unwrap();
-    let question = IdmmQuestionRef { message_id, sequence: projection.last_seq, fingerprint: projection.semantic_digest };
-    (session, question)
+    let projection=store.messages_after(&session.agent_session_id,0).await.unwrap().into_iter()
+        .find(|message|message.projection_id==format!("message:{message_id}")).unwrap();
+    let question=IdmmQuestionRef {message_id,sequence:projection.last_seq,fingerprint:projection.semantic_digest};
+    (session,question)
 }
 
 fn explanation(question: &IdmmQuestionRef) -> IdmmDecisionExplanation {
@@ -156,7 +171,7 @@ async fn idmm_question_cannot_cross_context_clear_or_agent_transition() {
 }
 
 #[tokio::test]
-async fn idmm_notice_accepts_formal_projected_assistant_questions_without_a_native_turn() {
+async fn idmm_notice_rejects_formal_projected_questions_without_an_exact_answered_turn() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();
     let (session, ready) = create_ready(&store, "idmm-domain-question").await;
     let message_id = Uuid::now_v7().to_string();
@@ -166,24 +181,19 @@ async fn idmm_notice_accepts_formal_projected_assistant_questions_without_a_nati
     let before = store.messages_after(&session.agent_session_id, 0).await.unwrap().into_iter()
         .find(|message| message.projection_id == format!("message:{message_id}")).unwrap();
     let question = IdmmQuestionRef { message_id, sequence: before.last_seq, fingerprint: before.semantic_digest.clone() };
-    let result = store.append_idmm_notice(&owner(), &session.agent_session_id, "domain-question-notice", notice(&question)).await.unwrap().unwrap();
-    assert_eq!(result.record.unwrap().causation_event_id, Some(projected.event_id));
-    assert_eq!(store.messages_after(&session.agent_session_id, 0).await.unwrap().into_iter()
-        .find(|message| message.projection_id == before.projection_id).unwrap(), before);
-    let input = StrictJsonValue(json!({"content":"公开资料即可","idmm_decision":explanation(&question)}));
-    assert!(store.start_turn(&session.agent_session_id, "session-api".into(), "domain-question-answer".into(),
-        "domain-question-turn".into(), input).await.is_ok());
+    assert!(store.append_idmm_notice(&owner(),&session.agent_session_id,"domain-question-notice",notice(&question)).await.unwrap().is_none());
+    assert_eq!(store.messages_after(&session.agent_session_id,0).await.unwrap().into_iter()
+        .find(|message|message.projection_id==before.projection_id).unwrap(),before);
+    let input=StrictJsonValue(json!({"content":"公开资料即可","idmm_decision":explanation(&question)}));
+    assert!(matches!(store.start_turn(&session.agent_session_id,"session-api".into(),"domain-question-answer".into(),
+        "domain-question-turn".into(),input).await,Err(SessionStoreError::Conflict(_))));
 }
 
 #[tokio::test]
 async fn idmm_renderer_history_paginates_counts_and_rebuilds_notices_without_exposing_them_to_message_readers() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();
-    let (session, ready) = create_ready(&store, "idmm-history-notices").await;
-    let message_id = Uuid::now_v7().to_string();
-    store.append_event(&append(&session.agent_session_id, &message_id, "session-api", "history-question",
-        "message/assistant-projected", &message_id, Some(ready), json!({"content":"你希望缓存多久？"}))).await.unwrap();
-    let source = store.messages_before(&session.agent_session_id, None, 1).await.unwrap().0.remove(0);
-    let question = IdmmQuestionRef { message_id, sequence: source.last_seq, fingerprint: source.semantic_digest.clone() };
+    let (session,question)=question_fixture(&store,"idmm-history-notices").await;
+    let source=store.messages_before(&session.agent_session_id,None,1).await.unwrap().0.remove(0);
     store.append_idmm_notice(&owner(), &session.agent_session_id, "history-wait", notice(&question)).await.unwrap().unwrap();
     let mut failed = notice(&question);
     failed.status = IdmmDecisionNoticeStatus::Failed;
@@ -193,11 +203,11 @@ async fn idmm_renderer_history_paginates_counts_and_rebuilds_notices_without_exp
         if rebuild { store.rebuild_projections(&session.agent_session_id).await.unwrap(); }
         let mut cursor = None;
         let mut pages = Vec::new();
-        for has_more in [true, true, false] {
+        for has_more in [true, true, true, true, false] {
             let page = store.message_history_before(&session.agent_session_id, cursor, 1).await.unwrap();
             assert_eq!(page.0.len(), 1);
             assert_eq!(page.1, has_more);
-            assert_eq!(page.2, 3);
+            assert_eq!(page.2, 5);
             cursor = Some(page.0[0].first_seq);
             pages.push(page);
         }
@@ -209,8 +219,54 @@ async fn idmm_renderer_history_paginates_counts_and_rebuilds_notices_without_exp
         if let Some(expected) = &original_pages { assert_eq!(&pages, expected); }
         else { original_pages = Some(pages); }
         let messages = store.messages_before(&session.agent_session_id, None, 10).await.unwrap();
-        assert_eq!(messages.0, vec![source.clone()]);
+        assert_eq!(messages.0.len(),2);
+        assert!(messages.0.contains(&source));
+        assert!(messages.0.iter().all(|row|row.presentation_intent=="message"));
         assert!(!messages.1);
-        assert_eq!(messages.2, 1);
+        assert_eq!(messages.2, 2);
+    }
+}
+
+#[tokio::test]
+async fn typed_input_handoff_is_an_exact_question_without_assistant_text_and_expires_on_answer() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "idmm-typed-input").await;
+    let (accepted, started) = store.start_turn(&session.agent_session_id, "session_api".into(),
+        "typed-question-input".into(), "typed-question-turn".into(), StrictJsonValue(json!({"content":"Create a presentation."})))
+        .await.unwrap();
+    let root = accepted.record.unwrap().event_id;
+    let started = started.record.unwrap();
+    let request = json!({"request_id":"ask-student","question":"姓名和爱好","remaining_work":"生成自我介绍 PPT。"});
+    let terminal = append(&session.agent_session_id, "typed-question-terminal", "runtime-supervisor", "typed-question-terminal",
+        "turn/completed", "typed-question-turn", Some(started.event_id), json!({"user_input_request":request}));
+    store.append_event(&terminal).await.unwrap();
+    let summaries = store.turn_history_for_sources(&session.agent_session_id, &[root.as_ref().to_owned()]).await.unwrap();
+    let summary = &summaries[0];
+    assert_eq!(summary.projection["turn_outcome"]["kind"], "input_required");
+    let question = IdmmQuestionRef {
+        message_id: summary.projection["correlation_id"].as_str().unwrap().to_owned(),
+        sequence: summary.last_seq, fingerprint: summary.semantic_digest.clone(),
+    };
+    let mut forged = question.clone();
+    forged.fingerprint = "a".repeat(64);
+    assert!(store.append_idmm_notice(&owner(), &session.agent_session_id, "typed-forged", notice(&forged)).await.unwrap().is_none());
+    assert!(store.append_idmm_notice(&owner(), &session.agent_session_id, "typed-visible", notice(&question)).await.unwrap().is_some());
+    let input = StrictJsonValue(json!({"content":"My name is Lin.","origin":"idmm","idmm_decision":explanation(&question)}));
+    store.start_turn(&session.agent_session_id, "session_api".into(), "typed-answer".into(), "typed-answer-turn".into(), input).await.unwrap();
+    assert!(store.append_idmm_notice(&owner(), &session.agent_session_id, "typed-after-answer", notice(&question)).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn idmm_prose_question_requires_the_latest_exact_answered_turn_at_admission() {
+    for (key,kind,step) in [("failed-question","turn/failed",1),("cancelled-question","turn/cancelled",1),
+        ("unavailable-question","turn/completed",2)] {
+        let store=AgentSessionStore::open_in_memory().await.unwrap();
+        let (session,question)=question_fixture_with_terminal(&store,key,kind,step).await;
+        assert!(store.append_idmm_notice(&owner(),&session.agent_session_id,"not-a-delivery",notice(&question)).await.unwrap().is_none());
+        let input=StrictJsonValue(json!({"content":"方案一","origin":"idmm","idmm_decision":explanation(&question)}));
+        assert!(matches!(store.start_turn(&session.agent_session_id,"session_api".into(),"not-a-safe-answer".into(),
+            "not-a-safe-turn".into(),input).await,Err(SessionStoreError::Conflict(_))),
+            "failed, cancelled, or unproven output cannot authorize an automatic answer");
+        assert!(!store.messages_after(&session.agent_session_id,0).await.unwrap().iter().any(|row|row.presentation_intent=="idmm_notice"));
     }
 }

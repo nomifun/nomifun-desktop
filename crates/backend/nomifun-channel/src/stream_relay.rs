@@ -1125,7 +1125,7 @@ mod input_handoff_tests {
                 if !body.is_empty() { tx.send(AgentStreamEvent::Text(TextEventData { step:None,content:body.into() })).unwrap(); }
                 tx.send(input_note(request())).unwrap();
                 tx.send(input_note(request())).unwrap();
-                tx.send(AgentStreamEvent::Finish(FinishEventData { session_id:None,stop_reason:Some(TurnStopReason::InputRequired) })).unwrap();
+                tx.send(AgentStreamEvent::Finish(FinishEventData { turn_outcome: None, session_id:None,stop_reason:Some(TurnStopReason::InputRequired) })).unwrap();
                 drop(tx);
                 relay.run(rx).await;
                 let messages = if platform == PluginType::Weixin {recorder.take_sends()} else {recorder.take_edits()};
@@ -1155,7 +1155,7 @@ mod input_handoff_tests {
                     let mut another = request(); another.remaining_work = "Contradicting unfinished work".into();
                     tx.send(input_note(another)).unwrap();
                 }
-                tx.send(AgentStreamEvent::Finish(FinishEventData {session_id:None,stop_reason:Some(
+                tx.send(AgentStreamEvent::Finish(FinishEventData {turn_outcome:None,session_id:None,stop_reason:Some(
                     if conflict {TurnStopReason::InputRequired} else {TurnStopReason::Paused})})).unwrap();
                 drop(tx);
                 relay.run(rx).await;
@@ -1177,7 +1177,7 @@ mod input_handoff_tests {
                     throttle_ms:0,conversation_id:"session".into() },recorder.clone(),ChannelStopConfirmationStore::new(),None);
                 let (tx,rx) = broadcast::channel(8);
                 if !missing_note {tx.send(input_note(request())).unwrap();}
-                tx.send(AgentStreamEvent::Finish(FinishEventData {session_id:None,stop_reason:Some(
+                tx.send(AgentStreamEvent::Finish(FinishEventData {turn_outcome:None,session_id:None,stop_reason:Some(
                     if missing_note {TurnStopReason::InputRequired} else {TurnStopReason::EndTurn})})).unwrap();
                 drop(tx);
                 relay.run(rx).await;
@@ -1354,7 +1354,7 @@ mod media_tests {
                 retry: None,
             })).unwrap();
         }
-        tx.send(AgentStreamEvent::Finish(FinishEventData { session_id: None, stop_reason: None })).unwrap();
+        tx.send(AgentStreamEvent::Finish(FinishEventData { turn_outcome: None, session_id: None, stop_reason: None })).unwrap();
         drop(tx);
 
         relay.run(rx).await;
@@ -1396,7 +1396,7 @@ mod media_tests {
             retry: None,
         }))
         .unwrap();
-        tx.send(AgentStreamEvent::Finish(FinishEventData {
+        tx.send(AgentStreamEvent::Finish(FinishEventData { turn_outcome: None,
             session_id: None,
             stop_reason: None,
         }))
@@ -1635,7 +1635,7 @@ mod media_tests {
             retry: None,
         }))
         .unwrap();
-        tx.send(AgentStreamEvent::Finish(FinishEventData {
+        tx.send(AgentStreamEvent::Finish(FinishEventData { turn_outcome: None,
             session_id: None,
             stop_reason: None,
         }))
@@ -1813,7 +1813,7 @@ mod media_tests {
             retry: None,
         }))
         .unwrap();
-        tx.send(AgentStreamEvent::Finish(FinishEventData {
+        tx.send(AgentStreamEvent::Finish(FinishEventData { turn_outcome: None,
             session_id: None,
             stop_reason: None,
         }))
@@ -2119,7 +2119,7 @@ mod media_tests {
         tx.send(AgentStreamEvent::Text(TextEventData { step: None, content: "unverified partial success".into(),
         }))
         .unwrap();
-        tx.send(AgentStreamEvent::Finish(FinishEventData {
+        tx.send(AgentStreamEvent::Finish(FinishEventData { turn_outcome: None,
             session_id: None,
             stop_reason: None,
         }))
@@ -2152,7 +2152,7 @@ mod media_tests {
         tx.send(AgentStreamEvent::Text(TextEventData { step: None, content: "unverified partial success".into(),
         }))
         .unwrap();
-        tx.send(AgentStreamEvent::Finish(FinishEventData {
+        tx.send(AgentStreamEvent::Finish(FinishEventData { turn_outcome: None,
             session_id: None,
             stop_reason: None,
         }))
@@ -2202,7 +2202,7 @@ mod media_tests {
             artifacts: Vec::new(),
             retry: None,
         })).unwrap();
-        tx.send(AgentStreamEvent::Finish(FinishEventData { session_id: None, stop_reason: None })).unwrap();
+        tx.send(AgentStreamEvent::Finish(FinishEventData { turn_outcome: None, session_id: None, stop_reason: None })).unwrap();
         drop(tx);
 
         relay.run(rx).await;

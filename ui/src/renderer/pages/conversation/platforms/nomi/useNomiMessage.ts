@@ -6,7 +6,7 @@
 
 import type { ConversationId, MessageId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
-import { isKnowledgeWritebackPresentation, isUserInputRequestPresentation, transformMessage, transformUserCreatedEvent } from '@/common/chat/chatLib';
+import { isKnowledgeWritebackPresentation, isUserInputRequestPresentation, isTurnReadErrorPresentation, transformMessage, transformUserCreatedEvent } from '@/common/chat/chatLib';
 import { isToolGroupStatusActive, normalizeToolGroupStatus } from '@/common/chat/toolGroupStatus';
 import { optionalDisplayText, toDisplayText } from '@/common/chat/displayText';
 import type { IResponseMessage } from '@/common/adapter/ipcBridge';
@@ -402,7 +402,7 @@ export const useNomiMessage = (
 
       // These canonical receipts update the original reply's compact notice.
       // They must not reconcile or re-raise the current Turn's busy state.
-      if (isKnowledgeWritebackPresentation(message)) {
+      if (isKnowledgeWritebackPresentation(message) || isTurnReadErrorPresentation(message)) {
         addOrUpdateMessage(transformMessage(message));
         return;
       }

@@ -9,7 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import type { IConversationTurnCompletedEvent, IResponseMessage, IUserMessageCreatedEvent } from '@/common/adapter/ipcBridge';
-import { isUserInputRequestPresentation, type TMessage } from '@/common/chat/chatLib';
+import { isUserInputRequestPresentation, isTurnOutcomePresentation, isTurnReadErrorPresentation, type TMessage } from '@/common/chat/chatLib';
 import type { CompanionId, ConversationId, MessageId } from '@/common/types/ids';
 import { reconcileConversationAuthoritativeRuntime, terminalReconcileDelayForAttempt } from '../conversation/platforms/reconcileConversationTurnAfterStreamTerminal';
 import { browserNarrationFor } from './browserNarration';
@@ -86,8 +86,10 @@ export function useCompanionSessionBubble(companionId: CompanionId | null, compa
       const browser = browserNarrationFor(message.data);
       const toolHint = browser ? tRef.current(browser.key, { name: nameRef.current, ...browser.params })
         : tRef.current('nomi.companion.usingTools', { name: nameRef.current });
+      const queryError = isTurnReadErrorPresentation(message);
       update(current => streamCompanionSessionBubble(current, message, toolHint,
-        tRef.current(companionErrorKey(streamErrorCode(message.data)))));
+        queryError ? tRef.current('messages.turnOutcomeReadFailed') : tRef.current(companionErrorKey(streamErrorCode(message.data))),
+        tRef.current('messages.turnOutcomeUnavailable')));
     };
     const hydrate = (root: MessageId, force = false, retryAttempt = 0) => {
       const conversationId = stateRef.current.conversationId;
@@ -119,10 +121,8 @@ export function useCompanionSessionBubble(companionId: CompanionId | null, compa
             // or the preceding Turn. Tool-heavy turns can span several pages.
             if (!page.has_more || page.items.some(message => message.message_id === root || message.msg_id === root
               || (message.turn_id != null && message.turn_id !== root))) break;
-            const oldest = page.items.at(-1);
-            if (!oldest?.message_id || oldest.created_at == null) break;
-            const nextCursor = `${oldest.created_at}:${oldest.message_id}`;
-            if (nextCursor === cursor) break;
+            const nextCursor = page.next_cursor;
+            if (!nextCursor || nextCursor === cursor) throw new TypeError('Canonical companion history cursor did not advance');
             cursor = nextCursor;
           }
           if (!isCurrent()) return;
@@ -131,7 +131,7 @@ export function useCompanionSessionBubble(companionId: CompanionId | null, compa
             return id && message.turn_id === root && message.type === 'text'
               && stateRef.current.segmentRevisions.get(id) !== observed.segmentRevisions.get(id);
           });
-          update(current => hydrateCompanionSessionBubble(current, messages, observed));
+          update(current => hydrateCompanionSessionBubble(current, messages, observed, tRef.current('messages.turnOutcomeUnavailable')));
           // A concurrent live update wins the first read. Re-read once against
           // that update so a lost prefix can be recovered without guessing overlap.
           if (!raced) {
@@ -304,7 +304,7 @@ export function useCompanionSessionBubble(companionId: CompanionId | null, compa
         if (!currentBinding() || !message.turn_id) return;
         if (!stateRef.current.conversationId || (message.conversation_id === stateRef.current.conversationId
           && message.turn_id !== stateRef.current.turnId && !settledRoots.has(message.turn_id))) {
-          if (!message.stream_complete || isUserInputRequestPresentation(message)) {
+          if (!message.stream_complete || isUserInputRequestPresentation(message) || isTurnOutcomePresentation(message) || isTurnReadErrorPresentation(message)) {
             pendingStreams.push(message);
             if (pendingStreams.length > 128) pendingStreams.shift();
           }

@@ -284,7 +284,7 @@
       },
       "predecessor": {
         "mode": "any_of",
-        "kinds": ["message/completed", "message/assistant-projected"]
+        "kinds": ["message/completed", "message/assistant-projected", "turn/completed"]
       },
       "correlation": "message",
       "idempotency": "producer_scoped_required",

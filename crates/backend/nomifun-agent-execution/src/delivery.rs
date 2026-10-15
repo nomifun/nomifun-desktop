@@ -12,6 +12,9 @@ pub struct AgentExecutionDelivery {
     /// are absorbing replays and must not be awaited as newly-started work.
     pub replayed: bool,
     pub completed: bool,
+    /// Public result derived from the exact canonical Turn. A closed lifecycle
+    /// alone never establishes an answer, input handoff or task delivery.
+    pub turn_outcome: Option<nomifun_agent_contracts::AgentTurnOutcome>,
     /// A normal handoff on a completed Turn; it does not complete the task.
     pub user_input_request: Option<nomifun_agent_contracts::AgentUserInputRequest>,
     /// Exact operation's canonical nonterminal pause. A pause is not a

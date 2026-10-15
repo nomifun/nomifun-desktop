@@ -8,7 +8,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   assignTurnIdsFromUserRequests,
   buildTurnDisclosureItems,
-  collectPublicContinuationIds,
+  selectTurnPublicResultIds,
   type TurnDisclosureInputItem,
 } from './turnDisclosureModel';
 import { parseMessageId } from '@/common/types/ids';
@@ -31,10 +31,20 @@ const item = (
   role,
   createdAt: options.createdAt ?? 1000,
   sourceMessageIds: options.sourceMessageIds ?? [],
+  standalonePublic: role === 'assistant',
   ...options,
 });
 
 describe('buildTurnDisclosureItems', () => {
+  test('a closed canonical Turn without a result receipt does not elect any text by position or time', () => {
+    const entries = [item('user', 'user'),
+      item('first', 'assistant', { publicText: true, standalonePublic: false, createdAt: 2000 }),
+      item('last', 'assistant', { publicText: true, standalonePublic: false, createdAt: 9000 })];
+    const visible = buildTurnDisclosureItems(entries, { tailClosed: true }).filter(entry => entry.type === 'item');
+    expect(visible.map(entry => entry.id)).toEqual(['user']);
+    expect([...selectTurnPublicResultIds(entries)]).toEqual([]);
+  });
+
   test.each([false, true])('accepted input uses its wall clock before canonical start, with process=%p', (withProcess) => {
     const acceptedAt = 4_000_000;
     const entries = [
@@ -120,25 +130,22 @@ describe('buildTurnDisclosureItems', () => {
     expect(old.running).toBe(false);
   });
 
-  test('typed output continuation keeps every linked public part outside the process disclosure', () => {
+  test('an answered receipt keeps every exact public part outside the process disclosure', () => {
     const first=item('first','assistant',{createdAt:2000,sourceMessageIds:[SOURCE_1],publicText:true});
-    const tail=item('tail','assistant',{createdAt:3000,sourceMessageIds:[SOURCE_2],publicText:true,continuationOfMessageId:SOURCE_1});
-    const result=buildTurnDisclosureItems([item('user','user'),first,tail],{tailClosed:true});
+    const tail=item('tail','assistant',{createdAt:3000,sourceMessageIds:[SOURCE_2],publicText:true});
+    const summary=item('summary','metadata',{turnOutcome:{kind:'answered',message_ids:[SOURCE_1,SOURCE_2]}});
+    const result=buildTurnDisclosureItems([item('user','user'),summary,first,tail],{tailClosed:true});
     expect(result.filter(entry=>entry.type==='item').map(entry=>entry.id)).toEqual(['user','first','tail']);
-    const disclosure=result.find(entry=>entry.type==='turn_disclosure');
-    expect(disclosure?.type==='turn_disclosure' ? disclosure.processItemIds : []).not.toContain('first');
-    expect([...collectPublicContinuationIds([first,tail],tail)]).toEqual(['tail','first']);
+    expect([...selectTurnPublicResultIds([summary,first,tail])]).toEqual(['first','tail']);
   });
 
-  test('unlinked tool preamble, missing and foreign continuation sources are not invented final text', () => {
+  test('unreferenced and missing public sources cannot become the final reply', () => {
     const first=item('preamble','assistant',{createdAt:2000,sourceMessageIds:[SOURCE_1],publicText:true});
     const final=item('final','assistant',{createdAt:4000,sourceMessageIds:[SOURCE_2],publicText:true});
-    const result=buildTurnDisclosureItems([item('user','user'),first,item('tool','process',{createdAt:3000}),final],{tailClosed:true});
+    const summary=item('summary','metadata',{turnOutcome:{kind:'answered',message_ids:[SOURCE_2]}});
+    const result=buildTurnDisclosureItems([item('user','user'),summary,first,item('tool','process',{createdAt:3000}),final],{tailClosed:true});
     expect(result.filter(entry=>entry.type==='item').map(entry=>entry.id)).toEqual(['user','final']);
-    const linked={...final,continuationOfMessageId:SOURCE_1};
-    expect([...collectPublicContinuationIds([linked],linked)]).toEqual(['final']);
-    expect([...collectPublicContinuationIds([{...first,turnId:TURN_2},linked],linked)]).toEqual(['final']);
-    expect([...collectPublicContinuationIds([first,{...linked,terminal:true}],{...linked,terminal:true})]).toEqual([]);
+    expect([...selectTurnPublicResultIds([summary,first])]).toEqual([]);
   });
 
   test('a durable cancelled summary survives reload and partial assistant text', () => {
@@ -242,7 +249,7 @@ describe('buildTurnDisclosureItems', () => {
         item('terminal-error', 'assistant', {
           createdAt: 1500,
           processState: 'failed',
-          terminal: true,
+          terminal: true, turnOutcome: { kind: 'failed', message_ids: [] },
         }),
         item('late-partial-text', 'assistant', { createdAt: 2000 }),
       ],
@@ -262,8 +269,8 @@ describe('buildTurnDisclosureItems', () => {
       item('user', 'user', { createdAt: 1000 }),
       item('progress-note', 'assistant', { createdAt: 1500 }),
       item('patch', 'process', { createdAt: 2000, processState: 'failed' }),
-      item('partial-result', 'assistant', { createdAt: 2500 }),
-      item('terminal-error', 'assistant', { createdAt: 3000, processState: 'failed', terminal: true }),
+      item('partial-result', 'assistant', { publicText: true, sourceMessageIds: [SOURCE_1], createdAt: 2500 }),
+      item('terminal-error', 'assistant', { createdAt: 3000, processState: 'failed', terminal: true, turnOutcome: { kind: 'failed', message_ids: [SOURCE_1] } }),
     ], { tailClosed: true });
     expect(result.map(entry => entry.id)).toEqual(['user', DISCLOSURE_1, 'partial-result', 'terminal-error']);
     const disclosure = result.find(entry => entry.type === 'turn_disclosure');
@@ -274,11 +281,11 @@ describe('buildTurnDisclosureItems', () => {
     expect(disclosure.endAt).toBe(3000);
   });
 
-  test('uses message wall time when the failure row has a stable cursor timestamp', () => {
+  test('preserves exact partial-result membership independently of message wall time', () => {
     const result = buildTurnDisclosureItems([
       item('user', 'user', { createdAt: 1000 }),
-      item('terminal-error', 'assistant', { createdAt: 1020, turnEndedAt: 4000, processState: 'failed', terminal: true }),
-      item('partial-result', 'assistant', { createdAt: 1050, displayAt: 3500 }),
+      item('terminal-error', 'assistant', { createdAt: 1020, turnEndedAt: 4000, processState: 'failed', terminal: true, turnOutcome: { kind: 'failed', message_ids: [SOURCE_1] } }),
+      item('partial-result', 'assistant', { publicText: true, sourceMessageIds: [SOURCE_1], createdAt: 1050, displayAt: 3500 }),
       item('late-text', 'assistant', { createdAt: 1060, displayAt: 4500 }),
       item('delayed-old-text', 'assistant', { createdAt: 1070, displayAt: 3000 }),
     ], { tailClosed: true });
@@ -294,10 +301,10 @@ describe('buildTurnDisclosureItems', () => {
   test('late text and another turn cannot replace the preserved failure result', () => {
     const result = buildTurnDisclosureItems([
       item('user', 'user', { createdAt: 1000 }),
-      item('partial-result', 'assistant', { createdAt: 2500 }),
+      item('partial-result', 'assistant', { publicText: true, sourceMessageIds: [SOURCE_1], createdAt: 2500 }),
       item('other-user', 'user', { turnId: TURN_2, createdAt: 2600 }),
       item('other-answer', 'assistant', { turnId: TURN_2, createdAt: 2700 }),
-      item('terminal-error', 'assistant', { createdAt: 3000, processState: 'failed', terminal: true }),
+      item('terminal-error', 'assistant', { createdAt: 3000, processState: 'failed', terminal: true, turnOutcome: { kind: 'failed', message_ids: [SOURCE_1] } }),
       item('late-partial', 'assistant', { createdAt: 3500 }),
     ], { tailClosed: true });
     const visible = result.filter(entry => entry.type === 'item').map(entry => entry.id);
@@ -314,7 +321,7 @@ describe('buildTurnDisclosureItems', () => {
         item('user', 'user', { createdAt: 1000 }),
         item('analysis-note', 'assistant', { createdAt: 1500 }),
         item('tool', 'process', { createdAt: 2000 }),
-        item('summary', 'assistant', { createdAt: 4000 }),
+        item('summary', 'assistant', { publicText: true, sourceMessageIds: [SOURCE_1], turnOutcome: { kind: 'answered', message_ids: [SOURCE_1] }, createdAt: 4000 }),
       ],
       { tailClosed: true }
     );
@@ -756,7 +763,7 @@ describe('buildTurnDisclosureItems', () => {
         item('intro-1', 'assistant', { turnId: TURN_1, createdAt: 1500 }),
         item('tool-1', 'process', { turnId: TURN_1, createdAt: 2000 }),
         item('delayed-turn-2', 'process', { turnId: TURN_2, createdAt: 2500 }),
-        item('final-1', 'assistant', { turnId: TURN_1, createdAt: 3000 }),
+        item('final-1', 'assistant', { publicText: true, sourceMessageIds: [SOURCE_1], turnOutcome: { kind: 'answered', message_ids: [SOURCE_1] }, turnId: TURN_1, createdAt: 3000 }),
       ],
       { tailClosed: true }
     );
@@ -873,7 +880,7 @@ describe('buildTurnDisclosureItems', () => {
       [
         item('user-1', 'user', { turnId: TURN_1, createdAt: 1000 }),
         item('tool-1', 'process', { turnId: TURN_1, createdAt: 2000 }),
-        item('true-final-1', 'assistant', { turnId: TURN_1, createdAt: 6000 }),
+        item('true-final-1', 'assistant', { publicText: true, sourceMessageIds: [SOURCE_1], turnOutcome: { kind: 'answered', message_ids: [SOURCE_1] }, turnId: TURN_1, createdAt: 6000 }),
         item('delayed-turn-2', 'process', { turnId: TURN_2, createdAt: 6500 }),
         item('late-old-intro-1', 'assistant', { turnId: TURN_1, createdAt: 3000 }),
       ],
@@ -1115,4 +1122,12 @@ describe('stop notice', () => {
     expect(disclosure.state).toBe('running');
     expect(disclosure.running).toBe(true);
   });
+});
+
+test('a late paused status in a different row cannot replace the public terminal handoff', () => {
+  const question = item('question', 'assistant', { userInputRequestId: 'ask:profile',
+    turnOutcome: { kind: 'input_required', request_id: 'ask:profile' } });
+  const paused = item('late-paused-summary', 'metadata', { turnOutcome: { kind: 'paused', message_ids: [] }, createdAt: 999999 });
+  expect([...selectTurnPublicResultIds([question, paused])]).toEqual(['question']);
+  expect([...selectTurnPublicResultIds([paused, question])]).toEqual(['question']);
 });

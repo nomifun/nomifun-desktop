@@ -198,6 +198,17 @@ pub(crate) fn rule_answer(
 /// Detect only an explicit hand-off to the user. Ordinary prose containing a
 /// list is not a decision merely because it has numbered lines.
 pub fn detect_decision(text: &str) -> Option<DecisionPrompt> {
+    detect_decision_source(text, false)
+}
+
+/// Canonical input handoffs already declare a question; punctuation and
+/// wording do not decide whether it exists. Classification still applies the
+/// same sensitive-input and option rules used for ordinary assistant prose.
+pub(crate) fn detect_input_request(text: &str) -> Option<DecisionPrompt> {
+    detect_decision_source(text, true)
+}
+
+fn detect_decision_source(text: &str, explicit_request: bool) -> Option<DecisionPrompt> {
     let boundary = text
         .char_indices()
         .rev()
@@ -205,7 +216,7 @@ pub fn detect_decision(text: &str) -> Option<DecisionPrompt> {
         .last()
         .map_or(0, |(index, _)| index);
     let bounded = &text[boundary..];
-    if !has_question_cue(bounded) {
+    if bounded.trim().is_empty() || (!explicit_request && !has_question_cue(bounded)) {
         return None;
     }
     let lines = bounded.lines().collect::<Vec<_>>();
@@ -252,8 +263,10 @@ pub fn detect_decision(text: &str) -> Option<DecisionPrompt> {
             options,
         });
     }
+    let explicit_choice = !explicit_request || ["请选择", "选择一个", "选哪", "which option", "which approach",
+        "which one", "please choose", "please select"].iter().any(|cue| bounded.to_lowercase().contains(cue));
     Some(DecisionPrompt {
-        class: if options.len() >= 2 {
+        class: if options.len() >= 2 && explicit_choice {
             DecisionClass::Options
         } else {
             DecisionClass::OpenQuestion
@@ -343,5 +356,19 @@ mod tests {
         assert!(is_retryable_provider_fault("provider returned 429 rate limit"));
         assert!(is_retryable_provider_fault("network connection reset"));
         assert!(!is_retryable_provider_fault("completion evidence is incomplete"));
+    }
+}
+
+#[cfg(test)]
+mod input_request_tests {
+    use super::*;
+
+    #[test]
+    fn typed_question_does_not_need_prose_cues_or_treat_requested_fields_as_options() {
+        assert_eq!(detect_input_request("姓名和爱好").unwrap().class,DecisionClass::OpenQuestion);
+        assert_eq!(detect_input_request("请提供以下资料：\n1. 姓名\n2. 年龄\n3. 爱好").unwrap().class,DecisionClass::OpenQuestion);
+        assert_eq!(detect_input_request("API key").unwrap().class,DecisionClass::Sensitive);
+        assert_eq!(detect_input_request("请选择格式：\n1. Markdown\n2. HTML（推荐）").unwrap().class,DecisionClass::Options);
+        assert!(detect_decision("姓名和爱好").is_none());
     }
 }

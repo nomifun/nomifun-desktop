@@ -695,6 +695,10 @@ fn completed_robot_delivery_events(
     if delivery.user_input_request.is_some() {
         return vec![robot_stream_failure("The non-interactive robot invocation requires user input")];
     }
+    if delivery.result_ok == Some(true) && !matches!(delivery.turn_outcome,
+        Some(nomifun_agent_contracts::AgentTurnOutcome::Answered { .. })) {
+        return vec![robot_stream_failure("The canonical robot turn has no public answer")];
+    }
     match delivery.result_ok {
         Some(true) => {
             let mut events = Vec::with_capacity(2);
@@ -1129,7 +1133,7 @@ mod tests {
                     .is_empty()
             );
 
-            let reduced = reducer.push(AgentStreamEvent::Finish(FinishEventData {
+            let reduced = reducer.push(AgentStreamEvent::Finish(FinishEventData { turn_outcome: None,
                 session_id: None,
                 stop_reason: Some(stop_reason),
             }));

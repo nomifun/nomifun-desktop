@@ -62,6 +62,7 @@ import ConversationQuestionLocator from '../components/ConversationTitleMinimap/
 import {
   assignTurnIdsFromUserRequests,
   buildTurnDisclosureItems,
+  selectTurnPublicResultIds,
   type TurnDisclosureProcessState,
   type TurnDisclosureInputItem,
   type TurnDisclosureOutputItem,
@@ -310,9 +311,10 @@ const getProcessedItemRole = (item: IRenderableItem): TurnDisclosureInputItem['r
   }
   switch (item.type) {
     case 'text':
+      if (item.position === 'left' && (item.content.agentMessage || item.content.standalone_projection)) return 'other';
       return item.position === 'right' ? 'user' : 'assistant';
     case 'tips':
-      if (item.content.agent_transition || item.content.idmm_notice) return 'other';
+      if (item.content.agent_transition || item.content.idmm_notice || item.content.query_error) return 'other';
       if (isContextCompressionTip(item)) return 'process';
       return 'assistant';
     case 'thinking':
@@ -321,6 +323,7 @@ const getProcessedItemRole = (item: IRenderableItem): TurnDisclosureInputItem['r
     case 'tool_group':
       return 'process';
     case 'agent_status':
+      if (item.content.turn_outcome?.kind === 'unavailable') return 'assistant';
       return item.content.turn_summary ? 'metadata' : 'process';
     default:
       return 'other';
@@ -708,6 +711,11 @@ const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean; hideActi
       case 'tool_group':
         return <MessageToolGroup message={message}></MessageToolGroup>;
       case 'agent_status':
+        if (message.content.turn_outcome?.kind === 'unavailable') {
+          return <div role='note' data-testid='turn-outcome-unavailable' className='text-t-secondary text-13px'>
+            {t('messages.turnOutcomeUnavailable')}
+          </div>;
+        }
         return <MessageAgentStatus message={message}></MessageAgentStatus>;
       case 'thinking':
         return <MessageThinking message={message}></MessageThinking>;
@@ -894,8 +902,9 @@ const MessageList: React.FC<{
         turnEndedAt: getProcessedItemTurnEndedAt(item),
         terminal: isTerminalAssistantItem(item),
         sourceMessageIds: getProcessedItemSourceMessageIds(item),
-        continuationOfMessageId: item.type === 'text' ? item.content.continuation_of_message_id : undefined,
         publicText: item.type === 'text' && item.position === 'left',
+        turnOutcome: item.type === 'tips' || item.type === 'agent_status' ? item.content.turn_outcome : undefined,
+        userInputRequestId: item.type === 'tips' ? item.content.user_input_request?.request_id : undefined,
       };
     });
     const modelInput = assignTurnIdsFromUserRequests(rawModelInput, {
@@ -910,15 +919,15 @@ const MessageList: React.FC<{
       );
       if (ownerMessageId) creationOwnerMessageIdByTurn.set(entry.turnId, ownerMessageId);
     }
-    const finalAssistantTextByTurn = new Map<MessageId, IMessageText>();
+    const publicResultIds = selectTurnPublicResultIds(modelInput);
+    const publicAssistantTextByTurn = new Map<MessageId, IMessageText>();
     for (const entry of modelInput) {
-      if (!entry.turnId || entry.role !== 'assistant') continue;
+      if (!entry.turnId || !publicResultIds.has(entry.id)) continue;
       const item = itemById.get(entry.id);
       if (item?.type !== 'text' || item.position !== 'left') continue;
-      const current = finalAssistantTextByTurn.get(entry.turnId);
-      if (!current || entry.createdAt >= getProcessedItemCreatedAt(current)) {
-        finalAssistantTextByTurn.set(entry.turnId, item);
-      }
+      // Footer/copy placement follows the public membership already resolved
+      // from the receipt; an empty/unreferenced tail cannot replace it.
+      publicAssistantTextByTurn.set(entry.turnId, item);
     }
 
     const disclosureItems = buildTurnDisclosureItems(modelInput, {
@@ -956,7 +965,7 @@ const MessageList: React.FC<{
           };
         }
 
-        const finalTextMessage = finalAssistantTextByTurn.get(entry.turnId);
+        const finalTextMessage = publicAssistantTextByTurn.get(entry.turnId);
         const finalAnswer = finalTextMessage && !entry.processItemIds.includes(getProcessedItemAnchorId(finalTextMessage))
           ? toDisplayText(finalTextMessage.content.content)
           : undefined;
@@ -1011,7 +1020,7 @@ const MessageList: React.FC<{
           mergeKnowledgeWritebackNotices(knowledgeNoticesByTurn.get(entry.turnId), notice));
       }
     }
-    return { disclosureItems, modelInput, turnGates, fileTurnGates, verifiedImagesByTurn, creationOwnerMessageIdByTurn, finalAssistantTextByTurn, knowledgeNoticesByTurn };
+    return { disclosureItems, modelInput, turnGates, fileTurnGates, verifiedImagesByTurn, creationOwnerMessageIdByTurn, publicAssistantTextByTurn, knowledgeNoticesByTurn };
   }, [
     conversationContext?.activeRequestMessageId,
     conversationContext?.activeTurnId,
@@ -1052,7 +1061,7 @@ const MessageList: React.FC<{
     [permissionMessageSources, turnPresentation.modelInput, conversationContext?.activeTurnId, canonicalPermissionTurnId]);
 
   const displayList = useMemo<IProcessedItem[]>(() => {
-    const { disclosureItems, modelInput, turnGates, fileTurnGates, verifiedImagesByTurn, creationOwnerMessageIdByTurn, finalAssistantTextByTurn, knowledgeNoticesByTurn } = turnPresentation;
+    const { disclosureItems, modelInput, turnGates, fileTurnGates, verifiedImagesByTurn, creationOwnerMessageIdByTurn, publicAssistantTextByTurn, knowledgeNoticesByTurn } = turnPresentation;
     const deliverablesByTurn = new Map<MessageId, TurnDeliverableItem[]>();
     for (const [id, gate] of fileTurnGates) {
       if (gate.running) continue;
@@ -1141,7 +1150,7 @@ const MessageList: React.FC<{
           created_at: getProcessedItemCreatedAt(entry),
         });
       }
-      const actionMessage = finalAssistantTextByTurn.get(turnId);
+      const actionMessage = publicAssistantTextByTurn.get(turnId);
       const actionMessageId = actionMessage ? getMessageBusinessIdentity(actionMessage) : undefined;
       if (actionMessage && turnGates.get(turnId)?.running !== true) {
         withOutputs.push({

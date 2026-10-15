@@ -197,16 +197,6 @@ pub(crate) async fn settle(
     })
 }
 
-/// Whether the host reports an actionable gap for this accepted request right
-/// now. Read-only: it relays nothing and spends no relay budget.
-pub(crate) async fn actionable_gap(
-    port: Option<&Arc<dyn AgentCompletionCheckPort>>,
-    causality: &ChatCausality,
-) -> Result<bool, AgentEngineError> {
-    let Some(port) = port else { return Ok(false) };
-    Ok(matches!(normalize(port.check(causality).await?), AgentCompletionCheck::Reject(_)))
-}
-
 /// Relayed feedback asks for further actions. When the task ledger's plan
 /// would refuse them, say so in the journaled feedback itself (replay
 /// reconstructs the same notice) instead of letting the next effect fail.
