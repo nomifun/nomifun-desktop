@@ -20,7 +20,7 @@ await testI18n.use(initReactI18next).init({
 });
 
 describe('provider compatibility mode picker', () => {
-  test('keeps automatic, OpenAI, and Claude presets visible together', () => {
+  test('keeps automatic, Responses, Chat Completions, and Claude presets visible together', () => {
     const html = renderToStaticMarkup(
       <I18nextProvider i18n={testI18n}>
         <ProviderCompatibilityModePicker value='anthropic' onChange={() => undefined} />
@@ -30,11 +30,23 @@ describe('provider compatibility mode picker', () => {
     expect(html.includes('data-provider-compatibility-mode="true"')).toBe(true);
     expect(html.includes('data-provider-compatibility-option="auto"')).toBe(true);
     expect(html.includes('data-provider-compatibility-option="openai"')).toBe(true);
+    expect(html.includes('data-provider-compatibility-option="openai-responses"')).toBe(true);
     expect(html.includes('data-provider-compatibility-option="anthropic"')).toBe(true);
     expect(html.includes('自动识别')).toBe(true);
-    expect(html.includes('OpenAI 兼容')).toBe(true);
+    expect(html.includes('OpenAI Responses')).toBe(true);
+    expect(html.includes('Chat Completions')).toBe(true);
     expect(html.includes('Claude 兼容')).toBe(true);
     expect(html.includes('anthropic.messages')).toBe(true);
     expect(html.includes('x-api-key')).toBe(true);
+  });
+
+  test('explains the distinct Responses endpoint when explicitly selected', () => {
+    const html = renderToStaticMarkup(
+      <I18nextProvider i18n={testI18n}>
+        <ProviderCompatibilityModePicker value='openai-responses' onChange={() => undefined} />
+      </I18nextProvider>
+    );
+    expect(html).toContain('/responses');
+    expect(html).toContain('网关需明确支持此接口');
   });
 });

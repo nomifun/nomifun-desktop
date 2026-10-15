@@ -15,7 +15,7 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::json;
 use tower::ServiceExt;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use nomifun_common::encrypt_string;
@@ -129,6 +129,78 @@ async fn a_401_on_the_correct_path_confirms_the_address() {
         format!("{}/v1/chat/completions", server.uri())
     );
     assert_eq!(body["data"]["root_shape"], "versioned_root");
+}
+
+#[tokio::test]
+async fn responses_probe_uses_the_responses_wire_endpoint_without_generating_content() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/relay/v1/responses"))
+        .and(header("authorization", "Bearer sk-test"))
+        .and(body_json(json!({})))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": {"message": "Missing required parameter: model"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (router, db) = setup().await;
+    let provider_id = create_provider(&db, &format!("{}/relay/v1", server.uri())).await;
+    let body = probe(&router, &provider_id, json!({"protocol":"openai.responses","probe_candidates":false})).await;
+    assert_eq!(body["data"]["reachability"], "reachable");
+    assert_eq!(body["data"]["attempted_url"], format!("{}/relay/v1/responses", server.uri()));
+    assert_eq!(body["data"]["protocol"], "openai.responses");
+}
+
+#[tokio::test]
+async fn missing_post_handlers_and_removed_endpoints_do_not_confirm_a_protocol() {
+    for status in [405, 410] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(json!({"error":"unavailable"})))
+            .mount(&server)
+            .await;
+        let (router, db) = setup().await;
+        let provider_id = create_provider(&db, &format!("{}/v1", server.uri())).await;
+        let body = probe(&router, &provider_id, json!({"protocol":"openai.responses","probe_candidates":false})).await;
+        assert_eq!(body["data"]["reachability"], "unreachable", "{status}");
+        assert_eq!(body["data"]["http_status"], status);
+    }
+}
+
+#[tokio::test]
+async fn a_reachable_protocol_root_outranks_a_generic_credential_rejection() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({"error":"unauthorized"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/responses"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({"error":"model is required"})))
+        .mount(&server)
+        .await;
+    let (router, db) = setup().await;
+    let provider_id = create_provider(&db, &format!("{}/v1", server.uri())).await;
+    let body = probe(&router, &provider_id, json!({"protocol":"openai.responses"})).await;
+    assert_eq!(body["data"]["suggested_base_url"], format!("{}/api/v1", server.uri()));
+}
+
+#[tokio::test]
+async fn html_sniffing_preserves_non_api_diagnosis_even_with_an_incorrect_content_type() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw("<!doctype html><html>gateway</html>", "application/json"))
+        .mount(&server)
+        .await;
+    let (router, db) = setup().await;
+    let provider_id = create_provider(&db, &format!("{}/v1", server.uri())).await;
+    let body = probe(&router, &provider_id, json!({"protocol":"openai.responses","probe_candidates":false})).await;
+    assert_eq!(body["data"]["reachability"], "unreachable");
+    assert_eq!(body["data"]["error_kind"], "non_api_response");
 }
 
 /// Protocols such as Gemini embed the selected model in the request path. The

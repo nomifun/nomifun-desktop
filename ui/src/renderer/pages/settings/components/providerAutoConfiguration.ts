@@ -15,7 +15,7 @@ import {
   type ModelProtocolManifestMap,
 } from './providerModelAdvanced';
 
-export type ProviderCompatibilityMode = 'auto' | 'openai' | 'anthropic';
+export type ProviderCompatibilityMode = 'auto' | 'openai-responses' | 'openai' | 'anthropic';
 
 const OPENAI_PROTOCOL_BY_TASK: Readonly<Partial<Record<ModelTask, string>>> = {
   chat: 'openai.chat_text',
@@ -30,6 +30,11 @@ const OPENAI_PROTOCOL_BY_TASK: Readonly<Partial<Record<ModelTask, string>>> = {
 
 const ANTHROPIC_PROTOCOL_BY_TASK: Readonly<Partial<Record<ModelTask, string>>> = {
   chat: 'anthropic.messages',
+};
+
+const OPENAI_RESPONSES_PROTOCOL_BY_TASK: Readonly<Partial<Record<ModelTask, string>>> = {
+  ...OPENAI_PROTOCOL_BY_TASK,
+  chat: 'openai.responses',
 };
 
 const EMPTY_PROTOCOL_BY_TASK: Readonly<Partial<Record<ModelTask, string>>> = {};
@@ -71,7 +76,7 @@ export const isAutoConfigurationPlatform = (platform: string): boolean => {
 export const providerCompatibilityAuthScheme = (
   mode: ProviderCompatibilityMode
 ): string | undefined => {
-  if (mode === 'openai') return 'bearer';
+  if (mode === 'openai' || mode === 'openai-responses') return 'bearer';
   if (mode === 'anthropic') return 'header_key:x-api-key';
   return undefined;
 };
@@ -80,6 +85,7 @@ export const providerCompatibilityProtocolPreferences = (
   mode: ProviderCompatibilityMode
 ): Readonly<Partial<Record<ModelTask, string>>> => {
   if (mode === 'openai') return OPENAI_PROTOCOL_BY_TASK;
+  if (mode === 'openai-responses') return OPENAI_RESPONSES_PROTOCOL_BY_TASK;
   if (mode === 'anthropic') return ANTHROPIC_PROTOCOL_BY_TASK;
   return EMPTY_PROTOCOL_BY_TASK;
 };
@@ -96,7 +102,7 @@ export const normalizeProviderBaseUrlForCompatibilityMode = (
   try {
     const url = new URL(normalized);
     const segments = url.pathname.split('/').filter(Boolean);
-    if (mode === 'openai' && !segments.some(isVersionSegment)) {
+    if ((mode === 'openai' || mode === 'openai-responses') && !segments.some(isVersionSegment)) {
       segments.push('v1');
     } else if (mode === 'anthropic' && segments.length > 0 && isVersionSegment(segments.at(-1)!)) {
       segments.pop();
@@ -320,6 +326,7 @@ export const applyProviderCompatibilityMode = (
     if (!force) return definition;
     const knownProtocols = new Set([
       ...Object.values(OPENAI_PROTOCOL_BY_TASK),
+      ...Object.values(OPENAI_RESPONSES_PROTOCOL_BY_TASK),
       ...Object.values(ANTHROPIC_PROTOCOL_BY_TASK),
     ]);
     const next: ModelDefinitionDraft = {

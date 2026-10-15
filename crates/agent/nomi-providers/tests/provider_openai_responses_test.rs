@@ -254,6 +254,75 @@ async fn model_reasoning_default_applies_when_the_request_has_no_override() {
 }
 
 #[tokio::test]
+async fn native_reasoning_options_and_optional_tool_arguments_keep_their_semantics() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            completed_text("resp_native_options", false, "ok"),
+            "text/event-stream",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut provider_compat = compat(false);
+    provider_compat.extra_body = Some(
+        json!({
+            "reasoning": {"summary": "auto", "effort": "injected"},
+            "include": ["message.output_text.logprobs", "reasoning.encrypted_content", "message.output_text.logprobs"]
+        })
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let provider = OpenAIResponsesProvider::new("key", &server.uri(), provider_compat);
+    let mut request = request(false);
+    request.reasoning_effort = None;
+    let schema = json!({
+        "type": "object",
+        "properties": {"city": {"type": "string"}, "unit": {"type": "string"}},
+        "required": ["city"]
+    });
+    request.tools = vec![
+        ToolDef {
+            name: "weather".into(),
+            description: "Weather".into(),
+            input_schema: schema.clone(),
+            deferred: false,
+        },
+        ToolDef {
+            name: "forecast".into(),
+            description: "Forecast".into(),
+            input_schema: schema.clone(),
+            deferred: true,
+        },
+    ];
+    let events = collect(provider.stream(&request).await.unwrap()).await;
+    assert!(events.iter().any(|event| matches!(event, LlmEvent::Done { .. })));
+
+    let received = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(body["reasoning"], json!({"summary": "auto"}));
+    assert_eq!(body["include"], json!(["reasoning.encrypted_content", "message.output_text.logprobs"]));
+    assert_eq!(body["tools"][0]["parameters"], schema);
+    assert_eq!(body["tools"][0]["strict"], false);
+    assert_eq!(body["tools"][1]["strict"], false);
+}
+
+#[tokio::test]
+async fn malformed_responses_include_options_fail_before_transport() {
+    let server = MockServer::start().await;
+    for include in [json!(null), json!("reasoning.encrypted_content"), json!([false]), json!([" "])] {
+        let mut provider_compat = compat(false);
+        provider_compat.extra_body = Some(json!({"include": include}).as_object().unwrap().clone());
+        let provider = OpenAIResponsesProvider::new("key", &server.uri(), provider_compat);
+        assert!(matches!(provider.stream(&request(false)).await, Err(ProviderError::Config(_))));
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn function_outputs_keep_schema_refs_opaque_for_compatibility_gateways() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -807,6 +876,106 @@ async fn encrypted_reasoning_is_wrapped_opaquely_and_replayed_statelessly() {
     assert_eq!(second["store"], false);
     assert_eq!(second["input"][0]["type"], "reasoning");
     assert_eq!(second["input"][0]["encrypted_content"], "opaque-ciphertext");
+}
+
+#[tokio::test]
+async fn reasoning_text_and_multiple_summary_parts_finish_independently() {
+    let reasoning = json!({
+        "id": "rs_parts",
+        "type": "reasoning",
+        "summary": [
+            {"type": "summary_text", "text": "First summary."},
+            {"type": "summary_text", "text": "Second summary."}
+        ],
+        "content": [{"type": "reasoning_text", "text": "Reasoning text."}],
+        "encrypted_content": "opaque-parts"
+    });
+    let mut events = vec![
+        created("resp_parts", false),
+        (
+            "response.output_item.added",
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"id": "rs_parts", "type": "reasoning", "summary": []}
+            }),
+        ),
+    ];
+    for (delta_type, done_type, index_field, part_index, text) in [
+        ("response.reasoning_summary_text.delta", "response.reasoning_summary_text.done", "summary_index", 0, "First summary."),
+        ("response.reasoning_summary_text.delta", "response.reasoning_summary_text.done", "summary_index", 1, "Second summary."),
+        ("response.reasoning_text.delta", "response.reasoning_text.done", "content_index", 0, "Reasoning text."),
+    ] {
+        for (event_type, field) in [(delta_type, "delta"), (done_type, "text")] {
+            let mut payload = json!({
+                "type": event_type,
+                "output_index": 0,
+                "item_id": "rs_parts",
+            });
+            payload[index_field] = json!(part_index);
+            payload[field] = json!(text);
+            events.push((event_type, payload));
+        }
+    }
+    events.extend([
+        (
+            "response.output_item.done",
+            json!({"type": "response.output_item.done", "output_index": 0, "item": reasoning.clone()}),
+        ),
+        (
+            "response.completed",
+            json!({
+                "type": "response.completed",
+                "response": {"id": "resp_parts", "status": "completed", "store": false, "output": [reasoning]}
+            }),
+        ),
+    ]);
+    let actual = protocol_error_events(sse(events), false).await;
+    assert!(!actual.iter().any(|event| matches!(event, LlmEvent::Error(_))), "{actual:?}");
+    let thinking = actual.iter().filter_map(|event| match event {
+        LlmEvent::ThinkingDelta(text) => Some(text.as_str()),
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert_eq!(thinking, ["First summary.", "Second summary.", "Reasoning text."]);
+    assert!(actual.iter().any(|event| matches!(event, LlmEvent::ThinkingSignature(_))));
+    assert!(actual.iter().any(|event| matches!(event, LlmEvent::Done { .. })));
+}
+
+#[tokio::test]
+async fn reasoning_summary_indices_and_done_only_aggregate_are_bounded() {
+    for (parts, expected_error) in [
+        (vec![(128, "small".to_owned())], "summary_index"),
+        (vec![(0, "a".repeat(270_000)), (1, "b".repeat(270_000))], "safety limit"),
+    ] {
+        let mut events = vec![
+            created("resp_reasoning_bounds", false),
+            (
+                "response.output_item.added",
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {"id": "rs_bounds", "type": "reasoning", "summary": []}
+                }),
+            ),
+        ];
+        for (index, text) in parts {
+            events.push((
+                "response.reasoning_summary_text.done",
+                json!({
+                    "type": "response.reasoning_summary_text.done",
+                    "output_index": 0,
+                    "item_id": "rs_bounds",
+                    "summary_index": index,
+                    "text": text
+                }),
+            ));
+        }
+        let actual = protocol_error_events(sse(events), false).await;
+        assert_failed_without_commit(&actual);
+        assert!(actual.iter().any(|event| matches!(
+            event, LlmEvent::Error(message) if message.contains(expected_error)
+        )));
+    }
 }
 
 async fn protocol_error_events(body: String, retain: bool) -> Vec<LlmEvent> {

@@ -122,6 +122,10 @@ impl OpenAIResponsesProvider {
                     "name": tool.name,
                     "description": description,
                     "parameters": parameters,
+                    // Responses otherwise attempts to normalize schemas into
+                    // strict mode, which can turn optional tool arguments
+                    // into required ones. Keep our declared tool semantics.
+                    "strict": false,
                 })
             })
             .collect()
@@ -144,13 +148,26 @@ impl OpenAIResponsesProvider {
             .max_tokens_field
             .as_deref()
             .unwrap_or("max_output_tokens");
+        let mut include = vec![json!("reasoning.encrypted_content")];
+        if let Some(configured) = self.compat.extra_body.as_ref().and_then(|extra| extra.get("include")) {
+            let configured = configured.as_array().filter(|values| values.iter().all(|value| {
+                value.as_str().is_some_and(|value| !value.trim().is_empty())
+            })).ok_or_else(|| ProviderError::Config(
+                "Responses include must be an array of non-empty strings".into(),
+            ))?;
+            for value in configured {
+                if !include.contains(value) {
+                    include.push(value.clone());
+                }
+            }
+        }
         let mut typed = json!({
             "model": request.model,
             "instructions": request.system,
             "input": input,
             "stream": true,
             "store": retain,
-            "include": ["reasoning.encrypted_content"],
+            "include": include,
         });
         if let Some(limit) = request.max_tokens {
             typed[max_tokens_field] = json!(limit);
@@ -187,7 +204,16 @@ impl OpenAIResponsesProvider {
             object.remove("tools");
         }
         if reasoning_effort.is_none() {
-            object.remove("reasoning");
+            // An absent typed effort keeps the provider default, while other
+            // native options such as reasoning.summary remain configurable.
+            if let Some(Value::Object(reasoning)) = object.get_mut("reasoning") {
+                reasoning.remove("effort");
+                if reasoning.is_empty() {
+                    object.remove("reasoning");
+                }
+            } else {
+                object.remove("reasoning");
+            }
         }
         if previous_response_id.is_none() {
             object.remove("previous_response_id");
@@ -665,7 +691,8 @@ enum OutputItemState {
     },
     Reasoning {
         id: String,
-        summary: String,
+        summary: BTreeMap<usize, String>,
+        text: BTreeMap<usize, String>,
         completed: Option<Value>,
     },
 }
@@ -1077,23 +1104,26 @@ impl ResponsesStreamState {
 
     fn on_reasoning_delta(&mut self, object: &Map<String, Value>) -> Result<Vec<LlmEvent>, ProviderError> {
         let index = output_index(object)?;
+        let (is_summary, part_index) = reasoning_part_index(object)?;
         self.ensure_item_open(index)?;
         let item_id = required_str(object, "item_id", "reasoning delta")?;
         let delta = required_str(object, "delta", "reasoning delta")?;
         let item = self.items.get_mut(&index).ok_or_else(|| {
             ProviderError::Parse(format!("Responses reasoning delta references unknown item {index}"))
         })?;
-        let OutputItemState::Reasoning { id, summary, .. } = item else {
+        let OutputItemState::Reasoning { id, summary, text, .. } = item else {
             return Err(ProviderError::Parse(
                 "Responses reasoning delta references a non-reasoning item".into(),
             ));
         };
-        if id != item_id || summary.len().saturating_add(delta.len()) > MAX_REASONING_STATE_BYTES {
+        let content_bytes = message_content_bytes(summary, text)?;
+        if id != item_id || content_bytes.saturating_add(delta.len()) > MAX_REASONING_STATE_BYTES {
             return Err(ProviderError::Parse(
                 "Responses reasoning delta is inconsistent or too large".into(),
             ));
         }
-        summary.push_str(delta);
+        let parts = if is_summary { summary } else { text };
+        parts.entry(part_index).or_default().push_str(delta);
         Ok((!delta.is_empty())
             .then(|| LlmEvent::ThinkingDelta(delta.to_owned()))
             .into_iter()
@@ -1102,24 +1132,33 @@ impl ResponsesStreamState {
 
     fn on_reasoning_done(&mut self, object: &Map<String, Value>) -> Result<Vec<LlmEvent>, ProviderError> {
         let index = output_index(object)?;
+        let (is_summary, part_index) = reasoning_part_index(object)?;
         self.ensure_item_open(index)?;
         let item_id = required_str(object, "item_id", "reasoning done")?;
         let completed = required_str(object, "text", "reasoning done")?;
         let item = self.items.get_mut(&index).ok_or_else(|| {
             ProviderError::Parse(format!("Responses reasoning done references unknown item {index}"))
         })?;
-        let OutputItemState::Reasoning { id, summary, .. } = item else {
+        let OutputItemState::Reasoning { id, summary, text, .. } = item else {
             return Err(ProviderError::Parse(
                 "Responses reasoning done references a non-reasoning item".into(),
             ));
         };
-        if id != item_id || (!summary.is_empty() && summary != completed) {
+        let content_bytes = message_content_bytes(summary, text)?;
+        let parts = if is_summary { summary } else { text };
+        let streamed = parts.entry(part_index).or_default();
+        if id != item_id || (!streamed.is_empty() && streamed != completed) {
             return Err(ProviderError::Parse(
                 "Responses reasoning done did not match its streamed content".into(),
             ));
         }
-        if summary.is_empty() && !completed.is_empty() {
-            *summary = completed.to_owned();
+        if streamed.is_empty() && !completed.is_empty() {
+            if content_bytes.saturating_add(completed.len()) > MAX_REASONING_STATE_BYTES {
+                return Err(ProviderError::Parse(
+                    "Responses completed reasoning exceeded its safety limit".into(),
+                ));
+            }
+            *streamed = completed.to_owned();
             return Ok(vec![LlmEvent::ThinkingDelta(completed.to_owned())]);
         }
         Ok(Vec::new())
@@ -1502,7 +1541,8 @@ fn parse_added_item(item: &Map<String, Value>) -> Result<OutputItemState, Provid
         }
         "reasoning" => Ok(OutputItemState::Reasoning {
             id: id.to_owned(),
-            summary: String::new(),
+            summary: BTreeMap::new(),
+            text: BTreeMap::new(),
             completed: None,
         }),
         other => Err(ProviderError::Parse(format!(
@@ -1612,6 +1652,25 @@ fn message_content_bytes(
 
 fn item_and_content_index(object: &Map<String, Value>) -> Result<(usize, usize), ProviderError> {
     Ok((output_index(object)?, content_index(object)?))
+}
+
+fn reasoning_part_index(object: &Map<String, Value>) -> Result<(bool, usize), ProviderError> {
+    let is_summary = object
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind.starts_with("response.reasoning_summary_text."));
+    if !is_summary {
+        return Ok((false, content_index(object)?));
+    }
+    let index = object.get("summary_index").and_then(Value::as_u64).ok_or_else(|| {
+        ProviderError::Parse("Responses event is missing unsigned `summary_index`".into())
+    })?;
+    if index >= MAX_CONTENT_PARTS as u64 {
+        return Err(ProviderError::Parse(format!(
+            "Responses summary_index exceeds the {MAX_CONTENT_PARTS}-part safety limit"
+        )));
+    }
+    Ok((true, index as usize))
 }
 
 fn parse_usage(response: &Map<String, Value>) -> Result<TokenUsage, ProviderError> {

@@ -307,8 +307,20 @@ impl OpenAIProvider {
             ),
             "stream": true
         });
-        if include_stream_usage {
-            body["stream_options"] = json!({ "include_usage": true });
+        let configured_stream_options = self
+            .compat
+            .extra_body
+            .as_ref()
+            .and_then(|extra| extra.get("stream_options"));
+        let omit_stream_options = !include_stream_usage
+            || configured_stream_options.is_some_and(Value::is_null);
+        if !omit_stream_options {
+            let mut options = configured_stream_options
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            options.entry("include_usage").or_insert(json!(true));
+            body["stream_options"] = Value::Object(options);
         }
         if let Some(limit) = request.max_tokens {
             body[max_tokens_field] = json!(limit);
@@ -351,7 +363,7 @@ impl OpenAIProvider {
         if reasoning_effort.is_none() {
             object.remove("reasoning_effort");
         }
-        if !include_stream_usage {
+        if omit_stream_options {
             object.remove("stream_options");
         }
         body

@@ -1122,6 +1122,46 @@ async fn openai_extra_body_preserves_unknown_fields_but_typed_fields_win() {
     assert!(body.get("reasoning_effort").is_none());
 }
 
+#[tokio::test]
+async fn chat_stream_options_can_disable_usage_or_omit_the_field_for_compatible_gateways() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_sse_body(&[
+                &json!({"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}).to_string(),
+            ]),
+            "text/event-stream",
+        ))
+        .expect(4)
+        .mount(&server)
+        .await;
+
+    for options in [
+        None,
+        Some(serde_json::Value::Null),
+        Some(json!({"include_usage": false, "include_obfuscation": false})),
+        Some(json!({"include_obfuscation": false})),
+    ] {
+        let mut compat = ProviderCompat::openai_defaults();
+        compat.extra_body = options.map(|options| {
+            json!({"stream_options": options}).as_object().unwrap().clone()
+        });
+        let provider = OpenAIProvider::new("key", &server.uri(), compat);
+        let events = collect_events(provider.stream(&make_request()).await.unwrap()).await;
+        assert!(events.iter().any(|event| matches!(event, LlmEvent::Done { .. })));
+    }
+
+    let received = server.received_requests().await.unwrap();
+    let bodies = received.iter().map(|request| {
+        serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()
+    }).collect::<Vec<_>>();
+    assert_eq!(bodies[0]["stream_options"], json!({"include_usage": true}));
+    assert!(bodies[1].get("stream_options").is_none());
+    assert_eq!(bodies[2]["stream_options"], json!({"include_usage": false, "include_obfuscation": false}));
+    assert_eq!(bodies[3]["stream_options"], json!({"include_usage": true, "include_obfuscation": false}));
+}
+
 /// A mid-turn steer reaches the model on the wire.
 ///
 /// The engine appends user steering as a trailing Text block on the tool-result

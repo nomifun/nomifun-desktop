@@ -155,7 +155,8 @@ fn manifest_prioritizes_preset_protocols_and_installs_a_custom_compat_default() 
         vec![
             "anthropic.messages",
             "gemini.generate_text",
-            "openai.chat_text"
+            "openai.chat_text",
+            "openai.responses"
         ]
     );
 }
@@ -210,6 +211,24 @@ fn custom_presets_recommend_the_unique_registry_declared_compat_protocol_per_tas
                 .is_some_and(|candidate| candidate.default_connections.is_empty()),
             "custom recommendation must not expose a provider connection for {task:?}"
         );
+    }
+}
+
+#[test]
+fn openai_prefers_responses_and_compatible_providers_can_select_it_explicitly() {
+    let openai = protocol_manifest_for("OpenAI", ModelTask::Chat);
+    let recommendation = openai.recommendation.unwrap();
+    assert_eq!(recommendation.protocol_id, "openai.responses");
+    assert_eq!(recommendation.default_base_url.as_deref(), Some("https://api.openai.com/v1"));
+    assert!(openai.protocols.iter().any(|descriptor| descriptor.protocol_id == "openai.chat_text"));
+
+    for platform in ["custom", "new-api", "openrouter", "deepseek"] {
+        let manifest = protocol_manifest_for(platform, ModelTask::Chat);
+        assert_eq!(manifest.recommendation.unwrap().protocol_id, "openai.chat_text", "{platform}");
+        let responses = manifest.protocols.iter().find(|descriptor| descriptor.protocol_id == "openai.responses")
+            .expect("Responses is an explicitly selectable serializer");
+        assert!(responses.scopes.contains(&ProtocolScope::Custom));
+        assert!(responses.default_connections.is_empty(), "do not import OpenAI URLs into {platform}");
     }
 }
 
@@ -290,7 +309,7 @@ fn unsupported_preset_tasks_expose_custom_protocols_without_endpoint_or_auth_def
 #[test]
 fn gemini_native_chat_and_regional_base_selection_are_exact() {
     let gemini = protocol_manifest_for("gemini", ModelTask::Chat);
-    assert_eq!(gemini.protocols.len(), 3);
+    assert_eq!(gemini.protocols.len(), 4);
     assert_eq!(gemini.protocols[0].protocol_id, "gemini.generate_text");
     assert!(gemini.protocols[1..]
         .iter()
@@ -429,7 +448,7 @@ fn all_recommended_lifecycle_urls_match_the_locked_official_matrix() {
         (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
     });
     assert_eq!(
-        hash, 4_581_283_236_433_659_689,
+        hash, 13_308_157_315_014_894_705,
         "recommendation URL snapshot changed:\n{snapshot}"
     );
 }

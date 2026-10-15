@@ -136,11 +136,18 @@ describe('provider auto configuration', () => {
   test('provides complete OpenAI and Claude compatibility presets', () => {
     expect(providerCompatibilityAuthScheme('auto')).toBeUndefined();
     expect(providerCompatibilityAuthScheme('openai')).toBe('bearer');
+    expect(providerCompatibilityAuthScheme('openai-responses')).toBe('bearer');
     expect(providerCompatibilityAuthScheme('anthropic')).toBe('header_key:x-api-key');
     expect(providerCompatibilityProtocolPreferences('openai')['chat']).toBe(
       'openai.chat_text'
     );
     expect(providerCompatibilityProtocolPreferences('openai')['image_generation']).toBe(
+      'openai.images'
+    );
+    expect(providerCompatibilityProtocolPreferences('openai-responses')['chat']).toBe(
+      'openai.responses'
+    );
+    expect(providerCompatibilityProtocolPreferences('openai-responses')['image_generation']).toBe(
       'openai.images'
     );
     expect(providerCompatibilityProtocolPreferences('anthropic')['chat']).toBe(
@@ -149,6 +156,28 @@ describe('provider auto configuration', () => {
     expect(
       providerCompatibilityProtocolPreferences('anthropic')['image_generation']
     ).toBeUndefined();
+  });
+
+  test('Responses mode restricts probes, preserves model values, and can return to automatic discovery', () => {
+    const responses = descriptor('openai.responses', ['bearer']);
+    const chat = descriptor('openai.chat_text', ['bearer']);
+    const initial = {
+      model: 'unlisted/future-model',
+      capabilities: [{ ...emptyCapabilityDraft('chat'), outputLimit: 32_768,
+        providerParamsJson: '{"reasoning_effort":"high","text":{"verbosity":"low"}}' }],
+    };
+    const definition = applyProviderCompatibilityMode(initial, 'openai-responses', true);
+    expect(definition.capabilities[0]).toMatchObject({
+      protocol: 'openai.responses', outputLimit: 32_768,
+      providerParamsJson: initial.capabilities[0].providerParamsJson,
+    });
+    const targets = buildProviderAutoConfigurationTargets(definition,
+      { chat: manifest([chat, responses]) }, 'bearer', false,
+      providerCompatibilityProtocolPreferences('openai-responses'));
+    expect(targets[0]?.candidates.map(candidate => candidate.descriptor.protocol_id)).toEqual(['openai.responses']);
+    expect(applyProviderCompatibilityMode(definition, 'auto', true).capabilities[0]).toMatchObject({
+      protocol: '', transportSource: 'blank', providerParamsJson: initial.capabilities[0].providerParamsJson,
+    });
   });
 
   test('restricts live probing to the explicitly selected interface mode', () => {
@@ -239,6 +268,12 @@ describe('provider auto configuration', () => {
   });
 
   test('normalizes provider roots for OpenAI and Claude wire formats', () => {
+    expect(normalizeProviderBaseUrlForCompatibilityMode(
+      'https://gateway.example/api', 'openai-responses'
+    )).toBe('https://gateway.example/api/v1');
+    expect(normalizeProviderBaseUrlForCompatibilityMode(
+      'https://gateway.example/api/v1', 'openai-responses'
+    )).toBe('https://gateway.example/api/v1');
     expect(
       normalizeProviderBaseUrlForCompatibilityMode(
         'https://gateway.example',

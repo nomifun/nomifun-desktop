@@ -19,9 +19,31 @@ Model IDs remain manually editable when discovery fails. Only provider-declared 
 
 The `nomifun-model-invoke` protocol registry owns serializers, supported tasks, authentication, endpoint defaults and editability. Editors read its `/api/model-protocols` manifest rather than maintaining another protocol list. Configuration suggestions affect execution only after explicitly saving the capability; runtime does not repeat recommendation or infer protocols from model names.
 
-Tasks under one provider may use different domains, named connections and credentials. `base_url_override` affects only the selected task; `endpoint`, `poll_endpoint`, `content_endpoint` and `realtime_endpoint` represent submission, polling, content and realtime transport. Absolute overrides with a different credential origin require explicit `allow_cross_origin_credentials`. Changing protocols clears old transport overrides, cross-origin consent and protocol parameters before applying the new manifest.
+Tasks under one provider may use different domains, named connections and credentials. `base_url_override` affects only the selected task; `endpoint`, `poll_endpoint`, `content_endpoint` and `realtime_endpoint` represent submission, polling, content and realtime transport. Absolute overrides with a different credential origin require explicit `allow_cross_origin_credentials`. Changing protocols clears old transport overrides and cross-origin consent before applying the new manifest. Authored parameter drafts and limits remain intact; incompatible protocol controls surface explicit editor and save-time errors for the user to correct.
 
 `provider_params` obeys the protocol's strict encoding contract and cannot carry credentials or local transport fields. Values that cannot be encoded losslessly are rejected on save. Responses expose `has_credentials` without returning secrets. Invocation-graph changes atomically increment `config_revision`; resolution, asynchronous jobs and health observations use a consistent revision, so stale probes cannot overwrite new configuration.
+
+New Chat configuration under the official OpenAI preset recommends `openai.responses`.
+Custom providers may explicitly select it; ordinary compatible services retain
+`openai.chat_text` as their default. Saved protocols are never rewritten automatically.
+Responses uses its own typed serializers for input, function calls and stream events.
+Tool schemas set `strict: false` explicitly to retain optional platform arguments.
+Reasoning summary parts are validated separately by item and summary/content index.
+
+`max_tokens_field` selects only the output field alias for either OpenAI Chat
+protocol. The smaller of the typed request limit and capability `output_limit`
+remains authoritative; aliases cannot replace messages, tools or protocol state.
+Chat Completions accepts `stream_options: null` to omit optional usage options,
+or an object whose `include_usage` overrides the default. Responses `include`
+extensions merge with required encrypted reasoning continuation fields.
+Parameter JSON cannot inject protocol-owned model, input, tool, streaming or
+retained cloud-state fields.
+Reasoning effort uses the normalized `reasoning_effort` control. Saving native
+Responses `reasoning.effort` asks the user to use that control instead, while
+other native options such as `summary`, `mode` and `context` remain configurable.
+Chat Completions omits local round IDs, tool metadata and `is_error`. Tool errors
+are expressed in result text; images and audio follow the complete tool-result
+batch as user attachments, keeping the tool messages themselves text-only.
 
 “OpenAI compatible” does not prove compatibility across modalities. Ark versus Volcengine voice, native DashScope and MiniMax regional connections are expressed by their adapters and manifests, without a duplicate endpoint matrix. Provider changes update the registry, serializer and focused contract tests, then require actual-account verification. Local substitutes do not prove cloud permissions or model experience.
 

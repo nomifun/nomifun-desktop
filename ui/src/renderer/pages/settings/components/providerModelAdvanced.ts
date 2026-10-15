@@ -22,6 +22,7 @@ import {
   reasoningEffortsForProtocol,
   type SessionReasoningEffort,
 } from '@/common/types/reasoningEffort';
+import { validateProviderParameterControls, type ProviderParameterIssue } from './providerParameterValidation';
 
 /** The endpoint fields owned by a task capability on the wire. */
 export const CAPABILITY_ENDPOINT_FIELDS = [
@@ -134,11 +135,14 @@ export type CapabilityValidationError =
   | 'output_ceiling_required'
   | 'invalid_token_limit'
   | 'cross_origin_consent_required'
+  | 'invalid_max_tokens_field'
+  | 'native_reasoning_effort'
+  | ProviderParameterIssue['code']
   | 'invalid_provider_params';
 
 export interface CapabilityValidationResult {
   valid: boolean;
-  errors: Array<{ task?: ModelTask; code: CapabilityValidationError }>;
+  errors: Array<{ task?: ModelTask; code: CapabilityValidationError; parameter?: string }>;
 }
 
 /**
@@ -162,12 +166,12 @@ export const capabilityValidationMessageKey = (code: CapabilityValidationError):
  */
 export const describeValidationErrors = (
   errors: CapabilityValidationResult['errors'],
-  translate: (key: string, fallback: string) => string
+  translate: (key: string, fallback: string, parameter?: string) => string
 ): string =>
   [
     ...new Set(
       errors.map((error) => {
-        const message = translate(capabilityValidationMessageKey(error.code), error.code);
+        const message = translate(capabilityValidationMessageKey(error.code), error.code, error.parameter);
         return error.task
           ? `${translate(`settings.modelTask.${error.task}`, error.task)} · ${message}`
           : message;
@@ -853,6 +857,47 @@ export const withProviderParamChainRounds = (raw: string, enabled: boolean): str
   return Object.keys(next).length > 0 ? JSON.stringify(next, null, 2) : '';
 };
 
+/** Compatibility controls edit the canonical JSON without discarding custom keys. */
+export const providerParamMaxTokensField = (raw: string): string => {
+  const parsed = parseProviderParams(raw);
+  return parsed.ok && typeof parsed.value.max_tokens_field === 'string'
+    ? parsed.value.max_tokens_field.trim()
+    : '';
+};
+
+export const withProviderParamMaxTokensField = (raw: string, field: string): string => {
+  const parsed = parseProviderParams(raw);
+  if (!parsed.ok) return raw;
+  const next = { ...parsed.value };
+  if (field.trim()) next.max_tokens_field = field.trim();
+  else delete next.max_tokens_field;
+  return Object.keys(next).length > 0 ? JSON.stringify(next, null, 2) : '';
+};
+
+export type ChatStreamUsageMode = 'default' | 'omit' | 'include' | 'custom';
+
+export const providerParamStreamUsage = (raw: string): ChatStreamUsageMode => {
+  const parsed = parseProviderParams(raw);
+  if (!parsed.ok || !Object.prototype.hasOwnProperty.call(parsed.value, 'stream_options')) return 'default';
+  if (parsed.value.stream_options === null) return 'omit';
+  return isPlainObject(parsed.value.stream_options) && parsed.value.stream_options.include_usage === true
+    ? 'include'
+    : 'custom';
+};
+
+export const withProviderParamStreamUsage = (raw: string, mode: Exclude<ChatStreamUsageMode, 'custom'>): string => {
+  const parsed = parseProviderParams(raw);
+  if (!parsed.ok) return raw;
+  const next = { ...parsed.value };
+  if (mode === 'default') delete next.stream_options;
+  else if (mode === 'omit') next.stream_options = null;
+  else next.stream_options = {
+    ...(isPlainObject(next.stream_options) ? next.stream_options : {}),
+    include_usage: true,
+  };
+  return Object.keys(next).length > 0 ? JSON.stringify(next, null, 2) : '';
+};
+
 export const providerParamReasoningEffort = (raw: string): ModelReasoningEffort | undefined => {
   const parsed = parseProviderParams(raw);
   if (!parsed.ok) return undefined;
@@ -875,6 +920,14 @@ export const withProviderParamReasoningEffort = (
   const parsed = parseProviderParams(raw);
   if (!parsed.ok) return raw;
   const next = { ...parsed.value };
+  // The normalized control is authoritative after an explicit edit. A native
+  // Responses effort from an older raw draft must not remain as a second value.
+  if (isPlainObject(next.reasoning) && Object.prototype.hasOwnProperty.call(next.reasoning, 'effort')) {
+    const reasoning = { ...next.reasoning };
+    delete reasoning.effort;
+    if (Object.keys(reasoning).length > 0) next.reasoning = reasoning;
+    else delete next.reasoning;
+  }
   if (effort) next.reasoning_effort = effort;
   else delete next.reasoning_effort;
   return Object.keys(next).length > 0 ? JSON.stringify(next, null, 2) : '';
@@ -983,6 +1036,14 @@ export const validateModelDefinition = (
         errors.push({ task: capability.task, code: 'invalid_provider_params' });
       }
     }
+    if (providerParams.ok) errors.push(...validateProviderParameterControls(
+      capability.protocol, capability.task, providerParams.value,
+    ).map(issue => ({ task: capability.task, ...issue })));
+    if (
+      providerParams.ok && capability.protocol === 'openai.responses' &&
+      isPlainObject(providerParams.value.reasoning) &&
+      Object.prototype.hasOwnProperty.call(providerParams.value.reasoning, 'effort')
+    ) errors.push({ task: capability.task, code: 'native_reasoning_effort' });
   }
   return { valid: errors.length === 0, errors };
 };

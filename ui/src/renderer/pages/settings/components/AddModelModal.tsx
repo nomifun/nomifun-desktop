@@ -150,8 +150,8 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
         // Name the blockers. A bare "finish configuring each task" left a
         // new-api provider — which requires an explicit protocol per model —
         // with no way to discover what was missing.
-        const detail = describeValidationErrors(validation.errors, (key, fallback) =>
-          t(key, { defaultValue: fallback })
+        const detail = describeValidationErrors(validation.errors, (key, fallback, parameter) =>
+          t(key, { defaultValue: fallback, parameter })
         );
         message.warning(
           detail ||

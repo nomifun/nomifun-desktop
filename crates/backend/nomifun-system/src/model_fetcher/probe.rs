@@ -125,27 +125,28 @@ impl ModelFetchService {
 
         let mut candidates = Vec::new();
         let mut suggested_base_url = None;
+        let mut suggested_rank = 2;
         if configured.reachability == ProviderReachability::Unreachable && probe_candidates {
-            // Deterministic order, and never a doubled version segment.
-            for candidate_root in root_candidates(&config.base_url) {
-                if candidate_root == config.base_url.trim().trim_end_matches('/') {
-                    continue;
-                }
-                let outcome = self
-                    .probe_one(
-                        &client,
-                        &candidate_root,
-                        &protocol,
-                        task,
-                        &template,
-                        model,
-                        &config.auth,
-                    )
-                    .await?;
-                let better = outcome.reachability != ProviderReachability::Unreachable;
+            // Probe independent roots together so a gateway that times out does
+            // not multiply the ten-second timeout by every URL variant. Keep
+            // results in deterministic candidate order when choosing a root.
+            let roots = root_candidates(&config.base_url).into_iter().filter(|root| {
+                root != config.base_url.trim().trim_end_matches('/')
+            }).collect::<Vec<_>>();
+            let outcomes = futures::future::join_all(roots.iter().map(|root| {
+                self.probe_one(&client, root, &protocol, task, &template, model, &config.auth)
+            })).await;
+            for (candidate_root, outcome) in roots.into_iter().zip(outcomes) {
+                let outcome = outcome?;
+                let rank = match outcome.reachability {
+                    ProviderReachability::Reachable => 0,
+                    ProviderReachability::CredentialsRejected => 1,
+                    ProviderReachability::Unreachable => 2,
+                };
                 candidates.push(outcome.into());
-                if better && suggested_base_url.is_none() {
+                if rank < suggested_rank {
                     suggested_base_url = Some(candidate_root);
+                    suggested_rank = rank;
                 }
             }
         }
@@ -168,7 +169,7 @@ impl ModelFetchService {
             error_kind: Some(error_kind_for(
                 configured.reachability,
                 configured.http_status,
-                configured.content_type.is_some(),
+                configured.non_api_response,
             )),
             content_type: configured.content_type,
             message: configured.message,
@@ -204,14 +205,20 @@ impl ModelFetchService {
         let request = client
             .post(&url)
             .timeout(PROBE_TIMEOUT)
+            .header("Accept", "application/json")
             // An empty JSON object is enough to prove the path exists: a correct
             // endpoint answers 400, which costs no tokens and produces no content.
             .json(&serde_json::json!({}));
+        let request = if protocol == "anthropic.messages" {
+            request.header("anthropic-version", "2023-06-01")
+        } else {
+            request
+        };
         let request = auth
             .apply(request)
             .map_err(|error| AppError::BadRequest(error.to_string()))?;
 
-        let response = match request.send().await {
+        let mut response = match request.send().await {
             Ok(response) => response,
             Err(error) => {
                 return Ok(ProbeOutcome {
@@ -220,6 +227,7 @@ impl ModelFetchService {
                     reachability: ProviderReachability::Unreachable,
                     http_status: None,
                     content_type: None,
+                    non_api_response: false,
                     message: Some(transport_message(&error)),
                 });
             }
@@ -228,20 +236,32 @@ impl ModelFetchService {
         let status = response.status();
         let content_type = is_non_api_content_type(response.headers());
         let redactor = nomifun_net::secret_redaction::SecretRedactor::new(auth.secrets());
-        let body = response.bytes().await.unwrap_or_default();
-        let sniffed = &body[..body.len().min(BODY_SNIFF_BYTES)];
-        let markup = content_type.is_some() || looks_like_markup(sniffed);
+        // Probing an accidentally streaming route must not buffer an unbounded
+        // response just to inspect a short diagnostic prefix.
+        let mut body = Vec::with_capacity(BODY_SNIFF_BYTES);
+        while body.len() < BODY_SNIFF_BYTES {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    let remaining = BODY_SNIFF_BYTES - body.len();
+                    body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                }
+                Ok(None) | Err(_) => break,
+            }
+        }
+        let markup = content_type.is_some() || looks_like_markup(&body);
 
         let reachability = if markup {
             // A document at any status means there is no API here, even at 200.
             ProviderReachability::Unreachable
         } else if matches!(status.as_u16(), 401 | 403) {
             ProviderReachability::CredentialsRejected
-        } else if status.as_u16() == 404 || status.is_server_error() {
-            ProviderReachability::Unreachable
-        } else {
-            // 200/400/422/429 all prove the endpoint exists and parsed the request.
+        } else if status.is_success() || matches!(status.as_u16(), 400 | 415 | 422 | 429) {
+            // 200/400/415/422/429 prove the endpoint exists and parsed the request.
             ProviderReachability::Reachable
+        } else {
+            // A catch-all GET route can answer 405 to every POST. A removed
+            // endpoint can answer 410. Neither confirms this protocol works.
+            ProviderReachability::Unreachable
         };
 
         let message = if markup {
@@ -258,6 +278,7 @@ impl ModelFetchService {
             reachability,
             http_status: Some(status.as_u16()),
             content_type,
+            non_api_response: markup,
             message,
         })
     }
@@ -292,6 +313,7 @@ struct ProbeOutcome {
     reachability: ProviderReachability,
     http_status: Option<u16>,
     content_type: Option<String>,
+    non_api_response: bool,
     message: Option<String>,
 }
 
@@ -411,7 +433,7 @@ mod tests {
     fn a_builtin_platform_falls_back_to_its_recommendation() {
         assert_eq!(
             resolve_probe_protocol("openai", None, ModelTask::Chat).unwrap(),
-            "openai.chat_text"
+            "openai.responses"
         );
     }
 }

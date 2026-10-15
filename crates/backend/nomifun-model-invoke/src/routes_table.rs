@@ -23,7 +23,10 @@ const fn route(protocol: &'static str) -> Option<TaskRoute> {
 fn openai_route(task: ModelTask) -> Option<TaskRoute> {
     use ModelTask::*;
     match task {
-        Chat => route("openai.chat_text"),
+        // Responses is OpenAI's recommended generation API and is required by
+        // models whose tools/reasoning are not exposed through Chat Completions.
+        // This only prefills new capabilities; existing explicit routes stay put.
+        Chat => route("openai.responses"),
         // Persistent WebSocket sessions use the dedicated realtime registry;
         // they must never be coerced into the one-shot OpenAI HTTP adapter.
         RealtimeConversation => None,
@@ -237,7 +240,7 @@ mod tests {
 
     #[test]
     fn openai_has_no_rerank_or_video_route() {
-        assert_eq!(platform_route("openai", Chat), plain("openai.chat_text"));
+        assert_eq!(platform_route("openai", Chat), plain("openai.responses"));
         assert_eq!(platform_route("openai", ImageGeneration), plain("openai.images"));
         assert_eq!(platform_route("openai", ImageEdit), plain("openai.images"));
         // Sora shuts down 2026-09-24 with no successor path, so OpenAI video is

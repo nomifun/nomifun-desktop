@@ -26,9 +26,9 @@ pub fn merge_chat_provider_params(
         .get("reasoning_effort")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let typed_openai_output = if protocol == ChatProtocol::OpenaiChat {
-        body_object.get("max_tokens").or_else(|| body_object.get("max_completion_tokens"))
-            .or_else(|| body_object.get("max_output_tokens"))
+    let typed_openai_output = if matches!(protocol, ChatProtocol::OpenaiChat | ChatProtocol::OpenaiResponses) {
+        body_object.get("max_output_tokens").or_else(|| body_object.get("max_completion_tokens"))
+            .or_else(|| body_object.get("max_tokens"))
             .or_else(|| configured.get("max_tokens_field").and_then(Value::as_str)
                 .and_then(|key| body_object.get(key.trim()))).cloned()
     } else { None };
@@ -40,9 +40,10 @@ pub fn merge_chat_provider_params(
         // Provider defaults may tune sampling/thinking; active thinking is
         // checked against the exact route before transport. Defaults cannot
         // replace model-owned messages/tools or reinsert cloud routing fields.
-        if protocol.uses_anthropic_messages() && matches!(key.as_str(),
-            "model" | "stream" | "messages" | "system" | "tools" | "tool_choice"
-            | "anthropic_version") {
+        if matches!(key.as_str(), "model" | "stream" | "messages" | "system"
+            | "input" | "instructions" | "tools" | "tool_choice" | "toolConfig"
+            | "systemInstruction" | "contents" | "previous_response_id" | "conversation"
+            | "store" | "anthropic_version") {
             continue;
         }
         if matches!(
@@ -54,6 +55,54 @@ pub fn merge_chat_provider_params(
                 | "_nomifun_context_limit_kind"
                 | nomifun_agent_contracts::MODEL_GATEWAY_CATALOG_BASELINE_PARAM
         ) {
+            continue;
+        }
+        // These are optional serializer defaults, not caller-owned content.
+        // A compatible endpoint can reject stream_options altogether, and a
+        // Responses caller can request additional include fields without
+        // losing the encrypted continuation required for stateless replay.
+        if protocol == ChatProtocol::OpenaiChat && key == "stream_options" {
+            match value {
+                Value::Null => { body_object.remove(key); }
+                Value::Object(options) => {
+                    if options.get("include_usage").is_some_and(|value| !value.is_boolean()) {
+                        return Err(ChatModelError::invalid_request("stream_options.include_usage must be a boolean"));
+                    }
+                    let target = body_object.entry(key.clone())
+                        .or_insert_with(|| Value::Object(Default::default()));
+                    let target = target.as_object_mut().ok_or_else(|| {
+                        ChatModelError::invalid_request("stream_options must be an object or null")
+                    })?;
+                    target.extend(options.clone());
+                }
+                _ => return Err(ChatModelError::invalid_request("stream_options must be an object or null")),
+            }
+            continue;
+        }
+        if protocol == ChatProtocol::OpenaiResponses && key == "include" {
+            let includes = value.as_array().filter(|values| values.iter().all(|value|
+                value.as_str().is_some_and(|value| !value.trim().is_empty())))
+                .ok_or_else(|| ChatModelError::invalid_request("Responses include must be an array of strings"))?;
+            let target = body_object.entry(key.clone()).or_insert_with(|| Value::Array(Vec::new()));
+            let target = target.as_array_mut().ok_or_else(|| {
+                ChatModelError::protocol_violation("Responses request include is not an array")
+            })?;
+            for include in includes {
+                if !target.contains(include) { target.push(include.clone()); }
+            }
+            continue;
+        }
+        if protocol == ChatProtocol::OpenaiResponses && key == "reasoning" {
+            let mut options = value.as_object().cloned().ok_or_else(|| {
+                ChatModelError::invalid_request("OpenAI Responses reasoning configuration must be an object")
+            })?;
+            // Effort has one normalized configuration control shared with the
+            // editor and the other consumers. Native summary/mode/context
+            // options remain lossless; they cannot override typed effort.
+            options.remove("effort");
+            if !options.is_empty() {
+                merge_missing_json_value(body_object, key, &Value::Object(options));
+            }
             continue;
         }
         merge_missing_json_value(body_object, key, value);
@@ -75,7 +124,7 @@ pub fn merge_chat_provider_params(
         .filter(|key| !key.trim().is_empty());
     let ceiling = output_limit
         .map(|limit| {
-            u32::try_from(limit).map_err(|_| {
+            u32::try_from(limit).ok().filter(|limit| *limit > 0).ok_or_else(|| {
                 ChatModelError::new(
                     ChatModelErrorCode::InvalidRequest,
                     "provider output ceiling exceeds the supported range",
@@ -98,13 +147,17 @@ pub fn merge_chat_provider_params(
                 cap_json_number(generation, "maxOutputTokens", ceiling);
             }
         }
-        ChatProtocol::OpenaiResponses => {
-            if let Some(ceiling) = ceiling {
-                cap_json_number(body_object, "max_output_tokens", ceiling);
+        ChatProtocol::OpenaiChat | ChatProtocol::OpenaiResponses => {
+            let key = configured_ceiling_key.unwrap_or(if protocol == ChatProtocol::OpenaiResponses {
+                "max_output_tokens"
+            } else { "max_tokens" });
+            if matches!(key, "model" | "stream" | "messages" | "system" | "input"
+                | "instructions" | "tools" | "tool_choice" | "previous_response_id"
+                | "conversation" | "store" | "include" | "reasoning" | "stream_options"
+                | "text" | "response_format" | "output_config" | "systemInstruction"
+                | "contents" | "toolConfig" | "anthropic_version" | "parallel_tool_calls") {
+                return Err(ChatModelError::invalid_request("output token field cannot replace a protocol-owned request field"));
             }
-        }
-        ChatProtocol::OpenaiChat => {
-            let key = configured_ceiling_key.unwrap_or("max_tokens");
             // The Broker uses a canonical output field. Selecting a vendor's
             // wire alias changes its name, not the caller's requested amount.
             // This mapping also applies when the model leaves its own ceiling
@@ -346,5 +399,102 @@ pub fn chat_request_uses_reasoning(protocol: ChatProtocol, body: &Value) -> bool
                 .is_some_and(|thinking| thinking.get("thinkingLevel").is_some()
                     || thinking.get("thinkingBudget").and_then(Value::as_i64).is_some_and(|budget| budget != 0)
                     || thinking.get("includeThoughts").and_then(Value::as_bool) == Some(true)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn optional_stream_usage_can_be_overridden_or_omitted_for_compatible_endpoints() {
+        let body = json!({"model":"custom", "stream":true, "stream_options":{"include_usage":true}});
+        let omitted = merge_chat_provider_params(body.clone(), &json!({"stream_options":null}),
+            ChatProtocol::OpenaiChat, None).unwrap();
+        assert!(omitted.get("stream_options").is_none());
+        assert_eq!(omitted["stream"], true);
+        let disabled = merge_chat_provider_params(body, &json!({"stream_options":{"include_usage":false,"vendor_flag":true}}),
+            ChatProtocol::OpenaiChat, None).unwrap();
+        assert_eq!(disabled["stream_options"], json!({"include_usage":false,"vendor_flag":true}));
+        for invalid in [json!(false), json!({"include_usage":"false"})] {
+            assert!(merge_chat_provider_params(json!({}), &json!({"stream_options":invalid}),
+                ChatProtocol::OpenaiChat, None).is_err());
+        }
+    }
+
+    #[test]
+    fn responses_include_extensions_keep_required_encrypted_continuation_and_deduplicate() {
+        let body = json!({"include":["reasoning.encrypted_content"]});
+        let merged = merge_chat_provider_params(body,
+            &json!({"include":["message.output_text.logprobs","reasoning.encrypted_content"]}),
+            ChatProtocol::OpenaiResponses, None).unwrap();
+        assert_eq!(merged["include"], json!(["reasoning.encrypted_content","message.output_text.logprobs"]));
+        assert!(merge_chat_provider_params(json!({}), &json!({"include":[false]}),
+            ChatProtocol::OpenaiResponses, None).is_err());
+        assert!(merge_chat_provider_params(json!({}), &json!({"include":[""]}),
+            ChatProtocol::OpenaiResponses, None).is_err());
+    }
+
+    #[test]
+    fn responses_effort_has_one_control_and_keeps_native_reasoning_options() {
+        let configured = json!({"reasoning_effort":"high", "reasoning":{"effort":"low","summary":"auto","mode":"pro"}});
+        let merged = merge_chat_provider_params(json!({}), &configured, ChatProtocol::OpenaiResponses, None).unwrap();
+        assert_eq!(merged["reasoning"],json!({"effort":"high","summary":"auto","mode":"pro"}));
+        let typed = merge_chat_provider_params(json!({"reasoning":{"effort":"none"}}), &configured,
+            ChatProtocol::OpenaiResponses, None).unwrap();
+        assert_eq!(typed["reasoning"]["effort"],"none");
+        let absent = merge_chat_provider_params(json!({}), &json!({"reasoning":{"effort":"low","summary":"auto"}}),
+            ChatProtocol::OpenaiResponses, None).unwrap();
+        assert_eq!(absent["reasoning"],json!({"summary":"auto"}));
+    }
+
+    #[test]
+    fn responses_output_alias_preserves_the_callers_limit_and_configured_ceiling() {
+        for (ceiling, expected) in [(None,512), (Some(4096),512), (Some(128),128)] {
+            let merged = merge_chat_provider_params(json!({"max_output_tokens":512}),
+                &json!({"max_tokens_field":" vendor_limit "}),
+                ChatProtocol::OpenaiResponses, ceiling).unwrap();
+            assert_eq!(merged["vendor_limit"], expected);
+            assert!(merged.get("max_output_tokens").is_none());
+            assert!(merged.get("max_tokens_field").is_none());
+        }
+        let omitted = merge_chat_provider_params(json!({}), &json!({"max_tokens_field":"vendor_limit"}),
+            ChatProtocol::OpenaiResponses, None).unwrap();
+        assert!(omitted.get("vendor_limit").is_none());
+        let standard = merge_chat_provider_params(json!({"max_output_tokens":512}), &json!({}),
+            ChatProtocol::OpenaiResponses, Some(128)).unwrap();
+        assert_eq!(standard["max_output_tokens"],128);
+    }
+
+    #[test]
+    fn defaults_cannot_inject_content_tools_or_retained_cloud_state() {
+        for protocol in [ChatProtocol::OpenaiChat, ChatProtocol::OpenaiResponses, ChatProtocol::Gemini] {
+            let merged = merge_chat_provider_params(json!({"model":"selected", "stream":true, "store":false}),
+                &json!({"model":"other", "stream":false,"store":true,"messages":[],"input":[],
+                    "instructions":"other", "tools":[{}],"tool_choice":"required",
+                    "previous_response_id":"other", "conversation":"other", "temperature":0.2}),
+                protocol, None).unwrap();
+            assert_eq!(merged["model"], "selected");
+            assert_eq!(merged["stream"],true);
+            assert_eq!(merged["store"],false);
+            assert_eq!(merged["temperature"],0.2);
+            for key in ["messages","input","instructions","tools","tool_choice","previous_response_id","conversation"] {
+                assert!(merged.get(key).is_none(),"{protocol:?}: {key}");
+            }
+        }
+    }
+
+    #[test]
+    fn output_alias_cannot_replace_owned_request_fields_and_ceiling_must_be_positive() {
+        for protocol in [ChatProtocol::OpenaiChat, ChatProtocol::OpenaiResponses] {
+            for key in ["model","messages","tools","stream","include","reasoning","text"] {
+                assert!(merge_chat_provider_params(json!({"model":"selected"}),
+                    &json!({"max_tokens_field":key}), protocol, Some(512)).is_err());
+            }
+            for limit in [0,-1,i64::MAX] {
+                assert!(merge_chat_provider_params(json!({}), &json!({}), protocol, Some(limit)).is_err());
+            }
+        }
     }
 }

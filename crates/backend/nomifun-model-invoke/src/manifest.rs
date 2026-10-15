@@ -511,7 +511,7 @@ use ProtocolTransportKind::{Http, Sdk, Websocket};
 
 const PROTOCOL_SPECS: &[ProtocolSpec] = &[
     ProtocolSpec { id: "openai.chat_text", tasks: &[Chat], executor: Agent, transport: Http, scopes: ALL_SCOPES, platforms: OPENAI_CHAT_PLATFORMS, connection_role: None, endpoints: &[endpoint(Chat, "endpoint", Submit, "POST", "/chat/completions")] },
-    ProtocolSpec { id: "openai.responses", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_ONLY, platforms: &["openai", "nomifun-model-gateway"], connection_role: None, endpoints: &[endpoint(Chat, "endpoint", Submit, "POST", "/responses")] },
+    ProtocolSpec { id: "openai.responses", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["openai", "nomifun-model-gateway"], connection_role: None, endpoints: &[endpoint(Chat, "endpoint", Submit, "POST", "/responses")] },
     ProtocolSpec { id: "anthropic.messages", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["anthropic", "nomifun-model-gateway"], connection_role: None, endpoints: &[origin_endpoint(Chat, "endpoint", Submit, "POST", "/v1/messages")] },
     ProtocolSpec { id: "bedrock.anthropic_messages", tasks: &[Chat], executor: Agent, transport: Sdk, scopes: NATIVE_ONLY, platforms: &["bedrock"], connection_role: None, endpoints: &[] },
     ProtocolSpec { id: "gemini.generate_text", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["gemini", "nomifun-model-gateway"], connection_role: None, endpoints: &[origin_endpoint(Chat, "endpoint", Submit, "POST", "/v1beta/models/{model}:streamGenerateContent?alt=sse")] },
@@ -867,6 +867,64 @@ pub fn validate_provider_params_for_protocol(
             ));
         }
     }
+    if let Some(stream_options) = object.get("stream_options") {
+        if protocol_id != "openai.chat_text" || task != Chat {
+            return Err(InvokeError::config(
+                "provider_params.stream_options is supported only by openai.chat_text Chat capabilities",
+            ));
+        }
+        if !stream_options.is_null()
+            && (!stream_options.is_object()
+                || stream_options.get("include_usage").is_some_and(|value| !value.is_boolean()))
+        {
+            return Err(InvokeError::config(
+                "Chat provider_params.stream_options must be an object or null; include_usage must be a boolean",
+            ));
+        }
+    }
+    if let Some(required) = object.get("require_reasoning_content") {
+        if protocol_id != "openai.chat_text" || task != Chat || !required.is_boolean() {
+            return Err(InvokeError::config(
+                "provider_params.require_reasoning_content is a boolean control supported only by openai.chat_text Chat capabilities",
+            ));
+        }
+    }
+    if object.contains_key("max_tokens_field")
+        && (task != Chat || !matches!(protocol_id, "openai.chat_text" | "openai.responses"))
+    {
+        return Err(InvokeError::config(
+            "provider_params.max_tokens_field is supported only by OpenAI Chat Completions or Responses capabilities",
+        ));
+    }
+    if task == Chat && matches!(protocol_id, "openai.chat_text" | "openai.responses") {
+        // These fields are constructed from the canonical request. Accepting
+        // overrides either loses the saved value or corrupts execution/context.
+        const OWNED_CHAT_FIELDS: &[&str] = &[
+            "model", "messages", "input", "instructions", "tools", "tool_choice", "system",
+            "stream", "previous_response_id", "conversation", "store",
+        ];
+        if let Some(field) = OWNED_CHAT_FIELDS.iter().find(|field| object.contains_key(**field)) {
+            return Err(InvokeError::config(format!(
+                "Chat provider_params field {field:?} is owned by the request serializer",
+            )));
+        }
+        if protocol_id == "openai.responses" {
+            if object.get("reasoning").is_some_and(|reasoning| reasoning.get("effort").is_some()) {
+                return Err(InvokeError::config(
+                    "Responses provider_params.reasoning.effort is controlled by provider_params.reasoning_effort; keep other native reasoning fields under reasoning",
+                ));
+            }
+            if let Some(include) = object.get("include") {
+                if !include.as_array().is_some_and(|values| {
+                    values.iter().all(|value| value.as_str().is_some_and(|value| !value.trim().is_empty()))
+                }) {
+                    return Err(InvokeError::config(
+                        "Responses provider_params.include must be an array of non-empty strings",
+                    ));
+                }
+            }
+        }
+    }
     if let Some(reasoning_effort) = object.get("reasoning_effort") {
         if task != Chat || !protocol_supports_reasoning_effort(protocol_id) {
             return Err(InvokeError::config(
@@ -885,7 +943,24 @@ pub fn validate_provider_params_for_protocol(
         let configured_ceiling_key = match object.get("max_tokens_field") {
             None => None,
             Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
-                Some(value.trim())
+                let value = value.trim();
+                if value.chars().any(char::is_whitespace)
+                    || matches!(value,
+                        "model" | "messages" | "input" | "instructions" | "tools" | "system"
+                        | "systemInstruction" | "contents" | "toolConfig" | "anthropic_version" | "parallel_tool_calls"
+                        | "tool_choice" | "stream" | "previous_response_id" | "conversation"
+                        | "store" | "include" | "reasoning" | "stream_options" | "text"
+                        | "response_format" | "output_config" | "generationConfig"
+                        | "temperature" | "top_p" | "reasoning_effort"
+                        | "max_tokens_field" | "require_reasoning_content" | "chain_rounds")
+                    || is_reserved_local_transport_param_key(value)
+                    || is_local_provider_metadata_param_key(value)
+                {
+                    return Err(InvokeError::config(
+                        "Chat provider_params.max_tokens_field must name a token limit field, not a request or local control field",
+                    ));
+                }
+                Some(value)
             }
             Some(_) => {
                 return Err(InvokeError::config(
@@ -916,15 +991,6 @@ pub fn validate_provider_params_for_protocol(
         {
             return Err(InvokeError::config(
                 "Chat provider_params must not set generationConfig.maxOutputTokens; use the capability's output_limit field",
-            ));
-        }
-        if object.contains_key("require_reasoning_content")
-            && !object
-                .get("require_reasoning_content")
-                .is_some_and(serde_json::Value::is_boolean)
-        {
-            return Err(InvokeError::config(
-                "Chat provider_params.require_reasoning_content must be a boolean",
             ));
         }
     }
@@ -1637,6 +1703,45 @@ mod tests {
     }
 
     #[test]
+    fn openai_local_controls_are_protocol_scoped_and_cannot_replace_request_fields() {
+        for params in [
+            serde_json::json!({"stream_options":null}),
+            serde_json::json!({"stream_options":{"include_usage":false}}),
+            serde_json::json!({"max_tokens_field":"max_completion_tokens","require_reasoning_content":true}),
+            serde_json::json!({"max_tokens_field":"tokenBudget"}),
+        ] {
+            validate_provider_params_for_protocol("openai.chat_text", Chat, &params).unwrap();
+        }
+        validate_provider_params_for_protocol("openai.responses", Chat,
+            &serde_json::json!({"max_tokens_field":"tokenBudget","include":["message.output_text.logprobs"]})).unwrap();
+        validate_provider_params_for_protocol("openai.responses", Chat,
+            &serde_json::json!({"reasoning":{"summary":"auto"},"reasoning_effort":"high"})).unwrap();
+        for (protocol, task, params) in [
+            ("openai.responses", Chat, serde_json::json!({"require_reasoning_content":true})),
+            ("anthropic.messages", Chat, serde_json::json!({"max_tokens_field":"max_tokens"})),
+            ("openai.images", ImageGeneration, serde_json::json!({"max_tokens_field":"tokenBudget"})),
+            ("openai.responses", Chat, serde_json::json!({"stream_options":null})),
+            ("openai.chat_text", Chat, serde_json::json!({"stream_options":true})),
+            ("openai.chat_text", Chat, serde_json::json!({"stream_options":{"include_usage":"false"}})),
+            ("openai.responses", Chat, serde_json::json!({"include":"reasoning.encrypted_content"})),
+            ("openai.responses", Chat, serde_json::json!({"include":[42]})),
+            ("openai.responses", Chat, serde_json::json!({"reasoning":{"effort":"high"}})),
+        ] {
+            assert!(validate_provider_params_for_protocol(protocol, task, &params).is_err(), "{protocol}: {params}");
+        }
+        for field in ["model", "messages", "tools", "stream", "store", "input", "system", "previous_response_id", "conversation"] {
+            for protocol in ["openai.chat_text", "openai.responses"] {
+                assert!(validate_provider_params_for_protocol(protocol, Chat,
+                    &serde_json::json!({field: "override"})).is_err(), "{protocol}: {field}");
+            }
+        }
+        for field in ["model", "messages", "system", "toolConfig", "parallel_tool_calls", "text", "stream_options", "reasoning", "temperature", "api_key", "_nomifun_context_limit_kind"] {
+            assert!(validate_provider_params_for_protocol("openai.chat_text", Chat,
+                &serde_json::json!({"max_tokens_field": field})).is_err(), "{field}");
+        }
+    }
+
+    #[test]
     fn output_ceiling_requirement_matches_registered_chat_protocols() {
         assert!(protocol_requires_output_ceiling("anthropic.messages"));
         assert!(protocol_requires_output_ceiling(
@@ -1874,13 +1979,14 @@ mod tests {
             vec![
                 "anthropic.messages",
                 "gemini.generate_text",
-                "openai.chat_text"
+                "openai.chat_text",
+                "openai.responses"
             ]
         );
     }
 
     #[test]
-    fn openai_exposes_native_responses_without_changing_the_chat_recommendation() {
+    fn openai_prefers_responses_while_retaining_explicit_chat_completions() {
         let view = protocol_manifest_for("OpenAI", Chat);
         assert!(
             view.protocols
@@ -1888,7 +1994,7 @@ mod tests {
                 .any(|descriptor| descriptor.protocol_id == "openai.responses")
         );
         let recommendation = view.recommendation.expect("OpenAI Chat recommendation");
-        assert_eq!(recommendation.protocol_id, "openai.chat_text");
+        assert_eq!(recommendation.protocol_id, "openai.responses");
     }
 
     #[test]
@@ -1948,12 +2054,14 @@ mod tests {
     }
 
     #[test]
-    fn model_gateway_responses_is_explicit_opt_in_without_widening_custom_scope() {
+    fn responses_is_available_as_an_explicit_custom_protocol() {
         let descriptor = protocol_descriptor("openai.responses").unwrap();
-        assert_eq!(descriptor.scopes, vec![ProtocolScope::Native]);
+        assert_eq!(descriptor.scopes, vec![ProtocolScope::Native, ProtocolScope::Custom]);
         for platform in ["custom", "new-api", "typo-provider"] {
             let view = protocol_manifest_for(platform, Chat);
-            assert!(view.protocols.iter().all(|protocol| protocol.protocol_id != "openai.responses"));
+            let responses = view.protocols.iter().find(|protocol| protocol.protocol_id == "openai.responses")
+                .expect("explicit Responses serializer");
+            assert!(responses.default_connections.is_empty());
         }
         assert!(protocol_manifest_for("nomifun-model-gateway", Chat)
             .protocols.iter().any(|protocol| protocol.protocol_id == "openai.responses"));
@@ -2025,7 +2133,7 @@ mod tests {
     #[test]
     fn gemini_chat_uses_native_agent_protocol_and_api_key_auth() {
         let view = protocol_manifest_for("gemini", Chat);
-        assert_eq!(view.protocols.len(), 3);
+        assert_eq!(view.protocols.len(), 4);
         assert_eq!(view.protocols[0].protocol_id, "gemini.generate_text");
         assert!(view.protocols[1..]
             .iter()
@@ -2135,7 +2243,7 @@ mod tests {
             (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
         });
         assert_eq!(
-            hash, 4_581_283_236_433_659_689,
+            hash, 13_308_157_315_014_894_705,
             "recommendation URL snapshot changed:\n{snapshot}"
         );
     }

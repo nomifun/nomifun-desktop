@@ -755,12 +755,31 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(html.includes('store: true')).toBe(true);
     expect(html.includes('至少 30 天')).toBe(true);
     expect(html.includes('不会减少计费的输入 tokens')).toBe(true);
+    expect(html.includes('data-openai-protocol-hint="openai.responses"')).toBe(true);
+    expect(html.includes('data-chat-compatibility-controls')).toBe(false);
 
     const otherProtocol = render({
       model: 'step-3.7-flash',
       capabilities: [{ ...emptyCapabilityDraft('chat'), protocol: 'stepfun.chat' }],
     });
     expect(otherProtocol.includes('data-chain-rounds-control')).toBe(false);
+  });
+
+  test('shows output field and stream compatibility controls only for Chat Completions', () => {
+    const chatManifest = manifest('chat');
+    chatManifest.protocols[0].protocol_id = 'openai.chat_text';
+    chatManifest.recommendation!.protocol_id = 'openai.chat_text';
+    const html = render({ model: 'unlisted/model', capabilities: [{ ...emptyCapabilityDraft('chat'),
+      protocol: 'openai.chat_text', providerParamsJson: '{"max_tokens_field":"tokenBudget","stream_options":null}' }] },
+      { chat: chatManifest });
+    expect(html).toContain('data-openai-protocol-hint="openai.chat_text"');
+    expect(html).toContain('data-chat-compatibility-controls="true"');
+    expect(html).toContain('data-max-tokens-field-control="true"');
+    expect(html).toContain('data-stream-usage-control="true"');
+    expect(html).toContain('tokenBudget');
+    expect(html).toContain('不发送 stream_options');
+    const other = render({ model: 'm', capabilities: [{ ...emptyCapabilityDraft('chat'), protocol: 'anthropic.messages' }] });
+    expect(other).not.toContain('data-chat-compatibility-controls');
   });
 
   test('disables the Responses round-chaining checkbox while raw JSON is invalid', () => {

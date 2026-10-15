@@ -19,9 +19,24 @@
 
 `nomifun-model-invoke` 的协议 registry 是 serializer、支持任务、鉴权、endpoint 默认值和可编辑性的来源。模型编辑器通过 `/api/model-protocols` 读取 manifest，不维护第二套协议列表。配置期推荐只有显式保存 capability 后才参与执行；运行时不重新推荐或解析模型名。
 
-同一供应商的不同任务可以使用不同域名、命名连接和凭据。`base_url_override` 只覆盖当前任务，`endpoint`、`poll_endpoint`、`content_endpoint` 和 `realtime_endpoint` 分别表达提交、轮询、内容和实时连接。绝对覆盖地址与凭据连接异源时，必须显式允许 `allow_cross_origin_credentials`。协议切换清除旧 transport 覆盖、跨域确认及协议参数，再应用新 manifest。
+同一供应商的不同任务可以使用不同域名、命名连接和凭据。`base_url_override` 只覆盖当前任务，`endpoint`、`poll_endpoint`、`content_endpoint` 和 `realtime_endpoint` 分别表达提交、轮询、内容和实时连接。绝对覆盖地址与凭据连接异源时，必须显式允许 `allow_cross_origin_credentials`。协议切换清除旧 transport 覆盖和跨域确认，再应用新 manifest；保留用户参数草稿和限额，不兼容的协议控制在界面及保存时明确报错，交由用户修正。
 
 `provider_params` 使用协议自己的严格编码契约，不能包含凭据或本地 transport 字段；无法无损编码的值在保存时拒绝。响应只暴露 `has_credentials`，不回显秘密。调用图变化原子递增 `config_revision`；解析、异步任务和健康结果使用一致修订，旧探测结果不能覆盖新配置。
+
+OpenAI 官方新增 Chat 配置推荐 `openai.responses`；自定义供应商也可显式选择该协议，
+普通兼容服务的缺省仍为 `openai.chat_text`。已保存协议不自动重写。Responses 的输入、
+函数调用和流事件使用自己的 typed serializer；工具 schema 显式 `strict: false`，保留
+平台可选参数的语义。多段推理摘要按 item 与 summary/content index 独立校验。
+
+`max_tokens_field` 只指定 OpenAI 两种 Chat 协议的输出字段别名，数值仍由 typed 请求与
+capability `output_limit` 的较小值决定；别名不能覆盖消息、工具或协议状态。
+Chat Completions 的 `stream_options: null` 省略可选用量字段，对象中的 `include_usage`
+可显式覆盖缺省值；Responses 的 `include` 扩展与必需的加密推理续传字段合并。
+协议拥有的模型、输入、工具、流模式和云端状态字段不能由参数 JSON 注入。
+推理强度只使用标准化的 `reasoning_effort` 配置；Responses 的原生 `reasoning.effort`
+在保存时提示改用该字段，`summary`、`mode` 和 `context` 等其他原生设置保留。
+Chat Completions 不发送本地 round、工具 metadata 或 `is_error` 字段；工具错误作为结果
+文本表达，图片和音频在整批工具结果之后使用 user 附件消息传递，工具结果本身保持文本格式。
 
 “OpenAI 兼容”不证明所有模态兼容。Ark 与火山语音、DashScope 原生协议、MiniMax 的地区连接等差异由各自 adapter 和 manifest 表达，不复制成另一份手写 endpoint 矩阵。新增或变更供应商时更新 registry、serializer 与定向合同测试，并针对实际账号验证；本地替身测试不代表云端权限或模型体验通过。
 

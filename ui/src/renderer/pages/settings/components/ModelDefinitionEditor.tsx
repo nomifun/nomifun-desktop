@@ -47,7 +47,9 @@ import {
   parseProviderParams,
   patchCapabilityDraft,
   providerParamChainRounds,
+  providerParamMaxTokensField,
   providerParamReasoningEffort,
+  providerParamStreamUsage,
   protocolDescriptorForDraft,
   reasoningEffortsForProtocol,
   protocolSupportsReasoningEffort,
@@ -61,7 +63,9 @@ import {
   rootMatchesShape,
   withProviderParamVoice,
   withProviderParamChainRounds,
+  withProviderParamMaxTokensField,
   withProviderParamReasoningEffort,
+  withProviderParamStreamUsage,
   withCatalogTaskEvidence,
   type CapabilityEndpointDescriptor,
   type CapabilityEndpointField,
@@ -130,6 +134,7 @@ const callConfigIntentForError = (code: CapabilityValidationError): CallConfigIn
       return 'connection';
     case 'output_ceiling_required':
     case 'invalid_token_limit':
+    case 'native_reasoning_effort':
       return 'limits';
     case 'protocol_required':
     case 'protocol_not_registered':
@@ -138,6 +143,11 @@ const callConfigIntentForError = (code: CapabilityValidationError): CallConfigIn
     case 'base_url_required':
     case 'cross_origin_consent_required':
     case 'invalid_provider_params':
+    case 'invalid_max_tokens_field':
+    case 'provider_param_scope':
+    case 'provider_param_type':
+    case 'provider_param_owned':
+    case 'provider_param_output_limit':
       return 'protocol';
     default:
       return 'diagnostics';
@@ -1109,10 +1119,16 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
         const outputLimitEditorOpen =
           Boolean(editingOutputLimitByTask[capability.task]) || outputLimitMissing;
         const reasoningEffort = providerParamReasoningEffort(capability.providerParamsJson);
+        const maxTokensField = providerParamMaxTokensField(capability.providerParamsJson);
+        const streamUsageMode = providerParamStreamUsage(capability.providerParamsJson);
         const reasoningEffortOptions = reasoningEffortsForProtocol(capability.protocol);
         const hasReasoningEffort =
           parsedProviderParams.ok &&
-          Object.prototype.hasOwnProperty.call(parsedProviderParams.value, 'reasoning_effort');
+          (Object.prototype.hasOwnProperty.call(parsedProviderParams.value, 'reasoning_effort') ||
+            (capability.protocol === 'openai.responses' &&
+              typeof parsedProviderParams.value.reasoning === 'object' &&
+              parsedProviderParams.value.reasoning !== null &&
+              Object.prototype.hasOwnProperty.call(parsedProviderParams.value.reasoning, 'effort')));
         const reasoningEffortProtocolSupported = protocolSupportsReasoningEffort(capability.protocol);
         const reasoningEffortAvailable =
           capability.task === 'chat' &&
@@ -1306,11 +1322,11 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               >
                 {taskValidationErrors.map((error) => (
                   <div
-                    key={error.code}
+                    key={`${error.code}:${error.parameter ?? ''}`}
                     className='text-11px leading-4 text-danger-6'
                     data-capability-error={error.code}
                   >
-                    {t(capabilityValidationMessageKey(error.code), { defaultValue: error.code })}
+                    {t(capabilityValidationMessageKey(error.code), { defaultValue: error.code, parameter: error.parameter })}
                   </div>
                 ))}
               </div>
@@ -1602,6 +1618,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                 {t('settings.modelAdvanced.protocol', { defaultValue: '调用协议' })}
               </div>
               <Select
+                aria-label={t('settings.modelAdvanced.protocol', { defaultValue: '调用协议' })}
                 value={capability.protocol || undefined}
                 loading={loading}
                 disabled={protocolOptions.length === 0}
@@ -1651,6 +1668,17 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                 }}
                 triggerProps={{ getPopupContainer: () => document.body }}
               />
+              {capability.task === 'chat' && (capability.protocol === 'openai.responses' || capability.protocol === 'openai.chat_text') && (
+                <div className='text-11px text-t-tertiary' data-openai-protocol-hint={capability.protocol}>
+                  {capability.protocol === 'openai.responses'
+                    ? t('settings.modelAdvanced.responsesProtocolHint', {
+                        defaultValue: 'Responses API（/responses）：适用于新版 OpenAI 模型；兼容网关需要明确支持此接口。最大输出默认使用 max_output_tokens。',
+                      })
+                    : t('settings.modelAdvanced.chatCompletionsProtocolHint', {
+                        defaultValue: 'Chat Completions API（/chat/completions）：适用于提供该接口的兼容供应商。新版 OpenAI 模型建议使用 Responses。',
+                      })}
+                </div>
+              )}
               {genericAdvancedProtocol && (
                 <div className='text-11px text-warning-6' role='note' data-generic-protocol-warning>
                   {t('settings.protocolGenericCompatibilityWarning', {
@@ -2230,6 +2258,69 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               )}
             </button>
             <div hidden={!protocolParamsOpen} className='space-y-12px'>
+            {capability.task === 'chat' && capability.protocol === 'openai.chat_text' && (
+              <div className='space-y-12px' data-chat-compatibility-controls>
+                <div className='space-y-6px' data-max-tokens-field-control>
+                  <div className='text-12px text-t-secondary'>
+                    {t('settings.modelAdvanced.maxTokensField', { defaultValue: '最大输出参数名' })}
+                  </div>
+                  <Select
+                    aria-label={t('settings.modelAdvanced.maxTokensField', { defaultValue: '最大输出参数名' })}
+                    value={maxTokensField}
+                    disabled={!providerParamsValid}
+                    showSearch
+                    allowCreate
+                    options={[
+                      { value: '', label: t('settings.modelAdvanced.protocolDefault', { defaultValue: '协议默认' }) },
+                      { value: 'max_completion_tokens', label: 'max_completion_tokens' },
+                      { value: 'max_tokens', label: 'max_tokens' },
+                      ...(!['', 'max_completion_tokens', 'max_tokens'].includes(maxTokensField)
+                        ? [{ value: maxTokensField, label: maxTokensField }]
+                        : []),
+                    ]}
+                    onChange={(field: string) => updateCapability(capability.task, {
+                      providerParamsJson: withProviderParamMaxTokensField(capability.providerParamsJson, field),
+                    })}
+                    triggerProps={{ getPopupContainer: () => document.body }}
+                  />
+                  <div className='text-11px text-t-tertiary'>
+                    {t('settings.modelAdvanced.maxTokensFieldHint', {
+                      defaultValue: '按供应商文档选择输出上限字段：较新的 GPT Chat 接口使用 max_completion_tokens，部分兼容供应商使用 max_tokens。协议默认不代表在线探测，也可输入自定义字段名。',
+                    })}
+                  </div>
+                </div>
+                <div className='space-y-6px' data-stream-usage-control>
+                  <div className='text-12px text-t-secondary'>
+                    {t('settings.modelAdvanced.streamUsage', { defaultValue: '流式用量选项' })}
+                  </div>
+                  <Select
+                    aria-label={t('settings.modelAdvanced.streamUsage', { defaultValue: '流式用量选项' })}
+                    value={streamUsageMode}
+                    disabled={!providerParamsValid}
+                    options={[
+                      { value: 'default', label: t('settings.modelAdvanced.protocolDefault', { defaultValue: '协议默认' }) },
+                      { value: 'omit', label: t('settings.modelAdvanced.streamUsageOmit', { defaultValue: '不发送 stream_options' }) },
+                      { value: 'include', label: t('settings.modelAdvanced.streamUsageInclude', { defaultValue: '请求流式 token 用量' }) },
+                      ...(streamUsageMode === 'custom'
+                        ? [{ value: 'custom', label: t('settings.modelAdvanced.streamUsageCustom', { defaultValue: '保留自定义 JSON' }), disabled: true }]
+                        : []),
+                    ]}
+                    onChange={(mode: string) => {
+                      if (mode !== 'default' && mode !== 'omit' && mode !== 'include') return;
+                      updateCapability(capability.task, {
+                        providerParamsJson: withProviderParamStreamUsage(capability.providerParamsJson, mode),
+                      });
+                    }}
+                    triggerProps={{ getPopupContainer: () => document.body }}
+                  />
+                  <div className='text-11px text-t-tertiary'>
+                    {t('settings.modelAdvanced.streamUsageHint', {
+                      defaultValue: '供应商不接受 stream_options 时选择不发送；这可能使 token 用量无法取得。自定义选项可在下方 JSON 中调整。',
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
             {capability.task === 'speech_synthesis' &&
               ttsSupportsProviderParamVoice(capability.protocol) && (
               <div className='space-y-6px'>

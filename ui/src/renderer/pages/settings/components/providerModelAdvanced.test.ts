@@ -30,7 +30,9 @@ import {
   normalizeModelId,
   patchCapabilityDraft,
   providerParamChainRounds,
+  providerParamMaxTokensField,
   providerParamReasoningEffort,
+  providerParamStreamUsage,
   providerParamVoice,
   reasoningEffortsForProtocol,
   protocolSupportsReasoningEffort,
@@ -40,7 +42,9 @@ import {
   requiresCrossOriginConsent,
   withProviderParamVoice,
   withProviderParamChainRounds,
+  withProviderParamMaxTokensField,
   withProviderParamReasoningEffort,
+  withProviderParamStreamUsage,
   withCatalogTaskEvidence,
   validateModelDefinition,
   type ModelCapabilityDraft,
@@ -148,7 +152,7 @@ describe('model definition capability selection', () => {
   test('provider protocol presets and discovery never manufacture a purpose for an unknown ID', () => {
     const unknown = changeModelDefinitionId(createModelDefinitionDraft(), 'unknown-voice-model');
     const manifests = { chat: manifest('chat', 'openai.chat_text') };
-    for (const mode of ['auto', 'openai', 'anthropic'] as const) {
+    for (const mode of ['auto', 'openai-responses', 'openai', 'anthropic'] as const) {
       expect(applyProviderCompatibilityMode(unknown, mode, true).capabilities).toEqual([]);
     }
     expect(buildProviderAutoConfigurationTargets(unknown, manifests, 'bearer', false)).toEqual([]);
@@ -1228,7 +1232,116 @@ describe('model id entry', () => {
   });
 });
 
+describe('Chat compatibility parameters', () => {
+  test('configures the output field and returns to protocol defaults without erasing other parameters', () => {
+    const raw = '{"temperature":0.2,"future":{"enabled":true}}';
+    const configured = withProviderParamMaxTokensField(raw, ' max_completion_tokens ');
+    expect(providerParamMaxTokensField(configured)).toBe('max_completion_tokens');
+    expect(JSON.parse(configured)).toEqual({ temperature: 0.2, future: { enabled: true }, max_tokens_field: 'max_completion_tokens' });
+    expect(JSON.parse(withProviderParamMaxTokensField(configured, ''))).toEqual(JSON.parse(raw));
+    expect(providerParamMaxTokensField('{"max_tokens_field":"tokenBudget"}')).toBe('tokenBudget');
+    expect(withProviderParamMaxTokensField('{"max_tokens_field":"max_tokens"}', '')).toBe('');
+    const malformed = ' {"future":';
+    expect(withProviderParamMaxTokensField(malformed, 'max_tokens')).toBe(malformed);
+  });
+
+  test('makes stream option omission explicit and preserves custom nested values when requesting usage', () => {
+    const raw = '{"stream_options":{"include_usage":false,"vendor":true},"reasoning_effort":"high"}';
+    expect(providerParamStreamUsage(raw)).toBe('custom');
+    const included = withProviderParamStreamUsage(raw, 'include');
+    expect(providerParamStreamUsage(included)).toBe('include');
+    expect(JSON.parse(included)).toEqual({ stream_options: { include_usage: true, vendor: true }, reasoning_effort: 'high' });
+    const omitted = withProviderParamStreamUsage(included, 'omit');
+    expect(providerParamStreamUsage(omitted)).toBe('omit');
+    expect(JSON.parse(omitted)).toEqual({ stream_options: null, reasoning_effort: 'high' });
+    expect(JSON.parse(withProviderParamStreamUsage(omitted, 'default'))).toEqual({ reasoning_effort: 'high' });
+    expect(providerParamStreamUsage('')).toBe('default');
+    expect(withProviderParamStreamUsage('{"stream_options":null}', 'default')).toBe('');
+    const malformed = ' {"stream_options":';
+    expect(withProviderParamStreamUsage(malformed, 'omit')).toBe(malformed);
+  });
+
+  test('rejects malformed output parameter names before saving while accepting arbitrary vendor fields', () => {
+    for (const max_tokens_field of ['', ' ', null, 1, 'bad field', 'messages', 'system', 'systemInstruction',
+      'contents', 'toolConfig', 'anthropic_version', 'parallel_tool_calls', 'reasoning', 'stream_options',
+      'temperature', 'api_key', 'endpoint', '_nomifun_context_limit_kind']) {
+      const definition = { model: 'unlisted/model', capabilities: [{ ...emptyCapabilityDraft('chat'),
+        protocol: 'openai.chat_text', providerParamsJson: JSON.stringify({ max_tokens_field }) }] };
+      expect(validateModelDefinition(definition, { chat: manifest('chat', 'openai.chat_text') },
+        'https://gateway.example/v1').errors).toContainEqual({ task: 'chat', code: 'invalid_max_tokens_field', parameter: 'max_tokens_field' });
+    }
+    const definition = { model: 'unlisted/model', capabilities: [{ ...emptyCapabilityDraft('chat'),
+      protocol: 'openai.chat_text', providerParamsJson: '{"max_tokens_field":"tokenBudget"}' }] };
+    expect(validateModelDefinition(definition, { chat: manifest('chat', 'openai.chat_text') },
+      'https://gateway.example/v1').valid).toBe(true);
+  });
+
+  test('preserves protocol-specific parameters while identifying every wrong-protocol control', () => {
+    for (const [protocol, parameter, value] of [
+      ['openai.responses', 'stream_options', null],
+      ['openai.chat_text', 'chain_rounds', true],
+      ['openai.responses', 'require_reasoning_content', false],
+      ['anthropic.messages', 'max_tokens_field', 'max_tokens'],
+    ] as const) {
+      const providerParamsJson = JSON.stringify({ [parameter]: value, future: { mode: 'fast' } });
+      const definition = { model: 'unlisted/model', capabilities: [{ ...emptyCapabilityDraft('chat'),
+        protocol, providerParamsJson }] };
+      const result = validateModelDefinition(definition, { chat: manifest('chat', protocol) }, 'https://gateway.example/v1');
+      expect(result.errors).toContainEqual({ task: 'chat', code: 'provider_param_scope', parameter });
+      expect(definition.capabilities[0].providerParamsJson).toBe(providerParamsJson);
+      expect(capabilityInputsFromDefinition(definition)?.[0]?.provider_params).toEqual({ [parameter]: value, future: { mode: 'fast' } });
+    }
+  });
+
+  test('rejects invalid control types and accepts documented null, false, and custom nested options', () => {
+    for (const params of [{ stream_options: true }, { stream_options: { include_usage: 'false' } }, { require_reasoning_content: 1 }]) {
+      const definition = { model: 'm', capabilities: [{ ...emptyCapabilityDraft('chat'), protocol: 'openai.chat_text',
+        providerParamsJson: JSON.stringify(params) }] };
+      expect(validateModelDefinition(definition, { chat: manifest('chat', 'openai.chat_text') },
+        'https://gateway.example/v1').errors.some(error => error.code === 'provider_param_type')).toBe(true);
+    }
+    for (const params of [{ stream_options: null }, { stream_options: { include_usage: false, vendor: true } }, { require_reasoning_content: false }]) {
+      const definition = { model: 'm', capabilities: [{ ...emptyCapabilityDraft('chat'), protocol: 'openai.chat_text',
+        providerParamsJson: JSON.stringify(params) }] };
+      expect(validateModelDefinition(definition, { chat: manifest('chat', 'openai.chat_text') },
+        'https://gateway.example/v1').valid).toBe(true);
+    }
+    const responses = { model: 'm', capabilities: [{ ...emptyCapabilityDraft('chat'), protocol: 'openai.responses', providerParamsJson: '{"chain_rounds":"true"}' }] };
+    expect(validateModelDefinition(responses, { chat: manifest('chat', 'openai.responses') },
+      'https://gateway.example/v1').errors).toContainEqual({ task: 'chat', code: 'provider_param_type', parameter: 'chain_rounds' });
+  });
+
+  test('rejects serializer-owned content and output shadow values with the offending key', () => {
+    for (const [params, code, parameter] of [
+      [{ model: 'other' }, 'provider_param_owned', 'model'],
+      [{ headers: {} }, 'provider_param_owned', 'headers'],
+      [{ max_completion_tokens: 2048 }, 'provider_param_output_limit', 'max_completion_tokens'],
+      [{ max_tokens_field: 'tokenBudget', tokenBudget: 2048 }, 'provider_param_output_limit', 'tokenBudget'],
+    ] as const) {
+      const definition = { model: 'm', capabilities: [{ ...emptyCapabilityDraft('chat'), protocol: 'openai.chat_text',
+        providerParamsJson: JSON.stringify(params) }] };
+      expect(validateModelDefinition(definition, { chat: manifest('chat', 'openai.chat_text') },
+        'https://gateway.example/v1').errors).toContainEqual({ task: 'chat', code, parameter });
+    }
+  });
+});
+
 describe('model reasoning effort', () => {
+  test('explicit normalized edits resolve native effort conflicts while preserving sibling reasoning options', () => {
+    const raw = '{"reasoning":{"effort":"low","summary":"auto"},"text":{"verbosity":"low"}}';
+    expect(providerParamReasoningEffort(raw)).toBeUndefined();
+    expect(JSON.parse(withProviderParamReasoningEffort(raw, 'high'))).toEqual({
+      reasoning_effort: 'high', reasoning: { summary: 'auto' }, text: { verbosity: 'low' },
+    });
+    expect(JSON.parse(withProviderParamReasoningEffort(raw, undefined))).toEqual({
+      reasoning: { summary: 'auto' }, text: { verbosity: 'low' },
+    });
+    expect(withProviderParamReasoningEffort('{"reasoning":{"effort":"high"}}', undefined)).toBe('');
+    const definition = { model: 'gpt-future', capabilities: [{ ...emptyCapabilityDraft('chat'),
+      protocol: 'openai.responses', providerParamsJson: raw }] };
+    expect(validateModelDefinition(definition, { chat: manifest('chat', 'openai.responses') },
+      'https://provider.example/v1').errors).toContainEqual({ task: 'chat', code: 'native_reasoning_effort' });
+  });
   test('reads, writes, clears, and preserves unrelated provider params', () => {
     expect(providerParamReasoningEffort('{"reasoning_effort":"medium"}')).toBe('medium');
     expect(providerParamReasoningEffort('{"reasoning_effort":"max"}')).toBe('max');

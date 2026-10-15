@@ -191,22 +191,22 @@ async fn agent_chat_protocols_accept_only_their_executable_auth_scheme() {
 }
 
 #[tokio::test]
-async fn responses_save_is_openai_native_typed_and_endpoint_owned() {
+async fn responses_save_is_explicitly_available_to_compatible_providers_and_endpoint_owned() {
+    for platform in ["custom", "new-api", "stepfun", "openrouter"] {
+        let db = init_database_memory().await.unwrap();
+        let response = system_routes(build_state(&db))
+            .oneshot(request(http_provider(
+                platform, "bearer", "openai.responses", "compatible-contract", "/responses",
+            )))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(status, StatusCode::CREATED, "{platform}: {}", String::from_utf8_lossy(&body));
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["data"]["models"][0]["capabilities"][0]["protocol"], "openai.responses");
+    }
     let mut invalid = vec![
-        http_provider(
-            "stepfun",
-            "bearer",
-            "openai.responses",
-            "step-contract",
-            "/responses",
-        ),
-        http_provider(
-            "custom",
-            "bearer",
-            "openai.responses",
-            "custom-contract",
-            "/responses",
-        ),
         http_provider(
             "openai",
             "bearer",

@@ -44,6 +44,32 @@ provider 凭据保存在本地配置中。任何云端 provider 仍会按自己�
 配置。模型别名和描述由各用途共用；凭据和模型的完整调用接口集合仍可在
 **供应商与密钥**中管理。
 
+## 选择 OpenAI 对话协议
+
+OpenAI 官方预设的新对话接口推荐 **OpenAI Responses**（`openai.responses`，
+`/v1/responses`）。自定义供应商和兼容网关也可以明确选择它，但需要服务端实际实现
+Responses；支持 Chat Completions 并不代表支持 Responses。**自动识别**只提供配置建议，
+不会试调用付费模型，也不会替换已经保存的接口。
+
+只实现 `/v1/chat/completions` 的服务选择 **OpenAI Chat Completions**
+（`openai.chat_text`）。部分较新的 GPT 需要 Responses 才能进行带推理的工具调用；
+协议支持范围以 [OpenAI 官方迁移指南](https://developers.openai.com/api/docs/guides/migrate-to-responses)
+和所用模型、网关的文档为准。编辑已有模型时，在调用接口中显式切换协议并保存；
+后台目录更新不会自动迁移已有配置。
+
+Chat Completions 的高级配置提供输出上限字段选择：官方较新模型使用
+`max_completion_tokens`，部分兼容服务使用 `max_tokens`；“协议默认”保留兼容服务的
+缺省字段。实际 token 数统一在**最大输出上限**中填写，不在参数 JSON 中重复设置。
+推理 token 也会占用输出预算，过小的上限可能在产生可见回答前耗尽。
+
+不支持 `stream_options` 的网关可在高级配置选择省略流式用量参数
+（参数 JSON 中为 `"stream_options": null`）；这仍使用流式回答，但不要求额外的用量帧。
+推理强度保留模型默认或使用服务端支持的值。不要给不支持采样控制的推理模型配置
+`temperature`、`top_p` 等字段；保存协议参数不代表该模型接受所有参数。
+
+连接探测只检查地址、鉴权和接口响应。模型列表加载成功或探测显示可达，仍不证明
+特定模型能够生成回答或调用工具；请针对保存的模型接口运行健康检查。
+
 ## 在会话中录入模型
 
 先准备一个可以正常对话和调用工具的模型，再请通用 Agent 添加提供商或模型。也可在模型管理点击**在会话中添加 · 通用 Agent**，补全预填请求后发送。

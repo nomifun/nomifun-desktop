@@ -24,7 +24,7 @@ const ProviderCompatibilityModePicker: React.FC<{
       <Radio.Group
         type='button'
         value={value}
-        className='flex w-full [&_.arco-radio-button]:flex-1'
+        className='flex flex-wrap w-full [&_.arco-radio-button]:flex-1'
         onChange={(next) => onChange(next as ProviderCompatibilityMode)}
       >
         <Radio value='auto' data-provider-compatibility-option='auto'>
@@ -32,9 +32,14 @@ const ProviderCompatibilityModePicker: React.FC<{
             defaultValue: '自动识别',
           })}
         </Radio>
+        <Radio value='openai-responses' data-provider-compatibility-option='openai-responses'>
+          {t('settings.providerCompatibilityMode.responses', {
+            defaultValue: 'OpenAI Responses',
+          })}
+        </Radio>
         <Radio value='openai' data-provider-compatibility-option='openai'>
           {t('settings.providerCompatibilityMode.openai', {
-            defaultValue: 'OpenAI 兼容',
+            defaultValue: 'Chat Completions',
           })}
         </Radio>
         <Radio value='anthropic' data-provider-compatibility-option='anthropic'>
@@ -46,16 +51,20 @@ const ProviderCompatibilityModePicker: React.FC<{
       <div className='text-11px leading-4 text-t-tertiary'>
         {value === 'auto'
           ? t('settings.providerCompatibilityMode.autoHint', {
-              defaultValue: '系统会探测可用协议；无法确认时默认使用 OpenAI 兼容模式。',
+              defaultValue: '探测可用协议；无法确认时使用 Chat Completions。仅支持 Responses 的网关请选择 OpenAI Responses。',
             })
+          : value === 'openai-responses'
+            ? t('settings.providerCompatibilityMode.responsesHint', {
+                defaultValue: '使用 /responses，适合新版 OpenAI 模型及支持 Responses 的网关；网关需明确支持此接口。',
+              })
           : value === 'openai'
             ? t('settings.providerCompatibilityMode.openaiHint', {
                 defaultValue:
-                  '预置 openai.chat_text、Bearer 鉴权和 /v1 根路径，适用于 OpenAI 兼容网关。',
+                  '使用 /chat/completions，适合提供该接口的 OpenAI 兼容供应商；与 Responses 是不同接口。',
               })
             : t('settings.providerCompatibilityMode.anthropicHint', {
                 defaultValue:
-                  '预置 anthropic.messages、x-api-key 鉴权和 Claude 所需的最大输出配置。',
+                  '使用 anthropic.messages 和 x-api-key 鉴权；最大输出需按模型文档配置。',
               })}
       </div>
     </div>

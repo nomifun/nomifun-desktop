@@ -414,8 +414,8 @@ const AddPlatformModal = ModalHOC<{
     }
     if (!validation.valid) {
       // Name the blockers rather than restating that something is unfinished.
-      const detail = describeValidationErrors(validation.errors, (key, fallback) =>
-        t(key, { defaultValue: fallback })
+      const detail = describeValidationErrors(validation.errors, (key, fallback, parameter) =>
+        t(key, { defaultValue: fallback, parameter })
       );
       message.warning(
         detail ||

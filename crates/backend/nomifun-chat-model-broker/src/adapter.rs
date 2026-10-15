@@ -529,7 +529,27 @@ fn encode_openai_chat_request(
     for instruction in &input.instructions {
         messages.push(json!({"role": "system", "content": instruction}));
     }
-    messages.extend(input.messages.iter().flat_map(openai_messages));
+    let mut tool_media = Vec::new();
+    for message in &input.messages {
+        if message.role != ChatRole::Tool && !tool_media.is_empty() {
+            messages.push(json!({"role":"user", "content":std::mem::take(&mut tool_media)}));
+        }
+        messages.extend(openai_messages(message));
+        if message.role == ChatRole::Tool {
+            for part in &message.content {
+                if let ChatContentPart::ToolResult { call_id, output, .. } = part {
+                    let media = openai_tool_result_media(output);
+                    if !media.is_empty() {
+                        tool_media.push(json!({"type":"text", "text":format!("Attachments returned by tool call {}: ", call_id.as_ref())}));
+                        tool_media.extend(media);
+                    }
+                }
+            }
+        }
+    }
+    if !tool_media.is_empty() {
+        messages.push(json!({"role":"user", "content":tool_media}));
+    }
     let mut body = json!({
         "model": model,
         "messages": messages,
@@ -978,8 +998,7 @@ fn openai_messages(message: &ChatMessage) -> Vec<Value> {
                 } => Some(json!({
                     "role": "tool",
                     "tool_call_id": call_id,
-                    "content": openai_tool_result_content(output),
-                    "is_error": is_error,
+                    "content": openai_tool_result_content(output, *is_error),
                 })),
                 _ => None,
             })
@@ -996,9 +1015,6 @@ fn openai_messages(message: &ChatMessage) -> Vec<Value> {
         "role": role,
         "content": openai_content(&message.content, message.role == ChatRole::Assistant),
     });
-    if let Some(round_id) = &message.provider_round_id {
-        value["provider_round_id"] = Value::String(round_id.as_ref().to_owned());
-    }
     let tool_calls: Vec<Value> = message
         .content
         .iter()
@@ -1007,7 +1023,7 @@ fn openai_messages(message: &ChatMessage) -> Vec<Value> {
                 call_id,
                 name,
                 arguments,
-                provider_metadata,
+                ..
             } => Some(json!({
                 "id": call_id,
                 "type": "function",
@@ -1015,13 +1031,15 @@ fn openai_messages(message: &ChatMessage) -> Vec<Value> {
                     "name": name,
                     "arguments": serde_json::to_string(&arguments.0).unwrap_or_default(),
                 },
-                "provider_metadata": provider_metadata,
             })),
             _ => None,
         })
         .collect();
     if !tool_calls.is_empty() {
         value["tool_calls"] = Value::Array(tool_calls);
+        if value["content"].as_array().is_some_and(Vec::is_empty) {
+            value["content"] = Value::Null;
+        }
     }
     if message.role == ChatRole::Assistant
         && value["content"].as_array().is_some_and(Vec::is_empty)
@@ -1049,7 +1067,7 @@ fn openai_content(content: &[ChatContentPart], assistant: bool) -> Value {
                 data_base64,
             } => Some(json!({
                 "type": "input_audio",
-                "input_audio": {"format": media_type, "data": data_base64}
+                "input_audio": {"format": openai_audio_format(media_type), "data": data_base64}
             })),
             ChatContentPart::Reasoning { .. } => {
                 // Chat text parts have no private-reasoning role. A sole
@@ -1073,41 +1091,52 @@ fn openai_content(content: &[ChatContentPart], assistant: bool) -> Value {
     Value::Array(parts)
 }
 
-fn openai_tool_result_content(parts: &[ChatToolResultPart]) -> Value {
+fn openai_tool_result_content(parts: &[ChatToolResultPart], is_error: bool) -> Value {
+    // Chat tool messages accept text only. Multimodal tool outputs are sent
+    // after all responses in the tool batch as a user attachment message.
+    let text = parts.iter().filter_map(|part| match part {
+        ChatToolResultPart::Text { text } => Some(text.as_str()),
+        _ => None,
+    }).collect::<Vec<_>>().join("\n");
+    let text = if is_error { format!("[tool error]\n{text}") } else { text };
+    Value::String(text)
+}
+
+fn openai_tool_result_media(parts: &[ChatToolResultPart]) -> Vec<Value> {
     let content = parts
         .iter()
-        .map(|part| match part {
-            ChatToolResultPart::Text { text } => {
-                json!({"type": "text", "text": text})
-            }
+        .filter_map(|part| match part {
+            ChatToolResultPart::Text { .. } => None,
             ChatToolResultPart::Image {
                 media_type,
                 data_base64,
-            } => json!({
+            } => Some(json!({
                 "type": "image_url",
                 "image_url": {
                     "url": format!("data:{media_type};base64,{data_base64}")
                 }
-            }),
+            })),
             ChatToolResultPart::Audio {
                 media_type,
                 data_base64,
-            } => json!({
+            } => Some(json!({
                 "type": "input_audio",
                 "input_audio": {
-                    "format": media_type,
+                    "format": openai_audio_format(media_type),
                     "data": data_base64
                 }
-            }),
+            })),
         })
         .collect::<Vec<_>>();
-    if let [part] = content.as_slice()
-        && part.get("type").and_then(Value::as_str) == Some("text")
-        && let Some(text) = part.get("text").cloned()
-    {
-        return text;
+    content
+}
+
+fn openai_audio_format(media_type: &str) -> &str {
+    match media_type {
+        "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        value => value,
     }
-    Value::Array(content)
 }
 
 fn responses_items(messages: &[ChatMessage]) -> Vec<Value> {
@@ -2260,6 +2289,52 @@ fn extract_openai_raw_reasoning(delta: &Map<String, Value>) -> Option<String> {
 #[cfg(test)]
 mod private_chat_replay_tests {
     use super::*;
+
+    #[test]
+    fn chat_tool_history_uses_only_wire_fields_and_defers_media_until_the_batch_finishes() {
+        let mut input = crate::recorded_conformance_fixtures().into_iter()
+            .find(|fixture| fixture.protocol == ChatProtocol::OpenaiChat).unwrap().request.input;
+        input.instructions.clear();
+        input.messages = serde_json::from_value(json!([
+            {"role":"assistant", "provider_round_id":"local-round", "content":[
+                {"type":"tool_call","call_id":"one","name":"read","arguments":{},"provider_metadata":{"local":"metadata"}},
+                {"type":"tool_call","call_id":"two","name":"read","arguments":{}}
+            ]},
+            {"role":"tool", "content":[{"type":"tool_result","call_id":"one","is_error":true,"output":[
+                {"type":"text","text":"first failure"},
+                {"type":"image","media_type":"image/png","data_base64":"aW1hZ2U="}
+            ]}]},
+            {"role":"tool", "content":[{"type":"tool_result","call_id":"two","is_error":false,"output":[
+                {"type":"text","text":"second result"},
+                {"type":"audio","media_type":"audio/wav","data_base64":"YXVkaW8="}
+            ]}]},
+            {"role":"user", "content":[{"type":"text","text":"Continue"}]}
+        ])).unwrap();
+        let body = encode_openai_chat_request(&input,"selected").unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.iter().map(|message| message["role"].as_str().unwrap()).collect::<Vec<_>>(),
+            vec!["assistant","tool","tool","user","user"]);
+        assert!(messages[0].get("provider_round_id").is_none());
+        assert!(messages[0]["content"].is_null());
+        assert!(messages[0]["tool_calls"][0].get("provider_metadata").is_none());
+        assert_eq!(messages[1]["content"],"[tool error]\nfirst failure");
+        assert!(messages[1].get("is_error").is_none());
+        assert_eq!(messages[2]["content"],"second result");
+        assert_eq!(messages[3]["content"][1]["image_url"]["url"],"data:image/png;base64,aW1hZ2U=");
+        assert_eq!(messages[3]["content"][3]["input_audio"],json!({"format":"wav","data":"YXVkaW8="}));
+        assert_eq!(messages[4]["content"],"Continue");
+        input.messages.pop();
+        let terminal = encode_openai_chat_request(&input,"selected").unwrap();
+        assert_eq!(terminal["messages"].as_array().unwrap().len(),4);
+        assert_eq!(terminal["messages"][3]["role"],"user");
+    }
+
+    #[test]
+    fn chat_user_audio_uses_api_format_names() {
+        let message = ChatMessage { role:ChatRole::User, provider_round_id:None,
+            content:vec![ChatContentPart::Audio {media_type:"audio/mpeg".into(),data_base64:"YXVkaW8=".into()}] };
+        assert_eq!(openai_messages(&message)[0]["content"][0]["input_audio"]["format"],"mp3");
+    }
 
     #[test]
     fn openai_chat_private_thinking_never_becomes_public_assistant_content() {

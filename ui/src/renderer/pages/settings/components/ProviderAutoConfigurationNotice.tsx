@@ -51,9 +51,13 @@ const ProviderAutoConfigurationNotice: React.FC<{
           color={confidence === 'fallback' ? 'orange' : 'green'}
           bordered={false}
         >
-          {mode === 'openai'
+          {mode === 'openai-responses'
+            ? t('settings.providerCompatibilityMode.responses', {
+                defaultValue: 'OpenAI Responses',
+              })
+            : mode === 'openai'
             ? t('settings.providerCompatibilityMode.openai', {
-                defaultValue: 'OpenAI 兼容',
+                defaultValue: 'Chat Completions',
               })
             : mode === 'anthropic'
               ? t('settings.providerCompatibilityMode.anthropic', {

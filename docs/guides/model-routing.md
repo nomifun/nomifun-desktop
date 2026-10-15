@@ -55,6 +55,38 @@ preserves the latest configuration for other tasks. Model aliases and
 descriptions are shared across tasks. Use **Providers & keys** to manage
 credentials or the model's complete set of invocation routes.
 
+## Choose an OpenAI chat protocol
+
+New Chat routes under the official OpenAI preset recommend **OpenAI Responses**
+(`openai.responses`, `/v1/responses`). Custom providers and compatible gateways
+can explicitly select it when their server implements Responses. Chat Completions
+support alone does not establish Responses support. **Auto detection** supplies
+configuration suggestions without calling a paid model or replacing saved routes.
+
+For a service implementing `/v1/chat/completions`, choose **OpenAI Chat Completions**
+(`openai.chat_text`). Some newer GPT models require Responses for reasoning with
+tools. Check the [official OpenAI migration guide](https://developers.openai.com/api/docs/guides/migrate-to-responses)
+and the model or gateway documentation. To migrate an existing model, explicitly
+change its invocation protocol and save. Catalog refresh does not migrate saved routes.
+
+Chat Completions advanced settings expose the output token field: newer official
+models use `max_completion_tokens`, while some compatible servers use `max_tokens`.
+**Protocol default** retains the compatible default. Set the actual token count in
+**Maximum output**, rather than duplicating it in parameter JSON. Reasoning tokens
+consume this budget too, so a small limit can be exhausted before any visible answer.
+
+For gateways rejecting `stream_options`, choose to omit streaming usage options
+in advanced settings (`"stream_options": null` in parameter JSON). Answers still
+stream, without requiring an extra usage frame. Leave reasoning effort at the model
+default or select a value accepted by that server. Avoid `temperature`, `top_p`,
+and other sampling controls on reasoning models that reject them. Saving protocol
+parameters does not establish that a particular model accepts every field.
+
+A connection probe checks the address, authentication and endpoint response only.
+Loading the model list or observing a reachable endpoint does not verify that a
+particular model can generate an answer or call tools. Run the model health check
+against the saved route.
+
 ## Add models from a conversation
 
 With an existing model that supports chat and tools, ask the general-purpose Agent to add a provider or model. You can also choose **Add in conversation · General Agent** from Model Management to prepare the request.
