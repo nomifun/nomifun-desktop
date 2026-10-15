@@ -19,6 +19,7 @@ import { browserStorageKey } from '@/common/utils/browserStorageKey';
 import CompanionConversation from '../companion/CompanionConversation';
 import CompanionAppearanceQuickSettings from './CompanionAppearanceQuickSettings';
 import CompanionAgentModelQuickSettings from './CompanionAgentModelQuickSettings';
+import CompanionRobotResourceSettings from './CompanionRobotResourceSettings';
 import { useCompanionConversationUpdates } from './useCompanionConversationUpdates';
 import type { CompanionHandle, WorkspaceTabKey } from './types';
 import styles from './CompanionCohabitView.module.css';
@@ -40,7 +41,8 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
   const [robotCount, setRobotCount] = useState(0);
   const [appearanceSaving, setAppearanceSaving] = useState(false);
   const [agentModelSaving, setAgentModelSaving] = useState(false);
-  const quickSettingsSaving = appearanceSaving || agentModelSaving;
+  const [robotResourceSaving, setRobotResourceSaving] = useState(false);
+  const quickSettingsSaving = appearanceSaving || agentModelSaving || robotResourceSaving;
   const activeCompanionId = useRef(companionId);
   activeCompanionId.current = companionId;
   const modelConfigured = Boolean(profile?.model);
@@ -50,10 +52,14 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
   const onAgentModelSavingChange = useCallback((saving: boolean) => {
     if (activeCompanionId.current === companionId) setAgentModelSaving(saving);
   }, [companionId]);
+  const onRobotResourceSavingChange = useCallback((saving: boolean) => {
+    if (activeCompanionId.current === companionId) setRobotResourceSaving(saving);
+  }, [companionId]);
 
   useEffect(() => {
     setAppearanceSaving(false);
     setAgentModelSaving(false);
+    setRobotResourceSaving(false);
   }, [companionId]);
 
   useEffect(() => {
@@ -188,6 +194,8 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
             ? t('nomi.cohabit.robotOnline', { count: robotCount, defaultValue: '{{count}} 台机器人已绑定' })
             : t('nomi.cohabit.noRobot', { defaultValue: '尚未绑定机器人' })}</strong>
           <span>{t('nomi.cohabit.channelsHint', { defaultValue: '消息渠道与 MCP 在管理中配置' })}</span>
+          <CompanionRobotResourceSettings key={companionId} companionId={companionId} conversation={conversation}
+            disabled={quickSettingsSaving || Boolean(conversationError)} onChanged={refreshConversation} onSavingChange={onRobotResourceSavingChange} />
           <button type='button' onClick={() => onManage('remote')}>{t('nomi.cohabit.manageConnections', { defaultValue: '管理渠道与机器人' })}</button>
         </section>
 

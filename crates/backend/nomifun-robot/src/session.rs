@@ -153,12 +153,10 @@ fn tts_notice_for(error: &anyhow::Error) -> String {
 /// should be abandoned (a run of TTS errors), never for a single bad sentence —
 /// that one is still on the device's screen.
 ///
-/// The model's text drives no facial expression. It once carried an
-/// `[emotion:name]` marker for exactly that, the model emitted `[winking]`
-/// instead, and the result was a marker read aloud and no face at all; the whole
-/// channel is gone rather than re-syntaxed. `ServerMessage::Llm` is still sent —
-/// but only from device/turn STATE (`show_voice_notice`, `report_turn_failure`),
-/// which is a fact the gateway owns rather than a syntax it hopes for.
+/// Spoken text drives no facial expression. Conversational expressions travel
+/// through the Session's granted device MCP tools. `ServerMessage::Llm` remains
+/// a device/turn state notice (`show_voice_notice`, `report_turn_failure`), not
+/// an alternate control channel parsed from speech text.
 #[allow(clippy::too_many_arguments)]
 async fn speak_sentence(
     writer: &Writer,

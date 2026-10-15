@@ -16,7 +16,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::dto::RobotDto;
@@ -65,6 +65,8 @@ pub fn admin_router(state: RobotAdminState) -> Router {
         .route("/api/robots/statuses", get(statuses))
         .route("/api/robots/endpoints", get(endpoints))
         .route("/api/robots/{robot_id}/permissions", patch(set_permissions))
+        .route("/api/robots/{robot_id}/capabilities", get(capabilities).put(set_capabilities))
+        .route("/api/robots/{robot_id}/capabilities/refresh", post(refresh_capabilities))
         .route("/api/robots/{robot_id}/speak", post(speak_response))
         .route(
             "/api/robots/{robot_id}",
@@ -78,14 +80,16 @@ async fn list(State(state): State<RobotAdminState>) -> Response {
     for record in state.registry.list().await {
         let mut robot = RobotDto::from(&record);
         for tool in state.tools.tools(&record.robot_id).await {
-            let permission = match crate::tool_registry::tool_action(&tool.device_name) {
+            if !crate::capability_profile::tool_enabled(&record.capability_profile, &tool.device_name) { continue; }
+            let permission = match crate::capability_profile::resolve_tool_action(&record.capability_profile, &tool.device_name) {
                 crate::capability::RobotAction::Display => "display",
                 crate::capability::RobotAction::Motion => "motion",
                 crate::capability::RobotAction::Vision => "vision",
                 crate::capability::RobotAction::Device => "device_tools",
             };
             if !robot.supported_permissions.iter().any(|value| value == permission) { robot.supported_permissions.push(permission.to_owned()); }
-            if crate::tool_registry::requires_continuous_vision(&tool.device_name)
+            if crate::tool_registry::requires_continuous_vision_for_action(&tool.device_name,
+                crate::capability_profile::resolve_tool_action(&record.capability_profile, &tool.device_name))
                 && !robot.supported_permissions.iter().any(|value| value == "continuous_vision") {
                 robot.supported_permissions.push("continuous_vision".to_owned());
             }
@@ -93,6 +97,96 @@ async fn list(State(state): State<RobotAdminState>) -> Response {
         robots.push(robot);
     }
     Json(json!({ "robots": robots })).into_response()
+}
+
+#[derive(Serialize)]
+struct CapabilityToolDto {
+    device_name: String,
+    exposed_name: String,
+    description: String,
+    input_schema: serde_json::Value,
+    action: crate::capability::RobotAction,
+    allowed_actions: Vec<crate::capability::RobotAction>,
+    enabled: bool,
+    effective_description: String,
+    default_arguments: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct CapabilityCatalogDto {
+    robot_id: String,
+    connected: bool,
+    revision: u64,
+    profile: crate::capability_profile::RobotCapabilityProfile,
+    tools: Vec<CapabilityToolDto>,
+}
+
+async fn capability_catalog(state: &RobotAdminState, record: &crate::registry::RobotRecord) -> CapabilityCatalogDto {
+    let connection = state.registry.current_connection(&record.robot_id).await;
+    let catalog = match connection {
+        Some(connection) => state.tools.tools_for_connection(&record.robot_id, &connection).await,
+        None => None,
+    };
+    let connected = catalog.is_some();
+    let profile = &record.capability_profile;
+    let tools = catalog.unwrap_or_default().into_iter().map(|tool| {
+        let effective_description = crate::capability_profile::effective_description(profile, &tool);
+        let action = crate::capability_profile::resolve_tool_action(profile, &tool.device_name);
+        let allowed_actions = crate::capability_profile::allowed_tool_actions(&tool.device_name);
+        let enabled = crate::capability_profile::tool_enabled(profile, &tool.device_name);
+        let default_arguments = profile.tool_overrides.get(&tool.device_name)
+            .map(|value| value.default_arguments.clone()).unwrap_or_default();
+        CapabilityToolDto { device_name:tool.device_name, exposed_name:tool.exposed_name,
+            description:tool.description, input_schema:tool.input_schema, action, allowed_actions,
+            enabled, effective_description, default_arguments }
+    }).collect();
+    CapabilityCatalogDto { robot_id:record.robot_id.clone(), connected, revision:record.capability_revision,
+        profile:profile.clone(), tools }
+}
+
+async fn capabilities(State(state): State<RobotAdminState>, Path(robot_id): Path<String>) -> Response {
+    let Some(record) = state.registry.get(&robot_id).await else { return StatusCode::NOT_FOUND.into_response(); };
+    Json(capability_catalog(&state, &record).await).into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetCapabilitiesBody {
+    expected_revision: u64,
+    profile: crate::capability_profile::RobotCapabilityProfile,
+}
+
+async fn set_capabilities(State(state): State<RobotAdminState>, Path(robot_id): Path<String>, Json(body): Json<SetCapabilitiesBody>) -> Response {
+    use crate::registry::CapabilityUpdateError;
+    match state.registry.set_capability_profile(&robot_id, body.expected_revision, body.profile, &state.tools).await {
+        Ok(record) => Json(capability_catalog(&state, &record).await).into_response(),
+        Err(error) => {
+            let (status, code) = match &error {
+                CapabilityUpdateError::NotFound => (StatusCode::NOT_FOUND,"ROBOT_NOT_FOUND"),
+                CapabilityUpdateError::Conflict => (StatusCode::CONFLICT,"ROBOT_CAPABILITIES_CHANGED"),
+                CapabilityUpdateError::Offline => (StatusCode::CONFLICT,"ROBOT_OFFLINE"),
+                CapabilityUpdateError::Invalid(_) => (StatusCode::UNPROCESSABLE_ENTITY,"ROBOT_CAPABILITIES_INVALID"),
+                CapabilityUpdateError::Persistence(_) => (StatusCode::INTERNAL_SERVER_ERROR,"ROBOT_CAPABILITIES_SAVE_FAILED"),
+            };
+            (status,Json(json!({"code":code,"error":error.to_string()}))).into_response()
+        }
+    }
+}
+
+async fn refresh_capabilities(State(state): State<RobotAdminState>, Path(robot_id): Path<String>) -> Response {
+    use crate::registry::CapabilityRefreshError;
+    match state.registry.refresh_capabilities(&robot_id,&state.tools).await {
+        Ok(record) => Json(capability_catalog(&state,&record).await).into_response(),
+        Err(error) => {
+            let (status,code)=match &error {
+                CapabilityRefreshError::NotFound => (StatusCode::NOT_FOUND,"ROBOT_NOT_FOUND"),
+                CapabilityRefreshError::Offline => (StatusCode::CONFLICT,"ROBOT_OFFLINE"),
+                CapabilityRefreshError::Device(_) => (StatusCode::BAD_GATEWAY,"ROBOT_CAPABILITIES_REFRESH_FAILED"),
+                CapabilityRefreshError::Persistence(_) => (StatusCode::INTERNAL_SERVER_ERROR,"ROBOT_CAPABILITIES_SAVE_FAILED"),
+            };
+            (status,Json(json!({"code":code,"error":error.to_string()}))).into_response()
+        }
+    }
 }
 
 async fn set_permissions(
@@ -296,6 +390,47 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn attach_catalog(h: &Seeded) {
+        let id="aa:bb:cc:dd:ee:ff";
+        h.state.registry.claim(&h.code,"companion-1").await.unwrap();
+        h.state.registry.connect(id,"companion-1","capability-connection").await.unwrap();
+        let (tx,_rx)=tokio::sync::mpsc::channel(4);
+        h.state.tools.attach(id,Arc::new(crate::mcp_bridge::RobotMcpClient::new(tx,"capability-connection".into())),vec![crate::mcp_bridge::RobotToolDescriptor {
+            device_name:"vendor.neck.turn".into(),exposed_name:"robot_vendor_neck_turn".into(),description:"Turn".into(),
+            input_schema:json!({"type":"object","properties":{"angle":{"type":"integer","minimum":0,"maximum":90}},"required":["angle"],"additionalProperties":false}),
+        }]).await;
+    }
+
+    #[tokio::test]
+    async fn capability_catalog_supports_offline_read_and_online_cas_update() {
+        let h=seeded().await;
+        let uri="/api/robots/aa:bb:cc:dd:ee:ff/capabilities";
+        let response=admin_router(h.state.clone()).oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap()).await.unwrap();
+        let offline=json_of(response).await;
+        assert_eq!(offline["connected"],false);
+        assert_eq!(offline["revision"],0);
+        let body=json!({"expected_revision":0,"profile":{"tool_overrides":{"vendor.neck.turn":{"action":"motion","default_arguments":{"angle":30}}},"presets":[{"id":"greeting","name":"Greeting","tool_name":"vendor.neck.turn","arguments":{"angle":45},"enabled":true}]}});
+        let response=admin_router(h.state.clone()).oneshot(Request::builder().method("PUT").uri(uri).header("content-type","application/json").body(Body::from(body.to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::CONFLICT);
+        attach_catalog(&h).await;
+        let response=admin_router(h.state.clone()).oneshot(Request::builder().method("PUT").uri(uri).header("content-type","application/json").body(Body::from(body.to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::OK);
+        let saved=json_of(response).await;
+        assert_eq!(saved["revision"],1);
+        assert_eq!(saved["tools"][0]["action"],"motion");
+        assert_eq!(saved["tools"][0]["default_arguments"]["angle"],30);
+        assert_eq!(saved["tools"][0]["allowed_actions"].as_array().unwrap().len(),4);
+        assert!(!h.state.registry.get("aa:bb:cc:dd:ee:ff").await.unwrap().permissions.motion);
+        let stale=admin_router(h.state.clone()).oneshot(Request::builder().method("PUT").uri(uri).header("content-type","application/json").body(Body::from(body.to_string())).unwrap()).await.unwrap();
+        assert_eq!(stale.status(),StatusCode::CONFLICT);
+        let mut invalid=body;
+        invalid["expected_revision"]=json!(1);
+        invalid["profile"]["tool_overrides"]["vendor.neck.turn"]["default_arguments"]["angle"]=json!(91);
+        let response=admin_router(h.state.clone()).oneshot(Request::builder().method("PUT").uri(uri).header("content-type","application/json").body(Body::from(invalid.to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(h.state.registry.get("aa:bb:cc:dd:ee:ff").await.unwrap().capability_revision,1);
     }
 
     #[tokio::test]

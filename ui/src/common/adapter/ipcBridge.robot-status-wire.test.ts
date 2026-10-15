@@ -30,6 +30,7 @@ const rawRobot = (companionId: unknown) => ({
   companion_id: companionId,
   board: 'esp32-s3n16r8-emoji',
   firmware_version: '1.9.0',
+  capability_revision: 3,
   last_seen: '2026-08-06T10:00:00Z',
   created_at: '2026-08-05T09:00:00Z',
 });
@@ -73,6 +74,7 @@ describe('robot wire contract', () => {
       expect(rows[0]?.robot_id).toBe(ROBOT_ID);
       expect(rows[0]?.companion_id).toBe(COMPANION_ID);
       expect(rows[0]?.firmware_version).toBe('1.9.0');
+      expect(rows[0]?.capability_revision).toBe(3);
     } finally {
       globalThis.fetch = realFetch;
     }

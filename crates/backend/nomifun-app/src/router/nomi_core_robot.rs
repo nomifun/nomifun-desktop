@@ -93,8 +93,12 @@ impl std::error::Error for RobotModuleError {}
 struct FrozenRobotDeviceTool {
     action: RobotAction,
     device_name: String,
+    device_exposed_name: String,
     raw_input_schema: serde_json::Value,
     validator: Arc<jsonschema::Validator>,
+    raw_validator: Arc<jsonschema::Validator>,
+    default_arguments: serde_json::Map<String, serde_json::Value>,
+    fixed_arguments: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Clone, Debug)]
@@ -219,7 +223,11 @@ impl RobotModuleOwner {
 
         let mut descriptors = Vec::new();
         let mut frozen = BTreeMap::new();
-        for action in RobotAction::ALL {
+        let configured = nomifun_robot::capability_profile::resolve_profile_tools(
+            &robot.capability_profile, &self.tools.tools(&robot.robot_id).await,
+        ).map_err(|error| RobotModuleError::invalid(error.to_string()))?;
+        for tool in configured {
+            let action = tool.action;
             let action_id = ActionId::from(action.id());
             if !allowed_actions.contains(&action_id) {
                 continue;
@@ -231,47 +239,56 @@ impl RobotModuleOwner {
                     action.id()
                 )));
             }
-            if !robot.permissions.allows_action(action) {
+            if !robot.permissions.allows_action(action)
+                || !robot.permissions.allows_configured_tool(&robot.capability_profile, &tool.device_name) {
                 continue;
             }
-            for tool in self.tools.tools_for_action(&robot.robot_id, action).await {
-                validate_provider_tool_name(&tool.exposed_name)?;
-                if descriptors.len() >= 128 {
-                    return Err(RobotModuleError::invalid(
-                        "Robot Session tool surface exceeds 128 actions",
-                    ));
-                }
-                let input_schema = strict_device_input_schema(tool.input_schema.clone())?;
-                let validator = Arc::new(
-                    jsonschema::options()
-                        .with_retriever(NoExternalDeviceSchema)
-                        .build(&input_schema.0)
-                        .map_err(|_| RobotModuleError::invalid("Robot device schema is invalid"))?,
-                );
-                if frozen
-                    .insert(
-                        tool.exposed_name.clone(),
-                        FrozenRobotDeviceTool {
-                            action,
-                            device_name: tool.device_name,
-                            raw_input_schema: tool.input_schema,
-                            validator,
-                        },
-                    )
-                    .is_some()
-                {
-                    return Err(RobotModuleError::invalid(format!(
-                        "Robot published duplicate provider tool {}",
-                        tool.exposed_name
-                    )));
-                }
-                descriptors.push(RobotSessionToolDescriptor {
-                    action_id: action_id.clone(),
-                    provider_name: tool.exposed_name,
-                    description: bounded_description(&tool.description),
-                    input_schema,
-                });
+            validate_provider_tool_name(&tool.provider_name)?;
+            if descriptors.len() >= 128 {
+                return Err(RobotModuleError::invalid(
+                    "Robot Session tool surface exceeds 128 actions",
+                ));
             }
+            let input_schema = strict_device_input_schema(tool.input_schema.clone())?;
+            let validator = Arc::new(
+                jsonschema::options()
+                    .with_retriever(NoExternalDeviceSchema)
+                    .build(&input_schema.0)
+                    .map_err(|_| RobotModuleError::invalid("Robot device schema is invalid"))?,
+            );
+            let raw_schema = strict_device_input_schema(tool.raw_input_schema.clone())?;
+            let raw_validator = Arc::new(jsonschema::options()
+                .with_retriever(NoExternalDeviceSchema)
+                .build(&raw_schema.0)
+                .map_err(|_| RobotModuleError::invalid("Robot device schema is invalid"))?);
+            let description = bounded_description(&tool.description);
+            if frozen
+                .insert(
+                    tool.provider_name.clone(),
+                    FrozenRobotDeviceTool {
+                        action,
+                        device_name: tool.device_name,
+                        device_exposed_name: tool.device_exposed_name,
+                        raw_input_schema: tool.raw_input_schema,
+                        validator,
+                        raw_validator,
+                        default_arguments: tool.default_arguments,
+                        fixed_arguments: tool.fixed_arguments,
+                    },
+                )
+                .is_some()
+            {
+                return Err(RobotModuleError::invalid(format!(
+                    "Robot published duplicate provider tool {}",
+                    tool.provider_name
+                )));
+            }
+            descriptors.push(RobotSessionToolDescriptor {
+                action_id: action_id.clone(),
+                provider_name: tool.provider_name,
+                description,
+                input_schema,
+            });
         }
         descriptors.sort_by(|left, right| {
             (&left.action_id, &left.provider_name).cmp(&(&right.action_id, &right.provider_name))
@@ -409,6 +426,13 @@ impl RobotModuleOwner {
                 "The robot was rebound to another Companion; update this Agent binding.",
             ));
         }
+        let expected_revision = binding.typed_parameters.get("capability_revision")
+            .map(|value| value.parse::<u64>().map_err(|_| RobotModuleError::invalid("Invalid robot capability revision")))
+            .transpose()?.unwrap_or(0);
+        if expected_revision != robot.capability_revision {
+            return Err(RobotModuleError::new("ROBOT_CAPABILITIES_CHANGED",
+                "Robot capabilities changed. Reapply this robot to the idle conversation before starting a new operation.", false));
+        }
         Ok(robot)
     }
 
@@ -423,6 +447,7 @@ impl RobotModuleOwner {
         binding: &TypedResourceBinding,
         action: RobotAction,
         exposed_name: &str,
+        device_exposed_name: &str,
         expected_device_name: &str,
         expected_connection_id: &str,
         expected_input_schema: &serde_json::Value,
@@ -458,7 +483,7 @@ impl RobotModuleOwner {
         // the exclusive side of the same gate.
         let robot = self.load_bound_robot(binding).await?;
         if !robot.permissions.allows_action(action)
-            || !robot.permissions.allows_tool(expected_device_name)
+            || !robot.permissions.allows_configured_tool(&robot.capability_profile, expected_device_name)
         {
             return Err(RobotModuleError::new(
                 ROBOT_PERMISSION_DENIED,
@@ -520,13 +545,14 @@ impl RobotModuleOwner {
 
         let result = self
             .tools
-            .call_frozen_for_action(
+            .call_configured_for_action(
                 &robot.robot_id,
                 action,
-                exposed_name,
+                device_exposed_name,
                 Some(expected_device_name),
                 Some(expected_connection_id),
                 Some(expected_input_schema),
+                &robot,
                 canonical_input.0["arguments"].clone(),
             )
             .await;
@@ -628,6 +654,17 @@ impl NomiHostDynamicToolInvoker for BoundRobotSessionToolInvoker {
                 false,
             ));
         }
+        let arguments = if let Some(fixed) = &frozen.fixed_arguments {
+            serde_json::Value::Object(fixed.clone())
+        } else {
+            let mut merged = frozen.default_arguments.clone();
+            merged.extend(request.arguments.0.as_object().expect("validated object").clone());
+            serde_json::Value::Object(merged)
+        };
+        if !frozen.raw_validator.is_valid(&arguments) {
+            return Err(NomiHostDynamicToolError::new(ROBOT_INVALID_PAYLOAD,
+                "Configured arguments do not match the device's original schema", false));
+        }
         self.owner
             .execute_bound_device_tool(
                 &self.principal,
@@ -638,10 +675,11 @@ impl NomiHostDynamicToolInvoker for BoundRobotSessionToolInvoker {
                 &self.binding,
                 frozen.action,
                 &request.provider_name,
+                &frozen.device_exposed_name,
                 &frozen.device_name,
                 &self.connection_id,
                 &frozen.raw_input_schema,
-                request.arguments.0,
+                arguments,
             )
             .await
             .map_err(dynamic_tool_error)
@@ -881,6 +919,7 @@ mod tests {
         owner: Arc<RobotModuleOwner>,
         binding: TypedResourceBinding,
         calls: Arc<std::sync::atomic::AtomicUsize>,
+        requests: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
     }
 
     async fn fixture(permissions: RobotPermissions) -> Fixture {
@@ -919,10 +958,13 @@ mod tests {
         let responder = Arc::clone(&client);
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let recorded = Arc::clone(&calls);
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = requests.clone();
         tokio::spawn(async move {
             while let Some(Frame::Text(frame)) = rx.recv().await {
                 recorded.fetch_add(1, Ordering::SeqCst);
                 let value: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                captured.lock().unwrap().push(value["payload"]["params"].clone());
                 responder
                     .handle_incoming(serde_json::json!({
                         "jsonrpc":"2.0",
@@ -948,6 +990,15 @@ mod tests {
                         }),
                     },
                     RobotToolDescriptor {
+                        device_name: "self.head.express".to_owned(),
+                        exposed_name: "robot_head_express".to_owned(),
+                        description: "Queue an expressive face and head gesture".to_owned(),
+                        input_schema: serde_json::json!({"type":"object","properties":{
+                            "emotion":{"type":"string","enum":["happy","sad","surprise","thinking","neutral"]},
+                            "action":{"type":"string","enum":["none","nod","shake","left","right","up","down","center"]}
+                        }}),
+                    },
+                    RobotToolDescriptor {
                         device_name: "self.display.text".to_owned(),
                         exposed_name: "robot_display_text".to_owned(),
                         description: "Show text".to_owned(),
@@ -965,6 +1016,14 @@ mod tests {
                         description: "Read device extension status".to_owned(),
                         input_schema: serde_json::json!({"type":"object"}),
                     },
+                    RobotToolDescriptor {
+                        device_name: "vendor.arm.pose".to_owned(),
+                        exposed_name: "robot_vendor_arm_pose".to_owned(),
+                        description: "Vendor arm primitive".to_owned(),
+                        input_schema: serde_json::json!({"type":"object","properties":{
+                            "angle":{"type":"integer","minimum":-30,"maximum":30}
+                        },"required":["angle"],"additionalProperties":false}),
+                    },
                 ],
             )
             .await;
@@ -980,6 +1039,7 @@ mod tests {
             owner,
             binding: binding(["vision", "display", "motion", "device"]),
             calls,
+            requests,
         }
     }
 
@@ -1043,13 +1103,105 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(tools.descriptors.len(), 2);
+        assert_eq!(tools.descriptors.len(), 3);
         assert!(tools.descriptors.iter().all(|descriptor| matches!(
             descriptor.action_id.as_ref(),
             nomifun_robot::capability::ROBOT_VISION_ACTION_ID
                 | nomifun_robot::capability::ROBOT_MOTION_ACTION_ID
         )));
         assert_eq!(module_capability_id().as_ref(), ROBOT_MODULE_ID);
+    }
+
+    #[tokio::test]
+    async fn expressive_tools_keep_original_schema_and_motion_authority() {
+        let fixture = fixture(permissions()).await;
+        let actions = BTreeSet::from([ActionId::from(RobotAction::Motion.id())]);
+        let tools = fixture.owner.resolve_session_tools(
+            &principal(), &AgentSessionId::from("session-1"), &fixture.binding, &actions,
+        ).await.unwrap();
+        let tool = tools.descriptors.iter().find(|tool| tool.provider_name == "robot_head_express").unwrap();
+        assert_eq!(tool.action_id.as_ref(), RobotAction::Motion.id());
+        assert_eq!(tool.description, "Queue an expressive face and head gesture");
+        let mut request = invocation("robot_head_express", "express-happy");
+        request.arguments = StrictJsonValue(serde_json::json!({"emotion":"happy","action":"nod"}));
+        tools.invoker.invoke(request).await.unwrap();
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        let mut invalid = invocation("robot_head_express", "invalid-emotion");
+        invalid.arguments = StrictJsonValue(serde_json::json!({"emotion":"invented","action":"nod"}));
+        assert_eq!(tools.invoker.invoke(invalid).await.unwrap_err().code.as_ref(), ROBOT_INVALID_PAYLOAD);
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1, "invalid expression must not reach the device");
+
+        let mut permitted = permissions();
+        permitted.motion = false;
+        fixture.owner.registry.set_permissions("robot-1", permitted).await.unwrap();
+        let blocked = fixture.owner.resolve_session_tools(
+            &principal(), &AgentSessionId::from("session-1"), &fixture.binding, &actions,
+        ).await.unwrap();
+        assert!(blocked.descriptors.is_empty());
+        let mut expression = invocation("robot_head_express", "after-motion-revoked");
+        expression.arguments = StrictJsonValue(serde_json::json!({"emotion":"happy","action":"nod"}));
+        assert_eq!(tools.invoker.invoke(expression).await.unwrap_err().code.as_ref(), ROBOT_PERMISSION_DENIED);
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn arbitrary_device_profiles_defaults_and_named_actions_use_the_same_effect_path() {
+        use nomifun_robot::capability_profile::{RobotCapabilityProfile, RobotCapabilityPreset, RobotToolOverride};
+        let fixture = fixture(permissions()).await;
+        let actions = BTreeSet::from([ActionId::from(RobotAction::Motion.id())]);
+        let old_tools = fixture.owner.resolve_session_tools(
+            &principal(), &AgentSessionId::from("session-1"), &fixture.binding, &actions,
+        ).await.unwrap();
+        let mut profile = RobotCapabilityProfile::default();
+        profile.tool_overrides.insert("vendor.arm.pose".into(), RobotToolOverride {
+            action: Some(RobotAction::Motion), description: Some("Use a small arm gesture to greet the user".into()),
+            default_arguments: serde_json::json!({"angle":10}).as_object().unwrap().clone(),
+            ..Default::default()
+        });
+        profile.presets.push(RobotCapabilityPreset {
+            id:"greeting".into(), name:"Greeting".into(), tool_name:"vendor.arm.pose".into(),
+            description:"A brief greeting gesture".into(),
+            arguments:serde_json::json!({"angle":15}).as_object().unwrap().clone(), enabled:true,
+        });
+        let saved = fixture.owner.registry.set_capability_profile(
+            "robot-1", 0, profile, &fixture.owner.tools,
+        ).await.unwrap();
+        assert_eq!(saved.capability_revision, 1);
+        let old = old_tools.invoker.invoke(invocation("robot_gimbal_look", "stale-profile")).await.unwrap_err();
+        assert_eq!(old.code.as_ref(), "ROBOT_CAPABILITIES_CHANGED");
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+        let mut current_binding = fixture.binding.clone();
+        current_binding.typed_parameters.insert("capability_revision".into(), "1".into());
+        let current = fixture.owner.resolve_session_tools(
+            &principal(), &AgentSessionId::from("session-1"), &current_binding, &actions,
+        ).await.unwrap();
+        let tool = current.descriptors.iter().find(|tool| tool.provider_name == "robot_vendor_arm_pose").unwrap();
+        assert_eq!(tool.description, "Use a small arm gesture to greet the user");
+        assert_eq!(tool.input_schema.0["properties"]["angle"]["default"], 10);
+        for name in ["robot_vendor_arm_pose", "robot_preset_greeting"] {
+            let mut request = invocation(name, name);
+            request.arguments = StrictJsonValue(serde_json::json!({}));
+            current.invoker.invoke(request).await.unwrap();
+        }
+        let requests = fixture.requests.lock().unwrap();
+        assert_eq!(requests[0]["name"], "vendor.arm.pose");
+        assert_eq!(requests[0]["arguments"], serde_json::json!({"angle":10}));
+        assert_eq!(requests[1]["name"], "vendor.arm.pose");
+        assert_eq!(requests[1]["arguments"], serde_json::json!({"angle":15}));
+        drop(requests);
+        let mut invalid = invocation("robot_vendor_arm_pose", "out-of-range-profile-argument");
+        invalid.arguments = StrictJsonValue(serde_json::json!({"angle":31}));
+        assert_eq!(current.invoker.invoke(invalid).await.unwrap_err().code.as_ref(), ROBOT_INVALID_PAYLOAD);
+        let mut override_fixed = invocation("robot_preset_greeting", "preset-override");
+        override_fixed.arguments = StrictJsonValue(serde_json::json!({"angle":-30}));
+        assert_eq!(current.invoker.invoke(override_fixed).await.unwrap_err().code.as_ref(), ROBOT_INVALID_PAYLOAD);
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
+
+        let display_only = fixture.owner.resolve_session_tools(
+            &principal(), &AgentSessionId::from("session-1"), &current_binding,
+            &BTreeSet::from([ActionId::from(RobotAction::Display.id())]),
+        ).await.unwrap();
+        assert!(display_only.descriptors.iter().all(|tool| tool.provider_name != "robot_preset_greeting"));
     }
 
     #[tokio::test]
@@ -1064,7 +1216,7 @@ mod tests {
             &principal(), &AgentSessionId::from("session-1"), &fixture.binding, &actions,
         ).await.unwrap();
         let names = tools.descriptors.iter().map(|tool| tool.provider_name.as_str()).collect::<BTreeSet<_>>();
-        assert_eq!(names, BTreeSet::from(["robot_display_text", "robot_extension_read"]));
+        assert_eq!(names, BTreeSet::from(["robot_display_text", "robot_extension_read", "robot_vendor_arm_pose"]));
         for (name, key) in [("robot_display_text", "display"), ("robot_extension_read", "device")] {
             let mut request = invocation(name, key);
             request.arguments = StrictJsonValue(serde_json::json!({}));

@@ -18,6 +18,7 @@ pub struct RobotDto {
     pub created_at: String,
     pub permissions: crate::registry::RobotPermissions,
     pub supported_permissions: Vec<String>,
+    pub capability_revision: u64,
 }
 
 fn ms_to_rfc3339(ms: i64) -> String {
@@ -37,6 +38,7 @@ impl From<&RobotRecord> for RobotDto {
             last_seen: record.last_seen.map(ms_to_rfc3339),
             created_at: ms_to_rfc3339(record.created_at),
             permissions: record.permissions.clone(),
+            capability_revision: record.capability_revision,
             supported_permissions: vec!["proactive_speech".to_owned()],
         }
     }

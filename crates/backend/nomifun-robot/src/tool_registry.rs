@@ -33,13 +33,38 @@ pub fn tool_action(device_name: &str) -> RobotAction {
 }
 
 pub fn requires_continuous_vision(device_name: &str) -> bool {
-    tool_action(device_name) == RobotAction::Vision
+    requires_continuous_vision_for_action(device_name, tool_action(device_name))
+}
+
+pub fn requires_continuous_vision_for_action(device_name: &str, action: RobotAction) -> bool {
+    action == RobotAction::Vision
         && device_name.split(['.', '_']).any(|part| matches!(part, "stream" | "watch" | "continuous" | "monitor"))
 }
 
 struct Attached {
     client: Arc<RobotMcpClient>,
     tools: Vec<RobotToolDescriptor>,
+}
+
+/// Complete catalog prepared from one exact authenticated connection. Its
+/// fields are private so management callers cannot synthesize hardware tools.
+pub struct PreparedRobotToolRefresh {
+    robot_id: String,
+    client: Arc<RobotMcpClient>,
+    tools: Vec<RobotToolDescriptor>,
+}
+
+/// Retains the cache write lock while the Robot owner durably advances its
+/// capability revision. Dropping it before publish leaves the old cache intact.
+pub struct RobotToolRefreshCommit<'a> {
+    map: tokio::sync::RwLockWriteGuard<'a, HashMap<String, Attached>>,
+    prepared: PreparedRobotToolRefresh,
+}
+
+impl RobotToolRefreshCommit<'_> {
+    pub fn publish(mut self) {
+        self.map.get_mut(&self.prepared.robot_id).expect("prepared connection is locked").tools = self.prepared.tools;
+    }
 }
 
 /// Live robot → (MCP client, cached toolset).
@@ -103,6 +128,36 @@ impl RobotToolRegistry {
             .get(robot_id)
             .map(|a| a.tools.clone())
             .unwrap_or_default()
+    }
+
+    pub async fn tools_for_connection(&self, robot_id: &str, connection_id: &str) -> Option<Vec<RobotToolDescriptor>> {
+        self.inner.read().await.get(robot_id)
+            .filter(|attached| attached.client.connection_id() == connection_id)
+            .map(|attached| attached.tools.clone())
+    }
+
+    /// A failed refresh retains the complete prior catalog. A late reply from
+    /// an old connection can never replace its successor's cache.
+    pub async fn refresh(&self, robot_id: &str, expected_connection_id: &str) -> Result<(), ToolCallError> {
+        let prepared = self.prepare_refresh(robot_id, expected_connection_id).await?;
+        self.lock_refresh_commit(prepared).await?.publish();
+        Ok(())
+    }
+
+    pub async fn prepare_refresh(&self, robot_id: &str, expected_connection_id: &str) -> Result<PreparedRobotToolRefresh, ToolCallError> {
+        let client = self.inner.read().await.get(robot_id)
+            .filter(|attached| attached.client.connection_id() == expected_connection_id)
+            .map(|attached| Arc::clone(&attached.client)).ok_or(ToolCallError::Offline)?;
+        let tools = client.list_tools().await.map_err(|error| ToolCallError::Rejected(error.to_string()))?;
+        Ok(PreparedRobotToolRefresh {robot_id:robot_id.to_owned(),client,tools})
+    }
+
+    pub async fn lock_refresh_commit(&self, prepared: PreparedRobotToolRefresh) -> Result<RobotToolRefreshCommit<'_>, ToolCallError> {
+        let map = self.inner.write().await;
+        if !map.get(&prepared.robot_id).is_some_and(|attached| Arc::ptr_eq(&attached.client,&prepared.client)) {
+            return Err(ToolCallError::Offline);
+        }
+        Ok(RobotToolRefreshCommit {map,prepared})
     }
 
     /// Cached tools inside one selected Agent Action ceiling.
@@ -178,6 +233,37 @@ impl RobotToolRegistry {
         expected_input_schema: Option<&Value>,
         args: Value,
     ) -> Result<String, ToolCallError> {
+        self.call_with_profile(robot_id, action, exposed_name, expected_device_name, expected_connection_id,
+            expected_input_schema, None, args).await
+    }
+
+    /// The application holds the RobotRegistry action lease while passing the
+    /// authoritative live record. Editable classification can narrow tool use;
+    /// it cannot bypass hardware categories or the device's permission switch.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn call_configured_for_action(
+        &self, robot_id: &str, action: RobotAction, exposed_name: &str,
+        expected_device_name: Option<&str>, expected_connection_id: Option<&str>,
+        expected_input_schema: Option<&Value>, record: &crate::registry::RobotRecord, args: Value,
+    ) -> Result<String, ToolCallError> {
+        if record.robot_id != robot_id || expected_device_name.is_none() || expected_connection_id.is_none() || expected_input_schema.is_none() {
+            return Err(ToolCallError::Rejected("Configured dispatch requires an exact live Robot record and frozen tool contract".into()));
+        }
+        crate::capability_profile::validate_profile_shape(&record.capability_profile)
+            .map_err(|error| ToolCallError::Rejected(error.to_string()))?;
+        if !record.permissions.allows_configured_tool(&record.capability_profile, expected_device_name.unwrap()) {
+            return Err(ToolCallError::Rejected("Configured tool is disabled or lacks device permission".into()));
+        }
+        self.call_with_profile(robot_id, action, exposed_name, expected_device_name, expected_connection_id,
+            expected_input_schema, Some(&record.capability_profile), args).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn call_with_profile(
+        &self, robot_id: &str, action: RobotAction, exposed_name: &str,
+        expected_device_name: Option<&str>, expected_connection_id: Option<&str>,
+        expected_input_schema: Option<&Value>, profile: Option<&crate::capability_profile::RobotCapabilityProfile>, args: Value,
+    ) -> Result<String, ToolCallError> {
         let (client, device_name) = {
             let map = self.inner.read().await;
             let attached = map.get(robot_id).ok_or(ToolCallError::Offline)?;
@@ -191,7 +277,8 @@ impl RobotToolRegistry {
                 .iter()
                 .find(|tool| tool.exposed_name == exposed_name)
                 .ok_or_else(|| ToolCallError::Rejected(format!("unknown tool {exposed_name}")))?;
-            let actual = tool_action(&tool.device_name);
+            let actual = profile.map(|profile| crate::capability_profile::resolve_tool_action(profile, &tool.device_name))
+                .unwrap_or_else(|| tool_action(&tool.device_name));
             if actual != action {
                 return Err(ToolCallError::Rejected(format!(
                     "tool {exposed_name} belongs to {}, not {}",
@@ -241,6 +328,71 @@ mod tests {
     use serde_json::json;
     use tokio::sync::mpsc;
 
+    async fn request_payload(rx: &mut mpsc::Receiver<Frame>) -> serde_json::Value {
+        let frame=rx.recv().await.unwrap();
+        let Frame::Text(text)=frame else { panic!("expected MCP text frame") };
+        serde_json::from_str::<serde_json::Value>(&text).unwrap()["payload"].clone()
+    }
+
+    #[tokio::test]
+    async fn refresh_failure_retains_cache_and_old_connection_cannot_replace_successor() {
+        let tools=Arc::new(RobotToolRegistry::default());
+        let (tx,mut rx)=mpsc::channel(8);
+        let client=Arc::new(RobotMcpClient::new(tx,"old".into()));
+        tools.attach("device",client.clone(),vec![descriptor("vendor.original")]).await;
+        let task={ let tools=tools.clone(); tokio::spawn(async move { tools.refresh("device","old").await }) };
+        let request=request_payload(&mut rx).await;
+        assert_eq!(request["method"],"tools/list");
+        client.handle_incoming(json!({"id":request["id"],"result":{"tools":[{"name":"vendor.partial","inputSchema":{"type":"object"}}],"nextCursor":"more"}})).await;
+        let request=request_payload(&mut rx).await;
+        client.handle_incoming(json!({"id":request["id"],"error":{"message":"unavailable"}})).await;
+        assert!(task.await.unwrap().is_err());
+        assert_eq!(tools.tools("device").await[0].device_name,"vendor.original");
+        let task={ let tools=tools.clone(); tokio::spawn(async move { tools.refresh("device","old").await }) };
+        let request=request_payload(&mut rx).await;
+        let (replacement_tx,_replacement_rx)=mpsc::channel(4);
+        tools.attach("device",Arc::new(RobotMcpClient::new(replacement_tx,"new".into())),vec![descriptor("vendor.successor")]).await;
+        client.handle_incoming(json!({"id":request["id"],"result":{"tools":[{"name":"vendor.old_refresh","inputSchema":{"type":"object"}}]}})).await;
+        assert!(matches!(task.await.unwrap(),Err(ToolCallError::Offline)));
+        assert_eq!(tools.tools("device").await[0].device_name,"vendor.successor");
+    }
+
+    #[tokio::test]
+    async fn successful_refresh_changes_catalog_and_frozen_old_schema_is_rejected() {
+        let tools=Arc::new(RobotToolRegistry::default());
+        let (tx,mut rx)=mpsc::channel(4);
+        let client=Arc::new(RobotMcpClient::new(tx,"socket".into()));
+        let original=descriptor("self.head.turn");
+        tools.attach("device",client.clone(),vec![original.clone()]).await;
+        let task={ let tools=tools.clone(); tokio::spawn(async move { tools.refresh("device","socket").await }) };
+        let request=request_payload(&mut rx).await;
+        client.handle_incoming(json!({"id":request["id"],"result":{"tools":[{"name":"self.head.turn","inputSchema":{"type":"object","properties":{"angle":{"type":"integer"}}}}]}})).await;
+        task.await.unwrap().unwrap();
+        assert_ne!(tools.tools("device").await[0].input_schema,original.input_schema);
+        assert!(matches!(tools.call_frozen_for_action("device",RobotAction::Motion,&original.exposed_name,Some(&original.device_name),Some("socket"),Some(&original.input_schema),json!({})).await,Err(ToolCallError::Rejected(_))));
+    }
+
+    #[tokio::test]
+    async fn configured_dispatch_uses_owner_mapping_and_device_permissions() {
+        let tools=Arc::new(RobotToolRegistry::default());
+        let (tx,mut rx)=mpsc::channel(4);
+        let client=Arc::new(RobotMcpClient::new(tx,"socket".into()));
+        let tool=descriptor("vendor.neck.turn");
+        tools.attach("device",client.clone(),vec![tool.clone()]).await;
+        let directory=tempfile::tempdir().unwrap();
+        let registry=crate::registry::RobotRegistry::load(directory.path()).await.unwrap();
+        let (mut record,_)=registry.upsert_on_report(crate::registry::RobotReport {robot_id:"device".into(),client_id:"client".into(),board:"test".into(),firmware_version:"1".into()},1).await.unwrap();
+        record.capability_profile.tool_overrides.insert(tool.device_name.clone(),crate::capability_profile::RobotToolOverride { action:Some(RobotAction::Motion),..Default::default() });
+        let denied=tools.call_configured_for_action("device",RobotAction::Motion,&tool.exposed_name,Some(&tool.device_name),Some("socket"),Some(&tool.input_schema),&record,json!({})).await;
+        assert!(matches!(denied,Err(ToolCallError::Rejected(_))));
+        record.permissions.motion=true;
+        let task={let tools=tools.clone(); let tool=tool.clone(); tokio::spawn(async move {tools.call_configured_for_action("device",RobotAction::Motion,&tool.exposed_name,Some(&tool.device_name),Some("socket"),Some(&tool.input_schema),&record,json!({})).await})};
+        let request=request_payload(&mut rx).await;
+        assert_eq!(request["params"]["name"],"vendor.neck.turn");
+        client.handle_incoming(json!({"id":request["id"],"result":{"content":[{"type":"text","text":"accepted"}]}})).await;
+        assert!(task.await.unwrap().is_ok());
+    }
+
     fn descriptor(device_name: &str) -> RobotToolDescriptor {
         RobotToolDescriptor {
             device_name: device_name.to_owned(),
@@ -287,6 +439,7 @@ mod tests {
         }
         for name in [
             "self.head.look",
+            "self.head.express",
             "self.gimbal.turn",
             "self.motion.stop",
             "self.servo.calibrate",
@@ -303,6 +456,19 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn facial_expression_with_head_motion_cannot_use_display_authority() {
+        let registry = registry().await;
+        let (tx, _rx) = mpsc::channel::<Frame>(4);
+        registry.attach("expression-robot", Arc::new(RobotMcpClient::new(tx, "expression-socket".into())),
+            vec![descriptor("self.head.express")]).await;
+        assert!(registry.tools_for_action("expression-robot", RobotAction::Display).await.is_empty());
+        assert_eq!(registry.tools_for_action("expression-robot", RobotAction::Motion).await.len(), 1);
+        let result = registry.call_for_action("expression-robot", RobotAction::Display,
+            "robot_head_express", json!({"emotion":"happy","action":"nod"})).await;
+        assert!(matches!(result, Err(ToolCallError::Rejected(_))));
     }
 
     #[tokio::test]

@@ -12666,14 +12666,15 @@ fn fixed_product_agent_switch_resource(
 
 /// Re-admission derives operations from the edited Agent's exact grants, but
 /// must retain a Companion's chosen cwd, Knowledge policy and connection.
-/// MCP parameters belong to the newly frozen tool locks and are re-resolved by
-/// their existing authority; the selected servers remain Session-owned.
+/// MCP and robot parameters belong to newly frozen tool contracts and are
+/// re-resolved by their existing authority; selected device identities remain
+/// Session-owned.
 fn preserve_companion_refresh_resource_choices(
     replacement: &mut AgentBindingValueDto,
     current: &AgentBindingValueDto,
 ) -> Result<(), AppError> {
     for resource in &mut replacement.typed_resource_bindings {
-        if resource.resource_kind == "mcp_server" {
+        if matches!(resource.resource_kind.as_str(), "mcp_server" | "robot") {
             continue;
         }
         let previous = current.typed_resource_bindings.iter().find(|previous| {
@@ -12903,6 +12904,33 @@ mod agent_switch_resource_tests {
             assert_ne!(next.binding_id, previous.binding_id,
                 "the newly authorized operations produce a new immutable resource definition");
         }
+    }
+
+    #[test]
+    fn companion_refresh_keeps_new_robot_capability_parameters() {
+        let mut source: AgentBindingValueDto = serde_json::from_value(
+            serde_json::to_value(companion_binding()).unwrap(),
+        ).unwrap();
+        let mut robot = source.typed_resource_bindings[0].clone();
+        robot.resource_kind = "robot".to_owned();
+        robot.resource_id = "selected-robot".to_owned();
+        robot.operations = BTreeSet::from(["motion".to_owned()]);
+        robot.typed_parameters = BTreeMap::from([
+            ("companion_id".to_owned(), "companion-1".to_owned()),
+            ("capability_revision".to_owned(), "0".to_owned()),
+        ]);
+        super::super::nomi_core_resource_bindings::freeze_resource_definition_id(&mut robot).unwrap();
+        source.typed_resource_bindings.push(robot.clone());
+        let mut replacement = source.clone();
+        let next = replacement.typed_resource_bindings.last_mut().unwrap();
+        next.typed_parameters.insert("capability_revision".to_owned(), "1".to_owned());
+        next.typed_parameters.insert("adapter_revision".to_owned(), "current".to_owned());
+        super::super::nomi_core_resource_bindings::freeze_resource_definition_id(next).unwrap();
+        let expected = next.clone();
+        preserve_companion_refresh_resource_choices(&mut replacement, &source).unwrap();
+        assert_eq!(replacement.typed_resource_bindings.last().unwrap(), &expected);
+        assert_ne!(expected.binding_id, robot.binding_id);
+        assert_eq!(expected.resource_id, robot.resource_id);
     }
 
     #[test]

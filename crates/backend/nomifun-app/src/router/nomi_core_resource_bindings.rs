@@ -1664,13 +1664,14 @@ impl ProductResourceAuthority {
         {
             return Err(ResourceSelectionResolutionError::forbidden(self.kind));
         }
-        let typed_parameters = robot
+        let mut typed_parameters = robot
             .companion_id
             .as_ref()
             .map(|companion_id| {
                 BTreeMap::from([("companion_id".to_owned(), companion_id.to_string())])
             })
             .unwrap_or_default();
+        typed_parameters.insert("capability_revision".to_owned(), robot.capability_revision.to_string());
         Ok(ServerResolvedResource {
             resource_id: robot.robot_id,
             allowed_operations: BTreeSet::from([

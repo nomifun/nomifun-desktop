@@ -6583,6 +6583,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures-util",
+ "jsonschema",
  "nomifun-api-types",
  "nomifun-common",
  "nomifun-model-invoke",

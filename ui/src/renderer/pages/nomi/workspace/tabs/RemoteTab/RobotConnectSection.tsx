@@ -21,6 +21,7 @@ import {
 import { ROBOT_STATUS_COLOR } from '@/renderer/components/capability/capabilityStatusColors';
 import type { I18nKey } from '@/renderer/services/i18n/i18n-keys';
 import AddRobotModal from './AddRobotModal';
+import RobotCapabilitiesModal from './RobotCapabilitiesModal';
 import { useRobotStatuses } from './useRobotStatuses';
 
 interface RobotConnectSectionProps {
@@ -56,6 +57,7 @@ const RobotConnectSection: React.FC<RobotConnectSectionProps> = ({
   const [loadFailed, setLoadFailed] = useState(false);
   const [lanEnabled, setLanEnabled] = useState<boolean | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  const [capabilityRobot, setCapabilityRobot] = useState<IApiRobot | null>(null);
   const [busyRobotId, setBusyRobotId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -244,6 +246,9 @@ const RobotConnectSection: React.FC<RobotConnectSectionProps> = ({
                       ))}
                     </div>
                     <div className='flex items-center gap-8px'>
+                    <Button size='small' onClick={() => setCapabilityRobot(row)}>
+                      {t('nomi.robot.capabilities.open')}
+                    </Button>
                     <Button
                       size='small'
                       loading={busyRobotId === row.robot_id}
@@ -275,6 +280,8 @@ const RobotConnectSection: React.FC<RobotConnectSectionProps> = ({
           void refresh();
         }}
       />
+      {capabilityRobot && <RobotCapabilitiesModal robot={capabilityRobot}
+        onCancel={() => setCapabilityRobot(null)} onSaved={() => void refresh()} />}
     </>
   );
 };

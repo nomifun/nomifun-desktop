@@ -230,10 +230,10 @@ impl EngineToolInvoker for SessionTools {
                 "ROBOT_OFFLINE: no device call was dispatched. Connect the bound robot to this desktop before requesting a new operation.",
                 true,
             )),
-            Err(error) if error.code.as_ref() == "ROBOT_PERMISSION_DENIED" => {
+            Err(error) if matches!(error.code.as_ref(), "ROBOT_PERMISSION_DENIED" | "ROBOT_CAPABILITIES_CHANGED") => {
                 Ok(EngineToolResult::text(
                     invocation.call.call_id,
-                    format!("ROBOT_PERMISSION_DENIED: {}", error.internal_message),
+                    format!("{}: {}", error.code.as_ref(), error.internal_message),
                     true,
                 ))
             }

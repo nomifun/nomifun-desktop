@@ -14,9 +14,9 @@ to your desktop over the LAN instead of using the default `xiaozhi.me` service.
 
 Once paired, a robot continues its companion's existing desktop conversation, using the same persona, Agent settings, memory and knowledge bindings. Pairing and reconnecting do not create a separate robot conversation or Agent.
 
-Ordinary Agent conversations can explicitly select a robot in the resource picker before launch. The companion conversation page currently has no robot resource picker. Pairing a single device does not automatically grant control authority.
+Ordinary Agent conversations can explicitly select a robot in the resource picker before launch. In a companion's Cohabit view, use **Connections → Conversation robot** in the right sidebar, select a device paired with that companion, then click **Apply robot**. Select **No robot control** and apply to remove the conversation's device control resource. Wait until the current reply finishes; active and paused turns block changes. Pairing a single device does not automatically select it or grant control authority.
 
-To configure device control for an existing companion session, an integration should call `PUT /api/product-agent-bindings/companion/{companion_id}` with the current Agent `selection`, the existing `conversation_id`, and the complete `resource_selections`, including the `robot` and all other resources to retain. This applies the change through the formal session binding transition; the companion's Agent dropdown does not select a robot resource.
+The picker calls `PUT /api/product-agent-bindings/companion/{companion_id}` with the current Agent `selection`, the existing `conversation_id`, and the complete `resource_selections`, including the `robot` and all other resources to retain. This uses the formal session binding transition and preserves session identity, the current model, other resources, and message history. Integrations should use this same endpoint; the companion's Agent dropdown does not select a robot resource.
 
 Device settings show the permissions supported by the connected firmware. Photos, movement and extension tools require their respective permissions. Continuous observation requires an additional permission and remains scoped to the current conversation turn. Revoking permissions, unpairing or disconnecting invalidates earlier device authority. Photos and observations are attached to the originating conversation message.
 
@@ -95,7 +95,7 @@ do not require camera permission or a robot resource selected in advance.
 | --- | --- |
 | `robot/vision` | Camera and vision tools; continuous observation needs an additional permission. |
 | `robot/display` | Screen, expression and lighting tools. |
-| `robot/motion` | Head, gimbal and servo tools, including status reads such as `self.head.get_status`. |
+| `robot/motion` | Head, gimbal and servo tools, including `self.head.get_status` and the combined expression/motion tool `self.head.express`. |
 | `robot/device` | Other device extension tools provided by the firmware. |
 
 The latest recommended official Companion Agent includes all four Actions.
@@ -106,8 +106,8 @@ configurations or existing sessions. To add the recommended capabilities, choose
 capabilities**, review the additions, and select **Complete and save**. Return to
 the companion and, after the current reply finishes, select **Apply latest setup**
 to explicitly apply the saved configuration to its current session. This keeps
-the session identity, current model and message history. Then confirm that the
-session selects the correct robot resource and allow the required operations in
+the session identity, current model and message history. Then select the device
+under **Connections → Conversation robot** in the Cohabit view, click **Apply robot**, and allow the required operations in
 device settings. Personal Agents also need explicit grants for the Robot Actions
 you want to use.
 
@@ -122,9 +122,44 @@ Start with these checks:
    `esp32-s3n16r8-emoji` firmware exposes device-side MCP tools under
    `self.head.*`, including `self.head.get_status`.
 
+Conversational expressions and gestures use the same session's authorized MCP
+tools. Updated gimbal firmware offers `self.head.express` for a combined face and
+head gesture. Because its face animations can also move the servos, this combined
+tool requires `robot/motion` and device motion permission. The model chooses
+appropriate moments instead of moving on every sentence. Emotion tags in spoken
+text are not control instructions. An `accepted` or queued response confirms
+submission, not completed physical movement.
+
 Servo motion is disabled by default on firmware builds that require calibration.
 Read the board documentation and calibrate center/travel limits before enabling
 automatic motion. Incorrect limits can stall or damage a servo.
+
+## 6. Configure and extend robot capabilities
+
+Open **Channels & robots → Robot connections → Capability configuration** for a
+device. Its MCP tools and JSON Schema generate the editor; it does not depend on
+board names, tool names, or a fixed number of servos.
+
+- Enable or disable tools, edit descriptions and default arguments, and classify
+  tools with unfamiliar names. Existing camera and physical-motion categories
+  cannot be downgraded to weaker permissions. Original device schemas still
+  constrain every argument; configuration cannot widen physical travel limits.
+- Create named actions such as “Greeting” from an existing tool and fixed
+  arguments. Multiple named actions may reuse one device tool and retain its
+  permission and effect-receipt path. Saving or refreshing does not execute them.
+- Edit conversational timing, frequency and personality in the existing Agent
+  instructions. Tool descriptions explain capabilities and grant no authority.
+
+Saving creates a new device capability revision without changing Agent Actions
+or device permissions. In the Cohabit view, **Apply robot** while the conversation
+is idle to bind the new revision to the same session, preserving its identity,
+model, history and other resources. Old tool invokers cannot dispatch after the
+configuration changes. When firmware publishes new tools, **Refresh device
+capabilities**, then reapply the robot to the conversation.
+
+This editor configures and extends capabilities; it is not a manual hardware
+control panel. New hardware primitives require firmware support, while defaults,
+usage descriptions and named actions over existing primitives are editable.
 
 ## How Data Flows
 

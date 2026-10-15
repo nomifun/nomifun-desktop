@@ -11,10 +11,7 @@ default = []
 test-support = []
 
 [dependencies]
-# The `[emotion:name]` vocabulary and its strippers live here, not in this
-# crate: the desktop relay removes the same marker from the same stream and
-# cannot depend on the device pipeline. Free anyway — nomifun-api-types
-# already pulls nomifun-common in.
+# Shared speech/display cleanup; expressive actions use the granted MCP tools.
 nomifun-common = { workspace = true }
 nomifun-api-types = { workspace = true }
 nomifun-realtime = { workspace = true }
@@ -29,6 +26,7 @@ futures-util = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+jsonschema = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

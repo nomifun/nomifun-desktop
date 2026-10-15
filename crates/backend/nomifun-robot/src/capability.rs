@@ -179,6 +179,7 @@ mod tests {
 
     fn record(permissions: RobotPermissions) -> RobotRecord {
         RobotRecord {
+            capability_profile: Default::default(), capability_revision: 0,
             robot_id: "robot-1".to_owned(),
             client_id: "client-1".to_owned(),
             name: "Desk bot".to_owned(),

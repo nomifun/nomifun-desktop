@@ -724,6 +724,7 @@ mod tests {
     #[test]
     fn build_ota_response_shape_is_stable() {
         let record = crate::registry::RobotRecord {
+            capability_profile: Default::default(), capability_revision: 0,
             permissions: Default::default(), authorization_revision: 0,
             robot_id: "aa:bb:cc:dd:ee:ff".into(),
             client_id: "cid".into(),

@@ -26,7 +26,7 @@ test('pairing completes with the companion identity without creating a device Ag
   const endpoints = spyOn(robot.endpoints, 'invoke').mockResolvedValue({ ota_urls: [], lan_enabled: true });
   const claim = spyOn(robot.claim, 'invoke').mockResolvedValue({
     robot_id: 'aa:bb:cc:dd:ee:ff', companion_id: companionId, name: 'Robot', board: '',
-    firmware_version: '', last_seen: null, created_at: '',
+    firmware_version: '', last_seen: null, created_at: '', capability_revision: 0,
     supported_permissions: ['proactive_speech'],
     permissions: { vision: false, motion: false, display: true, device_tools: false,
       proactive_speech: false, continuous_vision: false },

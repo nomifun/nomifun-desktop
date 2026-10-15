@@ -385,45 +385,11 @@ impl PreferenceReader for AppPreferences {
 // Conversation backend
 // ---------------------------------------------------------------------------
 
-/// The robot-body section appended to the companion persona.
-///
-/// This is the only place the model is told what a *spoken* reply must look
-/// like, so it is where output discipline belongs.
-///
-/// **The model is required to emit plain spoken text, and nothing else.** There
-/// is no marker channel in this text and no vocabulary to learn: no
-/// square/full-width brackets, no stage directions or action annotations, no
-/// emoji, no markdown, no parenthetical asides.
-///
-/// That is a deliberate replacement for a deleted design. The prompt used to ask
-/// for a leading `[emotion:名]` marker out of a 21-name vocabulary so the gateway
-/// could drive the OLED face; the model emitted `[winking]` — the bare name —
-/// and every stripper keyed on the literal `"[emotion:"` matched nothing. The
-/// marker was therefore printed in the desktop transcript AND read aloud by TTS
-/// AND drove no face: broken and noisy at once. A syntax contract with an LLM is
-/// not enforceable, so it is gone rather than re-syntaxed. A PROHIBITION is far
-/// more enforceable than a syntax contract, which is exactly why this reads as
-/// one.
-///
-/// A prohibition is still not a guarantee, so both readers of the model's text
-/// strip stage directions as a backstop, syntax-agnostically
-/// (`nomifun_common::stage_direction`): the desktop relay
-/// (`stream_relay.rs`'s `spoken_output` turn policy, which owns the live stream, the
-/// persisted `messages` row, search and the knowledge writeback) and the device
-/// path (`nomifun-robot`'s `sanitize_for_speech` / `sanitize_for_display`, which
-/// own TTS and the OLED). Those two are NOT duplicates and neither may be
-/// deleted as one: they serve different consumers off independent `broadcast`
-/// clones, and the crates may not depend on each other.
-///
-/// Facial expression still exists, but it is STATE-driven: `session.rs` sends
-/// `ServerMessage::Llm { emotion: "sad" }` when the voice link is broken or a
-/// turn failed. That is a fact the gateway owns, not a syntax it hopes for.
-///
-/// One prompt rule earns its wording carefully: **the text is read aloud**.
-/// Without saying so, models write for a display — emoji, markdown, parenthetical
-/// asides — none of which a TTS engine can voice, and some of which make it fail
-/// outright.
-/// Production device ingress shares the Companion's canonical AgentSession.
+/// Bridge device speech into the Companion's canonical AgentSession.
+/// Conversational gestures use discovered, explicitly granted MCP tools and
+/// ordinary Session effects. Speech/display cleanup keeps stage directions out
+/// of the text; it does not interpret them as physical control instructions.
+/// Protocol emotion messages are reserved for gateway-owned state notices.
 #[derive(Clone)]
 pub(crate) struct AppRobotBackend {
     pub sessions: Arc<crate::router::nomi_core_session::NomiCoreSessionOwner>,

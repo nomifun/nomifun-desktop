@@ -40,6 +40,12 @@ impl Default for RobotPermissions {
 }
 
 impl RobotPermissions {
+    pub fn allows_configured_tool(&self, profile: &crate::capability_profile::RobotCapabilityProfile, device_name: &str) -> bool {
+        let action = crate::capability_profile::resolve_tool_action(profile, device_name);
+        crate::capability_profile::tool_enabled(profile, device_name)
+            && self.allows_action(action)
+            && (!crate::tool_registry::requires_continuous_vision_for_action(device_name, action) || self.continuous_vision)
+    }
     pub fn allows_tool(&self, device_name: &str) -> bool {
         self.allows_action(crate::tool_registry::tool_action(device_name))
             && (!crate::tool_registry::requires_continuous_vision(device_name) || self.continuous_vision)
@@ -71,6 +77,36 @@ pub struct RobotRecord {
     pub created_at: i64,
     pub permissions: RobotPermissions,
     pub authorization_revision: u64,
+    #[serde(default)]
+    pub capability_profile: crate::capability_profile::RobotCapabilityProfile,
+    #[serde(default)]
+    pub capability_revision: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CapabilityUpdateError {
+    #[error("Robot does not exist")]
+    NotFound,
+    #[error("Robot capability configuration changed; reload before saving")]
+    Conflict,
+    #[error("Connect the robot before saving capability configuration")]
+    Offline,
+    #[error(transparent)]
+    Invalid(#[from] crate::capability_profile::ProfileError),
+    #[error("Robot capability configuration could not be persisted: {0}")]
+    Persistence(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CapabilityRefreshError {
+    #[error("Robot does not exist")]
+    NotFound,
+    #[error("Connect the robot before refreshing its capabilities")]
+    Offline,
+    #[error("Robot tools could not be refreshed: {0}")]
+    Device(String),
+    #[error("Robot capability revision could not be persisted: {0}")]
+    Persistence(String),
 }
 
 /// The subset of a firmware device report the registry cares about.
@@ -242,6 +278,8 @@ impl RobotRegistry {
             }
             None => {
                 let record = RobotRecord {
+                    capability_profile: Default::default(),
+                    capability_revision: 0,
                     permissions: RobotPermissions::default(),
                     authorization_revision: 0,
                     name: default_name(&report.board),
@@ -387,6 +425,55 @@ impl RobotRegistry {
         Ok(result)
     }
 
+    /// Configuration is device metadata, never a permission grant. Serialize
+    /// it with physical effects and publish only after durable replacement.
+    pub async fn set_capability_profile(
+        &self, robot_id: &str, expected_revision: u64,
+        profile: crate::capability_profile::RobotCapabilityProfile,
+        tools: &crate::tool_registry::RobotToolRegistry,
+    ) -> Result<RobotRecord, CapabilityUpdateError> {
+        let _authority = self.operation_gate(robot_id).write_owned().await;
+        let mut map = self.inner.write().await;
+        let current = map.get(robot_id).ok_or(CapabilityUpdateError::NotFound)?;
+        if current.capability_revision != expected_revision { return Err(CapabilityUpdateError::Conflict); }
+        let connection = self.current_connection(robot_id).await.ok_or(CapabilityUpdateError::Offline)?;
+        let catalog = tools.tools_for_connection(robot_id, &connection).await.ok_or(CapabilityUpdateError::Offline)?;
+        crate::capability_profile::validate_profile_update(&profile, &current.capability_profile, &catalog)?;
+        if current.capability_profile == profile { return Ok(current.clone()); }
+        let mut next = map.clone();
+        let record = next.get_mut(robot_id).expect("record was checked");
+        record.capability_profile = profile;
+        record.capability_revision = record.capability_revision.checked_add(1).ok_or(CapabilityUpdateError::Conflict)?;
+        let result = record.clone();
+        self.persist(&next).await.map_err(|error| CapabilityUpdateError::Persistence(error.to_string()))?;
+        *map = next;
+        Ok(result)
+    }
+
+    /// Explicit discovery changes the frozen Agent tool surface, even when a
+    /// firmware happens to return the same schema. Publish the complete cache
+    /// together with a durable revision so existing Sessions must reapply it.
+    pub async fn refresh_capabilities(&self, robot_id: &str, tools: &crate::tool_registry::RobotToolRegistry) -> Result<RobotRecord, CapabilityRefreshError> {
+        let _authority = self.operation_gate(robot_id).write_owned().await;
+        if self.get(robot_id).await.is_none() { return Err(CapabilityRefreshError::NotFound); }
+        let connection = self.current_connection(robot_id).await.ok_or(CapabilityRefreshError::Offline)?;
+        let prepared = tools.prepare_refresh(robot_id,&connection).await.map_err(|error| match error {
+            crate::mcp_bridge::ToolCallError::Offline => CapabilityRefreshError::Offline,
+            error => CapabilityRefreshError::Device(error.to_string()),
+        })?;
+        let mut map=self.inner.write().await;
+        let mut next=map.clone();
+        let record=next.get_mut(robot_id).ok_or(CapabilityRefreshError::NotFound)?;
+        record.capability_revision=record.capability_revision.checked_add(1)
+            .ok_or_else(|| CapabilityRefreshError::Persistence("capability revision overflow".into()))?;
+        let result=record.clone();
+        let commit=tools.lock_refresh_commit(prepared).await.map_err(|_| CapabilityRefreshError::Offline)?;
+        self.persist(&next).await.map_err(|error| CapabilityRefreshError::Persistence(error.to_string()))?;
+        commit.publish();
+        *map=next;
+        Ok(result)
+    }
+
     pub async fn connect(&self, robot_id: &str, companion_id: &str, connection_id: &str) -> anyhow::Result<()> {
         let _authority = self.operation_gate(robot_id).write_owned().await;
         let map = self.inner.read().await;
@@ -491,6 +578,73 @@ mod tests {
             client_id: "3f2b9c1e-0000-4000-8000-000000000001".to_owned(),
             board: "esp32-s3n16r8-emoji".to_owned(),
             firmware_version: "1.9.0".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn capability_profile_is_cas_persisted_without_granting_permissions() {
+        use crate::capability_profile::{RobotCapabilityProfile,RobotToolOverride};
+        let dir=tempfile::tempdir().unwrap();
+        let reg=RobotRegistry::load(dir.path()).await.unwrap();
+        let id="profile-device";
+        let (initial,_)=reg.upsert_on_report(report(id),1).await.unwrap();
+        reg.claim(initial.activation_code.as_deref().unwrap(),"companion-1").await.unwrap();
+        let tools=crate::tool_registry::RobotToolRegistry::default();
+        let mut profile=RobotCapabilityProfile::default();
+        profile.tool_overrides.insert("vendor.turn".into(),RobotToolOverride { description:Some("Brief turn".into()),action:Some(crate::capability::RobotAction::Motion),..Default::default() });
+        assert!(matches!(reg.set_capability_profile(id,0,profile.clone(),&tools).await,Err(CapabilityUpdateError::Offline)));
+        reg.connect(id,"companion-1","connection-1").await.unwrap();
+        let (tx,_rx)=tokio::sync::mpsc::channel(4);
+        tools.attach(id,Arc::new(crate::mcp_bridge::RobotMcpClient::new(tx,"connection-1".into())),vec![crate::mcp_bridge::RobotToolDescriptor {
+            device_name:"vendor.turn".into(),exposed_name:"robot_vendor_turn".into(),description:"Turn".into(),input_schema:serde_json::json!({"type":"object","properties":{}}),
+        }]).await;
+        let saved=reg.set_capability_profile(id,0,profile.clone(),&tools).await.unwrap();
+        assert_eq!(saved.capability_revision,1);
+        assert_eq!(saved.permissions,initial.permissions);
+        assert_eq!(RobotRegistry::load(dir.path()).await.unwrap().get(id).await.unwrap().capability_profile,profile);
+        assert!(matches!(reg.set_capability_profile(id,0,profile.clone(),&tools).await,Err(CapabilityUpdateError::Conflict)));
+        assert_eq!(reg.set_capability_profile(id,1,profile.clone(),&tools).await.unwrap().capability_revision,1,"idempotent save does not revoke sessions");
+        let path=dir.path().join(ROBOT_REL_DIR).join(ROBOTS_FILE);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        profile.tool_overrides.get_mut("vendor.turn").unwrap().enabled=false;
+        assert!(matches!(reg.set_capability_profile(id,1,profile,&tools).await,Err(CapabilityUpdateError::Persistence(_))));
+        assert_eq!(reg.get(id).await.unwrap(),saved,"failed writes cannot change capability revision or live profile");
+    }
+
+    #[tokio::test]
+    async fn explicit_refresh_publishes_cache_with_revision_and_write_failure_preserves_both() {
+        let dir=tempfile::tempdir().unwrap();
+        let reg=Arc::new(RobotRegistry::load(dir.path()).await.unwrap());
+        let tools=Arc::new(crate::tool_registry::RobotToolRegistry::default());
+        let id="refresh-device";
+        let (initial,_)=reg.upsert_on_report(report(id),1).await.unwrap();
+        reg.claim(initial.activation_code.as_deref().unwrap(),"companion-1").await.unwrap();
+        reg.connect(id,"companion-1","refresh-connection").await.unwrap();
+        let (tx,mut rx)=tokio::sync::mpsc::channel(4);
+        let client=Arc::new(crate::mcp_bridge::RobotMcpClient::new(tx,"refresh-connection".into()));
+        tools.attach(id,client.clone(),vec![crate::mcp_bridge::RobotToolDescriptor {
+            device_name:"vendor.original".into(),exposed_name:"robot_vendor_original".into(),description:"Original".into(),input_schema:serde_json::json!({"type":"object"}),
+        }]).await;
+        for (name,expect_success) in [("vendor.updated",true),("vendor.unpublished",false)] {
+            let task={let reg=reg.clone();let tools=tools.clone();tokio::spawn(async move {reg.refresh_capabilities(id,&tools).await})};
+            let crate::link::Frame::Text(text)=rx.recv().await.unwrap() else {panic!("expected MCP request")};
+            let request:serde_json::Value=serde_json::from_str(&text).unwrap();
+            client.handle_incoming(serde_json::json!({"id":request["payload"]["id"],"result":{"tools":[{"name":name,"inputSchema":{"type":"object"}}]}})).await;
+            let result=task.await.unwrap();
+            if expect_success {
+                let saved=result.unwrap();
+                assert_eq!(saved.capability_revision,1);
+                assert_eq!(saved.permissions,initial.permissions);
+                assert_eq!(RobotRegistry::load(dir.path()).await.unwrap().get(id).await.unwrap().capability_revision,1);
+                let path=dir.path().join(ROBOT_REL_DIR).join(ROBOTS_FILE);
+                std::fs::remove_file(&path).unwrap();
+                std::fs::create_dir(&path).unwrap();
+            } else {
+                assert!(matches!(result,Err(CapabilityRefreshError::Persistence(_))));
+            }
+            assert_eq!(reg.get(id).await.unwrap().capability_revision,1);
+            assert_eq!(tools.tools(id).await[0].device_name,"vendor.updated");
         }
     }
 

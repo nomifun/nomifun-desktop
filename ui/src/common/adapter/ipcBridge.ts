@@ -2193,6 +2193,8 @@ export interface IApiRobot {
   /** Firmware board type, e.g. `esp32-s3n16r8-emoji`. */
   board: string;
   firmware_version: string;
+  /** Version of the discovered tools and saved capability profile. */
+  capability_revision: number;
   /** RFC 3339, or null when the device has never reported in. */
   last_seen: string | null;
   /** RFC 3339. */
@@ -2224,6 +2226,49 @@ export interface IApiRobotEndpoints {
   lan_enabled: boolean;
 }
 
+export type IApiRobotCapabilityAction = 'vision' | 'display' | 'motion' | 'device';
+
+export interface IApiRobotCapabilityOverride {
+  enabled: boolean;
+  action: IApiRobotCapabilityAction | null;
+  description: string | null;
+  default_arguments: Record<string, unknown>;
+}
+
+export interface IApiRobotCapabilityPreset {
+  id: string;
+  name: string;
+  tool_name: string;
+  description: string;
+  arguments: Record<string, unknown>;
+  enabled: boolean;
+}
+
+export interface IApiRobotCapabilityProfile {
+  tool_overrides: Record<string, IApiRobotCapabilityOverride>;
+  presets: IApiRobotCapabilityPreset[];
+}
+
+export interface IApiRobotCapabilityTool {
+  device_name: string;
+  exposed_name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+  action: IApiRobotCapabilityAction;
+  allowed_actions: IApiRobotCapabilityAction[];
+  enabled: boolean;
+  effective_description: string;
+  default_arguments: Record<string, unknown>;
+}
+
+export interface IApiRobotCapabilities {
+  robot_id: string;
+  connected: boolean;
+  revision: number;
+  profile: IApiRobotCapabilityProfile;
+  tools: IApiRobotCapabilityTool[];
+}
+
 const fromApiRobot = (value: IApiRobot): IApiRobot => ({
   ...value,
   companion_id: value.companion_id == null ? null : parseCompanionId(value.companion_id),
@@ -2235,6 +2280,21 @@ const fromApiRobotStatus = (value: IApiRobotStatus): IApiRobotStatus => ({
 });
 
 export const robot = {
+  getCapabilities: httpGet<IApiRobotCapabilities, { robot_id: string }>(
+    (p) => `/api/robots/${encodeURIComponent(p.robot_id)}/capabilities`,
+  ),
+  setCapabilities: httpPut<IApiRobotCapabilities, {
+    robot_id: string;
+    expected_revision: number;
+    profile: IApiRobotCapabilityProfile;
+  }>(
+    (p) => `/api/robots/${encodeURIComponent(p.robot_id)}/capabilities`,
+    (p) => ({ expected_revision: p.expected_revision, profile: p.profile }),
+  ),
+  refreshCapabilities: httpPost<IApiRobotCapabilities, { robot_id: string }>(
+    (p) => `/api/robots/${encodeURIComponent(p.robot_id)}/capabilities/refresh`,
+    () => ({}),
+  ),
   speak: httpPost<{ accepted: boolean }, { robot_id: string; conversation_id: ConversationId }>(
     (p) => `/api/robots/${p.robot_id}/speak`, (p) => ({ conversation_id: p.conversation_id }),
   ),

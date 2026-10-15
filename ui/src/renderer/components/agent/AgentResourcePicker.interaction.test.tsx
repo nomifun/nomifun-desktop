@@ -164,13 +164,13 @@ describe('Agent resource picker', () => {
     const list = spyOn(ipcBridge.robot.list, 'invoke').mockResolvedValue([
       {
         robot_id: 'robot-ready', name: 'Mochi bot', companion_id: null,
-        board: 'esp32-s3', firmware_version: '1.0.0', last_seen: null,
+        board: 'esp32-s3', firmware_version: '1.0.0', last_seen: null, capability_revision: 0,
         created_at: '2026-09-18T00:00:00Z', supported_permissions: ['vision', 'motion'],
         permissions: { vision: true, motion: true, display: false, device_tools: false, proactive_speech: false, continuous_vision: false },
       },
       {
         robot_id: 'robot-blocked', name: 'Roux bot', companion_id: null,
-        board: 'esp32-s3', firmware_version: '1.0.0', last_seen: null,
+        board: 'esp32-s3', firmware_version: '1.0.0', last_seen: null, capability_revision: 0,
         created_at: '2026-09-18T00:00:00Z', supported_permissions: ['vision'],
         permissions: { vision: true, motion: false, display: false, device_tools: false, proactive_speech: false, continuous_vision: false },
       },

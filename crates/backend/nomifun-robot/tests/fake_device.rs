@@ -570,6 +570,170 @@ async fn authenticated_device_tools_are_scoped_and_called_through_the_live_link(
 }
 
 #[tokio::test]
+async fn yuntai_expressions_are_discovered_and_queued_only_with_motion_authority() {
+    use nomifun_robot::capability::RobotAction;
+
+    let h = boot().await;
+    let robot_id = "aa:bb:cc:dd:ee:21";
+    let ota: Value = h
+        .http
+        .post(format!("{}/robot/ota", h.base))
+        .header("Device-Id", robot_id)
+        .header("Client-Id", "yuntai")
+        .json(&serde_json::json!({
+            "version": 2,
+            "application": { "version": "1.9.0" },
+            "board": { "type": "esp32-s3n16r8-emoji" }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = ota["websocket"]["token"].as_str().unwrap();
+    let ws_url = ota["websocket"]["url"].as_str().unwrap();
+    h.http
+        .post(format!("{}/api/robots/claim", h.base))
+        .json(&serde_json::json!({
+            "code": ota["activation"]["code"],
+            "companion_id": "0190f5fe-7c00-7a00-8000-0000000000ab"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let request = ws_request(
+        ws_url,
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Device-Id", robot_id),
+            ("Client-Id", "yuntai"),
+            ("Protocol-Version", "1"),
+        ],
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    send_text(
+        &mut socket,
+        r#"{"type":"hello","version":1,"transport":"websocket","features":{"mcp":true}}"#,
+    )
+    .await;
+    let initialize = loop {
+        let frame = next_json(&mut socket).await;
+        if frame["type"] == "mcp" && frame["payload"]["method"] == "initialize" {
+            break frame;
+        }
+    };
+    answer_mcp(
+        &mut socket,
+        &initialize,
+        serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": { "tools": {} },
+            "serverInfo": { "name": "esp32-s3n16r8-emoji", "version": "1.9.0" }
+        }),
+    )
+    .await;
+    let list = next_json(&mut socket).await;
+    assert_eq!(list["payload"]["method"], "tools/list");
+
+    // Match emoji_board.cc and McpTool::to_json: both expression parameters
+    // have defaults and advertise their choices through the generic enum API.
+    let description = concat!(
+        "Express a brief emotion and optional head gesture during natural conversation. ",
+        "Use for a cheerful greeting, sympathy, surprise, thinking, agreement or disagreement. ",
+        "emotion: happy, sad, surprise, thinking, neutral. ",
+        "action: none, nod, shake, left, right, up, down, center. ",
+        "This shows the robot face and can move physical servos; action=none adds no separate ",
+        "gesture, but emotion animations can still move the head. accepted means queued, not completed."
+    );
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "emotion": { "type": "string", "default": "neutral", "enum": ["happy","sad","surprise","thinking","neutral"] },
+            "action": { "type": "string", "default": "none", "enum": ["none","nod","shake","left","right","up","down","center"] }
+        }
+    });
+    answer_mcp(
+        &mut socket,
+        &list,
+        serde_json::json!({ "tools": [{
+            "name": "self.head.express", "description": description, "inputSchema": schema
+        }] }),
+    )
+    .await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !h.tools.is_attached(robot_id).await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("yuntai tools must be discovered through the authenticated MCP link");
+
+    let motion = h.tools.tools_for_action(robot_id, RobotAction::Motion).await;
+    assert_eq!(motion.len(), 1);
+    assert_eq!(motion[0].device_name, "self.head.express");
+    assert_eq!(motion[0].exposed_name, "robot_head_express");
+    assert_eq!(motion[0].description, description);
+    assert_eq!(motion[0].input_schema, schema);
+    let display = h.tools.tools_for_action(robot_id, RobotAction::Display).await;
+    assert!(display.is_empty(), "a face animation that can move servos needs motion authority");
+    let inventory: Value = h.http
+        .get(format!("{}/api/robots", h.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let supported = inventory["robots"][0]["supported_permissions"].as_array().unwrap();
+    assert!(supported.iter().any(|permission| permission == "motion"),
+        "the yuntai expression tool must make the motion permission available in device settings");
+
+    let call = tokio::spawn({
+        let tools = Arc::clone(&h.tools);
+        async move {
+            tools
+                .call_for_action(
+                    robot_id,
+                    RobotAction::Motion,
+                    "robot_head_express",
+                    serde_json::json!({ "emotion": "happy", "action": "nod" }),
+                )
+                .await
+        }
+    });
+    let invocation = next_json(&mut socket).await;
+    assert_eq!(invocation["payload"]["method"], "tools/call");
+    assert_eq!(invocation["payload"]["params"]["name"], "self.head.express");
+    assert_eq!(invocation["payload"]["params"]["arguments"], serde_json::json!({ "emotion": "happy", "action": "nod" }));
+    // McpTool::Call wraps the firmware's JSON string in text content. This
+    // acknowledges queue submission; it makes no claim about physical motion.
+    let accepted = r#"{"accepted":true,"emotion":"happy","action":"nod"}"#;
+    answer_mcp(
+        &mut socket,
+        &invocation,
+        serde_json::json!({
+            "content": [{ "type": "text", "text": accepted }],
+            "isError": false
+        }),
+    )
+    .await;
+    assert_eq!(call.await.unwrap().unwrap(), accepted);
+
+    let error = h.tools.call_for_action(
+        robot_id,
+        RobotAction::Display,
+        "robot_head_express",
+        serde_json::json!({ "emotion": "happy", "action": "none" }),
+    ).await.expect_err("display authority must not dispatch an expression that can move servos");
+    assert!(error.to_string().contains("robot/motion"));
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(50), next_json(&mut socket)).await.is_err(),
+        "the denied expression must never reach the device, even with action=none");
+}
+
+#[tokio::test]
 async fn an_unclaimed_device_is_refused_a_session() {
     let h = boot().await;
     let ota: Value = h

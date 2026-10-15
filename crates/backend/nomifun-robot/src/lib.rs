@@ -7,6 +7,7 @@
 
 pub mod audio;
 pub mod capability;
+pub mod capability_profile;
 pub mod dto;
 pub mod endpoint;
 pub mod effect_ledger;

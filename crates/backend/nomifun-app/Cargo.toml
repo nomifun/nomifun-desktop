@@ -147,6 +147,10 @@ name = "nomi_core_route_gap"
 path = "tests/nomi_core_route_gap.rs"
 
 [[test]]
+name = "robot_capability_configuration"
+path = "tests/robot_capability_configuration.rs"
+
+[[test]]
 name = "session_capability_selection_e2e"
 path = "tests/session_capability_selection_e2e.rs"
 
