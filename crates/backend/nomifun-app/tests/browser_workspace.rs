@@ -34,9 +34,13 @@ impl browser_workspace_provider::BrowserUserClosePort for IdleUserClose {
 #[derive(Default)]
 struct Factory {
     created: Mutex<Vec<CreateBrowserRuntime>>,
+    executed: Arc<Mutex<Vec<BrowserTabCommand>>>,
 }
 
-struct Runtime(u64);
+struct Runtime {
+    generation: u64,
+    executed: Arc<Mutex<Vec<BrowserTabCommand>>>,
+}
 
 #[async_trait]
 impl BrowserRuntimeFactory for Factory {
@@ -45,7 +49,7 @@ impl BrowserRuntimeFactory for Factory {
         request: CreateBrowserRuntime,
     ) -> Result<Arc<dyn BrowserRuntime>, WorkspaceError> {
         self.created.lock().unwrap().push(request.clone());
-        Ok(Arc::new(Runtime(request.runtime_generation)))
+        Ok(Arc::new(Runtime { generation: request.runtime_generation, executed: self.executed.clone() }))
     }
 }
 
@@ -63,7 +67,7 @@ impl BrowserRuntime for Runtime {
     async fn navigation_diagnostics(&self, target: nomifun_browser_platform::runtime::BrowserTabTarget)
         -> Result<nomifun_browser_platform::navigation::BrowserNavigationReport, WorkspaceError> {
         use nomifun_browser_platform::navigation::*;
-        if target.runtime_generation != self.0 || target.tab_id != "owned-diagnostic-tab" || target.document_generation != 2 {
+        if target.runtime_generation != self.generation || target.tab_id != "owned-diagnostic-tab" || target.document_generation != 2 {
             return Err(WorkspaceError::StaleTarget);
         }
         Ok(BrowserNavigationReport {
@@ -81,7 +85,7 @@ impl BrowserRuntime for Runtime {
     async fn snapshot(&self) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
         Ok(BrowserRuntimeSnapshot {
             downloads: Vec::new(),
-            runtime_generation: self.0,
+            runtime_generation: self.generation,
             revision: 1,
             active_tab_id: None,
             tabs: Vec::new(),
@@ -90,9 +94,10 @@ impl BrowserRuntime for Runtime {
 
     async fn execute(
         &self,
-        _: BrowserTabCommand,
+        command: BrowserTabCommand,
         _: tokio_util::sync::CancellationToken,
     ) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
+        self.executed.lock().unwrap().push(command);
         self.snapshot().await
     }
 
@@ -262,6 +267,36 @@ async fn canonical_route_binder_selects_managed_and_attached_without_fallback() 
         .is_none());
 }
 
+#[tokio::test]
+async fn authorized_agent_cannot_invoke_the_users_pause_or_resume_controls() {
+    let owner = "0190f5fe-7c00-7a00-8000-000000000001";
+    let session = "0190f5fe-7c00-7a00-8000-000000000087";
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("storage-generation"), "0190f5fe-7c00-7a00-8000-000000000002").unwrap();
+    let factory = Arc::new(Factory::default());
+    let resources = Arc::new(BrowserResourceService::new(factory.clone()));
+    let binding = binding(owner);
+    let authority = BrowserSessionAuthority::from_action_ids(owner, session,
+        ["browser/observe", "browser/navigate", "browser/act"],
+        browser_provider::browser_resource_binding(binding.clone(), browser_provider::provider_descriptor(&provider(), &binding).unwrap()).unwrap()).unwrap();
+    let bound = browser_provider::bind_authorized_resource(Some(resources.clone()), None, root.path(), authority).await.unwrap();
+    let BoundBrowserProviderResource::Managed(resource) = bound else { panic!("managed browser") };
+    let guard = resource.begin_run().await.unwrap();
+    let target = nomifun_browser_platform::runtime::BrowserTabTarget {
+        tab_id: "agent-owned-tab".into(), runtime_generation: resource.runtime_generation(), document_generation: 1,
+    };
+    for command in [BrowserTabCommand::PauseNavigation { target: target.clone(), expected_navigation_sequence: 11 },
+        BrowserTabCommand::ResumeNavigation { target, expected_navigation_sequence: 11 }] {
+        assert_eq!(resource.agent_command(&guard, command.clone()).await.unwrap_err(), WorkspaceError::UnsupportedAction);
+        assert_eq!(resource.user_command(command).await.unwrap_err(), WorkspaceError::Admission(RunAdmissionError::UserInputLocked),
+            "the active native Agent gate also rejects a user control without relying on canonical preparation state");
+    }
+    assert!(factory.created.lock().unwrap().is_empty(), "a forbidden user control must not initialize a native child");
+    assert!(factory.executed.lock().unwrap().is_empty(), "a forbidden user control must never reach the native port");
+    resource.finish_run(&guard).await.unwrap();
+    resources.shutdown().await.unwrap();
+}
+
 #[test]
 fn browser_profile_uses_canonical_owner_and_session_identity() {
     let authority = browser_provider::browser_resource_binding(
@@ -336,6 +371,32 @@ async fn user_api_opens_without_agent_browser_grants_and_rejects_foreign_owners_
     assert_eq!(create.status(), StatusCode::OK);
     assert_eq!(factory.created.lock().unwrap().len(), 1, "the native runtime port was used without Agent Browser authority");
     let generation = factory.created.lock().unwrap()[0].runtime_generation;
+    let control_target = serde_json::json!({ "tab_id": "owned-control-tab", "runtime_generation": generation, "document_generation": 2 });
+    for command in ["reload", "stop_loading", "pause_navigation", "resume_navigation"] {
+        let before = factory.executed.lock().unwrap().len();
+        let missing_sequence = serde_json::json!({ "command": command, "target": control_target }).to_string();
+        let response = router.clone().oneshot(request(owner_id, "POST", format!("{base}/commands"), &missing_sequence)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "{command} must fail closed without its observed native attempt");
+        assert_eq!(factory.executed.lock().unwrap().len(), before, "malformed {command} must not dispatch");
+        let guarded = serde_json::json!({ "command": command, "target": control_target, "expected_navigation_sequence": 11 }).to_string();
+        let response = router.clone().oneshot(request(owner_id, "POST", format!("{base}/commands"), &guarded)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "an idle owned user may dispatch {command}");
+        let foreign = router.clone().oneshot(request("0190f5fe-7c00-7a00-8000-000000000002", "POST", format!("{base}/commands"), &guarded)).await.unwrap();
+        assert_eq!(foreign.status(), StatusCode::FORBIDDEN, "a native attempt receipt grants no foreign Session ownership");
+        let executed = factory.executed.lock().unwrap();
+        assert_eq!(executed.len(), before + 1);
+        let dispatched = executed.last().unwrap();
+        assert_eq!(dispatched.expected_navigation_sequence(), Some(11), "the native port must receive the captured attempt unchanged");
+        let dispatched_kind = match dispatched {
+            BrowserTabCommand::Reload { .. } => "reload",
+            BrowserTabCommand::StopLoading { .. } => "stop_loading",
+            BrowserTabCommand::PauseNavigation { .. } => "pause_navigation",
+            BrowserTabCommand::ResumeNavigation { .. } => "resume_navigation",
+            _ => panic!("the route changed the control kind"),
+        };
+        assert_eq!(dispatched_kind, command);
+        assert_eq!(dispatched.target().unwrap(), &serde_json::from_value::<nomifun_browser_platform::runtime::BrowserTabTarget>(control_target.clone()).unwrap());
+    }
     let diagnostic_query = format!("tab_id=owned-diagnostic-tab&runtime_generation={generation}&document_generation=2");
     let diagnostic = router.clone().oneshot(request(owner_id, "GET", format!("{base}/diagnostics?{diagnostic_query}"), "")).await.unwrap();
     assert_eq!(diagnostic.status(), StatusCode::OK);
@@ -360,12 +421,27 @@ async fn user_api_opens_without_agent_browser_grants_and_rejects_foreign_owners_
     assert_eq!(preparing.status(), StatusCode::CONFLICT);
     let blocked = router.clone().oneshot(request(owner_id, "POST", format!("{base}/commands"), r#"{"command":"create","url":"https://example.test/"}"#)).await.unwrap();
     assert_eq!(blocked.status(), StatusCode::CONFLICT);
+    let accepted_commands = factory.executed.lock().unwrap().len();
+    for command in ["reload", "stop_loading", "pause_navigation", "resume_navigation"] {
+        let guarded = serde_json::json!({ "command": command, "target": control_target, "expected_navigation_sequence": 11 }).to_string();
+        let blocked = router.clone().oneshot(request(owner_id, "POST", format!("{base}/commands"), &guarded)).await.unwrap();
+        assert_eq!(blocked.status(), StatusCode::CONFLICT, "canonical Turn preparation must reject user {command}");
+        let body: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(blocked.into_body(), 64 * 1024).await.unwrap()).unwrap();
+        assert_eq!(body["code"], "BROWSER_USER_INPUT_LOCKED");
+    }
+    assert_eq!(factory.executed.lock().unwrap().len(), accepted_commands, "the canonical preparation gate rejects controls before native dispatch");
     assert_eq!(factory.created.lock().unwrap().len(), 1, "preparation cannot create a user-ready native child");
     let snapshot = router.clone().oneshot(request(owner_id, "GET", base.clone(), "")).await.unwrap();
     let snapshot: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(snapshot.into_body(), 64 * 1024).await.unwrap()).unwrap();
     assert_eq!(snapshot["data"]["run"]["input_state"], "agent_running");
     let user = resources.get_for_agent_session(owner_id, session.as_ref()).await.unwrap().unwrap();
     let guard = user.begin_run().await.unwrap();
+    for command in ["pause_navigation", "resume_navigation"] {
+        let guarded = serde_json::json!({ "command": command, "target": control_target, "expected_navigation_sequence": 11 }).to_string();
+        let blocked = router.clone().oneshot(request(owner_id, "POST", format!("{base}/commands"), &guarded)).await.unwrap();
+        assert_eq!(blocked.status(), StatusCode::CONFLICT, "a held native Agent input gate must reject user {command}");
+    }
+    assert_eq!(factory.executed.lock().unwrap().len(), accepted_commands);
     let already_locked = router.oneshot(request(owner_id, "POST", base, "{}")).await.unwrap();
     assert_eq!(already_locked.status(), StatusCode::OK, "a first pane may attach to a genuinely locked runtime during chat");
     let locked: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(already_locked.into_body(), 64 * 1024).await.unwrap()).unwrap();

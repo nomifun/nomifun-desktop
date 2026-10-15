@@ -1,11 +1,14 @@
 [workspace]
 resolver = "3"
 members = ["crates/agent/*", "crates/backend/*", "crates/shared/*", "apps/web", "apps/desktop"]
-exclude = ["vendor/wry"]
+exclude = ["vendor/wry", "vendor/tauri", "vendor/tauri-runtime-wry"]
 
 [patch.crates-io]
 # Child-WebView shutdown belongs to the native browser owner, not a JS callback.
 wry = { path = "vendor/wry" }
+# Explicit external pages omit application initialization and IPC at creation.
+tauri = { path = "vendor/tauri" }
+tauri-runtime-wry = { path = "vendor/tauri-runtime-wry" }
 
 [workspace.package]
 version = "0.8.8"

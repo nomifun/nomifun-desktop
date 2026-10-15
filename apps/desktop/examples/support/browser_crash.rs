@@ -29,6 +29,8 @@ pub(super) async fn verify(app: &tauri::AppHandle, url: &str) -> Result<Value, S
     let result=async {
         workspace.user_command(BrowserTabCommand::Create {url:url.into()}).await.map_err(message)?;
         let target=super::wait_workspace_page(&workspace,url).await?;
+        let expected_navigation_sequence=workspace.snapshot().await.map_err(message)?.runtime.ok_or("Missing pre-crash runtime")?.tabs.into_iter()
+            .find(|tab|tab.target==target).and_then(|tab|tab.load).ok_or("Missing pre-crash native navigation guard")?.navigation_sequence;
         let view=app.get_webview(&target.tab_id).ok_or("Missing crash fixture child")?;
         let nonce=super::evaluate(&view,"popupNonce").await?;
         let run=workspace.begin_run().await.map_err(message)?;
@@ -48,10 +50,10 @@ pub(super) async fn verify(app: &tauri::AppHandle, url: &str) -> Result<Value, S
         let unavailable=tokio::time::timeout(std::time::Duration::from_millis(500),super::windows::protocol_call(&view,"Runtime.evaluate",json!({"expression":"true"}))).await.map_err(|_|"A new renderer command hung after confirmed process exit")?;
         if unavailable.is_ok() {return Err("A dead document accepted a new renderer operation".into());}
         if !matches!(workspace.act(&run,BrowserAction::click(button)).await,Err(WorkspaceError::StaleTarget)) { return Err("Pre-crash reference was not rejected".into()); }
-        if !matches!(workspace.agent_command(&run,BrowserTabCommand::Reload {target:target.clone()}).await,Err(WorkspaceError::StaleTarget)) { return Err("Pre-crash navigation target was not rejected".into()); }
+        if !matches!(workspace.agent_command(&run,BrowserTabCommand::Reload {target:target.clone(),expected_navigation_sequence}).await,Err(WorkspaceError::StaleTarget)) { return Err("Pre-crash navigation target was not rejected".into()); }
         if workspace.snapshot().await.map_err(message)?.run.input_state!=BrowserInputState::AgentRunning { return Err("Crash implicitly unlocked the browser".into()); }
         workspace.finish_run(&run).await.map_err(message)?;
-        workspace.user_command(BrowserTabCommand::Reload {target:failed.target}).await.map_err(message)?;
+        workspace.user_command(BrowserTabCommand::Reload {expected_navigation_sequence:failed.load.as_ref().ok_or("Missing failed navigation guard")?.navigation_sequence,target:failed.target}).await.map_err(message)?;
         let recovered=super::wait_workspace_page(&workspace,url).await?;
         if recovered.tab_id!=target.tab_id || recovered.document_generation<=target.document_generation || super::evaluate(&view,"popupNonce").await?==nonce { return Err("Explicit recovery did not replace only the crashed document".into()); }
         let next=workspace.begin_run().await.map_err(message)?;

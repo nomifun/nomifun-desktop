@@ -407,6 +407,26 @@ impl BrowserRunCoordinator {
         .map_err(|_| RunAdmissionError::WorkerFailed)?
     }
 
+    /// An interrupt is only Stop/Pause of an exact registered human navigation.
+    /// It cannot perform page input or take ownership of an Agent operation.
+    /// Retain the state guard in an owned task through native acknowledgement,
+    /// so a dropped HTTP waiter cannot let an Agent begin during the interrupt.
+    pub(crate) async fn user_interrupt<T, F, Fut>(self: &Arc<Self>, work: F) -> Result<T, RunAdmissionError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+    {
+        let coordinator = self.clone();
+        tokio::spawn(async move {
+            let state = coordinator.state.lock().await;
+            if state.active.is_some() || state.gate_failed { return Err(RunAdmissionError::UserInputLocked); }
+            let result = work().await;
+            drop(state);
+            Ok(result)
+        }).await.map_err(|_| RunAdmissionError::WorkerFailed)?
+    }
+
     /// Human navigation/tab commands use the same operation gate as Agent work.
     /// Hardware input is controlled by the native adapter, never by this API.
     pub async fn user_operation<T, F, Fut>(

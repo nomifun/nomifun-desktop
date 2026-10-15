@@ -1,7 +1,10 @@
 //! Real WKWebView compatibility smoke with disposable loopback pages.
 //! Run: cargo run -p nomifun-desktop --example macos_browser_compatibility_smoke
 //! --hold-ui waits for a physical click on the popup link with user input unlocked.
-//! --live-sites adds a 60-second read-only Bilibili/Baidu entry check.
+//! --live-sites observes Baidu homepage/search and Bilibili for 60s each.
+//! --manual-sites adds physical page input and host Back/Reload/show/hide steps.
+//! --identity-ab compares Safari17/native WK on identically prepared stores.
+//! --evidence-dir <path> retains JSON and site screenshots in that directory.
 //! --media-permissions tests real website permission denial/retirement only.
 //! --media-permissions --media-user-ready waits up to 60 seconds per case for a trusted Start click.
 //! It never creates an app backend, reads a user database, or uses CDP/evaluate.
@@ -24,6 +27,12 @@ mod live;
 #[cfg(target_os = "macos")]
 #[path = "support/macos_browser_compatibility_downloads.rs"]
 mod downloads;
+#[cfg(any(target_os = "macos", test))]
+#[path = "support/macos_browser_compatibility_outcome.rs"]
+mod outcome;
+#[cfg(target_os = "macos")]
+#[path = "support/macos_browser_identity_ab.rs"]
+mod identity_ab;
 #[cfg(target_os = "macos")]
 #[path = "support/macos_browser_compatibility_permissions.rs"]
 mod permissions;
@@ -34,12 +43,37 @@ mod application_launch;
 #[cfg(target_os = "macos")]
 fn main() {
     use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
-    let hold_ui = std::env::args().any(|arg| arg == "--hold-ui");
-    let live_sites = std::env::args().any(|arg| arg == "--live-sites");
-    let media_user_ready = std::env::args().any(|arg| arg == "--media-user-ready");
-    let media_permissions = std::env::args().any(|arg| arg == "--media-permissions");
+    let mut hold_ui = false;
+    let mut live_sites = false;
+    let mut manual_sites = false;
+    let mut compare_identity = false;
+    let mut media_permissions = false;
+    let mut media_user_ready = false;
+    let mut evidence_dir = None;
+    let mut arguments = std::env::args().skip(1);
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--hold-ui" => hold_ui = true,
+            "--live-sites" => live_sites = true,
+            "--manual-sites" => { manual_sites = true; live_sites = true; }
+            "--identity-ab" => compare_identity = true,
+            "--media-permissions" => media_permissions = true,
+            "--media-user-ready" => media_user_ready = true,
+            "--evidence-dir" => evidence_dir = Some(std::path::PathBuf::from(arguments.next().expect("--evidence-dir needs a path"))),
+            application_launch::DESCRIPTOR_ARGUMENT => {
+                // The launcher adds this host argument. Admission below owns
+                // validation; consume only its paired value in this CLI parser.
+                arguments.next().expect("development descriptor needs a path");
+            }
+            _ => panic!("Unknown compatibility runner option"),
+        }
+    }
     if media_user_ready && !media_permissions {
         eprintln!("--media-user-ready requires explicit --media-permissions");
+        std::process::exit(2);
+    }
+    if compare_identity && media_permissions {
+        eprintln!("--identity-ab and --media-permissions use separate audit runs; run each explicitly");
         std::process::exit(2);
     }
     // The fixed audit scope admits LaunchServices before the loopback worker,
@@ -53,7 +87,9 @@ fn main() {
     };
     let fixture = Arc::new(fixture::Fixture::new().expect("disposable loopback fixture"));
     let temporary = tempfile::tempdir().expect("disposable smoke evidence directory");
-    let report_path = temporary.path().join("compatibility-report.json");
+    if let Some(directory) = &evidence_dir { std::fs::create_dir_all(directory).expect("evidence directory"); }
+    let report_path = evidence_dir.as_deref().unwrap_or(temporary.path()).join("compatibility-report.json");
+    let retained_report_path = evidence_dir.as_ref().map(|_| report_path.clone());
     let success = Arc::new(AtomicBool::new(false));
     let native_cleanup = Arc::new(AtomicBool::new(false));
     let evidence = Arc::new(Mutex::new(None));
@@ -75,13 +111,23 @@ fn main() {
             let handle = app.handle().clone();
             let watchdog = handle.clone();
             tauri::async_runtime::spawn(async move {
-                let base = if media_user_ready { 450 } else if hold_ui && live_sites { 240 } else { 150 };
-                tokio::time::sleep(std::time::Duration::from_secs(base + if media_permissions { 120 } else { 0 })).await;
+                let base = if manual_sites { 960 } else if live_sites { 420 } else { 150 };
+                let per_arm = base.max(if media_user_ready { 450 } else { 0 }) + if media_permissions { 120 } else { 0 };
+                tokio::time::sleep(std::time::Duration::from_secs(per_arm * if compare_identity { 2 } else { 1 })).await;
                 eprintln!("MACOS_BROWSER_COMPATIBILITY_SMOKE_FAIL native runtime timed out");
                 watchdog.exit(1);
             });
             tauri::async_runtime::spawn(async move {
-                let result = probe::verify(&handle, &worker_fixture, hold_ui, live_sites, media_permissions, media_user_ready, &completed_cleanup).await;
+                let result = if compare_identity {
+                    let result = identity_ab::verify(&handle, &worker_fixture, hold_ui, live_sites, manual_sites, evidence_dir.as_deref()).await;
+                    // A/B returns Ok only after each retained runtime, native
+                    // host and disposable persistent store have settled.
+                    if result.is_ok() { completed_cleanup.store(true, Ordering::SeqCst); }
+                    result
+                } else {
+                    probe::verify(&handle, &worker_fixture, hold_ui, live_sites, manual_sites,
+                        evidence_dir.as_deref(), media_permissions, media_user_ready, &completed_cleanup).await
+                };
                 // Release this worker's fixture owner before dispatching exit;
                 // main can then prove its server Drop/joins actually happened.
                 drop(worker_fixture);
@@ -117,19 +163,33 @@ fn main() {
     };
     let cleanup_verified = native_cleanup.load(Ordering::SeqCst) && fixture_cleanup && evidence_cleanup;
     let mut code = if exit == 0 && success.load(Ordering::SeqCst) && cleanup_verified { 0 } else { 1 };
+    let mut report = evidence.lock().unwrap().take();
+    if code == 0 {
+        let report = report.as_mut().expect("smoke evidence");
+        report["disposable_evidence_cleanup"] = serde_json::json!(true);
+        report["native_cleanup_verified"] = serde_json::json!(true);
+        report["evidence_directory_retained"] = serde_json::json!(retained_report_path.is_some());
+        let fixture_passed = if compare_identity { report["fixture_checks_passed"] == true } else { report["core_checks_passed"] == true };
+        let live_passed = !live_sites || if compare_identity { report["live_checks_passed"] == true }
+            else { report["live_sites"]["entry_checks_passed"] == true };
+        if !fixture_passed || !live_passed { code = 2; }
+        if let Some(path) = retained_report_path {
+            if std::fs::write(path, serde_json::to_vec_pretty(&report).expect("report serialization")).is_err() {
+                eprintln!("MACOS_BROWSER_COMPATIBILITY_SMOKE_FAIL retained report update failed");
+                code = 1;
+            }
+        }
+    }
+    // The authenticated launcher receipt must describe the final process code,
+    // including an incomplete website/A-B run after successful native cleanup.
     if let Some(bootstrap) = &mut bootstrap {
         if let Err(error) = bootstrap.report_exit(code, cleanup_verified) {
             eprintln!("MACOS_BROWSER_COMPATIBILITY_SMOKE_FAIL application shutdown receipt failed: {error}");
             code = 1;
         }
     }
-    if code == 0 {
-        let mut report = evidence.lock().unwrap().take().expect("smoke evidence");
-        report["disposable_evidence_cleanup"] = serde_json::json!(true);
-        report["native_cleanup_verified"] = serde_json::json!(true);
-        if live_sites { println!("MACOS_BROWSER_COMPATIBILITY_SMOKE_CORE_PASS {report}"); }
-        else { println!("MACOS_BROWSER_COMPATIBILITY_SMOKE_PASS {report}"); }
-    }
+    if code == 0 { println!("MACOS_BROWSER_COMPATIBILITY_SMOKE_PASS {}", report.expect("smoke evidence")); }
+    else if code == 2 { println!("MACOS_BROWSER_COMPATIBILITY_SMOKE_INCOMPLETE {}", report.expect("smoke evidence")); }
     std::process::exit(code);
 }
 

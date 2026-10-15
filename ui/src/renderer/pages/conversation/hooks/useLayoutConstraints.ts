@@ -1,5 +1,4 @@
 import {
-  MAX_WORKSPACE_PANEL_PX,
   MIN_CHAT_PANEL_PX,
   MIN_PREVIEW_PANEL_PX,
   MIN_WORKSPACE_PANEL_PX,
@@ -13,18 +12,11 @@ type UseLayoutConstraintsParams = {
   isPreviewOpen: boolean;
   rightSiderCollapsed: boolean;
   setRightSiderCollapsed: React.Dispatch<React.SetStateAction<boolean>>;
-  workspaceWidthPx: number;
-  setWorkspaceWidthPx: (px: number) => void;
-  chatSplitRatio: number;
-  setChatSplitRatio: (ratio: number) => void;
-  dynamicChatMinRatio: number;
-  dynamicChatMaxRatio: number;
 };
 
 /**
- * Constrains the user-preferred workspace width and chat-preview ratio so
- * that all panels remain above their minimum pixel widths; auto-collapses
- * workspace when the container is too narrow to fit chat + preview + workspace.
+ * Temporarily collapses the workspace when all three panels cannot fit.
+ * Widths and ratios are derived by calcLayoutMetrics, preserving preferences.
  */
 export function useLayoutConstraints({
   containerWidth,
@@ -33,27 +25,13 @@ export function useLayoutConstraints({
   isPreviewOpen,
   rightSiderCollapsed,
   setRightSiderCollapsed,
-  workspaceWidthPx,
-  setWorkspaceWidthPx,
-  chatSplitRatio,
-  setChatSplitRatio,
-  dynamicChatMinRatio,
-  dynamicChatMaxRatio,
 }: UseLayoutConstraintsParams): void {
-  // Constrain workspace width when preview is open
+  // The workspace yields space without replacing its preferred width.
   useEffect(() => {
     if (!workspaceEnabled || !isPreviewOpen || rightSiderCollapsed) {
       return;
     }
     const safeContainerWidth = Math.max(containerWidth || 0, 1);
-    const maxWorkspaceByContainer = Math.max(
-      MIN_WORKSPACE_PANEL_PX,
-      safeContainerWidth - minChatPanelPx - MIN_PREVIEW_PANEL_PX
-    );
-    const maxWorkspace = Math.min(MAX_WORKSPACE_PANEL_PX, maxWorkspaceByContainer);
-    if (workspaceWidthPx > maxWorkspace) {
-      setWorkspaceWidthPx(maxWorkspace);
-    }
     // Auto-collapse workspace when container is too narrow for all three panels
     if (safeContainerWidth < minChatPanelPx + MIN_PREVIEW_PANEL_PX + MIN_WORKSPACE_PANEL_PX) {
       setRightSiderCollapsed(true);
@@ -64,25 +42,9 @@ export function useLayoutConstraints({
     isPreviewOpen,
     rightSiderCollapsed,
     setRightSiderCollapsed,
-    setWorkspaceWidthPx,
     workspaceEnabled,
-    workspaceWidthPx,
   ]);
 
-  // Clamp chat split ratio within dynamic bounds
-  useEffect(() => {
-    if (!isPreviewOpen) {
-      return;
-    }
-    const clampedChat = Math.max(dynamicChatMinRatio, Math.min(dynamicChatMaxRatio, chatSplitRatio));
-    if (clampedChat !== chatSplitRatio) {
-      setChatSplitRatio(clampedChat);
-    }
-  }, [
-    chatSplitRatio,
-    dynamicChatMaxRatio,
-    dynamicChatMinRatio,
-    isPreviewOpen,
-    setChatSplitRatio,
-  ]);
+  // The visible chat ratio is clamped synchronously by calcLayoutMetrics.
+  // Window resizing must not overwrite the user's saved split preference.
 }

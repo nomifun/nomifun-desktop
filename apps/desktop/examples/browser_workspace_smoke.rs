@@ -4,6 +4,8 @@
 //! --html-drag-only selects the same-document native drag regression. The
 //! default matrix also proves that a drag across native frame sessions is
 //! rejected before browser input begins.
+//! --navigation-only exercises the production navigation owner with isolated
+//! HTTP request witnesses, page loops, pause/resume and external page identity.
 
 #[cfg(windows)]
 #[path = "../src/browser_surface/automation.rs"]
@@ -49,6 +51,33 @@ mod close_all_checks;
 #[cfg(windows)]
 #[path = "support/browser_site_data.rs"]
 mod site_data_probe;
+#[cfg(windows)]
+#[path = "support/browser_navigation_fixture.rs"]
+mod navigation_fixture;
+#[cfg(windows)]
+#[path = "support/browser_navigation_conformance.rs"]
+mod navigation_conformance;
+#[cfg(windows)]
+#[path = "support/browser_history_conformance.rs"]
+mod history_conformance;
+#[cfg(windows)]
+#[path = "support/browser_navigation_tls.rs"]
+mod navigation_tls;
+#[cfg(target_os = "windows")]
+#[path = "support/browser_worker_witness.rs"]
+mod worker_witness;
+#[cfg(windows)]
+#[path = "support/browser_popup_pause_witness.rs"]
+mod popup_pause_witness;
+#[cfg(all(windows, debug_assertions))]
+#[path = "support/browser_popup_inflight_conformance.rs"]
+mod popup_inflight;
+#[cfg(windows)]
+#[path = "support/browser_worker_plain.rs"]
+mod worker_plain;
+#[cfg(windows)]
+#[path = "support/browser_profile_conformance.rs"]
+mod profile_conformance;
 #[cfg(windows)]
 #[path = "support/browser_permissions.rs"]
 mod permission_checks;
@@ -211,7 +240,8 @@ fn main() {
                 } else if path == "/upload-frames" {
                     include_str!("fixtures/browser_upload_frames.html").replace("__PORT__",&address.port().to_string())
                 } else if path == "/dialog-initial" {
-                    include_str!("fixtures/browser_dialog_initial.html").to_owned()
+                    format!("{}{}",include_str!("fixtures/browser_dialog_initial.html"),
+                        r#"<label for=initial-native-input>Initial document input</label><input id=initial-native-input autocomplete=off oninput="window.initialNativeInputTrusted=event.isTrusted">"#)
                 } else if path == "/dialog-popup" {
                     include_str!("fixtures/browser_dialog_popup.html").to_owned()
                 } else if path == "/user-files" {
@@ -264,6 +294,7 @@ fn main() {
     let frame_input_only = std::env::args().any(|arg| arg == "--frame-input-only");
     let upload_frames_only = std::env::args().any(|arg| arg == "--upload-frames-only");
     let managed_popup_only = std::env::args().any(|arg| arg == "--managed-popup-only");
+    let popup_inflight_only = std::env::args().any(|arg| arg == "--popup-inflight-only");
     let presentation_only = std::env::args().any(|arg| arg == "--presentation-only");
     let frame_drag_only = std::env::args().any(|arg| arg == "--frame-drag-only");
     let crash_only = std::env::args().any(|arg| arg == "--crash-only");
@@ -284,6 +315,10 @@ fn main() {
     let downloads_folder_only = std::env::args().any(|arg| arg == "--downloads-folder-only");
     let evaluation_only = std::env::args().any(|arg| arg == "--evaluate-only");
     let site_data_probe_only = std::env::args().any(|arg| arg == "--site-data-probe-only");
+    let navigation_only = std::env::args().any(|arg| arg == "--navigation-only");
+    let history_only = std::env::args().any(|arg| arg == "--history-only");
+    let profile_only = std::env::args().any(|arg| arg == "--profile-only");
+    let profile_child = std::env::args().any(|arg| arg == "--profile-child");
     let user_download_selection_only = std::env::args().any(|arg| arg == "--user-download-selection-only");
     let user_download_cancel_active_only = std::env::args().any(|arg| arg == "--user-download-cancel-active-only");
     let app = tauri::Builder::default()
@@ -306,8 +341,36 @@ fn main() {
                 .build()?;
             let handle = app.handle().clone();
             let watchdog = handle.clone();
+            if profile_only || profile_child {
+                // No baseline controller may select a WebView2 environment
+                // before the production Profile / override child proof.
+                let profile_completed=completed.clone();
+                let profile_evidence=completed_evidence.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(if profile_child {60}else{210})).await;
+                    eprintln!("BROWSER_WORKSPACE_SMOKE_FAIL native Profile conformance timed out");
+                    watchdog.exit(1);
+                });
+                tauri::async_runtime::spawn(async move {
+                    let scope=if profile_child {"profile-child"}else{"profile-only"};
+                    let result=tokio::time::timeout(std::time::Duration::from_secs(if profile_child {45}else{180}),async {
+                        if profile_child {profile_conformance::child_phase(&handle).await}
+                        else {profile_conformance::verify(&handle).await}
+                    }).await;
+                    match result {
+                        Ok(Ok(value))=>{
+                            *profile_evidence.lock().unwrap()=Some(serde_json::json!({"scope":scope,"profile":value}));
+                            profile_completed.store(true,Ordering::SeqCst);
+                        },
+                        Ok(Err(error))=>eprintln!("BROWSER_WORKSPACE_SMOKE_FAIL {error}"),
+                        Err(_)=>eprintln!("BROWSER_WORKSPACE_SMOKE_FAIL native Profile conformance timed out"),
+                    }
+                    handle.exit(if profile_completed.load(Ordering::SeqCst){0}else{1});
+                });
+                return Ok(());
+            }
             tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(if live_agent_only {360} else if user_file_selection_only || user_file_filter_only || user_download_selection_only || user_download_cancel_active_only {330} else if save_picker_selection_only {240} else if picker_selection_only { 210 } else if agent_only { 150 } else { 60 })).await;
+                tokio::time::sleep(std::time::Duration::from_secs(if live_agent_only {360} else if user_file_selection_only || user_file_filter_only || user_download_selection_only || user_download_cancel_active_only {330} else if save_picker_selection_only {240} else if picker_selection_only { 210 } else if navigation_only {180} else if agent_only { 150 } else if popup_inflight_only {80} else { 60 })).await;
                 eprintln!("BROWSER_WORKSPACE_SMOKE_FAIL native creation or shutdown timed out");
                 watchdog.exit(1);
             });
@@ -338,7 +401,16 @@ fn main() {
                 .await;
                 let result = match child {
                     Ok(Ok(view)) => {
-                        let result = tokio::time::timeout(std::time::Duration::from_secs(if live_agent_only {330} else if user_file_selection_only || user_file_filter_only || user_download_selection_only || user_download_cancel_active_only {300} else if save_picker_selection_only {210} else if picker_selection_only { 180 } else if agent_only { 120 } else { 45 }), async {
+                        let result = tokio::time::timeout(std::time::Duration::from_secs(if live_agent_only {330} else if user_file_selection_only || user_file_filter_only || user_download_selection_only || user_download_cancel_active_only {300} else if save_picker_selection_only {210} else if picker_selection_only { 180 } else if navigation_only {160} else if agent_only { 120 } else if popup_inflight_only {60} else { 45 }), async {
+                            if history_only {
+                                let result=history_conformance::verify(&handle).await?;
+                                return Ok(serde_json::json!({"scope":"history-only","history":result}));
+                            }
+                            if navigation_only {
+                                view.hide().map_err(|error|error.to_string())?;
+                                let result=navigation_conformance::verify(&handle).await?;
+                                return Ok(serde_json::json!({"scope":"navigation-only","navigation":result}));
+                            }
                             if let Some(key)=live_credential {
                                 view.hide().map_err(|_|"LIVE_INITIAL_VIEW_FAILED")?;
                                 let live_handle=handle.clone();
@@ -459,6 +531,16 @@ fn main() {
                                 view.hide().map_err(|error|error.to_string())?;
                                 let crash=crash_recovery::verify(&handle,&format!("http://{address}/popup-source")).await?;
                                 return Ok(serde_json::json!({"scope":"crash-only","crash":crash}));
+                            }
+                            if popup_inflight_only {
+                                view.hide().map_err(|error|error.to_string())?;
+                                #[cfg(debug_assertions)]
+                                {
+                                    let popup=popup_inflight::verify(&handle).await?;
+                                    return Ok(serde_json::json!({"scope":"popup-inflight-only","claimed_popup":popup}));
+                                }
+                                #[cfg(not(debug_assertions))]
+                                return Err("Popup inflight conformance is available only in a debug build".into());
                             }
                             if managed_popup_only {
                                 view.hide().map_err(|error|error.to_string())?;
@@ -1873,15 +1955,16 @@ async fn verify_workspace(app: &tauri::AppHandle, url: &str) -> Result<serde_jso
         .finish_run(&next)
         .await
         .map_err(|e| e.to_string())?;
-    let old_target = workspace
+    let old_tab = workspace
         .snapshot()
         .await
         .map_err(|e| e.to_string())?
         .runtime
         .ok_or("Missing native runtime")?
         .tabs[0]
-        .target
         .clone();
+    let old_target = old_tab.target.clone();
+    let old_navigation_sequence = old_tab.load.as_ref().ok_or("Missing native navigation guard")?.navigation_sequence;
     let next_url = format!("{url}next");
     workspace
         .user_command(BrowserTabCommand::Navigate {
@@ -1896,7 +1979,7 @@ async fn verify_workspace(app: &tauri::AppHandle, url: &str) -> Result<serde_jso
     }
     if !matches!(
         workspace
-            .user_command(BrowserTabCommand::Reload { target: old_target })
+            .user_command(BrowserTabCommand::Reload { target: old_target, expected_navigation_sequence:old_navigation_sequence })
             .await,
         Err(WorkspaceError::StaleTarget)
     ) {

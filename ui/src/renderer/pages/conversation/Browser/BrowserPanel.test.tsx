@@ -12,7 +12,7 @@ import { BackendHttpError } from '@/common/adapter/httpBridge';
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'en-US', interpolation: { escapeValue: false }, resources: { 'en-US': { translation: { browserWorkspace: words } } } });
 const target = { tab_id: 'browser-1', runtime_generation: 1, document_generation: 1 };
-const initial: BrowserSnapshot = { agent_session_id: 'session-1', browser_id: 'managed-browser', run: { revision: 1, input_state: 'user_ready', input_gate_failed: false }, runtime: { runtime_generation: 1, revision: 1, active_tab_id: 'browser-1', downloads: [], tabs: [{ target, title: 'Fixture', url: 'http://localhost:3000/', lifecycle: 'ready', can_go_back: false, can_go_forward: false, zoom_percent: 100 }] } };
+const initial: BrowserSnapshot = { agent_session_id: 'session-1', browser_id: 'managed-browser', run: { revision: 1, input_state: 'user_ready', input_gate_failed: false }, runtime: { runtime_generation: 1, revision: 1, active_tab_id: 'browser-1', downloads: [], tabs: [{ target, title: 'Fixture', url: 'http://localhost:3000/', lifecycle: 'ready', load: { navigation_sequence: 1, phase: 'finished', content_state: 'current_document' }, can_go_back: false, can_go_forward: false, zoom_percent: 100 }] } };
 const originalRect = HTMLElement.prototype.getBoundingClientRect;
 const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
 const originalSecureContext = Object.getOwnPropertyDescriptor(window, 'isSecureContext');
@@ -61,6 +61,7 @@ function fixture(overrides: Partial<BrowserClient> = {}, linkRequest?: BrowserLi
   const client: BrowserClient = {
     async listenShortcuts(_id, listener) { shortcut = listener; return () => { shortcut = () => {}; }; },
     async closeResource() {},
+    async snapshot() { return initial; },
     async ensure() { return initial; },
     async command(_id, command) { commands.push(command); return initial; },
     async diagnostics() { return { coverage: 'main_document_navigation', events: [], dropped: 0 }; },
@@ -202,19 +203,19 @@ test('a native unavailable event hides the existing surface and clears the ready
   await waitFor(() => expect(visibility.at(-1)).toBe(false));
 });
 
-test('native address shortcut focuses and selects the chrome address; new-tab draft closes without closing the page', async () => {
+test.each(['metaKey', 'ctrlKey'] as const)('native address shortcut focuses and selects the chrome address; %s new-tab draft closes without closing the page', async modifier => {
   const screen = fixture(); await screen.ready();
   const address = screen.getByRole('textbox', { name: words.address }) as HTMLInputElement;
   // Wait for the loaded-tab synchronization effect before testing the shortcut.
   // Otherwise act() may flush that pre-existing effect after select(), moving
   // the caret to the end and turning this into a scheduler race.
   await waitFor(() => expect(address.value).toBe(initial.runtime!.tabs[0]!.url));
-  await act(async () => screen.shortcut({agent_session_id:'session-1',target,action:'address'}));
+  await act(async () => screen.shortcut({agent_session_id:'session-1',target,expected_navigation_sequence:1,action:'address'}));
   expect(document.activeElement).toBe(address);
   expect(address.selectionStart).toBe(0); expect(address.selectionEnd).toBe(address.value.length);
-  fireEvent.keyDown(address,{key:'t',metaKey:true});
+  fireEvent.keyDown(address,{key:'t',[modifier]:true});
   expect(address.value).toBe('');
-  fireEvent.keyDown(address,{key:'w',metaKey:true});
+  fireEvent.keyDown(address,{key:'w',[modifier]:true});
   expect(address.value).toBe(initial.runtime!.tabs[0]!.url);
   expect(screen.commands).toEqual([]);
 });
@@ -222,16 +223,30 @@ test('native address shortcut focuses and selects the chrome address; new-tab dr
 test('native shortcut rejects other AgentSessions, stale documents and events received after Agent starts', async () => {
   const screen = fixture(); await screen.ready();
   await act(async () => {
-    screen.shortcut({agent_session_id:'another',target,action:'reload'});
-    screen.shortcut({agent_session_id:'session-1',target:{...target,document_generation:0},action:'reload'});
+    screen.shortcut({agent_session_id:'another',target,expected_navigation_sequence:1,action:'reload'});
+    screen.shortcut({agent_session_id:'session-1',target:{...target,document_generation:0},expected_navigation_sequence:1,action:'reload'});
   });
   expect(screen.commands).toEqual([]);
   await act(async () => screen.emit({kind:'snapshot',snapshot:{...initial,run:{...initial.run,revision:2,input_state:'agent_running'}}}));
   expect(screen.getAllByText(words.agentRunning).length).toBeGreaterThan(0);
   expect(screen.getByText(words.stopHint)).toBeTruthy();
   expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(true);
-  await act(async () => screen.shortcut({agent_session_id:'session-1',target,action:'close_tab'}));
+  await act(async () => screen.shortcut({agent_session_id:'session-1',target,expected_navigation_sequence:1,action:'close_tab'}));
   expect(screen.commands).toEqual([]);
+});
+
+test('a delayed native reload shortcut cannot retarget a newer provisional attempt in the same document', async () => {
+  const screen = fixture();
+  await screen.ready();
+  const successor = pageSnapshot({ navigation_sequence: 2, phase: 'provisional', content_state: 'retained_document', requested_url: 'https://successor.example/' }, 'loading');
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: successor }));
+  await act(async () => {
+    screen.shortcut({ agent_session_id: 'session-1', target, action: 'reload', expected_navigation_sequence: 1 });
+    screen.shortcut({ agent_session_id: 'session-1', target, action: 'reload' } as BrowserShortcut);
+  });
+  expect(screen.commands).toEqual([]);
+  await act(async () => screen.shortcut({ agent_session_id: 'session-1', target, action: 'reload', expected_navigation_sequence: 2 }));
+  expect(screen.commands).toEqual([{ command: 'reload', target, expected_navigation_sequence: 2 }]);
 });
 
 test('Escape closes the panel and tab arrows move focus through the accessible tablist', async () => {
@@ -339,7 +354,7 @@ test('reload shortcut uses the existing exact-target command and ignores repeats
   fireEvent.keyDown(address,{key:'r',ctrlKey:true,repeat:true});
   expect(screen.commands).toEqual([]);
   fireEvent.keyDown(address,{key:'r',ctrlKey:true});
-  await waitFor(() => expect(screen.commands).toEqual([{command:'reload',target}]));
+  await waitFor(() => expect(screen.commands).toEqual([{command:'reload',target,expected_navigation_sequence:1}]));
 });
 
 test('initial layout overflow waits for valid bounds without failing or replaying ensure', async () => {
@@ -669,7 +684,7 @@ test('close all is disabled while another browser command is pending', async () 
   await screen.findByText(words.closeAllPages);
   fireEvent.click(screen.getByRole('button', { name: words.reload }));
   fireEvent.click(screen.getByText(words.closeAllPages));
-  expect(commands).toEqual([{ command: 'reload', target }]);
+  expect(commands).toEqual([{ command: 'reload', target, expected_navigation_sequence: 1 }]);
   await act(async () => finish(initial));
   expect(commands).toHaveLength(1);
 });
@@ -834,7 +849,7 @@ test('a cancelled website permission offers a scoped page refresh, not an implic
   const hint = screen.getByText(words.permissionRetryHint);
   expect(screen.getByRole('link', { name: words.permissionSettings }).getAttribute('href')).toBe('#/settings/permissions?tab=browser-use');
   fireEvent.click(hint.parentElement!.querySelector('button')!);
-  await waitFor(() => expect(screen.commands).toEqual([{ command: 'reload', target }]));
+  await waitFor(() => expect(screen.commands).toEqual([{ command: 'reload', target, expected_navigation_sequence: 1 }]));
   expect(screen.queryByRole('button', { name: words.permissionAllow })).toBeNull();
 });
 
@@ -864,6 +879,55 @@ test('address navigation uses the current native target and unmount only detache
   screen.unmount();
   await waitFor(() => expect(screen.detached).toEqual([1]));
   expect(screen.commands.some(command => command.command === 'close')).toBe(false);
+});
+
+test.each(['existing', 'new'] as const)('one event batch admits only one %s-tab address submission', async mode => {
+  const commands: BrowserCommand[] = [];
+  let finish!: (snapshot: BrowserSnapshot) => void;
+  const screen = fixture({ async command(_id, command) { commands.push(command); return new Promise(resolve => { finish = resolve; }); } });
+  await screen.ready();
+  if (mode === 'new') fireEvent.click(screen.getByRole('button', { name: words.newTab }));
+  const address = screen.getByRole('textbox', { name: words.address });
+  fireEvent.change(address, { target: { value: 'https://www.baidu.com/' } });
+  await act(async () => {
+    fireEvent.submit(address.closest('form')!);
+    fireEvent.submit(address.closest('form')!);
+  });
+  expect(commands).toEqual([mode === 'new' ? { command: 'create', url: 'https://www.baidu.com/' } : { command: 'navigate', target, url: 'https://www.baidu.com/' }]);
+  await act(async () => finish(initial));
+  expect((address as HTMLInputElement).disabled).toBe(false);
+});
+
+test('a same-batch native shortcut and toolbar reload share synchronous command admission', async () => {
+  const commands: BrowserCommand[] = [];
+  let finish!: (snapshot: BrowserSnapshot) => void;
+  const screen = fixture({ async command(_id, command) { commands.push(command); return new Promise(resolve => { finish = resolve; }); } });
+  await screen.ready();
+  await act(async () => {
+    screen.shortcut({ agent_session_id: 'session-1', target, expected_navigation_sequence: 1, action: 'reload' });
+    screen.shortcut({ agent_session_id: 'session-1', target, expected_navigation_sequence: 1, action: 'reload' });
+    fireEvent.click(screen.getByRole('button', { name: words.reload }));
+  });
+  expect(commands).toEqual([{ command: 'reload', target, expected_navigation_sequence: 1 }]);
+  await act(async () => finish(initial));
+});
+
+test('mounting, URL snapshots, resize, visibility and remount never issue page navigation', async () => {
+  let ensures = 0;
+  const client = { async ensure() { ensures++; return initial; } };
+  const screen = fixture(client);
+  await screen.ready();
+  await act(async () => {
+    screen.emit({ kind: 'snapshot', snapshot: { ...initial, runtime: { ...initial.runtime!, revision: 2, tabs: [{ ...initial.runtime!.tabs[0]!, url: 'https://www.baidu.com/' }] } } });
+    window.dispatchEvent(new Event('resize'));
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  expect(screen.commands).toEqual([]);
+  screen.unmount();
+  const reopened = fixture(client);
+  await reopened.ready();
+  expect(ensures).toBe(2);
+  expect(reopened.commands).toEqual([]);
 });
 
 test('a late HTTP result cannot undo a newer native run lock', () => {
@@ -991,6 +1055,35 @@ test('a command from the previous AgentSession cannot overwrite the new page sta
   expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).value).toBe('http://localhost/session-2');
 });
 
+test.each(['session', 'client', 'host'] as const)('an old %s command cannot release the replacement pending operation', async change => {
+  const pending: Array<(snapshot: BrowserSnapshot) => void> = [];
+  const commands: BrowserCommand[] = [];
+  const screen = fixture({
+    async ensure(id) { return { ...initial, agent_session_id: id }; },
+    async command(_id, command) { commands.push(command); return new Promise(resolve => { pending.push(resolve); }); },
+  });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.reload }));
+  const replacementClient = change === 'client' ? { ...screen.client } : screen.client;
+  const session = change === 'session' ? 'session-2' : 'session-1';
+  const panel = (available: boolean) => <I18nextProvider i18n={i18n}><BrowserPanel agentSessionId={session} client={replacementClient} hostSurfaceAvailable={available} onClose={() => {}} /></I18nextProvider>;
+  if (change === 'host') {
+    screen.rerender(panel(false));
+    expect(await screen.findByText(words.surfaceUnavailableHint)).toBeTruthy();
+  }
+  screen.rerender(panel(true));
+  const address = screen.getByRole('textbox', { name: words.address }) as HTMLInputElement;
+  await waitFor(() => expect(address.disabled).toBe(false));
+  fireEvent.click(screen.getByRole('button', { name: words.reload }));
+  expect(commands).toHaveLength(2);
+  await act(async () => pending[0]!(initial));
+  expect(address.disabled).toBe(true);
+  fireEvent.submit(address.closest('form')!);
+  expect(commands).toHaveLength(2);
+  await act(async () => pending[1]!({ ...initial, agent_session_id: session }));
+  expect(address.disabled).toBe(false);
+});
+
 test('an initialization failure explains restart and never offers a futile retry', async () => {
   const screen = fixture({ async ensure() {
     throw new BackendHttpError({ method: 'POST', path: '/api/agent-sessions/session-1/browser', status: 503,
@@ -1023,6 +1116,351 @@ test('a canonical preparation lock tells the user to stop the Agent without open
 function pageSnapshot(load: BrowserLoadSummary, lifecycle: 'loading' | 'ready' | 'stopped' | 'failed' | 'crashed', revision = 2): BrowserSnapshot {
   return { ...initial, runtime: { ...initial.runtime!, revision, tabs: [{ ...initial.runtime!.tabs[0]!, load, lifecycle }] } };
 }
+
+test.each(['snapshot', 'typed_error'] as const)('an initialized failed Create reported by %s retains its page and address recovery', async outcome => {
+  const url = 'https://unavailable.example/';
+  const createdTarget = { ...target, tab_id: 'browser-2' };
+  const failed: BrowserSnapshot = { ...initial, runtime: { ...initial.runtime!, revision: 2, active_tab_id: createdTarget.tab_id,
+    tabs: [...initial.runtime!.tabs, { ...initial.runtime!.tabs[0]!, target: createdTarget, title: 'Unavailable page', url: 'about:blank', lifecycle: 'failed',
+      load: { navigation_sequence: 1, phase: 'failed', content_state: 'none', requested_url: url,
+        problem: { stage: 'provisional', safe_reason: 'dns', native_domain_class: 'web_view2', native_code: 1 } } }] } };
+  const commands: BrowserCommand[] = [];
+  let reads = 0;
+  const visibility: boolean[] = [];
+  const screen = fixture({
+    async snapshot() { reads++; return failed; },
+    async update(_id, _sequence, _bounds, visible) { visibility.push(visible); },
+    async command(_id, command) {
+      commands.push(command);
+      if (command.command === 'create') {
+        if (outcome === 'typed_error') throw new BackendHttpError({ method: 'POST', path: '/api/browser/commands', status: 409,
+          body: { code: 'BROWSER_PAGE_FAILED', error: 'navigation failed' } });
+        return failed;
+      }
+      return failed;
+    },
+  });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.newTab }));
+  const address = screen.getByRole('textbox', { name: words.address }) as HTMLInputElement;
+  fireEvent.change(address, { target: { value: url } });
+  fireEvent.submit(address.closest('form')!);
+  expect(await screen.findByText(words.pageFailed)).toBeTruthy();
+  await waitFor(() => expect(address.disabled).toBe(false));
+  expect(address.value).toBe(url);
+  expect(screen.queryByText(words.unavailable)).toBeNull();
+  await waitFor(() => expect(visibility.at(-1)).toBe(true));
+  expect(reads).toBe(outcome === 'typed_error' ? 1 : 0);
+  fireEvent.change(address, { target: { value: 'https://recovery.example/' } });
+  fireEvent.submit(address.closest('form')!);
+  await waitFor(() => expect(commands).toEqual([{ command: 'create', url }, { command: 'navigate', target: createdTarget, url: 'https://recovery.example/' }]));
+});
+
+test.each([
+  ['BROWSER_PAGE_FAILED', 'failed', 'failed'],
+  ['BROWSER_PAGE_STOPPED', 'cancelled', 'stopped'],
+  ['BROWSER_PAGE_CRASHED', 'crashed', 'crashed'],
+] as const)('typed %s reads native page facts and retains address recovery', async (code, phase, lifecycle) => {
+  const attempted = 'https://unavailable.example/';
+  const failedTarget = { ...target, document_generation: 2 };
+  const failed = pageSnapshot({ navigation_sequence: 2, phase, content_state: phase === 'crashed' ? 'none' : 'retained_document',
+    requested_url: attempted, content_url: initial.runtime!.tabs[0]!.url, cancellation_reason: phase === 'cancelled' ? 'user_stop' : undefined }, lifecycle);
+  failed.runtime!.tabs[0]!.target = failedTarget;
+  const commands: BrowserCommand[] = [];
+  let reads = 0;
+  const screen = fixture({ async snapshot() { reads++; return failed; }, async command(_id, command) {
+    commands.push(command);
+    if (commands.length === 1) throw new BackendHttpError({ method: 'POST', path: '/api/browser/commands', status: 409, body: { code, error: 'page navigation ended' } });
+    return failed;
+  } });
+  await screen.ready();
+  const address = screen.getByRole('textbox', { name: words.address }) as HTMLInputElement;
+  fireEvent.change(address, { target: { value: attempted } });
+  fireEvent.submit(address.closest('form')!);
+  expect(await screen.findByText(words.pageNavigationIncomplete)).toBeTruthy();
+  expect(reads).toBe(1);
+  expect(address.disabled).toBe(false);
+  expect(screen.queryByText(words.unavailable)).toBeNull();
+  if (phase !== 'crashed') expect(screen.getByText(words.retainedDocumentHint)).toBeTruthy();
+  fireEvent.change(address, { target: { value: 'https://recovery.example/' } });
+  fireEvent.submit(address.closest('form')!);
+  await waitFor(() => expect(commands[1]).toEqual({ command: 'navigate', target: failedTarget, url: 'https://recovery.example/' }));
+});
+
+test('a typed failure accepts a matching native completion delivered after the first read without replaying navigation', async () => {
+  const attempted = 'https://unavailable.example/';
+  const failed = pageSnapshot({ navigation_sequence: 2, phase: 'failed', content_state: 'retained_document', requested_url: attempted }, 'failed');
+  let finishRead!: (snapshot: BrowserSnapshot) => void;
+  let reads = 0;
+  const commands: BrowserCommand[] = [];
+  const screen = fixture({ snapshot: () => { reads++; return new Promise(resolve => { finishRead = resolve; }); }, async command(_id, command) {
+    commands.push(command); throw new BackendHttpError({ method: 'POST', path: '/api/browser/commands', status: 409,
+      body: { code: 'BROWSER_PAGE_FAILED', error: 'page failed' } });
+  } });
+  await screen.ready();
+  const address = screen.getByRole('textbox', { name: words.address }) as HTMLInputElement;
+  fireEvent.change(address, { target: { value: attempted } });
+  fireEvent.submit(address.closest('form')!);
+  await waitFor(() => expect(reads).toBe(1));
+  await act(async () => { screen.emit({ kind: 'snapshot', snapshot: failed }); finishRead(initial); });
+  expect(await screen.findByText(words.pageNavigationIncomplete)).toBeTruthy();
+  expect(reads).toBe(1);
+  expect(commands).toEqual([{ command: 'navigate', target, url: attempted }]);
+  expect(address.disabled).toBe(false);
+  expect(screen.getByText(words.pageFailed)).toBeTruthy();
+});
+
+test('a late failed-page fact read cannot overwrite or release the next Session operation', async () => {
+  let finishRead!: (snapshot: BrowserSnapshot) => void;
+  let finishNew!: (snapshot: BrowserSnapshot) => void;
+  let reads = 0;
+  const commands: BrowserCommand[] = [];
+  const screen = fixture({
+    async ensure(id) { return { ...initial, agent_session_id: id, runtime: { ...initial.runtime!, tabs: [{ ...initial.runtime!.tabs[0]!, url: `https://${id}.example/` }] } }; },
+    snapshot: () => { reads++; return new Promise(resolve => { finishRead = resolve; }); },
+    async command(id, command) {
+      commands.push(command);
+      if (id === 'session-1') throw new BackendHttpError({ method: 'POST', path: '/api/browser/commands', status: 409,
+        body: { code: 'BROWSER_PAGE_FAILED', error: 'page failed' } });
+      return new Promise(resolve => { finishNew = resolve; });
+    },
+  });
+  await screen.ready();
+  let address = screen.getByRole('textbox', { name: words.address }) as HTMLInputElement;
+  fireEvent.change(address, { target: { value: 'https://unavailable.example/' } });
+  fireEvent.submit(address.closest('form')!);
+  await waitFor(() => expect(reads).toBe(1));
+  screen.rerender(<I18nextProvider i18n={i18n}><BrowserPanel agentSessionId='session-2' client={screen.client} onClose={() => {}} /></I18nextProvider>);
+  await waitFor(() => { address = screen.getByRole('textbox', { name: words.address }) as HTMLInputElement; expect(address.disabled).toBe(false); });
+  fireEvent.click(screen.getByRole('button', { name: words.reload }));
+  await act(async () => finishRead(pageSnapshot({ navigation_sequence: 2, phase: 'failed', content_state: 'retained_document', requested_url: 'https://unavailable.example/' }, 'failed')));
+  expect(address.value).toBe('https://session-2.example/');
+  expect(address.disabled).toBe(true);
+  expect(screen.queryByText(words.pageNavigationIncomplete)).toBeNull();
+  expect(reads).toBe(1);
+  expect(commands).toHaveLength(2);
+  await act(async () => finishNew({ ...initial, agent_session_id: 'session-2' }));
+  expect(address.disabled).toBe(false);
+});
+
+test('a typed failed Create cannot attribute an older page as the newly created tab and only reads bounded facts', async () => {
+  const attempted = 'https://unavailable.example/';
+  const olderPage = pageSnapshot({ navigation_sequence: 2, phase: 'failed', content_state: 'retained_document', requested_url: attempted }, 'failed');
+  let reads = 0;
+  const commands: BrowserCommand[] = [];
+  const screen = fixture({ async snapshot() { reads++; return olderPage; }, async command(_id, command) {
+    commands.push(command); throw new BackendHttpError({ method: 'POST', path: '/api/browser/commands', status: 409,
+      body: { code: 'BROWSER_PAGE_FAILED', error: 'page failed' } });
+  } });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.newTab }));
+  const address = screen.getByRole('textbox', { name: words.address }) as HTMLInputElement;
+  fireEvent.change(address, { target: { value: attempted } });
+  fireEvent.submit(address.closest('form')!);
+  expect(await screen.findByText(words.pageNavigationIncomplete)).toBeTruthy();
+  expect(reads).toBe(3);
+  expect(screen.getAllByRole('tab')).toHaveLength(1);
+  expect(commands).toEqual([{ command: 'create', url: attempted }]);
+  expect(address.disabled).toBe(false);
+});
+
+test.each([
+  ['BROWSER_NATIVE_INITIALIZATION_FAILED', 503],
+  ['BROWSER_NATIVE_COMMAND_FAILED', 502],
+  ['FORBIDDEN', 403],
+  ['transport', 0],
+] as const)('%s is not treated as a recoverable native page failure', async (code, status) => {
+  let reads = 0;
+  const screen = fixture({ async snapshot() { reads++; return pageSnapshot({ navigation_sequence: 2, phase: 'failed', content_state: 'retained_document' }, 'failed'); },
+    async command() { if (code === 'transport') throw new Error('response lost'); throw new BackendHttpError({ method: 'POST', path: '/api/browser/commands', status, body: { code, error: 'operation failed' } }); } });
+  await screen.ready();
+  const address = screen.getByRole('textbox', { name: words.address }) as HTMLInputElement;
+  fireEvent.change(address, { target: { value: 'https://unavailable.example/' } });
+  fireEvent.submit(address.closest('form')!);
+  expect(await screen.findByText(words.unavailable)).toBeTruthy();
+  expect(reads).toBe(0);
+  expect(address.disabled).toBe(true);
+  expect(screen.queryByText(words.pageNavigationIncomplete)).toBeNull();
+});
+
+test('a failed-page read that proves lost authority keeps the browser blocked', async () => {
+  let reads = 0;
+  const screen = fixture({ async snapshot() { reads++; throw new BackendHttpError({ method: 'GET', path: '/api/browser', status: 403,
+    body: { code: 'FORBIDDEN', error: 'access denied' } }); }, async command() { throw new BackendHttpError({ method: 'POST', path: '/api/browser/commands', status: 409,
+    body: { code: 'BROWSER_PAGE_FAILED', error: 'page failed' } }); } });
+  await screen.ready();
+  const address = screen.getByRole('textbox', { name: words.address }) as HTMLInputElement;
+  fireEvent.change(address, { target: { value: 'https://unavailable.example/' } });
+  fireEvent.submit(address.closest('form')!);
+  expect(await screen.findByText(words.unavailable)).toBeTruthy();
+  expect(address.disabled).toBe(true);
+  expect(reads).toBe(1);
+  expect(screen.queryByText(words.pageNavigationIncomplete)).toBeNull();
+});
+
+test.each(['reload', 'stop_loading', 'pause_navigation', 'resume_navigation'] as const)('%s captures the displayed native navigation attempt before dispatch', async command => {
+  const control = { paused: command === 'resume_navigation', loop_suspected: command === 'pause_navigation', repeated_navigation_count: 5 };
+  const state = pageSnapshot({ navigation_sequence: 7, phase: command === 'stop_loading' ? 'provisional' : 'finished',
+    content_state: 'current_document', navigation_control: control }, command === 'stop_loading' ? 'loading' : 'ready');
+  const screen = fixture();
+  await screen.ready();
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: state }));
+  const label = command === 'reload' ? words.reload : command === 'stop_loading' ? words.stopLoading : command === 'pause_navigation' ? words.pauseNavigation : words.resumeNavigation;
+  fireEvent.click(screen.getByRole('button', { name: label }));
+  await waitFor(() => expect(screen.commands).toEqual([{ command, target, expected_navigation_sequence: 7 }]));
+  const successor = pageSnapshot({ ...state.runtime!.tabs[0]!.load!, navigation_sequence: 8 }, state.runtime!.tabs[0]!.lifecycle, 3);
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: successor }));
+  expect(screen.commands).toEqual([{ command, target, expected_navigation_sequence: 7 }]);
+});
+
+test('navigation loop advice waits for a user action and Pause/Resume wait for native acknowledgement', async () => {
+  const control = { paused: false, loop_suspected: true, repeated_navigation_count: 5 };
+  const state = pageSnapshot({ navigation_sequence: 5, phase: 'finished', content_state: 'current_document', navigation_control: control }, 'ready');
+  const pending: Array<(snapshot: BrowserSnapshot) => void> = [];
+  const commands: BrowserCommand[] = [];
+  const screen = fixture({ async ensure() { return state; }, async command(_id, command) { commands.push(command); return new Promise(resolve => { pending.push(resolve); }); } });
+  await screen.ready();
+  expect(screen.getByText(words.navigationRepeating)).toBeTruthy();
+  expect(screen.getByText(words.navigationRepeatingHint.replace('{{count}}', '5'))).toBeTruthy();
+  expect(commands).toEqual([]);
+  fireEvent.click(screen.getByRole('button', { name: words.pauseNavigation }));
+  expect(commands).toEqual([{ command: 'pause_navigation', target, expected_navigation_sequence: 5 }]);
+  expect(screen.queryByText(words.navigationPaused)).toBeNull();
+  const paused = pageSnapshot({ ...state.runtime!.tabs[0]!.load!, navigation_control: { ...control, paused: true } }, 'ready', 3);
+  await act(async () => pending[0]!(paused));
+  expect(screen.getByText(words.navigationPaused)).toBeTruthy();
+  expect(screen.getByText(words.navigationPausedHint)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: words.resumeNavigation }));
+  expect(commands).toEqual([{ command: 'pause_navigation', target, expected_navigation_sequence: 5 }, { command: 'resume_navigation', target, expected_navigation_sequence: 5 }]);
+  expect(screen.getByText(words.navigationPaused)).toBeTruthy();
+  const resumed = pageSnapshot({ ...state.runtime!.tabs[0]!.load!, navigation_control: { paused: false, loop_suspected: false, repeated_navigation_count: 0 } }, 'ready', 4);
+  await act(async () => pending[1]!(resumed));
+  expect(screen.queryByText(words.navigationPaused)).toBeNull();
+  expect(screen.queryByText(words.navigationRepeating)).toBeNull();
+  expect(commands).toHaveLength(2);
+});
+
+test('supported pages expose manual Pause in the menu before a loop is suspected', async () => {
+  const state = pageSnapshot({ navigation_sequence: 1, phase: 'finished', content_state: 'current_document',
+    navigation_control: { paused: false, loop_suspected: false, repeated_navigation_count: 0 } }, 'ready');
+  const screen = fixture({ async ensure() { return state; } });
+  await screen.ready();
+  expect(screen.queryByText(words.navigationRepeating)).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: words.menu }));
+  fireEvent.click(screen.getByRole('menuitem', { name: words.pauseNavigation }));
+  await waitFor(() => expect(screen.commands).toEqual([{ command: 'pause_navigation', target, expected_navigation_sequence: 1 }]));
+});
+
+test('a page without native navigation control never offers Pause/Resume', async () => {
+  const screen = fixture();
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.menu }));
+  expect(screen.queryByRole('menuitem', { name: words.pauseNavigation })).toBeNull();
+  expect(screen.queryByRole('menuitem', { name: words.resumeNavigation })).toBeNull();
+  expect(screen.queryByText(words.navigationRepeating)).toBeNull();
+});
+
+test('a blocked navigation while paused preserves the page without generic cancellation advice', async () => {
+  const state = pageSnapshot({ navigation_sequence: 5, phase: 'cancelled', content_state: 'retained_document',
+    cancellation_reason: 'automatic_navigation_paused', navigation_control: { paused: true, loop_suspected: false, repeated_navigation_count: 0 } }, 'stopped');
+  const screen = fixture({ async ensure() { return state; } });
+  await screen.ready();
+  expect(screen.getByText(words.navigationPaused)).toBeTruthy();
+  expect(screen.queryByText(words.pageCancelled)).toBeNull();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.commands).toEqual([]);
+});
+
+test('Pause and Stop share a separate synchronous gate while a native navigation is pending', async () => {
+  const commands: BrowserCommand[] = [];
+  const pending: Array<(snapshot: BrowserSnapshot) => void> = [];
+  const screen = fixture({ async command(_id, command) { commands.push(command); return new Promise(resolve => { pending.push(resolve); }); } });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.reload }));
+  const control = { paused: false, loop_suspected: true, repeated_navigation_count: 5 };
+  const loading = pageSnapshot({ navigation_sequence: 5, phase: 'provisional', content_state: 'retained_document', navigation_control: control }, 'loading');
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: loading }));
+  const pause = screen.getByRole('button', { name: words.pauseNavigation }) as HTMLButtonElement;
+  expect(pause.disabled).toBe(false);
+  await act(async () => {
+    fireEvent.click(pause);
+    fireEvent.click(pause);
+    fireEvent.click(screen.getByRole('button', { name: words.stopLoading }));
+  });
+  expect(commands).toEqual([{ command: 'reload', target, expected_navigation_sequence: 1 }, { command: 'pause_navigation', target, expected_navigation_sequence: 5 }]);
+  const paused = pageSnapshot({ ...loading.runtime!.tabs[0]!.load!, phase: 'cancelled', cancellation_reason: 'user_stop', navigation_control: { ...control, paused: true } }, 'stopped', 3);
+  await act(async () => pending[1]!(paused));
+  expect((screen.getByRole('button', { name: words.resumeNavigation }) as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => pending[0]!(loading));
+  expect(screen.getByText(words.navigationPaused)).toBeTruthy();
+  expect((screen.getByRole('button', { name: words.resumeNavigation }) as HTMLButtonElement).disabled).toBe(false);
+});
+
+test.each(['pause_navigation', 'resume_navigation', 'stop_loading', 'reload'] as const)('a stale %s is nonfatal and never claims a changed control state', async command => {
+  const paused = command === 'resume_navigation';
+  const stopping = command === 'stop_loading';
+  const state = pageSnapshot({ navigation_sequence: 5, phase: stopping ? 'provisional' : 'finished', content_state: 'current_document',
+    navigation_control: { paused, loop_suspected: true, repeated_navigation_count: 5 } }, stopping ? 'loading' : 'ready');
+  const screen = fixture({ async ensure() { return state; }, async command() { throw new BackendHttpError({ method: 'POST', path: '/api/browser/commands', status: 409,
+    body: { code: 'BROWSER_STALE_TARGET', error: 'stale target' } }); } });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: command === 'reload' ? words.reload : stopping ? words.stopLoading : paused ? words.resumeNavigation : words.pauseNavigation }));
+  expect(await screen.findByText(words.navigationControlFailed)).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(false);
+  expect(Boolean(screen.queryByText(words.navigationPaused))).toBe(paused);
+});
+
+test.each(['agent_running', 'input_gate_failed'] as const)('native navigation controls obey the %s user input gate', async gate => {
+  const state = pageSnapshot({ navigation_sequence: 5, phase: 'finished', content_state: 'current_document',
+    navigation_control: { paused: false, loop_suspected: true, repeated_navigation_count: 5 } }, 'ready');
+  const screen = fixture({ async ensure() { return state; } });
+  await screen.ready();
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...state, run: { revision: 2, input_state: gate === 'agent_running' ? gate : 'user_ready', input_gate_failed: gate === 'input_gate_failed' } } }));
+  const pause = screen.getByRole('button', { name: words.pauseNavigation }) as HTMLButtonElement;
+  expect(pause.disabled).toBe(true);
+  fireEvent.click(pause);
+  expect(screen.commands).toEqual([]);
+});
+
+test.each(['navigation', 'stop'] as const)('Stop can interrupt a pending navigation when %s returns first without releasing another operation', async first => {
+  const commands: BrowserCommand[] = [];
+  const pending: Array<(snapshot: BrowserSnapshot) => void> = [];
+  const screen = fixture({ async command(_id, command) { commands.push(command); return new Promise(resolve => { pending.push(resolve); }); } });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.reload }));
+  const loading = pageSnapshot({ navigation_sequence: 2, phase: 'provisional', content_state: 'retained_document' }, 'loading');
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: loading }));
+  const stop = screen.getByRole('button', { name: words.stopLoading }) as HTMLButtonElement;
+  expect(stop.disabled).toBe(false);
+  await act(async () => { fireEvent.click(stop); fireEvent.click(stop); });
+  expect(commands).toEqual([{ command: 'reload', target, expected_navigation_sequence: 1 }, { command: 'stop_loading', target, expected_navigation_sequence: 2 }]);
+  const stopped = pageSnapshot({ ...loading.runtime!.tabs[0]!.load!, phase: 'cancelled', cancellation_reason: 'user_stop' }, 'stopped', 3);
+  await act(async () => pending[first === 'navigation' ? 0 : 1]!(first === 'navigation' ? loading : stopped));
+  const address = screen.getByRole('textbox', { name: words.address }) as HTMLInputElement;
+  expect(address.disabled).toBe(true);
+  fireEvent.submit(address.closest('form')!);
+  expect(commands).toHaveLength(2);
+  await act(async () => pending[first === 'navigation' ? 1 : 0]!(first === 'navigation' ? stopped : loading));
+  expect(address.disabled).toBe(false);
+  expect(screen.queryByRole('button', { name: words.stopLoading })).toBeNull();
+  expect(screen.getByRole('button', { name: words.reload })).toBeTruthy();
+});
+
+test.each(['agent_running', 'input_gate_failed'] as const)('a pending navigation never permits Stop after the %s gate closes', async gate => {
+  const commands: BrowserCommand[] = [];
+  let finish!: (snapshot: BrowserSnapshot) => void;
+  const screen = fixture({ async command(_id, command) { commands.push(command); return new Promise(resolve => { finish = resolve; }); } });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.reload }));
+  const state = pageSnapshot({ navigation_sequence: 2, phase: 'provisional', content_state: 'retained_document' }, 'loading');
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...state, run: { revision: 2, input_state: gate === 'agent_running' ? gate : 'user_ready', input_gate_failed: gate === 'input_gate_failed' } } }));
+  const stop = screen.getByRole('button', { name: words.stopLoading }) as HTMLButtonElement;
+  expect(stop.disabled).toBe(true);
+  fireEvent.click(stop);
+  expect(commands).toEqual([{ command: 'reload', target, expected_navigation_sequence: 1 }]);
+  await act(async () => finish(state));
+});
 
 test.each(['failed', 'crashed', 'stopped'] as const)('a %s page shows single-page recovery while retaining the native attachment', async lifecycle => {
   const layouts: boolean[] = [];
@@ -1151,6 +1589,19 @@ test('a late diagnostic response cannot copy after the active document changes',
   expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(false);
 });
 
+test('unmounting invalidates a pending diagnostic operation before it can write to the clipboard', async () => {
+  const copied = clipboardFixture();
+  let finish!: (report: unknown) => void;
+  const screen = fixture({ diagnostics: () => new Promise(resolve => { finish = resolve; }) });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.menu }));
+  fireEvent.click(screen.getByRole('menuitem', { name: words.copyDiagnostics }));
+  screen.unmount();
+  await act(async () => finish({ coverage: 'main_document_navigation', events: [] }));
+  expect(copied).toEqual([]);
+  expect(screen.commands).toEqual([]);
+});
+
 test.each(['failed', 'cancelled'] as const)('the %s attempt address stays distinct from a retained document and is used for an explicit fresh navigation', async phase => {
   const requested = 'https://new.example/search?q=user-query';
   const retained = 'http://localhost:3000/';
@@ -1230,9 +1681,18 @@ test('a completed internal bootstrap never advertises a page loading operation o
   expect(screen.commands).toEqual([]);
 });
 
-test('platforms without a native load summary retain lifecycle-based Stop controls', async () => {
-  const screen = fixture({ async ensure() { return { ...initial, runtime: { ...initial.runtime!, tabs: [{ ...initial.runtime!.tabs[0]!, lifecycle: 'loading' }] } }; } });
+test.each(['loading', 'ready'] as const)('an adapter without a native attempt disables %s controls while retaining explicit address navigation', async lifecycle => {
+  const screen = fixture({ async ensure() { return { ...initial, runtime: { ...initial.runtime!, tabs: [{ ...initial.runtime!.tabs[0]!, lifecycle, load: undefined }] } }; } });
   await screen.ready();
-  fireEvent.click(screen.getByRole('button', { name: words.stopLoading }));
-  await waitFor(() => expect(screen.commands).toEqual([{ command: 'stop_loading', target }]));
+  const control = screen.getByRole('button', { name: lifecycle === 'loading' ? words.stopLoading : words.reload }) as HTMLButtonElement;
+  expect(control.disabled).toBe(true);
+  fireEvent.click(control);
+  expect(screen.commands).toEqual([]);
+  const address = screen.getByRole('textbox', { name: words.address }) as HTMLInputElement;
+  expect(address.disabled).toBe(false);
+  fireEvent.keyDown(address, { key: 'r', ctrlKey: true });
+  expect(screen.commands).toEqual([]);
+  fireEvent.change(address, { target: { value: 'https://recovery.example/' } });
+  fireEvent.submit(address.closest('form')!);
+  await waitFor(() => expect(screen.commands).toEqual([{ command: 'navigate', target, url: 'https://recovery.example/' }]));
 });

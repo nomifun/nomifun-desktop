@@ -5,9 +5,19 @@
  */
 import React from 'react';
 
+/** A visible desktop work surface needs room until it closes or unmounts. */
+export interface WorkSurfaceSpaceRequest {
+  minimumWidth: number;
+  close: () => void;
+}
+
+export type ReserveWorkSurfaceSpace = (request: WorkSurfaceSpaceRequest) => () => void;
+
 export interface LayoutContextValue {
   siderCollapsed: boolean;
   setSiderCollapsed: (value: boolean) => void;
+  reserveSiderSpace?: ReserveWorkSurfaceSpace;
+  reserveWorkSurfaceSpace?: ReserveWorkSurfaceSpace;
 }
 
 export const LayoutContext = React.createContext<LayoutContextValue | null>(null);

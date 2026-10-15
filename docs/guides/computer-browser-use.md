@@ -6,7 +6,19 @@ NomiFun separates desktop-wide Computer automation from a conversation's native 
 
 Open the browser from the Browser button inside a conversation. The global Browser management/settings page and its compatibility redirect have been removed.
 
+The embedded browser is the primary browsing experience, with navigation and recovery in its panel. System-browser opening and Attached Chrome remain explicitly selected features for particular workflows; an embedded-page failure does not switch browsers automatically.
+
 The user and Agent see the same native web page. During an Agent run, user page input is locked. Stop the Agent and wait for pending operations to settle before interacting manually. Hiding the panel keeps the page and tabs alive; it is not a takeover or a reset.
+
+At the minimum 880×600 desktop window, the main navigation and Session list may temporarily collapse to keep chat and the embedded browser visible side by side. Widening the window or closing the browser panel restores your preferred sidebar state and widths; resizing does not replace your saved split preference. Explicitly expanding a sidebar that yielded space hides the browser panel. Open Browser again to show the same Session's pages; hiding it keeps any active Agent input lock in place.
+
+Repeated page navigation can show a warning and offer Pause page navigation. Pause retains usable content and blocks subsequent page navigations and new popups from the current tab; other open tabs keep running. Resume page navigation releases the hold without reloading; an explicit address, reload or history command can also continue browsing. Stop loading cancels the current load, so the website's next timer may still run. Pause does not stop all network activity; close the tab when all activity from that page must end. These user controls remain locked during Agent work.
+
+Pause is shown only when the native browser establishes support. Without it, Stop loading and closing the tab remain available.
+
+Windows has native validation for settling popups already being created when Pause is requested. macOS still needs a native fix and validation for this case; a popup whose creation began before Pause may still open. If Windows navigation control reports unavailable, close the affected tab and open it again.
+
+Copy navigation diagnostics distinguishes host commands, new website navigations and HTTP redirects. It is not a full Fetch/XHR log and excludes cookies, authentication headers and form content. For verification or unsupported embedded environments, explicitly open the page in the system browser. Login state stays separate. Record normal access, verification pages and repeat navigation separately; observing a CAPTCHA is not proof that normal access passed.
 
 For a frontend project, start its development server, then ask the Agent to navigate to the localhost URL in the conversation browser, observe the page, interact, and verify the result. Navigation, clicks, keyboard input and standard HTML selections use the real browser. A screenshot stream is not the interactive surface.
 

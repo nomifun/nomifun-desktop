@@ -140,6 +140,35 @@ pub struct BrowserWorkspace {
     slot: Arc<RuntimeSlot>,
     coordinator: Arc<BrowserRunCoordinator>,
     closing: AtomicBool,
+    // Only the currently admitted human navigation's native cancellation.
+    // This is transient operation ownership, never a second history ledger.
+    user_navigation: std::sync::Mutex<Option<Arc<UserNavigation>>>,
+}
+
+enum UserNavigationScope {
+    Existing(crate::runtime::BrowserTabTarget),
+    Creating { runtime_generation: u64, previous_tabs: BTreeSet<String> },
+}
+
+struct UserNavigation {
+    scope: UserNavigationScope,
+    cancel: CancellationToken,
+}
+
+struct UserNavigationLease {
+    workspace: std::sync::Weak<BrowserWorkspace>,
+    navigation: Arc<UserNavigation>,
+}
+
+impl Drop for UserNavigationLease {
+    fn drop(&mut self) {
+        if let Some(workspace) = self.workspace.upgrade() {
+            let mut pending = workspace.user_navigation.lock().unwrap_or_else(|error| error.into_inner());
+            if pending.as_ref().is_some_and(|current| Arc::ptr_eq(current, &self.navigation)) {
+                *pending = None;
+            }
+        }
+    }
 }
 
 impl BrowserWorkspace {
@@ -315,12 +344,89 @@ impl BrowserWorkspace {
         if self.closing.load(Ordering::Acquire) {
             return Err(WorkspaceError::WorkspaceClosed);
         }
+        if matches!(&command, BrowserTabCommand::StopLoading { .. } | BrowserTabCommand::PauseNavigation { .. }) {
+            let workspace = self.clone();
+            let interrupt = command.clone();
+            let cancelled = self.coordinator.user_interrupt(move || async move {
+                workspace.interrupt_user_navigation(interrupt).await
+            }).await??;
+            if cancelled {
+                // The original owned task retains the operation gate through
+                // native callback settlement. Join that gate before returning;
+                // never replay Stop/Pause against a successor document.
+                let workspace = self.clone();
+                return self.coordinator.user_operation(move || async move {
+                    Ok(workspace.existing_runtime_snapshot().await)
+                }).await?;
+            }
+        }
         let workspace = self.clone();
         self.coordinator
             .user_operation(move || async move {
-                Ok(workspace.execute(command, CancellationToken::new()).await)
+                Ok(workspace.execute_user_command(command).await)
             })
             .await?
+    }
+
+    async fn existing_runtime_snapshot(&self) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
+        if self.closing.load(Ordering::Acquire) { return Err(WorkspaceError::WorkspaceClosed); }
+        let runtime = self.slot.inner.lock().await.runtime.clone().ok_or(WorkspaceError::TabNotFound)?;
+        runtime.snapshot().await
+    }
+
+    async fn interrupt_user_navigation(&self, command: BrowserTabCommand) -> Result<bool, WorkspaceError> {
+        let (target, expected_sequence) = match &command {
+            BrowserTabCommand::StopLoading { target, expected_navigation_sequence }
+            | BrowserTabCommand::PauseNavigation { target, expected_navigation_sequence } => (target, *expected_navigation_sequence),
+            _ => return Err(WorkspaceError::ActionDenied),
+        };
+        if target.runtime_generation != self.runtime_generation() { return Err(WorkspaceError::StaleTarget); }
+        let pending = self.user_navigation.lock().unwrap_or_else(|error| error.into_inner()).clone();
+        let Some(pending) = pending else { return Ok(false); };
+        let matches_scope = match &pending.scope {
+            UserNavigationScope::Existing(original) => original.tab_id == target.tab_id
+                && original.runtime_generation == target.runtime_generation,
+            UserNavigationScope::Creating { runtime_generation, previous_tabs } =>
+                *runtime_generation == target.runtime_generation && !previous_tabs.contains(&target.tab_id),
+        };
+        if !matches_scope { return Ok(false); }
+        let runtime = self.slot.inner.lock().await.runtime.clone().ok_or(WorkspaceError::TabNotFound)?;
+        let snapshot = runtime.snapshot().await?;
+        if !snapshot.tabs.iter().any(|tab| tab.target == *target
+            && tab.load.as_ref().is_some_and(|load| load.navigation_sequence == expected_sequence)) {
+            return Err(WorkspaceError::StaleTarget);
+        }
+        // This is the user's explicit current-target control, rather than an
+        // old command's guessed cancellation receipt. Native dispatch rechecks
+        // the target/attempt atomically; the original operation still owns the
+        // coordinator gate until its callback and cleanup settle.
+        runtime.execute(command, CancellationToken::new()).await?;
+        let registered = self.user_navigation.lock().unwrap_or_else(|error| error.into_inner());
+        if registered.as_ref().is_some_and(|current| Arc::ptr_eq(current, &pending)) {
+            pending.cancel.cancel();
+        }
+        Ok(true)
+    }
+
+    async fn execute_user_command(self: &Arc<Self>, command: BrowserTabCommand) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
+        let scope = match &command {
+            BrowserTabCommand::Navigate { target, .. } | BrowserTabCommand::Reload { target, .. }
+            | BrowserTabCommand::Back { target } | BrowserTabCommand::Forward { target } =>
+                Some(UserNavigationScope::Existing(target.clone())),
+            BrowserTabCommand::Create { .. } => {
+                let snapshot = self.slot.ensure().await?.snapshot().await?;
+                Some(UserNavigationScope::Creating { runtime_generation: snapshot.runtime_generation,
+                    previous_tabs: snapshot.tabs.into_iter().map(|tab| tab.target.tab_id).collect() })
+            }
+            _ => None,
+        };
+        let cancel = CancellationToken::new();
+        let _lease = scope.map(|scope| {
+            let navigation = Arc::new(UserNavigation { scope, cancel: cancel.clone() });
+            *self.user_navigation.lock().unwrap_or_else(|error| error.into_inner()) = Some(navigation.clone());
+            UserNavigationLease { workspace: Arc::downgrade(self), navigation }
+        });
+        self.execute(command, cancel).await
     }
 
     async fn execute(
@@ -568,7 +674,7 @@ impl BrowserResource {
         run: &BrowserRunGuard,
         command: BrowserTabCommand,
     ) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
-        if matches!(command, BrowserTabCommand::Permission { .. } | BrowserTabCommand::Dialog { .. } | BrowserTabCommand::CancelDownload { .. } | BrowserTabCommand::OpenExternal { .. } | BrowserTabCommand::CloseAll { .. } | BrowserTabCommand::OpenDownloads { .. } | BrowserTabCommand::ClearSiteData { .. } | BrowserTabCommand::SetZoom { .. }) {
+        if matches!(command, BrowserTabCommand::Permission { .. } | BrowserTabCommand::Dialog { .. } | BrowserTabCommand::CancelDownload { .. } | BrowserTabCommand::OpenExternal { .. } | BrowserTabCommand::CloseAll { .. } | BrowserTabCommand::OpenDownloads { .. } | BrowserTabCommand::ClearSiteData { .. } | BrowserTabCommand::SetZoom { .. } | BrowserTabCommand::PauseNavigation { .. } | BrowserTabCommand::ResumeNavigation { .. }) {
             return Err(WorkspaceError::UnsupportedAction);
         }
         self.authority.authorize(action_for_tab_command(&command))?;
@@ -689,6 +795,7 @@ impl BrowserResourceService {
             coordinator: BrowserRunCoordinator::new(slot.clone()),
             slot,
             closing: AtomicBool::new(false),
+            user_navigation: std::sync::Mutex::new(None),
         });
         resources.insert(key, workspace.clone());
         Ok(workspace)
@@ -959,6 +1066,8 @@ fn action_for_tab_command(command: &BrowserTabCommand) -> BrowserCapabilityActio
         BrowserTabCommand::CloseAll { .. }
         | BrowserTabCommand::ClearSiteData { .. }
         | BrowserTabCommand::OpenExternal { .. }
+        | BrowserTabCommand::PauseNavigation { .. }
+        | BrowserTabCommand::ResumeNavigation { .. }
         | BrowserTabCommand::Permission { .. }
         | BrowserTabCommand::Dialog { .. } => BrowserCapabilityAction::Act,
     }
@@ -966,3 +1075,5 @@ fn action_for_tab_command(command: &BrowserTabCommand) -> BrowserCapabilityActio
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod user_navigation_tests;

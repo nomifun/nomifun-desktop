@@ -13,6 +13,7 @@ pub(crate) struct Receipt {
     pub user_agent: String,
     pub javascript_user_agent: Option<String>,
     pub case: Option<String>,
+    pub storage_ok: Option<bool>,
     pub media_probe: Option<serde_json::Value>,
 }
 
@@ -92,6 +93,7 @@ fn serve(mut stream: TcpStream, receipts: Arc<Mutex<Vec<Receipt>>>, stop: Arc<At
         receipts.push(Receipt {
             path: path.into(), user_agent, javascript_user_agent: parameters.get("ua").cloned(),
             case: parameters.get("case").cloned(),
+            storage_ok: parameters.get("storage_ok").map(|value| value == "true"),
             media_probe: path.starts_with("/media-").then(|| {
                 let flag = |key: &str| parameters.get(key).and_then(|value| match value.as_str() { "true" => Some(true), "false" => Some(false), _ => None });
                 let count = |key: &str| parameters.get(key).and_then(|value|value.parse::<u32>().ok()).filter(|value|*value <= 256);
@@ -117,6 +119,13 @@ fn serve(mut stream: TcpStream, receipts: Arc<Mutex<Vec<Receipt>>>, stop: Arc<At
         "/ua-root" => html(&mut stream, 200, &ua_page("root", "Compatibility UA root", true)),
         "/ua-frame" => html(&mut stream, 200, &ua_page("frame", "Compatibility UA frame", false)),
         "/popup" => html(&mut stream, 200, &ua_page("popup", "Compatibility popup ready", false)),
+        "/identity-warm" => reply(&mut stream, 200, "text/html; charset=utf-8", identity_warm_page().as_bytes(),
+            "Set-Cookie: compatibility-fixture=warm; Path=/; SameSite=Lax\r\n"),
+        "/identity-check" => html(&mut stream, 200, &identity_check_page()),
+        "/identity-worker.js" => reply(&mut stream, 200, "application/javascript", br#"
+            postMessage(navigator.userAgent);
+            fetch('/ua-report?case=worker&ua=' + encodeURIComponent(navigator.userAgent));
+        "#, ""),
         "/redirect-final" => html(&mut stream, 200, &simple_page("Compatibility redirects settled", "")),
         "/forbidden" => html(&mut stream, 403, &simple_page("Compatibility HTTP 403 site content", "")),
         "/media-permission" => {
@@ -167,10 +176,70 @@ fn serve(mut stream: TcpStream, receipts: Arc<Mutex<Vec<Receipt>>>, stop: Arc<At
               setTimeout(() => location.reload(), 120);
             }
         "#)),
-        "/ua-report" | "/ua-fetch" | "/media-probe" | "/media-device-probe" | "/media-visibility-probe" | "/media-focus-probe" | "/media-start-blocked" | "/media-user-start" | "/media-denied" | "/media-unexpected-grant" => reply(&mut stream, 204, "text/plain", b"", ""),
+        "/loop-reload" => html(&mut stream, 200, &simple_page("Compatibility continuous reload", "setInterval(() => location.reload(), 180);")),
+        "/loop-replace" => html(&mut stream, 200, &simple_page("Compatibility continuous replace", "setInterval(() => location.replace('/loop-replace'), 180);")),
+        "/loop-a" => html(&mut stream, 200, &simple_page("Compatibility alternating A", "setInterval(() => location.replace('/loop-b'), 180);")),
+        "/loop-b" => html(&mut stream, 200, &simple_page("Compatibility alternating B", "setInterval(() => location.replace('/loop-a'), 180);")),
+        "/loop-meta" => html(&mut stream, 200, "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"1;url=/loop-meta\"><title>Compatibility continuous meta refresh</title><h1>Compatibility continuous meta refresh</h1>"),
+        "/resource-burst" => html(&mut stream, 200, r#"<!doctype html><meta charset="utf-8"><title>Compatibility resource burst</title>
+            <h1>Compatibility resource burst</h1><iframe title="Burst child" src="/ua-frame"></iframe>
+            <script>for (let i = 0; i < 30; i++) {
+              fetch('/ua-fetch?burst=' + i);
+              const image = new Image(); image.src = '/ua-image?burst=' + i; document.body.append(image);
+            }</script>"#),
+        "/ua-report" | "/ua-fetch" | "/storage-report" | "/media-probe" | "/media-device-probe" | "/media-visibility-probe" | "/media-focus-probe" | "/media-start-blocked" | "/media-user-start" | "/media-denied" | "/media-unexpected-grant" => reply(&mut stream, 204, "text/plain", b"", ""),
         "/ua-image" => reply(&mut stream, 200, "image/gif", b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff!\xf9\x04\x01\0\0\0\0,\0\0\0\0\x01\0\x01\0\0\x02\x02D\x01\0;", ""),
         _ => reply(&mut stream, 404, "text/plain", b"Fixture not found", ""),
     }
+}
+
+fn identity_warm_page() -> String {
+    simple_page("Compatibility profile warm", r#"
+        localStorage.setItem('compatibility-profile', 'warm');
+        const request = indexedDB.open('compatibility-profile', 1);
+        request.onupgradeneeded = () => request.result.createObjectStore('state');
+        request.onsuccess = () => {
+          const db = request.result;
+          const tx = db.transaction('state', 'readwrite');
+          tx.objectStore('state').put('warm', 'status');
+          tx.oncomplete = () => {
+            db.close();
+            fetch('/storage-report?case=warm&storage_ok=true');
+            document.getElementById('state').textContent = 'Profile warm complete';
+          };
+        };
+    "#)
+}
+
+fn identity_check_page() -> String {
+    format!(r#"<!doctype html><meta charset="utf-8"><title>Compatibility identity comparison</title>
+        <style>body{{font:18px system-ui;padding:24px}}iframe{{width:500px;height:160px}}a{{display:block;padding:16px}}</style>
+        <h1>Compatibility identity comparison</h1><p id="javascript-ua"></p><p id="worker-ua"></p>
+        <p id="storage">Profile checks pending</p>
+        <iframe title="Compatibility UA frame" src="/ua-frame?case=frame"></iframe>
+        <img alt="Fixture pixel" src="/ua-image?case=root">
+        <a href="/popup" target="identity-popup">Open compatibility popup</a>
+        <script>
+          document.getElementById('javascript-ua').textContent = navigator.userAgent;
+          fetch('/ua-report?case=root&ua=' + encodeURIComponent(navigator.userAgent));
+          fetch('/ua-fetch?case=root');
+          const worker = new Worker('/identity-worker.js');
+          worker.onmessage = event => document.getElementById('worker-ua').textContent = event.data;
+          const request = indexedDB.open('compatibility-profile', 1);
+          request.onsuccess = () => {{
+            const db = request.result;
+            if (!db.objectStoreNames.contains('state')) {{ db.close(); return; }}
+            const tx = db.transaction('state', 'readonly');
+            const read = tx.objectStore('state').get('status');
+            read.onsuccess = () => {{
+              const ok = read.result === 'warm' && localStorage.getItem('compatibility-profile') === 'warm'
+                && document.cookie.split(';').some(value => value.trim() === 'compatibility-fixture=warm');
+              fetch('/storage-report?case=check&storage_ok=' + ok);
+              document.getElementById('storage').textContent = ok ? 'Profile checks passed' : 'Profile checks failed';
+            }};
+            tx.oncomplete = () => db.close();
+          }};
+        </script>"#)
 }
 
 fn ua_page(case: &str, title: &str, root: bool) -> String {

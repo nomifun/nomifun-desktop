@@ -1,6 +1,6 @@
 //! One reducer owns navigation evidence and document availability. Metadata
 //! sampling never creates a document or turns cancellation into success.
-use crate::engine::PageSnapshot;
+use crate::state::PageSnapshot;
 use nomifun_browser_platform::runtime::{
     BrowserCancellationReason as Cancel, BrowserContentState as Content,
     BrowserFailureReason as Reason, BrowserFailureStage as Stage,
@@ -22,6 +22,7 @@ pub(crate) enum Update {
     Metadata { url: String, title: String, back: bool, forward: bool, progress: u16 },
     Response { url: Option<String>, status: Option<u16> },
     PolicyCancelled { url: Option<String>, reason: Cancel },
+    AutomaticNavigationPaused(bool),
     Closed,
 }
 
@@ -197,6 +198,10 @@ pub(crate) fn reduce(s: &mut PageSnapshot, update: Update) -> Vec<BrowserNavigat
             event.cancellation_reason = Some(reason);
             Some(event)
         }
+        Update::AutomaticNavigationPaused(paused) => {
+            s.load.navigation_control.get_or_insert_with(Default::default).paused = paused;
+            None
+        }
     };
     s.lifecycle = match s.load.phase {
         Phase::Idle | Phase::Requested | Phase::Provisional | Phase::Committed => BrowserTabLifecycle::Loading,
@@ -312,5 +317,49 @@ mod tests {
         assert_eq!(s.load.phase, Phase::Requested);
         assert_eq!(s.lifecycle, BrowserTabLifecycle::Loading);
         assert!(s.load.cancellation_reason.is_none());
+    }
+    #[test]
+    fn pause_keeps_the_current_document_and_metadata_cannot_resume_it() {
+        let mut s = PageSnapshot::default();
+        begin(&mut s, "https://example.com/current");
+        reduce(&mut s, Update::Committed { url: "https://example.com/current".into() });
+        reduce(&mut s, Update::Finished { url: "https://example.com/current".into() });
+        let generation = s.document_generation;
+        let sequence = s.load.navigation_sequence;
+        assert!(reduce(&mut s, Update::AutomaticNavigationPaused(true)).is_empty());
+        reduce(&mut s, Update::Metadata { url: "https://example.com/current".into(), title: "retained".into(), back: false, forward: false, progress: 100 });
+        assert!(s.load.navigation_control.as_ref().unwrap().paused);
+        assert_eq!(s.load.content_state, Content::CurrentDocument);
+        assert_eq!(s.document_generation, generation);
+        assert_eq!(s.load.navigation_sequence, sequence);
+        assert_eq!(s.lifecycle, BrowserTabLifecycle::Ready);
+    }
+    #[test]
+    fn pausing_in_flight_has_a_distinct_reason_and_resume_replays_nothing() {
+        let mut s = PageSnapshot::default();
+        begin(&mut s, "https://example.com/repeat");
+        let generation = s.document_generation;
+        let sequence = s.load.navigation_sequence;
+        reduce(&mut s, Update::AutomaticNavigationPaused(true));
+        let events = reduce(&mut s, Update::Cancelled(Cancel::AutomaticNavigationPaused));
+        assert_eq!(events[0].cancellation_reason, Some(Cancel::AutomaticNavigationPaused));
+        assert_eq!(s.load.phase, Phase::Cancelled);
+        assert_eq!(s.load.content_state, Content::None);
+        assert!(s.load.navigation_control.as_ref().unwrap().paused);
+        assert!(reduce(&mut s, Update::AutomaticNavigationPaused(false)).is_empty());
+        assert_eq!(s.load.phase, Phase::Cancelled);
+        assert!(!s.load.navigation_control.as_ref().unwrap().paused);
+        assert_eq!(s.document_generation, generation);
+        assert_eq!(s.load.navigation_sequence, sequence);
+    }
+    #[test]
+    fn a_paused_policy_sample_does_not_invent_a_navigation_attempt() {
+        let mut s = PageSnapshot::default();
+        let events = reduce(&mut s, Update::PolicyCancelled {
+            url: Some("https://example.com/repeat".into()), reason: Cancel::AutomaticNavigationPaused,
+        });
+        assert_eq!(events[0].navigation_sequence, None);
+        assert_eq!(events[0].document_generation, None);
+        assert_eq!(s.load.navigation_sequence, 0);
     }
 }

@@ -465,8 +465,13 @@ impl InnerWebView {
     // Webview handlers
     unsafe { Self::attach_handlers(hwnd, &webview, &mut attributes, &mut token, env, is_child)? };
 
-    // IPC handler
-    unsafe { Self::attach_ipc_handler(&webview, &mut attributes, &mut token)? };
+    // A host that supplied no IPC handler owns an ordinary browser page. Do
+    // not inject window.ipc or expose native web-message transport to it.
+    if attributes.ipc_handler.is_some() {
+      unsafe { Self::attach_ipc_handler(&webview, &mut attributes, &mut token)? };
+    } else {
+      unsafe { webview.Settings()?.SetIsWebMessageEnabled(false)? };
+    }
 
     // Custom protocols handler
     let http_or_https = if pl_attrs.use_https { "https" } else { "http" };

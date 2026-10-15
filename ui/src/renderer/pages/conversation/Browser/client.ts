@@ -4,17 +4,19 @@ export type BrowserTarget = { tab_id: string; runtime_generation: number; docume
 export type BrowserPermission = { request_id: string; kind: string; origin: string };
 export type BrowserDialog = { request_id: string; target: BrowserTarget; kind: 'alert' | 'confirm' | 'prompt' | 'before_unload'; message: string; default_text: string; origin: string; text_truncated: boolean };
 export type BrowserNavigationPhase = 'idle' | 'requested' | 'provisional' | 'committed' | 'finished' | 'cancelled' | 'failed' | 'crashed';
-export type BrowserLoadProblem = { stage: 'provisional' | 'committed'; safe_reason: 'network_connection' | 'dns' | 'timeout' | 'tls' | 'unsupported_url' | 'access_denied' | 'other'; native_domain_class: 'url' | 'web_kit' | 'other'; native_code: number };
-export type BrowserLoadSummary = { navigation_sequence: number; phase: BrowserNavigationPhase; content_state: 'none' | 'retained_document' | 'current_document'; estimated_progress?: number; cancellation_reason?: 'user_stop' | 'replaced' | 'download' | 'navigation_rejected' | 'unknown'; problem?: BrowserLoadProblem; response_status?: number; requested_url?: string; content_url?: string };
+export type BrowserLoadProblem = { stage: 'provisional' | 'committed'; safe_reason: 'network_connection' | 'dns' | 'timeout' | 'tls' | 'unsupported_url' | 'access_denied' | 'other'; native_domain_class: 'url' | 'web_kit' | 'web_view2' | 'other'; native_code: number };
+export type BrowserNavigationControl = { paused: boolean; loop_suspected: boolean; repeated_navigation_count: number };
+export type BrowserLoadSummary = { navigation_sequence: number; phase: BrowserNavigationPhase; content_state: 'none' | 'retained_document' | 'current_document'; estimated_progress?: number; cancellation_reason?: 'user_stop' | 'replaced' | 'download' | 'navigation_rejected' | 'automatic_navigation_paused' | 'unknown'; problem?: BrowserLoadProblem; response_status?: number; requested_url?: string; content_url?: string; navigation_control?: BrowserNavigationControl };
 export type BrowserTab = { target: BrowserTarget; title: string; url: string; lifecycle: 'loading' | 'ready' | 'stopped' | 'failed' | 'crashed'; load?: BrowserLoadSummary; can_go_back: boolean; can_go_forward: boolean; zoom_percent: number; blocked_permissions?: string[]; permission_requests?: BrowserPermission[]; script_dialog?: BrowserDialog };
 export type BrowserDownload = { id: string; tab_id: string; filename: string; state: 'choosing' | 'in_progress' | 'cancelling' | 'completed' | 'cancelled' | 'failed'; received_bytes: number; total_bytes: number | null; can_cancel: boolean };
 export type BrowserInteractionCapabilities = { engine: string; interaction_fidelity: 'browser_input' | 'browser_protocol' | 'semantic_dom'; actions: string[]; unsupported_actions: string[]; limitations: string[] };
 export type BrowserSnapshot = { agent_session_id: string; browser_id: string; interaction_capabilities?: BrowserInteractionCapabilities; run: { revision: number; input_state: 'user_ready' | 'agent_running'; input_gate_failed: boolean }; runtime: { runtime_generation: number; revision: number; active_tab_id: string | null; tabs: BrowserTab[]; downloads: BrowserDownload[] } | null };
-export type BrowserCommand = { command: 'create'; url: string } | { command: 'close_all' | 'open_downloads' | 'clear_site_data'; runtime_generation: number } | { command: 'activate' | 'close' | 'back' | 'forward' | 'reload' | 'stop_loading' | 'open_external'; target: BrowserTarget } | { command: 'navigate'; target: BrowserTarget; url: string } | { command: 'set_zoom'; target: BrowserTarget; percent: number } | { command: 'permission'; target: BrowserTarget; request_id: string; allow: boolean } | { command: 'dialog'; target: BrowserTarget; request_id: string; accept: boolean; text?: string } | { command: 'cancel_download'; target: BrowserTarget; download_id: string };
+export type BrowserNavigationCommand = { command: 'reload' | 'stop_loading' | 'pause_navigation' | 'resume_navigation'; target: BrowserTarget; expected_navigation_sequence: number };
+export type BrowserCommand = BrowserNavigationCommand | { command: 'create'; url: string } | { command: 'close_all' | 'open_downloads' | 'clear_site_data'; runtime_generation: number } | { command: 'activate' | 'close' | 'back' | 'forward' | 'open_external'; target: BrowserTarget } | { command: 'navigate'; target: BrowserTarget; url: string } | { command: 'set_zoom'; target: BrowserTarget; percent: number } | { command: 'permission'; target: BrowserTarget; request_id: string; allow: boolean } | { command: 'dialog'; target: BrowserTarget; request_id: string; accept: boolean; text?: string } | { command: 'cancel_download'; target: BrowserTarget; download_id: string };
 
 export type SurfaceBounds = { x: number; y: number; width: number; height: number };
 export type BrowserShortcutAction = 'address' | 'new_tab' | 'close_tab' | 'reload' | 'back' | 'forward';
-export type BrowserShortcut = { agent_session_id: string; target: BrowserTarget; action: BrowserShortcutAction };
+export type BrowserShortcut = { agent_session_id: string; target: BrowserTarget; action: BrowserShortcutAction; expected_navigation_sequence: number };
 export type BrowserViewEvent = { kind: 'snapshot'; snapshot: BrowserSnapshot } | { kind: 'unavailable'; code: string };
 
 export function newerSnapshot(current: BrowserSnapshot | null, incoming: BrowserSnapshot): BrowserSnapshot {
@@ -28,6 +30,7 @@ export function newerSnapshot(current: BrowserSnapshot | null, incoming: Browser
 export interface BrowserClient {
   listenShortcuts(agentSessionId: string, listener: (shortcut: BrowserShortcut) => void): Promise<() => void>;
   closeResource(agentSessionId: string, runtimeGeneration: number): Promise<void>;
+  snapshot(agentSessionId: string): Promise<BrowserSnapshot>;
   ensure(agentSessionId: string): Promise<BrowserSnapshot>;
   command(agentSessionId: string, command: BrowserCommand): Promise<BrowserSnapshot>;
   diagnostics(agentSessionId: string, target: BrowserTarget): Promise<unknown>;
@@ -43,6 +46,7 @@ export const browserClient: BrowserClient = {
     return listen<BrowserShortcut>('browser-capability-shortcut', event => { if (event.payload.agent_session_id === id) listener(event.payload); });
   },
   async closeResource(id, runtimeGeneration) { await httpRequest('DELETE', `/api/agent-sessions/${encodeURIComponent(id)}/browser`, { runtime_generation: runtimeGeneration }); },
+  snapshot: id => httpRequest('GET', `/api/agent-sessions/${encodeURIComponent(id)}/browser`, undefined, { timeoutMs: 1000 }),
   ensure: id => httpRequest('POST', `/api/agent-sessions/${encodeURIComponent(id)}/browser`, {}),
   command: (id, command) => httpRequest('POST', `/api/agent-sessions/${encodeURIComponent(id)}/browser/commands`, command),
   diagnostics: (id, target) => httpRequest('GET', `/api/agent-sessions/${encodeURIComponent(id)}/browser/diagnostics?${new URLSearchParams({ tab_id: target.tab_id, runtime_generation: String(target.runtime_generation), document_generation: String(target.document_generation) })}`),

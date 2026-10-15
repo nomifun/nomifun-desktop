@@ -350,7 +350,8 @@ fn generated_tauri_context<R: tauri::Runtime>() -> tauri::Context<R> {
 ///    the SAME directory instead of drifting. (The pre-0.3.4 shell appended
 ///    `/Nomi` here, which turned that inheritance into `…/Nomi/Nomi` and
 ///    made the post-update boot reject its own dataset.)
-/// 2. The shared per-channel default from
+/// 2. Debug GUI acceptance builds may embed a data root at compile time.
+/// 3. The shared per-channel default from
 ///    `nomifun_app::cli::default_data_dir()`: stable builds use `NomiFun`,
 ///    non-stable builds a sibling such as `NomiFun-dev`.
 ///
@@ -360,8 +361,11 @@ fn generated_tauri_context<R: tauri::Runtime>() -> tauri::Context<R> {
 fn default_data_dir() -> anyhow::Result<PathBuf> {
     let requested = std::env::var_os("NOMIFUN_DATA_DIR")
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(nomifun_app::cli::default_data_dir);
+        .map(PathBuf::from);
+    #[cfg(debug_assertions)]
+    let requested = requested.or_else(|| option_env!("NOMIFUN_BROWSER_GUI_DATA_DIR")
+        .filter(|value| !value.is_empty()).map(PathBuf::from));
+    let requested = requested.unwrap_or_else(nomifun_app::cli::default_data_dir);
     nomifun_app::bootstrap::prepare_startup_storage_root(requested, None)
 }
 
@@ -3321,6 +3325,10 @@ fn main() -> std::process::ExitCode {
     // from here; the listeners bind their own ports.
     let mut cli = nomifun_app::cli::Cli::parse_from(["nomifun-desktop"]);
     cli.data_dir = data_dir.clone();
+    #[cfg(debug_assertions)]
+    if let Some(work_dir) = option_env!("NOMIFUN_BROWSER_GUI_WORK_DIR").filter(|value| !value.is_empty()) {
+        cli.work_dir = Some(PathBuf::from(work_dir));
+    }
     // Opt-in verbose backend logging without a custom build, e.g.
     //   NOMI_LOG_LEVEL=debug            (everything)
     //   NOMI_LOG_LEVEL=info             (default)
@@ -3780,6 +3788,14 @@ fn main() -> std::process::ExitCode {
                     let quitting = window.app_handle().state::<QuitFlag>().0.load(Ordering::SeqCst);
                     if !quitting {
                         api.prevent_close();
+                        #[cfg(debug_assertions)]
+                        if option_env!("NOMIFUN_BROWSER_GUI_DATA_DIR").is_some_and(|value| !value.is_empty())
+                            && option_env!("NOMIFUN_BROWSER_GUI_WORK_DIR").is_some_and(|value| !value.is_empty()) {
+                            let app = window.app_handle();
+                            app.state::<QuitFlag>().0.store(true, Ordering::SeqCst);
+                            app.exit(0);
+                            return;
+                        }
                         let _ = window.hide();
                     }
                 }

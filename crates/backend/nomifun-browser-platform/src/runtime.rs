@@ -145,7 +145,8 @@ impl BrowserResourceKey {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BrowserProfilePersistence {
     Persistent,
     Ephemeral,
@@ -686,9 +687,23 @@ pub enum BrowserTabCommand {
     },
     Reload {
         target: BrowserTabTarget,
+        /// The attempt observed when the command was issued, including while
+        /// its successor has not committed a new document yet.
+        expected_navigation_sequence: u64,
     },
     StopLoading {
         target: BrowserTabTarget,
+        expected_navigation_sequence: u64,
+    },
+    /// User-only hold of future main-document navigations, independent of Stop.
+    PauseNavigation {
+        target: BrowserTabTarget,
+        expected_navigation_sequence: u64,
+    },
+    /// User-only explicit release of the Page hold; does not invent a reload.
+    ResumeNavigation {
+        target: BrowserTabTarget,
+        expected_navigation_sequence: u64,
     },
     /// Explicit user handoff of the current native URL; never an Agent action.
     OpenExternal { target: BrowserTabTarget },
@@ -711,6 +726,17 @@ pub enum BrowserTabCommand {
 }
 
 impl BrowserTabCommand {
+    /// Attempt guard supplied with the command, never sampled after ingress.
+    pub fn expected_navigation_sequence(&self) -> Option<u64> {
+        match self {
+            Self::Reload { expected_navigation_sequence, .. }
+            | Self::StopLoading { expected_navigation_sequence, .. }
+            | Self::PauseNavigation { expected_navigation_sequence, .. }
+            | Self::ResumeNavigation { expected_navigation_sequence, .. } => Some(*expected_navigation_sequence),
+            _ => None,
+        }
+    }
+
     pub fn target(&self) -> Option<&BrowserTabTarget> {
         match self {
             Self::Create { .. } | Self::CloseAll { .. } | Self::OpenDownloads { .. } | Self::ClearSiteData { .. } => None,
@@ -720,8 +746,10 @@ impl BrowserTabCommand {
             | Self::Navigate { target, .. }
             | Self::Back { target }
             | Self::Forward { target }
-            | Self::Reload { target }
-            | Self::StopLoading { target }
+            | Self::Reload { target, .. }
+            | Self::StopLoading { target, .. }
+            | Self::PauseNavigation { target, .. }
+            | Self::ResumeNavigation { target, .. }
             | Self::OpenExternal { target }
             | Self::CancelDownload { target, .. }
             | Self::Permission { target, .. }
@@ -1092,5 +1120,18 @@ mod interaction_capability_tests {
         }
         assert!(capabilities.limitations.iter().any(|item| item.contains("do not create trusted input or user activation")));
         assert!(WorkspaceError::UnsupportedAction.to_string().contains("Do not retry the same action"));
+    }
+
+    #[test]
+    fn navigation_controls_require_the_observed_attempt_sequence_on_the_wire() {
+        let target = serde_json::json!({ "tab_id": "owned", "runtime_generation": 7, "document_generation": 9 });
+        for command in ["reload", "stop_loading", "pause_navigation", "resume_navigation"] {
+            let missing = serde_json::json!({ "command": command, "target": target });
+            assert!(serde_json::from_value::<BrowserTabCommand>(missing).is_err(), "{command} accepted a missing attempt guard");
+            let guarded = serde_json::json!({ "command": command, "target": target, "expected_navigation_sequence": 11 });
+            let parsed = serde_json::from_value::<BrowserTabCommand>(guarded).unwrap();
+            assert_eq!(parsed.target().unwrap().document_generation, 9);
+            assert_eq!(parsed.expected_navigation_sequence(), Some(11));
+        }
     }
 }

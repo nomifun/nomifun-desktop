@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Modal } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
 import { Add, ArrowLeft, ArrowRight, Close, Earth, Lock, Refresh } from '@icon-park/react';
-import { browserClient, navigationUrl, newerSnapshot, type BrowserClient, type BrowserCommand, type BrowserSnapshot, type SurfaceBounds, type BrowserShortcut, type BrowserShortcutAction } from './client';
+import { browserClient, navigationUrl, newerSnapshot, type BrowserClient, type BrowserCommand, type BrowserNavigationCommand, type BrowserSnapshot, type SurfaceBounds, type BrowserShortcut, type BrowserShortcutAction } from './client';
 import { browserShortcut } from './keyboardShortcuts';
 import styles from './BrowserPanel.module.css';
 import type { BrowserLinkRequest } from './BrowserLinkContext';
@@ -15,7 +15,30 @@ import { capabilityPermissionsHref } from '@/renderer/hooks/system/systemPermiss
 type Props = { agentSessionId: string; onClose: () => void; client?: BrowserClient; linkRequest?: BrowserLinkRequest; onLinkConsumed?: (id: number, handled: boolean) => void; onLinkAvailabilityChange?: (available: boolean) => void; hostSurfaceAvailable?: boolean; panelId?: string };
 type BrowserFailureKind = 'host' | 'initialization' | 'locked' | 'request' | 'clear';
 type BrowserFailure = { kind: BrowserFailureKind; message: 'browserWorkspace.hostUnavailableHint' | 'browserWorkspace.requestFailed' | 'browserWorkspace.clearSiteDataFailed' | 'browserWorkspace.initializationFailed' | 'browserWorkspace.stopHint'; retryable: boolean };
+type CommandFlight = { scope: object; sequence: number; command?: BrowserCommand };
 const ZOOM_LEVELS = [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200] as const;
+const navigationCommands = new Set(['create', 'navigate', 'reload', 'back', 'forward']);
+const interruptsNavigation = (command?: BrowserCommand) => command?.command === 'stop_loading' || command?.command === 'pause_navigation';
+const pageFailurePhases = new Map([['BROWSER_PAGE_FAILED', 'failed'], ['BROWSER_PAGE_STOPPED', 'cancelled'], ['BROWSER_PAGE_CRASHED', 'crashed']]);
+
+function hasMatchingPageFailure(next: BrowserSnapshot | null, before: BrowserSnapshot | null, command: BrowserCommand, code: string): boolean {
+  if (!next?.runtime || !before || next.agent_session_id !== before.agent_session_id || next.browser_id !== before.browser_id) return false;
+  if (before.runtime && next.runtime.runtime_generation !== before.runtime.runtime_generation) return false;
+  return next.runtime.tabs.some(tab => {
+    if (!tab.load || tab.load.phase !== pageFailurePhases.get(code)) return false;
+    if (command.command === 'create') {
+      return !before.runtime?.tabs.some(previous => previous.target.tab_id === tab.target.tab_id) &&
+        navigationUrl(tab.load.requested_url ?? tab.url) === navigationUrl(command.url);
+    }
+    if (!('target' in command) || tab.target.tab_id !== command.target.tab_id || tab.target.runtime_generation !== command.target.runtime_generation ||
+        tab.target.document_generation < command.target.document_generation) return false;
+    if ('expected_navigation_sequence' in command && !navigationCommands.has(command.command)) return tab.load.navigation_sequence === command.expected_navigation_sequence;
+    const previous = before.runtime?.tabs.find(previous => previous.target.tab_id === command.target.tab_id);
+    const sequence = 'expected_navigation_sequence' in command ? command.expected_navigation_sequence : previous?.load?.navigation_sequence;
+    return sequence !== undefined && tab.load.navigation_sequence > sequence &&
+      (command.command !== 'navigate' || navigationUrl(tab.load.requested_url ?? tab.url) === navigationUrl(command.url));
+  });
+}
 
 export function browserFailure(reason: unknown): BrowserFailure {
   const http = isBackendHttpError(reason) ? reason : null;
@@ -38,6 +61,7 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
   const addressScope = useRef('');
   const addressWasDraft = useRef(false);
   const [busy, setBusy] = useState(false);
+  const [interrupting, setInterrupting] = useState(false);
   const [failure, setFailure] = useState<BrowserFailure | null>(null);
   const [clearFailed, setClearFailed] = useState(false);
   const [retry, setRetry] = useState(0);
@@ -54,23 +78,29 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
   const requestLayout = useRef<() => void>(() => {});
   const blocked = useRef(false);
   const draft = useRef(false);
-  const currentAgentSession = useRef(agentSessionId);
   const currentSnapshot = useRef(snapshot);
   const focusedEmptySession = useRef('');
   const commandSequence = useRef(0);
+  const commandScope = useRef({ agentSessionId, client, hostSurfaceAvailable });
+  const commandFlight = useRef<CommandFlight | null>(null);
+  const interruptFlight = useRef<CommandFlight | null>(null);
   const shortcutHandler = useRef<(action: BrowserShortcutAction, source?: BrowserShortcut) => void>(() => {});
   const [confirmation, setConfirmation] = useState<{ kind: 'rebuild' | 'clear_site_data'; agentSessionId: string; generation: number } | null>(null);
   useEffect(() => { setConfirmation(null); setMenuOpen(false); }, [agentSessionId]);
-  currentAgentSession.current = agentSessionId;
+  if (commandScope.current.agentSessionId !== agentSessionId || commandScope.current.client !== client || commandScope.current.hostSurfaceAvailable !== hostSurfaceAvailable) {
+    commandScope.current = { agentSessionId, client, hostSurfaceAvailable };
+  }
   currentSnapshot.current = snapshot;
   draft.current = draftTab;
   useEffect(() => { requestLayout.current(); }, [draftTab]);
   const tabs = snapshot?.runtime?.tabs ?? [];
   const downloads = snapshot?.runtime?.downloads ?? [];
   const active = tabs.find(tab => tab.target.tab_id === snapshot?.runtime?.active_tab_id);
+  const navigationSequence = active?.load?.navigation_sequence;
   const pageLoading = active?.load
     ? active.load.navigation_sequence > 0 && ['requested', 'provisional', 'committed'].includes(active.load.phase)
     : active?.lifecycle === 'loading';
+  const navigationControl = active?.load?.navigation_control;
   const attemptedAddress = active?.load && active.load.navigation_sequence > 0 && ['requested', 'provisional', 'committed', 'failed', 'cancelled'].includes(active.load.phase)
     ? active.load.requested_url : undefined;
   const pageAddress = (attemptedAddress ?? active?.url) === 'about:blank' ? '' : attemptedAddress ?? active?.url ?? '';
@@ -79,7 +109,8 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
     : active?.load?.phase === 'failed' || active?.lifecycle === 'failed' ? 'failed'
       : active?.load?.phase === 'cancelled' || active?.lifecycle === 'stopped' ? 'cancelled' : null;
   const noPageContent = active?.load?.content_state === 'none' || pageIssue === 'crashed' || (active?.lifecycle === 'stopped' && !active.load);
-  const pageIssueVisible = Boolean(active && pageIssue && !draftTab && !failure);
+  const pageIssueVisible = Boolean(active && pageIssue && !draftTab && !failure &&
+    !(navigationControl?.paused && active.load?.cancellation_reason === 'automatic_navigation_paused'));
   const progress = Number.isFinite(active?.load?.estimated_progress) ? Math.max(0, Math.min(100, active!.load!.estimated_progress!)) : undefined;
   const zoomPercent = active?.zoom_percent ?? 100;
   const zoomOutPercent = [...ZOOM_LEVELS].reverse().find(percent => percent < zoomPercent);
@@ -93,8 +124,15 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
   );
   const dialog = active?.script_dialog;
   const locked = snapshot?.run.input_state === 'agent_running';
-  const controlsDisabled = !snapshot || locked || snapshot.run.input_gate_failed || busy || Boolean(failure);
+  const inputDisabled = !hostSurfaceAvailable || !snapshot || locked || snapshot.run.input_gate_failed || Boolean(failure);
+  const controlsDisabled = inputDisabled || busy || interrupting;
   const canNavigate = !controlsDisabled;
+  const canReload = canNavigate && Boolean(active) && navigationSequence !== undefined;
+  const canResumeNavigation = canNavigate && navigationSequence !== undefined && Boolean(navigationControl?.paused);
+  const canInterruptNavigation = !inputDisabled && !interrupting && !draftTab && Boolean(active) && navigationSequence !== undefined &&
+    (!busy || Boolean(commandFlight.current?.command && navigationCommands.has(commandFlight.current.command.command)));
+  const canStopLoading = canInterruptNavigation && pageLoading;
+  const canPauseNavigation = canInterruptNavigation && Boolean(navigationControl) && !navigationControl?.paused;
   const canZoom = canNavigate && Boolean(active) && !draftTab;
   const canAct = !controlsDisabled;
   const canDownload = !controlsDisabled;
@@ -136,12 +174,14 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
   }, [agentSessionId, failure, locked, snapshot?.run.input_gate_failed, tabs.length]);
 
   useEffect(() => {
+    const invalidateCommands = () => { ++commandSequence.current; commandFlight.current = null; interruptFlight.current = null; };
+    invalidateCommands();
+    setInterrupting(false);
     if (!hostSurfaceAvailable) {
       setSnapshot(null); setAddress(''); setBusy(false); setNotice(''); setClearFailed(false);
-      ++commandSequence.current;
       blocked.current = true;
       setFailure({ kind: 'host', message: 'browserWorkspace.hostUnavailableHint', retryable: false });
-      return () => { requestLayout.current = () => {}; hide.current = () => {}; };
+      return () => { invalidateCommands(); requestLayout.current = () => {}; hide.current = () => {}; };
     }
     let disposed = false;
     let attachment: number | undefined;
@@ -228,7 +268,7 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
     window.addEventListener('scroll', schedule, true);
     document.addEventListener('visibilitychange', schedule);
     setFailure(null);
-    setSnapshot(null); setAddress(''); setBusy(false); setNotice(''); setClearFailed(false); ++commandSequence.current;
+    setSnapshot(null); setAddress(''); setBusy(false); setNotice(''); setClearFailed(false);
     blocked.current = false;
     void (async () => {
       try {
@@ -241,7 +281,7 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
     })();
     return () => {
       disposed = true;
-      ++commandSequence.current;
+      invalidateCommands();
       cancelAnimationFrame(frame);
       resized.disconnect(); overlays.disconnect();
       window.removeEventListener('resize', schedule);
@@ -253,12 +293,32 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
     };
   }, [agentSessionId, client, hostSurfaceAvailable, retry]);
 
+  // React state updates are batched. Claim the operation synchronously so a
+  // second submit/shortcut cannot dispatch before the Busy render commits.
+  const beginFlight = useCallback((command?: BrowserCommand): CommandFlight | null => {
+    const interrupt = interruptsNavigation(command);
+    const holder = interrupt ? interruptFlight : commandFlight;
+    if (holder.current || (!interrupt && interruptFlight.current)) return null;
+    const flight = { scope: commandScope.current, sequence: ++commandSequence.current, command };
+    holder.current = flight;
+    if (interrupt) setInterrupting(true); else setBusy(true);
+    return flight;
+  }, []);
+  const ownsFlight = useCallback((flight: CommandFlight) => commandScope.current === flight.scope &&
+    (interruptsNavigation(flight.command) ? interruptFlight : commandFlight).current === flight, []);
+  const finishFlight = useCallback((flight: CommandFlight) => {
+    if (!ownsFlight(flight)) return;
+    if (interruptsNavigation(flight.command)) { interruptFlight.current = null; setInterrupting(false); }
+    else { commandFlight.current = null; setBusy(false); }
+  }, [ownsFlight]);
+
   const run = useCallback(async (command: BrowserCommand, fromLink = false) => {
-    if (controlsDisabled) return;
+    if (command.command === 'stop_loading' ? !canStopLoading : command.command === 'pause_navigation' ? !canPauseNavigation : controlsDisabled) return;
+    const flight = beginFlight(command);
+    if (!flight) return;
+    const before = currentSnapshot.current;
     if (['navigate', 'reload', 'back', 'forward'].includes(command.command)) addressEdited.current = false;
-    const issued = ++commandSequence.current;
-    const current = () => currentAgentSession.current === agentSessionId && commandSequence.current === issued;
-    setBusy(true);
+    const current = () => ownsFlight(flight) && commandSequence.current === flight.sequence;
     try { const next = await client.command(agentSessionId, command); if (current()) {
       setSnapshot(previous => newerSnapshot(previous, next));
       if (command.command === 'open_external') setNotice(t('browserWorkspace.externalHandedOff'));
@@ -266,7 +326,42 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
       if (command.command === 'clear_site_data') setNotice(t('browserWorkspace.clearSiteDataDone'));
     } }
     catch (reason) { if (current()) {
-      if (command.command === 'permission') setNotice(t('browserWorkspace.permissionExpired'));
+      const http = isBackendHttpError(reason) ? reason : null;
+      const code = http?.code ?? '';
+      const pageCommand = navigationCommands.has(command.command) || 'expected_navigation_sequence' in command;
+      if (code === 'BROWSER_NATIVE_INITIALIZATION_FAILED' || code === 'BROWSER_NATIVE_SURFACE_UNAVAILABLE' || http?.status === 501 || http?.status === 401 || http?.status === 403) {
+        blocked.current = true; hide.current(); setFailure(browserFailure(reason));
+      } else if (pageCommand && pageFailurePhases.has(code)) {
+        // CDP can report its error before the native completion callback. Read
+        // facts only; no retry, reload or inferred successful navigation.
+        let observed = currentSnapshot.current;
+        for (let attempt = 0; attempt < 3 && !hasMatchingPageFailure(observed, before, command, code); attempt++) {
+          try { observed = await client.snapshot(agentSessionId); }
+          catch (readFailure) {
+            const readHttp = isBackendHttpError(readFailure) ? readFailure : null;
+            if (readHttp && ([401, 403, 501].includes(readHttp.status) || readHttp.code === 'BROWSER_NATIVE_INITIALIZATION_FAILED' || readHttp.code === 'BROWSER_NATIVE_SURFACE_UNAVAILABLE')) {
+              if (current()) { blocked.current = true; hide.current(); setFailure(browserFailure(readFailure)); }
+              return;
+            }
+            break;
+          }
+          if (!current()) return;
+          const next = observed;
+          setSnapshot(previous => newerSnapshot(previous, next));
+          if (!hasMatchingPageFailure(observed, before, command, code) && attempt < 2) {
+            await new Promise(resolve => window.setTimeout(resolve, 100));
+            if (!current()) return;
+            if (hasMatchingPageFailure(currentSnapshot.current, before, command, code)) observed = currentSnapshot.current;
+          }
+        }
+        if (!current()) return;
+        if (observed && hasMatchingPageFailure(observed, before, command, code)) {
+          const next = observed;
+          setSnapshot(previous => newerSnapshot(previous, next));
+        }
+        setNotice(t('browserWorkspace.pageNavigationIncomplete'));
+      } else if (pageCommand && code === 'BROWSER_STALE_TARGET') setNotice(t('browserWorkspace.navigationControlFailed'));
+      else if (command.command === 'permission') setNotice(t('browserWorkspace.permissionExpired'));
       else if (command.command === 'dialog') setNotice(t('browserWorkspace.dialogExpired'));
       else if (command.command === 'cancel_download') setNotice(t('browserWorkspace.downloadCancelFailed'));
       else if (command.command === 'open_external') setNotice(t('browserWorkspace.externalFailed'));
@@ -276,19 +371,25 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
       else if (fromLink) setNotice(t('browserWorkspace.linkFailed'));
       else { blocked.current = true; hide.current(); setFailure(browserFailure(reason)); }
     } }
-    finally { if (current()) setBusy(false); }
-  }, [client, agentSessionId, controlsDisabled, t]);
+    finally { finishFlight(flight); }
+  }, [client, agentSessionId, controlsDisabled, canStopLoading, canPauseNavigation, beginFlight, ownsFlight, finishFlight, t]);
+  const controlNavigation = (command: BrowserNavigationCommand['command']) => {
+    if (active && navigationSequence !== undefined) void run({ command, target: active.target, expected_navigation_sequence: navigationSequence });
+  };
   shortcutHandler.current = (action, source) => {
     if (controlsDisabled || confirmation || dialog || permission) return;
     if (source && (draftTab || source.agent_session_id !== agentSessionId || !active ||
         source.target.tab_id !== active.target.tab_id || source.target.runtime_generation !== active.target.runtime_generation ||
-        source.target.document_generation !== active.target.document_generation)) return;
+        source.target.document_generation !== active.target.document_generation || navigationSequence === undefined || source.expected_navigation_sequence !== navigationSequence)) return;
     if (action === 'address') { if (canNavigate) { input.current?.focus(); input.current?.select(); } return; }
     if (action === 'new_tab') { if (canNavigate) { setDraftTab(true); setAddress(''); input.current?.focus(); } return; }
     if (action === 'close_tab' && draftTab) { setDraftTab(false); return; }
     if (!active || draftTab) return;
     if (action === 'back' && !active.can_go_back || action === 'forward' && !active.can_go_forward) return;
-    void run({ command: action === 'close_tab' ? 'close' : action, target: active.target });
+    if (action === 'reload') {
+      const sequence = source ? source.expected_navigation_sequence : navigationSequence;
+      if (sequence !== undefined) void run({ command: 'reload', target: source?.target ?? active.target, expected_navigation_sequence: sequence });
+    } else void run({ command: action === 'close_tab' ? 'close' : action, target: active.target });
   };
   useEffect(() => {
     let disposed = false;
@@ -328,33 +429,33 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
 
   const rebuild = () => {
     const generation = snapshot?.runtime?.runtime_generation;
-    if (generation === undefined || busy || (locked && !snapshot?.run.input_gate_failed)) return;
+    if (generation === undefined || busy || interrupting || commandFlight.current || interruptFlight.current || (locked && !snapshot?.run.input_gate_failed)) return;
     setConfirmation({ kind: 'rebuild', agentSessionId, generation });
   };
   const copyAddress = async () => {
     if (controlsDisabled || draftTab || !active?.url) return;
-    const issued = ++commandSequence.current;
-    const current = () => currentAgentSession.current === agentSessionId && commandSequence.current === issued;
-    setBusy(true);
+    const flight = beginFlight();
+    if (!flight) return;
+    const current = () => ownsFlight(flight) && commandSequence.current === flight.sequence;
     try {
       await copyText(active.url);
       if (current()) setNotice(t('browserWorkspace.addressCopied'));
     } catch {
       if (current()) setNotice(t('browserWorkspace.addressCopyFailed'));
-    } finally { if (current()) setBusy(false); }
+    } finally { finishFlight(flight); }
   };
   const copyDiagnostics = async () => {
     if (controlsDisabled || draftTab || !active) return;
     const captured = { ...active.target };
-    const issued = ++commandSequence.current;
+    const flight = beginFlight();
+    if (!flight) return;
     const current = () => {
       const latest = currentSnapshot.current;
       const latestTarget = latest?.runtime?.tabs.find(tab => tab.target.tab_id === latest.runtime?.active_tab_id)?.target;
-      return currentAgentSession.current === agentSessionId && commandSequence.current === issued &&
+      return ownsFlight(flight) && commandSequence.current === flight.sequence &&
         latest?.run.input_state === 'user_ready' && !latest.run.input_gate_failed && latestTarget?.tab_id === captured.tab_id &&
         latestTarget.runtime_generation === captured.runtime_generation && latestTarget.document_generation === captured.document_generation;
     };
-    setBusy(true);
     try {
       const report = await client.diagnostics(agentSessionId, captured);
       if (!current()) return;
@@ -363,11 +464,11 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
     } catch {
       if (current()) setNotice(t('browserWorkspace.diagnosticsCopyFailed'));
     } finally {
-      if (currentAgentSession.current === agentSessionId && commandSequence.current === issued) setBusy(false);
+      finishFlight(flight);
     }
   };
   const confirmRebuild = async () => {
-    if (!confirmation || confirmation.agentSessionId !== agentSessionId || busy) return;
+    if (!confirmation || confirmation.agentSessionId !== agentSessionId || busy || interrupting || commandFlight.current || interruptFlight.current) return;
     if (confirmation.kind === 'clear_site_data') {
       if (controlsDisabled) return;
       const captured = confirmation;
@@ -378,15 +479,15 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
       setConfirmation(current => current === captured ? null : current);
       return;
     }
-    const issued = ++commandSequence.current;
-    const current = () => currentAgentSession.current === agentSessionId && commandSequence.current === issued;
-    setBusy(true);
+    const flight = beginFlight();
+    if (!flight) return;
+    const current = () => ownsFlight(flight) && commandSequence.current === flight.sequence;
     try {
       await client.closeResource(agentSessionId, confirmation.generation);
       if (current()) { blocked.current = false; setRetry(value => value + 1); }
     } catch {
       if (current()) setNotice(t('browserWorkspace.rebuildFailed'));
-    } finally { if (current()) { setBusy(false); setConfirmation(null); } }
+    } finally { if (current()) setConfirmation(null); finishFlight(flight); }
   };
 
   const browserTitle = t('settings.openCapabilities.domainBrowserTitle', { defaultValue: 'Browser' });
@@ -467,10 +568,10 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
     <form className={styles.navigation} onSubmit={navigate}>
       <button className={styles.icon} type='button' disabled={!canNavigate || !active?.can_go_back} aria-label={t('browserWorkspace.back')} onClick={() => active && void run({ command: 'back', target: active.target })}><ArrowLeft size={16} /></button>
       <button className={styles.icon} type='button' disabled={!canNavigate || !active?.can_go_forward} aria-label={t('browserWorkspace.forward')} onClick={() => active && void run({ command: 'forward', target: active.target })}><ArrowRight size={16} /></button>
-      <button className={styles.icon} type='button' disabled={!canNavigate || !active} aria-label={t(pageLoading ? 'browserWorkspace.stopLoading' : 'browserWorkspace.reload')} onClick={() => active && void run({ command: pageLoading ? 'stop_loading' : 'reload', target: active.target })}>{pageLoading ? <Close size={15} /> : <Refresh size={15} />}</button>
+      <button className={styles.icon} type='button' disabled={pageLoading ? !canStopLoading : !canReload} aria-label={t(pageLoading ? 'browserWorkspace.stopLoading' : 'browserWorkspace.reload')} onClick={() => controlNavigation(pageLoading ? 'stop_loading' : 'reload')}>{pageLoading ? <Close size={15} /> : <Refresh size={15} />}</button>
       <input ref={input} value={address} disabled={!canNavigate} placeholder={t('browserWorkspace.addressPlaceholder')} aria-label={t('browserWorkspace.address')} onChange={event => { event.target.setCustomValidity(''); addressEdited.current = true; setAddress(event.target.value); }} spellCheck={false} autoComplete='off' />
       <div className={styles.menuHost}>
-        <button ref={menuButton} type='button' className={styles.icon} aria-label={t('browserWorkspace.menu')} aria-haspopup='menu' aria-expanded={menuOpen} disabled={!snapshot?.runtime || busy || (locked && !snapshot.run.input_gate_failed)} onClick={() => setMenuOpen(open => !open)} onKeyDown={event => {
+        <button ref={menuButton} type='button' className={styles.icon} aria-label={t('browserWorkspace.menu')} aria-haspopup='menu' aria-expanded={menuOpen} disabled={!snapshot?.runtime || busy || interrupting || (locked && !snapshot.run.input_gate_failed)} onClick={() => setMenuOpen(open => !open)} onKeyDown={event => {
           if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
           event.preventDefault(); setMenuOpen(true); focusMenuItem(event.key === 'ArrowUp' ? 'last' : 'first');
         }}>⋯</button>
@@ -491,6 +592,7 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
           <div className={styles.menuDivider} />
           <button type='button' role='menuitem' disabled={controlsDisabled || draftTab || !active?.url} onClick={() => { setMenuOpen(false); void copyAddress(); }}>{t('browserWorkspace.copyAddress')}</button>
           <button type='button' role='menuitem' disabled={controlsDisabled || draftTab || !active} onClick={() => { setMenuOpen(false); void copyDiagnostics(); }}>{t('browserWorkspace.copyDiagnostics')}</button>
+          {navigationControl && active && !draftTab && <button type='button' role='menuitem' disabled={navigationControl.paused ? !canResumeNavigation : !canPauseNavigation} onClick={() => { setMenuOpen(false); controlNavigation(navigationControl.paused ? 'resume_navigation' : 'pause_navigation'); }}>{t(navigationControl.paused ? 'browserWorkspace.resumeNavigation' : 'browserWorkspace.pauseNavigation')}</button>}
           <button type='button' role='menuitem' disabled={!canAct || draftTab || !active || !/^https?:\/\//i.test(active.url)} onClick={() => { setMenuOpen(false); if (active && !draftTab) void run({ command: 'open_external', target: active.target }); }}>{t('browserWorkspace.openExternal')}</button>
           <button type='button' role='menuitem' disabled={!canDownload} onClick={() => { setMenuOpen(false); if (snapshot?.runtime) void run({ command: 'open_downloads', runtime_generation: snapshot.runtime.runtime_generation }); }}>{t('browserWorkspace.openDownloads')}</button>
           <button type='button' role='menuitem' disabled={!canAct || !active || draftTab} onClick={() => {
@@ -523,6 +625,12 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
     {locked && <div className={styles.runLock} role='status'><Lock size={15} /><span><strong>{t('browserWorkspace.agentRunning')}</strong>{t('browserWorkspace.stopHint')}</span></div>}
     {snapshot?.run.input_gate_failed && <div className={styles.runLock} data-error role='alert'><Lock size={15} /><span><strong>{t('browserWorkspace.notReady')}</strong>{t('browserWorkspace.requestFailed')}</span></div>}
     {notice && <div className={styles.notice} role='status'><span>{notice}</span><button type='button' className={styles.icon} aria-label={t('browserWorkspace.dismissNotice')} onClick={() => setNotice('')}><Close size={12} /></button></div>}
+    {active && navigationControl && (navigationControl.paused || navigationControl.loop_suspected) && !draftTab && !failure && <div className={styles.pageProblem} role='status' aria-live='polite'>
+      <div><strong>{t(navigationControl.paused ? 'browserWorkspace.navigationPaused' : 'browserWorkspace.navigationRepeating')}</strong>
+        <span>{navigationControl.paused ? t('browserWorkspace.navigationPausedHint') : t('browserWorkspace.navigationRepeatingHint', { count: navigationControl.repeated_navigation_count })}</span>
+      </div>
+      <button type='button' disabled={navigationControl.paused ? !canResumeNavigation : !canPauseNavigation} onClick={() => controlNavigation(navigationControl.paused ? 'resume_navigation' : 'pause_navigation')}>{t(navigationControl.paused ? 'browserWorkspace.resumeNavigation' : 'browserWorkspace.pauseNavigation')}</button>
+    </div>}
     {pageLoading && !draftTab && !failure && <div className={styles.loadStatus} role='status' aria-live='polite'>
       <span>{t('browserWorkspace.pageLoading')}{progress !== undefined && ` · ${progress}%`}</span>
       {slowLoading && <span>{t('browserWorkspace.pageLoadingSlow')}</span>}
@@ -540,7 +648,7 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
     {!permission && active && Boolean(active.blocked_permissions?.length) && !locked && !draftTab && !failure && <div className={styles.permission} role='status'>
       <span>{t('browserWorkspace.permissionRetryHint')}</span>
       {hasSystemPermissionBlock && <a className={styles.permissionLink} href={capabilityPermissionsHref('browser-use')}>{t('browserWorkspace.permissionSettings')}</a>}
-      <button type='button' disabled={!canNavigate} onClick={() => void run({ command: 'reload', target: active.target })}>{t('browserWorkspace.reload')}</button>
+      <button type='button' disabled={!canReload} onClick={() => controlNavigation('reload')}>{t('browserWorkspace.reload')}</button>
     </div>}
     {permission && active && !locked && !draftTab && !failure && <div className={styles.permission} role='group' aria-live='polite' aria-label={t('browserWorkspace.permissionTitle')}>
       <span>{t('browserWorkspace.permissionRequest', { origin: permission.origin, permission: t(`browserWorkspace.permissionKinds.${permission.kind}`, { defaultValue: permission.kind }) })}</span>

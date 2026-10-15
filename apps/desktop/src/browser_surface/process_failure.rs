@@ -68,11 +68,12 @@ pub(crate) async fn install(
                 unsafe {
                     args.ProcessFailedKind(&mut kind)?;
                 }
-                let changed = apply(
+                let changed = invalidates_document(kind) && (super::navigation::crashed(&event_label) || apply(
                     &mut metadata.lock().unwrap_or_else(|error| error.into_inner()),
                     kind,
-                );
+                ));
                 if changed {
+                    super::navigation_request_gate::document_exited(&event_label);
                     let _=super::permissions::deny_pending(&event_label);
                     super::fail_pending_commands(&event_label);
                     revision.bump();

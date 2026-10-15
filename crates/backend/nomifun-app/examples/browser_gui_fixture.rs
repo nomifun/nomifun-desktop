@@ -6,6 +6,9 @@
 //! scripts/validation/run-macos-wk-app-acceptance.mjs for the authenticated driver.
 //! --user-browser-only prepares a normal chat Session with no Browser Module
 //! or Browser Resource binding, for testing the independent user sidebar.
+//! After that owned GUI dataset's desktop has normally exited, append a second
+//! empty Session with: <existing-data-dir> --append-user-browser-session <first-session-id>.
+//! The append mode uses only the normal owner-scoped API and starts no model server.
 //! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--user-browser-only|--native-actions|--native-pause|--computer-denied|--computer-granted|--computer-a11y-denied|--computer-screen-denied|--computer-input|--computer-stale-focus|--computer-concurrent-user|--computer-pointer-input <target-app> <target-status>|--computer-click-variants <target-app> <target-status>|--computer-drag-cancel <target-app> <target-status>|--computer-input-crash <target-app> <target-status>|--computer-unicode-input <target-app> <target-status>|--computer-large-a11y <target-app> <target-status>|--computer-soak <target-app> <target-status>|--computer-launch-missing]
 //! Launch the real desktop EXE with NOMIFUN_DATA_DIR set to the printed path.
 use axum::{
@@ -2812,6 +2815,209 @@ async fn fixture_read(app: &DesktopServer, path: &str) -> anyhow::Result<Value> 
     let value:Value=response.json().await?;
     Ok(value["data"].clone())
 }
+
+fn require_empty_user_browser_session(
+    observed: &Value,
+    session_id: &str,
+    title: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        observed["session"]["agent_session_id"] == session_id
+            && observed["head"]["session_id"] == session_id
+            && observed["session"]["metadata"]["title"] == title
+            && observed["session"]["metadata"]["archived"] == false
+            && observed["session"]["owner_ref"]["principal_kind"] == "user"
+            && observed["session"]["remote_binding_provenance"].is_null()
+            && observed["session"]["parent_session_id"].is_null(),
+        "Expected the exact owned standalone user-browser fixture Session"
+    );
+    anyhow::ensure!(
+        observed["session"]["agent_binding"]["typed_resource_bindings"]
+            .as_array().is_some_and(Vec::is_empty)
+            && observed["head"]["active_turn_id"].is_null()
+            && observed["head"]["active_set_generation"] == 0,
+        "User-browser fixture must have no resources or active Turn; resource_count={:?}, active_turn_present={}, generation={:?}, message_count={:?}",
+        observed["session"]["agent_binding"]["typed_resource_bindings"].as_array().map(Vec::len),
+        !observed["head"]["active_turn_id"].is_null(),
+        observed["head"]["active_set_generation"].as_u64(),
+        observed["messages"].as_array().map(Vec::len)
+    );
+    let events = observed["events"].as_array()
+        .ok_or_else(|| anyhow::anyhow!("Canonical fixture events missing"))?;
+    anyhow::ensure!(
+        !events.is_empty() && events.len() <= 3
+            && events.iter().enumerate().all(|(index, event)| {
+                event["seq"].as_u64() == Some(index as u64 + 1)
+                    && matches!(event["kind"].as_str(), Some(
+                        "session/opening" | "capability/active-set-committed" | "session/ready"
+                    ))
+            })
+            && events[0]["kind"] == "session/opening"
+            && observed["head"]["last_seq"].as_u64() == Some(events.len() as u64)
+            && observed["session"]["next_seq"].as_u64() == Some(events.len() as u64 + 1),
+        "Fixture has non-initial canonical history; zero Turns cannot be proved"
+    );
+    // The current registry projects opening into session_status; ready only
+    // reduces the head. Its status row is initialization, not chat or a Turn.
+    let opening = &events[0];
+    let correlation = opening["correlation_id"].as_str()
+        .ok_or_else(|| anyhow::anyhow!("Opening status correlation missing"))?;
+    let identity = format!("session:{correlation}");
+    let opening_id = opening["event_id"].as_str()
+        .ok_or_else(|| anyhow::anyhow!("Opening event identity missing"))?;
+    let expected = json!({"projection_id":identity,"correlation_id":correlation,
+        "presentation_intent":"session_status","state":"opening",
+        "reference":{"last_event_id":opening_id}});
+    let messages = observed["messages"].as_array()
+        .ok_or_else(|| anyhow::anyhow!("Canonical status projections missing"))?;
+    anyhow::ensure!(messages.len() == 1, "Fixture has additional non-initial message projections");
+    let message = &messages[0];
+    anyhow::ensure!(message["session_id"] == session_id && message["projection_id"] == identity
+        && message["first_seq"] == 1 && message["last_seq"] == 1
+        && message["presentation_intent"] == "session_status"
+        && message["message_type"].is_null() && message["message_status"].is_null()
+        && message["projection"] == expected,
+        "Fixture projection differs from exact canonical initialization status");
+    Ok(())
+}
+
+async fn append_user_browser_session(root: PathBuf, first_id: &str) -> anyhow::Result<()> {
+    nomifun_common::validate_uuidv7(first_id)?;
+    anyhow::ensure!(root.is_absolute() && root.is_dir(), "Existing absolute fixture data directory required");
+    // This opt-in branch accepts the exact previously prepared GUI test root,
+    // not an arbitrary user dataset. The normal server still owns its dataset
+    // lock and startup validation. The caller must first prove the desktop exit.
+    let launch_path = root.parent().ok_or_else(|| anyhow::anyhow!("Fixture parent missing"))?
+        .join("gui-launch-evidence.json");
+    let launch: Value = serde_json::from_slice(&std::fs::read(launch_path)?)?;
+    let prepared_root = PathBuf::from(launch["data_directory"].as_str()
+        .ok_or_else(|| anyhow::anyhow!("Prepared GUI data root missing"))?);
+    let work_root = PathBuf::from(launch["work_directory"].as_str()
+        .ok_or_else(|| anyhow::anyhow!("Prepared GUI work root missing"))?);
+    anyhow::ensure!(
+        launch["scope"] == "production-main-source-debug-vite-test-namespace"
+            && launch["canonical_session_id"] == first_id
+            && std::fs::canonicalize(&prepared_root)? == std::fs::canonicalize(&root)?
+            && work_root.is_absolute() && work_root.is_dir()
+            && root.join("nomifun-backend.db").is_file(),
+        "Append requires the exact previously owned GUI fixture root and first Session"
+    );
+    let cli = nomifun_app::cli::Cli {
+        host: "127.0.0.1".into(), port: 0, data_dir: root.clone(),
+        work_dir: Some(work_root), app_version: env!("CARGO_PKG_VERSION").into(),
+        local: true, log_dir: Some(root.join("logs")), log_level: Some("off".into()), command: None,
+    };
+    let browser_resources = Arc::new(BrowserResourceService::new(Arc::new(PreparatoryBrowserFactory)));
+    let (app, keep_alive) = match DesktopServer::start_with_outcome(&cli, "", None, None, None,
+        DesktopHostServices { browser_resources: Some(browser_resources), ..Default::default() }).await {
+        Ok(started) => started,
+        Err(mut failure) => {
+            if !failure.cleanup_verified() {
+                let Some(retained) = failure.take_retained_keep_alive() else {
+                    eprintln!("GUI fixture startup cleanup is unverified without retry authority; retaining runtime");
+                    std::future::pending::<()>().await;
+                    return Err(failure.into_inner());
+                };
+                loop {
+                    match retained.shutdown_after_startup_failure().await {
+                        Ok(()) => break,
+                        Err(error) => {
+                            eprintln!("GUI fixture startup cleanup retry pending: {error:#}");
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                        }
+                    }
+                }
+                drop(retained);
+            }
+            return Err(failure.into_inner());
+        }
+    };
+    let prepared = async {
+        const FIRST_TITLE: &str = "内置浏览器独立用户入口验收";
+        const SECOND_TITLE: &str = "内置浏览器第二独立会话验收";
+        let first_path = format!("/api/agent-sessions/{first_id}");
+        let before = fixture_read(&app, &first_path).await?;
+        require_empty_user_browser_session(&before, first_id, FIRST_TITLE)?;
+        let reference = before["session"]["agent_binding"]["preset_revision_ref"].clone();
+        let preset_id = reference["preset_id"].as_str()
+            .ok_or_else(|| anyhow::anyhow!("Fixture Preset identity missing"))?;
+        let editor = fixture_read(&app, &format!("/api/agent-presets/{preset_id}/editor")).await?;
+        let grants = editor["draft"]["document"]["enabled_capabilities"].as_array()
+            .ok_or_else(|| anyhow::anyhow!("Fixture capability grants missing"))?;
+        let capability_ids = grants.iter().map(|grant| grant["capability"]["id"].as_str()
+            .ok_or_else(|| anyhow::anyhow!("Fixture capability identity missing")))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        anyhow::ensure!(
+            editor["preset"]["display_name"] == FIRST_TITLE
+                && editor["draft"]["current_revision"] == reference
+                && !capability_ids.contains(&"browser"),
+            "Fixture Preset guard failed; title_matches={}, reference_matches={}, capability_ids={:?}",
+            editor["preset"]["display_name"] == FIRST_TITLE,
+            editor["draft"]["current_revision"] == reference,
+            capability_ids
+        );
+        // This is the same product model selection the UI sends, derived by the
+        // API from the saved canonical binding. No projection text is used as
+        // Runtime history, authority or a fallback for canonical facts.
+        let projection = fixture_read(&app, &format!("{first_path}/projection")).await?;
+        anyhow::ensure!(
+            projection["conversation_id"] == first_id
+                && projection["agent_snapshot"]["canonical_binding"] == before["session"]["agent_binding"]
+                && projection["agent_snapshot"]["enabled_capabilities"] == json!(capability_ids),
+            "Fixture model presentation does not match its canonical binding"
+        );
+        let model = json!({
+            "provider_id": projection["model"]["provider_id"].as_str()
+                .ok_or_else(|| anyhow::anyhow!("Fixture model Provider missing"))?,
+            "model": projection["model"]["model"].as_str()
+                .ok_or_else(|| anyhow::anyhow!("Fixture model name missing"))?
+        });
+        anyhow::ensure!(model["model"] == "browser-gui-fixture", "Append requires the local synthetic GUI model");
+        let response = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(30)).build()?
+            .post(format!("http://127.0.0.1:{}/api/agent-sessions", app.loopback_port()))
+            .header("x-nomi-local-trust", app.local_trust_secret())
+            .header("idempotency-key", format!("browser-gui-secondary:{first_id}"))
+            .json(&json!({"preset_id":preset_id,"title":SECOND_TITLE,"model":model,"resource_selections":[]}))
+            .send().await?;
+        anyhow::ensure!(response.status().is_success(), "Formal secondary Session creation failed");
+        let created: Value = response.json().await?;
+        let second_id = created["data"]["agent_session_id"].as_str()
+            .ok_or_else(|| anyhow::anyhow!("Secondary Session identity missing"))?;
+        anyhow::ensure!(second_id != first_id, "Secondary Session reused the first identity");
+        let second = fixture_read(&app, &format!("/api/agent-sessions/{second_id}")).await?;
+        require_empty_user_browser_session(&second, second_id, SECOND_TITLE)?;
+        let second_projection = fixture_read(&app, &format!("/api/agent-sessions/{second_id}/projection")).await?;
+        anyhow::ensure!(
+            second["session"]["agent_binding"]["preset_revision_ref"] == reference
+                && second["session"]["owner_ref"] == before["session"]["owner_ref"]
+                && second_projection["model"]["provider_id"] == model["provider_id"]
+                && second_projection["model"]["model"] == model["model"]
+                && second_projection["agent_snapshot"]["enabled_capabilities"] == projection["agent_snapshot"]["enabled_capabilities"],
+            "Secondary Session did not preserve the exact fixture Preset/model contract"
+        );
+        let after = fixture_read(&app, &first_path).await?;
+        anyhow::ensure!(before == after, "Preparing the secondary Session changed the first canonical Session");
+        Ok::<_, anyhow::Error>(json!({"data_dir":root,"first_session_id":first_id,"secondary_session_id":second_id,
+            "preset_revision":reference,"model":model,"first_session_unchanged":true,
+            "browser_resource_bindings":0,"browser_capability_grants":0,"enabled_capability_ids":capability_ids,
+            "turns":0,"model_server_started":false}))
+    }.await;
+    // Always run the normal lifecycle, including validation failures. The real
+    // desktop may take ownership again only after this succeeds.
+    loop {
+        match app.shutdown_all().await {
+            Ok(()) => break,
+            Err(error) => {
+                eprintln!("GUI fixture cleanup retry pending; retaining server ownership: {error:#}");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+    drop(app);
+    drop(keep_alive);
+    println!("BROWSER_GUI_SECONDARY_SESSION_READY {}", prepared?);
+    Ok(())
+}
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let root = PathBuf::from(
@@ -2819,6 +3025,12 @@ async fn main() -> anyhow::Result<()> {
             .nth(1)
             .ok_or_else(|| anyhow::anyhow!("new absolute data directory required"))?,
     );
+    if std::env::args().nth(2).as_deref() == Some("--append-user-browser-session") {
+        let first_id = std::env::args().nth(3)
+            .ok_or_else(|| anyhow::anyhow!("Exact first GUI Session identity required"))?;
+        anyhow::ensure!(std::env::args().nth(4).is_none(), "Unexpected append fixture arguments");
+        return append_user_browser_session(root, &first_id).await;
+    }
     anyhow::ensure!(
         root.is_absolute() && !root.exists(),
         "refusing an existing or relative data directory"

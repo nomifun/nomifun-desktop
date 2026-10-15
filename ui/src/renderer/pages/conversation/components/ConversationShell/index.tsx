@@ -11,6 +11,8 @@ import { ipcBridge } from '@/common';
 import { Message } from '@arco-design/web-react';
 import ContentSider, { useContentSiderCollapse } from '@renderer/components/layout/ContentSider';
 import { useResizableSplit } from '@renderer/hooks/ui/useResizableSplit';
+import { useContainerWidth } from '@renderer/hooks/ui/useContainerWidth';
+import { LayoutContext, useLayoutContext, type WorkSurfaceSpaceRequest } from '@renderer/hooks/context/LayoutContext';
 import WorkpathSessionList from '@renderer/pages/conversation/SessionList';
 import { useSidebarDisplayPreferences } from '@renderer/pages/conversation/SessionList/hooks/useSidebarDisplayPreferences';
 import { addProjectWorkpath } from '@renderer/pages/conversation/SessionList/utils/projectWorkpaths';
@@ -42,6 +44,13 @@ const ConversationShell: React.FC = () => {
   const navigate = useNavigate();
 
   const sidebar = useContentSiderCollapse(SESSION_SIDER_STORAGE_KEY, false);
+  const layout = useLayoutContext();
+  const { ref: shellRef, width: shellWidth } = useContainerWidth<HTMLDivElement>({ fallbackToWindowWidth: true });
+  const [workSurfaceSpace, setWorkSurfaceSpace] = useState<WorkSurfaceSpaceRequest | null>(null);
+  const reserveWorkSurfaceSpace = useCallback((request: WorkSurfaceSpaceRequest) => {
+    setWorkSurfaceSpace(request);
+    return () => setWorkSurfaceSpace(current => current === request ? null : current);
+  }, []);
   const [batchMode, setBatchMode] = useState(false);
   const {
     preferences: displayPreferences,
@@ -58,15 +67,25 @@ const ConversationShell: React.FC = () => {
     storageKey: SESSION_SIDER_WIDTH_STORAGE_KEY,
   });
 
-  const collapsed = sidebar.collapsed;
+  // Measure the complete shell, not the expanded child pane. Otherwise hiding
+  // the list would change the measurement used to decide whether to show it.
+  const constrainedCollapsed = Boolean(workSurfaceSpace && shellWidth - sessionResize.splitRatio < workSurfaceSpace.minimumWidth);
+  const collapsed = sidebar.collapsed || constrainedCollapsed;
+  const reserveSiderSpace = layout?.reserveSiderSpace;
+  useEffect(() => {
+    if (workSurfaceSpace) return reserveSiderSpace?.(workSurfaceSpace);
+  }, [reserveSiderSpace, workSurfaceSpace]);
 
   const collapse = useCallback(() => {
     sidebar.setCollapsed(true);
   }, [sidebar]);
 
   const toggle = useCallback(() => {
-    sidebar.toggle();
-  }, [sidebar]);
+    if (constrainedCollapsed) {
+      workSurfaceSpace?.close();
+      sidebar.setCollapsed(false);
+    } else sidebar.toggle();
+  }, [constrainedCollapsed, sidebar, workSurfaceSpace]);
 
   // Broadcast collapse state so the titlebar toggle reflects it (mount + change).
   useEffect(() => {
@@ -150,12 +169,14 @@ const ConversationShell: React.FC = () => {
 
   return (
     <InitialMessageProvider>
-      <div className='relative flex size-full min-h-0'>
+      <LayoutContext.Provider value={layout ? { ...layout, reserveWorkSurfaceSpace } : null}>
+      <div ref={shellRef} className='relative flex size-full min-h-0'>
         {!collapsed && panel}
         <div className='relative flex-1 min-w-0 min-h-0 flex flex-col'>
           <Outlet />
         </div>
       </div>
+      </LayoutContext.Provider>
     </InitialMessageProvider>
   );
 };

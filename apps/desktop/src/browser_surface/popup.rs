@@ -15,8 +15,13 @@ use webview2_com::{
 use windows::Win32::{Foundation::HWND, UI::Input::KeyboardAndMouse::IsWindowEnabled};
 use windows::core::{BOOL, IUnknown, Interface, PWSTR};
 
+#[cfg(debug_assertions)]
+#[path = "popup_phase_probe.rs"]
+mod phase_probe;
+
 const LIMIT: usize = 8;
 const UNAVAILABLE: &str = "Native popup request is stale or unavailable.";
+type Admission = std::sync::Arc<dyn Fn() -> Option<PopupAdmission> + Send + Sync>;
 
 struct Pending {
     owner: uuid::Uuid,
@@ -60,6 +65,8 @@ struct Registration {
     popup_token: i64,
     navigation_token: i64,
     close_token: i64,
+    #[cfg(debug_assertions)]
+    phase_probe: Option<phase_probe::Probe>,
 }
 
 impl Drop for Registration {
@@ -107,6 +114,17 @@ fn deny_owner(owner: uuid::Uuid) {
             .filter_map(|(id, pending)| (pending.owner == owner).then_some(*id))
             .collect()
     });
+    for id in ids {
+        let _ = deny(id);
+    }
+}
+
+/// Pause invalidates requests admitted before its hold, including ones whose
+/// child is still being created. `deny` latches denial before native cleanup;
+/// failed or in-flight cleanup retains its exact owner and cannot be resumed.
+pub(super) fn pause_view(label: &str) {
+    let ids: Vec<_> = PENDING.with(|entries| entries.borrow().iter()
+        .filter_map(|(id, pending)| (pending.opener_label == label).then_some(*id)).collect());
     for id in ids {
         let _ = deny(id);
     }
@@ -179,6 +197,7 @@ pub(crate) struct PopupRequest {
     pub(crate) opener_label: String,
     pub(crate) url: String,
     pub(crate) admission: Option<PopupAdmission>,
+    admission_check: Option<Admission>,
 }
 
 #[derive(Clone)]
@@ -204,9 +223,13 @@ impl PopupRequest {
         let id = self.id;
         let label = child.label().to_owned();
         let admission = self.admission.clone();
+        let admission_check = self.admission_check.clone();
         let (tx, rx) = oneshot::channel();
         self.app.run_on_main_thread(move || {
             let result = PENDING.with(|entries| {
+                if !admission_current(&admission_check, &admission) {
+                    return Err(UNAVAILABLE);
+                }
                 let mut entries = entries.borrow_mut();
                 let pending = entries.get_mut(&id).ok_or(UNAVAILABLE)?;
                 if pending.creating || pending.denied || pending.child_native_closed
@@ -237,10 +260,14 @@ impl PopupRequest {
         let app = self.app.clone();
         let opener_label = self.opener_label.clone();
         let admission = self.admission.clone();
+        let admission_check = self.admission_check.clone();
         let (tx, rx) = oneshot::channel();
         self.app
             .run_on_main_thread(move || {
                 let result = (|| -> Result<tauri::Webview, String> {
+                    if !admission_current(&admission_check, &admission) {
+                        return Err(UNAVAILABLE.into());
+                    }
                     if admission.as_ref().is_some_and(|context| {
                         context.cancel.is_cancelled() || context.closed.is_cancelled()
                     }) {
@@ -264,6 +291,7 @@ impl PopupRequest {
                                     &label,
                                     tauri::WebviewUrl::External("about:blank".parse().unwrap()),
                                 )
+                                .external_page()
                                 .with_environment(environment)
                                 .incognito(private)
                                 .focused(false)
@@ -302,6 +330,7 @@ impl PopupRequest {
         let id = self.id;
         let label = child.label().to_owned();
         let admission = self.admission.clone();
+        let admission_check = self.admission_check.clone();
         let (tx, rx) = oneshot::channel();
         child
             .with_webview(move |platform| {
@@ -311,6 +340,9 @@ impl PopupRequest {
                 }
                 let mut pending = PENDING.with(|entries| entries.borrow_mut().remove(&id));
                 let result = (|| -> Result<(), String> {
+                    if !admission_current(&admission_check, &admission) {
+                        return Err(UNAVAILABLE.into());
+                    }
                     if admission.as_ref().is_some_and(|context| {
                         context.cancel.is_cancelled() || context.closed.is_cancelled()
                     }) {
@@ -346,6 +378,11 @@ impl PopupRequest {
                             .controller()
                             .CoreWebView2()
                             .map_err(|_| UNAVAILABLE)?;
+                        #[cfg(debug_assertions)]
+                        phase_probe_snapshot(&label, &core, "before_binding");
+                        if !admission_current(&admission_check, &admission) {
+                            return Err(UNAVAILABLE.into());
+                        }
                         pending
                             .args
                             .SetNewWindow(&core)
@@ -359,6 +396,8 @@ impl PopupRequest {
                             .map_err(|_| UNAVAILABLE)?;
                         pending.deferral.take();
                         pending.child.take();
+                        #[cfg(debug_assertions)]
+                        phase_probe_snapshot(&label, &core, "after_binding");
                     }
                     Ok(())
                 })();
@@ -373,6 +412,29 @@ impl PopupRequest {
             })
             .map_err(|_| UNAVAILABLE.to_owned())?;
         rx.await.map_err(|_| UNAVAILABLE.to_owned())?
+    }
+}
+
+#[cfg(debug_assertions)]
+fn phase_probe_snapshot(label: &str, core: &ICoreWebView2, phase: &'static str) {
+    let samples = REGISTRATIONS.with(|entries| {
+        entries.borrow().values()
+            .find(|entry| entry.label == label)
+            .and_then(|entry| entry.phase_probe.as_ref()).map(phase_probe::Probe::samples)
+    });
+    // A native submission can pump callbacks. Release the registration borrow
+    // before making any COM call, just as the existing popup owner does.
+    if let Some(samples) = samples { phase_probe::snapshot(&samples, core, phase); }
+}
+
+fn admission_current(check: &Option<Admission>, expected: &Option<PopupAdmission>) -> bool {
+    match check {
+        None => true,
+        Some(check) => check().is_some_and(|current| {
+            expected.as_ref().is_some_and(|expected| current.opener == expected.opener)
+                && !current.cancel.is_cancelled()
+                && !current.closed.is_cancelled()
+        }),
     }
 }
 
@@ -421,14 +483,14 @@ impl PopupSubscription {
 
     pub(crate) async fn listen_guarded(
         view: &tauri::Webview,
-        admission: std::sync::Arc<dyn Fn() -> Option<PopupAdmission> + Send + Sync>,
+        admission: Admission,
     ) -> Result<Self, String> {
         Self::listen_inner(view, Some(admission)).await
     }
 
     async fn listen_inner(
         view: &tauri::Webview,
-        admission: Option<std::sync::Arc<dyn Fn() -> Option<PopupAdmission> + Send + Sync>>,
+        admission: Option<Admission>,
     ) -> Result<Self, String> {
         let owner = uuid::Uuid::now_v7();
         let app = view.app_handle().clone();
@@ -469,6 +531,14 @@ impl PopupSubscription {
                     unsafe {
                         args.IsUserInitiated(&mut gesture)?;
                     }
+                    let mut raw = PWSTR::null();
+                    let status = unsafe { args.Uri(&mut raw) };
+                    let uri = super::event_string(raw, 8192);
+                    status?;
+                    if super::navigation::popup_requested(&opener_label, uri.clone(), gesture.as_bool())
+                        == Some(false) {
+                        return Ok(());
+                    }
                     if !gesture.as_bool() {
                         return Ok(());
                     }
@@ -484,10 +554,6 @@ impl PopupSubscription {
                     }) {
                         return Ok(());
                     }
-                    let mut raw = PWSTR::null();
-                    let status = unsafe { args.Uri(&mut raw) };
-                    let uri = super::event_string(raw, 8192);
-                    status?;
                     let Some(url) = uri.as_deref().and_then(admitted_uri) else {
                         return Ok(());
                     };
@@ -527,6 +593,7 @@ impl PopupSubscription {
                         opener_label: opener_label.clone(),
                         url,
                         admission: context.clone(),
+                        admission_check: admission.clone(),
                     };
                     if sender.try_send(request).is_err() {
                         let _ = deny(id);
@@ -575,10 +642,14 @@ impl PopupSubscription {
                     let _ = unsafe { core.remove_NewWindowRequested(popup_token) };
                     return Err(error);
                 }
+                #[cfg(debug_assertions)]
+                let phase_probe = phase_probe::Probe::install(&core, &label);
                 REGISTRATIONS.with(|entries| {
                     entries.borrow_mut().insert(
                         owner,
                         Registration {
+                            #[cfg(debug_assertions)]
+                            phase_probe,
                             label,
                             core,
                             popup_token,
@@ -632,6 +703,31 @@ impl PopupSubscription {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn retained_admission_rechecks_current_policy_and_exact_opener_before_binding() {
+        use std::sync::{Arc, Mutex};
+        let expected = PopupAdmission {
+            download: None,
+            opener: nomifun_browser_platform::runtime::BrowserTabTarget {
+                tab_id: "opener".into(), runtime_generation: 1, document_generation: 1,
+            },
+            cancel: Default::default(),
+            closed: Default::default(),
+        };
+        let current = Arc::new(Mutex::new(Some(expected.clone())));
+        let observed = current.clone();
+        let check: Option<Admission> = Some(Arc::new(move || observed.lock().unwrap().clone()));
+        assert!(admission_current(&check, &Some(expected.clone())));
+        *current.lock().unwrap() = None;
+        assert!(!admission_current(&check, &Some(expected.clone())));
+        let mut successor = expected.clone();
+        successor.opener.document_generation += 1;
+        *current.lock().unwrap() = Some(successor);
+        assert!(!admission_current(&check, &Some(expected.clone())));
+        *current.lock().unwrap() = Some(expected.clone());
+        expected.closed.cancel();
+        assert!(!admission_current(&check, &Some(expected)));
+    }
     #[test]
     fn failed_cleanup_retains_exact_authority_until_acknowledged() {
         let drops = std::rc::Rc::new(std::cell::Cell::new(0));

@@ -13,7 +13,8 @@ import classNames from 'classnames';
 import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { LayoutContext } from '@renderer/hooks/context/LayoutContext';
+import { LayoutContext, type WorkSurfaceSpaceRequest } from '@renderer/hooks/context/LayoutContext';
+import { useContainerWidth } from '@renderer/hooks/ui/useContainerWidth';
 import { NavigationHistoryProvider } from '@renderer/hooks/context/NavigationHistoryContext';
 import { WebuiServerProvider } from '@renderer/hooks/context/WebuiServerContext';
 import {
@@ -64,6 +65,21 @@ const Layout: React.FC<{
   const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState(false);
   const [railWidth, setRailWidth] = useState<number>(() => readStoredRailWidth());
+  const { ref: shellRef, width: shellWidth } = useContainerWidth<HTMLDivElement>({ fallbackToWindowWidth: true });
+  const [workSurfaceSpace, setWorkSurfaceSpace] = useState<WorkSurfaceSpaceRequest | null>(null);
+  const reserveSiderSpace = useCallback((request: WorkSurfaceSpaceRequest) => {
+    setWorkSurfaceSpace(request);
+    return () => setWorkSurfaceSpace(current => current === request ? null : current);
+  }, []);
+  const constrainedCollapsed = Boolean(workSurfaceSpace && shellWidth - railWidth < workSurfaceSpace.minimumWidth);
+  const effectiveCollapsed = collapsed || constrainedCollapsed;
+  const constrainedSurfaceRef = useRef<WorkSurfaceSpaceRequest | null>(null);
+  constrainedSurfaceRef.current = constrainedCollapsed ? workSurfaceSpace : null;
+  const setEffectiveCollapsed = useCallback((value: boolean) => {
+    // An explicit expansion gives the existing navigation panel the space.
+    if (!value) constrainedSurfaceRef.current?.close();
+    setCollapsed(value);
+  }, []);
   const updateAvailability = useUpdateAvailability();
   const { contextHolder: directorySelectionContextHolder } = useDirectorySelection();
   const navigate = useNavigate();
@@ -72,7 +88,7 @@ const Layout: React.FC<{
   const updateButtonLabel = updateAvailability.version
     ? `${t('update.availableTitle')}: ${updateAvailability.version}`
     : t('update.availableTitle');
-  const collapsedRef = useRef(collapsed);
+  const collapsedRef = useRef(effectiveCollapsed);
   const railWidthRef = useRef(railWidth);
   const dragStateRef = useRef<{ active: boolean; startX: number; startWidth: number }>({
     active: false,
@@ -86,7 +102,7 @@ const Layout: React.FC<{
   // Clear stale sidebar tooltips after navigation or collapse state changes.
   useEffect(() => {
     cleanupSiderTooltips();
-  }, [collapsed, location.pathname, location.search, location.hash]);
+  }, [effectiveCollapsed, location.pathname, location.search, location.hash]);
 
   // 启动后静默检查一次更新（仅桌面壳）：发现新版本时同步全局 Logo 入口并沿用现有弹窗提醒；
   // 无更新 / 离线 / 出错时不显示 Logo 入口。
@@ -116,8 +132,8 @@ const Layout: React.FC<{
 
   const siderWidth = railWidth;
   useEffect(() => {
-    collapsedRef.current = collapsed;
-  }, [collapsed]);
+    collapsedRef.current = effectiveCollapsed;
+  }, [effectiveCollapsed]);
   useEffect(() => {
     railWidthRef.current = railWidth;
   }, [railWidth]);
@@ -142,7 +158,7 @@ const Layout: React.FC<{
 
   // Double-click the drag handle to restore the default rail width.
   const resetSiderWidth = useCallback(() => {
-    setCollapsed(false);
+    setEffectiveCollapsed(false);
     railWidthRef.current = DEFAULT_SIDER_WIDTH;
     setRailWidth(DEFAULT_SIDER_WIDTH);
     try {
@@ -171,7 +187,7 @@ const Layout: React.FC<{
         ? proposedWidth < RAIL_COLLAPSE_THRESHOLD + SIDER_DRAG_HYSTERESIS
         : proposedWidth <= RAIL_COLLAPSE_THRESHOLD - SIDER_DRAG_HYSTERESIS;
       if (shouldCollapse !== wasCollapsed) {
-        setCollapsed(shouldCollapse);
+        setEffectiveCollapsed(shouldCollapse);
       }
       if (shouldCollapse) return;
 
@@ -220,17 +236,20 @@ const Layout: React.FC<{
   const siderStyle = {
     position: 'relative' as const,
     overflow: 'visible' as const,
+    boxSizing: 'border-box' as const,
+    borderRight: effectiveCollapsed ? 'none' : undefined,
   };
 
   return (
-    <LayoutContext.Provider value={{ siderCollapsed: collapsed, setSiderCollapsed: setCollapsed }}>
+    <LayoutContext.Provider value={{ siderCollapsed: effectiveCollapsed, setSiderCollapsed: setEffectiveCollapsed, reserveSiderSpace }}>
       <NavigationHistoryProvider>
         <WebuiServerProvider>
           <div
+            ref={shellRef}
             className='app-shell flex flex-col size-full min-h-0'
             style={
               {
-                '--app-sider-width': `${collapsed ? 0 : siderWidth}px`,
+                '--app-sider-width': `${effectiveCollapsed ? 0 : siderWidth}px`,
               } as React.CSSProperties
             }
           >
@@ -239,10 +258,10 @@ const Layout: React.FC<{
           <ArcoLayout className={'size-full layout flex-1 min-h-0'}>
             <ArcoLayout.Sider
               collapsedWidth={0}
-              collapsed={collapsed}
+              collapsed={effectiveCollapsed}
               width={siderWidth}
               className={classNames('!bg-2 layout-sider', {
-                collapsed: collapsed,
+                collapsed: effectiveCollapsed,
               })}
               style={siderStyle}
             >
@@ -250,13 +269,13 @@ const Layout: React.FC<{
                 className={classNames(
                   'flex items-center justify-start pt-8px pb-8px pl-18px pr-16px gap-12px layout-sider-header',
                   {
-                    'cursor-pointer group ': collapsed,
+                    'cursor-pointer group ': effectiveCollapsed,
                   }
                 )}
               >
                 <div
                   className={classNames('shrink-0 size-32px relative rd-0.5rem overflow-hidden', {
-                    '!size-24px': collapsed,
+                    '!size-24px': effectiveCollapsed,
                   })}
                 >
                   <svg className='absolute inset-0 w-full h-full' viewBox='0 0 80 80' fill='none'>
@@ -281,7 +300,7 @@ const Layout: React.FC<{
                 <div className='min-w-0 flex-1 truncate text-16px text-t-primary collapsed-hidden font-semibold'>
                   NomiFun
                 </div>
-                {updateAvailability.available && !collapsed && (
+                {updateAvailability.available && !effectiveCollapsed && (
                   <InstantHoverTooltip content={updateButtonLabel} position='right' className='ml-auto'>
                     <button
                       type='button'
@@ -305,7 +324,7 @@ const Layout: React.FC<{
                       onSessionClick: () => {
                         cleanupSiderTooltips();
                       },
-                      collapsed,
+                      collapsed: effectiveCollapsed,
                     } as any)
                   : sider}
               </ArcoLayout.Content>

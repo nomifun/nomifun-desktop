@@ -39,6 +39,14 @@ pub(crate) mod diagnostics;
 pub(crate) mod frames;
 #[path = "navigation_metadata.rs"]
 pub(crate) mod navigation_metadata;
+#[path = "windows_navigation.rs"]
+pub(crate) mod navigation;
+#[path = "navigation_request_gate.rs"]
+pub(crate) mod navigation_request_gate;
+#[path = "windows_presentation.rs"]
+pub(crate) mod presentation;
+#[path = "effective_environment.rs"]
+pub(crate) mod effective_environment;
 #[path = "permissions.rs"]
 pub(crate) mod permissions;
 #[path = "script_dialogs.rs"]
@@ -99,6 +107,105 @@ type CommandSender = std::rc::Rc<RefCell<Option<oneshot::Sender<Result<Value, St
 struct PendingCommand {
     label: String,
     sender: CommandSender,
+    navigation: Option<PendingNavigation>,
+    before_unload: BeforeUnloadDecision,
+    deferred_response: Option<Result<Value, String>>,
+}
+struct PendingNavigation {
+    receipt: navigation::Receipt,
+    source: nomifun_browser_platform::runtime::BrowserNavigationSource,
+    navigate: bool,
+    rejected: Arc<AtomicBool>,
+}
+#[derive(Default, PartialEq, Eq)]
+enum BeforeUnloadDecision { #[default] None, Pending, Rejected }
+#[derive(Clone, Copy)]
+pub(super) struct BeforeUnloadRequest { command: uuid::Uuid, receipt: navigation::Receipt }
+
+// This is a scope for the explicit same-document Stay control, not proof that
+// this host command caused the dialog. Page/iframe timers can also open it.
+pub(super) fn before_unload_request(label: &str) -> Option<BeforeUnloadRequest> {
+    let receipt = navigation::requested_receipt(label)?;
+    COMMANDS.with(|commands| commands.borrow().iter().find_map(|(id, pending)| {
+        (pending.label == label && pending.navigation.as_ref().is_some_and(|nav| nav.receipt == receipt))
+            .then_some(BeforeUnloadRequest { command: *id, receipt })
+    }))
+}
+pub(super) fn begin_before_unload_rejection(label: &str, request: BeforeUnloadRequest) -> Result<bool, nomifun_browser_platform::runtime::WorkspaceError> {
+    if navigation::requested_receipt(label) != Some(request.receipt) { return Ok(false); }
+    let retained = COMMANDS.with(|commands| {
+        let mut commands = commands.borrow_mut();
+        let Some(pending) = commands.get_mut(&request.command) else { return false; };
+        if pending.label != label || pending.before_unload != BeforeUnloadDecision::None
+            || !pending.navigation.as_ref().is_some_and(|nav| nav.receipt == request.receipt) { return false; }
+        pending.before_unload = BeforeUnloadDecision::Pending;
+        true
+    });
+    if !retained { return Ok(false); }
+    // Stay explicitly stops only the captured current request. It does not
+    // attribute an unsolicited dialog or its callback to that request.
+    match navigation::stop_requested_before_unload(label, request.receipt) {
+        Ok(true) => Ok(true),
+        Ok(false) => { finish_before_unload_decision(request.command, false); Ok(false) },
+        Err(_) => {
+            finish_before_unload_decision(request.command, false);
+            Err(nomifun_browser_platform::runtime::WorkspaceError::NativeCommandFailed)
+        },
+    }
+}
+pub(super) fn complete_before_unload_rejection(label: &str, request: BeforeUnloadRequest, acknowledged: bool) {
+    let rejected = acknowledged && navigation::before_unload_stopped_matches(label, request.receipt);
+    finish_before_unload_decision(request.command, rejected);
+}
+fn finish_before_unload_decision(command: uuid::Uuid, rejected: bool) {
+    let response = COMMANDS.with(|commands| {
+        let mut commands = commands.borrow_mut();
+        let Some(pending) = commands.get_mut(&command) else { return None; };
+        if pending.before_unload != BeforeUnloadDecision::Pending { return None; }
+        pending.before_unload = if rejected { BeforeUnloadDecision::Rejected } else { BeforeUnloadDecision::None };
+        pending.deferred_response.take()
+    });
+    if let Some(response) = response { finish_protocol_command(command, response); }
+}
+fn finish_protocol_command(id: uuid::Uuid, result: Result<Value, String>) {
+    let mut result = Some(result);
+    let pending = COMMANDS.with(|commands| {
+        let mut commands = commands.borrow_mut();
+        let pending = commands.get_mut(&id)?;
+        // Deferral.Complete may pump this callback. Its result is retained until
+        // the exact false reply has either acknowledged or failed.
+        if pending.before_unload == BeforeUnloadDecision::Pending {
+            pending.deferred_response = result.take();
+            return None;
+        }
+        commands.remove(&id)
+    });
+    let Some(pending) = pending else { return; };
+    let result = result.unwrap();
+    if let Some(nav) = pending.navigation {
+        let failed = result.as_ref().map_or(true, navigation_response_failed);
+        let download = result.as_ref().is_ok_and(|value| value["isDownload"].as_bool() == Some(true));
+        let same_document = nav.navigate && !failed && !download && result.as_ref().is_ok_and(|value| value.get("loaderId").is_none());
+        if known_before_unload_abort(&pending.before_unload, &result) && !download {
+            nav.rejected.store(true, Ordering::Release);
+            navigation::settled_rejection(&pending.label, nav.receipt, nav.source);
+        } else {
+            if failed {
+                navigation::settled_protocol_failure(&pending.label, nav.receipt, nav.source, result.as_ref().ok().and_then(|value|value["errorText"].as_str()));
+            } else {
+                navigation::settled(&pending.label, nav.receipt, nav.source, false, download, same_document);
+            }
+        }
+    }
+    if let Some(sender) = pending.sender.borrow_mut().take() { let _ = sender.send(result); }
+}
+fn known_before_unload_abort(decision: &BeforeUnloadDecision, result: &Result<Value, String>) -> bool {
+    *decision == BeforeUnloadDecision::Rejected && result.as_ref().is_ok_and(|value|value["errorText"].as_str()==Some("net::ERR_ABORTED") && value["isDownload"].as_bool()!=Some(true))
+}
+pub(crate) fn navigation_response_failed(response: &Value) -> bool {
+    // Chromium downloads deliberately abort document navigation. The separate
+    // positive download result hands settlement to the native transfer owner.
+    response.get("errorText").is_some() && response["isDownload"].as_bool()!=Some(true)
 }
 
 /// A confirmed renderer/browser exit is native settlement evidence: the old
@@ -344,6 +451,9 @@ pub(super) fn finalize_closed_view(label: &str) {
     fail_pending_commands(label);
     popup::close_view(label);
     navigation_metadata::close_view(label);
+    navigation::close_view(label);
+    navigation_request_gate::close_view(label);
+    presentation::close_view(label);
     permissions::close_view(label);
     script_dialogs::close_view(label);
     process_failure::close_view(label);
@@ -373,7 +483,24 @@ async fn protocol_call_session(
     method: &str,
     params: Value,
 ) -> Result<Value, String> {
-    protocol_call_inner(view,session,method,params,None,None).await
+    protocol_call_inner(view,session,method,params,None,None,None,None).await
+}
+
+pub(crate) struct NavigationDispatch {
+    pub source: nomifun_browser_platform::navigation::BrowserNavigationSource,
+    pub url: Option<String>,
+    pub action: nomifun_browser_platform::navigation::BrowserNavigationActionType,
+    pub receipt: Arc<std::sync::Mutex<Option<navigation::Receipt>>>,
+    pub rejected_before_unload: Arc<AtomicBool>,
+    pub cancel: tokio_util::sync::CancellationToken,
+    pub closing: tokio_util::sync::CancellationToken,
+}
+
+pub(crate) async fn protocol_navigation(view:&tauri::Webview,method:&str,params:Value,dispatch:NavigationDispatch,expected:Option<navigation::Receipt>)->Result<Value,String>{
+    protocol_call_inner(view,None,method,params,None,None,Some(dispatch),expected).await
+}
+pub(crate) async fn stop_navigation(view:&tauri::Webview,expected:navigation::Receipt)->Result<(),String>{
+    navigation::stop_current(view,expected).await
 }
 
 pub(crate) struct UserFileCommandGuard {
@@ -389,14 +516,14 @@ impl UserFileCommandGuard {
     }
 }
 async fn set_user_files(view:&tauri::Webview,session:Option<&str>,params:Value,guard:UserFileCommandGuard)->Result<Value,String> {
-    protocol_call_inner(view,session,"DOM.setFileInputFiles",params,None,Some(guard)).await
+    protocol_call_inner(view,session,"DOM.setFileInputFiles",params,None,Some(guard),None,None).await
 }
 
 pub(crate) async fn reconcile_file_chooser_policy(view:&tauri::Webview,input_locked:Arc<AtomicBool>)->Result<(),String> {
-    protocol_call_inner(view,None,"Page.setInterceptFileChooserDialog",serde_json::json!({}),Some(input_locked),None).await.map(|_|())
+    protocol_call_inner(view,None,"Page.setInterceptFileChooserDialog",serde_json::json!({}),Some(input_locked),None,None,None).await.map(|_|())
 }
 
-async fn protocol_call_inner(view:&tauri::Webview,session:Option<&str>,method:&str,params:Value,current_input_policy:Option<Arc<AtomicBool>>,user_guard:Option<UserFileCommandGuard>)->Result<Value,String> {
+async fn protocol_call_inner(view:&tauri::Webview,session:Option<&str>,method:&str,params:Value,current_input_policy:Option<Arc<AtomicBool>>,user_guard:Option<UserFileCommandGuard>,navigation_dispatch:Option<NavigationDispatch>,navigation_guard:Option<navigation::Receipt>)->Result<Value,String> {
     if view.app_handle().get_webview(view.label()).is_none() {
         return Err("Browser view is no longer registered.".into());
     }
@@ -405,6 +532,7 @@ async fn protocol_call_inner(view:&tauri::Webview,session:Option<&str>,method:&s
     }
     let recovery=matches!(method,"Page.navigate"|"Page.reload"|"Page.getNavigationHistory"|"Page.navigateToHistoryEntry");
     let chooser_policy=method=="Page.setInterceptFileChooserDialog";
+    let navigate=method=="Page.navigate";
     let method = HSTRING::from(method);
     let session = session.map(HSTRING::from);
     let label = view.label().to_owned();
@@ -419,6 +547,12 @@ async fn protocol_call_inner(view:&tauri::Webview,session:Option<&str>,method:&s
         if user_guard.as_ref().is_some_and(|guard|!guard.permitted()) {
             let _=tx.send(Err("User file request is no longer current".into()));
             return;
+        }
+        if navigation_dispatch.as_ref().is_some_and(|dispatch|dispatch.cancel.is_cancelled()||dispatch.closing.is_cancelled()) {
+            let _=tx.send(Err("Browser navigation was cancelled before dispatch.".into()));return;
+        }
+        if let Some(expected)=navigation_guard {
+            if let Err(error)=navigation::check(&label,expected) {let _=tx.send(Err(error));return;}
         }
         // ProcessFailed is positive evidence that the old document cannot
         // answer renderer commands. Do not enqueue a new unfinishable callback.
@@ -442,33 +576,40 @@ async fn protocol_call_inner(view:&tauri::Webview,session:Option<&str>,method:&s
             let _ = tx.send(Err("Browser has too many pending protocol commands.".into()));
             return;
         }
+        let navigation_source=navigation_dispatch.as_ref().map(|dispatch|dispatch.source);
+        let navigation_rejected=navigation_dispatch.as_ref().map(|dispatch|dispatch.rejected_before_unload.clone());
+        let navigation_receipt=if let Some(dispatch)=navigation_dispatch {
+            match navigation::prepare(&label,dispatch.source,dispatch.url,dispatch.action) {
+                Ok(receipt)=>{*dispatch.receipt.lock().unwrap_or_else(|e|e.into_inner())=Some(receipt);Some(receipt)},
+                Err(error)=>{let _=tx.send(Err(error));return;},
+            }
+        }else{None};
         // Completion and synchronous submission failure share one sender.
         let sender = std::rc::Rc::new(std::cell::RefCell::new(Some(tx)));
         COMMANDS.with(|commands| {
             commands.borrow_mut().insert(
                 command_id,
                 PendingCommand {
-                    label,
+                    label:label.clone(),
                     sender: sender.clone(),
+                    navigation: navigation_receipt.map(|receipt| PendingNavigation { receipt, source:navigation_source.unwrap(), navigate, rejected:navigation_rejected.unwrap() }),
+                    before_unload: BeforeUnloadDecision::None,
+                    deferred_response: None,
                 },
             )
         });
-        let completion_sender = sender.clone();
         let callback = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(
             move |status, response| {
-                COMMANDS.with(|commands| commands.borrow_mut().remove(&command_id));
                 let result = status
                     .map_err(|_| "Browser protocol command failed.".to_owned())
                     .and_then(|()| {
                         if response.len() > 4 * 1024 * 1024 {
                             return Err("Browser protocol response exceeds its limit.".to_owned());
                         }
-                        serde_json::from_str(&response)
+                        serde_json::from_str::<Value>(&response)
                             .map_err(|_| "Browser protocol response was invalid.".to_owned())
                     });
-                if let Some(sender) = completion_sender.borrow_mut().take() {
-                    let _ = sender.send(result);
-                }
+                finish_protocol_command(command_id, result);
                 Ok(())
             },
         ));
@@ -494,56 +635,12 @@ async fn protocol_call_inner(view:&tauri::Webview,session:Option<&str>,method:&s
             })
         };
         if submitted.is_err() {
-            COMMANDS.with(|commands| commands.borrow_mut().remove(&command_id));
-            if let Some(sender) = sender.borrow_mut().take() {
-                let _ = sender.send(Err(
-                    "Browser protocol command could not be submitted.".to_owned()
-                ));
-            }
+            finish_protocol_command(command_id, Err("Browser protocol command could not be submitted.".to_owned()));
         }
     })
     .map_err(|_| "Browser view is unavailable.".to_owned())?;
     rx.await
         .map_err(|_| "Browser closed before protocol completion.".to_owned())?
-}
-
-/// Wry creates a dedicated WRY_WEBVIEW child HWND for each WebView2 controller.
-/// Called inside apply_surface's existing main-thread task. Keep a pending
-/// screenshot's compositor alive while hiding its HWND immediately.
-pub(crate) fn hide_native_window(view: &tauri::Webview) -> Result<(), String> {
-    let parent = view
-        .window()
-        .hwnd()
-        .map_err(|_| "Browser window is unavailable.".to_owned())?
-        .0 as usize;
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    view.with_webview(move |platform| {
-        let result = (|| -> Result<(), String> {
-            let mut container = HWND::default();
-            unsafe { platform.controller().ParentWindow(&mut container) }
-                .map_err(|_| "Browser container is unavailable.".to_owned())?;
-            if container.0.is_null()
-                || container.0 as usize == parent
-                || unsafe { GetParent(container) }
-                    .map(|handle| handle.0 as usize)
-                    .ok()
-                    != Some(parent)
-            {
-                return Err("Browser capture container ownership is invalid.".into());
-            }
-            unsafe {
-                let _ = windows::Win32::UI::WindowsAndMessaging::ShowWindow(
-                    container,
-                    windows::Win32::UI::WindowsAndMessaging::SW_HIDE,
-                );
-            }
-            Ok(())
-        })();
-        let _ = tx.send(result);
-    })
-    .map_err(|_| "Browser view is unavailable.".to_owned())?;
-    rx.try_recv()
-        .map_err(|_| "Capture visibility requires the UI thread.".to_owned())?
 }
 
 /// Wry creates a dedicated WRY_WEBVIEW child HWND for each WebView2 controller.
@@ -660,6 +757,9 @@ mod tests {
                     PendingCommand {
                         label: label.into(),
                         sender: sender.clone(),
+                        navigation: None,
+                        before_unload: BeforeUnloadDecision::None,
+                        deferred_response: None,
                     },
                 )
             });
@@ -675,6 +775,62 @@ mod tests {
         fail_pending_commands("other-view");
         assert!(other.try_recv().unwrap().is_err());
         assert!(COMMANDS.with(|commands| commands.borrow().is_empty()));
+    }
+
+    #[test]
+    fn before_unload_response_waits_for_decision_ack_and_failed_ack_keeps_error() {
+        let id = uuid::Uuid::now_v7();
+        let (tx, mut rx) = oneshot::channel();
+        COMMANDS.with(|commands| commands.borrow_mut().insert(id, PendingCommand {
+            label: "decision-view".into(), sender: std::rc::Rc::new(RefCell::new(Some(tx))),
+            navigation: None, before_unload: BeforeUnloadDecision::Pending, deferred_response: None,
+        }));
+        finish_protocol_command(id, Ok(serde_json::json!({"errorText":"net::ERR_ABORTED"})));
+        assert_eq!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+        assert!(COMMANDS.with(|commands| commands.borrow().get(&id).unwrap().deferred_response.is_some()));
+        finish_before_unload_decision(id, false);
+        assert_eq!(rx.try_recv().unwrap().unwrap()["errorText"], "net::ERR_ABORTED");
+        assert!(!COMMANDS.with(|commands| commands.borrow().contains_key(&id)));
+    }
+
+    #[test]
+    fn process_exit_settles_a_deferred_before_unload_response_once() {
+        let id = uuid::Uuid::now_v7();
+        let (tx, mut rx) = oneshot::channel();
+        COMMANDS.with(|commands| commands.borrow_mut().insert(id, PendingCommand {
+            label: "exited-decision-view".into(), sender: std::rc::Rc::new(RefCell::new(Some(tx))),
+            navigation: None, before_unload: BeforeUnloadDecision::Pending, deferred_response: None,
+        }));
+        finish_protocol_command(id, Ok(serde_json::json!({"errorText":"net::ERR_ABORTED"})));
+        fail_pending_commands("exited-decision-view");
+        assert!(rx.try_recv().unwrap().is_err());
+        finish_before_unload_decision(id, true);
+        finish_protocol_command(id, Ok(serde_json::json!({})));
+        assert_eq!(rx.try_recv(), Err(oneshot::error::TryRecvError::Closed));
+        assert!(!COMMANDS.with(|commands| commands.borrow().contains_key(&id)));
+    }
+
+    #[test]
+    fn stay_proof_never_suppresses_dns_tls_other_or_unproved_abort() {
+        let abort = Ok(serde_json::json!({"errorText":"net::ERR_ABORTED"}));
+        assert!(known_before_unload_abort(&BeforeUnloadDecision::Rejected, &abort));
+        assert!(!known_before_unload_abort(&BeforeUnloadDecision::None, &abort));
+        assert!(!known_before_unload_abort(&BeforeUnloadDecision::Pending, &abort));
+        for error in ["net::ERR_NAME_NOT_RESOLVED", "net::ERR_CERT_AUTHORITY_INVALID", "net::ERR_FAILED", ""] {
+            assert!(!known_before_unload_abort(&BeforeUnloadDecision::Rejected, &Ok(serde_json::json!({"errorText":error}))));
+        }
+        assert!(!known_before_unload_abort(&BeforeUnloadDecision::Rejected, &Err("Protocol failed".into())));
+        assert!(!known_before_unload_abort(&BeforeUnloadDecision::Rejected, &Ok(serde_json::json!({"errorText":"net::ERR_ABORTED","isDownload":true}))));
+    }
+
+    #[test]
+    fn positive_download_result_precedes_aborted_document_navigation() {
+        let download = serde_json::json!({"errorText":"net::ERR_ABORTED","isDownload":true});
+        assert!(!navigation_response_failed(&download));
+        assert!(!known_before_unload_abort(&BeforeUnloadDecision::Rejected, &Ok(download)));
+        assert!(navigation_response_failed(&serde_json::json!({"errorText":"net::ERR_ABORTED","isDownload":false})));
+        assert!(navigation_response_failed(&serde_json::json!({"errorText":"net::ERR_NAME_NOT_RESOLVED"})));
+        assert!(!navigation_response_failed(&serde_json::json!({"loaderId":"owned-loader"})));
     }
 
     #[test]

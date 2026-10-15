@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use tauri::{Listener, Manager};
 use tokio::sync::Semaphore;
@@ -29,7 +29,7 @@ const TEXT: &str = "Unified Runtime 原生输入";
 const UPLOAD_TEXT: &str = "Unified Browser upload 中文 payload";
 const DOWNLOAD_TEXT: &str = "Unified Browser download 中文 payload\n";
 const STEP: &str = "Exercise the unified Browser Action path";
-const REQUIREMENT: &str = "browser-flow";
+const FINAL_SUMMARY:&str="UNIFIED_BROWSER_DONE: Navigation, trusted input, upload and download completed on the native Browser page.";
 const PROMPT: &str =
     "Use the Browser to open the local fixture, observe, type, click and verify the same native page.";
 const HTML: &str = r#"<!doctype html><meta charset="utf-8"><title>Unified Browser turn</title>
@@ -49,6 +49,7 @@ struct Model {
     download_result: Mutex<Option<Value>>,
     stop: CancellationToken,
     failure: Mutex<Option<String>>,
+    report_completion_advertised: AtomicBool,
 }
 
 fn error(value: impl std::fmt::Display) -> String {
@@ -137,29 +138,21 @@ async fn completion_body(
                     .find(|message| message["role"] == "tool")
             })
             .and_then(|message| message["content"].as_str())
-            .unwrap_or("missing adaptive-gate result");
-        if !prior.contains("Call update_plan") {
-            *model.failure.lock().unwrap() = Some(format!("Adaptive plan gate failed: {prior}"));
+            .unwrap_or("missing initial native navigation result");
+        // Browser navigation acknowledges dispatch. The current Agent contract
+        // permits it before an optional plan and reports genuine Loading until
+        // the native document commits; do not restore the retired plan gate or
+        // demand the old Host's fabricated immediate Ready.
+        let initial=serde_json::from_str::<Value>(prior).ok();
+        if initial.as_ref().is_none_or(|value|value["runtime_generation"]!=1
+            || value["tabs"].as_array().is_none_or(|tabs|tabs.len()!=1
+                || tabs[0]["target"]["runtime_generation"]!=value["runtime_generation"]
+                || value["active_tab_id"]!=tabs[0]["target"]["tab_id"])) {
+            *model.failure.lock().unwrap() = Some(format!("Initial native navigation receipt failed: {prior}"));
             return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     }
-    if step == 2 {
-        let prior = body["messages"]
-            .as_array()
-            .and_then(|messages| {
-                messages
-                    .iter()
-                    .rev()
-                    .find(|message| message["role"] == "tool")
-            })
-            .and_then(|message| message["content"].as_str())
-            .unwrap_or("missing plan result");
-        if !prior.contains("Plan and source-anchored requirements recorded") {
-            *model.failure.lock().unwrap() = Some(format!("Initial plan failed: {prior}"));
-            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    }
-    if step == 3 {
+    if step == 1 {
         match tokio::time::timeout(
             std::time::Duration::from_secs(10),
             model.presented.acquire(),
@@ -185,7 +178,7 @@ async fn completion_body(
             }
         }
     }
-    if step == 11 {
+    if step == 9 {
         match latest_tool_value(&body) {
             Ok(value) if value["download"]["path"].is_string() => {
                 *model.download_result.lock().unwrap() = Some(value);
@@ -197,21 +190,21 @@ async fn completion_body(
             }
         }
     }
-    if step == 14 {
-        let prior = body["messages"]
-            .as_array()
-            .and_then(|messages| {
-                messages
-                    .iter()
-                    .rev()
-                    .find(|message| message["role"] == "tool")
-            })
-            .and_then(|message| message["content"].as_str())
-            .unwrap_or("missing completion report result");
-        if !prior.contains("Completion account recorded") {
-            *model.failure.lock().unwrap() =
-                Some(format!("Completion report failed: {prior}"));
-            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    if step == 7 {
+        // Preserve the actual upload owner result before a later observation or
+        // download can obscure an earlier refusal. All input here is synthetic.
+        let prior=latest_tool_value(&body);
+        match prior {
+            Ok(value) if value["status"]=="completed" && value["target"]["runtime_generation"]==1=>{
+                eprintln!("AGENT_UPLOAD_DISPATCH completed");
+            }
+            outcome=>{
+                let prior=body["messages"].as_array().and_then(|messages|messages.iter().rev().find(|message|message["role"]=="tool"))
+                    .and_then(|message|message["content"].as_str()).unwrap_or("missing upload result");
+                let bounded:String=prior.chars().take(4096).collect();
+                *model.failure.lock().unwrap()=Some(format!("Native upload owner result failed: {outcome:?}; controlled_result={bounded}"));
+                return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
         }
     }
     let response = (|| -> Result<(Value, &'static str), String> {
@@ -221,79 +214,54 @@ async fn completion_body(
                 step,
                 json!({"url":model.url}),
             ),
-            1 => tool_call(
-                "update_plan".into(),
-                step,
-                json!({
-                    "explanation":"Exercise the exact Browser Action owner and native lifecycle.",
-                    "requirements":[{
-                        "id":REQUIREMENT,
-                        "description":"Open and interact with the requested native Browser page.",
-                        "source":{"input":0,"quote":"Use the Browser"}
-                    }],
-                    "plan":[{"step":STEP,"status":"in_progress"}]
-                }),
-            ),
-            2 => tool_call(
-                browser_tool_name(&body, "browser/navigate")?,
-                step,
-                json!({"url":model.url}),
-            ),
-            3 | 5 | 7 | 9 | 11 => tool_call(
+            1 | 3 | 5 | 7 | 9 => tool_call(
                 browser_tool_name(&body, "browser/observe")?,
                 step,
                 json!({}),
             ),
-            4 => tool_call(
+            2 => tool_call(
                 browser_tool_name(&body, "browser/act")?,
                 step,
                 json!({"action":"type","element":observed_element(&body,"Input")?,"text":TEXT}),
             ),
-            6 => tool_call(
+            4 => tool_call(
                 browser_tool_name(&body, "browser/act")?,
                 step,
                 json!({"action":"click","element":observed_element(&body,"Submit")?}),
             ),
-            8 => tool_call(
+            6 => tool_call(
                 browser_tool_name(&body, "browser/upload")?,
                 step,
                 json!({"element":observed_element(&body,"Attachment")?,"files":["upload.txt"]}),
             ),
-            10 => tool_call(
+            8 => tool_call(
                 browser_tool_name(&body, "browser/download")?,
                 step,
                 json!({"element":observed_element(&body,"Download local fixture")?}),
             ),
-            12 => tool_call(
-                "update_plan".into(),
-                step,
-                json!({
-                    "explanation":"The native Browser actions completed and were freshly observed.",
-                    "plan":[{"step":STEP,"status":"completed"}]
-                }),
-            ),
-            13 => tool_call(
-                "report_completion".into(),
-                step,
-                json!({
-                    "summary":"The unified Browser Action path completed on the native page.",
-                    "criteria":[{
-                        "step":STEP,
-                        "disposition":"supported",
-                        "evidence_call_ids":["native-step-11"],
-                        "rationale":"Navigation, fresh observations and trusted native input all returned successful owner results.",
-                        "requirement_ids":[REQUIREMENT]
+            10 => {
+                let tools=body["tools"].as_array();
+                let report=tools.is_some_and(|tools|tools.iter().any(|tool|tool["function"]["name"]=="report_completion"));
+                let names:Vec<_>=tools.into_iter().flatten().filter_map(|tool|tool["function"]["name"].as_str()).take(64).collect();
+                model.report_completion_advertised.store(report,Ordering::SeqCst);
+                eprintln!("AGENT_TERMINAL_TOOL_EXPOSURE {}",json!({"report_completion_advertised":report,"names":names,
+                    "total_tool_count":tools.map_or(0,Vec::len),"names_log_limit":64}));
+                if !report {
+                    return Ok((json!({"role":"assistant","content":FINAL_SUMMARY}),"stop"));
+                }
+                tool_call("report_completion".into(),step,json!({
+                    "summary":FINAL_SUMMARY,"criteria":[{
+                        "step":STEP,"disposition":"supported","evidence_call_ids":["native-step-9"],
+                        "rationale":"The final fresh native observation returned the same page after the input, upload and download actions."
                     }]
-                }),
-            ),
-            14 => {
-                model.terminal_entered.add_permits(1);
-                return Ok((
-                    json!({"role":"assistant","content":"UNIFIED_BROWSER_DONE"}),
-                    "stop",
-                ));
+                }))
             }
-            _ => return Err(format!("Unexpected extra model request {step}")),
+            _ => {
+                let prior=body["messages"].as_array().and_then(|messages|messages.iter().rev().find(|message|message["role"]=="tool"))
+                    .and_then(|message|message["content"].as_str()).unwrap_or("missing terminal report result");
+                let bounded:String=prior.chars().take(4096).collect();
+                return Err(format!("Unexpected extra model request {step}; prior_terminal_tool_result={bounded}"));
+            }
         };
         Ok((delta, "tool_calls"))
     })();
@@ -308,7 +276,11 @@ async fn completion_body(
                 .into_response();
         }
     };
-    if step == 14 {
+    if step == 10 {
+        // Complete with the exposed terminal contract in this same response.
+        // Hold it while verifying native input ownership; the fixture never
+        // needs an additional model round or a forced optional TaskLedger.
+        model.terminal_entered.add_permits(1);
         tokio::select! {
             _ = model.stop.cancelled() => {
                 return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -421,6 +393,40 @@ async fn wait_user_ready(
     Ok(())
 }
 
+async fn canonical_terminal(router:&nomifun_app::DesktopServer,id:&str,operation:&str)->Result<Value,String> {
+    let mut after=0_u64;let mut total=0_usize;let mut terminals=Vec::new();let mut exact_turn_kinds=Vec::new();
+    // The canonical store clamps every page to 500. Follow the returned exact
+    // Session cursor rather than assuming one large requested limit is a tail.
+    for page_index in 0..32 {
+        let page=api(router,"GET",&format!("/api/agent-sessions/{id}/events?after_seq={after}&limit=500"),Value::Null).await?;
+        if page["agent_session_id"]!=id || page["next_cursor"]["agent_session_id"]!=id {return Err("Canonical event page belongs to another Session".into());}
+        let events=page["events"].as_array().ok_or("Canonical event page missing typed events")?;
+        let next=page["next_cursor"]["seq"].as_u64().ok_or("Canonical event page cursor missing")?;
+        total+=events.len();
+        for event in events {
+            if event["agent_session_id"]==id && event["correlation_id"]==operation
+                && event["kind"].as_str().is_some_and(|kind|kind.starts_with("turn/")) && exact_turn_kinds.len()<64 {
+                exact_turn_kinds.push(json!({"kind":event["kind"],"seq":event["seq"]}));
+            }
+            if matches!(event["kind"].as_str(),Some("turn/completed"|"turn/failed"|"turn/cancelled")) {
+                let exact=event["agent_session_id"]==id && event["correlation_id"]==operation;
+                let reason=event["payload"]["value"]["message"].as_str().or_else(||event["payload"]["value"]["error"]["message"].as_str());
+                let reason=reason.map(|reason|reason.chars().take(1024).collect::<String>());
+                terminals.push(json!({"kind":event["kind"],"seq":event["seq"],"exact_operation":exact,
+                    "payload_storage":event["payload"]["storage"],"error_code":event["payload"]["value"]["error"]["code"],"reason":reason}));
+                if exact {
+                    if event["kind"]!="turn/completed" {return Err(format!("Canonical Browser Turn settled without success: {terminals:?}; pages={},events={total},cursor={next},exact_turn_kinds={exact_turn_kinds:?}",page_index+1));}
+                    return Ok(json!({"kind":"turn/completed","exact_session_and_operation":true,"terminal_seq":event["seq"],
+                        "pages_read":page_index+1,"events_read":total,"cursor":next,"exact_turn_kinds":exact_turn_kinds}));
+                }
+            }
+        }
+        if events.is_empty() || next<=after {return Err(format!("Canonical Browser Turn terminal absent at exhausted cursor: pages={},events={total},cursor={next},terminals={terminals:?},exact_turn_kinds={exact_turn_kinds:?}",page_index+1));}
+        after=next;
+    }
+    Err(format!("Canonical Browser event pages exceeded bounded fixture budget: events={total},cursor={after},terminals={terminals:?},exact_turn_kinds={exact_turn_kinds:?}"))
+}
+
 pub(super) async fn native_state(view: &tauri::Webview) -> Result<(bool, bool), String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     view.with_webview(move |platform| {
@@ -488,6 +494,7 @@ async fn verify(app: &tauri::AppHandle, root: &tempfile::TempDir) -> Result<Valu
         download_result: Mutex::new(None),
         stop: CancellationToken::new(),
         failure: Mutex::new(None),
+        report_completion_advertised: AtomicBool::new(false),
     });
     let server_stop = model.stop.clone();
     let router = Router::new()
@@ -559,7 +566,20 @@ async fn verify(app: &tauri::AppHandle, root: &tempfile::TempDir) -> Result<Valu
                                 CancellationToken::new(),
                             )
                             .await
-                            .map_err(error)
+                            .map_err(error)?;
+                        // Dispatch can acknowledge before native commit. The
+                        // deterministic fixture waits for the real document,
+                        // preserving Loading in the production receipt.
+                        let deadline=tokio::time::Instant::now()+std::time::Duration::from_secs(8);
+                        loop {
+                            if workspace.snapshot().await.map_err(error)?.runtime.as_ref().is_some_and(|runtime|
+                                runtime.tabs.iter().any(|tab|tab.lifecycle==nomifun_browser_platform::runtime::BrowserTabLifecycle::Ready
+                                    && tab.load.as_ref().is_some_and(|load|load.phase==nomifun_browser_platform::runtime::BrowserNavigationPhase::Finished
+                                        && load.content_state==nomifun_browser_platform::runtime::BrowserContentState::CurrentDocument))) {break;}
+                            if tokio::time::Instant::now()>=deadline {return Err("Initial native Browser document did not commit".to_owned());}
+                            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        }
+                        Ok::<_,String>(())
                     }
                     .await;
                     if let Err(reason) = shown {
@@ -570,7 +590,7 @@ async fn verify(app: &tauri::AppHandle, root: &tempfile::TempDir) -> Result<Valu
             }
         });
     let result = async {
-        let provider=api(&router,"POST","/api/providers",json!({"platform":"custom","name":"Unified Browser fixture","base_url":format!("http://{address}/v1"),"auth_scheme":"bearer","credentials":{"api_keys":["local-fixture-not-a-secret"]},"enabled":true,"initial_model":{"model":"native-fixture","enabled":true,"capabilities":[{"task":"chat","traits":["function_calling","streaming"],"protocol":"openai.chat_text","connection_role":"default","output_limit":4096}]}})).await?;
+        let provider=api(&router,"POST","/api/providers",json!({"platform":"custom","name":"Unified Browser fixture","base_url":format!("http://{address}/v1"),"auth_scheme":"bearer","credentials":{"api_keys":["local-fixture-not-a-secret"]},"enabled":true,"initial_model":{"model":"native-fixture","enabled":true,"capabilities":[{"task":"chat","traits":[],"protocol":"openai.chat_text","connection_role":"default","output_limit":4096}]}})).await?;
         let provider=provider["provider_id"].as_str().ok_or("Provider id missing")?;
         let editor=api(&router,"POST","/api/agent-presets/from-template/chat.minimal",json!({"reuse_existing":false,"display_name":"Unified Browser fixture","model_route_refs":{},"chat_route_records":{},"model":{"provider_id":provider,"model":"native-fixture"}})).await?;
         let preset=editor["preset"]["preset_id"].as_str().ok_or("Preset id missing")?;
@@ -583,10 +603,16 @@ async fn verify(app: &tauri::AppHandle, root: &tempfile::TempDir) -> Result<Valu
         api(&router,"POST",&format!("/api/agent-presets/{preset}/revisions"),json!({"expected_current_revision":editor["revision"]["reference"],"draft":draft,"reason":"unified Browser native integration"})).await?;
         let session=api(&router,"POST","/api/agent-sessions",json!({"preset_id":preset,"title":"Unified Browser fixture","model":{"provider_id":provider,"model":"native-fixture"},"resource_selections":[{"resource_kind":"browser","resource_id":"managed-browser"}]})).await?;
         let id=session["agent_session_id"].as_str().ok_or("Session id missing")?;
-        let session_work=work.join("agent-sessions").join(id);
-        std::fs::create_dir_all(&session_work).map_err(error)?;
+        // A Browser-only Session has no Workspace resource in its projection.
+        // Canonical warmup materializes the runtime's private working directory;
+        // router/state.rs supplies this fixture's work/conversations root.
+        api(&router,"POST",&format!("/api/agent-sessions/{id}/warmup"),Value::Null).await?;
+        let session_work=work.join("conversations").join(id).canonicalize().map_err(error)?;
+        if !session_work.starts_with(work.canonicalize().map_err(error)?)
+            || session_work.file_name().and_then(|name|name.to_str())!=Some(id) {return Err("Canonical Session workspace left the owned fixture root".into());}
         std::fs::write(session_work.join("upload.txt"),UPLOAD_TEXT).map_err(error)?;
-        api(&router,"POST",&format!("/api/agent-sessions/{id}/turns"),json!({"input":{"content":PROMPT},"idempotency_key":uuid::Uuid::now_v7().to_string()})).await?;
+        let accepted_turn=api(&router,"POST",&format!("/api/agent-sessions/{id}/turns"),json!({"input":{"content":PROMPT},"idempotency_key":uuid::Uuid::now_v7().to_string()})).await?;
+        let operation=accepted_turn["operation_id"].as_str().ok_or("Canonical Turn operation receipt missing")?;
         let terminal_deadline=tokio::time::Instant::now()+std::time::Duration::from_secs(60);
         loop {
             if let Ok(permit)=model.terminal_entered.try_acquire(){permit.forget();break;}
@@ -605,18 +631,21 @@ async fn verify(app: &tauri::AppHandle, root: &tempfile::TempDir) -> Result<Valu
         if presentations.lock().unwrap().as_slice()!=[id]{return Err(format!("Unexpected Browser presentation events: {:?}",presentations.lock().unwrap()));}
         let proof=super::evaluate(&view,"({value:document.getElementById('field').value,result:document.getElementById('result').textContent,proof:window.proof})").await?;
         if proof["value"]!=TEXT || proof["result"]!=TEXT || !proof["proof"]["events"].as_array().is_some_and(|events|events.iter().all(|event|event["trusted"]==true) && events.iter().any(|event|event["type"]=="click" && event["target"]=="submit")){return Err(format!("Native Browser input proof failed: {proof}"));}
-        if !matches!(workspace.user_command(BrowserTabCommand::Reload{target:target.clone()}).await,Err(WorkspaceError::Admission(nomifun_browser_platform::run_guard::RunAdmissionError::UserInputLocked))){return Err("User command entered during the Agent Browser run".into());}
+        let expected_navigation_sequence=runtime.tabs[0].load.as_ref().ok_or("Missing native navigation guard")?.navigation_sequence;
+        if !matches!(workspace.user_command(BrowserTabCommand::Reload{target:target.clone(),expected_navigation_sequence}).await,Err(WorkspaceError::Admission(nomifun_browser_platform::run_guard::RunAdmissionError::UserInputLocked))){return Err("User command entered during the Agent Browser run".into());}
         let uploaded=super::evaluate(&view,"(async()=>({status:await window.uploadComplete,name:document.getElementById('attachment').files[0]?.name,text:await document.getElementById('attachment').files[0]?.text()}))()").await?;
-        if uploaded["status"]!=204 || uploaded["name"]!="upload.txt" || uploaded["text"]!=UPLOAD_TEXT || model.uploaded.lock().unwrap().as_slice()!=[UPLOAD_TEXT.as_bytes().to_vec()]{return Err(format!("Native upload proof failed: {uploaded}"));}
+        if uploaded["status"]!=204 || uploaded["name"]!="upload.txt" || uploaded["text"]!=UPLOAD_TEXT || model.uploaded.lock().unwrap().as_slice()!=[UPLOAD_TEXT.as_bytes().to_vec()]{
+            let receipt=super::evaluate(&view,"({file_count:document.getElementById('attachment').files.length,upload_promise_present:!!window.uploadComplete,document_nonce:window.proof.nonce})").await?;
+            return Err(format!("Native upload proof failed: {uploaded}; native_receipt={receipt}; server_upload_count={}",model.uploaded.lock().unwrap().len()));
+        }
         let download=model.download_result.lock().unwrap().clone().ok_or("Missing native download result")?;
         let relative=download["download"]["path"].as_str().ok_or("Missing native download publication path")?;
         let downloaded=std::fs::read(session_work.join(relative)).map_err(error)?;
         if downloaded!=DOWNLOAD_TEXT.as_bytes() || download["download"]["bytes"]!=downloaded.len() || download["download"]["sha256"]!=format!("{:x}",Sha256::digest(&downloaded)){return Err(format!("Native download publication proof failed: {download}"));}
         model.finish.add_permits(1);
         wait_user_ready(&router,id,&workspace,&view).await?;
-        let events=api(&router,"GET",&format!("/api/agent-sessions/{id}/events?after_seq=0&limit=1000"),Value::Null).await?;
-        if !events["events"].as_array().is_some_and(|events|events.iter().any(|event|event["kind"]=="turn/completed")){return Err("Unified Browser turn did not publish turn/completed".into());}
-        if model.calls.load(Ordering::SeqCst)!=15{return Err(format!("Unified Browser model made an unexpected number of calls: {}",model.calls.load(Ordering::SeqCst)));}
+        let terminal=canonical_terminal(&router,id,operation).await.map_err(|reason|format!("{reason}; model_calls={}; model_failure={:?}",model.calls.load(Ordering::SeqCst),model.failure.lock().unwrap().as_ref()))?;
+        if model.calls.load(Ordering::SeqCst)!=11{return Err(format!("Unified Browser model made an unexpected number of calls: {}",model.calls.load(Ordering::SeqCst)));}
         let messages=api(&router,"GET",&format!("/api/agent-sessions/{id}/messages?after_seq=0&limit=100"),Value::Null).await?;
         if !messages.to_string().contains("UNIFIED_BROWSER_DONE"){return Err("Canonical history omitted the final reply".into());}
         if super::evaluate(&view,"document.getElementById('result').textContent").await?!=TEXT{return Err("Terminal cleanup replaced the native page".into());}
@@ -628,7 +657,9 @@ async fn verify(app: &tauri::AppHandle, root: &tempfile::TempDir) -> Result<Valu
             "selected_module":"browser",
             "selected_actions":["browser/navigate","browser/observe","browser/act","browser/upload","browser/download"],
             "unified_action_tools":true,
-            "adaptive_plan_and_completion":true,
+            "terminal_completion_delivery":true,
+            "completion_mode":if model.report_completion_advertised.load(Ordering::SeqCst){"report_completion"}else{"assistant_stop"},
+            "canonical_terminal":terminal,
             "native_target":target,
             "auto_open_once":true,
             "native_input_locked_until_cleanup":true,

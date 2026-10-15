@@ -9,7 +9,9 @@ use tokio_util::sync::CancellationToken;
 
 fn error(value: impl std::fmt::Display) -> String { value.to_string() }
 
-pub(crate) async fn verify(app: &tauri::AppHandle, fixture: &Fixture, hold_ui: bool, live_sites: bool, media_permissions: bool, media_user_ready: bool, cleanup_verified: &AtomicBool) -> Result<Value, String> {
+pub(crate) async fn verify(app: &tauri::AppHandle, fixture: &Fixture, hold_ui: bool, live_sites: bool,
+    manual_sites: bool, evidence_dir: Option<&std::path::Path>, media_permissions: bool,
+    media_user_ready: bool, cleanup_verified: &AtomicBool) -> Result<Value, String> {
     let factory = DesktopBrowserHost::new(app.clone());
     let created = tokio::time::timeout(Duration::from_secs(10), factory.create(CreateBrowserRuntime {
         key: BrowserResourceKey { principal_id: "compatibility-fixture".into(),
@@ -24,13 +26,14 @@ pub(crate) async fn verify(app: &tauri::AppHandle, fixture: &Fixture, hold_ui: b
             return match shutdown { Ok(()) => { cleanup_verified.store(true, Ordering::SeqCst); Err(failure) }, Err(cleanup) => Err(format!("{failure}; cleanup: {cleanup}")) };
         }
     };
-    let base = if media_user_ready { 420 } else if hold_ui && live_sites { 210 } else { 120 };
-    let result = tokio::time::timeout(Duration::from_secs(base + if media_permissions { 120 } else { 0 }), async {
+    let base = if manual_sites { 900 } else if live_sites { 360 } else { 120 };
+    let timeout = base.max(if media_user_ready { 420 } else { 0 }) + if media_permissions { 120 } else { 0 };
+    let result = tokio::time::timeout(Duration::from_secs(timeout), async {
         let mut report = scenarios(app, fixture, &runtime, hold_ui).await?;
         if media_permissions { report["media_permissions"] = super::permissions::verify(app, &runtime, fixture, media_user_ready).await?; }
         report["core_checks_passed"] = json!(true);
         if live_sites {
-            report["live_sites"] = match super::live::verify(&runtime).await {
+            report["live_sites"] = match super::live::verify(&runtime, manual_sites, evidence_dir).await {
                 Ok(report) => report,
                 Err(error) => json!({"entry_checks_passed":false,"error":error,"login":"not_covered","actual_video_playback":"not_covered"}),
             };
@@ -72,7 +75,8 @@ async fn scenarios(app: &tauri::AppHandle, fixture: &Fixture, runtime: &Arc<dyn 
     if pending.load.as_ref().is_none_or(|load| load.content_state != BrowserContentState::None) {
         return Err("First external request incorrectly retained bootstrap as user content".into());
     }
-    command(runtime, BrowserTabCommand::StopLoading { target: pending.target }).await?;
+    let stopped_sequence = pending.load.as_ref().ok_or("Stop target has no native navigation sequence")?.navigation_sequence;
+    command(runtime, BrowserTabCommand::StopLoading { target: pending.target,expected_navigation_sequence:stopped_sequence }).await?;
     let stopped = wait_tab(runtime, &stopped_id, |tab| tab.lifecycle == BrowserTabLifecycle::Stopped).await?;
     let load = stopped.load.as_ref().ok_or("Missing stopped-page evidence")?;
     if load.phase != BrowserNavigationPhase::Cancelled || load.content_state != BrowserContentState::None
@@ -203,6 +207,9 @@ async fn scenarios(app: &tauri::AppHandle, fixture: &Fixture, runtime: &Arc<dyn 
         return Err("Page reload was misattributed to repeated host navigation".into());
     }
 
+    eprintln!("MACOS_BROWSER_COMPATIBILITY_SMOKE_STAGE loop_pause_resume");
+    let loops = verify_loops(runtime, fixture, &stopped_id).await?;
+
     // A fresh tab has no document to retain when the main resource fails.
     eprintln!("MACOS_BROWSER_COMPATIBILITY_SMOKE_STAGE connection_failure");
     let failed_id = create(runtime, &fixture.url("/disconnect?token=failure-secret")).await?;
@@ -271,10 +278,112 @@ async fn scenarios(app: &tauri::AppHandle, fixture: &Fixture, runtime: &Arc<dyn 
         "first_stop_without_content":true,"stop_and_failure_surface_mask":true,
         "same_tab_recovery":true,"http_and_javascript_ua":{"root":true,"iframe":true,"fetch":true,"image":true},
         "popup":popup_evidence,"redirect_single_attempt":true,"page_reload_distinguished":true,
+        "automatic_navigation_pause":loops,
         "failed_observation_returns_promptly":true,"http_403_document_retained":true,
         "provisional_failure_retains_old_document":true,"diagnostics_redacted_and_target_checked":true,
         "unassociated_response_samples":true,"navigation_report":final_report,
     }))
+}
+
+async fn verify_loops(runtime: &Arc<dyn BrowserRuntime>, fixture: &Fixture, id: &str) -> Result<Value, String> {
+    runtime.release_pressed_input().await.map_err(error)?;
+    runtime.unlock_user_input().await.map_err(error)?;
+    let mut results = Vec::new();
+    for (name, path, paths, timer_survives_pause) in [
+        ("reload", "/loop-reload", vec!["/loop-reload"], true),
+        ("replace", "/loop-replace", vec!["/loop-replace"], true),
+        ("alternating", "/loop-a", vec!["/loop-a", "/loop-b"], true),
+        ("meta", "/loop-meta", vec!["/loop-meta"], false),
+    ] {
+        navigate(runtime,id,&fixture.url(path)).await?;
+        let warning = wait_tab(runtime,id,|tab| tab.load.as_ref().and_then(|load| load.navigation_control.as_ref())
+            .is_some_and(|control| control.loop_suspected)).await?;
+        let before_pause_sequence = trace_sequence(runtime,id).await?;
+        fresh_pause(runtime,id,true).await?;
+        let paused = wait_tab(runtime,id,|tab| tab.load.as_ref().and_then(|load| load.navigation_control.as_ref())
+            .is_some_and(|control| control.paused)).await?;
+        if paused.load.as_ref().is_none_or(|load| load.content_state == BrowserContentState::None) {
+            return Err("Pausing a website loop removed its usable document".into());
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let stable_count: usize = paths.iter().map(|path| fixture.count(path)).sum();
+        let before_resume = report(runtime,&tab(runtime,id).await?.target).await?;
+        let host_count = before_resume.trace.counters.user_commands + before_resume.trace.counters.agent_commands;
+        let mut stable_samples = Vec::new();
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(if timer_survives_pause { 100 } else { 150 })).await;
+            let count: usize = paths.iter().map(|path| fixture.count(path)).sum();
+            stable_samples.push(count);
+            if count != stable_count { return Err(format!("Pause allowed another {name} main-document request")); }
+        }
+        let held = report(runtime,&tab(runtime,id).await?.target).await?;
+        if !held.trace.events.iter().any(|event| event.sequence > before_pause_sequence && event.action.as_ref().is_some_and(|action|
+            action.main_frame && action.policy == BrowserNavigationPolicy::Paused)) {
+            return Err(format!("Pause of {name} had no native future-action rejection witness"));
+        }
+        fresh_pause(runtime,id,false).await?;
+        let resumed = report(runtime,&tab(runtime,id).await?.target).await?;
+        if resumed.trace.counters.user_commands + resumed.trace.counters.agent_commands != host_count {
+            return Err("Resume fabricated a host navigation or reload".into());
+        }
+        if timer_survives_pause {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while paths.iter().map(|path| fixture.count(path)).sum::<usize>() <= stable_count {
+                if Instant::now() >= deadline { return Err(format!("Resume did not release {name}'s next website timer request")); }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+        fresh_pause(runtime,id,true).await?;
+        navigate(runtime,id,&fixture.url("/redirect-final")).await?;
+        let settled = finished(runtime,id).await?;
+        if settled.load.as_ref().and_then(|load| load.navigation_control.as_ref()).is_none_or(|control| control.paused) {
+            return Err("Explicit address navigation did not release the paused hold".into());
+        }
+        let settled_report = report(runtime,&settled.target).await?;
+        results.push(json!({"case":name,"loop_warning_at_sequence":warning.load.as_ref().map(|load| load.navigation_sequence),
+            "server_main_document_count_while_paused":stable_samples,"future_native_action_rejected":true,
+            "resume_does_not_create_host_request":true,"page_timer_resumed":timer_survives_pause,
+            "meta_resumption":"canceled_meta_timer_is_not_replayed; explicit navigation releases hold",
+            "explicit_navigation_releases_pause":true,"navigation_report":settled_report}));
+    }
+    let before_image = fixture.count("/ua-image");
+    let before_fetch = fixture.count("/ua-fetch");
+    let before_burst = report(runtime,&tab(runtime,id).await?.target).await?.trace.counters;
+    navigate(runtime,id,&fixture.url("/resource-burst")).await?;
+    finished(runtime,id).await?;
+    wait_receipt(fixture,"/ua-image",before_image + 30).await?;
+    wait_receipt(fixture,"/ua-fetch",before_fetch + 30).await?;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let burst = report(runtime,&tab(runtime,id).await?.target).await?;
+    if burst.trace.counters.user_commands != before_burst.user_commands + 1
+        || burst.trace.counters.agent_commands != before_burst.agent_commands
+        || burst.trace.counters.page_navigations != before_burst.page_navigations
+        || burst.trace.counters.unknown_navigations != before_burst.unknown_navigations {
+        return Err("Ordinary iframe/image/Fetch requests were counted as new main-document attempts".into());
+    }
+    if burst.load.as_ref().and_then(|load| load.navigation_control.as_ref()).is_some_and(|control| control.loop_suspected) {
+        return Err("Ordinary iframe/image/Fetch requests caused a main-document loop warning".into());
+    }
+    runtime.lock_user_input().await.map_err(error)?;
+    Ok(json!({"scenes":results,"resource_burst_no_loop_warning":true,"full_resource_network_diagnostics":"not_supported_by_WK_adapter"}))
+}
+
+async fn fresh_pause(runtime: &Arc<dyn BrowserRuntime>, id: &str, paused: bool) -> Result<(), String> {
+    for _ in 0..5 {
+        let current = tab(runtime,id).await?;
+        let expected_navigation_sequence = current.load.as_ref().ok_or("Pause target has no native navigation sequence")?.navigation_sequence;
+        let target = current.target;
+        let command = if paused { BrowserTabCommand::PauseNavigation {target,expected_navigation_sequence} }
+            else { BrowserTabCommand::ResumeNavigation {target,expected_navigation_sequence} };
+        match runtime.execute(command,CancellationToken::new()).await {
+            Ok(_) => return Ok(()),
+            // The native owner explicitly rejects these before mutation. A
+            // continuous loop can replace the sampled document before dispatch.
+            Err(WorkspaceError::StaleTarget | WorkspaceError::StaleObservation) => {},
+            Err(value) => return Err(error(value)),
+        }
+    }
+    Err("A fresh native pause target could not be acquired".into())
 }
 
 async fn command(runtime: &Arc<dyn BrowserRuntime>, command: BrowserTabCommand) -> Result<BrowserRuntimeSnapshot, String> {

@@ -46,7 +46,7 @@ pub(super) async fn verify(app: &tauri::AppHandle, url: &str) -> Result<serde_js
         if first.message != "First dialog" {return Err("Wrong first dialog result".into());}
         if workspace.act(&run,BrowserAction::click(element)).await.unwrap_err()!=WorkspaceError::DialogPending {return Err("Pending click was replayed".into());}
         if workspace.observe(&run,None).await.unwrap_err()!=WorkspaceError::DialogPending {return Err("Observation blocked behind paused input".into());}
-        if workspace.user_command(BrowserTabCommand::Reload {target:first.target.clone()}).await.unwrap_err()!=WorkspaceError::Admission(RunAdmissionError::UserInputLocked) {return Err("User acted while dialog input was owned by Agent".into());}
+        if workspace.user_command(BrowserTabCommand::Reload {target:first.target.clone(),expected_navigation_sequence:tab.load.as_ref().ok_or("Missing dialog native navigation guard")?.navigation_sequence}).await.unwrap_err()!=WorkspaceError::Admission(RunAdmissionError::UserInputLocked) {return Err("User acted while dialog input was owned by Agent".into());}
         let forged_user = BrowserTabCommand::Dialog {target:first.target.clone(),request_id:first.request_id.clone(),accept:true,text:None};
         if workspace.user_command(forged_user.clone()).await.unwrap_err()!=WorkspaceError::Admission(RunAdmissionError::UserInputLocked) {return Err("User answered an Agent dialog".into());}
         if workspace.agent_command(&run,forged_user).await.unwrap_err()!=WorkspaceError::UnsupportedAction {return Err("Agent used the user dialog channel".into());}

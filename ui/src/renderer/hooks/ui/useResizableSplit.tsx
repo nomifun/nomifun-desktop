@@ -106,7 +106,9 @@ export const useResizableSplit = (options: UseResizableSplitOptions = {}) => {
         }
 
         const startX = event.clientX;
-        const startRatio = splitRatio;
+        // Start from the currently visible width, which may be constrained by
+        // a smaller container without changing the saved user preference.
+        const startRatio = Math.max(minWidth, Math.min(maxWidth, splitRatio));
         const pointerId = event.pointerId;
         // px 模式下拖动直接换算为像素差，不再除以容器宽度
         const computeRatio = (clientX: number): number => {

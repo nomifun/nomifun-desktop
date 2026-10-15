@@ -21,7 +21,7 @@ fn action(key:u32, ctrl:bool, alt:bool, shift:bool)->Option<Action> {
     }
 }
 #[derive(Clone, serde::Serialize)]
-struct Shortcut { agent_session_id:String, target:BrowserTabTarget, action:Action }
+struct Shortcut { agent_session_id:String, target:BrowserTabTarget, action:Action, expected_navigation_sequence:u64 }
 struct Registration { controller:ICoreWebView2Controller, token:i64 }
 impl Drop for Registration {
     fn drop(&mut self) { let _=unsafe{self.controller.remove_AcceleratorKeyPressed(self.token)}; }
@@ -49,7 +49,7 @@ pub(crate) async fn install(view:&tauri::Webview, agent_session_id:String, metad
                 // must not create/close a stream of tabs, nor replay after unlock.
                 args.SetHandled(true)?;
                 if locked.load(Ordering::Acquire) || lparam & (1 << 30) != 0 {return Ok(());}
-                let target=metadata.lock().unwrap_or_else(|e|e.into_inner()).target.clone();
+                let (target,expected_navigation_sequence)={let data=metadata.lock().unwrap_or_else(|e|e.into_inner());let Some(load)=data.load.as_ref()else{return Ok(())};(data.target.clone(),load.navigation_sequence)};
                 let (app,locked,metadata,agent_session_id)=(app.clone(),locked.clone(),metadata.clone(),agent_session_id.clone());
                 tauri::async_runtime::spawn(async move {
                     let dispatch_app=app.clone();
@@ -58,7 +58,7 @@ pub(crate) async fn install(view:&tauri::Webview, agent_session_id:String, metad
                             || metadata.lock().unwrap_or_else(|e|e.into_inner()).target!=target {return;}
                         let Some(main)=dispatch_app.get_webview("main") else {return;};
                         if matches!(action,Action::Address|Action::NewTab) && main.set_focus().is_err() {return;}
-                        let _=dispatch_app.emit_to("main","browser-capability-shortcut",Shortcut{agent_session_id,target,action});
+                        let _=dispatch_app.emit_to("main","browser-capability-shortcut",Shortcut{agent_session_id,target,action,expected_navigation_sequence});
                     });
                 });
                 Ok(())

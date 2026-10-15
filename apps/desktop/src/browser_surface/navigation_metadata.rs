@@ -1,4 +1,4 @@
-//! Native history and same-document URL notifications for a conversation tab.
+//! Native history metadata. Navigation owns all document and URL state.
 
 use nomifun_browser_platform::{revision::BrowserRevision, runtime::BrowserTabSnapshot};
 use std::{
@@ -8,19 +8,16 @@ use std::{
 };
 use webview2_com::{
     HistoryChangedEventHandler, Microsoft::Web::WebView2::Win32::ICoreWebView2,
-    SourceChangedEventHandler,
 };
-use windows::core::{BOOL, PWSTR};
+use windows::core::BOOL;
 
 struct Registration {
     core: ICoreWebView2,
     history: i64,
-    source: i64,
 }
 impl Drop for Registration {
     fn drop(&mut self) {
         let _ = unsafe { self.core.remove_HistoryChanged(self.history) };
-        let _ = unsafe { self.core.remove_SourceChanged(self.source) };
     }
 }
 thread_local! {static REGISTRATIONS:RefCell<HashMap<String,Registration>>=RefCell::default();}
@@ -81,49 +78,12 @@ pub(crate) async fn install(
             unsafe {
                 core.add_HistoryChanged(&handler, &mut history_token)?;
             }
-            let source = SourceChangedEventHandler::create(Box::new(move |core, args| {
-                let (Some(core), Some(args)) = (core, args) else {
-                    return Ok(());
-                };
-                let mut new_document = BOOL::default();
-                unsafe {
-                    args.IsNewDocument(&mut new_document)?;
-                }
-                // Normal document loads are owned by the existing load callback.
-                // pushState/replaceState/hash changes must not invent a new document.
-                if !new_document.as_bool() {
-                    let mut raw = PWSTR::null();
-                    let result = unsafe { core.Source(&mut raw) };
-                    let url = super::event_string(raw, 8192);
-                    result?;
-                    if let Some(url) = url {
-                        let changed = {
-                            let mut data =
-                                metadata.lock().unwrap_or_else(|error| error.into_inner());
-                            let changed = data.url != url;
-                            data.url = url;
-                            changed
-                        };
-                        if changed {
-                            revision.bump();
-                        }
-                    }
-                }
-                history(&core, &metadata, &revision)?;
-                Ok(())
-            }));
-            let mut source_token = 0;
-            if let Err(error) = unsafe { core.add_SourceChanged(&source, &mut source_token) } {
-                let _ = unsafe { core.remove_HistoryChanged(history_token) };
-                return Err(error);
-            }
             REGISTRATIONS.with(|entries| {
                 entries.borrow_mut().insert(
                     label,
                     Registration {
                         core,
                         history: history_token,
-                        source: source_token,
                     },
                 )
             });

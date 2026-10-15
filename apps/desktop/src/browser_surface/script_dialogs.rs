@@ -23,6 +23,7 @@ pub(crate) use nomifun_browser_platform::runtime::{
 
 struct Pending {
     snapshot: Dialog,
+    before_unload: Option<super::BeforeUnloadRequest>,
     args: ICoreWebView2ScriptDialogOpeningEventArgs,
     deferral: ICoreWebView2Deferral,
 }
@@ -47,10 +48,18 @@ impl State {
         pending: &Pending,
         accept: bool,
         text: Option<&str>,
+        explicit_reply: bool,
     ) -> Result<(), WorkspaceError> {
         validate_reply(pending.snapshot.kind, accept, text)?;
+        let label = &pending.snapshot.target.tab_id;
+        let rejection = if explicit_reply && !accept && pending.snapshot.kind == DialogKind::BeforeUnload {
+            match pending.before_unload {
+                Some(request) if super::begin_before_unload_rejection(label, request)? => Some(request),
+                _ => None,
+            }
+        } else { None };
         // Do not hold RefCell borrows across COM: completion may pump messages.
-        unsafe {
+        let result: Result<(), WorkspaceError> = (|| unsafe {
             if accept {
                 if let Some(text) = text {
                     let value = HSTRING::from(text);
@@ -70,7 +79,10 @@ impl State {
                 .deferral
                 .Complete()
                 .map_err(|_| WorkspaceError::NativeCommandFailed)?;
-        }
+            Ok(())
+        })();
+        if let Some(request) = rejection { super::complete_before_unload_rejection(label, request, result.is_ok()); }
+        result?;
         let mut slot = self.pending.borrow_mut();
         if slot
             .as_ref()
@@ -84,7 +96,7 @@ impl State {
     fn cancel(&self) -> Result<(), WorkspaceError> {
         let pending = self.pending.borrow().clone();
         if let Some(pending) = pending {
-            self.finish(&pending, false, None)?;
+            self.finish(&pending, false, None, false)?;
         }
         Ok(())
     }
@@ -200,6 +212,7 @@ pub(crate) async fn install(
                     text_truncated: message_cut || default_cut,
                 };
                 let pending = Rc::new(Pending {
+                    before_unload: (kind == DialogKind::BeforeUnload).then(|| super::before_unload_request(&snapshot.target.tab_id)).flatten(),
                     snapshot: snapshot.clone(),
                     deferral: unsafe { args.GetDeferral()? },
                     args,
@@ -261,7 +274,7 @@ pub(crate) async fn respond(
             {
                 return Err(WorkspaceError::StaleTarget);
             }
-            state.finish(&pending, accept, text.as_deref())
+            state.finish(&pending, accept, text.as_deref(), true)
         })();
         let _ = tx.send(result);
     })

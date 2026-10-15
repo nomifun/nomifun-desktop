@@ -74,7 +74,9 @@ export const calcLayoutMetrics = (input: LayoutCalcInput): LayoutMetrics => {
 
   // chat-area flex（外层 chat+preview 容器内的聊天面板的 flex-grow）：
   // preview 打开时按 chatSplitRatio 分配，否则聊天区独占
-  const chatFlex = isPreviewOpen ? chatSplitRatio : 100;
+  const chatFlex = isPreviewOpen
+    ? Math.max(dynamicChatMinRatio, Math.min(dynamicChatMaxRatio, chatSplitRatio))
+    : 100;
   const workspaceWidthPx = workspaceEnabled ? effectiveWorkspaceWidthPx : 0;
   const titleAreaMaxWidth = Math.max(320, Math.min(820, containerWidth - 520));
 

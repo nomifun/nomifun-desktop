@@ -163,6 +163,12 @@ impl BrowserRuntime for Runtime {
             let tab = snapshot.tabs.iter_mut().find(|tab| tab.target == *target).ok_or(WorkspaceError::TabNotFound)?;
             tab.zoom_percent = *percent;
         }
+        if let BrowserTabCommand::PauseNavigation { target, expected_navigation_sequence } | BrowserTabCommand::ResumeNavigation { target, expected_navigation_sequence } = &command {
+            let paused = matches!(&command, BrowserTabCommand::PauseNavigation { .. });
+            let tab = snapshot.tabs.iter_mut().find(|tab| tab.target == *target).ok_or(WorkspaceError::TabNotFound)?;
+            let load = tab.load.as_mut().filter(|load| load.navigation_sequence == *expected_navigation_sequence).ok_or(WorkspaceError::StaleTarget)?;
+            load.navigation_control = Some(BrowserNavigationControl { paused, ..Default::default() });
+        }
         if let BrowserTabCommand::Create { url } = command {
             let id = format!("tab-{}", snapshot.tabs.len());
             let runtime_generation = snapshot.runtime_generation;
@@ -173,9 +179,10 @@ impl BrowserRuntime for Runtime {
                     document_generation: 1,
                 },
                 title: "fixture".into(),
-                url,
+                url: url.clone(),
                 lifecycle: BrowserTabLifecycle::Ready,
-                load: None,
+                load: Some(BrowserLoadSummary { navigation_sequence: 1, phase: BrowserNavigationPhase::Finished,
+                    content_state: BrowserContentState::CurrentDocument, content_url: Some(url), ..Default::default() }),
                 can_go_back: false,
                 can_go_forward: false,
                 zoom_percent: 100,
@@ -416,6 +423,26 @@ async fn page_zoom_is_bounded_and_only_available_to_the_human_owner() {
     let run = resource.begin_run().await.unwrap();
     assert_eq!(resource.agent_command(&run, command(100)).await, Err(WorkspaceError::UnsupportedAction));
     resource.finish_run(&run).await.unwrap();
+}
+
+#[tokio::test]
+async fn navigation_pause_and_resume_belong_to_the_human_owner_and_retain_run_lock() {
+    let factory = Arc::new(Factory::default());
+    let service = service(factory, &["managed"]);
+    let resource = service.ensure(authority("alice", "navigation-hold", "managed", all_actions()), BrowserProfile::Ephemeral).await.unwrap();
+    let snapshot = resource.user_command(create()).await.unwrap();
+    let target = snapshot.tabs[0].target.clone();
+    let expected_navigation_sequence = snapshot.tabs[0].load.as_ref().unwrap().navigation_sequence;
+    let paused = resource.user_command(BrowserTabCommand::PauseNavigation { target: target.clone(), expected_navigation_sequence }).await.unwrap();
+    assert!(paused.tabs[0].load.as_ref().unwrap().navigation_control.as_ref().unwrap().paused);
+    let run = resource.begin_run().await.unwrap();
+    for command in [BrowserTabCommand::PauseNavigation { target: target.clone(), expected_navigation_sequence }, BrowserTabCommand::ResumeNavigation { target: target.clone(), expected_navigation_sequence }] {
+        assert_eq!(resource.agent_command(&run, command.clone()).await, Err(WorkspaceError::UnsupportedAction));
+        assert_eq!(resource.user_command(command).await, Err(WorkspaceError::Admission(RunAdmissionError::UserInputLocked)));
+    }
+    resource.finish_run(&run).await.unwrap();
+    let resumed = resource.user_command(BrowserTabCommand::ResumeNavigation { target, expected_navigation_sequence }).await.unwrap();
+    assert!(!resumed.tabs[0].load.as_ref().unwrap().navigation_control.as_ref().unwrap().paused);
 }
 
 #[tokio::test]

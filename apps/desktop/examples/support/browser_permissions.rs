@@ -47,10 +47,12 @@ async fn tab(workspace: &Arc<BrowserResource>, id: &str) -> Result<BrowserTabSna
         .ok_or("Missing permission tab".into())
 }
 async fn refresh(workspace: &Arc<BrowserResource>, view: &tauri::Webview) -> Result<(), String> {
-    let target = tab(workspace, view.label()).await?.target;
+    let native_tab = tab(workspace, view.label()).await?;
+    let expected_navigation_sequence=native_tab.load.as_ref().ok_or("Missing permission navigation guard")?.navigation_sequence;
+    let target = native_tab.target;
     let generation = target.document_generation;
     workspace
-        .user_command(BrowserTabCommand::Reload { target })
+        .user_command(BrowserTabCommand::Reload { target, expected_navigation_sequence })
         .await
         .map_err(message)?;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -177,7 +179,8 @@ pub(super) async fn verify(
         workspace.finish_run(&run).await.map_err(message)?;
         refresh(&workspace,&view).await?;
         let (target,id)=request(&workspace,&view).await?;
-        workspace.user_command(BrowserTabCommand::Reload {target:target.clone()}).await.map_err(message)?;
+        let expected_navigation_sequence=tab(&workspace,view.label()).await?.load.ok_or("Missing permission navigation guard")?.navigation_sequence;
+        workspace.user_command(BrowserTabCommand::Reload {target:target.clone(),expected_navigation_sequence}).await.map_err(message)?;
         let deadline=tokio::time::Instant::now()+std::time::Duration::from_secs(3);
         loop {
             let fresh=tab(&workspace,view.label()).await?;

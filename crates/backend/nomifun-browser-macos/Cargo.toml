@@ -6,6 +6,10 @@ license.workspace = true
 
 # This native adapter is deliberately absent from the Windows dependency graph.
 # Windows continues to use the desktop's existing WebView2 host.
+[dependencies]
+nomifun-browser-platform.workspace = true
+url.workspace = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"
@@ -17,6 +21,4 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
-nomifun-browser-platform.workspace = true
-url.workspace = true
 uuid.workspace = true

@@ -110,6 +110,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
   const workspaceTarget = conversation_id != null ? conversationTarget(conversation_id) : undefined;
   const { workspaceEnabled = true } = props;
   const layout = useLayoutContext();
+  const reserveWorkSurfaceSpace = layout?.reserveWorkSurfaceSpace;
   // Native shell checks are limited to workspace chrome. Browser is a generic
   // current-AgentSession tool-rail surface in both the desktop shell and WebUI.
   const isDesktopRuntime = isDesktopShell();
@@ -201,6 +202,15 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
   // The fixed tool rail is outside the resizable chat / work-surface row.
   const workAreaWidth = Math.max(containerWidth - (showSessionToolRail ? 32 : 0), 1);
   const minChatPanelPx = props.embedded ? 0 : MIN_CHAT_PANEL_PX;
+  useEffect(() => {
+    // Browser dismissal only hides its surface. Preview dismissal also discards
+    // its tabs, so sidebar expansion must never receive closePreview directly.
+    if (!browserOpen || props.embedded || !reserveWorkSurfaceSpace) return;
+    return reserveWorkSurfaceSpace({
+      minimumWidth: minChatPanelPx + MIN_PREVIEW_PANEL_PX + (showSessionToolRail ? 32 : 0),
+      close: closeBrowser,
+    });
+  }, [browserOpen, conversation_id, props.embedded, reserveWorkSurfaceSpace, minChatPanelPx, showSessionToolRail, closeBrowser]);
 
   // --- Hook C: title rename ---
   const { editingTitle, setEditingTitle, titleDraft, setTitleDraft, renameLoading, canRenameTitle, submitTitleRename } =
@@ -212,7 +222,6 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
 
   const {
     splitRatio: workspaceWidthPxPref,
-    setSplitRatio: setWorkspaceWidthPxPref,
     createDragHandle: createWorkspaceDragHandle,
   } = useResizableSplit({
     unit: 'px',
@@ -235,7 +244,6 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
 
   const {
     splitRatio: chatSplitRatio,
-    setSplitRatio: setChatSplitRatio,
     createDragHandle: createPreviewDragHandle,
   } = useResizableSplit({
     defaultWidth: 60,
@@ -263,6 +271,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
     setRightSiderCollapsed,
     siderCollapsed: layout?.siderCollapsed,
     setSiderCollapsed: layout?.setSiderCollapsed,
+    manageSiderCollapse: !props.embedded && (!reserveWorkSurfaceSpace || isPreviewOpen),
   });
 
   // --- Hook E: layout constraints ---
@@ -273,12 +282,6 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
     isPreviewOpen: workSurfaceOpen,
     rightSiderCollapsed,
     setRightSiderCollapsed,
-    workspaceWidthPx: workspaceWidthPxPref,
-    setWorkspaceWidthPx: setWorkspaceWidthPxPref,
-    chatSplitRatio,
-    setChatSplitRatio,
-    dynamicChatMinRatio,
-    dynamicChatMaxRatio,
   });
 
   const [workspaceChangeCount, setWorkspaceChangeCount] = useState(0);
@@ -427,6 +430,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
               flexBasis: rightSiderCollapsed ? '0px' : `${Math.round(workspaceWidthPx)}px`,
               width: rightSiderCollapsed ? '0px' : `${Math.round(workspaceWidthPx)}px`,
               minWidth: rightSiderCollapsed ? '0px' : `${MIN_WORKSPACE_PANEL_PX}px`,
+              boxSizing: 'border-box',
               overflow: 'hidden',
               borderLeft: rightSiderCollapsed ? 'none' : '1px solid var(--bg-3)',
             }}

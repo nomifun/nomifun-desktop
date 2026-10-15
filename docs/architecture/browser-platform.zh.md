@@ -5,6 +5,8 @@
 
 ## 产品边界
 
+内嵌浏览器保持产品的主要浏览场景。兼容性、导航防重、暂停、诊断和失败恢复均在现有原生面板内完成；不将系统浏览器作为主场景重构目标或自动故障回退。系统浏览器打开与已授权 attached Chrome 保留为用户明确选择的部分场景功能。外部浏览器可以提供验收对照，不能替代内嵌浏览器通过证据。
+
 内置浏览器由 Browser domain 按已认证用户与同一个 canonical AgentSession 持有。点击会话右侧的浏览器按钮
 即可人工浏览，不要求当前 Agent 启用 Browser Module、配置 Provider 或已有 Browser Resource binding。
 打开、重试与用户地址栏命令不写入 Agent binding，不赋予 Agent 工具权限，也不新建第二个 Session。
@@ -18,6 +20,10 @@ Agent 的资源定义 ID 改变不会选择新页面或 Profile。`BrowserResour
 typed Resource binding 和当前 BrowserRunGuard。没有该授权的 Agent 无法观察或操作用户网页。
 Agent 选择 attached Chrome 不改变用户的内置浏览器，也不会把用户浏览器按钮变成 Chrome 连接授权。
 不同 exact managed Provider 不能静默借用既有实体，必须明确重建原生浏览器。
+
+共享桌面 renderer 的最低客户区为 880×600。聊天与 Browser/Preview 保持水平分栏，最小宽度分别为 360px、340px，另有 32px 会话工具栏。Browser 打开时，Layout 与 ConversationShell 按完整容器宽度及用户偏好的侧栏宽度派生临时让位状态，避免用侧栏收起后的子面板宽度判断恢复而反复收起/展开。主导航与会话列表只在空间不足时让位；窗口变宽、面板关闭、Session 切换或卸载后撤销空间请求并恢复原偏好。相关边框使用 border-box，使实际宽度与计算一致；缩窗仅约束当前显示尺寸，不重写保存的分栏比例或工作区宽度。
+
+空间预留与展开侧栏后的自动关闭只注册给 Browser：关闭只隐藏并 detach 面板，保留网页、runtime 和输入所有权，不销毁标签或释放 Agent 输入锁。Preview 沿用原有侧栏折叠策略，不把会清空标签和未保存编辑的 `closePreview` 交给布局让位回调；Browser 与 Preview 互相切换时同步交接侧栏管理。Windows 最低窗口 GUI 已保持原文档 nonce 与累计 3 次 fixture GET，并接收 trusted 页面输入；该空 Agent Session 只证明聊天输入可达，不证明运行中 Agent Stop 的实机验收。定向组件测试覆盖空间请求生命周期、迟到 cleanup、偏好恢复及未保存 Preview 内容的保留，其 Happy DOM 几何由 fixture 提供，不能替代原生像素证据。原生与 GUI 范围分别见[整改证据](../reports/2026-10-13-browser-remediation-evidence.zh.md)。
 
 所有 Agent Turn（包括没有 Browser 工具的普通聊天及 attached Chrome Agent）均在 Runtime 预备阶段取得
 同 Session 内置浏览器的输入锁。实体创建本身不创建原生网页；运行中首次创建原生 child 时输入已禁用。
@@ -84,15 +90,35 @@ framework preload、message pump、allocator 特例或隐藏回退内核。
 
 macOS 普通页与 popup 在首次请求前通过同一原生入口设置桌面 Safari 兼容身份，当前 profile 为 `macos-desktop-webkit-safari17-v1`。`Version/17.0` 是兼容身份基线，不是测得的 Safari/WebKit 运行版本；实际 OS 信息独立报告，未知的 WebKit 元数据保持 unknown。UA 不参与 Session/Profile 身份派生，不清除 Cookie，不打包 Safari 或额外内核，不通过 JavaScript getter 或单独请求 header 改写身份。Windows 保持其原生身份。
 
-Page 统一处理请求、开始、redirect、commit、finish、取消、失败和内容进程终止。`load` 摘要携带导航尝试序号、阶段、可显示内容状态、整数进度、安全错误及尝试/内容地址。内部 bootstrap 来源单独标记，不算用户文档；真实 about:blank popup 可以承载文档。取消/停止映射为 `Stopped`，不表示新页面已成功；`NSURLErrorCancelled` 按 domain 与 code 分类，替代导航与用户停止明确区分。原生导航对象及 dispatch receipt 保留精确关联，旧 Stop、迟到回调和旧 resize 不能影响后继页面。
+Page 统一处理请求、开始、redirect、commit、finish、取消、失败和内容进程终止。`load` 摘要携带导航控制序号、阶段、可显示内容状态、整数进度、安全错误及尝试/内容地址。内部 bootstrap 来源单独标记，不算用户文档；真实 about:blank popup 可以承载文档。取消/停止映射为 `Stopped`，不表示新页面已成功；`NSURLErrorCancelled` 按 domain 与 code 分类，替代导航与用户停止明确区分。原生导航对象及 dispatch receipt 保留精确关联，旧 Stop、迟到回调和旧 resize 不能影响后继页面。
 
 面板挂载/布局、原生 child 可显示性和输入锁分别表达。没有内容的失败、停止和进程终止在原生主线程隐藏 child，renderer 显示明确状态及重新输入地址入口；保留旧/部分内容时继续显示网页并说明尝试地址与内容地址。每次 native show 重新应用当前 Page mask。Agent 恢复导航等待布局且保留原有授权/输入锁，不依赖旧文档可执行；无内容读取及时返回 `BROWSER_PAGE_FAILED`、`BROWSER_PAGE_STOPPED` 或 `BROWSER_PAGE_CRASHED`。有效旧/部分文档可以重新观察和截图，并携带相同安全加载摘要。执行不确定性保持既有语义，不自动重放 DOM、POST 或 Agent 操作。
 
 用户下载的面板已呈现状态独立于网页内容遮罩：首次直接下载可以继续目的地确认，空内容隐藏不撤销选择；真正的面板隐藏、输入 owner 切换与进程终止仍撤销未完成选择。DOM、媒体权限与上传选择继续要求真实文档可见。
 
+Windows 在 `content_state=None` 的所有阶段保持 controller 与 child HWND 隐藏，包括失败后新请求的 requested/provisional；新请求本身不清除 controller 中的旧错误像素。真实非错误文档提交后恢复同槽显示，不依赖 resize/show 重放。`CurrentDocument` 和 `RetainedDocument` 按原有面板及捕获合同显示，真实 HTTP 403 内容也不因状态码被隐藏。Pause 只控制当前标签；其他已打开标签继续运行，已有命名窗口的独立导航不等同于新的 popup 创建。
+
 主文档导航诊断是 Page 所有的临时有界轨迹，关闭 tab 时释放：最近 32 次尝试、最多 128 条事件及 128 KiB 序列化事件预算。容量淘汰增加 dropped，关联证明失效单独表达。主 frame 响应 callback 没有 WKNavigation；无法证明关联时只保留未关联样本，不用同 URL/latest sequence 推断当前响应状态。此能力不代表 console、子资源或 Fetch/XHR 网络诊断可用，原有 unavailable 语义保持。
 
 菜单的复制导航诊断由用户显式触发，经当前 owner、已有 Workspace 和精确 target 读取；不会初始化 runtime、创建 Agent grant 或自动上传。地址栏保留原地址，诊断/Agent 输出使用现有安全 URL 投影删除 userinfo、query 和 fragment，并限制文本长度；不收集 Cookie、认证头、正文、表单或 NSError 任意描述。网络/站点异常只提供显式单标签恢复和慢加载提示，不主动无限刷新，不绕过验证码，也不清理整个工作区。
+
+两个平台均保留宿主 dispatch、原生 attempt 和公开 action 事实。dispatch 序号与原生导航序号独立；没有精确关联的样本不取得文档身份。Windows 的 NavigationId、成功/错误/取消/下载由原生 Page owner 维护，旧 Wry PageLoad 回调不再写浏览器业务状态。`counters` 在轨迹淘汰后仍保留累计数，关联损失与容量丢失分别表达。macOS 的 policy action 记录公开导航类型、method 和来源 frame/origin，但不能证明它属于最新 WKNavigation 或真实物理手势。
+
+Windows 的 Back/Forward 推进当前控制 fence 并记录宿主 dispatch，同时保留真实文档的阶段、进度、问题和原生绑定；同文档历史切换不会等待新的完整文档加载。只有真实 NativeStarting 才创建新的 Loading 尝试，`Page.navigateToHistoryEntry` 的空回复不证明导航完成，SourceChanged(false) 只更新元数据。公开 `load.navigation_sequence` 可以在没有新原生文档尝试时推进，因此取消和轨迹关联仍使用准确 NavigationId 及其原 attempt 序号。后继回复不能证明迟到历史来源时继续保持 Unknown。BeforeUnload 保留原有精确命令/对话框 scope 和真实原生决定，不恢复快照或补造已取消的尝试。
+
+`load.navigation_control` 表达可选的重复跳转提示与标签暂停。提示只看独立主文档 attempt 的原始地址等价性，在内存使用页内随机盐 hash；redirect、普通子资源或未关联 action 不作为刷新次数。提示不自动暂停。用户明确暂停后，原生 policy 阻止页面发起的后续主导航和 popup，保留可用内容；继续只解除 hold，不自动刷新。用户明确地址栏/刷新/历史命令按原有 guard 解除 hold。Stop 只停止当前加载，不能声称阻止未来网页 timer 或全部 Fetch/XHR。Stop/Pause 可以取消同标签当前的人工导航，但必须等待原操作原生清理后完成，不能取消 Agent operation、提前解锁或重放 Stop 到后继文档。
+
+Windows 的 NavigationStarting.Cancel 可能发生在 GET 已发出之后，因此暂停还需要精确 root Document 的 CDP Fetch 请求阶段拦截。首次明确暂停后，拦截器保留到该原生 controller 关闭；继续只转换逻辑状态，不调用 Fetch.disable 释放尚未送达回调的旧请求。原生 root frame、Fetch.networkId 和 Network 的最早创建时间共同证明请求归属；不修改 HTTP method、headers 或 body。当前共享时钟证明限定为报告 invariant TSC 的 x86/x64 CPU，其他 CPU 不提供 navigation_control，Pause 返回 UnsupportedAction，普通导航与 Stop 保持可用。该能力范围和实机通过范围分别记录在[整改证据](../reports/2026-10-13-browser-remediation-evidence.zh.md)。
+
+Windows 普通页、popup 与站点维护 view 使用显式 `WebviewBuilder::external_page()` 创建模式。它在首次文档前跳过 Tauri core/plugin 初始化、应用 URI scheme、IPC 与应用全局脚本；默认 main/companion 行为保持。Wry 在没有 IPC handler 时不安装 `window.ipc`。同一 Tauri 窗口、事件线程和原生 WebView2 接口继续承载网页，不修改 getter 或加载后删除脚本。精确依赖补丁与许可证见 [vendor 说明](../../vendor/TAURI-PATCHES.md)。原生环境读取实际 Runtime 版本、Profile 与 UA；有效目录/持久性与所选 Profile 不一致时拒绝外部导航，不清理或修复 override 选择的数据。UA 是可选诊断：属性接口不可用、读取失败或值无效时保留 identity 缺失并记录固定原因，不阻断普通页或 popup 创建，也不猜测或截断为测量成功。诊断只提供进程内不可逆 Profile token 和覆盖是否存在，不导出用户路径或任意启动参数。
+
+此处 external_page 表达原生内嵌 WebView 加载外部网站的初始化边界，页面仍在当前产品窗口中；该 API 不打开或选择系统浏览器。
+
+Windows 仅在创建原生 view 时准备普通本地盘 UDF 路径，核对该 SDK 输入与原 ProfileStore 目录是同一目录对象；Session namespace 与清理路径保持原值。外部导航前，SDK 的有效 UserDataFolder getter 也必须使用支持的表示并指向该目录。原生对照已复现 verbatim 表示导致 Cookie 丢失，因此即使 override 指向同一目录，仍在使用不支持的表示时拒绝导航；普通匹配 override 保持可用。UNC、长路径及特殊名称无法安全转换时在创建网页前拒绝，本次不宣称支持这些数据根。关闭与应用重启后的 Cookie、LocalStorage、IndexedDB 保留、Session 隔离及 override 拒绝证据见[整改记录](../reports/2026-10-13-browser-remediation-evidence.zh.md)。
+
+Windows 的 iframe auto-attach 保留启动等待，在首段 iframe 脚本前安装文件选择策略。Renderer 的 worker/worklet 使用独立归属，只通过准确原生 session 及时恢复，收到确认后解除调试附着；这些辅助 session 不取得 DOM 路由或 Agent 权限。辅助恢复失败保留有界归属，等待原生 detach 或 controller 关闭；辅助资源准入失败不使无关 iframe 路由失效。既有有界事件通道在丢失生命周期事件时仍明确报告关联失效。Worker 与嵌套 Worker 的实机通过范围独立记录在整改证据中。
+
+macOS conformance 可以在初始化 Engine 时选择不可变的 `NativeWebKit` 对照身份，整个 Runtime 与 popup 继承同一策略；正式用户侧栏仍默认使用既有 Safari17 身份。实际原生 UA 通过公开隔离世界读取证明，读取前保持 unknown，不从 OS 或已安装 Safari 推断。身份 A/B 的结果和正式用户侧栏验收分别记录，未取得实机对照前不改变默认策略。
 
 ### 导航恢复验收 2026-10-10
 

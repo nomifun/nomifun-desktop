@@ -29,16 +29,105 @@ mod evaluation;
 pub struct DesktopBrowserHost {
     app: tauri::AppHandle,
     popups: bool,
+    #[cfg(debug_assertions)]
+    popup_inflight: Option<Arc<PopupInflightProbe>>,
 }
 
 impl DesktopBrowserHost {
     pub fn new(app: tauri::AppHandle) -> Self {
-        Self { app, popups: true }
+        Self { app, popups: true, #[cfg(debug_assertions)] popup_inflight: None }
     }
 
     /// Only the transport conformance runner manually consumes native deferrals.
     pub(crate) fn for_transport_conformance(app: tauri::AppHandle) -> Self {
-        Self { app, popups: false }
+        Self { app, popups: false, #[cfg(debug_assertions)] popup_inflight: None }
+    }
+
+    /// Internal native conformance only. Normal and release hosts have no gate.
+    #[cfg(debug_assertions)]
+    pub(crate) fn for_popup_inflight_conformance(
+        app: tauri::AppHandle,
+        probe: Arc<PopupInflightProbe>,
+    ) -> Self {
+        Self { app, popups: true, popup_inflight: Some(probe) }
+    }
+}
+
+/// One exact opener, one candidate and one release. This is an internal debug
+/// barrier, never a webpage, renderer or backend API and never a policy override.
+#[cfg(debug_assertions)]
+#[derive(Default)]
+pub(crate) struct PopupInflightProbe {
+    armed: StdMutex<Option<PopupInflightArm>>,
+    close: StdMutex<Option<(BrowserTabTarget, tokio::sync::oneshot::Sender<BrowserTabTarget>)>>,
+}
+#[cfg(debug_assertions)]
+struct PopupInflightArm {
+    opener: BrowserTabTarget,
+    entered: tokio::sync::oneshot::Sender<PopupInflightCandidate>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+#[cfg(debug_assertions)]
+pub(crate) struct PopupInflightCandidate {
+    pub(crate) opener: BrowserTabTarget,
+    pub(crate) child: BrowserTabTarget,
+    /// Sent only after the existing exact view native Close returns success.
+    pub(crate) closed: tokio::sync::oneshot::Receiver<BrowserTabTarget>,
+}
+#[cfg(debug_assertions)]
+pub(crate) struct PopupInflightTicket {
+    pub(crate) entered: tokio::sync::oneshot::Receiver<PopupInflightCandidate>,
+    pub(crate) release: tokio::sync::oneshot::Sender<()>,
+}
+#[cfg(debug_assertions)]
+impl PopupInflightProbe {
+    pub(crate) fn arm(&self, opener: BrowserTabTarget) -> Result<PopupInflightTicket, WorkspaceError> {
+        let mut armed = self.armed.lock().unwrap_or_else(|e| e.into_inner());
+        if armed.is_some() || self.close.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+            return Err(WorkspaceError::NotActionable);
+        }
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        *armed = Some(PopupInflightArm { opener, entered, release: release_rx });
+        Ok(PopupInflightTicket { entered: entered_rx, release })
+    }
+
+    async fn claimed(
+        &self,
+        opener: &BrowserTabTarget,
+        child: BrowserTabTarget,
+        cancel: &CancellationToken,
+        closed: &CancellationToken,
+    ) -> Result<(), WorkspaceError> {
+        let armed = {
+            let mut slot = self.armed.lock().unwrap_or_else(|e| e.into_inner());
+            if slot.as_ref().is_some_and(|armed| armed.opener == *opener) { slot.take() } else { None }
+        };
+        let Some(armed) = armed else { return Ok(()); };
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+        *self.close.lock().unwrap_or_else(|e| e.into_inner()) = Some((child.clone(), close_tx));
+        armed.entered.send(PopupInflightCandidate {
+            opener: opener.clone(), child, closed: close_rx,
+        }).map_err(|_| WorkspaceError::NativeCommandFailed)?;
+        // No state, registry, UI or StdMutex borrow crosses this wait. Its
+        // errors stay inside consume_popup's existing candidate retire path.
+        tokio::select! {
+            biased;
+            _=cancel.cancelled()=>Err(RunAdmissionError::Cancelled.into()),
+            _=closed.cancelled()=>Err(WorkspaceError::WorkspaceClosed),
+            release=armed.release=>release.map_err(|_| WorkspaceError::NativeCommandFailed),
+        }
+    }
+
+    fn native_closed(&self, target: BrowserTabTarget) {
+        let receipt = {
+            let mut close = self.close.lock().unwrap_or_else(|e| e.into_inner());
+            // Close owns the complete native view, not one loader. Preserve
+            // the actual close-time document target in the receipt.
+            if close.as_ref().is_some_and(|(expected, _)| expected.tab_id == target.tab_id
+                && expected.runtime_generation == target.runtime_generation) { close.take() } else { None }
+        };
+        if let Some((_, receipt)) = receipt { let _ = receipt.send(target); }
     }
 }
 
@@ -69,6 +158,8 @@ impl BrowserRuntimeFactory for DesktopBrowserHost {
         Ok(Arc::new_cyclic(|weak| DesktopBrowserRuntime {
             weak: weak.clone(),
             popups: self.popups,
+            #[cfg(debug_assertions)]
+            popup_inflight: self.popup_inflight.clone(),
             input_locked: Arc::new(AtomicBool::new(!input_enabled)),
             app: self.app.clone(),
             request,
@@ -98,10 +189,15 @@ impl BrowserRuntimeFactory for DesktopBrowserHost {
 }
 
 struct NativeTab {
+    // Only a native popup has an opener. Keep the exact admitted document,
+    // never a label-only relationship that could bind to a replacement page.
+    popup_opener: Option<BrowserTabTarget>,
     close_gate: Mutex<()>,
     rendering_capture: Arc<AtomicBool>,
     view: tauri::Webview,
     metadata: Arc<StdMutex<BrowserTabSnapshot>>,
+    environment: StdMutex<Option<BrowserRuntimeInfo>>,
+    identity: StdMutex<Option<BrowserIdentityReport>>,
     automation: Arc<Mutex<super::automation::TabAutomation>>,
     operation: Arc<StdMutex<Option<CancellationToken>>>,
     popup_stop: CancellationToken,
@@ -125,6 +221,8 @@ struct RuntimeState {
 pub struct DesktopBrowserRuntime {
     weak: Weak<DesktopBrowserRuntime>,
     popups: bool,
+    #[cfg(debug_assertions)]
+    popup_inflight: Option<Arc<PopupInflightProbe>>,
     input_locked: Arc<AtomicBool>,
     app: tauri::AppHandle,
     request: CreateBrowserRuntime,
@@ -145,7 +243,7 @@ struct OwnedSiteDataView {
     view: Option<tauri::Webview>,
 }
 
-fn reconcile_chooser_after_load(view:&tauri::Webview,input_locked:Arc<AtomicBool>) {
+pub(super) fn reconcile_chooser_after_load(view:&tauri::Webview,input_locked:Arc<AtomicBool>) {
     let view=view.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(error)=windows::reconcile_file_chooser_policy(&view,input_locked).await {
@@ -193,6 +291,21 @@ fn native_error(error: impl std::fmt::Display) -> WorkspaceError {
     WorkspaceError::NativeCommandFailed
 }
 
+fn navigation_error(error:String)->WorkspaceError{
+    if stale_navigation_error(&error){WorkspaceError::StaleTarget}else{native_error(error)}
+}
+fn stale_navigation_error(error:&str)->bool{
+    matches!(error,"Browser navigation is no longer current."|"Browser navigation was replaced before Stop.")
+}
+
+fn require_document(metadata:&StdMutex<BrowserTabSnapshot>)->Result<(),WorkspaceError>{
+    let tab=metadata.lock().unwrap_or_else(|e|e.into_inner());
+    if tab.load.as_ref().is_some_and(|load|load.content_state==BrowserContentState::None){
+        match tab.lifecycle {BrowserTabLifecycle::Failed=>return Err(WorkspaceError::PageFailed),BrowserTabLifecycle::Stopped=>return Err(WorkspaceError::PageStopped),BrowserTabLifecycle::Crashed=>return Err(WorkspaceError::PageCrashed),_=>{}}
+    }
+    Ok(())
+}
+
 /// Navigation cancellation stops the same native page and still awaits the
 /// original callback. Never drop that callback or submit navigation after Stop.
 async fn navigation_command(
@@ -201,6 +314,8 @@ async fn navigation_command(
     params: serde_json::Value,
     cancel: &CancellationToken,
     closing: &CancellationToken,
+    source: BrowserNavigationSource,
+    expected: Option<windows::navigation::Receipt>,
 ) -> Result<(), WorkspaceError> {
     if closing.is_cancelled() {
         return Err(WorkspaceError::WorkspaceClosed);
@@ -208,7 +323,15 @@ async fn navigation_command(
     if cancel.is_cancelled() {
         return Err(RunAdmissionError::Cancelled.into());
     }
-    let navigation = windows::protocol_call(view, method, params);
+    // Releasing the request hold aborts its owned intercepted requests first;
+    // a deliberate navigation never resumes an old paused request.
+    windows::navigation_request_gate::disable_guarded(view,expected).await.map_err(navigation_error)?;
+    let receipt=Arc::new(StdMutex::new(None));
+    let rejected_before_unload=Arc::new(AtomicBool::new(false));
+    let dispatch=windows::NavigationDispatch {source,url:params["url"].as_str().map(str::to_owned),
+        action:match method {"Page.reload"=>BrowserNavigationActionType::Reload,"Page.navigateToHistoryEntry"=>BrowserNavigationActionType::BackForward,_=>BrowserNavigationActionType::Other},
+        receipt:receipt.clone(),rejected_before_unload:rejected_before_unload.clone(),cancel:cancel.clone(),closing:closing.clone()};
+    let navigation = windows::protocol_navigation(view, method, params,dispatch,expected);
     tokio::pin!(navigation);
     // Poll navigation first: if cancellation wins, the command has already
     // been submitted and stopLoading is ordered after it on the UI thread.
@@ -219,36 +342,71 @@ async fn navigation_command(
         _=closing.cancelled()=>None,
     };
     if cancel.is_cancelled() || closing.is_cancelled() || result.is_none() {
-        let stop = windows::protocol_call(view, "Page.stopLoading", serde_json::json!({})).await;
-        if result.is_none() {
-            let _ = navigation.await;
+        let submitted=*receipt.lock().unwrap_or_else(|e|e.into_inner());
+        let stop=match submitted {
+            Some(receipt)=>windows::stop_navigation(view,receipt).await,
+            None=>Ok(()),
+        };
+        let settled=match result {Some(result)=>result,None=>navigation.await};
+        if stop.as_ref().is_err_and(|error|stale_navigation_error(error)) {
+            if let Ok(response)=&settled {
+                if let Some(loader)=response["loaderId"].as_str() {
+                    // CDP returns the command's loader, while its native
+                    // NavigationId is unavailable. A frame-tree sample plus
+                    // an unchanged native receipt proves the owned document.
+                    if let Some(expected)=windows::navigation::committed_receipt(view).await? {
+                    if let Ok(tree)=windows::protocol_call(view,"Page.getFrameTree",serde_json::json!({})).await {
+                        if tree["frameTree"]["frame"]["loaderId"].as_str()==Some(loader) {
+                            let stopped=windows::stop_navigation(view,expected).await;
+                            if let Err(error)=stopped {if !stale_navigation_error(&error) {return Err(navigation_error(error));}}
+                        }
+                    }
+                    }
+                }
+            }
         }
-        stop.map_err(native_error)?;
+        // No NavigationId is returned by CDP dispatch. If a later native
+        // attempt appeared, cancellation may not stop that unassociated page.
+        if let Err(error)=stop {if !stale_navigation_error(&error) {return Err(navigation_error(error));}}
         if closing.is_cancelled() {
             return Err(WorkspaceError::WorkspaceClosed);
         }
         return Err(RunAdmissionError::Cancelled.into());
     }
-    result
+    let result=result
         .ok_or(WorkspaceError::NativeCommandFailed)?
-        .map_err(native_error)?;
+        .map_err(navigation_error)?;
+    if windows::navigation_response_failed(&result) && !rejected_before_unload.load(Ordering::Acquire) {return Err(WorkspaceError::PageFailed);}
+    // A download has settled this navigation without committing a new page.
+    // Its existing native download owner continues to govern the transfer.
     Ok(())
 }
 
 impl DesktopBrowserRuntime {
+    async fn native_data_directory(&self) -> Result<std::path::PathBuf, WorkspaceError> {
+        // Normalize only the SDK input at lazy native creation. The original
+        // directory remains the Profile identity and cleanup owner.
+        let expected = self.directory.clone();
+        let directory = tauri::async_runtime::spawn_blocking(move || {
+            windows::effective_environment::prepare_native_data_directory(&expected)
+        }).await.map_err(native_error)??;
+        if self.closing.is_cancelled() { return Err(WorkspaceError::WorkspaceClosed); }
+        Ok(directory)
+    }
+
     async fn create_site_data_view(&self) -> Result<tauri::Webview, WorkspaceError> {
         // Caller holds creating, and has already validated user/generation.
         if self.site_data_view.lock().await.is_some() { return Err(RunAdmissionError::WorkerFailed.into()); }
         let app = self.app.clone();
         if app.get_window("main").is_none() { return Err(WorkspaceError::NativeUnavailable); }
-        let directory = self.directory.clone();
+        let directory = self.native_data_directory().await?;
         let ephemeral = matches!(self.request.profile, BrowserProfile::Ephemeral);
         let label = format!("browser-site-data-{}",uuid::Uuid::now_v7());
         *self.site_data_view.lock().await = Some(OwnedSiteDataView { label:label.clone(), view:None });
         let created = tauri::async_runtime::spawn_blocking(move || {
             app.get_window("main").ok_or(WorkspaceError::NativeUnavailable)?.add_child(
                 tauri::webview::WebviewBuilder::new(label,tauri::WebviewUrl::External("about:blank".parse().unwrap()))
-                    .data_directory(directory).incognito(ephemeral).devtools(false).focused(false).disable_drag_drop_handler()
+                    .external_page().data_directory(directory).incognito(ephemeral).devtools(false).focused(false).disable_drag_drop_handler()
                     .on_navigation(|url|url.as_str()=="about:blank")
                     .on_new_window(|_,_|tauri::webview::NewWindowResponse::Deny),
                 tauri::LogicalPosition::new(-32000.0,-32000.0),tauri::LogicalSize::new(1.0,1.0),
@@ -263,6 +421,7 @@ impl DesktopBrowserRuntime {
         self.site_data_view.lock().await.as_mut().ok_or(WorkspaceError::WorkspaceClosed)?.view = Some(view.clone());
         let prepared = async {
             view.hide().map_err(native_error)?;
+            windows::effective_environment::inspect(&view,self.directory.clone(),if matches!(self.request.profile,BrowserProfile::Ephemeral){BrowserProfilePersistence::Ephemeral}else{BrowserProfilePersistence::Persistent}).await?;
             windows::set_native_user_input_enabled(&view,false).await.map_err(native_error)
         }.await;
         if let Err(error) = prepared { self.close_site_data_view().await?; return Err(error); }
@@ -311,6 +470,9 @@ impl DesktopBrowserRuntime {
                         .unwrap_or_else(|error| error.into_inner())
                         .target
                         .clone();
+                if !windows::navigation::popup_permitted(&opener.tab_id, &opener) {
+                    return None;
+                }
                 Some(windows::popup::PopupAdmission {
                     download: windows::user_downloads::capture_agent(&opener),
                     opener,
@@ -399,6 +561,10 @@ impl DesktopBrowserRuntime {
             self.revision.bump();
             return Err(native_error(error));
         }
+        #[cfg(debug_assertions)]
+        if let Some(probe) = &self.popup_inflight {
+            probe.native_closed(tab.metadata.lock().unwrap_or_else(|e| e.into_inner()).target.clone());
+        }
         let mut state=self.state.lock().await;
         state.tabs.remove(id);
         if state.active.as_deref()==Some(id) {state.active=state.tabs.keys().next().cloned();}
@@ -456,10 +622,7 @@ impl DesktopBrowserRuntime {
             diagnostics: Default::default(),
         }));
         let title_metadata = metadata.clone();
-        let load_metadata = metadata.clone();
         let title_revision = self.revision.clone();
-        let load_revision = self.revision.clone();
-        let load_input_locked=self.input_locked.clone();
         let view = request
             // Navigation/recovery must restore policy from live run ownership,
             // not from the state captured when this view was first created.
@@ -475,34 +638,7 @@ impl DesktopBrowserRuntime {
                             .title = title.chars().take(512).collect();
                         title_revision.bump();
                     })
-                    .on_page_load(move |view, payload| {
-                        if matches!(payload.event(),tauri::webview::PageLoadEvent::Started) {
-                            let _=windows::permissions::navigation_started(view.label());
-                            windows::user_file_chooser::cancel(view.label());
-                            windows::user_downloads::cancel_pending(view.label());
-                        }
-                        let mut data = load_metadata
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner());
-                        data.url = payload.url().to_string();
-                        match payload.event() {
-                            tauri::webview::PageLoadEvent::Started => {
-                                data.target.document_generation += 1;
-                                data.blocked_permissions.clear();
-                                data.diagnostics.clear_page();
-                                data.lifecycle = BrowserTabLifecycle::Loading;
-                            }
-                            tauri::webview::PageLoadEvent::Finished => {
-                                data.lifecycle = BrowserTabLifecycle::Ready
-                            }
-                        }
-                        drop(data);
-                        if matches!(payload.event(),tauri::webview::PageLoadEvent::Finished) {
-                            windows::diagnostics::document_loaded(&view);
-                            reconcile_chooser_after_load(&view,load_input_locked.clone());
-                        }
-                        load_revision.bump();
-                    })
+
             })
             .await
             .map_err(native_error)?;
@@ -530,14 +666,19 @@ impl DesktopBrowserRuntime {
         windows::permissions::install(&view, metadata.clone(), self.revision.clone(), self.input_locked.clone())
             .await
             .map_err(native_error)?;
+        windows::navigation::install(&view,metadata.clone(),self.revision.clone(),self.input_locked.clone(),false).await.map_err(native_error)?;
+        if windows::navigation_request_gate::install(&view).await.is_err(){let _=windows::navigation::gate_unavailable(&view).await;tracing::warn!("Request-stage navigation control is unavailable for this native page");}
         windows::process_failure::install(&view, metadata.clone(), self.revision.clone()).await.map_err(native_error)?;
         windows::diagnostics::install(&view, metadata.clone()).await;
         windows::script_dialogs::install(&view, metadata.clone(), self.revision.clone()).await?;
         let tab = Arc::new(NativeTab {
+            popup_opener: Some(context.opener.clone()),
             close_gate: Mutex::new(()),
             rendering_capture: Default::default(),
             view: view.clone(),
             metadata,
+            environment: StdMutex::new(None),
+            identity: StdMutex::new(None),
             automation: Default::default(),
             operation: Default::default(),
             popup_stop: self.closing.child_token(),
@@ -562,6 +703,15 @@ impl DesktopBrowserRuntime {
             if context.closed.is_cancelled() {
                 return Err(WorkspaceError::WorkspaceClosed);
             }
+            #[cfg(debug_assertions)]
+            if let Some(probe) = &self.popup_inflight {
+                let child = tab.metadata.lock().unwrap_or_else(|e| e.into_inner()).target.clone();
+                probe.claimed(&context.opener, child, &context.cancel, &context.closed).await?;
+            }
+            let environment=windows::effective_environment::inspect(&view,self.directory.clone(),if matches!(self.request.profile,BrowserProfile::Ephemeral){BrowserProfilePersistence::Ephemeral}else{BrowserProfilePersistence::Persistent}).await?;
+            *tab.environment.lock().unwrap_or_else(|e|e.into_inner())=Some(environment);
+            let identity=windows::effective_environment::inspect_identity(&view).await;
+            *tab.identity.lock().unwrap_or_else(|e|e.into_inner())=identity;
             windows::user_file_chooser::install(&view,tab.automation.clone(),self.input_locked.clone(),self.app.path().home_dir().map_err(native_error)?)
                 .await.map_err(native_error)?;
             windows::shortcuts::install(&view, self.request.key.agent_session_id.clone(), tab.metadata.clone(), self.input_locked.clone()).await.map_err(native_error)?;
@@ -594,6 +744,7 @@ impl DesktopBrowserRuntime {
             }
             // All handlers and the candidate are owned before the popup's first
             // document executes. A dialog can now yield through the registry.
+            {let state=self.state.lock().await;self.apply_surface(&state).await?;}
             request.complete(&view).await.map_err(native_error)?;
             let mut state = self.state.lock().await;
             if !state.tabs.contains_key(&id) { return Ok(()); }
@@ -677,6 +828,9 @@ impl DesktopBrowserRuntime {
             return Err(WorkspaceError::TabLimit);
         }
         drop(state);
+        // Finish path validation before publishing an uncertain native label.
+        let directory = self.native_data_directory().await?;
+        if cancel.is_cancelled() { return Err(RunAdmissionError::Cancelled.into()); }
         let id = format!("browser-{}", uuid::Uuid::now_v7());
         *scope.lock().unwrap_or_else(|e|e.into_inner())=Some(id.clone());
         let metadata = Arc::new(StdMutex::new(BrowserTabSnapshot {
@@ -698,11 +852,7 @@ impl DesktopBrowserRuntime {
             diagnostics: Default::default(),
         }));
         let title_metadata = metadata.clone();
-        let load_metadata = metadata.clone();
         let title_revision = self.revision.clone();
-        let load_revision = self.revision.clone();
-        let load_input_locked=self.input_locked.clone();
-        let directory = self.directory.clone();
         let ephemeral = matches!(self.request.profile, BrowserProfile::Ephemeral);
         let app = self.app.clone();
         let label = id.clone();
@@ -716,6 +866,7 @@ impl DesktopBrowserRuntime {
                         label,
                         tauri::WebviewUrl::External("about:blank".parse().unwrap()),
                     )
+                    .external_page()
                     .data_directory(directory)
                     .devtools(false)
                     .incognito(ephemeral)
@@ -730,32 +881,6 @@ impl DesktopBrowserRuntime {
                             .unwrap_or_else(|e| e.into_inner())
                             .title = title.chars().take(512).collect();
                         title_revision.bump();
-                    })
-                    .on_page_load(move |view, payload| {
-                        if matches!(payload.event(),tauri::webview::PageLoadEvent::Started) {
-                            let _=windows::permissions::navigation_started(view.label());
-                            windows::user_file_chooser::cancel(view.label());
-                            windows::user_downloads::cancel_pending(view.label());
-                        }
-                        let mut data = load_metadata.lock().unwrap_or_else(|e| e.into_inner());
-                        data.url = payload.url().to_string();
-                        match payload.event() {
-                            tauri::webview::PageLoadEvent::Started => {
-                                data.target.document_generation += 1;
-                                data.blocked_permissions.clear();
-                                data.diagnostics.clear_page();
-                                data.lifecycle = BrowserTabLifecycle::Loading;
-                            }
-                            tauri::webview::PageLoadEvent::Finished => {
-                                data.lifecycle = BrowserTabLifecycle::Ready
-                            }
-                        }
-                        drop(data);
-                        if matches!(payload.event(),tauri::webview::PageLoadEvent::Finished) {
-                            windows::diagnostics::document_loaded(&view);
-                            reconcile_chooser_after_load(&view,load_input_locked.clone());
-                        }
-                        load_revision.bump();
                     }),
                     // Native view is offscreen until the input policy is applied and
                     // the authenticated renderer has supplied a real display slot.
@@ -767,11 +892,14 @@ impl DesktopBrowserRuntime {
         .await
         .map_err(native_error)??;
         let tab = Arc::new(NativeTab {
+            popup_opener: None,
             close_gate: Mutex::new(()),
             rendering_capture: Default::default(),
             automation: Default::default(),
             view: view.clone(),
             metadata,
+            environment: StdMutex::new(None),
+            identity: StdMutex::new(None),
             operation: Default::default(),
             popup_stop: self.closing.child_token(),
             popup_work: Default::default(),
@@ -800,9 +928,15 @@ impl DesktopBrowserRuntime {
                     .await
                     .map_err(native_error)?;
             }
+            let environment=windows::effective_environment::inspect(&view,self.directory.clone(),if matches!(self.request.profile,BrowserProfile::Ephemeral){BrowserProfilePersistence::Ephemeral}else{BrowserProfilePersistence::Persistent}).await?;
+            *tab.environment.lock().unwrap_or_else(|e|e.into_inner())=Some(environment);
+            let identity=windows::effective_environment::inspect_identity(&view).await;
+            *tab.identity.lock().unwrap_or_else(|e|e.into_inner())=identity;
             windows::permissions::install(&view, tab.metadata.clone(), self.revision.clone(), self.input_locked.clone())
                 .await
                 .map_err(native_error)?;
+            windows::navigation::install(&view,tab.metadata.clone(),self.revision.clone(),self.input_locked.clone(),true).await.map_err(native_error)?;
+            if windows::navigation_request_gate::install(&view).await.is_err(){let _=windows::navigation::gate_unavailable(&view).await;tracing::warn!("Request-stage navigation control is unavailable for this native page");}
             windows::process_failure::install(&view, tab.metadata.clone(), self.revision.clone()).await.map_err(native_error)?;
             windows::diagnostics::install(&view, tab.metadata.clone()).await;
             windows::script_dialogs::install(&view, tab.metadata.clone(), self.revision.clone()).await?;
@@ -823,14 +957,18 @@ impl DesktopBrowserRuntime {
             )
             .await
             .map_err(native_error)?;
-            navigation_command(
+            {let state=self.state.lock().await;self.apply_surface(&state).await?;}
+            let navigation_result=navigation_command(
                 &view,
                 "Page.navigate",
                 serde_json::json!({"url":url.as_str()}),
                 cancel,
                 &self.closing,
+                if self.input_locked.load(Ordering::Acquire){BrowserNavigationSource::AgentCommand}else{BrowserNavigationSource::UserCommand},
+                None,
             )
-            .await?;
+            .await;
+            if let Err(error)=navigation_result {if error!=WorkspaceError::PageFailed{return Err(error);}}
             let mut state = self.state.lock().await;
             if state.closed || self.closing.is_cancelled() {
                 return Err(WorkspaceError::WorkspaceClosed);
@@ -847,6 +985,10 @@ impl DesktopBrowserRuntime {
         }
         .await;
         if let Err(error) = initialized {
+            let retained_stop=error==WorkspaceError::Admission(RunAdmissionError::Cancelled)
+                &&!self.closing.is_cancelled()
+                &&tab.metadata.lock().unwrap_or_else(|e|e.into_inner()).load.as_ref().is_some_and(|load|load.phase==BrowserNavigationPhase::Cancelled&&matches!(load.cancellation_reason,Some(BrowserCancellationReason::UserStop|BrowserCancellationReason::AutomaticNavigationPaused)));
+            if retained_stop {self.revision.bump();return Err(error);}
             {
                 let mut state=self.state.lock().await;
                 if state.active.as_ref()==Some(&id) {state.active=previous.filter(|id|state.tabs.contains_key(id));}
@@ -859,6 +1001,24 @@ impl DesktopBrowserRuntime {
     }
 
     async fn apply_surface(&self, state: &RuntimeState) -> Result<(), WorkspaceError> {
+        let popup_hold = if state.visible && state.bounds.is_some() && !state.closed {
+            state.active.as_ref().and_then(|id| state.tabs.get(id)).and_then(|child| {
+                if child.popup_stop.is_cancelled() { return None; }
+                let opener = child.popup_opener.as_ref()?;
+                let parent = self.target(state, opener).ok()?;
+                if parent.popup_stop.is_cancelled()
+                    || opener.runtime_generation != self.request.runtime_generation {
+                    return None;
+                }
+                let child_target = child.metadata.lock().unwrap_or_else(|e| e.into_inner()).target.clone();
+                Some(windows::presentation::PopupCommitHold {
+                    opener: opener.clone(),
+                    child: child_target,
+                    metadata: child.metadata.clone(),
+                    closing_lease: child.popup_stop.clone(),
+                })
+            })
+        } else { None };
         let views: Vec<_> = state
             .tabs
             .iter()
@@ -881,29 +1041,25 @@ impl DesktopBrowserRuntime {
                         // Native destruction retains its registry entry until
                         // acknowledged; queued layout must not touch that view.
                         if closing.is_cancelled() { continue; }
-                        if visible && active.as_ref() == Some(&id) && bounds.is_some() {
+                        if !windows::presentation::is_registered(&id) {
+                            // Keep an initializing candidate offscreen and
+                            // hidden until its native handlers own visibility.
+                            // Creation reapplies the current request before
+                            // external navigation or popup completion.
+                            view.hide().map_err(native_error)?;
+                            continue;
+                        }
+                        let wanted = visible && active.as_ref() == Some(&id) && bounds.is_some();
+                        if wanted {
                             let bounds = bounds.unwrap();
                             view.set_position(tauri::LogicalPosition::new(bounds.x, bounds.y))
                                 .map_err(native_error)?;
                             view.set_size(tauri::LogicalSize::new(bounds.width, bounds.height))
                                 .map_err(native_error)?;
-                            view.show().map_err(native_error)?;
-                            windows::permissions::set_visible(&id, true).map_err(native_error)?;
-                            windows::user_file_chooser::set_visible(&id, true);
-                            windows::user_downloads::set_visible(&id, true);
-                        } else {
-                            windows::user_file_chooser::set_visible(&id, false);
-                            windows::user_downloads::set_visible(&id, false);
-                            let permission_cleanup=windows::permissions::set_visible(&id, false);
-                            if rendering_capture.load(Ordering::Acquire) {
-                                windows::hide_native_window(&view).map_err(native_error)?;
-                            } else {
-                                view.hide().map_err(native_error)?;
-                            }
-                            // A failed permission callback must not leave the
-                            // native page covering a modal or a different pane.
-                            permission_cleanup.map_err(native_error)?;
                         }
+                        let hold = popup_hold.as_ref().filter(|hold| hold.opener.tab_id == id).cloned();
+                        windows::presentation::request(&id, wanted, cancel.clone(), closing, rendering_capture, hold)
+                            .map_err(native_error)?;
                     }
                     Ok(())
                 })();
@@ -1175,6 +1331,13 @@ impl BrowserRuntime for DesktopBrowserRuntime {
         }
         Ok(self.snapshot_locked(&state))
     }
+    async fn navigation_diagnostics(&self,target:BrowserTabTarget)->Result<BrowserNavigationReport,WorkspaceError>{
+        let tab={let state=self.state.lock().await;if state.closed{return Err(WorkspaceError::WorkspaceClosed);}self.target(&state,&target)?.clone()};
+        let mut report=windows::navigation::report(&tab.view,target).await?;
+        report.runtime=tab.environment.lock().unwrap_or_else(|e|e.into_inner()).clone();
+        report.identity=tab.identity.lock().unwrap_or_else(|e|e.into_inner()).clone();
+        Ok(report.project_metadata())
+    }
     async fn execute(&self, command: BrowserTabCommand, cancel: CancellationToken) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
         self.execute_owned(command, cancel).await
     }
@@ -1406,6 +1569,7 @@ impl DesktopBrowserRuntime {
             state.tabs.get(&id).cloned().ok_or(WorkspaceError::TabNotFound)?
         };
         let mut automation=tab.automation.lock().await;
+        require_document(&tab.metadata)?;
         let target=tab.metadata.lock().unwrap_or_else(|error|error.into_inner()).target.clone();
         {
             let state=self.state.lock().await;
@@ -1450,6 +1614,7 @@ impl DesktopBrowserRuntime {
                 .ok_or(WorkspaceError::TabNotFound)?
         };
         let mut automation = tab.automation.lock().await;
+        require_document(&tab.metadata)?;
         let target = {
             let state = self.state.lock().await;
             if state.closed {
@@ -1506,7 +1671,9 @@ impl DesktopBrowserRuntime {
         } else {
             None
         };
+        let interrupt=matches!(&command,BrowserTabCommand::Navigate {..}|BrowserTabCommand::Reload {..}|BrowserTabCommand::Back {..}|BrowserTabCommand::Forward {..}|BrowserTabCommand::StopLoading {..}|BrowserTabCommand::PauseNavigation {..}|BrowserTabCommand::ResumeNavigation {..});
         let _page = match &selected {
+            Some(_) if interrupt=>None,
             Some(tab) => Some(tab.automation.lock().await),
             None => None,
         };
@@ -1521,6 +1688,7 @@ impl DesktopBrowserRuntime {
             self.target(&state, target)?;
         }
         let backwards = matches!(&command, BrowserTabCommand::Back { .. });
+        let paused_command=matches!(&command,BrowserTabCommand::PauseNavigation {..});
         match command {
             BrowserTabCommand::Dialog { .. } => unreachable!("dialog command handled before page lock"),
             BrowserTabCommand::OpenDownloads { runtime_generation } => {
@@ -1574,40 +1742,48 @@ impl DesktopBrowserRuntime {
                 let url = valid_url(&url)?;
                 let tab = self.target(&state, &target)?.clone();
                 drop(state);
+                let expected=windows::navigation::receipt_for_target(&tab.view,target,None).await?;
                 navigation_command(
                     &tab.view,
                     "Page.navigate",
                     serde_json::json!({"url":url.as_str()}),
                     &cancel,
                     &self.closing,
+                    if self.input_locked.load(Ordering::Acquire){BrowserNavigationSource::AgentCommand}else{BrowserNavigationSource::UserCommand},
+                    Some(expected),
                 )
                 .await?;
                 state = self.state.lock().await;
             }
-            BrowserTabCommand::Reload { target } => {
+            BrowserTabCommand::Reload { target,expected_navigation_sequence } => {
                 let tab = self.target(&state, &target)?.clone();
                 drop(state);
+                let expected=windows::navigation::receipt_for_target(&tab.view,target,Some(expected_navigation_sequence)).await?;
                 navigation_command(
                     &tab.view,
                     "Page.reload",
                     serde_json::json!({}),
                     &cancel,
                     &self.closing,
+                    if self.input_locked.load(Ordering::Acquire){BrowserNavigationSource::AgentCommand}else{BrowserNavigationSource::UserCommand},
+                    Some(expected),
                 )
                 .await?;
                 state = self.state.lock().await;
             }
-            BrowserTabCommand::StopLoading { target } => {
+            BrowserTabCommand::StopLoading { target,expected_navigation_sequence } => {
                 let tab = self.target(&state, &target)?.clone();
                 drop(state);
-                windows::protocol_call(&tab.view, "Page.stopLoading", serde_json::json!({}))
+                let expected=windows::navigation::receipt_for_target(&tab.view,target,Some(expected_navigation_sequence)).await?;
+                windows::stop_navigation(&tab.view,expected)
                     .await
-                    .map_err(native_error)?;
+                    .map_err(navigation_error)?;
                 state = self.state.lock().await;
             }
             BrowserTabCommand::Back { target } | BrowserTabCommand::Forward { target } => {
                 let tab = self.target(&state, &target)?.clone();
                 drop(state);
+                let expected=windows::navigation::receipt_for_target(&tab.view,target,None).await?;
                 let history = windows::protocol_call(
                     &tab.view,
                     "Page.getNavigationHistory",
@@ -1632,10 +1808,25 @@ impl DesktopBrowserRuntime {
                         serde_json::json!({"entryId":entry["id"]}),
                         &cancel,
                         &self.closing,
+                        if self.input_locked.load(Ordering::Acquire){BrowserNavigationSource::AgentCommand}else{BrowserNavigationSource::UserCommand},
+                        Some(expected),
                     )
                     .await?;
                 }
                 state = self.state.lock().await;
+            }
+            BrowserTabCommand::PauseNavigation {target,expected_navigation_sequence}|BrowserTabCommand::ResumeNavigation {target,expected_navigation_sequence}=>{
+                let tab=self.target(&state,&target)?.clone();
+                drop(state);
+                windows::navigation::set_paused(&tab.view,target,paused_command,expected_navigation_sequence).await?;
+                if paused_command {
+                    // The native hold has already invalidated pending window
+                    // requests. Wait for any owned candidate to retire before
+                    // acknowledging Pause; Resume cannot release that old work.
+                    let _settled = tab.popup_work.lock().await;
+                    windows::popup::settle_view(&tab.view).await.map_err(native_error)?;
+                }
+                state=self.state.lock().await;
             }
         }
         self.revision.bump();

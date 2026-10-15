@@ -483,6 +483,14 @@ impl DesktopBrowserRuntime {
         command: BrowserTabCommand,
         cancel: CancellationToken,
     ) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
+        // Stop/pause must reach AppKit while the original navigation retains
+        // its pending owner, including across a modal page dialog. They only
+        // change native navigation state, never semantic observation handles,
+        // and execute_inner rechecks the exact supplied target and attempt.
+        if matches!(&command, BrowserTabCommand::StopLoading { .. }
+            | BrowserTabCommand::PauseNavigation { .. } | BrowserTabCommand::ResumeNavigation { .. }) {
+            return self.execute_inner(command, cancel, Arc::new(StdMutex::new(None))).await;
+        }
         if let BrowserTabCommand::Dialog {
             target,
             request_id,

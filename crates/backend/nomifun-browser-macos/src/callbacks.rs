@@ -6,7 +6,11 @@ use crate::{
     navigation::{self, Update},
 };
 use block2::DynBlock;
-use nomifun_browser_platform::runtime::{BrowserCancellationReason, BrowserNavigationSource};
+use nomifun_browser_platform::runtime::{
+    BrowserCancellationReason, BrowserNavigationSource, BrowserNavigationEvent,
+    BrowserNavigationEventKind, BrowserNavigationActionSummary, BrowserNavigationActionType,
+    BrowserNavigationHttpMethod, BrowserNavigationPolicy,
+};
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained,
     runtime::Bool,
@@ -25,10 +29,13 @@ pub(crate) struct DelegateState {
     navigation: RefCell<Option<Retained<WKNavigation>>>,
     announced: Cell<bool>,
     start_seen: Cell<bool>,
-    // Native requests replaced before their didStart acknowledgement retain
-    // identity until that start or terminal callback arrives. No page facts
-    // or persistent history are stored here.
+    // Replaced requests without a native start acknowledgement must retain
+    // their token until that acknowledgement or a terminal callback arrives.
     awaiting_retired_start: RefCell<Vec<Retained<WKNavigation>>>,
+    // Keep a bounded set of retired tokens so their late start, finish and
+    // failure callbacks remain distinguishable from unexplained routing loss.
+    // Retaining the native objects also prevents pointer identity reuse.
+    retired_navigations: RefCell<Vec<Retained<WKNavigation>>>,
 }
 define_class!(
     #[unsafe(super = NSObject)]
@@ -45,12 +52,16 @@ define_class!(
             action: &WKNavigationAction,
             decision: &DynBlock<dyn Fn(WKNavigationActionPolicy)>,
         ) {
-            let live = self.page().is_some();
-            let url = unsafe { action.request().URL() }
+            let page = self.page();
+            let live = page.is_some();
+            let request = unsafe { action.request() };
+            let url = request.URL()
                 .and_then(|u| u.absoluteString())
                 .map(|u| u.to_string())
                 .unwrap_or_default();
             let main = unsafe { action.targetFrame() }.is_none_or(|f| unsafe { f.isMainFrame() });
+            let paused = main && page.as_ref().is_some_and(|page|
+                page.snapshot().load.navigation_control.as_ref().is_some_and(|control| control.paused));
             // Non-network documents are allowed only as subframes. No local
             // file or host IPC scheme is ever admitted into an untrusted page.
             let download = unsafe { action.shouldPerformDownload() };
@@ -64,12 +75,40 @@ define_class!(
                     || url == "about:blank"
                     || (!main && (url.starts_with("data:") || url.starts_with("blob:")))
                     || generated_file);
-            if main && (download || !allowed) {
-                if let Some(page) = self.page() {
-                    page.transition(Update::PolicyCancelled { url: Some(url.clone()), reason: if download { BrowserCancellationReason::Download } else { BrowserCancellationReason::NavigationRejected } });
+            let policy = if paused { BrowserNavigationPolicy::Paused }
+                else if !allowed { BrowserNavigationPolicy::Cancel }
+                else if download { BrowserNavigationPolicy::Download }
+                else { BrowserNavigationPolicy::Allow };
+            // This trace promises main-document navigation coverage. An iframe
+            // may be its source, but unrelated subframe loads must not flood it.
+            if main && let Some(page) = &page {
+                let source_frame = unsafe { action.sourceFrame() };
+                let source_origin = source_frame.as_ref().and_then(|frame| unsafe { frame.request() }.URL())
+                    .and_then(|url| url.absoluteString())
+                    .and_then(|url| url::Url::parse(&url.to_string()).ok())
+                    .filter(|url| matches!(url.scheme(), "http" | "https"))
+                    .map(|url| url.origin().ascii_serialization());
+                let mut event = BrowserNavigationEvent::new(BrowserNavigationEventKind::Action,
+                    None, None, BrowserNavigationSource::Unknown, Some(url.clone()));
+                event.action = Some(BrowserNavigationActionSummary {
+                    navigation_type: navigation_type(unsafe { action.navigationType() }),
+                    main_frame: main,
+                    source_main_frame: source_frame.as_ref().map(|frame| unsafe { frame.isMainFrame() }),
+                    http_method: http_method(request.HTTPMethod().as_ref().map(|method| method.to_string()).as_deref()),
+                    policy, source_origin,
+                    // WKNavigationType is evidence of an action category, not
+                    // proof of physical user input. Do not infer a gesture.
+                    user_initiated: None,
+                });
+                page.navigation_action(event);
+                if main && (paused || download || !allowed) {
+                    page.transition(Update::PolicyCancelled { url: Some(url.clone()), reason:
+                        if paused { BrowserCancellationReason::AutomaticNavigationPaused }
+                        else if download { BrowserCancellationReason::Download }
+                        else { BrowserCancellationReason::NavigationRejected } });
                 }
             }
-            decision.call((if !allowed {
+            decision.call((if paused || !allowed {
                 WKNavigationActionPolicy::Cancel
             } else if download {
                 WKNavigationActionPolicy::Download
@@ -109,11 +148,14 @@ define_class!(
             let Some(page) = self.page() else {
                 return;
             };
-            if self.take_retired(navigation) { return; }
+            if self.retired(navigation) { return; }
+            if navigation.is_none() { page.mark_navigation_routing_lost(); return; }
             if self.ivars().announced.get() && !self.current(navigation) {
+                page.mark_navigation_routing_lost();
                 return;
             }
             if !self.ivars().announced.get() && self.current(navigation) { return; }
+            if !self.current(navigation) { self.retire_current(); }
             self.ivars().start_seen.set(true);
             *self.ivars().navigation.borrow_mut() = navigation.map(|value| unsafe { Retained::retain(value as *const WKNavigation as *mut WKNavigation) }.unwrap());
             if !self.ivars().announced.replace(false) {
@@ -122,6 +164,11 @@ define_class!(
             page.transition(Update::Started { url: view_url(view) });
             self.ivars().interactions.drain_dialogs();
             self.refresh(view);
+            // The action policy may have allowed this navigation just before
+            // a user pause. A queued didStart must not escape the new hold.
+            if page.snapshot().load.navigation_control.as_ref().is_some_and(|control| control.paused) {
+                self.stop_loading_with_reason(view, BrowserCancellationReason::AutomaticNavigationPaused);
+            }
         }
         #[unsafe(method(webView:didReceiveServerRedirectForProvisionalNavigation:))]
         fn redirected(&self, view: &WKWebView, navigation: Option<&WKNavigation>) {
@@ -139,9 +186,12 @@ define_class!(
         }
         #[unsafe(method(webView:didFinishNavigation:))]
         fn finished(&self, view: &WKWebView, navigation: Option<&WKNavigation>) {
-            if self.take_retired(navigation) { return; }
+            if self.retired(navigation) { return; }
             if self.active(navigation) {
-                if let Some(page) = self.page() { page.transition(Update::Finished { url: view_url(view) }); }
+                if let Some(page) = self.page() {
+                    page.transition(Update::Finished { url: view_url(view) });
+                    page.measure_identity();
+                }
                 self.refresh(view);
             }
         }
@@ -278,6 +328,9 @@ impl Delegate {
         action: &WKNavigationAction,
     ) -> Option<Retained<WKWebView>> {
         let opener = self.page()?;
+        if opener.snapshot().load.navigation_control.as_ref().is_some_and(|control| control.paused) {
+            return None;
+        }
         let url = unsafe { action.request().URL() }
             .and_then(|u| u.absoluteString())
             .map(|s| s.to_string())
@@ -317,6 +370,7 @@ impl Delegate {
             announced: Cell::new(false),
             start_seen: Cell::new(true),
             awaiting_retired_start: RefCell::new(Vec::new()),
+            retired_navigations: RefCell::new(Vec::new()),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -327,14 +381,12 @@ impl Delegate {
         self.prepare(url, source, false);
     }
     fn prepare(&self, url: Option<String>, source: BrowserNavigationSource, bootstrap: bool) {
-        let awaiting_start = !self.ivars().start_seen.get();
         self.ivars().announced.set(true);
         // Drop the prior retained navigation before dispatch. Completion from
         // its native token is inert even before replacement didStart arrives.
-        if let Some(previous) = self.ivars().navigation.borrow_mut().take() {
-            if awaiting_start { self.ivars().awaiting_retired_start.borrow_mut().push(previous); }
-        }
+        self.retire_current();
         if let Some(page) = self.page() {
+            if !bootstrap { page.transition(Update::AutomaticNavigationPaused(false)); }
             page.transition(Update::Begin { url, source, bootstrap });
         }
         self.ivars().interactions.drain_dialogs();
@@ -352,12 +404,23 @@ impl Delegate {
         }
     }
     pub(crate) fn stop_loading(&self, view: &WKWebView) {
+        self.stop_loading_with_reason(view, BrowserCancellationReason::UserStop);
+    }
+    pub(crate) fn pause_navigation(&self, view: &WKWebView) {
+        let tracked = self.page().is_some_and(|page| navigation::in_flight(page.snapshot().load.phase));
+        self.stop_loading_with_reason(view, BrowserCancellationReason::AutomaticNavigationPaused);
+        // WebKit can have accepted a policy action before its didStart facts
+        // reach the Page. Cancel that native work too, while leaving a finished
+        // retained document's lifecycle intact.
+        if !tracked { unsafe { view.stopLoading(); } }
+    }
+    fn stop_loading_with_reason(&self, view: &WKWebView, reason: BrowserCancellationReason) {
         if let Some(page) = self.page() {
             if navigation::in_flight(page.snapshot().load.phase) {
                 // Publish the terminal result and invalidate the token before
                 // stopLoading can synchronously deliver cancellation/finish.
                 self.ivars().announced.set(false);
-                page.transition(Update::Cancelled(BrowserCancellationReason::UserStop));
+                page.transition(Update::Cancelled(reason));
                 unsafe { view.stopLoading(); }
             }
         }
@@ -373,16 +436,38 @@ impl Delegate {
     fn current(&self, navigation: Option<&WKNavigation>) -> bool {
         navigation_id(self.ivars().navigation.borrow().as_deref()) == navigation_id(navigation)
     }
-    fn take_retired(&self, navigation: Option<&WKNavigation>) -> bool {
+    fn retired(&self, navigation: Option<&WKNavigation>) -> bool {
         let id = navigation_id(navigation);
-        let mut retired = self.ivars().awaiting_retired_start.borrow_mut();
-        if let Some(index) = retired.iter().position(|value| navigation_id(Some(value)) == id) {
-            retired.remove(index);
-            true
-        } else { false }
+        let awaiting = {
+            let mut retired = self.ivars().awaiting_retired_start.borrow_mut();
+            retired.iter().position(|value| navigation_id(Some(value)) == id).map(|index| retired.remove(index))
+        };
+        if let Some(previous) = awaiting {
+            self.remember_retired(previous);
+            return true;
+        }
+        self.ivars().retired_navigations.borrow().iter().any(|value| navigation_id(Some(value)) == id)
+    }
+    fn retire_current(&self) {
+        if let Some(previous) = self.ivars().navigation.borrow_mut().take() {
+            if !self.ivars().start_seen.get() { self.ivars().awaiting_retired_start.borrow_mut().push(previous); }
+            else { self.remember_retired(previous); }
+        }
+    }
+    fn remember_retired(&self, previous: Retained<WKNavigation>) {
+        let mut retired = self.ivars().retired_navigations.borrow_mut();
+        retired.push(previous);
+        if retired.len() > nomifun_browser_platform::navigation::MAX_NAVIGATION_ATTEMPTS {
+            retired.remove(0);
+        }
     }
     fn active(&self, navigation: Option<&WKNavigation>) -> bool {
-        self.current(navigation) && self.page().is_some_and(|page| {
+        if self.retired(navigation) { return false; }
+        if navigation.is_none() || !self.current(navigation) {
+            if let Some(page) = self.page() { page.mark_navigation_routing_lost(); }
+            return false;
+        }
+        self.page().is_some_and(|page| {
             let state = page.snapshot();
             state.bootstrap_loading || navigation::in_flight(state.load.phase)
         })
@@ -398,7 +483,7 @@ impl Delegate {
         });
     }
     fn failed(&self, view: &WKWebView, navigation: Option<&WKNavigation>, error: &NSError) {
-        if self.take_retired(navigation) { return; }
+        if self.retired(navigation) { return; }
         if !self.active(navigation) { return; }
         if let Some(page) = self.page() {
             page.transition(Update::Failed { domain: error.domain().to_string(), code: error.code() as i64 });
@@ -408,6 +493,32 @@ impl Delegate {
 }
 fn navigation_id(value: Option<&WKNavigation>) -> usize {
     value.map_or(0, |value| value as *const WKNavigation as usize)
+}
+fn navigation_type(value: WKNavigationType) -> BrowserNavigationActionType {
+    match value {
+        WKNavigationType::LinkActivated => BrowserNavigationActionType::LinkActivated,
+        WKNavigationType::FormSubmitted => BrowserNavigationActionType::FormSubmitted,
+        WKNavigationType::BackForward => BrowserNavigationActionType::BackForward,
+        WKNavigationType::Reload => BrowserNavigationActionType::Reload,
+        WKNavigationType::FormResubmitted => BrowserNavigationActionType::FormResubmitted,
+        WKNavigationType::Other => BrowserNavigationActionType::Other,
+        _ => BrowserNavigationActionType::Unknown,
+    }
+}
+fn http_method(value: Option<&str>) -> BrowserNavigationHttpMethod {
+    match value.map(str::to_ascii_uppercase).as_deref() {
+        Some("GET") => BrowserNavigationHttpMethod::Get,
+        Some("POST") => BrowserNavigationHttpMethod::Post,
+        Some("HEAD") => BrowserNavigationHttpMethod::Head,
+        Some("PUT") => BrowserNavigationHttpMethod::Put,
+        Some("PATCH") => BrowserNavigationHttpMethod::Patch,
+        Some("DELETE") => BrowserNavigationHttpMethod::Delete,
+        Some("OPTIONS") => BrowserNavigationHttpMethod::Options,
+        Some("CONNECT") => BrowserNavigationHttpMethod::Connect,
+        Some("TRACE") => BrowserNavigationHttpMethod::Trace,
+        Some(_) => BrowserNavigationHttpMethod::Other,
+        None => BrowserNavigationHttpMethod::Unknown,
+    }
 }
 fn view_url(view: &WKWebView) -> String {
     unsafe { view.URL() }.and_then(|url| url.absoluteString()).map(|url| url.to_string()).unwrap_or_else(|| "about:blank".into())

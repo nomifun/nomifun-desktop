@@ -59,6 +59,7 @@
    the expandable right panel, so Files / Changes / Metrics / DAG remain
    discoverable even while the panel itself is closed. */
 .workspace-tool-rail {
+  box-sizing: border-box;
   position: relative;
   z-index: 12;
   flex: 0 0 32px;
@@ -68,7 +69,7 @@
   flex-direction: column;
   align-items: center;
   gap: 3px;
-  padding: 8px 2px;
+  padding: 8px 1px;
   border-left: 1px solid var(--bg-3);
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--bg-2) 78%, transparent), var(--bg-1) 38%),

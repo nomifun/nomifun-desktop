@@ -1,10 +1,10 @@
 //! Thread-safe handles to native objects retained solely on AppKit's main thread.
 //! No browser subprocess owner, protocol server, IPC bridge or second event loop.
 use crate::{callbacks::Delegate, interactions::NativeInteractions, navigation};
+pub use crate::state::{NativeDialog, PageSnapshot};
 use block2::RcBlock;
 use nomifun_browser_platform::runtime::{
-    BrowserDialogKind, BrowserDownloadSnapshot, BrowserPermissionRequest, BrowserSurfaceBounds,
-    BrowserTabLifecycle, BrowserContentState, BrowserLoadSummary, BrowserNavigationPhase,
+    BrowserDownloadSnapshot, BrowserSurfaceBounds, BrowserContentState, BrowserNavigationPhase,
     BrowserNavigationSource, BrowserNavigationTrace, BrowserNavigationTraceSnapshot,
 };
 use objc2::{
@@ -62,52 +62,6 @@ const INTERRUPTED: &str = "BROWSER_ACTION_INTERRUPTED";
 const UNCONFIRMED: &str = "BROWSER_EXECUTION_UNCONFIRMED";
 const STALE: &str = "BROWSER_STALE_OBSERVATION";
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct NativeDialog {
-    pub request_id: String,
-    pub document_generation: u64,
-    pub kind: BrowserDialogKind,
-    pub message: String,
-    pub default_text: String,
-    pub origin: String,
-    pub text_truncated: bool,
-}
-#[derive(Clone, Debug, PartialEq)]
-pub struct PageSnapshot {
-    pub document_generation: u64,
-    pub url: String,
-    pub title: String,
-    pub lifecycle: BrowserTabLifecycle,
-    pub load: BrowserLoadSummary,
-    pub bootstrap_ready: bool,
-    pub(crate) bootstrap_loading: bool,
-    pub(crate) navigation_source: BrowserNavigationSource,
-    pub can_go_back: bool,
-    pub can_go_forward: bool,
-    pub dialog: Option<NativeDialog>,
-    pub blocked_permissions: Vec<String>,
-    pub permission_requests: Vec<BrowserPermissionRequest>,
-}
-impl Default for PageSnapshot {
-    fn default() -> Self {
-        Self {
-            document_generation: 0,
-            url: "about:blank".into(),
-            title: String::new(),
-            lifecycle: BrowserTabLifecycle::Loading,
-            load: BrowserLoadSummary::default(),
-            bootstrap_ready: false,
-            bootstrap_loading: false,
-            navigation_source: BrowserNavigationSource::Unknown,
-            can_go_back: false,
-            can_go_forward: false,
-            dialog: None,
-            blocked_permissions: vec![],
-            permission_requests: vec![],
-        }
-    }
-}
-
 pub(crate) struct NativePage {
     pub view: Retained<WKWebView>,
     // WebKit's named-world registry is weak. Retain the world for this native
@@ -139,12 +93,16 @@ pub(crate) fn native_page(id: Uuid) -> Option<Rc<NativePage>> {
 
 pub struct Engine {
     id: Uuid,
+    identity_policy: crate::BrowserIdentityPolicy,
     closing: AtomicBool,
     pages: Mutex<BTreeMap<Uuid, Weak<Page>>>,
     pointer_owners: Mutex<BTreeMap<isize, Weak<Page>>>,
 }
 impl Engine {
     pub fn initialize() -> Result<Arc<Self>, String> {
+        Self::initialize_with_identity_policy(crate::BrowserIdentityPolicy::default())
+    }
+    pub fn initialize_with_identity_policy(identity_policy: crate::BrowserIdentityPolicy) -> Result<Arc<Self>, String> {
         let _mtm = MainThreadMarker::new().ok_or("WK initialization requires the main thread")?;
         if NSProcessInfo::processInfo()
             .operatingSystemVersion()
@@ -155,6 +113,7 @@ impl Engine {
         }
         let owner = Arc::new(Self {
             id: Uuid::now_v7(),
+            identity_policy,
             closing: AtomicBool::new(false),
             pages: Mutex::new(BTreeMap::new()),
             pointer_owners: Mutex::new(BTreeMap::new()),
@@ -278,6 +237,9 @@ impl Engine {
             pending: Mutex::new(BTreeMap::new()),
             downloads: Mutex::new(vec![]),
             navigation_trace: Mutex::new(BrowserNavigationTrace::default()),
+            identity_user_agent: Mutex::new(None),
+            identity_measurement_started: AtomicBool::new(false),
+            identity_measurement_attempts: AtomicUsize::new(0),
         });
         self.pages
             .lock()
@@ -419,7 +381,10 @@ impl Engine {
                         // A held accelerator must never create/close a series
                         // of tabs or replay after an input-owner transition.
                         if event.isARepeat() { return true; }
-                        let _ = listener(action, page.snapshot().document_generation);
+                        // Capture both fences from the same native Page
+                        // snapshot at the physical event, before host routing.
+                        let snapshot = page.snapshot();
+                        let _ = listener(action, snapshot.document_generation, snapshot.load.navigation_sequence);
                         // A stale or busy host drops the command. Falling
                         // through could let Cmd+W close the desktop window.
                         return true;
@@ -589,16 +554,19 @@ pub struct Page {
     blocked_inputs: AtomicUsize,
     dialog_draining: AtomicBool,
     change_listener: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    shortcut_listener: Mutex<Option<Arc<dyn Fn(crate::BrowserShortcutAction, u64) -> bool + Send + Sync>>>,
+    shortcut_listener: Mutex<Option<Arc<dyn Fn(crate::BrowserShortcutAction, u64, u64) -> bool + Send + Sync>>>,
     pub(crate) popup_sender: Mutex<Option<mpsc::Sender<PopupCandidate>>>,
     pending: Mutex<BTreeMap<Uuid, Box<dyn FnOnce(&'static str) + Send>>>,
     downloads: Mutex<Vec<BrowserDownloadSnapshot>>,
     navigation_trace: Mutex<BrowserNavigationTrace>,
+    identity_user_agent: Mutex<Option<String>>,
+    identity_measurement_started: AtomicBool,
+    identity_measurement_attempts: AtomicUsize,
 }
 impl Page {
     #[cfg(test)]
     pub(crate) fn test_user_surface(presented: bool, visible: bool, locked: bool, draining: bool) -> Arc<Self> {
-        let engine = Arc::new(Engine { id: Uuid::now_v7(), closing: AtomicBool::new(false),
+        let engine = Arc::new(Engine { id: Uuid::now_v7(), identity_policy: crate::BrowserIdentityPolicy::default(), closing: AtomicBool::new(false),
             pages: Mutex::new(BTreeMap::new()), pointer_owners: Mutex::new(BTreeMap::new()) });
         let context = Arc::new(Context { id: Uuid::now_v7(), identifier: None, closed: AtomicBool::new(true) });
         let page = engine.allocate_page(context);
@@ -622,11 +590,56 @@ impl Page {
     pub fn navigation_trace(&self) -> BrowserNavigationTraceSnapshot {
         self.navigation_trace.lock().unwrap().snapshot()
     }
+    pub fn identity_report(&self) -> nomifun_browser_platform::runtime::BrowserIdentityReport {
+        crate::identity::report_for(self.engine.identity_policy, self.identity_user_agent.lock().unwrap().as_deref())
+    }
+    /// Read in the isolated native world, retrying only unavailable reads at a
+    /// later document finish (at most three attempts). No outbound request,
+    /// page script hooks, version guessing, or profile mutation is involved.
+    pub(crate) fn measure_identity(self: &Arc<Self>) {
+        if self.engine.identity_policy != crate::BrowserIdentityPolicy::NativeWebKit
+            || self.identity_user_agent.lock().unwrap().is_some()
+            || self.identity_measurement_attempts.load(Ordering::Acquire) >= 3
+            || self.identity_measurement_started.swap(true, Ordering::AcqRel) { return; }
+        if self.identity_measurement_attempts.fetch_add(1, Ordering::AcqRel) >= 3 {
+            self.identity_measurement_started.store(false, Ordering::Release);
+            return;
+        }
+        let Some(native) = native_page(self.id) else {
+            self.identity_measurement_started.store(false, Ordering::Release);
+            return;
+        };
+        let page = Arc::downgrade(self);
+        let done = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+            let Some(page) = page.upgrade() else { return; };
+            page.identity_measurement_started.store(false, Ordering::Release);
+            if !error.is_null() || page.close_requested.load(Ordering::Acquire) { return; }
+            if let Some(value) = unsafe { value.as_ref() }.and_then(|value| value.downcast_ref::<NSString>()) {
+                let measured: String = value.to_string().chars().take(512).collect();
+                if !measured.is_empty() { *page.identity_user_agent.lock().unwrap() = Some(measured); }
+            }
+        });
+        unsafe {
+            native.view.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+                &NSString::from_str("navigator.userAgent"), None, &native.content_world, Some(&done));
+        }
+    }
+    pub(crate) fn navigation_action(&self, event: nomifun_browser_platform::runtime::BrowserNavigationEvent) {
+        self.navigation_trace.lock().unwrap().push(event);
+    }
+    pub(crate) fn mark_navigation_routing_lost(&self) {
+        self.navigation_trace.lock().unwrap().mark_routing_lost();
+    }
     pub(crate) fn transition(&self, update: navigation::Update) {
         let mut trace = self.navigation_trace.lock().unwrap();
+        if matches!(&update, navigation::Update::AutomaticNavigationPaused(false)) {
+            trace.clear_repeat_window();
+        }
         let changed = self.metadata.send_if_modified(|snapshot| {
             let before = snapshot.clone();
             for event in navigation::reduce(snapshot, update) { trace.push(event); }
+            let paused = snapshot.load.navigation_control.as_ref().is_some_and(|control| control.paused);
+            snapshot.load.navigation_control = Some(trace.control(paused));
             *snapshot != before
         });
         drop(trace);
@@ -676,7 +689,7 @@ impl Page {
     }
     /// Called synchronously on AppKit's main thread for this focused child.
     /// The host must verify its exact active target before emitting an event.
-    pub fn set_shortcut_listener(&self, listener: Arc<dyn Fn(crate::BrowserShortcutAction, u64) -> bool + Send + Sync>) {
+    pub fn set_shortcut_listener(&self, listener: Arc<dyn Fn(crate::BrowserShortcutAction, u64, u64) -> bool + Send + Sync>) {
         *self.shortcut_listener.lock().unwrap() = Some(listener);
     }
     pub(crate) fn changed(&self, update: impl FnOnce(&mut PageSnapshot)) {
@@ -813,6 +826,22 @@ impl Page {
     pub async fn stop_loading(self: &Arc<Self>) -> Result<(), String> {
         let expected = self.snapshot();
         self.stop_loading_guarded(expected.document_generation, expected.load.navigation_sequence, Arc::new(|| true)).await
+    }
+    /// A pause holds future page-originated main-frame actions. Resuming only
+    /// releases that hold; it never repeats a request or an input operation.
+    pub async fn set_automatic_navigation_paused_guarded(
+        self: &Arc<Self>, paused: bool, generation: u64, navigation_sequence: u64, guard: Arc<DispatchGuard>,
+    ) -> Result<(), String> {
+        self.mutate(move |native| {
+            if !guard() { return Err("BROWSER_CANCELLED".into()); }
+            let page = native.owner.upgrade().ok_or(INTERRUPTED)?;
+            if !(NativeNavigationReceipt { document_generation: generation, navigation_sequence }).matches(&page.snapshot()) {
+                return Err("BROWSER_STALE_TARGET".into());
+            }
+            page.transition(navigation::Update::AutomaticNavigationPaused(paused));
+            if paused { native.delegate.pause_navigation(&native.view); }
+            Ok(())
+        }).await
     }
     pub async fn stop_loading_guarded(
         self: &Arc<Self>, generation: u64, navigation_sequence: u64, guard: Arc<DispatchGuard>,
@@ -1271,7 +1300,7 @@ pub(crate) fn create_native_page(
         &configuration,
         Arc::downgrade(page),
     );
-    crate::identity::apply(&view)?;
+    crate::identity::apply(&view, page.engine.identity_policy)?;
     let interactions = NativeInteractions::new(Arc::downgrade(page));
     let delegate = Delegate::new(mtm, Arc::downgrade(page), interactions.clone());
     unsafe {

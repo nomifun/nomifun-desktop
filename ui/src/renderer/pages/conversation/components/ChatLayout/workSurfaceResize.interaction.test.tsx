@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { ipcBridge } from '@/common';
+import { LayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { parseConversationId } from '@/common/types/ids';
 import { initializeAgentBrowserStorageGeneration, setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 import * as Preview from '../../Preview';
@@ -163,4 +164,41 @@ test('a narrow embedded desktop pane preserves its smaller chat minimum and fits
     expect(chatWidth).toBeLessThan(360);
     expect(chatWidth + parseFloat(attachment.surface.style.minWidth)).toBeLessThanOrEqual(paneWidth);
   }
+});
+
+test('resizing constrains the visible split without replacing its preference or remounting the browser', async () => {
+  const view = mountLayout(false);
+  fireEvent.click(view.getByRole('button', { name: 'Browser' }));
+  const browser = panels(view.container, 'browser');
+  const savedRatio = await drag(browser.handle, 600, 800);
+  expect(localStorage.getItem(splitStorageKey)).toBe(String(savedRatio));
+  const browserRegion = view.getByRole('region', { name: 'Browser' });
+
+  paneWidth = 880;
+  await act(async () => { fireEvent(window, new Event('resize')); });
+  expect(parseFloat(browser.chat.style.flexBasis)).toBeCloseTo(100 - 340 / (paneWidth - 32) * 100);
+  expect(localStorage.getItem(splitStorageKey)).toBe(String(savedRatio));
+  expect(view.getByRole('region', { name: 'Browser' })).toBe(browserRegion);
+
+  paneWidth = 1200;
+  await act(async () => { fireEvent(window, new Event('resize')); });
+  expect(parseFloat(browser.chat.style.flexBasis)).toBeCloseTo(savedRatio);
+  expect(localStorage.getItem(splitStorageKey)).toBe(String(savedRatio));
+  expect(view.getByRole('region', { name: 'Browser' })).toBe(browserRegion);
+});
+
+test('an embedded product preview never changes the global navigation rail', () => {
+  const setSiderCollapsed = mock(() => {});
+  const view = render(<I18nextProvider i18n={i18n}>
+    <LayoutContext.Provider value={{ siderCollapsed: false, setSiderCollapsed }}>
+      <ChatLayout conversation_id={conversationId} embedded workspaceEnabled={false} hideAdvancedControls sider={null}>
+        <Composer />
+      </ChatLayout>
+    </LayoutContext.Provider>
+  </I18nextProvider>);
+  fireEvent.click(view.getByRole('button', { name: 'Open attachment' }));
+  expect(view.getByText('Attachment content')).toBeDefined();
+  expect(setSiderCollapsed).not.toHaveBeenCalled();
+  view.unmount();
+  expect(setSiderCollapsed).not.toHaveBeenCalled();
 });
