@@ -53,8 +53,11 @@ function memoryRepository(initial: readonly CreativeTemplateDefinitionV1[]): Cre
     list: async () => [...records.values()].map(cloneTemplateDefinition),
     load: async (id) => cloneTemplateDefinition(records.get(id)!),
     create: async (template) => {
-      records.set(template.id, cloneTemplateDefinition(template));
-      return cloneTemplateDefinition(template);
+      const created = cloneTemplateDefinition(template);
+      created.metadata.createdAt = Date.now();
+      created.metadata.updatedAt = created.metadata.createdAt;
+      records.set(created.id, created);
+      return cloneTemplateDefinition(created);
     },
     save: async (id, expectedRevision, template) => {
       expect(records.get(id)?.revision).toBe(expectedRevision);
@@ -77,7 +80,107 @@ const renderWorkspace = (templates: readonly CreativeTemplateDefinitionV1[], pro
 const visibleNames = (container: HTMLElement) =>
   [...container.querySelectorAll('article[data-template-id] h2')].map((heading) => heading.textContent);
 
+const paginatedTemplates = (count: number) => Array.from({ length: count }, (_, index) => {
+  const template = createTemplateFixture(index >= 35);
+  template.id = `018f0000-0000-7000-8000-${String(index + 100).padStart(12, '0')}`;
+  template.metadata.name = `${index < 35 ? 'Campaign' : 'Series'} ${index + 1}`;
+  template.metadata.category = index < 35 ? 'Marketing' : 'Photography';
+  template.metadata.updatedAt = template.metadata.createdAt + count - index;
+  return template;
+});
+
+const pagination = (container: HTMLElement) => container.querySelector('.nomi-pagination')! as HTMLElement;
+const currentPage = (container: HTMLElement) => pagination(container).querySelector('[aria-current="true"]')?.textContent;
+const goToPage = (container: HTMLElement, page: number) =>
+  fireEvent.click(within(pagination(container)).getByText(String(page), { selector: 'li' }));
+
 describe('Creative Template workspace interactions', () => {
+  test('uses shared pagination to navigate templates and resets to the first page when its size changes', async () => {
+    const view = renderWorkspace(paginatedTemplates(41));
+    expect(visibleNames(view.container)).toHaveLength(20);
+    expect(visibleNames(view.container)[0]).toBe('Campaign 1');
+    expect(visibleNames(view.container)).not.toContain('Campaign 21');
+    expect(currentPage(view.container)).toBe('1');
+
+    goToPage(view.container, 2);
+    expect(visibleNames(view.container)).toHaveLength(20);
+    expect(visibleNames(view.container)[0]).toBe('Campaign 21');
+    expect(currentPage(view.container)).toBe('2');
+
+    fireEvent.click(within(pagination(view.container)).getByRole('combobox'));
+    fireEvent.click(await view.findByRole('option', { name: /^10\s/ }));
+    expect(currentPage(view.container)).toBe('1');
+    expect(visibleNames(view.container)).toHaveLength(10);
+    expect(visibleNames(view.container)[0]).toBe('Campaign 1');
+    goToPage(view.container, 3);
+    expect(visibleNames(view.container)[0]).toBe('Campaign 21');
+  });
+
+  test.each(['kind', 'category', 'query'] as const)('returns to the first matching page after changing the %s filter', async (filter) => {
+    const view = renderWorkspace(paginatedTemplates(41));
+    goToPage(view.container, 2);
+
+    if (filter === 'kind') {
+      fireEvent.click(view.getByRole('button', { name: 'Single image' }));
+    } else if (filter === 'category') {
+      fireEvent.click(view.getByRole('combobox', { name: 'All categories' }));
+      fireEvent.click(await view.findByRole('option', { name: 'Marketing' }));
+    } else {
+      fireEvent.change(view.getByRole('textbox', { name: 'Search names, categories, and descriptions' }), { target: { value: 'Campaign' } });
+    }
+
+    expect(currentPage(view.container)).toBe('1');
+    expect(visibleNames(view.container)).toHaveLength(20);
+    expect(visibleNames(view.container)[0]).toBe('Campaign 1');
+    expect(view.getByRole('status').textContent).toBe('35 of 41 templates');
+    goToPage(view.container, 2);
+    fireEvent.click(view.getByRole('button', { name: 'Clear filters' }));
+    expect(currentPage(view.container)).toBe('1');
+    expect(visibleNames(view.container)[0]).toBe('Campaign 1');
+    expect(view.getByRole('status').textContent).toBe('41 of 41 templates');
+  });
+
+  test('shows the preceding page after deleting the only template on the last page', async () => {
+    const view = renderWorkspace(paginatedTemplates(41));
+    goToPage(view.container, 3);
+    expect(visibleNames(view.container)).toEqual(['Series 41']);
+    fireEvent.click(view.getByRole('button', { name: 'Delete Series 41' }));
+    const confirm = within(await view.findByRole('dialog', { name: 'Delete template' }));
+    fireEvent.click(confirm.getByRole('button', { name: 'Delete' }));
+
+    await waitFor(() => expect(currentPage(view.container)).toBe('2'));
+    expect(visibleNames(view.container)).toHaveLength(20);
+    expect(visibleNames(view.container)[0]).toBe('Campaign 21');
+    expect(visibleNames(view.container).at(-1)).toBe('Series 40');
+    expect(view.getByRole('status').textContent).toBe('40 of 40 templates');
+  });
+
+  test('returns to the first page to show a newly duplicated template', async () => {
+    const templates = paginatedTemplates(41);
+    const repository = memoryRepository(templates);
+    const view = renderWorkspace(templates, { repository });
+    goToPage(view.container, 2);
+    fireEvent.click(view.getByRole('button', { name: 'Duplicate Campaign 21' }));
+
+    await waitFor(() => expect(currentPage(view.container)).toBe('1'));
+    const created = (await repository.list()).find((template) => !templates.some((original) => original.id === template.id))!;
+    expect(visibleNames(view.container)[0]).toBe(created.metadata.name);
+    expect(visibleNames(view.container)).toHaveLength(20);
+  });
+
+  test('returns to the first page to show a newly saved template', async () => {
+    const view = renderWorkspace(paginatedTemplates(41));
+    goToPage(view.container, 2);
+    fireEvent.click(view.getByRole('button', { name: 'New template' }));
+    const editor = within(await view.findByRole('dialog', { name: 'New template' }));
+    fireEvent.change(editor.getByPlaceholderText('Template name'), { target: { value: 'New campaign' } });
+    fireEvent.click(editor.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(currentPage(view.container)).toBe('1'));
+    expect(visibleNames(view.container)[0]).toBe('New campaign');
+    expect(visibleNames(view.container)).toHaveLength(20);
+  });
+
   test('combines kind, category, and search filters and clears a no-results state', async () => {
     const poster = createTemplateFixture();
     const series = createTemplateFixture(true);
@@ -105,6 +208,7 @@ describe('Creative Template workspace interactions', () => {
 
     fireEvent.click(view.getByRole('button', { name: 'Single image' }));
     expect(view.getByRole('heading', { name: 'No matching templates' })).not.toBeNull();
+    expect(view.container.querySelector('.nomi-pagination')).toBeNull();
     const emptyState = view.getByRole('heading', { name: 'No matching templates' }).parentElement!;
     fireEvent.click(within(emptyState).getByRole('button', { name: 'Clear filters' }));
     expect(visibleNames(view.container)).toHaveLength(3);
@@ -165,6 +269,7 @@ describe('Creative Template workspace interactions', () => {
     fireEvent.click(confirm.getByRole('button', { name: 'Delete' }));
     await waitFor(() => expect(view.getByRole('heading', { name: 'No templates yet' })).not.toBeNull());
     expect(await repository.list()).toHaveLength(0);
+    expect(view.container.querySelector('.nomi-pagination')).toBeNull();
   });
 
   test('changes a variable type through the visible selector and saves its typed default', async () => {

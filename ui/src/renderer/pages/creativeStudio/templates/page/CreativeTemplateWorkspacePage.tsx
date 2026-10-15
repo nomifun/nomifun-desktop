@@ -9,6 +9,8 @@ import { Pic, Plus, Robot } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import NomiPagination from '@/renderer/components/base/NomiPagination';
+
 import type { CreativeModelCatalogSnapshot } from '../../models';
 import type { TemplateDraftPort } from '../agent';
 import {
@@ -47,6 +49,7 @@ import {
 type PageState = 'loading' | 'ready' | 'error';
 type TemplateAction = 'save' | 'copy' | 'delete' | null;
 const UNCATEGORIZED_CATEGORY = '__uncategorized__';
+const DEFAULT_PAGE_SIZE = 20;
 
 export interface CreativeTemplateWorkspacePageProps {
   repository?: CreativeTemplateRepository;
@@ -103,7 +106,9 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('all');
   const [kind, setKind] = useState<TemplateKindFilter>('all');
-  const resetFilters = () => { setQuery(''); setCategory('all'); setKind('all'); };
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const resetFilters = () => { setQuery(''); setCategory('all'); setKind('all'); setPage(1); };
   const [editing, setEditing] = useState<CreativeTemplateDefinitionV1 | null>(null);
   const [editingIsNew, setEditingIsNew] = useState(false);
   const [running, setRunning] = useState<CreativeTemplateDefinitionV1 | null>(null);
@@ -193,6 +198,16 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
       ].some((value) => value.toLocaleLowerCase().includes(needle));
     });
   }, [category, kind, query, templates]);
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const pagedTemplates = useMemo(
+    () => filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [currentPage, filtered, pageSize]
+  );
+
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount);
+  }, [page, pageCount]);
 
   const beginCreate = (mode: 'single-image' | 'multi-image-series') => {
     setEditing(withPrivateTemplateVisibility(createBlankTemplate(mode, copy)));
@@ -216,6 +231,7 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
             revision: privateEditing.revision + 1,
           });
       setTemplates((current) => upsertTemplate(current, saved));
+      setPage(1);
       setEditing(null);
       setEditingIsNew(false);
       Message.success(
@@ -250,6 +266,7 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
         withPrivateTemplateVisibility(duplicateTemplate(template, copy))
       );
       setTemplates((current) => upsertTemplate(current, created));
+      setPage(1);
       Message.success(
         t('creativeStudio.templates.workspace.copySuccess', {
           defaultValue: 'Template copy created',
@@ -331,7 +348,10 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
           kind={kind} category={category} query={query}
           categories={categories.map((item) => ({ value: item, label: item === UNCATEGORIZED_CATEGORY ? uncategorized : item }))}
           count={filtered.length} total={templates.length} disabled={pageState !== 'ready'}
-          onKindChange={setKind} onCategoryChange={setCategory} onQueryChange={setQuery} onReset={resetFilters}
+          onKindChange={(value) => { setKind(value); setPage(1); }}
+          onCategoryChange={(value) => { setCategory(value); setPage(1); }}
+          onQueryChange={(value) => { setQuery(value); setPage(1); }}
+          onReset={resetFilters}
         />
 
         {pageState === 'loading' ? (
@@ -391,30 +411,46 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
             )}
           </div>
         ) : (
-          <section
-            className={styles.grid}
-            aria-label={t('creativeStudio.templates.workspace.listLabel', {
-              defaultValue: 'Template list',
-            })}
-          >
-            {filtered.map((template) => (
-              <TemplateWorkspaceCard
-                key={template.id}
-                template={template}
-                disabled={action !== null}
-                copy={copy}
-                onRun={() => setRunning(cloneTemplateDefinition(template))}
-                onEdit={() => {
-                  setEditing(
-                    withPrivateTemplateVisibility(cloneTemplateDefinition(template))
-                  );
-                  setEditingIsNew(false);
+          <div className={styles.templateList}>
+            <section
+              className={styles.grid}
+              aria-label={t('creativeStudio.templates.workspace.listLabel', {
+                defaultValue: 'Template list',
+              })}
+            >
+              {pagedTemplates.map((template) => (
+                <TemplateWorkspaceCard
+                  key={template.id}
+                  template={template}
+                  disabled={action !== null}
+                  copy={copy}
+                  onRun={() => setRunning(cloneTemplateDefinition(template))}
+                  onEdit={() => {
+                    setEditing(
+                      withPrivateTemplateVisibility(cloneTemplateDefinition(template))
+                    );
+                    setEditingIsNew(false);
+                  }}
+                  onCopy={() => void copyTemplate(template)}
+                  onDelete={() => setDeleting(template)}
+                />
+              ))}
+            </section>
+            <div className={styles.pagination}>
+              <NomiPagination
+                current={currentPage}
+                pageSize={pageSize}
+                total={filtered.length}
+                showTotal
+                sizeCanChange
+                showJumper={filtered.length > pageSize}
+                onChange={(nextPage, nextPageSize) => {
+                  setPage(nextPageSize === pageSize ? nextPage : 1);
+                  setPageSize(nextPageSize);
                 }}
-                onCopy={() => void copyTemplate(template)}
-                onDelete={() => setDeleting(template)}
               />
-            ))}
-          </section>
+            </div>
+          </div>
         )}
 
         {runCenter ? <TemplateRunCenter port={runCenter} /> : null}

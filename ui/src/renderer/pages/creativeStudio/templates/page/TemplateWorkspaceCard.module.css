@@ -4,8 +4,8 @@
   height: 100%;
   box-sizing: border-box;
   flex-direction: column;
-  gap: 10px;
-  padding: 14px;
+  gap: 8px;
+  padding: 10px;
   border: 1px solid var(--color-border-2);
   border-radius: 12px;
   background: var(--color-bg-1);
@@ -98,7 +98,7 @@
   justify-content: space-between;
   gap: 8px;
   margin-top: auto;
-  padding-top: 8px;
+  padding-top: 6px;
   border-top: 1px solid var(--color-border-1);
 }
 .actions {
