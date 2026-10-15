@@ -121,7 +121,7 @@
       "label": "Conversation robot",
       "none": "No robot control",
       "unavailable": "Selected robot is no longer paired",
-      "hint": "Select a paired robot and apply it to this conversation. Robot Actions and device permissions must also be enabled.",
+      "hint": "Select a paired robot and click “Apply robot”. For movement, first turn on “Allow movement” under “Manage channels and robots”, and make sure the companion Agent has movement capabilities enabled. After pairing or saving capabilities, apply the robot here to update this conversation.",
       "apply": "Apply robot",
       "changed": "Conversation settings changed. Review the refreshed settings and apply again.",
       "saved": "Conversation robot updated"
@@ -534,7 +534,7 @@
     "speechSource": "Robot voice",
     "visualObservation": "Visual observation",
     "title": "Robot connection",
-    "hint": "Attach a physical robot to {{companionName}}: it speaks with this companion's persona, models and memories.",
+    "hint": "Attach a physical robot to {{companionName}}: it speaks with this companion's persona, models and memories. To use movement controls, turn on “Allow movement” below and check that the required movement tools are enabled in “Capabilities”. Then return to “Connections” beside the conversation, select a “Conversation robot” and click “Apply robot”.",
     "add": "Add a robot",
     "addTitle": "Add a robot",
     "otaStep": "1. Open the robot's Wi-Fi setup page and set the OTA address under Advanced settings to one of these:",

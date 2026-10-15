@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn editable_mapping_cannot_reduce_physical_or_camera_permission() {
-        for name in ["self.head.express", "self.camera.start_stream"] {
+        for name in ["self.head.express", "self.dog.action", "self.camera.start_stream"] {
             let mut profile=RobotCapabilityProfile::default();
             profile.tool_overrides.insert(name.into(), RobotToolOverride { action:Some(RobotAction::Display), ..Default::default() });
             assert!(validate_profile_shape(&profile).is_err(),"{name}");
@@ -318,5 +318,39 @@ mod tests {
         assert!(validate_profile_shape(&profile).is_ok());
         let permissions=crate::registry::RobotPermissions::default();
         assert!(!permissions.allows_configured_tool(&profile,"self.display.express"));
+    }
+
+    #[test]
+    fn dog_actions_default_to_motion_and_keep_that_permission_in_profiles() {
+        let tools = vec![tool("self.dog.action")];
+        let mut profile = RobotCapabilityProfile::default();
+        profile.tool_overrides.insert("self.dog.action".into(), RobotToolOverride {
+            description: Some("Use a short dog gesture".into()), ..Default::default()
+        });
+        profile.presets.push(RobotCapabilityPreset {
+            id: "dog_greeting".into(), name: "Dog greeting".into(),
+            tool_name: "self.dog.action".into(), description: String::new(),
+            arguments: json!({"angle":20}).as_object().unwrap().clone(), enabled: true,
+        });
+        validate_profile_update(&profile, &Default::default(), &tools).unwrap();
+        assert_eq!(allowed_tool_actions("self.dog.action"), vec![RobotAction::Motion]);
+        let resolved = resolve_profile_tools(&profile, &tools).unwrap();
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved.iter().all(|tool| tool.action == RobotAction::Motion));
+        let mut permissions = crate::registry::RobotPermissions {
+            device_tools: true, ..Default::default()
+        };
+        assert!(!permissions.allows_configured_tool(&profile, "self.dog.action"));
+        permissions.motion = true;
+        permissions.device_tools = false;
+        assert!(permissions.allows_configured_tool(&profile, "self.dog.action"));
+        profile.tool_overrides.get_mut("self.dog.action").unwrap().action = Some(RobotAction::Motion);
+        validate_profile_update(&profile, &Default::default(), &tools).unwrap();
+        assert!(resolve_profile_tools(&profile, &tools).unwrap().iter()
+            .all(|tool| tool.action == RobotAction::Motion));
+        for action in [RobotAction::Device, RobotAction::Display, RobotAction::Vision] {
+            profile.tool_overrides.get_mut("self.dog.action").unwrap().action = Some(action);
+            assert!(validate_profile_shape(&profile).is_err());
+        }
     }
 }

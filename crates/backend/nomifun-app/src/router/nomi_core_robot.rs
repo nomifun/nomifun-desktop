@@ -1005,6 +1005,15 @@ mod tests {
                         input_schema: serde_json::json!({"type":"object"}),
                     },
                     RobotToolDescriptor {
+                        device_name: "self.dog.action".to_owned(),
+                        exposed_name: "robot_dog_action".to_owned(),
+                        description: "Control the dog legs".to_owned(),
+                        input_schema: serde_json::json!({
+                            "type":"object", "properties":{"action":{"type":"string"}},
+                            "required":["action"]
+                        }),
+                    },
+                    RobotToolDescriptor {
                         device_name: "self.camera.take_photo".to_owned(),
                         exposed_name: "robot_camera_take_photo".to_owned(),
                         description: "Take a photo".to_owned(),
@@ -1103,13 +1112,53 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(tools.descriptors.len(), 3);
+        assert_eq!(tools.descriptors.len(), 4);
         assert!(tools.descriptors.iter().all(|descriptor| matches!(
             descriptor.action_id.as_ref(),
             nomifun_robot::capability::ROBOT_VISION_ACTION_ID
                 | nomifun_robot::capability::ROBOT_MOTION_ACTION_ID
         )));
         assert_eq!(module_capability_id().as_ref(), ROBOT_MODULE_ID);
+    }
+
+    #[tokio::test]
+    async fn dog_motion_is_discovered_and_dispatched_without_device_tool_authority() {
+        let mut permitted = permissions();
+        permitted.device_tools = false;
+        let fixture = fixture(permitted.clone()).await;
+        let tools = fixture.owner.resolve_session_tools(
+            &principal(), &AgentSessionId::from("dog-session"), &fixture.binding,
+            &BTreeSet::from([ActionId::from(RobotAction::Motion.id())]),
+        ).await.unwrap();
+        let dog = tools.descriptors.iter()
+            .find(|descriptor| descriptor.provider_name == "robot_dog_action").unwrap();
+        assert_eq!(dog.action_id.as_ref(), RobotAction::Motion.id());
+        let mut request = invocation("robot_dog_action", "dog-sit");
+        request.arguments = StrictJsonValue(serde_json::json!({"action":"sitdown"}));
+        tools.invoker.invoke(request).await.unwrap();
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.requests.lock().unwrap()[0]["name"], "self.dog.action");
+
+        permitted.motion = false;
+        permitted.device_tools = true;
+        fixture.owner.registry.set_permissions("robot-1", permitted).await.unwrap();
+        let mut request = invocation("robot_dog_action", "dog-revoked");
+        request.arguments = StrictJsonValue(serde_json::json!({"action":"sitdown"}));
+        let denied = tools.invoker.invoke(request).await.unwrap_err();
+        assert_eq!(denied.code.as_ref(), ROBOT_PERMISSION_DENIED);
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+
+        let device_tools = fixture.owner.resolve_session_tools(
+            &principal(), &AgentSessionId::from("device-session"), &fixture.binding,
+            &BTreeSet::from([ActionId::from(RobotAction::Device.id())]),
+        ).await.unwrap();
+        assert!(!device_tools.descriptors.iter()
+            .any(|descriptor| descriptor.provider_name == "robot_dog_action"));
+        let mut request = invocation("robot_dog_action", "dog-not-bound");
+        request.arguments = StrictJsonValue(serde_json::json!({"action":"sitdown"}));
+        let denied = device_tools.invoker.invoke(request).await.unwrap_err();
+        assert_eq!(denied.code.as_ref(), "ROBOT_SESSION_TOOL_NOT_BOUND");
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

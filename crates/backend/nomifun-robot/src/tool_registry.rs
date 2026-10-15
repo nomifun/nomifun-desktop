@@ -18,6 +18,11 @@ use crate::mcp_bridge::{RobotMcpClient, RobotToolDescriptor, ToolCallError};
 /// Unknown extensions stay in `robot/device`; descriptions are not used
 /// because they are device-supplied prose and therefore not an authority.
 pub fn tool_action(device_name: &str) -> RobotAction {
+    // This vendor tool controls the legs despite using the `dog` namespace.
+    // Keep the exception exact: other dog extensions retain device authority.
+    if device_name == "self.dog.action" {
+        return RobotAction::Motion;
+    }
     let namespace = device_name
         .strip_prefix("self.")
         .unwrap_or(device_name)
@@ -443,13 +448,21 @@ mod tests {
             "self.gimbal.turn",
             "self.motion.stop",
             "self.servo.calibrate",
+            "self.dog.action",
         ] {
             assert_eq!(tool_action(name), RobotAction::Motion, "{name}");
         }
         for name in ["self.camera.take_photo", "self.vision.describe"] {
             assert_eq!(tool_action(name), RobotAction::Vision, "{name}");
         }
-        for name in ["self.audio_speaker.set_volume", "get_device_status"] {
+        for name in [
+            "self.audio_speaker.set_volume",
+            "get_device_status",
+            "self.dog.setting",
+            "self.dog.action.extension",
+            "self.dog.read_status",
+            "self.extension.action",
+        ] {
             assert_eq!(
                 tool_action(name),
                 RobotAction::Device,

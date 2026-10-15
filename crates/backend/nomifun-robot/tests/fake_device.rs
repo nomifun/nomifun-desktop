@@ -504,6 +504,11 @@ async fn authenticated_device_tools_are_scoped_and_called_through_the_live_link(
                     "inputSchema": { "type": "object" }
                 },
                 {
+                    "name": "self.dog.action",
+                    "description": "control the legs",
+                    "inputSchema": { "type": "object" }
+                },
+                {
                     "name": "self.emoji.set_expression",
                     "description": "change the OLED face",
                     "inputSchema": { "type": "object" }
@@ -519,6 +524,37 @@ async fn authenticated_device_tools_are_scoped_and_called_through_the_live_link(
     })
     .await
     .expect("discovered tools must attach to the authenticated robot");
+
+    let motion_tools = h.tools.tools_for_action(robot_id, RobotAction::Motion).await;
+    assert_eq!(motion_tools.len(), 2);
+    assert!(motion_tools.iter().any(|tool| tool.device_name == "self.dog.action"));
+    assert!(h.tools.tools_for_action(robot_id, RobotAction::Device).await.is_empty());
+    let robots: Value = h.http.get(format!("{}/api/robots", h.base))
+        .send().await.unwrap().json().await.unwrap();
+    assert!(robots["robots"][0]["supported_permissions"].as_array().unwrap()
+        .iter().any(|permission| permission == "motion"));
+
+    let error = h.tools.call_for_action(
+        robot_id, RobotAction::Device, "robot_dog_action",
+        serde_json::json!({ "action": "sitdown" }),
+    ).await.expect_err("device authority must not dispatch dog motion");
+    assert!(error.to_string().contains("robot/motion"));
+
+    let dog_call = tokio::spawn({
+        let tools = Arc::clone(&h.tools);
+        async move { tools.call_for_action(
+            robot_id, RobotAction::Motion, "robot_dog_action",
+            serde_json::json!({ "action": "sitdown" }),
+        ).await }
+    });
+    let invocation = next_json(&mut socket).await;
+    assert_eq!(invocation["payload"]["method"], "tools/call");
+    assert_eq!(invocation["payload"]["params"]["name"], "self.dog.action");
+    assert_eq!(invocation["payload"]["params"]["arguments"]["action"], "sitdown");
+    answer_mcp(&mut socket, &invocation, serde_json::json!({
+        "content": [{ "type": "text", "text": "action accepted" }], "isError": false
+    })).await;
+    assert_eq!(dog_call.await.unwrap().unwrap(), "action accepted");
 
     let call = tokio::spawn({
         let tools = Arc::clone(&h.tools);
