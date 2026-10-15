@@ -1093,7 +1093,10 @@ impl InMemoryAgentRuntimeSessions {
                 }
                 continue;
             }
-            if turn_generation.is_some() && runtime.requires_turn_boundary_recycle() {
+            if turn_generation.is_some()
+                && !self.slot_has_active_turn(conversation_id, &slot)
+                && runtime.requires_turn_boundary_recycle()
+            {
                 info!(
                     conversation_id,
                     "Recycling stateless Agent process at its completed turn boundary"
@@ -1103,6 +1106,8 @@ impl InMemoryAgentRuntimeSessions {
                 // until exact process-tree exit is proven, then build the
                 // successor in a fresh slot. No restart-governor record is
                 // added for normal completed turns.
+                // A pristine warmup may also request replacement, but a
+                // generation already reserved before send must keep its slot.
                 self.teardown_slot_under_gate(
                     conversation_id,
                     slot,

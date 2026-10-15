@@ -648,6 +648,9 @@
               "id": "robot"
             },
             "action_allowlist": [
+              "robot/device",
+              "robot/display",
+              "robot/motion",
               "robot/vision"
             ]
           },
@@ -1431,5 +1434,5 @@
       "research.web"
     ]
   },
-  "payload_digest": "d4f9e34056c8dbe2389f46c1f2a6683685665b4b28b8429d31f22589e18d2b3d"
+  "payload_digest": "56db79e78fbc5b98bac6e0fb1689805969ae5c91e8bd795ad5bc8ef47f99b272"
 }

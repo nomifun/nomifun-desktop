@@ -14,7 +14,9 @@ to your desktop over the LAN instead of using the default `xiaozhi.me` service.
 
 Once paired, a robot continues its companion's existing desktop conversation, using the same persona, Agent settings, memory and knowledge bindings. Pairing and reconnecting do not create a separate robot conversation or Agent.
 
-Use the device button in the companion conversation header to select the desktop control target. A single paired device is selected automatically; multiple devices require an explicit choice. Desktop replies remain silent by default. After allowing desktop playback in device settings, **Play latest reply on this device** plays an existing reply without generating a new answer.
+Ordinary Agent conversations can explicitly select a robot in the resource picker before launch. The companion conversation page currently has no robot resource picker. Pairing a single device does not automatically grant control authority.
+
+To configure device control for an existing companion session, an integration should call `PUT /api/product-agent-bindings/companion/{companion_id}` with the current Agent `selection`, the existing `conversation_id`, and the complete `resource_selections`, including the `robot` and all other resources to retain. This applies the change through the formal session binding transition; the companion's Agent dropdown does not select a robot resource.
 
 Device settings show the permissions supported by the connected firmware. Photos, movement and extension tools require their respective permissions. Continuous observation requires an additional permission and remains scoped to the current conversation turn. Revoking permissions, unpairing or disconnecting invalidates earlier device authority. Photos and observations are attached to the originating conversation message.
 
@@ -82,6 +84,33 @@ companion must be unbound there before it can be claimed again.
 
 ## 5. Verify the Connection
 
+Before testing device tools, confirm all three requirements: the companion's
+current Agent explicitly grants the corresponding Robot Actions, the current
+companion session explicitly selects this paired device as its `robot` resource,
+and device settings allow the requested operation. Pairing alone does not grant
+Agent tool authority. Ordinary voice conversations
+do not require camera permission or a robot resource selected in advance.
+
+| Robot Action | Device tools |
+| --- | --- |
+| `robot/vision` | Camera and vision tools; continuous observation needs an additional permission. |
+| `robot/display` | Screen, expression and lighting tools. |
+| `robot/motion` | Head, gimbal and servo tools, including status reads such as `self.head.get_status`. |
+| `robot/device` | Other device extension tools provided by the firmware. |
+
+The latest recommended official Companion Agent includes all four Actions.
+Available tools still depend on the selected robot, its firmware and device
+permissions. Upgrading does not automatically expand saved official Agent
+configurations or existing sessions. To add the recommended capabilities, choose
+**Edit Agent** under the companion's **Agent setup**, select **Complete recommended
+capabilities**, review the additions, and select **Complete and save**. Return to
+the companion and, after the current reply finishes, select **Apply latest setup**
+to explicitly apply the saved configuration to its current session. This keeps
+the session identity, current model and message history. Then confirm that the
+session selects the correct robot resource and allow the required operations in
+device settings. Personal Agents also need explicit grants for the Robot Actions
+you want to use.
+
 Start with these checks:
 
 1. Speak to the robot and confirm that recognized text appears in the NomiFun
@@ -126,8 +155,12 @@ coordination; it does not make a cloud ASR, TTS, or chat provider local.
   verify the provider credentials and quota.
 - **No audio reply is played:** Configure the companion's TTS model and voice,
   then verify speaker wiring and volume.
-- **Head commands do nothing:** Confirm the firmware exposes `self.head.*`, then
-  calibrate it and enable motion as described by the board documentation.
+- **Head commands do nothing:** Confirm the companion's current Agent grants
+  `robot/motion`, its current session selects the correct robot resource, device
+  settings allow motion, and the firmware exposes `self.head.*`. For physical
+  movement, also calibrate the device and enable motion as described by the board
+  documentation. `self.head.get_status` belongs to `robot/motion` too and requires
+  the corresponding Agent grant and device permission.
 
 ## Network Safety
 

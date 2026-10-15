@@ -1309,6 +1309,18 @@ impl OfficialPresetSeedManifestPayload {
                 });
             }
         }
+        let robot_actions = BTreeSet::from([
+            "robot/vision", "robot/display", "robot/motion", "robot/device",
+        ].map(crate::ActionId::from));
+        if companion.enabled_capabilities.iter()
+            .find(|selection| selection.capability.id.as_ref() == "robot")
+            .is_none_or(|selection| selection.action_allowlist != robot_actions)
+        {
+            return Err(PresetContractViolation {
+                code: CanonicalErrorCode::from(ROLE_COVERAGE_INCOMPLETE),
+                message: "companion.default must recommend all four explicit Robot actions; device permissions remain independent".into(),
+            });
+        }
 
         if !self.forbidden_official_keys.contains("research")
             || !self.forbidden_official_keys.contains("research.web")
@@ -2198,6 +2210,9 @@ mod tests {
             "channel.messaging/reply",
             "channel.messaging/send",
             "robot/vision",
+            "robot/display",
+            "robot/motion",
+            "robot/device",
         ] {
             assert!(companion.contains(action), "Companion identity or follow-up lost {action}");
         }
@@ -2384,6 +2399,24 @@ mod tests {
             manifest.templates.get_mut(&key).unwrap().enabled_capabilities
                 .retain(|selection| selection.capability.id.as_ref() != removed);
             assert_eq!(manifest.validate().unwrap_err().code.as_ref(), ROLE_COVERAGE_INCOMPLETE);
+        }
+    }
+
+    #[test]
+    fn companion_recommendations_cover_each_robot_action_without_implicit_module_authority() {
+        let manifest = official_preset_seed_manifest_payload();
+        let expected = BTreeSet::from([
+            "robot/vision", "robot/display", "robot/motion", "robot/device",
+        ].map(crate::ActionId::from));
+        let robot = manifest.templates[&OfficialPresetKey::CompanionDefault].enabled_capabilities.iter()
+            .find(|selection| selection.capability.id.as_ref() == "robot").unwrap();
+        assert_eq!(robot.action_allowlist, expected);
+        for action in &expected {
+            let mut incomplete = manifest.clone();
+            incomplete.templates.get_mut(&OfficialPresetKey::CompanionDefault).unwrap()
+                .enabled_capabilities.iter_mut().find(|selection| selection.capability.id.as_ref() == "robot")
+                .unwrap().action_allowlist.remove(action);
+            assert_eq!(incomplete.validate().unwrap_err().code.as_ref(), ROLE_COVERAGE_INCOMPLETE);
         }
     }
 

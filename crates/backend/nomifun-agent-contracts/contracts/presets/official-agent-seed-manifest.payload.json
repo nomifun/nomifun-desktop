@@ -646,6 +646,9 @@
             "id": "robot"
           },
           "action_allowlist": [
+            "robot/device",
+            "robot/display",
+            "robot/motion",
             "robot/vision"
           ]
         },

@@ -309,7 +309,7 @@ Store 在同一事务中更新当前 binding 并保留必要的历史引用；�
 | `assistant.general` | 通用文件、进程、版本管理、产物、项目记忆、网页研究、计划任务、浏览器、桌面操作、媒体、素材和 Office，以及 SSH、知识库和会话管理。 |
 | `coding.codex` | 文件、版本管理、进程、产物、项目记忆、研究、协作、SSH、知识库和会话管理；保留 headless Runtime 要求，不依赖浏览器或桌面控制。 |
 | `app.developer` | 完整 Coding 基线加应用托管十个动作；应用目录固定为工作区，普通多会话与运行设置共用原 owner。其他预设不默认选择应用托管。 |
-| `companion.default` | 保留伙伴人格、长期记忆、机器人视觉、渠道和计划任务；补齐日常文件、进程、产物、研究、浏览器、桌面、媒体、素材、Office、SSH、协作与管理能力。 |
+| `companion.default` | 保留伙伴人格、长期记忆、渠道和计划任务；推荐机器人视觉、显示、动作及其他设备控制，并继续受明确资源选择和设备许可约束；补齐日常文件、进程、产物、研究、浏览器、桌面、媒体、素材、Office、SSH、协作与管理能力。 |
 | `customer-service.default` | 客服笔记读写与交接、知识检索、渠道发送和回复，以及文件、进程、产物、研究和计划任务；不默认授予全局知识库或跨会话、终端管理。 |
 | `creative-studio.default` | 媒体、Canvas、素材、模板、Office、文件、进程、产物、项目记忆、研究、浏览器、协作和计划任务；保留三个创作 Package Skill。 |
 
@@ -515,6 +515,14 @@ Channel 从当前 owner 和 typed binding 找 Session。存在会话记录但没
 Cron、Companion、Requirements、AutoWork、IDMM 和 AgentExecution 可以保留各自业务配置及监督状态，但会话输入、准入、取消与终态必须引用 canonical Turn receipt。Conversation 名称不代表另一个存储源。
 
 伙伴的产品 Agent 选择可以使用官方“伙伴”模板或兼容的个人 Agent。兼容性要求保留伙伴能力与必需的 `companion` 资源；资源解析始终以目标伙伴的精确身份为准，不能继承另一个伙伴的身份或记忆资源。伙伴产品会话由 owner-scoped canonical opening 事实确认，具体伙伴归属再从 typed binding 派生，与所选 Agent 是否来自官方模板无关；普通 Agent 会话仅挂载伙伴资源不会成为该伙伴的产品会话。桌面、Channel 与 Robot 继续引用同一个现役 Session。
+
+已绑定机器人的语音是该伙伴现役 Session 的普通输入，不以摄像头或 `robot/vision` 授权为前提，也不要求提前挂载 `robot` 资源。入口校验 canonical 伙伴身份、设备绑定与当前连接；若 Session 已明确选择机器人资源，仍须唯一匹配本次输入的设备和伙伴。接入语音不改写共享 Session 的冻结资源，也不授予设备控制权限；工具调用继续经过已选择资源、当前 Turn、精确连接和设备权限的原有门禁。
+
+已有视觉观察是可选上下文。设备关闭视觉权限时省略该观察，也不读取先前缓存的视觉内容；这不会阻塞同一设备已授权的显示或其他设备工具。显式拍照调用仍在执行时校验视觉权限，关闭权限不会获得例外。机器人资源的操作集合只来自已冻结的精确 Action 选择，选择显示或设备动作不会补造视觉授权。
+
+已成功物化机器人工具目录的 Runtime，在完整关闭的 Turn 之后，通过现有 turn-boundary recycle 证明旧 Runtime 退出并结算效果，再为下一 Turn 重建本地资源，按当前设备连接重新冻结目录。尚未开始任何 Turn 的设备预热实例，也在首次输入准入时重新物化，避免预热后重连留下旧连接目录。空目录同样刷新；普通未物化设备目录的 Session 继续复用 Runtime。该过程保留同一 Session、canonical 历史、Agent、模型及资源授权；暂停回合不触发这条重建路径，未知效果或清理未完成仍阻断后继。当前实现为每个设备新 Turn 承担一次本地 Runtime 重建，不通过放宽旧连接调用或重放旧操作处理重连。
+
+产品 Agent 绑定入口中的显式资源选择应用于当前伙伴 Session；请求同时带有 `model` 时，也物化对应的未来默认绑定。省略 `model` 不重建未来默认绑定，仍保存用户选择的 Agent 并保留 `needs_model` 合同。即使 Agent 身份相同，也比较解析后的真实资源并沿用空闲边界的 ContextOnly / CAS 切换，保留 Session ID、当前模型和伙伴身份；完全相同的选择不追加转换事件。现役 Session 应用失败时，不先保存未来默认配置。
 
 模型与扩展派生可能把执行 binding 指向隐藏的 Session-only Preset，它不能替代用户原先选择的可编辑 Agent 身份。选择器通过现有 typed Agent transition 的 `request_digest` 验证原始选择命令，不按名称或相似配置猜测来源，也不增加来源绑定账本。初次创建前保存的产品选择仍是创作意图；编辑个人 Agent 后须显式应用最新设定，才改变当前 Session 的冻结版本。
 
