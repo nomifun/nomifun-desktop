@@ -7,32 +7,23 @@
 import type { ConversationId, MessageId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import AtFileMenu from '@/renderer/components/chat/AtFileMenu';
-import BtwOverlay from '@/renderer/components/chat/BtwOverlay';
-import SlashCommandMenu, { type SlashCommandMenuItem } from '@/renderer/components/chat/SlashCommandMenu';
-import { useBtwCommand } from '@/renderer/components/chat/BtwOverlay/useBtwCommand';
-import { useSlashCommandController } from '@/renderer/hooks/chat/useSlashCommandController';
 import { useWorkspaceMentionFiles } from '@/renderer/hooks/file/useWorkspaceMentionFiles';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 import { usePreviewContext } from '@/renderer/pages/conversation/Preview';
 import { warmupConversation } from '@/renderer/pages/conversation/utils/warmupConversation';
 import { buildAtFileInsertion, getActiveAtFileQuery, getAllAtFileQueries } from '@/renderer/utils/chat/atFileQuery';
-import { getLastAssistantText } from '@/renderer/utils/chat/getLastAssistantText';
 import { emitter, type ReplyQuote, useAddEventListener } from '@/renderer/utils/emitter';
 import { mergeFileSelectionItems, type FileSelectionItem } from '@/renderer/utils/file/fileSelection';
 import type { FileOrFolderItem } from '@/renderer/utils/file/fileTypes';
 import { filterWorkspaceMentionItems } from '@/renderer/utils/file/workspaceMentions';
-import { copyText } from '@/renderer/utils/ui/clipboard';
-import { Button, Input, Message, Tag } from '@arco-design/web-react';
+import { Button, Tag } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { CloseSmall, Lightning, Quote } from '@icon-park/react';
-import type { SlashCommandItem } from '@/common/chat/slash/types';
-import type { TFunction } from 'i18next';
 import { theme } from '@/platform';
 import React, { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useCompositionInput } from '@renderer/hooks/chat/useCompositionInput';
 import { useConfig } from '@renderer/hooks/config/useConfig';
-import { useConversationExport } from '@renderer/hooks/file/useConversationExport';
 import { useDragUpload } from '@renderer/hooks/file/useDragUpload';
 import { useLatestRef } from '@renderer/hooks/ui/useLatestRef';
 import { usePasteService } from '@renderer/hooks/file/usePasteService';
@@ -47,13 +38,14 @@ import { getConversationInputHistory, isCaretOnFirstLine } from '@/renderer/util
 import TaskPlanBar from '@renderer/pages/conversation/components/TaskPlanBar';
 import type { TaskPlanSnapshot } from '@/common/protocolBindings/TaskPlanSnapshot';
 import Composer, { ComposerSendButton } from '../Composer';
+import { useComposerCommands, type ComposerCommand, type ComposerCommandPanel } from '../commands/useComposerCommands';
 
 const constVoid = (): void => undefined;
 const listWorkspaceMentionFiles = (root: string) => ipcBridge.fs.listWorkspaceFiles.invoke({ root });
 // 临界值：超过该字符数直接切换至多行模式，避免为超长文本做昂贵的宽度测量
 // Threshold: switch to multi-line mode directly when character count exceeds this value to avoid heavy layout work
 const MAX_SINGLE_LINE_CHARACTERS = 800;
-const BTW_COMMAND_RE = /^\/btw(?:\s+([\s\S]*))?$/i;
+const EMPTY_COMMANDS: readonly ComposerCommand[] = [];
 const AT_FILE_HIGHLIGHT_COLOR = theme.Color.PrimaryColor;
 
 const getSelectedItemMatchKeys = (item: FileSelectionItem): string[] => {
@@ -150,18 +142,6 @@ const buildOwnedSelectionItems = (
   return nextItems;
 };
 
-function extractBtwQuestion(value: string): string | null {
-  const match = value.trim().match(BTW_COMMAND_RE);
-  return match ? match[1] || '' : null;
-}
-
-function getSlashCommandDescription(command: SlashCommandItem, t: TFunction): string {
-  if (command.source !== 'builtin' && command.name === 'compact') {
-    return t('conversation.slashCommands.compact.description', { defaultValue: command.description });
-  }
-  return command.description;
-}
-
 const SendBox: React.FC<{
   value?: string;
   onChange?: (value: string) => void;
@@ -172,12 +152,9 @@ const SendBox: React.FC<{
   onSteer?: (message: string) => Promise<void>;
   /** Gate the steer affordance (e.g. only for the Nomi native engine). */
   steerAvailable?: boolean;
-  /** When provided (Nomi only), enables "edit a sent message" mode: the message text is
-   *  recalled into the composer via the `sendbox.edit` event and submitting calls this
-   *  instead of onSend, which truncates the conversation and re-runs from that message. */
+  /** Recall a sent prompt for revision. Submission creates a new canonical Turn;
+   *  the original message and its history remain immutable. */
   onEditResubmit?: (msgId: MessageId, createdAt: number, message: string) => Promise<void>;
-  /** Clear the agent's conversation context (release model context). When set, a `/clear` builtin appears. */
-  onClearContext?: () => void | Promise<void>;
   disabled?: boolean;
   /** Block submission during background refreshes without interrupting typing or IME. */
   submitDisabled?: boolean;
@@ -201,10 +178,9 @@ const SendBox: React.FC<{
   defaultMultiLine?: boolean;
   lockMultiLine?: boolean;
   sendButtonPrefix?: React.ReactNode;
-  slash_commands?: SlashCommandItem[];
-  onSlashBuiltinCommand?: (name: string) => void;
-  hasPendingAttachments?: boolean;
-  enableBtw?: boolean;
+  commands?: readonly ComposerCommand[];
+  commandPanel?: ComposerCommandPanel;
+  commandTargetKey?: string;
   allowSendWhileLoading?: boolean;
   compactActions?: boolean;
   compactStacked?: boolean;
@@ -219,7 +195,6 @@ const SendBox: React.FC<{
   onSteer,
   steerAvailable,
   onEditResubmit,
-  onClearContext,
   prefix,
   renderAttachments,
   className,
@@ -242,10 +217,9 @@ const SendBox: React.FC<{
   defaultMultiLine = false,
   lockMultiLine = false,
   sendButtonPrefix,
-  slash_commands = [],
-  onSlashBuiltinCommand,
-  hasPendingAttachments = false,
-  enableBtw = false,
+  commands = EMPTY_COMMANDS,
+  commandPanel,
+  commandTargetKey,
   allowSendWhileLoading = false,
   compactActions = false,
   compactStacked = false,
@@ -262,6 +236,10 @@ const SendBox: React.FC<{
   const [isSingleLine, setIsSingleLine] = useState(!defaultMultiLine);
   const [isInputFocused, setIsInputFocused] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const commandController = useComposerCommands({
+    targetKey: commandTargetKey ?? String(conversationContext?.conversation_id ?? 'composer'),
+    input, setInput, commands, panel: commandPanel, anchorRef: containerRef,
+  });
   const singleLineWidthRef = useRef<number>(0);
   const measurementCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const warmedConversationRef = useRef<ConversationId | undefined>(undefined);
@@ -293,7 +271,7 @@ const SendBox: React.FC<{
     containerRef.current?.querySelector<HTMLTextAreaElement>('textarea')?.focus();
   }, [conversationContext?.conversation_id]);
 
-  // 编辑已发送消息：把原文回填输入框，进入"编辑模式"，提交即截断重跑（仅 Nomi 提供 onEditResubmit）
+  // Recall a sent prompt; its revised text is submitted as a new Turn.
   useAddEventListener(
     'sendbox.edit',
     (payload) => {
@@ -434,14 +412,6 @@ const SendBox: React.FC<{
     'sendbox'
   );
   const [message, context] = useArcoMessage();
-  const conversationExport = useConversationExport({
-    conversation_id: conversationContext?.conversation_id,
-    workspace: conversationContext?.workspace,
-    t,
-    messageApi: message,
-  });
-  const btwCommand = useBtwCommand(conversationContext?.conversation_id, enableBtw);
-  const btwQuestion = useMemo(() => extractBtwQuestion(input), [input]);
   const activeAtFileQuery = useMemo(() => {
     if (!conversationContext?.workspace) {
       return null;
@@ -480,106 +450,7 @@ const SendBox: React.FC<{
     });
   }, [allAtFileQueries, selectedWorkspaceItems]);
 
-  const builtinSlashCommands = useMemo<SlashCommandItem[]>(() => {
-    const commands: SlashCommandItem[] = [];
-    if (enableBtw) {
-      commands.push({
-        name: 'btw',
-        description: t('conversation.sideQuestion.description'),
-        kind: 'builtin',
-        source: 'builtin',
-        selectionBehavior: 'insert',
-      });
-    }
-    if (onSlashBuiltinCommand) {
-      commands.push({
-        name: 'open',
-        description: t('conversation.workspace.addFile', { defaultValue: 'Add File' }),
-        kind: 'builtin',
-        source: 'builtin',
-      });
-    }
-    if (conversationContext?.conversation_id) {
-      commands.push({
-        name: 'copy',
-        description: t('messages.copy', { defaultValue: 'Copy' }),
-        kind: 'builtin',
-        source: 'builtin',
-      });
-      commands.push({
-        name: 'export',
-        description: t('messages.export.commandDescription'),
-        kind: 'builtin',
-        source: 'builtin',
-      });
-    }
-    if (conversationContext?.conversation_id && onClearContext) {
-      commands.push({
-        name: 'clear',
-        description: t('conversation.clearContext.description', { defaultValue: 'Clear conversation context' }),
-        kind: 'builtin',
-        source: 'builtin',
-      });
-    }
-    return commands;
-  }, [conversationContext?.conversation_id, enableBtw, onClearContext, onSlashBuiltinCommand, t]);
-
-  const mergedSlashCommands = useMemo(() => {
-    const map = new Map<string, SlashCommandItem>();
-    for (const command of builtinSlashCommands) {
-      map.set(command.name, command);
-    }
-    for (const command of slash_commands) {
-      if (!map.has(command.name)) {
-        map.set(command.name, command);
-      }
-    }
-    return Array.from(map.values());
-  }, [builtinSlashCommands, slash_commands]);
-
-  const slashController = useSlashCommandController({
-    input,
-    commands: mergedSlashCommands,
-    onExecuteBuiltin: (name) => {
-      if (name === 'copy') {
-        const lastAssistantText = getLastAssistantText(messageList, Boolean(loading));
-        if (!lastAssistantText) {
-          Message.warning(t('messages.copyLastOutput.empty'));
-        } else {
-          void copyText(lastAssistantText)
-            .then(() => {
-              Message.success(t('messages.copySuccess'));
-            })
-            .catch(() => {
-              Message.error(t('messages.copyFailed'));
-            });
-        }
-      } else if (name === 'export') {
-        void conversationExport.openExportFlow();
-      } else if (name === 'clear') {
-        void Promise.resolve(onClearContext?.());
-      } else {
-        onSlashBuiltinCommand?.(name);
-      }
-      setInput('');
-    },
-    onSelectTemplate: (name) => {
-      setInput(`/${name} `);
-    },
-  });
-
-  const slashMenuItems = useMemo<SlashCommandMenuItem[]>(
-    () =>
-      slashController.filteredCommands.map((command) => ({
-        key: command.name,
-        label: `/${command.name}`,
-        description: getSlashCommandDescription(command, t),
-        badge: command.hint,
-      })),
-    [slashController.filteredCommands, t]
-  );
-
-  const isCommandMenuOpen = conversationExport.isOpen || slashController.isOpen;
+  const isCommandMenuOpen = commandController.isOpen;
   const isAtFileMenuOpen =
     Boolean(conversationContext?.workspace) &&
     Boolean(activeAtFileQuery) &&
@@ -595,7 +466,7 @@ const SendBox: React.FC<{
     () => filterWorkspaceMentionItems(workspaceMentions.items, deferredAtFileQuery),
     [deferredAtFileQuery, workspaceMentions.items]
   );
-  const isOverlayOpen = isCommandMenuOpen || btwCommand.isOpen || isAtFileMenuOpen;
+  const isOverlayOpen = isCommandMenuOpen || isAtFileMenuOpen;
 
   const getTextareaElement = useCallback((): HTMLTextAreaElement | null => {
     const textarea = containerRef.current?.querySelector('textarea');
@@ -663,79 +534,11 @@ const SendBox: React.FC<{
       historyDraftRef.current = null;
       setHistoryNavigationIndex(null);
     }
-    if (conversationExport.isOpen && value) {
-      conversationExport.closeExportFlow();
-    }
     setInput(value);
     requestAnimationFrame(() => {
       syncCaretPosition();
       syncHighlightScroll();
     });
-  };
-
-  const handleOverlayKeyDown = (event: React.KeyboardEvent) => {
-    return conversationExport.handleKeyDown(event) || slashController.onKeyDown(event);
-  };
-
-  const renderExportFileNamePanel = () => {
-    return (
-      <div
-        className='rounded-14px border border-solid overflow-hidden p-12px flex flex-col gap-10px'
-        style={{
-          borderColor: 'var(--color-border-2)',
-          background: 'color-mix(in srgb, var(--color-bg-1) 88%, transparent)',
-          backdropFilter: 'blur(14px) saturate(1.1)',
-          WebkitBackdropFilter: 'blur(14px) saturate(1.1)',
-        }}
-      >
-        <div className='text-13px font-semibold text-t-primary'>{t('messages.export.file_nameLabel')}</div>
-        <Input
-          autoFocus
-          value={conversationExport.filename}
-          onChange={conversationExport.setFilename}
-          placeholder={t('messages.export.file_namePlaceholder')}
-          disabled={conversationExport.loading}
-          onKeyDown={(event) => {
-            conversationExport.handleKeyDown(event);
-          }}
-        />
-        <div className='text-12px text-t-secondary break-all'>
-          {t('messages.export.pathLabel')}: {conversationExport.pathPreview}
-        </div>
-        <div className='flex items-center justify-end gap-8px'>
-          <Button
-            size='small'
-            type='secondary'
-            disabled={conversationExport.loading}
-            onClick={() => {
-              conversationExport.closeExportFlow();
-            }}
-          >
-            {t('common.cancel')}
-          </Button>
-          <Button
-            size='small'
-            type='secondary'
-            disabled={conversationExport.loading}
-            onClick={() => {
-              conversationExport.showMenu();
-            }}
-          >
-            {t('common.back')}
-          </Button>
-          <Button
-            size='small'
-            type='primary'
-            loading={conversationExport.loading}
-            onClick={() => {
-              void conversationExport.submitFilename();
-            }}
-          >
-            {t('common.save')}
-          </Button>
-        </div>
-      </div>
-    );
   };
 
   useEffect(() => {
@@ -1164,9 +967,10 @@ const SendBox: React.FC<{
   };
 
   const sendMessageHandler = () => {
+    if (commandController.dispatchInput()) return;
     if (disabled || submitDisabled) return;
     if (isUploading || isStopping) return;
-    // 编辑模式：提交走截断重跑而非普通发送。
+    // Revision mode submits a new Turn through the owning conversation port.
     if (editingMsgId && onEditResubmit) {
       if (isLoading || !input.trim()) return;
       const finalMessage = input;
@@ -1197,27 +1001,6 @@ const SendBox: React.FC<{
     if (activeCid) {
       warmedConversationRef.current = activeCid;
     }
-    if (enableBtw && btwQuestion !== null) {
-      const normalizedQuestion = btwQuestion.trim();
-      if (!normalizedQuestion) {
-        message.warning(t('conversation.sideQuestion.emptyQuestion'));
-        return;
-      }
-      if (btwCommand.isLoading) {
-        message.warning(t('conversation.sideQuestion.alreadyRunning'));
-        return;
-      }
-      if (hasPendingAttachments || domSnippets.length > 0) {
-        message.warning(t('conversation.sideQuestion.attachmentsNotAllowed'));
-        return;
-      }
-      historyDraftRef.current = null;
-      setHistoryNavigationIndex(null);
-      setInput('');
-      void btwCommand.ask(normalizedQuestion);
-      return;
-    }
-
     if (!allowSendWhileLoading && (isLoading || loading)) {
       console.info('[sendbox]', {
         event: 'blocked-while-loading',
@@ -1259,6 +1042,7 @@ const SendBox: React.FC<{
   };
 
   const steerMessageHandler = () => {
+    if (commandController.dispatchInput()) return;
     if (disabled || submitDisabled) return;
     if (!onSteer || isUploading || isStopping) return;
     // The draft is cleared eagerly so an in-flight steer cannot overwrite text
@@ -1301,7 +1085,9 @@ const SendBox: React.FC<{
   const hasDraftToSend = input.trim().length > 0 || domSnippets.length > 0;
 
   // Calculate button disabled state
-  const isButtonDisabled = disabled || submitDisabled || isUploading || isStopping || (!input.trim() && domSnippets.length === 0);
+  const isButtonDisabled = commandController.hasCommandInput
+    ? commandController.busy || isStopping
+    : disabled || submitDisabled || isUploading || isStopping || (!input.trim() && domSnippets.length === 0);
 
   // Reusable send button component
   const sendButton = <ComposerSendButton disabled={isButtonDisabled} onClick={sendMessageHandler} />;
@@ -1339,12 +1125,16 @@ const SendBox: React.FC<{
     />
   );
 
+  const pausedCancelButton = <Button type='secondary' onClick={stopHandler}
+    data-testid='sendbox-paused-cancel-btn' aria-label={t('conversation.stop.endPausedTurn')}>
+    {t('conversation.stop.endPausedTurn')}
+  </Button>;
   const renderActionButtons = () => {
     if (isStopping) return stopButton;
-    if (paused) return <Button type='secondary' onClick={stopHandler}
-      data-testid='sendbox-paused-cancel-btn' aria-label={t('conversation.stop.endPausedTurn')}>
-      {t('conversation.stop.endPausedTurn')}
-    </Button>;
+    if (commandController.hasCommandInput) return <div className='flex items-center gap-2'>
+      {paused ? pausedCancelButton : loading && onStop ? stopButton : null}{sendButton}
+    </div>;
+    if (paused) return pausedCancelButton;
     if (allowSendWhileLoading && (isLoading || loading)) {
       // Stop is an independent safety action. A non-empty draft must never
       // replace or hide it: users may need to cancel the current turn even
@@ -1446,15 +1236,7 @@ const SendBox: React.FC<{
         topRightTools={topRightTools}
         header={prefix}
         overlays={<>
-          <BtwOverlay
-            answer={btwCommand.answer}
-            anchorEl={containerRef.current}
-            isLoading={btwCommand.isLoading}
-            isOpen={btwCommand.isOpen}
-            onDismiss={btwCommand.dismiss}
-            parentTaskRunning={Boolean(loading || isLoading)}
-            question={btwCommand.question}
-          />
+          {commandController.menu}
           {isAtFileMenuOpen && (
             <div className='absolute left-12px right-12px bottom-[calc(100%+8px)] z-70'>
               <AtFileMenu
@@ -1476,44 +1258,6 @@ const SendBox: React.FC<{
                 onHoverItem={setAtFileMenuActiveIndex}
                 onSelectItem={insertSelectedAtFile}
               />
-            </div>
-          )}
-          {isCommandMenuOpen && (
-            <div className='absolute left-12px right-12px bottom-[calc(100%+8px)] z-70'>
-              {conversationExport.step === 'menu' ? (
-                <SlashCommandMenu
-                  title={t('messages.export.menuTitle')}
-                  hint={t('messages.export.menuHint')}
-                  items={conversationExport.menuItems}
-                  activeIndex={conversationExport.activeIndex}
-                  loading={conversationExport.loading}
-                  onHoverItem={conversationExport.setActiveIndex}
-                  onSelectItem={(item) => {
-                    conversationExport.onSelectMenuItem(item.key);
-                  }}
-                  emptyText={t('messages.slash.empty', { defaultValue: 'No commands found' })}
-                />
-              ) : conversationExport.step === 'filename' ? (
-                renderExportFileNamePanel()
-              ) : (
-                <SlashCommandMenu
-                  title={t('messages.slash.title', { defaultValue: 'Commands' })}
-                  hint={t('messages.slash.hint', { defaultValue: 'Type / to open command menu' })}
-                  items={slashMenuItems}
-                  activeIndex={slashController.activeIndex}
-                  loading={false}
-                  onHoverItem={slashController.setActiveIndex}
-                  onSelectItem={(item) => {
-                    const targetIndex = slashController.filteredCommands.findIndex(
-                      (command) => command.name === item.key
-                    );
-                    if (targetIndex >= 0) {
-                      slashController.onSelectByIndex(targetIndex);
-                    }
-                  }}
-                  emptyText={t('messages.slash.empty', { defaultValue: 'No commands found' })}
-                />
-              )}
             </div>
           )}
         </>}
@@ -1627,7 +1371,7 @@ const SendBox: React.FC<{
           onKeyDown: createKeyDownHandler(
                   sendMessageHandler,
                   (event) => {
-                    if (handleAtFileMenuKeyDown(event) || handleOverlayKeyDown(event) || handleHistoryKeyDown(event)) {
+                    if (handleAtFileMenuKeyDown(event) || commandController.onKeyDown(event) || handleHistoryKeyDown(event)) {
                       return true;
                     }
                     // Mod(Ctrl/Cmd)+Enter steers the draft into the running turn

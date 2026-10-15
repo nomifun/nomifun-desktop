@@ -24,7 +24,8 @@ import {
   parseProviderId,
 } from '@/common/types/ids';
 import { BackendHttpError } from '@/common/adapter/httpBridge';
-import { agentPlatform, fs as skillFs } from '@/common/adapter/ipcBridge';
+import { agentPlatform, conversation, fs as skillFs } from '@/common/adapter/ipcBridge';
+import type { TChatConversation } from '@/common/config/storage';
 import { serializeCreativeStudioAgentHistory } from '../../../agent/adapters';
 import type {
   CreativeStudioAgentChatPort,
@@ -731,6 +732,11 @@ const run = async (): Promise<void> => {
   const bindingOptions = spyOn(agentPlatform.productBindingOptions, 'invoke')
     .mockRejectedValue(new Error('Agent options are unavailable in this transcript fixture'));
   const skillCatalog = spyOn(skillFs.listAvailableSkills, 'invoke').mockResolvedValue([]);
+  const commandActivity = spyOn(conversation.get, 'invoke').mockImplementation(async ({ conversation_id }) => ({
+    id: conversation_id, name: 'Canvas planning', type: 'nomi', status: 'finished',
+  } as TChatConversation));
+  const commandEvents = [conversation.listChanged, conversation.turnStarted, conversation.turnCompleted,
+    conversation.turnPaused, conversation.reconnected].map(event => spyOn(event, 'on').mockImplementation(() => () => {}));
   const originalConsoleError = console.error;
   console.error = (...args: unknown[]) => {
     if (
@@ -757,6 +763,8 @@ const run = async (): Promise<void> => {
   } finally {
     bindingOptions.mockRestore();
     skillCatalog.mockRestore();
+    commandActivity.mockRestore();
+    commandEvents.forEach(event => event.mockRestore());
     console.error = originalConsoleError;
   }
 };

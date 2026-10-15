@@ -4,14 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, mock, test } from 'bun:test';
-import { cleanup, fireEvent, render } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import { act, cleanup, fireEvent, render } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { readFileSync } from 'node:fs';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 
 import { parseMessageId, parseProviderId } from '@/common/types/ids';
+import { ipcBridge } from '@/common';
+import type { TChatConversation } from '@/common/config/storage';
 
 import CreativeStudioAgentPanel from './CreativeStudioAgentPanel';
 import {
@@ -34,7 +36,16 @@ await testI18n.use(initReactI18next).init({
 });
 
 const noop = () => undefined;
-afterEach(cleanup);
+beforeEach(() => {
+  spyOn(ipcBridge.conversation.get, 'invoke').mockImplementation(async ({ conversation_id }) => ({
+    id: conversation_id, name: 'Canvas planning', type: 'nomi', status: 'finished',
+  } as TChatConversation));
+  for (const event of [ipcBridge.conversation.listChanged, ipcBridge.conversation.turnStarted,
+    ipcBridge.conversation.turnCompleted, ipcBridge.conversation.turnPaused, ipcBridge.conversation.reconnected]) {
+    spyOn(event, 'on').mockImplementation(() => noop);
+  }
+});
+afterEach(() => { cleanup(); mock.restore(); });
 const model = {
   providerId: parseProviderId('0190f5fe-7c00-7a00-8000-000000000001'),
   model: 'chat-model',
@@ -245,7 +256,7 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
     expect(html.includes('Stop Agent')).toBe(true);
   });
 
-  test('shows canonical failure guidance and keeps the original diagnostic and identity collapsed', () => {
+  test('shows canonical failure guidance and keeps the original diagnostic and identity collapsed', async () => {
     const retry = mock(noop);
     const canonicalSessionId = '0190f5fe-7c00-7a00-8000-000000000110';
     const canonicalTurnId = '0190f5fe-7c00-7a00-8000-000000000111';
@@ -256,6 +267,7 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
           agentLabel: 'Original Agent', modelName: 'original-model', workspacePath: '/original-workspace', retryable: true },
         turnId: canonicalTurnId, timestamp: 1_700_000_000_000 }], onRetryMessage: retry,
     })} /></I18nextProvider>);
+    await act(async () => {});
     expect(page.getByRole('alert').textContent).toBe(conversation.agentError.codes.USER_LLM_PROVIDER_NETWORK_ERROR.title);
     const detail = page.getByText('Original provider diagnostic');
     expect(detail.closest('[hidden]')).not.toBeNull();

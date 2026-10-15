@@ -174,7 +174,7 @@ pub struct CompanionThread {
 /// One archived (or currently open) companion session window — a bounded span
 /// of the companion's single chat thread. Closed on ≥`idle_minutes` of
 /// inactivity, compressed into a day-partitioned `digest`, after which the live
-/// engine context is reset (`clear_context`) so the next window starts small.
+/// canonical model context is reset so the next window starts small.
 /// `session_day` is the window's LOCAL start day (`YYYYMMDD`) — the partition key
 /// for "去年今日" recall, so a cross-midnight session stays attributed to the day
 /// it began.

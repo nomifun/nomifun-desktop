@@ -112,7 +112,7 @@ pub struct NomiCompatOverrides {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_api_types::{NomiBuildExtra, SlashCommandItem};
+    use nomifun_api_types::NomiBuildExtra;
     use serde_json::json;
 
     #[test]
@@ -183,15 +183,6 @@ mod tests {
         assert_eq!(json["delegation_policy"], "automatic");
     }
 
-    #[test]
-    fn slash_command_item_serde() {
-        let cmd = SlashCommandItem {
-            command: "/review".into(),
-            description: "Code review".into(),
-        };
-        let json = serde_json::to_value(&cmd).unwrap();
-        assert_eq!(json["command"], "/review");
-    }
     #[test]
     fn nomi_build_extra_serde_with_preset_rules() {
         let json = json!({

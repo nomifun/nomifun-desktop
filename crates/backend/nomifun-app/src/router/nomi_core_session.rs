@@ -17,6 +17,8 @@ mod app_project_fences;
 pub(super) use app_project_fences::{AppProjectWorkspaceFence, AppProjectDeletionFence, guard_app_project_directory_read, guard_app_project_scope_read, guard_agent_app_project_import};
 #[path = "session_contract_evolution.rs"]
 mod session_contract_evolution;
+#[path = "session_context_clear.rs"]
+mod session_context_clear;
 #[path = "native_execution_control.rs"]
 pub(super) mod native_execution_control;
 
@@ -93,7 +95,7 @@ use nomifun_api_types::{
     AgentChatModelSelectionDto, AgentResolvedSnapshot, SessionCursorDto,
     SessionReasoningEffortDto, UpdateAgentSessionReasoningRequestDto,
     UpdateAgentSessionReasoningResponseDto,
-    SendMessageRequest, SideQuestionRequest, SideQuestionResponse,
+    SendMessageRequest,
     TypedResourceBindingDto, UpdateConversationRequest, WebSocketMessage, WorkspaceBrowseQuery, WorkspaceEntry,
     CreateAgentPresetFromTemplateRequest, PutAgentBindingRequest,
 };
@@ -2613,9 +2615,7 @@ impl NomiCoreSessionOwner {
         idempotency_key: &str,
         request: SendMessageRequest,
     ) -> Result<IdempotentMessageDelivery, AppError> {
-        if request.origin.as_deref() == Some("idmm") {
-            return Err(AppError::BadRequest("IDMM origin is reserved for the supervisor".into()));
-        }
+        Self::validate_ordinary_message_origin(&request)?;
         self.dispatch_canonical_turn(
             owner_id,
             &AgentSessionId::from(session_id.to_owned()),
@@ -2625,6 +2625,13 @@ impl NomiCoreSessionOwner {
             None,
         )
         .await
+    }
+
+    fn validate_ordinary_message_origin(request: &SendMessageRequest) -> Result<(), AppError> {
+        if request.origin.as_deref() == Some("idmm") {
+            return Err(AppError::BadRequest("IDMM origin is reserved for the supervisor".into()));
+        }
+        Ok(())
     }
 
     pub(crate) async fn send_session_idmm_message_idempotent(
@@ -3435,7 +3442,10 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
             turn,
         } = request;
         let nomifun_cron::CronTurnRequest { message, runtime } = turn;
+        let message = cron_turn_message_to_request(message);
+        Self::validate_ordinary_message_origin(&message)?;
         let session_id = agent_session_id.as_ref();
+        let _operation_fence = self.session_operation_lock(session_id).write_owned().await;
         nomifun_common::CronJobId::parse(&runtime.overlay.cron_job_id).map_err(|error| {
             AppError::BadRequest(format!("invalid Cron runtime annotation: {error}"))
         })?;
@@ -3476,14 +3486,37 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
             .ok_or_else(|| AppError::Conflict(format!(
                 "AgentSession {session_id} has no Cron workspace projection"
             )))?;
-        let delivery = self
-            .send_session_message_idempotent(
+        // Redelivery belongs to the original accepted input. It must not reset
+        // context or tear down a successor Runtime, even after this run ended.
+        let receipt = self.canonical.turn_receipt(
+            &PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.clone() },
+            &agent_session_id,
+            &Self::turn_operation_id(&owner_id, session_id, &idempotency_key),
+        ).await?;
+        if receipt.status == nomifun_agent_session::TurnReceiptStatus::NotFound && runtime.clear_context {
+            self.clear_session_context_locked(
                 &owner_id,
-                session_id,
-                &idempotency_key,
-                cron_turn_message_to_request(message),
-            )
-            .await?;
+                &agent_session_id,
+                &format!("cron-context-clear:{}", runtime.overlay.cron_job_run_id),
+                "cron_run",
+                None,
+            ).await?;
+            // A crash may leave the clear committed before this run's input.
+            // If another request or clear followed it, this run cannot reuse
+            // the old boundary or clear the intervening work a second time.
+            self.canonical.store().validate_context_clear_continuation(
+                &PrincipalRef { principal_kind:"user".into(),principal_id:owner_id.clone() },
+                &agent_session_id,
+                &nomifun_agent_session::ClearSessionContext {
+                    idempotency_key:format!("cron-context-clear:{}",runtime.overlay.cron_job_run_id).into(),
+                    reason:"cron_run".into(),
+                },
+            ).await.map_err(agent_session_store_error)?;
+        }
+        let delivery = self.dispatch_canonical_turn_locked(
+            &owner_id, &agent_session_id, &idempotency_key,
+            message, false, None, None, None, false, None,
+        ).await?;
         Ok(nomifun_cron::CronPreparedTurnDelivery {
             delivery: cron_delivery_from_conversation(delivery),
             workspace,
@@ -4003,7 +4036,19 @@ impl nomifun_companion::CompanionArchiveSessionPort for NomiCoreSessionOwner {
         session_id: &str,
         since_ts: i64,
         limit: u32,
-    ) -> Result<Vec<nomifun_companion::archiver::WindowMessage>, AppError> {
+        idempotency_key: &str,
+    ) -> Result<nomifun_companion::archiver::ArchiveWindow, AppError> {
+        let id = AgentSessionId::from(session_id.to_owned());
+        let _operation_fence = self.session_operation_lock(session_id).write_owned().await;
+        let command = nomifun_agent_session::ClearSessionContext {
+            idempotency_key:idempotency_key.into(), reason:"companion_archive".into(),
+        };
+        let boundary = match self.canonical.store().preflight_context_clear(
+            &PrincipalRef {principal_kind:"user".into(),principal_id:owner_id.into()}, &id, &command,
+        ).await.map_err(agent_session_store_error)? {
+            nomifun_agent_session::ContextClearPreparation::Ready(boundary) => boundary,
+            nomifun_agent_session::ContextClearPreparation::AlreadyCleared(_) => return Err(AppError::Conflict("Archive window context was already reset".into())),
+        };
         let query = ListMessagesQuery {
             cursor: Some(String::new()),
             page_size: Some(limit.clamp(1, 400)),
@@ -4016,27 +4061,24 @@ impl nomifun_companion::CompanionArchiveSessionPort for NomiCoreSessionOwner {
             query,
         )
         .await?;
-        Ok(response
+        let messages = response
             .items
             .into_iter()
             .filter_map(|message| companion_archive_message(message, since_ts))
-            .collect())
+            .collect();
+        Ok(nomifun_companion::archiver::ArchiveWindow { messages, context_boundary:boundary })
     }
 
     async fn reset_context(
         &self,
         owner_id: &str,
         session_id: &str,
+        idempotency_key: &str,
+        expected: &nomifun_agent_session::ContextClearBoundary,
     ) -> Result<(), AppError> {
         let _operation_fence = self.session_operation_lock(session_id).write_owned().await;
-        self.get_session(owner_id, session_id).await?;
-        if let Some(engines) = self.native_engines.get().and_then(std::sync::Weak::upgrade) {
-            engines.cancel_and_join_knowledge_writebacks(&AgentSessionId::from(session_id.to_owned())).await?;
-        }
-        if let Some(runtime) = self.runtime_sessions.get_runtime(session_id) {
-            runtime.clear_context().await?;
-        }
-        Ok(())
+        self.clear_session_context_locked(owner_id, &AgentSessionId::from(session_id.to_owned()),
+            idempotency_key, "companion_archive", Some(expected)).await.map(|_| ())
     }
 }
 
@@ -8320,10 +8362,6 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
         .route(
             "/api/agent-sessions/{agent_session_id}/clear-context",
             post(clear_nomi_core_agent_session_context),
-        )
-        .route(
-            "/api/agent-sessions/{agent_session_id}/side-question",
-            post(ask_nomi_core_agent_session_side_question),
         )
         .route(
             "/api/agent-sessions/{agent_session_id}/workspace",
@@ -15402,95 +15440,26 @@ async fn warm_nomi_core_agent_session(
     Ok(Json(ApiResponse::success()))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClearAgentSessionContextRequest {
+    idempotency_key: String,
+}
+
 async fn clear_nomi_core_agent_session_context(
     State(state): State<NomiCoreAgentApiState>,
     Extension(owner): Extension<AuthenticatedOwner>,
     Path(agent_session_id): Path<String>,
+    Json(request): Json<ClearAgentSessionContextRequest>,
 ) -> Result<Json<ApiResponse<()>>, NomiCoreApiError> {
     let session_id = parse_agent_session_id(&agent_session_id)?;
-    let _operation_fence = state.session_owner.session_operation_lock(session_id.as_ref()).write_owned().await;
-    let observation = state
-        .session_owner
-        .canonical()
-        .get(&authenticated_principal(&owner), &session_id)
-        .await?;
-    if observation.head.status == "running" {
-        return Err(NomiCoreApiError::new(
-            StatusCode::CONFLICT,
-            "AGENT_SESSION_TURN_ACTIVE",
-            "wait for the active Turn before clearing model context",
-        ));
+    if request.idempotency_key.trim().is_empty() || request.idempotency_key.len() > 512
+        || request.idempotency_key.chars().any(char::is_control) {
+        return Err(AppError::BadRequest("context clear requires a bounded idempotency key".into()).into());
     }
-    if let Some(engines) = state.session_owner.native_engines.get().and_then(std::sync::Weak::upgrade) {
-        engines.cancel_and_join_knowledge_writebacks(&session_id).await?;
-    }
-    if let Some(runtime) = state
-        .session_owner
-        .runtime_sessions
-        .get_runtime(session_id.as_ref())
-    {
-        runtime.clear_context().await?;
-    }
-    let cause: String = sqlx::query_scalar(
-        "SELECT event_id FROM agent_events WHERE session_id = ? ORDER BY seq DESC LIMIT 1",
-    )
-    .bind(session_id.as_ref())
-    .fetch_one(&state.session_owner.pool)
-    .await
-    .map_err(|error| AppError::Internal(error.to_string()))?;
-    let identity = format!("context-clear:{}", Uuid::now_v7());
-    state
-        .session_owner
-        .canonical()
-        .store()
-        .append_event(&nomifun_agent_contracts::SessionEventAppend {
-            agent_session_id: session_id.clone(),
-            event_id: nomifun_agent_contracts::EventId::from(Uuid::now_v7().to_string()),
-            producer_id: nomifun_agent_contracts::EventProducerId::from("session_api"),
-            idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(identity),
-            semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
-                kind: nomifun_agent_contracts::SessionEventKind("context/cleared".to_owned()),
-                kind_version: 1,
-                correlation_id: nomifun_agent_contracts::CorrelationId::from(
-                    session_id.as_ref().to_owned(),
-                ),
-                causation_event_id: Some(nomifun_agent_contracts::EventId::from(cause)),
-                payload: nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(
-                    StrictJsonValue(json!({ "reason": "user_requested" })),
-                ),
-            },
-        })
-        .await
-        .map_err(agent_session_store_error)?;
+    state.session_owner.clear_session_context(owner.as_ref(), &session_id,
+        &format!("user-context-clear:{}", request.idempotency_key), "user_requested").await?;
     Ok(Json(ApiResponse::success()))
-}
-
-async fn ask_nomi_core_agent_session_side_question(
-    State(state): State<NomiCoreAgentApiState>,
-    Extension(owner): Extension<AuthenticatedOwner>,
-    Path(agent_session_id): Path<String>,
-    Json(request): Json<SideQuestionRequest>,
-) -> Result<Json<ApiResponse<SideQuestionResponse>>, NomiCoreApiError> {
-    let session_id = parse_agent_session_id(&agent_session_id)?;
-    state
-        .session_owner
-        .canonical()
-        .get(&authenticated_principal(&owner), &session_id)
-        .await?;
-    let runtime = state
-        .session_owner
-        .runtime_sessions
-        .get_runtime(session_id.as_ref())
-        .ok_or_else(|| {
-            NomiCoreApiError::new(
-                StatusCode::CONFLICT,
-                "AGENT_SESSION_RUNTIME_NOT_ACTIVE",
-                "side questions require an active Session Runtime",
-            )
-        })?;
-    Ok(Json(ApiResponse::ok(
-        runtime.handle_side_question(request).await?,
-    )))
 }
 
 async fn browse_nomi_core_agent_session_workspace(

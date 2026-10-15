@@ -603,6 +603,7 @@ const TerminalSessionContent: React.FC<{ sessionId: TerminalId }> = ({ sessionId
         {/* Enhanced composer */}
         <div className='px-12px pt-8px pb-12px'>
           <TerminalSendBox
+            commandTargetKey={`terminal:${session.terminal_id}`}
             terminalApi={xtermApi}
             disabled={isExited || terminalError !== null}
             onClearView={() => xtermApi.current?.clear()}

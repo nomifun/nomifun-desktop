@@ -85,6 +85,28 @@ An accepted input that fails or is cancelled before Runtime startup remains vali
 
 Creation prompts, Cron notices and Execution summaries enter context through formal message events. Text before an explicit Agent transition is data only; it does not carry old grants, handles or completion gates. Context-clear events and the fixed accepted-root cursor bound the window.
 
+User context clearing, companion archiving and per-run Cron resets use one Session-owner
+command. It verifies the exact idle context boundary, joins knowledge write-back work,
+settles and tears down the existing Runtime, then rechecks native leases, recovery,
+effects, execution ownership and the original boundary under the canonical write fence.
+The sole result is an idempotent `context/cleared` event; Session identity, immutable
+bindings, visible history and long-term memory remain intact. Archived windows carry
+their original typed boundary across summary generation, so intervening inputs invalidate
+the reset before teardown. Cron resets use the exact run identity and admission fence;
+replaying accepted input never clears or stops successor work. UI/API contract 31
+requires an explicit user-action key and retires unsupported Runtime command discovery
+and side-question interfaces.
+
+Home, active chats, product conversations and Canvas share command parsing, availability,
+dispatch and a viewport-aware overlay above the presentation-only composer. Terminal
+commands use explicit terminal actions, with clear-view distinct from Session context
+clearing. Local actions never become model input, creation requests, steering or queued
+Turns. Opening a command catalog cannot create or warm a Session, and read-only
+transcripts remain read-only. Skill selection retains the existing frozen Snapshot and
+typed input-hint path rather than a second Runtime command catalog.
+An unchanged failed command retains its action key for retries; success or an explicit
+draft edit starts a new action, without a separate persistent command ledger.
+
 Current-generation history, immutable Snapshots, model changes and explicit Agent transitions remain supported product semantics. They are verified against identity, sequence, binding and content integrity. Executable recovery requires the native checkpoint's exact build and binding. Closed read-only event history may cross an explicitly validated transition without gaining authority.
 
 ### Model tool rules and guidance

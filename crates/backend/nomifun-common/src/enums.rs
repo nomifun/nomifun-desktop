@@ -59,7 +59,6 @@ pub enum MessageType {
     AgentStatus,
     Permission,
     Thinking,
-    AvailableCommands,
     SkillSuggest,
     CronTrigger,
 }

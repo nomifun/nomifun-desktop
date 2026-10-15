@@ -81,8 +81,7 @@ async fn knowledge_writeback_start_requires_exact_owner_completed_turn_snapshot_
     let mut wrong=request(&f,"process-a");wrong.binding_version+=1;assert!(store.start_knowledge_writeback(wrong).await.is_err());
     let mut wrong=request(&f,"process-a");wrong.operation_id="missing-turn".into();assert!(store.start_knowledge_writeback(wrong).await.is_err());
     let current=store.current_cursor(&f.session.agent_session_id).await.unwrap();
-    let clear=append(&f.session.agent_session_id,"clear-before-writeback","session_api","clear-before-writeback","context/cleared",f.session.agent_session_id.as_ref(),Some(f.terminal.clone()),json!({}));
-    store.append_event(&clear).await.unwrap();assert!(store.start_knowledge_writeback(request(&f,"process-a")).await.is_err());
+    clear_context(&store,&f.session.agent_session_id,"clear-before-writeback").await;assert!(store.start_knowledge_writeback(request(&f,"process-a")).await.is_err());
     assert_eq!(store.current_cursor(&f.session.agent_session_id).await.unwrap().seq,current.seq+1);
     let f=completed(&store,"binding-changed").await;let mut replacement=f.session.agent_binding.clone();replacement.binding_version+=1;replacement.resolved_snapshot_ref.snapshot_id="snapshot-replacement".into();replacement.resolved_snapshot_ref.snapshot_digest=digest('c');
     store.replace_session_agent_binding(&owner(),&f.session.agent_session_id,agent_switch(f.session.agent_binding.clone(),replacement.clone(),"knowledge-fence")).await.unwrap();

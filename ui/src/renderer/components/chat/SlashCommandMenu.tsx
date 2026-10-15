@@ -12,6 +12,7 @@ export interface SlashCommandMenuItem {
   label: string;
   description?: string;
   badge?: string;
+  disabledReason?: string;
 }
 
 interface SlashCommandMenuProps {
@@ -83,6 +84,8 @@ const SlashCommandMenu: React.FC<SlashCommandMenuProps> = ({
               type='button'
               role='option'
               aria-selected={index === activeIndex}
+              aria-disabled={item.disabledReason !== undefined}
+              title={item.disabledReason}
               ref={(node) => {
                 itemRefs.current[index] = node;
               }}
@@ -111,7 +114,7 @@ const SlashCommandMenu: React.FC<SlashCommandMenuProps> = ({
                   >
                     {item.label}
                   </div>
-                  {item.description && <div className='text-12px text-t-secondary truncate'>{item.description}</div>}
+                  {(item.disabledReason || item.description) && <div className='text-12px text-t-secondary truncate'>{item.disabledReason || item.description}</div>}
                 </div>
                 {item.badge && (
                   <span

@@ -91,7 +91,7 @@ pub use factory::build_agent_model_config_resolver;
 pub use knowledge_completer::LiveKnowledgeCompleter;
 pub use knowledge_completer::resolve_default_model;
 pub use terminal_title_completer::LiveTerminalTitleCompleter;
-pub use nomifun_api_types::{NomiBuildExtra, SlashCommandItem};
+pub use nomifun_api_types::NomiBuildExtra;
 pub use protocol::events::{AgentStreamEvent, FinishEventData, TurnStopReason};
 pub use protocol::send_error::AgentSendError;
 pub use registry::{AgentRegistry, UnavailableReason};

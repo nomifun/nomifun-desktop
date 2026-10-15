@@ -875,8 +875,6 @@ const ProcessTraceItem: React.FC<{
           ]}
         />
       );
-    case 'available_commands':
-      return null;
     default:
       return <div>{t('messages.unknownMessageType', { type: getUnhandledMessageType(item) })}</div>;
   }

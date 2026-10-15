@@ -54,9 +54,6 @@ pub struct AgentSourceInfo {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BehaviorPolicy {
-    #[serde(default)]
-    pub supports_side_question: bool,
-
     /// The agent's CLI bakes the model identity into its session
     /// system prompt at launch time and does not refresh it when
     /// `session/set_model` is called. Callers should inject a
@@ -226,7 +223,6 @@ mod tests {
         assert_eq!(meta.agent_source, AgentSource::Custom);
         assert!(nomifun_common::AgentId::parse(meta.agent_id).is_ok());
         assert!(!meta.available);
-        assert!(!meta.behavior_policy.supports_side_question);
     }
 
     #[test]
@@ -257,12 +253,10 @@ mod behavior_policy_tests {
     #[test]
     fn deserializes_new_capability_flags() {
         let json = serde_json::json!({
-            "supports_side_question": true,
             "self_identity_sticky": true,
             "session_load_via_meta_field": true,
         });
         let policy: BehaviorPolicy = serde_json::from_value(json).unwrap();
-        assert!(policy.supports_side_question);
         assert!(policy.self_identity_sticky);
         assert!(policy.session_load_via_meta_field);
     }
@@ -270,7 +264,6 @@ mod behavior_policy_tests {
     #[test]
     fn defaults_to_false_when_flags_omitted() {
         let policy: BehaviorPolicy = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert!(!policy.supports_side_question);
         assert!(!policy.self_identity_sticky);
         assert!(!policy.session_load_via_meta_field);
     }
@@ -279,7 +272,7 @@ mod behavior_policy_tests {
     fn retired_supports_team_flag_is_rejected() {
         assert!(
             serde_json::from_str::<BehaviorPolicy>(
-                r#"{"supports_team":true,"supports_side_question":true}"#
+                r#"{"supports_team":true}"#
             )
             .is_err()
         );

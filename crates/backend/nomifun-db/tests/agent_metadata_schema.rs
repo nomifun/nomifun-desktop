@@ -21,7 +21,16 @@ async fn previous_database(path: &std::path::Path) -> sqlx::SqlitePool {
             .bind(migration.version).bind(migration.description.as_ref()).bind(migration.checksum.as_ref())
             .execute(&pool).await.unwrap();
     }
-    sqlx::query("UPDATE agent_metadata SET name='Saved name',enabled=0,behavior_policy='{\"supports_side_question\":true}',agent_capabilities='{\"stale\":true}',available_models='[\"retired\"]' WHERE agent_id=?")
+    use nomifun_agent_contracts::{
+        AGENT_STORE_DATA_GENERATION, AGENT_STORE_MIGRATION_HEAD, AGENT_STORE_PROJECTION_SCHEMA_VERSION,
+        agent_store_schema_manifest_payload, digest_payload, official_preset_seed_manifest_payload,
+    };
+    sqlx::query("INSERT INTO schema_metadata(singleton_key,data_generation,root_instance_id,migration_head,seed_manifest_digest,canonical_schema_manifest_digest,projection_schema_version) VALUES('canonical',?,'main-sqlite-agent-store',?,?,?,?)")
+        .bind(i64::from(AGENT_STORE_DATA_GENERATION)).bind(i64::from(AGENT_STORE_MIGRATION_HEAD))
+        .bind(digest_payload(&official_preset_seed_manifest_payload()).unwrap().as_ref())
+        .bind(digest_payload(&agent_store_schema_manifest_payload()).unwrap().as_ref())
+        .bind(i64::from(AGENT_STORE_PROJECTION_SCHEMA_VERSION)).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE agent_metadata SET name='Saved name',enabled=0,behavior_policy='{\"self_identity_sticky\":true}',agent_capabilities='{\"stale\":true}',available_models='[\"retired\"]' WHERE agent_id=?")
         .bind(NOMI).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO client_preferences(key,value,updated_at) VALUES ('cache-migration-probe','preserved',1)")
         .execute(&pool).await.unwrap();
@@ -46,7 +55,7 @@ async fn removes_discovery_cache_preserves_metadata_and_known_lineage_on_restart
         assert!(RETIRED_COLUMNS.iter().all(|name| !columns.iter().any(|column| column == name)));
         let metadata: (String, bool, String, String) = sqlx::query_as("SELECT name,enabled,behavior_policy,source_key FROM agent_metadata WHERE agent_id=?")
             .bind(NOMI).fetch_one(pool).await.unwrap();
-        assert_eq!(metadata, ("Saved name".into(), false, "{\"supports_side_question\":true}".into(), "agent_builtin_nomi".into()));
+        assert_eq!(metadata, ("Saved name".into(), false, "{\"self_identity_sticky\":true}".into(), "agent_builtin_nomi".into()));
         assert_eq!(sqlx::query_scalar::<_, String>("SELECT value FROM client_preferences WHERE key='cache-migration-probe'")
             .fetch_one(pool).await.unwrap(), "preserved");
         let after: Vec<(String, String)> = sqlx::query_as("SELECT name,sql FROM sqlite_schema WHERE type='table' AND name LIKE 'agent_%' AND name<>'agent_metadata' ORDER BY name")

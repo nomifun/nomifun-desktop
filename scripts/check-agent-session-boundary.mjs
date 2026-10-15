@@ -80,8 +80,27 @@ const baseline = 'crates/backend/nomifun-db/migrations/001_canonical_baseline.sq
 const pluginForwardMigration = 'crates/backend/nomifun-db/migrations/002_simplify_plugin_library.sql';
 const metadataForwardMigration = 'crates/backend/nomifun-db/migrations/003_remove_agent_handshake_cache.sql';
 const hostingForwardMigration = 'crates/backend/nomifun-db/migrations/004_retire_plugin_hosting.sql';
-if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration].includes(path))) {
+const policyForwardMigration = 'crates/backend/nomifun-db/migrations/005_retire_side_question_policy.sql';
+if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration, policyForwardMigration].includes(path))) {
   failures.push('Agent clean cut requires its canonical baseline and only explicitly supported forward product migrations');
+}
+if (migrations.includes(policyForwardMigration)) {
+  const source = readFileSync(resolve(ROOT, policyForwardMigration), 'utf8').replace(/--[^\r\n]*/g, '');
+  const statements = source.split(';').map((statement) => statement.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const integrity = 'retired_side_question_policy_integrity';
+  const update = "UPDATE agent_metadata SET behavior_policy = json_remove(behavior_policy, '$.supports_side_question') WHERE behavior_policy IS NOT NULL AND json_type(behavior_policy, '$.supports_side_question') IS NOT NULL";
+  const checks = [statements[1], statements[3]];
+  if (statements.length !== 5
+    || statements[0] !== `CREATE TEMP TABLE ${integrity} ( valid INTEGER NOT NULL CHECK (valid = 1) )`
+    || statements[2] !== update || statements[4] !== `DROP TABLE ${integrity}`
+    || checks.some((statement) => !statement?.startsWith(`INSERT INTO ${integrity} SELECT CASE WHEN `)
+      || !statement.endsWith('FROM agent_metadata WHERE behavior_policy IS NOT NULL')
+      || /\b(?:UPDATE|DELETE|ALTER|DROP|CREATE|REPLACE)\b/i.test(statement))
+    || !statements[1]?.includes("json_valid(behavior_policy) = 1")
+    || !statements[1]?.includes("json_type(behavior_policy) = 'object'")
+    || /\b(?:agent_(?!metadata\b)\w+|schema_metadata|_sqlx_migrations)\b/i.test(source)) {
+    failures.push(`${policyForwardMigration}: only the exact retired metadata key may be removed after fail-closed JSON checks; canonical facts, other settings and lineage receipts cannot change`);
+  }
 }
 if (migrations.includes(metadataForwardMigration)) {
   const source = readFileSync(resolve(ROOT, metadataForwardMigration), 'utf8');

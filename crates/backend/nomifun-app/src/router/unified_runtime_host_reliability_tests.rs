@@ -298,13 +298,7 @@ async fn voice_actual_lazy_recovery_defers_old_namespace_binding_and_cleared_con
     keys.push(recovery_input(&journal,&owner,&session,"old-binding",binding+1,0,&namespace,false).await);
     keys.push(recovery_input(&journal,&owner,&session,"old-context",binding,0,&namespace,false).await);
     fixture.owner.canonical().cancel_exact_turn(&PrincipalRef {principal_kind:"user".into(),principal_id:owner.clone()},&id,"recovery-fixture-close",&"cleanup-retry-turn".into()).await.unwrap();
-    // This fixture's original Runtime descriptor does not expose API clear.
-    // Use the original typed canonical event owner to test the floor fence;
-    // this is not evidence that the fixture supports Runtime/UI clear.
-    let facts=store.chat_causality_facts(&id,&"recovery-clear-reader".into()).await.unwrap();let identity=nomifun_common::generate_id();
-    store.append_event(&SessionEventAppend {agent_session_id:id.clone(),event_id:identity.clone().into(),producer_id:"session_api".into(),idempotency_key:identity.into(),
-        semantic_event:SemanticSessionEventDraft {kind:SessionEventKind("context/cleared".into()),kind_version:1,correlation_id:session.clone().into(),causation_event_id:facts.events.last().map(|event|event.event_id.clone()),
-            payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"reason":"isolated_fixture_floor_fence"})))}}).await.unwrap();
+    fixture.owner.clear_session_context(&owner, &id, "recovery-fixture-clear", "user_requested").await.unwrap();
     drop(journal);drop(shared);let shared=Arc::new(nomifun_voice::SharedVoiceJournal::new(data_dir));let journal=shared.get_or_open().await.unwrap();
     let port=super::super::voice_work_host::AppVoiceWorkHost::new(fixture.owner.clone(),shared,fixture.voice_control.clone(),Some(fixture.voice_execution.clone()));let before=store.head(&id).await.unwrap().last_seq;
     assert!(port.recover_pending_inputs("wrong-owner",&session).await.is_err());port.recover_pending_inputs(&owner,&session).await.unwrap();

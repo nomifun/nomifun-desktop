@@ -137,9 +137,7 @@ async fn idmm_question_cannot_cross_context_clear_or_agent_transition() {
         let original = notice(&question);
         store.append_idmm_notice(&owner(), &session.agent_session_id, "before-boundary", original.clone()).await.unwrap().unwrap();
         if clear_context {
-            let cause = store.read_events(&session.agent_session_id, None, 500).await.unwrap().events.last().unwrap().event_id.clone();
-            store.append_event(&append(&session.agent_session_id, "clear-idmm-context", "session-api", "clear-idmm-context",
-                "context/cleared", session.agent_session_id.as_ref(), Some(cause), json!({"reason":"user_requested"}))).await.unwrap();
+            super::clear_context(&store, &session.agent_session_id, "clear-idmm-context").await;
         } else {
             let expected = session.agent_binding.clone();
             let replacement = agent_replacement(&expected, "idmm-target");

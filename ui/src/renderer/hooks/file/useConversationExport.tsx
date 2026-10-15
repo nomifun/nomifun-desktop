@@ -71,7 +71,7 @@ export function useConversationExport(options: UseConversationExportOptions): Us
   const transcriptLabels = useMemo<ExportTranscriptLabels>(
     () => ({
       conversation: t('messages.export.conversationLabel'),
-      conversation_id: t('messages.export.conversation_idLabel'),
+      conversation_id: t('messages.export.conversationIdLabel'),
       exportedAt: t('messages.export.exportedAtLabel'),
       type: t('messages.export.typeLabel'),
       noMessages: t('messages.export.noMessages'),
@@ -194,6 +194,7 @@ export function useConversationExport(options: UseConversationExportOptions): Us
     try {
       setLoading(true);
       const transcript = await loadTranscript(revision);
+      if (flowRevisionRef.current !== revision) return;
       if (!transcript) {
         messageApi.error?.(t('messages.export.unavailable'));
         closeExportFlow();
@@ -222,6 +223,7 @@ export function useConversationExport(options: UseConversationExportOptions): Us
     try {
       setLoading(true);
       const transcript = await loadTranscript(revision);
+      if (flowRevisionRef.current !== revision) return;
       if (!transcript) {
         messageApi.error?.(t('messages.export.unavailable'));
         closeExportFlow();

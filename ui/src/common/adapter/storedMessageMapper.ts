@@ -31,7 +31,6 @@ const STORED_MESSAGE_TYPES = new Set<TMessage['type']>([
   'tool_group',
   'agent_status',
   'thinking',
-  'available_commands',
 ]);
 
 const STORED_MESSAGE_POSITIONS = new Set<NonNullable<TMessage['position']>>([

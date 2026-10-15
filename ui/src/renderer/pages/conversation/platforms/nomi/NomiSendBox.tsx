@@ -11,6 +11,7 @@ import { uuid, uuidv7 } from '@/common/utils';
 import CommandQueuePanel from '@/renderer/components/chat/CommandQueuePanel';
 import contentStyles from '../../components/ConversationContentColumn.module.css';
 import SendBox from '@/renderer/components/chat/SendBox';
+import { useSessionComposerCommands } from '@/renderer/components/chat/commands/useSessionComposerCommands';
 import FileAttachButton from '@/renderer/components/media/FileAttachButton';
 import ComposerAttachments from '@/renderer/components/chat/ComposerAttachments';
 import SessionCapabilityPicker, { useSessionCapabilityCatalog } from '@/renderer/components/chat/SessionCapabilityPicker';
@@ -908,8 +909,9 @@ const NomiSendBox: React.FC<{
     },
     [setUploadFile]
   );
-  const { openFileSelector, onSlashBuiltinCommand } = useOpenFileSelector({
+  const { openFileSelector } = useOpenFileSelector({
     onFilesSelected: appendSelectedFiles,
+    targetKey: conversation_id,
   });
 
   useAddEventListener('nomi.selected.file', setAtPath);
@@ -975,21 +977,14 @@ const NomiSendBox: React.FC<{
     console.warn('[NomiSendBox] stop confirmation became stale', result);
   };
 
-  // Clear conversation context (release model context); keeps message records.
-  const handleClearContext = async (): Promise<void> => {
-    setRequestFailure(null);
-    try {
-      await ipcBridge.conversation.clearContext.invoke({ conversation_id });
-      Message.success({
-        content: t('conversation.clearContext.success', { defaultValue: 'Context cleared' }),
-        duration: 2000,
-        closable: true,
-      });
-    } catch (error) {
-      console.warn('[NomiSendBox] clear context failed', error);
-      reportRequestFailure(error, 'CONVERSATION_CONTEXT_CLEAR_FAILED');
-    }
-  };
+  const commandActions = useSessionComposerCommands({
+    conversationId: conversation_id,
+    workspace: workspacePath,
+    openFiles: openFileSelector,
+    activity: !turnActivity.hasHydratedRunningState ? 'unknown' : isBusy || pauseNotice || executionBusy ? 'busy' : 'idle',
+    disabledReason: submissionDisabled || preparingSubmission || collaborationSubmitting || initialSubmissionPending
+      ? t('common.processing') : undefined,
+  });
 
   const visibleRequestFailure = requestFailure?.conversationId === conversation_id
     && !hasCanonicalRequestError(requestFailure, messageList) ? requestFailure : null;
@@ -1058,8 +1053,8 @@ const NomiSendBox: React.FC<{
         }}
         loading={isCreating ? creationSubmitting : isBusy}
         paused={Boolean(pauseNotice)}
-        disabled={submissionDisabled || preparingSubmission || collaborationSubmitting || initialSubmissionPending || Boolean(pauseNotice) || (isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing || !sessionCapabilities.state || sessionCapabilities.saving)}
-        submitDisabled={!isCreating && (sessionCapabilities.loading || composerCollaborationEnabled && !collaboration.ready)}
+        disabled={submissionDisabled || preparingSubmission || collaborationSubmitting || initialSubmissionPending}
+        submitDisabled={Boolean(pauseNotice) || (isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing || !sessionCapabilities.state || sessionCapabilities.saving || sessionCapabilities.loading || composerCollaborationEnabled && !collaboration.ready)}
         preserveDraftUntilAccepted
         skipChatWarmup={isCreating}
         placeholder={
@@ -1076,10 +1071,11 @@ const NomiSendBox: React.FC<{
             : t('conversation.chat.noModelSelected')
         }
         onStop={handleStop}
-        onClearContext={handleClearContext}
+        commands={commandActions.commands}
+        commandPanel={commandActions.panel}
+        commandTargetKey={conversation_id}
         className='z-10'
         onFilesAdded={handleFilesAdded}
-        hasPendingAttachments={uploadFile.length > 0 || atPath.length > 0}
         supportedExts={allSupportedExts}
         defaultMultiLine
         lockMultiLine
@@ -1137,7 +1133,6 @@ const NomiSendBox: React.FC<{
         onSteer={onSteerHandler}
         steerAvailable={!isCreating}
         onEditResubmit={isCreating ? undefined : handleEditResubmit}
-        onSlashBuiltinCommand={onSlashBuiltinCommand}
         allowSendWhileLoading={!isCreating}
       />
     </div>

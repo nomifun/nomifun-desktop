@@ -61,6 +61,10 @@ pub use native_checkpoint::{NativeCheckpoint, NativeCheckpointWrite, MAX_NATIVE_
 mod runtime_state;
 pub use runtime_state::RuntimeStateObservation;
 
+#[path = "context_clear.rs"]
+mod context_clear;
+pub use context_clear::{ClearSessionContext, ContextClearBoundary, ContextClearPreparation};
+
 #[path = "storage_relocation.rs"]
 mod storage_relocation;
 
@@ -522,6 +526,7 @@ impl AgentSessionStore {
     ) -> Result<SessionEventAppendResult, SessionStoreError> {
         let mut tx = self.begin_write_transaction().await?;
         if append.semantic_event.kind.0 == nomifun_agent_contracts::TURN_WORKSPACE_FILES_OBSERVED
+            || append.semantic_event.kind.0 == "context/cleared"
             || knowledge_writeback::is_event(&append.semantic_event.kind.0) {
             return Err(SessionStoreError::ExecutionFenced);
         }

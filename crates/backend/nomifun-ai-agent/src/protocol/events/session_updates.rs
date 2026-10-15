@@ -26,12 +26,6 @@ pub struct ThinkingEventData {
     pub status: Option<String>,
 }
 
-/// Data for the `AvailableCommands` event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AvailableCommandsEventData {
-    pub commands: Vec<serde_json::Value>,
-}
-
 /// Data for the `SkillSuggest` event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillSuggestEventData {

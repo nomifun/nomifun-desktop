@@ -240,6 +240,8 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
 
       {props.view === 'chat' && (
         <CreativeStudioAgentComposer
+          targetKey={`canvas-agent:${props.activeSessionId ?? 'draft'}:${props.conversationId ?? 'unbound'}`}
+          conversationId={props.conversationId}
           draft={props.draft}
           model={props.model}
           modelLocked={props.modelLocked === true}

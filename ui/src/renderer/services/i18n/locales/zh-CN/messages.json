@@ -1,4 +1,12 @@
 {
+  "commands": {
+    "failed": "命令执行失败",
+    "noArguments": "{{command}} 不需要参数，请单独输入该命令",
+    "sessionRequired": "发送首条消息后可用",
+    "replyAfterTurn": "当前回合结束后可复制回复",
+    "stateUnconfirmed": "会话状态尚未确认，请稍后重试",
+    "clearAfterTurn": "当前任务结束并释放会话后可清空上下文"
+  },
   "completionSummary": {
     "nativeTimeout": "本轮 {{commandCount}} 次命令达到了运行时限，进程已结束并清理。该结果计入 {{toolCount}} 次调用结果；可在执行步骤中查看输出和清理详情。",
     "nativeNonzero": "本轮 {{commandCount}} 次命令已结束并返回非零结果（退出码 {{codes}}）。这些结果计入了 {{toolCount}} 次未成功调用，请查看执行步骤中的命令输出。",
@@ -195,7 +203,6 @@
   "downloadFailed": "下载失败",
   "imageLoadFailed": "图片加载失败",
   "scrollToBottom": "滚动到底部",
-  "availableCommands": "{{count}} 个可用命令",
   "atFile.hint": "输入以搜索文件",
   "atFile.menuLabel": "文件提及",
   "atFile.loading": "加载中...",

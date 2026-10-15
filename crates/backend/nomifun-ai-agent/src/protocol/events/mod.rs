@@ -7,7 +7,7 @@ use ts_rs::TS;
 pub use nomifun_api_types::AgentStreamErrorData as ErrorEventData;
 
 pub use session_updates::{
-    AgentStatusEventData, AvailableCommandsEventData, CronTriggerEventData, SkillSuggestEventData,
+    AgentStatusEventData, CronTriggerEventData, SkillSuggestEventData,
     ThinkingEventData,
 };
 pub use tool_call::{
@@ -34,8 +34,6 @@ pub enum AgentStreamEvent {
     TaskPlanChanged,
     SkillSuggest(SkillSuggestEventData),
     CronTrigger(CronTriggerEventData),
-    SlashCommandsUpdated(serde_json::Value),
-    AvailableCommands(AvailableCommandsEventData),
     /// Emitted once at the end of a turn with aggregate metrics so the UI can
     /// show duration / token cost and telemetry can record per-turn stats.
     /// Purely additive: consumers that don't recognise it ignore it.
@@ -506,7 +504,6 @@ mod tests {
             (AgentStreamEvent::TurnCompleted(TurnCompletedEventData::default()), "turn_completed"),
             (AgentStreamEvent::Finish(FinishEventData::default()), "finish"),
             (AgentStreamEvent::Error(ErrorEventData::legacy("e", None)), "error"),
-            (AgentStreamEvent::SlashCommandsUpdated(serde_json::json!({})), "slash_commands_updated"),
             (AgentStreamEvent::System(serde_json::json!({})), "system"),
             (AgentStreamEvent::RequestTrace(serde_json::json!({})), "request_trace"),
             (

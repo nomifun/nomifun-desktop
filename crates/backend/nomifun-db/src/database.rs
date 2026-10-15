@@ -18,6 +18,8 @@ const MAX_CONNECTIONS: u32 = 5;
 /// SQLite busy timeout in milliseconds.
 const BUSY_TIMEOUT_MS: u64 = 5000;
 
+// The complete database chain includes product metadata data migrations; its
+// latest receipt is independent of the canonical Agent schema migration head.
 static DB_MIGRATOR: Migrator = sqlx::migrate!();
 const CANONICAL_BASELINE_MIGRATION_VERSION: i64 = 1;
 /// Wraps a SQLite connection pool with lifecycle management.

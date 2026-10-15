@@ -50,7 +50,7 @@ async fn forward_cutover_preserves_committed_wal_works_and_canonical_rows() {
     assert_eq!(retained,"{\"kept\":true}");
     let current: Vec<(i64,Vec<u8>)>=sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version").fetch_all(database.pool()).await.unwrap();
     assert_eq!(&current[..3],receipts.as_slice());
-    assert_eq!(current.len(),4);
+    assert_eq!(current.len(),sqlx::migrate!("./migrations").iter().count());
     let directory=fs::read_dir(temp.path().join("preserved-plugin-works")).unwrap().next().unwrap().unwrap().path();
     assert_eq!(fs::read_to_string(directory.join("plugin-data/work/source.js")).unwrap(),"ordinary source preserved");
     assert!(directory.join("registration.json").exists());

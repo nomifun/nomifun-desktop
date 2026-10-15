@@ -37,7 +37,6 @@ export type AgentEnvEntry = {
  *
  */
 export type BehaviorPolicy = {
-  supports_side_question?: boolean;
 };
 
 /**

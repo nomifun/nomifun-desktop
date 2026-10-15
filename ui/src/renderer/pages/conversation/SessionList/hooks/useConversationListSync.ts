@@ -26,7 +26,7 @@ import { createConversationListRefresher } from './conversationListRefresher';
  * Whitelist of message types that indicate content generation is in progress.
  * Only these types should trigger the sidebar loading spinner.
  * Using a whitelist (instead of a blacklist) prevents unknown/internal message
- * types (e.g. slash_commands_updated) from falsely
+ * types unrelated to Turn lifecycle from falsely
  * triggering the generating state.
  */
 const isPreparingAgentStatus = (data: unknown): boolean => {

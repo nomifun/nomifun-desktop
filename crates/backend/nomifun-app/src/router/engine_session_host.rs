@@ -181,8 +181,8 @@ impl EngineSessionHost {
         }
     }
 
-    /// Context clearing keeps the reusable resource owner open for later Turns.
-    /// Caller holds the Session operation fence against new admissions.
+    /// Join background writes before the Session owner tears down Runtime and
+    /// commits a context boundary. Caller fences new Session admissions.
     pub(super) async fn cancel_and_join_knowledge_writebacks(&self, session: &AgentSessionId)
         -> Result<(), AppError> {
         if let Some(resources) = self.existing_kernel_session(session)? {

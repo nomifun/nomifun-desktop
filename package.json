@@ -33,7 +33,7 @@
     "test:desktop": "bun scripts/test-rust.mjs desktop",
     "test:upgrade": "cargo test --locked -p nomifun-app --test startup_smoke --no-default-features -- --test-threads=1",
     "test:browser": "bun scripts/test-rust.mjs browser",
-    "test:ui": "bun test --cwd ui",
+    "test:ui": "bun test --cwd ui --loader .svg:file --loader .png:file",
     "test:nomi-core-live-provider": "bun scripts/validation/run-nomi-core-live-provider-smoke.mjs",
     "demo:idmm": "bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --idmm-smoke --report .tmp-idmm-demo-report.json",
     "test:agent-reliability-report": "node --test scripts/validation/agent-reliability-report.test.mjs",

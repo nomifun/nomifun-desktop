@@ -1,4 +1,12 @@
 {
+  "commands": {
+    "failed": "Command failed",
+    "noArguments": "{{command}} takes no arguments; enter the command on its own",
+    "sessionRequired": "Available after the first message",
+    "replyAfterTurn": "Copy the reply after the current turn finishes",
+    "stateUnconfirmed": "Session state is not confirmed; try again shortly",
+    "clearAfterTurn": "Clear context after the current task releases the session"
+  },
   "completionSummary": {
     "nativeTimeout": "{{commandCount}} command(s) reached their time limit; their processes ended and cleanup completed. These outcomes are included in {{toolCount}} call results. See output and cleanup details in the execution steps.",
     "nativeNonzero": "{{commandCount}} command(s) ended with nonzero results (exit codes: {{codes}}). These results are included in {{toolCount}} unsuccessful calls; see each command's output in the execution steps.",
@@ -195,7 +203,6 @@
   "downloadFailed": "Failed to download",
   "imageLoadFailed": "Failed to load image",
   "scrollToBottom": "Scroll to bottom",
-  "availableCommands": "{{count}} Available Commands",
   "atFile.hint": "Type to search for files",
   "atFile.menuLabel": "File mentions",
   "atFile.loading": "Loading...",

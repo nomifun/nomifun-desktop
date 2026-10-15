@@ -15,9 +15,7 @@ use crate::protocol::events::AgentStreamEvent;
 use crate::protocol::send_error::AgentSendError;
 use crate::types::SendMessageData;
 
-use nomifun_api_types::{
-    GetModelInfoResponse, SideQuestionRequest, SideQuestionResponse, SlashCommandItem,
-};
+use nomifun_api_types::GetModelInfoResponse;
 
 /// Where a trusted host resource notification was queued.
 ///
@@ -150,15 +148,6 @@ pub trait MockAgentRuntime: AgentRuntimeControl {
             "Model switching is not supported for this mock".into(),
         ))
     }
-    async fn get_slash_commands(&self) -> Result<Vec<SlashCommandItem>, AppError> {
-        Ok(Vec::new())
-    }
-    async fn handle_side_question(&self, _req: SideQuestionRequest) -> Result<SideQuestionResponse, AppError> {
-        Ok(SideQuestionResponse {
-            status: "unsupported".into(),
-            answer: None,
-        })
-    }
 }
 
 /// Host-owned handle shared by Session, Remote and Automation. Production has
@@ -285,16 +274,6 @@ impl AgentRuntimeHandle {
     //
     // These fan out to inherent methods on concrete managers.
 
-    /// Clear the conversation context ("release model context") in place,
-    /// keeping the agent/process alive. Nomi empties its engine history.
-    pub async fn clear_context(&self) -> Result<(), AppError> {
-        match self {
-            Self::Official(m) => m.clear_context().await,
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Mock(_) => Ok(()),
-        }
-    }
-
     /// Push a mid-turn steering interjection into the running turn. The Nomi
     /// native engine injects mid-turn. `Ok(true)` = queued into a live turn;
     /// `Ok(false)` = no turn running (caller should send normally).
@@ -409,30 +388,4 @@ impl AgentRuntimeHandle {
         }
     }
 
-    /// Slash commands available in the current session.
-    pub async fn get_slash_commands(&self) -> Result<Vec<SlashCommandItem>, AppError> {
-        match self {
-            Self::Official(m) => m.get_slash_commands().await,
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Mock(m) => m.get_slash_commands().await,
-        }
-    }
-
-    /// Dispatch a side-question to the agent.
-    ///
-    /// No backend implements side-questions yet, so every variant honestly
-    /// reports `unsupported` (the UI surfaces this as a warning toast). An
-    /// earlier engine returned a hardcoded fake-success answer here, presenting
-    /// a placeholder string to the user as a real reply; that path was removed
-    /// rather than shipped.
-    pub async fn handle_side_question(&self, req: SideQuestionRequest) -> Result<SideQuestionResponse, AppError> {
-        if req.question.trim().is_empty() {
-            return Err(AppError::BadRequest("question must not be empty".into()));
-        }
-        match self {
-            Self::Official(m) => m.handle_side_question(req).await,
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Mock(m) => m.handle_side_question(req).await,
-        }
-    }
 }

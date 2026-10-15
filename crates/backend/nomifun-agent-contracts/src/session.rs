@@ -52,6 +52,26 @@ impl From<&AgentBindingValue> for AgentHandoffBindingRefV1 {
     }
 }
 
+/// Exact existing binding and active-set authority at one canonical clear.
+/// Resource and model replacement advance the referenced binding version.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ContextClearAdmissionProofV1 {
+    pub binding_ref: AgentHandoffBindingRefV1,
+    pub active_set_generation: u64,
+}
+
+/// The original clear command remains replayable for reason-only facts from
+/// this generation. New writers always include admission; its absence cannot
+/// authorize a product input that has not yet been accepted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ContextClearedPayloadV1 {
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<ContextClearAdmissionProofV1>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentHandoffInputCitationV1 {

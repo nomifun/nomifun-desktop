@@ -15,7 +15,7 @@ import React, { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 interface FileAttachButtonProps {
-  openFileSelector: () => void;
+  openFileSelector: () => void | Promise<void>;
   onLocalFilesAdded?: (files: FileMetadata[]) => void;
 }
 
@@ -53,6 +53,10 @@ const FileAttachButton: React.FC<FileAttachButtonProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   const [open, setOpen] = useState(false);
+  const handleOpenFiles = useCallback(async () => {
+    try { await openFileSelector(); }
+    catch { Message.error(t('common.fileAttach.failed')); }
+  }, [openFileSelector, t]);
   const handleLocalFileChange = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       const fileList = e.target.files;
@@ -83,7 +87,7 @@ const FileAttachButton: React.FC<FileAttachButtonProps> = ({
         type='secondary'
         shape='circle'
         icon={plusIcon}
-        onClick={openFileSelector}
+        onClick={() => void handleOpenFiles()}
         data-testid='nomi-attach-folder-btn'
         data-composer-action='attach'
       />
@@ -118,7 +122,7 @@ const FileAttachButton: React.FC<FileAttachButtonProps> = ({
           icon={<Paperclip theme='outline' size={15} strokeWidth={2.5} />}
           label={t('common.fileAttach.addFiles', { defaultValue: 'Add files' })}
           onClick={() => {
-            openFileSelector();
+            void handleOpenFiles();
             setOpen(false);
           }}
         />

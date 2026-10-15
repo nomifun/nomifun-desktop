@@ -1,7 +1,7 @@
 //! Session-scoped conversation operations exposed over HTTP.
 //!
 //! These DTOs back the per-conversation routes that read or mutate one live
-//! agent session: its model info, workspace listing, and side-question channel.
+//! agent session: its model info and workspace listing.
 //! They are engine-neutral — the enclosing routes
 //! dispatch through `AgentRuntimeHandle`.
 
@@ -49,21 +49,6 @@ pub struct WorkspaceEntry {
     pub entry_type: String,
 }
 
-/// Request body for side question.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SideQuestionRequest {
-    pub question: String,
-}
-
-/// Response for side question.
-#[derive(Debug, Serialize)]
-pub struct SideQuestionResponse {
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub answer: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,14 +63,4 @@ mod tests {
         assert!(json.get("entry_type").is_none());
     }
 
-    #[test]
-    fn side_question_response_omits_absent_answer() {
-        let resp = SideQuestionResponse {
-            status: "unsupported".into(),
-            answer: None,
-        };
-        let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["status"], "unsupported");
-        assert!(json.get("answer").is_none());
-    }
 }

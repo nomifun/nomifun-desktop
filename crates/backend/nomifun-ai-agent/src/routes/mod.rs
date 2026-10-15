@@ -4,7 +4,7 @@
 //!   agent-catalog listing and the model-provider health check).
 //!
 //! Session-scoped endpoints (mode / model / config / usage /
-//! agent-capabilities / slash-commands / side-question / workspace) now live
+//! agent-capabilities / workspace) now live
 //! in the `nomifun-conversation` crate, where they dispatch through
 //! `AgentRuntimeHandle` via the canonical AgentSession host.
 

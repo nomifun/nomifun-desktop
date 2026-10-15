@@ -7,6 +7,7 @@ export function useConfig<K extends ConfigKey>(
 ): [ConfigKeyMap[K] | undefined, (value: ConfigKeyMap[K]) => Promise<void>] {
   const value = useSyncExternalStore(
     (onStoreChange) => configService.subscribe(key, onStoreChange),
+    () => configService.get(key),
     () => configService.get(key)
   );
 

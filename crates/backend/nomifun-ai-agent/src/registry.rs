@@ -46,7 +46,7 @@ impl AgentRegistry {
 
         let mut map = HashMap::with_capacity(rows.len());
         for row in rows {
-            let Some((meta, reason)) = decode_row(row) else {
+            let Some((meta, reason)) = decode_row(row)? else {
                 continue;
             };
             log_probe_result(&meta, &reason);
@@ -177,16 +177,27 @@ fn is_visible(meta: &AgentMetadata) -> bool {
 /// the probe reason alongside the row so the caller can log a single
 /// uniform `(meta, reason)` line per agent without re-running the
 /// probe.
-fn decode_row(row: AgentMetadataRow) -> Option<(AgentMetadata, Option<UnavailableReason>)> {
-    let agent_type = parse_agent_type(&row.agent_type)?;
-    let agent_source = parse_agent_source(&row.agent_source)?;
+fn decode_row(row: AgentMetadataRow) -> Result<Option<(AgentMetadata, Option<UnavailableReason>)>, AppError> {
+    let Some(agent_type) = parse_agent_type(&row.agent_type) else { return Ok(None); };
+    let Some(agent_source) = parse_agent_source(&row.agent_source) else { return Ok(None); };
     let agent_source_info = decode_json_field(row.agent_source_info.as_deref(), "agent_source_info")
         .unwrap_or_else(AgentSourceInfo::default);
     let args = decode_json_field::<Vec<String>>(row.args.as_deref(), "args").unwrap_or_default();
     let env = decode_json_field::<Vec<AgentEnvEntry>>(row.env.as_deref(), "env").unwrap_or_default();
     let native_skills_dirs = decode_json_field::<Vec<String>>(row.native_skills_dirs.as_deref(), "native_skills_dirs");
-    let behavior_policy =
-        decode_json_field(row.behavior_policy.as_deref(), "behavior_policy").unwrap_or_else(BehaviorPolicy::default);
+    let behavior_policy = match row.behavior_policy.as_deref() {
+        None => BehaviorPolicy::default(),
+        Some(raw) => {
+            let invalid = || AppError::Internal(format!(
+                "agent_metadata {} has invalid behavior_policy; saved configuration was preserved", row.agent_id,
+            ));
+            let value: Value = serde_json::from_str(raw).map_err(|_| invalid())?;
+            if !value.is_object() { return Err(invalid()); }
+            // Decode the original object so serde also rejects duplicate typed
+            // fields instead of accepting the last value of a JSON Value map.
+            serde_json::from_str(raw).map_err(|_| invalid())?
+        }
+    };
 
     let mut meta = AgentMetadata {
         agent_id: row.agent_id,
@@ -214,7 +225,7 @@ fn decode_row(row: AgentMetadataRow) -> Option<(AgentMetadata, Option<Unavailabl
     meta.resolved_command = path;
     meta.available = meta.resolved_command.is_some()
         || (meta.enabled && meta.command.is_none() && meta.agent_source == AgentSource::Internal);
-    Some((meta, reason))
+    Ok(Some((meta, reason)))
 }
 
 /// Wrapper around [`probe_resolved_command`] that returns both the
@@ -447,6 +458,25 @@ mod tests {
         let reg = registry().await;
         let all = reg.list_all_including_hidden().await;
         assert_eq!(all.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_saved_behavior_policy_fails_without_replacing_the_registry_snapshot() {
+        let db=init_database_memory().await.unwrap();
+        let repo=Arc::new(SqliteAgentMetadataRepository::new(db.pool().clone()));
+        let reg=AgentRegistry::new(repo.clone());
+        reg.hydrate().await.unwrap();
+        let id=reg.list_all_including_hidden().await[0].agent_id.clone();
+        repo.set_behavior_policy(&id,r#"{"self_identity_sticky":true,"session_load_via_meta_field":true}"#).await.unwrap();
+        reg.hydrate().await.unwrap();
+        for invalid in [r#"{"supports_side_question":false,"self_identity_sticky":true}"#, "{", "[]", r#"{"unknown_policy":true}"#, r#"{"self_identity_sticky":true,"self_identity_sticky":false}"#] {
+            repo.set_behavior_policy(&id,invalid).await.unwrap();
+            assert!(reg.hydrate().await.is_err());
+            let saved=reg.get(&id).await.unwrap();
+            assert!(saved.behavior_policy.self_identity_sticky);
+            assert!(saved.behavior_policy.session_load_via_meta_field);
+            assert_eq!(repo.get(&id).await.unwrap().unwrap().behavior_policy.as_deref(),Some(invalid));
+        }
     }
 
     #[tokio::test]
