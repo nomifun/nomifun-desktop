@@ -115,10 +115,17 @@
   "processing": "Processing...",
   "optional": "(optional)",
   "clear": "Clear",
+  "errorFeedback": {
+    "technicalDetails": "Technical information",
+    "copyDetails": "Copy technical information"
+  },
   "imagePreview": {
     "title": "View image",
     "saveAs": "Save image as",
     "close": "Close image preview",
+    "previous": "Previous image",
+    "next": "Next image",
+    "position": "{{current}} / {{total}}",
     "loading": "Loading image…",
     "loadFailed": "Image failed to load",
     "zoom": "Image zoom",

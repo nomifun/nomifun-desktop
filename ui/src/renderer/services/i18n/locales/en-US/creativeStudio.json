@@ -1532,20 +1532,28 @@
     },
     "runCenter": {
       "actionError": "Template action failed",
-      "activeCount": "{{count}} running",
+      "actionErrorSummary": "The operation could not complete. Check the details and try again.",
       "approveSuccess": "Prompts approved; generation started",
       "cancel": "Cancel",
       "cancelSuccess": "Template run canceled",
       "count": "{{count}} runs",
-      "description": "Tasks, review drafts, and generated results are saved by NomiFun and restored after a refresh or restart.",
+      "empty": "No template runs yet",
+      "emptyHint": "Run a template to see it here",
+      "errorDetails": "View error details",
+      "errorSummary": "The template task could not complete. Check the details and try again.",
+      "errorTitle": "Template task error",
+      "errorUnknown": "No additional error details are available.",
       "kind": {
-        "multi": "Multi-image series",
-        "single": "Single-image task"
+        "multi": "Image series",
+        "single": "Single image"
       },
+      "loading": "Loading template runs…",
+      "moreActions": "More task actions",
+      "newestFirst": "Newest first",
       "openResult": "Open result",
       "progress": "Tasks {{completed}}/{{total}}",
       "progressUnknown": "-",
-      "resultAlt": "{{name}} result {{index}}",
+      "results": "{{count}} images",
       "resume": "Resume",
       "retry": "Run again",
       "retrySuccess": "A new run was created",
@@ -1560,7 +1568,7 @@
         "titlePlaceholder": "Image title"
       },
       "reviewAction": "Review prompts",
-      "reviewCount": "{{count}} awaiting review",
+      "saved": "Tasks and results are saved automatically",
       "status": {
         "awaitingReview": "Awaiting review",
         "cancelled": "Canceled",
@@ -1572,6 +1580,7 @@
         "succeeded": "Completed"
       },
       "title": "Template runs",
+      "unsettledCount": "{{count}} unfinished",
       "viewResult": "View result {{index}}"
     },
     "runModal": {
@@ -1614,13 +1623,7 @@
       "uploadGatewayUnavailable": "Image uploads are not available"
     },
     "runtime": {
-      "assetResponse": "A prompt-planning asset could not be read: {{detail}}",
-      "generic": "The template run encountered an error: {{detail}}",
-      "invalidPlan": "The template could not be prepared: {{detail}}",
-      "loadFailed": "Unable to load template runs: {{detail}}",
-      "plannerOutput": "Prompt planning returned an invalid result: {{detail}}",
-      "taskCancelled": "The image-generation task was canceled.",
-      "taskFailed": "Image generation failed: {{detail}}"
+      "loadFailed": "Unable to load template runs: {{detail}}"
     },
     "validation": {
       "brokenReference": "The template contains a broken reference. Reopen or edit it.",

@@ -1,0 +1,279 @@
+.entry {
+  display: inline-flex;
+  flex: none;
+  margin-left: 3px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border-base);
+}
+
+.trigger,
+.iconButton {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  padding: 0;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.trigger {
+  position: relative;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border-base);
+  border-radius: 50%;
+  background: var(--bg-base);
+}
+
+.trigger:hover,
+.trigger[aria-expanded='true'] {
+  border-color: color-mix(in srgb, var(--brand) 24%, var(--border-base));
+  background: color-mix(in srgb, var(--brand) 8%, var(--bg-base));
+  color: var(--brand);
+}
+
+.badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: inline-flex;
+  min-width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  padding: 0 3px;
+  border: 2px solid var(--bg-base);
+  border-radius: 999px;
+  background: var(--brand);
+  color: var(--on-primary, #fff);
+  font-size: 10px;
+  line-height: 12px;
+}
+
+.popover :global(.arco-popover-content) {
+  padding: 0;
+  border-color: var(--border-base);
+  border-radius: 14px;
+  background: var(--bg-base);
+}
+
+.popover :global(.arco-popover-arrow) {
+  border-color: var(--border-base);
+  background: var(--bg-base);
+}
+
+.panel {
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.header {
+  display: flex;
+  min-height: 50px;
+  align-items: center;
+  gap: 8px;
+  margin: 0 14px;
+  border-bottom: 1px solid var(--border-base);
+}
+
+.header > :first-child { color: var(--brand); }
+.header h2 { margin: 0; font-size: 14px; font-weight: 600; }
+.count { color: var(--color-text-3); font-size: 11px; }
+.header .iconButton { margin-left: auto; }
+
+.iconButton {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-3);
+}
+
+.iconButton:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+.list {
+  max-height: 364px;
+  min-height: 120px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  padding: 0 6px;
+}
+
+.row {
+  min-width: 0;
+  padding: 12px 8px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.row:last-child { border-bottom: 0; }
+.row:hover { background: var(--bg-hover); }
+.row[data-clickable='true'] { cursor: pointer; }
+
+.identity,
+.meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button.name { cursor: pointer; }
+button.name:hover { color: var(--brand); }
+
+.status {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  padding: 2px 7px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--bg-2);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.status[data-status='requested'],
+.status[data-status='queued'],
+.status[data-status='running'] {
+  background: color-mix(in srgb, var(--brand) 10%, var(--bg-base));
+  color: var(--brand);
+}
+
+.status[data-status='awaiting-review'],
+.status[data-status='paused'] {
+  background: color-mix(in srgb, var(--warning) 10%, var(--bg-base));
+  color: var(--warning);
+}
+
+.status[data-status='succeeded'] {
+  background: color-mix(in srgb, var(--success) 10%, var(--bg-base));
+  color: var(--success);
+}
+
+.status[data-status='failed'] {
+  background: color-mix(in srgb, var(--danger) 9%, var(--bg-base));
+  color: var(--danger);
+}
+
+button.status { cursor: pointer; }
+button.status:hover { filter: brightness(.95); }
+
+.meta {
+  flex-wrap: wrap;
+  margin-top: 6px;
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+
+.meta time { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.kind { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+.actions { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+
+.actions button,
+.results {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.actions .reviewAction,
+.actions button:hover:not(:disabled),
+.results:hover { color: var(--brand); }
+.actions button:disabled,
+.iconButton:disabled { cursor: default; opacity: .5; }
+.results { color: var(--color-text-3); }
+
+.progress {
+  display: block;
+  width: 100%;
+  height: 3px;
+  appearance: none;
+  overflow: hidden;
+  margin-top: 8px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--bg-3);
+  accent-color: var(--brand);
+}
+
+.progress::-webkit-progress-bar { background: var(--bg-3); }
+.progress::-webkit-progress-value { background: var(--brand); }
+.progress::-moz-progress-bar { background: var(--brand); }
+
+.footer {
+  display: flex;
+  box-sizing: border-box;
+  min-height: 35px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border-base);
+  color: var(--color-text-3);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.empty {
+  display: flex;
+  min-height: 180px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  color: var(--color-text-3);
+  text-align: center;
+}
+
+.empty strong { color: var(--text-primary); font-weight: 500; }
+.loadError { display: flex; align-items: flex-start; gap: 8px; padding: 14px 8px; color: var(--danger); }
+.loadError > :first-child { flex: none; }
+
+.trigger:focus-visible,
+.iconButton:focus-visible,
+.name:focus-visible,
+.status:focus-visible,
+.actions button:focus-visible,
+.results:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+.spinning { animation: template-task-spin 1s linear infinite; }
+@keyframes template-task-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinning { animation: none; } }

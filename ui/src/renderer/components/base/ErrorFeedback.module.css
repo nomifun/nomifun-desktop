@@ -1,3 +1,4 @@
+/* Shared error feedback and expandable diagnostic details. */
 .notice {
   min-width: 0;
   border: 1px solid var(--color-border-3);

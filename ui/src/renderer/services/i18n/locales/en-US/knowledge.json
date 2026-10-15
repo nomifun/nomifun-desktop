@@ -526,8 +526,6 @@
     "conflict": "The content has changed. Refresh and try again.",
     "invalidInput": "The operation could not be completed. Check the entered information or selected files and try again.",
     "rateLimited": "Too many requests. Please try again later.",
-    "technicalDetails": "Technical information",
-    "copyDetails": "Copy technical information",
     "chooseLocation": "Choose another save location"
   }
 }

@@ -342,6 +342,7 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
             <Button type='primary' size='small' icon={<Plus theme='outline' size={14} fill='currentColor' />} disabled={disabled} onClick={() => beginCreate('single-image')}>
               {t('creativeStudio.templates.workspace.newSingle', { defaultValue: 'New template' })}
             </Button>
+            {runCenter ? <TemplateRunCenter port={runCenter} /> : null}
           </div>
         </header>
         <TemplateWorkspaceToolbar
@@ -452,8 +453,6 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
             </div>
           </div>
         )}
-
-        {runCenter ? <TemplateRunCenter port={runCenter} /> : null}
       </div>
 
       {agentDraftPort && agentModelCatalog ? (

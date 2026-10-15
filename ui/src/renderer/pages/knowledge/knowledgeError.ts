@@ -9,8 +9,8 @@ import {
   isBackendHttpError,
   isBackendRequestError,
   isHandledAuthExpiredHttpError,
-  redactSensitiveText,
 } from '@/common/adapter/httpBridge';
+import { getErrorTechnicalDetails } from '@/renderer/utils/ui/errorFeedback';
 
 export type KnowledgeErrorContext = 'operation' | 'load' | 'export';
 
@@ -33,19 +33,6 @@ function isPresentation(error: unknown): error is KnowledgeErrorPresentation {
     && typeof value.technicalDetails === 'string'
     && typeof value.handled === 'boolean'
     && ['operation', 'load', 'export'].includes(value.context ?? '');
-}
-
-function technicalDetails(error: unknown): string {
-  if (isBackendHttpError(error)) {
-    // httpBridge has already redacted credentials in its structured body and
-    // message. Preserve that diagnostic instead of showing it as user copy.
-    return redactSensitiveText(`${error.name}: ${error.message}`);
-  }
-  if (error instanceof Error) return redactSensitiveText(`${error.name}: ${error.message}`);
-  if (typeof error === 'string') return redactSensitiveText(error);
-  // Arbitrary thrown objects may contain credentials. Do not dump them into
-  // UI or clipboard outside the bridge's redacted response contract.
-  return 'Unknown error';
 }
 
 /** A small presentation boundary shared by knowledge pages and their dialogs. */
@@ -131,7 +118,7 @@ export function normalizeKnowledgeError(
     context,
     title,
     message,
-    technicalDetails: technicalDetails(error),
+    technicalDetails: getErrorTechnicalDetails(error),
     handled: isHandledAuthExpiredHttpError(error),
   };
 }

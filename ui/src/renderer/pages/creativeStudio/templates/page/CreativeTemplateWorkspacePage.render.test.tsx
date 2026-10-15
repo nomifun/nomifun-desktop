@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 
-import { createTemplateFixture } from '../domain/testFixtures';
+import { createTemplateFixture, createTemplateRunFixture } from '../domain/testFixtures';
 import CreativeTemplateWorkspacePage from './CreativeTemplateWorkspacePage';
 
 const css = readFileSync(
@@ -94,5 +94,37 @@ describe('Creative Template workspace page', () => {
       expect(dialogCss.includes(selector)).toBe(true);
     }
     expect(dialogCss.includes('var(--nomi-modal-max-height)')).toBe(true);
+  });
+
+  test.each([false, true])('keeps the task entry after template creation in the header when history exists: %s', (hasHistory) => {
+    const run = createTemplateRunFixture();
+    run.templateSnapshot.metadata.name = 'Historical template run';
+    const html = renderToStaticMarkup(
+      <I18nextProvider i18n={testI18n}>
+        <CreativeTemplateWorkspacePage
+          autoLoad={false}
+          initialTemplates={[createTemplateFixture()]}
+          runCenter={{
+            snapshot: { loading: false, loadError: null, runs: hasHistory ? [run] : [], activities: {} },
+            assetUrl: () => '',
+            resume: async () => undefined,
+            cancel: async () => undefined,
+            review: async () => undefined,
+            retry: async () => undefined,
+          }}
+        />
+      </I18nextProvider>
+    );
+    const container = document.createElement('div');
+    container.innerHTML = html;
+    const createButton = within(container).getByRole('button', { name: 'New template' });
+    const actions = createButton.parentElement!;
+    const taskEntry = container.querySelector('[data-template-run-center]');
+
+    expect(taskEntry).not.toBeNull();
+    expect(actions.lastElementChild).toBe(taskEntry);
+    expect(createButton.nextElementSibling).toBe(taskEntry);
+    expect(container.querySelectorAll('[data-template-run-center]')).toHaveLength(1);
+    expect(container.textContent).not.toContain('Historical template run');
   });
 });

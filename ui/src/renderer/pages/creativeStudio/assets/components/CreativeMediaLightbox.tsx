@@ -9,7 +9,7 @@ import { Message, Modal, Tooltip } from '@arco-design/web-react';
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import ImageLightbox from '@/renderer/components/media/ImageLightbox';
+import ImageLightbox, { type ImageLightboxNavigation } from '@/renderer/components/media/ImageLightbox';
 import imageLightboxStyles from '@/renderer/components/media/ImageLightbox.module.css';
 import { saveUrlAs } from '@/renderer/utils/file/saveAs';
 import CreativeVideoPlayer from './CreativeVideoPlayer';
@@ -23,6 +23,9 @@ interface CreativeMediaLightboxProps {
   fileName?: string;
   mimeType?: string | null;
   onSaveAs?: () => Promise<unknown>;
+  navigation?: ImageLightboxNavigation;
+  loading?: boolean;
+  error?: string | null;
   onClose(): void;
   zIndex?: number;
 }
@@ -36,6 +39,9 @@ const CreativeMediaLightbox: React.FC<CreativeMediaLightboxProps> = ({
   fileName,
   mimeType,
   onSaveAs,
+  navigation,
+  loading,
+  error,
   onClose,
   zIndex,
 }) => {
@@ -49,7 +55,7 @@ const CreativeMediaLightbox: React.FC<CreativeMediaLightboxProps> = ({
     dialogTitle: t('common.saveAs', { defaultValue: '另存为' }),
   }));
   if (kind === 'image') {
-    return <ImageLightbox src={src} title={title} onClose={onClose} onSaveAs={saveMedia} zIndex={zIndex} />;
+    return <ImageLightbox src={src} title={title} loading={loading} error={error} navigation={navigation} onClose={onClose} onSaveAs={saveMedia} zIndex={zIndex} />;
   }
 
   const saveAsLabel = t('common.saveAs', { defaultValue: '另存为' });

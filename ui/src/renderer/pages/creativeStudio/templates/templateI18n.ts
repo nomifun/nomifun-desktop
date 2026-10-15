@@ -5,7 +5,6 @@
  */
 
 import type { CreativeTemplateValidationError } from './domain';
-import type { CreativeTemplateRunRuntimeErrorCode } from './runtime';
 
 export interface CreativeTemplateTranslationCopy {
   planningInstruction: string;
@@ -256,59 +255,6 @@ export function formatTemplateValidationError(
       path: error.path,
       detail: validationDetail(error, t),
     }
-  );
-}
-
-export function formatTemplateRuntimeError(
-  detail: string | null | undefined,
-  t: TemplateTranslate,
-  code?: CreativeTemplateRunRuntimeErrorCode | string
-): string {
-  const message = detail?.trim() || '';
-  if (code === 'task-cancelled') {
-    return translate(
-      t,
-      'creativeStudio.templates.runtime.taskCancelled',
-      'The image-generation task was cancelled.'
-    );
-  }
-  if (code === 'task-failed') {
-    return translate(
-      t,
-      'creativeStudio.templates.runtime.taskFailed',
-      'Image generation failed: {{detail}}',
-      { detail: message }
-    );
-  }
-  if (code === 'planner-output') {
-    return translate(
-      t,
-      'creativeStudio.templates.runtime.plannerOutput',
-      'Prompt planning returned an invalid result: {{detail}}',
-      { detail: message }
-    );
-  }
-  if (code === 'asset-response') {
-    return translate(
-      t,
-      'creativeStudio.templates.runtime.assetResponse',
-      'The planner asset could not be read: {{detail}}',
-      { detail: message }
-    );
-  }
-  if (code === 'invalid-plan') {
-    return translate(
-      t,
-      'creativeStudio.templates.runtime.invalidPlan',
-      'The template could not be prepared: {{detail}}',
-      { detail: message }
-    );
-  }
-  return translate(
-    t,
-    'creativeStudio.templates.runtime.generic',
-    'The template run encountered an error: {{detail}}',
-    { detail: message }
   );
 }
 

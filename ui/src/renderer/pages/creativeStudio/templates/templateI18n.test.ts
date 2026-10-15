@@ -9,7 +9,6 @@ import { describe, expect, test } from 'bun:test';
 import { validateTemplateDefinition } from './domain';
 import {
   createTemplateTranslationCopy,
-  formatTemplateRuntimeError,
   formatTemplateValidationError,
   templateFallbackError,
 } from './templateI18n';
@@ -33,8 +32,6 @@ const translate = (
     'creativeStudio.templates.validation.failed':
       'Validation failed at {{path}}: {{detail}}',
     'creativeStudio.templates.validation.invalidValue': 'Check the configuration.',
-    'creativeStudio.templates.runtime.taskFailed':
-      'Image task failed: {{detail}}',
     'creativeStudio.templates.errors.generic':
       'The template operation failed. Try again.',
   };
@@ -66,7 +63,7 @@ describe('template translation boundary', () => {
     );
   });
 
-  test('keeps validation and runtime details behind semantic translation keys', () => {
+  test('keeps validation details and operation failures behind semantic translation keys', () => {
     expect(
       formatTemplateValidationError(
         {
@@ -77,9 +74,6 @@ describe('template translation boundary', () => {
         translate
       )
     ).toBe('Validation failed at $.metadata: Check the configuration.');
-    expect(
-      formatTemplateRuntimeError('provider rejected task', translate, 'task-failed')
-    ).toBe('Image task failed: provider rejected task');
     expect(
       templateFallbackError(
         new Error('fixed English protocol detail'),

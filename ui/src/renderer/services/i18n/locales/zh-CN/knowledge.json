@@ -526,8 +526,6 @@
     "conflict": "内容已发生变化，请刷新后再试。",
     "invalidInput": "操作未完成，请检查填写的内容或所选文件后再试。",
     "rateLimited": "操作过于频繁，请稍后再试。",
-    "technicalDetails": "技术信息",
-    "copyDetails": "复制技术信息",
     "chooseLocation": "重新选择保存位置"
   }
 }

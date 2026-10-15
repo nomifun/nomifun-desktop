@@ -1532,20 +1532,28 @@
     },
     "runCenter": {
       "actionError": "模板操作失败",
-      "activeCount": "{{count}} 运行中",
+      "actionErrorSummary": "操作未能完成，请查看技术信息后重试。",
       "approveSuccess": "提示词已批准，开始生成",
       "cancel": "取消",
       "cancelSuccess": "模板任务已取消",
       "count": "{{count}} 个",
-      "description": "任务、审核草稿和生成结果均由 NomiFun 持久化，刷新或重启后会继续恢复。",
+      "empty": "暂无模板任务",
+      "emptyHint": "运行模板后，任务会显示在这里",
+      "errorDetails": "查看失败原因",
+      "errorSummary": "模板任务未能完成，请查看技术信息后重试。",
+      "errorTitle": "模板任务异常",
+      "errorUnknown": "暂未提供更多错误信息。",
       "kind": {
-        "multi": "多图系列",
-        "single": "单图任务"
+        "multi": "多图",
+        "single": "单图"
       },
+      "loading": "正在加载模板任务…",
+      "moreActions": "更多任务操作",
+      "newestFirst": "按提交时间倒序",
       "openResult": "打开结果",
       "progress": "任务 {{completed}}/{{total}}",
       "progressUnknown": "-",
-      "resultAlt": "{{name}} 结果 {{index}}",
+      "results": "{{count}} 张",
       "resume": "继续",
       "retry": "重新运行",
       "retrySuccess": "已创建新的运行",
@@ -1560,7 +1568,7 @@
         "titlePlaceholder": "画面标题"
       },
       "reviewAction": "审核提示词",
-      "reviewCount": "{{count}} 待审核",
+      "saved": "任务与结果自动保存",
       "status": {
         "awaitingReview": "待审核",
         "cancelled": "已取消",
@@ -1572,6 +1580,7 @@
         "succeeded": "已完成"
       },
       "title": "模板任务",
+      "unsettledCount": "{{count}} 个未结束任务",
       "viewResult": "查看结果 {{index}}"
     },
     "runModal": {
@@ -1614,13 +1623,7 @@
       "uploadGatewayUnavailable": "图片上传网关尚未连接"
     },
     "runtime": {
-      "assetResponse": "提示词规划素材读取失败：{{detail}}",
-      "generic": "模板运行遇到错误：{{detail}}",
-      "invalidPlan": "模板任务无法准备：{{detail}}",
-      "loadFailed": "无法加载模板运行记录：{{detail}}",
-      "plannerOutput": "提示词规划器返回了无效结果：{{detail}}",
-      "taskCancelled": "图片生成任务已取消。",
-      "taskFailed": "图片生成失败：{{detail}}"
+      "loadFailed": "无法加载模板运行记录：{{detail}}"
     },
     "validation": {
       "brokenReference": "此模板包含失效引用，请重新打开或编辑。",
