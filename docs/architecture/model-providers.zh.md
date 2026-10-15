@@ -23,15 +23,19 @@
 
 `provider_params` 使用协议自己的严格编码契约，不能包含凭据或本地 transport 字段；无法无损编码的值在保存时拒绝。响应只暴露 `has_credentials`，不回显秘密。调用图变化原子递增 `config_revision`；解析、异步任务和健康结果使用一致修订，旧探测结果不能覆盖新配置。
 
-OpenAI 官方新增 Chat 配置推荐 `openai.responses`；自定义供应商也可显式选择该协议，
-普通兼容服务的缺省仍为 `openai.chat_text`。已保存协议不自动重写。Responses 的输入、
+Chat 推荐由 [官方文档 profile](../../crates/backend/nomifun-model-invoke/src/model_profiles.rs)
+统一生成，当前逐家核验日期为 2026-10-15。官方确认并推荐 Responses 的服务优先
+`openai.responses`；仍主推或只确认支持 Chat Completions 的服务保持 `openai.chat_text`。
+同品牌的按量、套餐、地区和具体型号分别匹配，不根据名称扩大支持范围。Custom/New API
+探测优先 Responses；NomiFun 网关目录的已声明协议仍为确切来源。已保存协议不自动重写。Responses 的输入、
 函数调用和流事件使用自己的 typed serializer；工具 schema 显式 `strict: false`，保留
 平台可选参数的语义。多段推理摘要按 item 与 summary/content index 独立校验。
 
 `max_tokens_field` 只指定 OpenAI 两种 Chat 协议的输出字段别名，数值仍由 typed 请求与
 capability `output_limit` 的较小值决定；别名不能覆盖消息、工具或协议状态。
 Chat Completions 的 `stream_options: null` 省略可选用量字段，对象中的 `include_usage`
-可显式覆盖缺省值；Responses 的 `include` 扩展与必需的加密推理续传字段合并。
+可显式覆盖缺省值；Responses 的 `include` 数组合并加密推理续传字段，`include: null`
+则省略不支持该字段的兼容服务选项。没有加密续传信息时不补造加密内容。
 协议拥有的模型、输入、工具、流模式和云端状态字段不能由参数 JSON 注入。
 推理强度只使用标准化的 `reasoning_effort` 配置；Responses 的原生 `reasoning.effort`
 在保存时提示改用该字段，`summary`、`mode` 和 `context` 等其他原生设置保留。
@@ -39,6 +43,38 @@ Chat Completions 不发送本地 round、工具 metadata 或 `is_error` 字段�
 文本表达，图片和音频在整批工具结果之后使用 user 附件消息传递，工具结果本身保持文本格式。
 
 “OpenAI 兼容”不证明所有模态兼容。Ark 与火山语音、DashScope 原生协议、MiniMax 的地区连接等差异由各自 adapter 和 manifest 表达，不复制成另一份手写 endpoint 矩阵。新增或变更供应商时更新 registry、serializer 与定向合同测试，并针对实际账号验证；本地替身测试不代表云端权限或模型体验通过。
+
+## 文档推荐与模型目录
+
+现役建议数据分为 [国际原生平台](../../crates/backend/nomifun-model-invoke/src/model_profiles/global.json)、
+[国内模型厂商](../../crates/backend/nomifun-model-invoke/src/model_profiles/china-foundation.json)、
+[云平台与套餐](../../crates/backend/nomifun-model-invoke/src/model_profiles/cloud-platforms.json) 和
+[聚合网关及其他服务](../../crates/backend/nomifun-model-invoke/src/model_profiles/gateways.json)。
+每项记录官方来源、核验日期、协议依据及未知信息；这些是配置建议，不是运行时白名单。
+
+`model_defaults` 只返回精确型号的已核实上下文、输出推荐、思考档位及协议参数。
+原生目录已声明的数值优先；文档只补缺失值，输出推荐可采用厂商明确的同步/默认上限，
+不把批处理、后台长输出或占满共享上下文的理论最大值作为普通同步请求配置。
+Gemini 4 的共享窗口与旧代独立输入窗口分别记录；用户明确清除、修改及已保存的值不被建议覆盖。
+未知 ID 仍可手工配置；未确认的输出数值、能力和档位保持未知，不套用同家族或上游原厂限制。
+
+协议、型号和地址必须一起推荐。例如智谱部分型号的 Responses 使用 `/api/v1`，
+阿里 Coding Plan 仍用 Chat Completions；Bedrock 新 Mantle 接口不冒充已实现的旧 InvokeModel 路由。
+同样，聚合网关的实际目录、权限和部署限制不能从原厂同名模型推断。
+
+## 设置期实际协议验证
+
+显式检测动作通过 `/api/providers/detect-chat-protocol` 或已保存供应商的同名子路径
+读取当前模型与完整 capability 草稿，复用生产 OpenAI/Responses serializer 和流解码器。
+先验证当前协议，只有接口或协议解析明确不兼容时尝试另一项；可达状态、空 JSON 探测、
+认证、额度或瞬态故障不能产生已验证选择。返回的 capability 正是实际测试过的连接地址、
+端点和参数，保持原模型限额，另声明检测请求的有界输出预算。
+
+该动作不创建 Session、不写模型目录，也不授予运行时协议故障转移。已有供应商使用服务端
+加密凭据和修订围栏；新供应商使用本次显式提供的连接。界面保存结果前复核草稿快照，
+检测期间阻止重复提交，过期结果不覆盖模型、凭据或手工调整。检测明确提示用量并由用户点击，
+普通键入及基础可达性探测不自动发起付费模型请求。
+跨协议候选必须保留输出和思考语义；无法安全转移原生参数时停止选择，保留原草稿。
 
 ## 实现与验证
 

@@ -71,23 +71,23 @@ const ProviderAutoConfigurationNotice: React.FC<{
       <span className='min-w-0 flex-1 leading-16px'>
         {loading
           ? t('settings.providerAutoConfiguration.detecting', {
-              defaultValue: '正在探测协议、鉴权方式和可用 API 地址…',
+              defaultValue: '正在检查接口地址及鉴权格式，不会生成模型回答…',
             })
           : confidence === 'verified'
             ? t('settings.providerAutoConfiguration.verified', {
                 protocols: protocols.join(', '),
-                defaultValue: '已验证并采用 {{protocols}}；仍可在高级配置中修改。',
+                defaultValue: '已探测到接口 {{protocols}}；尚未验证当前模型，请点击「检测并选择可用协议」确认。',
               })
             : confidence === 'endpoint_confirmed'
               ? t('settings.providerAutoConfiguration.endpointConfirmed', {
                   protocols: protocols.join(', '),
                   defaultValue:
-                    '已确认接口并采用 {{protocols}}；当前密钥未通过验证，可稍后替换。',
+                    '已确认接口 {{protocols}}；当前密钥未通过验证，尚未验证当前模型。',
                 })
               : t('settings.providerAutoConfiguration.fallback', {
                   protocols: protocols.join(', '),
                   defaultValue:
-                    '暂未完成在线验证，已安装通用方案 {{protocols}}；可继续配置并在稍后调整。',
+                    '接口在线确认未完成，暂用通用协议 {{protocols}}；可检测当前模型后再确认。',
                 })}
         {!loading && adjustedUrl
           ? ` ${t('settings.providerAutoConfiguration.urlAdjusted', {

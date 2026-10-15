@@ -149,7 +149,8 @@ impl OpenAIResponsesProvider {
             .as_deref()
             .unwrap_or("max_output_tokens");
         let mut include = vec![json!("reasoning.encrypted_content")];
-        if let Some(configured) = self.compat.extra_body.as_ref().and_then(|extra| extra.get("include")) {
+        let configured_include = self.compat.extra_body.as_ref().and_then(|extra| extra.get("include"));
+        if let Some(configured) = configured_include.filter(|value| !value.is_null()) {
             let configured = configured.as_array().filter(|values| values.iter().all(|value| {
                 value.as_str().is_some_and(|value| !value.trim().is_empty())
             })).ok_or_else(|| ProviderError::Config(
@@ -199,6 +200,9 @@ impl OpenAIResponsesProvider {
         let object = body
             .as_object_mut()
             .expect("typed Responses request body is an object");
+        if configured_include.is_some_and(Value::is_null) {
+            object.remove("include");
+        }
         object.remove("chain_rounds");
         if request.tools.is_empty() {
             object.remove("tools");
@@ -486,10 +490,11 @@ fn clean_orphan_function_pairs(input: &mut Vec<Value>) {
 }
 
 fn encode_reasoning_state(items: &[Value]) -> Result<Option<String>, ProviderError> {
+    let items: Vec<&Value> = items.iter().filter(|item| has_native_reasoning_continuation(item)).collect();
     if items.is_empty() {
         return Ok(None);
     }
-    let encoded = serde_json::to_string(items).map_err(|error| {
+    let encoded = serde_json::to_string(&items).map_err(|error| {
         ProviderError::Parse(format!("could not encode Responses reasoning state: {error}"))
     })?;
     if encoded.len() > MAX_REASONING_STATE_BYTES {
@@ -519,8 +524,23 @@ fn decode_reasoning_state(signature: &str) -> Result<Vec<Value>, ProviderError> 
     }
     for item in &items {
         validate_reasoning_item(item).map_err(|error| ProviderError::Config(error.to_string()))?;
+        validate_completed_item_status(item.as_object().expect("validated reasoning is an object"))
+            .map_err(|error| ProviderError::Config(error.to_string()))?;
+        if !has_native_reasoning_continuation(item) {
+            return Err(ProviderError::Config(
+                "persisted Responses reasoning state has no native continuation".into(),
+            ));
+        }
     }
     Ok(items)
+}
+
+fn has_native_reasoning_continuation(item: &Value) -> bool {
+    item.get("encrypted_content").and_then(Value::as_str).is_some_and(|value| !value.is_empty())
+        // A provider's explicit null content is still its original native
+        // item, with its own id. Never replace it with streamed text/summary.
+        || item.get("content").is_some_and(|content| content.is_null()
+            || content.as_array().is_some_and(|parts| !parts.is_empty()))
 }
 
 fn validate_reasoning_item(item: &Value) -> Result<(), ProviderError> {
@@ -538,7 +558,32 @@ fn validate_reasoning_item(item: &Value) -> Result<(), ProviderError> {
             "Responses reasoning item has an invalid id".into(),
         ));
     }
-    let encrypted = required_str(object, "encrypted_content", "reasoning item")?;
+    if let Some(content) = object.get("content").filter(|content| !content.is_null()) {
+        let parts = content.as_array().ok_or_else(|| ProviderError::Parse(
+            "Responses raw reasoning content is not an array".into(),
+        ))?;
+        let mut bytes = 0usize;
+        if parts.len() > MAX_CONTENT_PARTS {
+            return Err(ProviderError::Parse("Responses raw reasoning contains too many parts".into()));
+        }
+        for part in parts {
+            if part.get("type").and_then(Value::as_str) != Some("reasoning_text") {
+                return Err(ProviderError::Parse("Responses raw reasoning contains an unsupported part".into()));
+            }
+            let text = part.get("text").and_then(Value::as_str).ok_or_else(|| ProviderError::Parse(
+                "Responses raw reasoning part has no text".into(),
+            ))?;
+            bytes = bytes.saturating_add(text.len());
+        }
+        if bytes > MAX_REASONING_STATE_BYTES {
+            return Err(ProviderError::Parse("Responses raw reasoning exceeded its safety limit".into()));
+        }
+    }
+    let encrypted = match object.get("encrypted_content") {
+        None | Some(Value::Null) => return Ok(()),
+        Some(Value::String(encrypted)) => encrypted,
+        Some(_) => return Err(ProviderError::Parse("Responses reasoning encrypted_content is not a string".into())),
+    };
     if encrypted.is_empty() || encrypted.len() > MAX_REASONING_STATE_BYTES {
         return Err(ProviderError::Parse(
             "Responses reasoning item has invalid encrypted_content".into(),
@@ -649,7 +694,7 @@ impl LlmProvider for OpenAIResponsesProvider {
         tokio::spawn(async move {
             let Some(outcome) = crate::retry::until_receiver_closed(
                 &tx,
-                process_sse_stream(response, &tx, retain),
+                process_sse_stream(response, &tx, retain, &redactor),
             )
             .await else {
                 return;
@@ -666,7 +711,7 @@ impl LlmProvider for OpenAIResponsesProvider {
                         &redactor,
                     )
                 },
-                |response| process_sse_stream(response, &tx, retain),
+                |response| process_sse_stream(response, &tx, retain, &redactor),
             )
             .await;
         });
@@ -709,10 +754,12 @@ struct ResponsesStreamState {
     retain: bool,
     created: bool,
     response_id: Option<String>,
-    store: Option<bool>,
     last_sequence: Option<u64>,
     items: BTreeMap<usize, OutputItemState>,
     done_items: HashSet<usize>,
+    completed_items: BTreeMap<usize, Value>,
+    content_parts: BTreeMap<(usize, usize), String>,
+    closed_content_parts: HashSet<(usize, usize)>,
     terminal_seen: bool,
 }
 
@@ -722,10 +769,12 @@ impl ResponsesStreamState {
             retain,
             created: false,
             response_id: None,
-            store: None,
             last_sequence: None,
             items: BTreeMap::new(),
             done_items: HashSet::new(),
+            completed_items: BTreeMap::new(),
+            content_parts: BTreeMap::new(),
+            closed_content_parts: HashSet::new(),
             terminal_seen: false,
         }
     }
@@ -745,6 +794,11 @@ impl ResponsesStreamState {
             )));
         }
         self.check_sequence(object)?;
+        if object.get("response_id").is_some()
+            && object.get("response_id").and_then(Value::as_str) != self.response_id.as_deref()
+        {
+            return Err(ProviderError::Parse("Responses changed response_id within one stream".into()));
+        }
 
         if !self.created && event_name != "response.created" && event_name != "error" {
             return Err(ProviderError::Parse(format!(
@@ -752,6 +806,24 @@ impl ResponsesStreamState {
             )));
         }
 
+        // Some compatible Responses implementations use response_id plus an
+        // output_index instead of repeating item_id. Resolve only an item
+        // already announced in this response; never invent an item identity.
+        let mut normalized = object.clone();
+        if matches!(event_name, "response.content_part.added" | "response.content_part.done" | "response.content_part.delta"
+            | "response.reasoning_part.added" | "response.reasoning_part.done")
+            && !normalized.contains_key("item_id")
+        {
+            if normalized.get("response_id").and_then(Value::as_str) != self.response_id.as_deref() {
+                return Err(ProviderError::Parse("Responses content event omitted its item and response identity".into()));
+            }
+            let index = output_index(object)?;
+            let item = self.items.get(&index).ok_or_else(|| ProviderError::Parse(
+                "Responses content event references an unknown item".into(),
+            ))?;
+            normalized.insert("item_id".into(), json!(item.id()));
+        }
+        let object = &normalized;
         match event_name {
             "response.created" => self.on_created(object),
             "response.queued" | "response.in_progress" => {
@@ -760,11 +832,18 @@ impl ResponsesStreamState {
             }
             "response.output_item.added" => self.on_item_added(object),
             "response.output_item.done" => self.on_item_done(object),
-            "response.content_part.added" | "response.content_part.done" => {
-                self.on_content_part(object)?;
-                Ok(Vec::new())
-            }
+            "response.content_part.added" | "response.content_part.done"
+            | "response.reasoning_part.added" | "response.reasoning_part.done" => self.on_content_part(object),
             "response.output_text.delta" => self.on_message_delta(object, false),
+            "response.content_part.delta" => {
+                let key = item_and_content_index(object)?;
+                match self.content_parts.get(&key).map(String::as_str) {
+                    Some("output_text") => self.on_message_delta(object, false),
+                    Some("refusal") => self.on_message_delta(object, true),
+                    Some("reasoning_text") => self.on_reasoning_delta(object),
+                    _ => Err(ProviderError::Parse("Responses content delta has no announced text part".into())),
+                }
+            }
             "response.refusal.delta" => self.on_message_delta(object, true),
             "response.output_text.done" => self.on_message_done(object, false),
             "response.refusal.done" => self.on_message_done(object, true),
@@ -783,6 +862,28 @@ impl ResponsesStreamState {
             }
             "response.completed" | "response.incomplete" | "response.failed" => {
                 self.on_terminal(event_name, object)
+            }
+            "response.done" => {
+                let mut response = response_object(object)?.clone();
+                let terminal = match response.get("status").and_then(Value::as_str) {
+                    Some("completed") => "response.completed",
+                    Some("incomplete") => "response.incomplete",
+                    Some("failed") => "response.failed",
+                    _ => return Err(ProviderError::Parse("Responses response.done is not terminal".into())),
+                };
+                if !response.contains_key("output") {
+                    if self.completed_items.len() != self.items.len()
+                        || self.completed_items.keys().copied().ne(0..self.items.len())
+                    {
+                        return Err(ProviderError::Parse("Responses response.done omitted unfinished output items".into()));
+                    }
+                    // The compatible terminal is a summary. Corroborate it
+                    // with actual item.done snapshots already received.
+                    response.insert("output".into(), json!(self.completed_items.values().collect::<Vec<_>>()));
+                }
+                let mut terminal_object = object.clone();
+                terminal_object.insert("response".into(), Value::Object(response));
+                self.on_terminal(terminal, &terminal_object)
             }
             "error" => Err(response_error(object)),
             _ => Err(ProviderError::Parse(format!(
@@ -835,17 +936,14 @@ impl ResponsesStreamState {
         if !valid_opaque_id(id) {
             return Err(ProviderError::Parse("Responses returned an invalid response id".into()));
         }
-        let store = response.get("store").and_then(Value::as_bool).ok_or_else(|| {
-            ProviderError::Parse("Responses response is missing boolean field `store`".into())
-        })?;
-        if store != self.retain {
+        let store = response_store(response)?;
+        if store.is_some_and(|store| store != self.retain) || (self.retain && store != Some(true)) {
             return Err(ProviderError::Parse(format!(
-                "Responses acknowledged store={store}, but the request required store={} ",
+                "Responses acknowledged store={store:?}, but the request required store={} ",
                 self.retain
             )));
         }
         self.response_id = Some(id.to_owned());
-        self.store = Some(store);
         Ok(())
     }
 
@@ -856,10 +954,8 @@ impl ResponsesStreamState {
                 "Responses changed response id within one stream".into(),
             ));
         }
-        let store = response.get("store").and_then(Value::as_bool).ok_or_else(|| {
-            ProviderError::Parse("Responses response is missing boolean field `store`".into())
-        })?;
-        if self.store != Some(store) || store != self.retain {
+        let store = response_store(response)?;
+        if store.is_some_and(|store| store != self.retain) || (self.retain && store != Some(true)) {
             return Err(ProviderError::Parse(
                 "Responses changed the acknowledged store policy within one stream".into(),
             ));
@@ -894,30 +990,62 @@ impl ResponsesStreamState {
         validate_done_item_status(item)?;
         let events = self.reconcile_item(index, item)?;
         self.done_items.insert(index);
+        self.completed_items.insert(index, Value::Object(item.clone()));
         Ok(events)
     }
 
-    fn on_content_part(&self, object: &Map<String, Value>) -> Result<(), ProviderError> {
+    fn on_content_part(&mut self, object: &Map<String, Value>) -> Result<Vec<LlmEvent>, ProviderError> {
         let index = output_index(object)?;
         self.ensure_item_open(index)?;
         let item_id = required_str(object, "item_id", "content part")?;
         let item = self.items.get(&index).ok_or_else(|| {
             ProviderError::Parse(format!("Responses content part references unknown item {index}"))
         })?;
-        if item.id() != item_id || !matches!(item, OutputItemState::Message { .. }) {
+        if item.id() != item_id {
             return Err(ProviderError::Parse(
-                "Responses content part does not match its message item".into(),
+                "Responses content part changed its output item id".into(),
             ));
         }
-        let _ = content_index(object)?;
+        let content_index = content_index(object)?;
         let part = object.get("part").and_then(Value::as_object).ok_or_else(|| {
             ProviderError::Parse("Responses content part is missing object field `part`".into())
         })?;
-        match part.get("type").and_then(Value::as_str) {
-            Some("output_text" | "refusal") => Ok(()),
-            other => Err(ProviderError::Parse(format!(
-                "Responses emitted unsupported message content part {other:?}"
-            ))),
+        let kind = required_str(part, "type", "content part")?;
+        let reasoning = matches!(item, OutputItemState::Reasoning { .. });
+        if !matches!((item, kind),
+            (OutputItemState::Message { .. }, "output_text" | "refusal")
+            | (OutputItemState::Reasoning { .. }, "reasoning_text"))
+            || (object.get("type").and_then(Value::as_str).is_some_and(|event| event.starts_with("response.reasoning_part.")) && !reasoning)
+        {
+            return Err(ProviderError::Parse("Responses content part type does not match its output item".into()));
+        }
+        let key = (index, content_index);
+        if self.closed_content_parts.contains(&key) {
+            return Err(ProviderError::Parse("Responses content event followed a completed part".into()));
+        }
+        let done = required_str(object, "type", "content event")?.ends_with(".done");
+        if done {
+            if self.content_parts.get(&key).map(String::as_str) != Some(kind) {
+                return Err(ProviderError::Parse("Responses completed an unknown or different content part".into()));
+            }
+            let mut completed = object.clone();
+            let field = if kind == "refusal" { "refusal" } else { "text" };
+            completed.insert(field.into(), json!(required_str(part, field, "completed content part")?));
+            let events = if reasoning {
+                self.on_reasoning_done(&completed)?
+            } else {
+                self.on_message_done(&completed, kind == "refusal")?
+            };
+            self.closed_content_parts.insert(key);
+            Ok(events)
+        } else {
+            if self.content_parts.contains_key(&key)
+                || !required_str(part, if kind == "refusal" { "refusal" } else { "text" }, "initial content part")?.is_empty()
+            {
+                return Err(ProviderError::Parse("Responses initial content part is duplicate or nonempty".into()));
+            }
+            self.content_parts.insert(key, kind.to_owned());
+            Ok(Vec::new())
         }
     }
 
@@ -928,6 +1056,7 @@ impl ResponsesStreamState {
     ) -> Result<Vec<LlmEvent>, ProviderError> {
         let (index, content_index) = item_and_content_index(object)?;
         self.ensure_item_open(index)?;
+        self.ensure_content_part_open(index, content_index)?;
         let item_id = required_str(object, "item_id", "message delta")?;
         let delta = required_str(object, "delta", "message delta")?;
         let item = self.items.get_mut(&index).ok_or_else(|| {
@@ -965,6 +1094,7 @@ impl ResponsesStreamState {
     ) -> Result<Vec<LlmEvent>, ProviderError> {
         let (index, content_index) = item_and_content_index(object)?;
         self.ensure_item_open(index)?;
+        self.ensure_content_part_open(index, content_index)?;
         let item_id = required_str(object, "item_id", "message done")?;
         let field = if refusal { "refusal" } else { "text" };
         let completed = required_str(object, field, "message done")?;
@@ -1106,6 +1236,7 @@ impl ResponsesStreamState {
         let index = output_index(object)?;
         let (is_summary, part_index) = reasoning_part_index(object)?;
         self.ensure_item_open(index)?;
+        if !is_summary { self.ensure_content_part_open(index, part_index)?; }
         let item_id = required_str(object, "item_id", "reasoning delta")?;
         let delta = required_str(object, "delta", "reasoning delta")?;
         let item = self.items.get_mut(&index).ok_or_else(|| {
@@ -1134,6 +1265,7 @@ impl ResponsesStreamState {
         let index = output_index(object)?;
         let (is_summary, part_index) = reasoning_part_index(object)?;
         self.ensure_item_open(index)?;
+        if !is_summary { self.ensure_content_part_open(index, part_index)?; }
         let item_id = required_str(object, "item_id", "reasoning done")?;
         let completed = required_str(object, "text", "reasoning done")?;
         let item = self.items.get_mut(&index).ok_or_else(|| {
@@ -1189,6 +1321,13 @@ impl ResponsesStreamState {
             return Err(ProviderError::Parse(format!(
                 "Responses emitted another item event after output item {index} was done"
             )));
+        }
+        Ok(())
+    }
+
+    fn ensure_content_part_open(&self, item: usize, part: usize) -> Result<(), ProviderError> {
+        if self.closed_content_parts.contains(&(item, part)) {
+            return Err(ProviderError::Parse("Responses text event followed a completed content part".into()));
         }
         Ok(())
     }
@@ -1323,16 +1462,51 @@ impl ResponsesStreamState {
                 }
                 Ok(Vec::new())
             }
-            ("reasoning", OutputItemState::Reasoning { completed, .. }) => {
+            ("reasoning", OutputItemState::Reasoning { summary, text, completed, .. }) => {
                 let value = Value::Object(item.clone());
                 validate_reasoning_item(&value)?;
+                let mut events = Vec::new();
+                for (field, kind, streamed) in [
+                    ("summary", "summary_text", &mut *summary),
+                    ("content", "reasoning_text", &mut *text),
+                ] {
+                    // StepFun deliberately closes a reasoning item with
+                    // content:null even after sending reasoning_text deltas.
+                    // Absence is not a replacement snapshot or reconstructed
+                    // reasoning; retain the provider's exact item unchanged.
+                    let Some(parts) = item.get(field).filter(|value| !value.is_null()) else { continue };
+                    let parts = parts.as_array().ok_or_else(|| ProviderError::Parse(
+                        format!("Responses reasoning {field} is not an array"),
+                    ))?;
+                    if parts.len() > MAX_CONTENT_PARTS || streamed.keys().any(|index| *index >= parts.len()) {
+                        return Err(ProviderError::Parse("Responses reasoning snapshot omitted streamed parts".into()));
+                    }
+                    for (index, part) in parts.iter().enumerate() {
+                        if part.get("type").and_then(Value::as_str) != Some(kind) {
+                            return Err(ProviderError::Parse("Responses reasoning snapshot changed part type".into()));
+                        }
+                        let final_text = part.get("text").and_then(Value::as_str).ok_or_else(|| {
+                            ProviderError::Parse("Responses reasoning snapshot omitted text".into())
+                        })?;
+                        if streamed.get(&index).is_some_and(|existing| existing != final_text) {
+                            return Err(ProviderError::Parse("Responses reasoning snapshot changed streamed text".into()));
+                        }
+                        if !streamed.contains_key(&index) && !final_text.is_empty() {
+                            events.push(LlmEvent::ThinkingDelta(final_text.to_owned()));
+                            streamed.insert(index, final_text.to_owned());
+                        }
+                    }
+                }
+                if message_content_bytes(summary, text)? > MAX_REASONING_STATE_BYTES {
+                    return Err(ProviderError::Parse("Responses reasoning snapshot exceeded its safety limit".into()));
+                }
                 if completed.as_ref().is_some_and(|existing| existing != &value) {
                     return Err(ProviderError::Parse(
                         "Responses terminal reasoning item did not match output_item.done".into(),
                     ));
                 }
                 *completed = Some(value);
-                Ok(Vec::new())
+                Ok(events)
             }
             _ => Err(ProviderError::Parse(
                 "Responses output item changed type within one stream".into(),
@@ -1358,6 +1532,12 @@ impl ResponsesStreamState {
             return Err(ProviderError::Parse(format!(
                 "Responses terminal event `{event_name}` carried status `{status}`"
             )));
+        }
+        // Failed responses can omit output/usage. Their machine error is the
+        // authoritative failure evidence after response identity/status checks;
+        // do not replace it with an unrelated missing-output parse error.
+        if event_name == "response.failed" {
+            return Err(terminal_response_error(response));
         }
         let output = response.get("output").and_then(Value::as_array).ok_or_else(|| {
             ProviderError::Parse("Responses terminal response is missing output".into())
@@ -1488,9 +1668,6 @@ impl ResponsesStreamState {
                     ),
                 });
             }
-            "response.failed" => {
-                return Err(terminal_response_error(response));
-            }
             _ => unreachable!(),
         }
         self.terminal_seen = true;
@@ -1559,7 +1736,7 @@ fn validate_done_item_status(item: &Map<String, Value>) -> Result<(), ProviderEr
         }
         // Reasoning items do not consistently carry a status. Their opaque
         // encrypted payload is checked against the terminal response instead.
-        None if item_type == "reasoning" => Ok(()),
+        None | Some(Value::Null) if item_type == "reasoning" => Ok(()),
         Some(Value::String(status)) => Err(ProviderError::Parse(format!(
             "Responses output_item.done contains `{item_type}` item with status `{status}`"
         ))),
@@ -1579,7 +1756,7 @@ fn validate_completed_item_status(item: &Map<String, Value>) -> Result<(), Provi
         // Reasoning items in the current Responses wire do not consistently
         // carry a status. Their encrypted payload and terminal equality are
         // validated separately; a present non-completed status is still fatal.
-        None if item_type == "reasoning" => Ok(()),
+        None | Some(Value::Null) if item_type == "reasoning" => Ok(()),
         Some(Value::String(status)) => Err(ProviderError::Parse(format!(
             "Responses completed round contains `{item_type}` item with status `{status}`"
         ))),
@@ -1605,6 +1782,14 @@ fn response_object(object: &Map<String, Value>) -> Result<&Map<String, Value>, P
     object.get("response").and_then(Value::as_object).ok_or_else(|| {
         ProviderError::Parse("Responses event is missing object field `response`".into())
     })
+}
+
+fn response_store(response: &Map<String, Value>) -> Result<Option<bool>, ProviderError> {
+    match response.get("store") {
+        None => Ok(None),
+        Some(Value::Bool(store)) => Ok(Some(*store)),
+        Some(_) => Err(ProviderError::Parse("Responses store is not boolean".into())),
+    }
 }
 
 fn output_index(object: &Map<String, Value>) -> Result<usize, ProviderError> {
@@ -1716,33 +1901,28 @@ fn optional_u64(object: &Map<String, Value>, field: &str) -> Result<u64, Provide
 }
 
 fn response_error(object: &Map<String, Value>) -> ProviderError {
-    let message = object
-        .get("message")
-        .and_then(Value::as_str)
-        .unwrap_or("Responses stream reported an error");
-    let code = object
+    let error = object.get("error").filter(|value| !value.is_null()).cloned()
+        .unwrap_or_else(|| Value::Object(object.clone()));
+    let code = error
         .get("code")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     ProviderError::Api {
         status: if code.contains("server") { 500 } else { 422 },
-        message: format!("{message} (code: {code})"),
+        message: json!({"error":error}).to_string(),
     }
 }
 
 fn terminal_response_error(response: &Map<String, Value>) -> ProviderError {
-    let error = response.get("error").and_then(Value::as_object);
-    let message = error
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
-        .unwrap_or("Responses request failed");
+    let error = response.get("error").filter(|value| !value.is_null()).cloned()
+        .unwrap_or_else(|| json!({"message":"Responses request failed","code":"unknown"}));
     let code = error
-        .and_then(|error| error.get("code"))
+        .get("code")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     ProviderError::Api {
         status: if code.contains("server") { 500 } else { 422 },
-        message: format!("{message} (code: {code})"),
+        message: json!({"error":error}).to_string(),
     }
 }
 
@@ -1758,7 +1938,7 @@ fn find_sse_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
     best
 }
 
-fn parse_sse_frame(frame: &[u8]) -> Result<(String, Value), ProviderError> {
+fn parse_sse_frame(frame: &[u8]) -> Result<Option<(String, Value)>, ProviderError> {
     let frame = std::str::from_utf8(frame).map_err(|error| {
         ProviderError::Parse(format!("Responses SSE frame is not valid UTF-8: {error}"))
     })?;
@@ -1788,28 +1968,47 @@ fn parse_sse_frame(frame: &[u8]) -> Result<(String, Value), ProviderError> {
             }
         }
     }
-    let event_name = event_name.ok_or_else(|| {
-        ProviderError::Parse("Responses SSE frame is missing its named event".into())
-    })?;
     if data.is_empty() {
+        if event_name.is_none() {
+            return Ok(None);
+        }
         return Err(ProviderError::Parse(
             "Responses SSE frame is missing its data payload".into(),
         ));
     }
     let data = data.join("\n");
     if data == "[DONE]" {
-        return Err(ProviderError::Parse(
-            "Responses used a Chat Completions [DONE] sentinel instead of a terminal Responses event"
-                .into(),
-        ));
+        if event_name.as_deref().is_some_and(|name| !matches!(name, "message" | "done")) {
+            return Err(ProviderError::Parse("Responses SSE sentinel contradicts its event name".into()));
+        }
+        return Ok(Some(("[DONE]".into(), Value::Null)));
     }
-    let payload = serde_json::from_str(&data).map_err(|error| {
+    let payload: Value = serde_json::from_str(&data).map_err(|error| {
         ProviderError::Parse(format!("Responses SSE data is invalid JSON: {error}"))
     })?;
-    Ok((event_name, payload))
+    let event_name = match event_name {
+        Some(name) if name != "message" => name,
+        _ => payload.get("type").and_then(Value::as_str).ok_or_else(|| {
+            ProviderError::Parse("Responses SSE data is missing a typed event".into())
+        })?.to_owned(),
+    };
+    Ok(Some((event_name, payload)))
 }
 
 async fn process_sse_stream(
+    response: reqwest::Response,
+    tx: &mpsc::Sender<LlmEvent>,
+    retain: bool,
+    redactor: &nomifun_net::secret_redaction::SecretRedactor,
+) -> StreamOutcome {
+    match process_sse_stream_inner(response, tx, retain).await {
+        StreamOutcome::FailedEmpty(error) => StreamOutcome::FailedEmpty(error.redacted(redactor)),
+        StreamOutcome::FailedPartial(error) => StreamOutcome::FailedPartial(error.redacted(redactor)),
+        StreamOutcome::Ok => StreamOutcome::Ok,
+    }
+}
+
+async fn process_sse_stream_inner(
     response: reqwest::Response,
     tx: &mpsc::Sender<LlmEvent>,
     retain: bool,
@@ -1859,9 +2058,18 @@ async fn process_sse_stream(
             }
             saw_frame = true;
             let (event_name, payload) = match parse_sse_frame(&frame) {
-                Ok(parsed) => parsed,
+                Ok(Some(parsed)) => parsed,
+                Ok(None) => continue,
                 Err(error) => return stream_failure(error, emitted_content),
             };
+            if event_name == "[DONE]" {
+                if !state.terminal_seen {
+                    return stream_failure(ProviderError::Parse(
+                        "Responses [DONE] sentinel cannot replace a terminal response event".into(),
+                    ), emitted_content);
+                }
+                continue;
+            }
             let events = match state.process(&event_name, &payload) {
                 Ok(events) => events,
                 Err(error) => return stream_failure(error, emitted_content),

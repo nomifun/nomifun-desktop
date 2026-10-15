@@ -42,6 +42,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
     const [message, messageHolder] = useArcoMessage();
     const [definition, setDefinition] = useState<ModelDefinitionDraft>(() => createModelDefinitionDraft(initialTask));
     const [saving, setSaving] = useState(false);
+    const [protocolDetecting, setProtocolDetecting] = useState(false);
     const [focusedCallConfigTask, setFocusedCallConfigTask] = useState<ModelTask>();
     const modelEditorRef = useRef<ModelDefinitionEditorHandle>(null);
     const appliedAutoConfigurationRef = useRef('');
@@ -53,6 +54,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
       preset: data?.platform,
       tasks,
       baseUrlHint: data?.base_url,
+      modelHint: definition.model,
     });
     const connectionState = useProviderConnections(data?.id, modalProps.visible && Boolean(data));
     const modelListState = useModeModeList({
@@ -138,6 +140,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
     }, [autoConfiguration.data]);
 
     const handleConfirm = useCallback(async () => {
+      if (protocolDetecting) return;
       if (autoConfiguration.isLoading) {
         message.warning(
           t('settings.providerAutoConfiguration.detecting', {
@@ -197,6 +200,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
       message,
       modalCtrl,
       onSubmit,
+      protocolDetecting,
       t,
       validation.errors,
       validation.valid,
@@ -245,7 +249,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
           okText={t('common.confirm')}
           cancelText={t('common.cancel')}
           okButtonProps={{
-            disabled: !validation.valid || autoConfiguration.isLoading,
+            disabled: !validation.valid || autoConfiguration.isLoading || protocolDetecting,
           }}
         >
           <div className={focusedCallConfigTask ? 'pt-4px' : 'pt-16px'}>
@@ -265,6 +269,10 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
               providerBaseUrl={data?.base_url ?? ''}
               providerAuthScheme={data?.auth_scheme ?? ''}
               providerLabel={data?.name ?? data?.platform ?? ''}
+              protocolDetection={data && modalProps.visible ? {
+                providerId: data.id, platform: data.platform, baseUrl: data.base_url, authScheme: data.auth_scheme,
+              } : undefined}
+              onProtocolDetectionPendingChange={setProtocolDetecting}
               manifests={manifests.manifests}
               manifestLoadingTasks={manifests.loadingTasks}
               manifestErrorTasks={manifests.errorTasks}

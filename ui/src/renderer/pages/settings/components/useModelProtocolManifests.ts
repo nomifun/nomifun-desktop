@@ -22,15 +22,15 @@ const EMPTY_MANIFESTS: ModelProtocolManifestMap = {};
 
 /**
  * Fetch provider-preset × task protocol manifests from the backend registry.
- * Custom and New API compatibility defaults are task-scoped and no longer wait
- * for model-id input, so typing a model never reloads or temporarily hides the
- * manifest.
+ * An exact model hint scopes advisory configuration defaults. Stale responses
+ * remain hidden while a different model's manifest is loading.
  */
 interface UseModelProtocolManifestsOptions {
   preset?: string;
   tasks: readonly ModelTask[];
   bootstrapTask?: ModelTask;
   baseUrlHint?: string;
+  modelHint?: string;
 }
 
 const useModelProtocolManifests = ({
@@ -38,12 +38,14 @@ const useModelProtocolManifests = ({
   tasks,
   bootstrapTask,
   baseUrlHint,
+  modelHint,
 }: UseModelProtocolManifestsOptions) => {
   const requestedTasks = useMemo(
     () => orderedUniqueTasks([...(bootstrapTask ? [bootstrapTask] : []), ...tasks]),
     [bootstrapTask, tasks]
   );
-  const requestKey = JSON.stringify([preset ?? '', baseUrlHint ?? '', requestedTasks]);
+  const model = modelHint?.trim() ?? '';
+  const requestKey = JSON.stringify([preset ?? '', baseUrlHint ?? '', requestedTasks, ...(model ? [model] : [])]);
   const swrKey =
     preset && requestedTasks.length > 0
       ? ['model-protocol-manifests', requestKey]
@@ -57,6 +59,7 @@ const useModelProtocolManifests = ({
             preset: preset!,
             task,
             ...(baseUrlHint ? { base_url: baseUrlHint } : {}),
+            ...(model ? { model } : {}),
           })
         )
       );

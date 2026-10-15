@@ -318,6 +318,9 @@ Chat 路由的当前模型配置摘要只纳入该模型的任务配置及其引
 
 通用 `Reasoning.signature` 没有可验证的生产路由，Broker 准备和各协议编码均明确拒绝其续传，不根据当前模型补造来源。Gemini 无签名思考仍按原生 `thought: true` 表达，带来源的工具签名和 typed Anthropic reasoning 沿用各自的精确路由边界；Gemini 的通用签名思考历史暂不支持。独立签名流事件被解析并不证明完整多轮或 native checkpoint 恢复可用。
 
+Responses 供应商实际返回的 raw reasoning item 使用同一个 `ChatProviderReasoning` 原生条目保留精确身份、内容与扩展字段，沿已有 provider block 及模型上下文续传。Broker 在实际生产 attempt 的原有来源边界绑定路由摘要，只允许相同 Responses 路由回传；不从摘要或展示文本补造 raw content、加密内容或 item ID。实际正文的展示仍使用既有思考事件，已关闭历史、上下文清空、压缩和 native 恢复保持原有内容边界及精确 build/binding 围栏，不新增事实链或恢复账本。
+供应商明确返回的 `content: null` 及空状态字段保持原值；已校验的流式正文可以展示，但不回填为原生 content、摘要或加密内容。续传使用原条目，避免把展示用思考再构造成第二份推理状态。
+
 Agent 或资源切换不能删除已结算效果引用的资源定义，也不能修改同一 binding ID 的定义。所有持久资源定义使用合同层 `resource_definition_id`：摘要覆盖 kind、resource、owner、operations、connection 和完整参数，排除 ID 自身；相同定义复用 ID，权限或参数改变生成新 ID。调用方在最终工作目录和策略参数确定后生成 ID，不以物理资源 ID 替代定义身份。执行期权限收窄继续引用原 canonical 定义，不写入第二份资源定义。
 
 Store 在同一事务中更新当前 binding 并保留必要的历史引用；资源查询、知识库挂载和删除保护只按当前 binding 选取资源。历史定义用于回执追溯，不赋予新 Agent 权限，不形成第二份活动资源账本。

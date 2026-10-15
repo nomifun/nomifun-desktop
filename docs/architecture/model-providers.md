@@ -23,9 +23,12 @@ Tasks under one provider may use different domains, named connections and creden
 
 `provider_params` obeys the protocol's strict encoding contract and cannot carry credentials or local transport fields. Values that cannot be encoded losslessly are rejected on save. Responses expose `has_credentials` without returning secrets. Invocation-graph changes atomically increment `config_revision`; resolution, asynchronous jobs and health observations use a consistent revision, so stale probes cannot overwrite new configuration.
 
-New Chat configuration under the official OpenAI preset recommends `openai.responses`.
-Custom providers may explicitly select it; ordinary compatible services retain
-`openai.chat_text` as their default. Saved protocols are never rewritten automatically.
+Chat suggestions come from the [official-document profiles](../../crates/backend/nomifun-model-invoke/src/model_profiles.rs),
+reviewed provider by provider on 2026-10-15. Prefer `openai.responses` where the
+service confirms and recommends it; services primarily or only documenting Chat
+Completions retain `openai.chat_text`. Metered plans, subscriptions, regions and
+exact models remain distinct. Custom/New API discovery tries Responses first;
+the NomiFun gateway retains its catalog's exact protocol declarations. Saved protocols are never rewritten automatically.
 Responses uses its own typed serializers for input, function calls and stream events.
 Tool schemas set `strict: false` explicitly to retain optional platform arguments.
 Reasoning summary parts are validated separately by item and summary/content index.
@@ -35,7 +38,9 @@ protocol. The smaller of the typed request limit and capability `output_limit`
 remains authoritative; aliases cannot replace messages, tools or protocol state.
 Chat Completions accepts `stream_options: null` to omit optional usage options,
 or an object whose `include_usage` overrides the default. Responses `include`
-extensions merge with required encrypted reasoning continuation fields.
+arrays merge with encrypted reasoning continuation fields; `include: null`
+omits that option for compatible endpoints rejecting it. Missing encrypted
+continuation is never fabricated.
 Parameter JSON cannot inject protocol-owned model, input, tool, streaming or
 retained cloud-state fields.
 Reasoning effort uses the normalized `reasoning_effort` control. Saving native
@@ -46,6 +51,50 @@ are expressed in result text; images and audio follow the complete tool-result
 batch as user attachments, keeping the tool messages themselves text-only.
 
 “OpenAI compatible” does not prove compatibility across modalities. Ark versus Volcengine voice, native DashScope and MiniMax regional connections are expressed by their adapters and manifests, without a duplicate endpoint matrix. Provider changes update the registry, serializer and focused contract tests, then require actual-account verification. Local substitutes do not prove cloud permissions or model experience.
+
+## Documented recommendations and catalogs
+
+Active advisory data is split into [global native platforms](../../crates/backend/nomifun-model-invoke/src/model_profiles/global.json),
+[China model vendors](../../crates/backend/nomifun-model-invoke/src/model_profiles/china-foundation.json),
+[cloud platforms and plans](../../crates/backend/nomifun-model-invoke/src/model_profiles/cloud-platforms.json),
+and [gateways and other services](../../crates/backend/nomifun-model-invoke/src/model_profiles/gateways.json).
+Every entry records official sources, its review date, protocol evidence and
+unknowns. These profiles supply configuration suggestions, not a runtime allowlist.
+
+`model_defaults` returns only verified exact-model context, recommended output,
+reasoning levels and protocol parameters. Native catalog values take priority;
+documents fill missing fields. An output recommendation can use a documented
+synchronous/default ceiling rather than a batch-only, background-only, or
+full-context theoretical maximum. Gemini 4's combined window is distinguished
+from earlier models' independent input ceilings. Saved values, explicit edits
+and explicit provider-default choices remain authoritative. Unknown model IDs
+remain editable without inheriting guessed family or upstream-vendor limits.
+
+Model, protocol and URL recommendations travel together: some Zhipu Responses
+models use `/api/v1`, while Alibaba Coding Plan retains Chat Completions.
+Bedrock's new Mantle endpoints are not advertised as existing InvokeModel routes.
+Aggregator limits and availability are never inferred from an upstream model name.
+
+## Actual protocol verification during setup
+
+An explicit action calls `/api/providers/detect-chat-protocol` or the saved
+provider's corresponding subroute with the exact model and capability draft.
+It reuses production OpenAI/Responses serializers and stream decoders, checking
+the current protocol before trying the alternative on confirmed incompatibility.
+Reachability, empty-JSON probes, authentication, quota and transient failures
+cannot create a verified choice. The returned capability is the URL, endpoint
+and parameters actually tested. Model limits remain unchanged; the response
+separately declares the bounded verification output budget.
+
+This action creates no Session, writes no catalog and grants no runtime protocol
+fallback. Saved providers use server-side encrypted credentials and revision
+fences; new providers use the explicitly supplied connections. The editor checks
+the draft snapshot before applying results, blocks duplicate submissions and
+discards stale results after model, credential or manual changes. A click and a
+usage notice precede real requests; normal typing and reachability discovery do
+not trigger billable model calls.
+Cross-protocol candidates must retain output and thinking semantics. When native
+parameters cannot be transferred safely, selection stops without changing the draft.
 
 ## Sources and validation
 

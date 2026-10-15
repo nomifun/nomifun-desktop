@@ -80,6 +80,10 @@ pub fn merge_chat_provider_params(
             continue;
         }
         if protocol == ChatProtocol::OpenaiResponses && key == "include" {
+            if value.is_null() {
+                body_object.remove(key);
+                continue;
+            }
             let includes = value.as_array().filter(|values| values.iter().all(|value|
                 value.as_str().is_some_and(|value| !value.trim().is_empty())))
                 .ok_or_else(|| ChatModelError::invalid_request("Responses include must be an array of strings"))?;
@@ -430,6 +434,9 @@ mod tests {
             &json!({"include":["message.output_text.logprobs","reasoning.encrypted_content"]}),
             ChatProtocol::OpenaiResponses, None).unwrap();
         assert_eq!(merged["include"], json!(["reasoning.encrypted_content","message.output_text.logprobs"]));
+        let omitted = merge_chat_provider_params(json!({"include":["reasoning.encrypted_content"]}),
+            &json!({"include":null}), ChatProtocol::OpenaiResponses, None).unwrap();
+        assert!(omitted.get("include").is_none());
         assert!(merge_chat_provider_params(json!({}), &json!({"include":[false]}),
             ChatProtocol::OpenaiResponses, None).is_err());
         assert!(merge_chat_provider_params(json!({}), &json!({"include":[""]}),

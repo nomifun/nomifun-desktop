@@ -21,6 +21,7 @@ pub mod error;
 mod provider_diagnostic;
 pub mod default_model;
 pub mod manifest;
+pub mod model_profiles;
 pub mod realtime;
 pub mod materialize;
 pub mod resolve;

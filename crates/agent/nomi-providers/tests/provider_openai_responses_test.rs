@@ -313,13 +313,254 @@ async fn native_reasoning_options_and_optional_tool_arguments_keep_their_semanti
 #[tokio::test]
 async fn malformed_responses_include_options_fail_before_transport() {
     let server = MockServer::start().await;
-    for include in [json!(null), json!("reasoning.encrypted_content"), json!([false]), json!([" "])] {
+    for include in [json!("reasoning.encrypted_content"), json!([false]), json!([" "])] {
         let mut provider_compat = compat(false);
         provider_compat.extra_body = Some(json!({"include": include}).as_object().unwrap().clone());
         let provider = OpenAIResponsesProvider::new("key", &server.uri(), provider_compat);
         assert!(matches!(provider.stream(&request(false)).await, Err(ProviderError::Config(_))));
     }
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn include_null_omits_the_optional_provider_extension() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            completed_text("resp_no_include", false, "ok"), "text/event-stream",
+        ))
+        .expect(1).mount(&server).await;
+    let mut provider_compat = compat(false);
+    provider_compat.extra_body = Some(json!({"include": null}).as_object().unwrap().clone());
+    let provider = OpenAIResponsesProvider::new("key", &server.uri(), provider_compat);
+    let events = collect(provider.stream(&request(false)).await.unwrap()).await;
+    assert!(events.iter().any(|event| matches!(event, LlmEvent::Done { .. })));
+    let received = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert!(body.get("include").is_none());
+}
+
+fn compatible_responses_frames() -> Vec<Value> {
+    vec![
+        json!({"type":"response.created","response":{"id":"resp_compatible","object":"response","status":"in_progress"}}),
+        json!({"type":"response.output_item.added","response_id":"resp_compatible","output_index":0,
+            "item":{"type":"message","id":"msg_compatible","role":"assistant","status":"in_progress","content":[]}}),
+        json!({"type":"response.content_part.added","response_id":"resp_compatible","output_index":0,"content_index":0,
+            "part":{"type":"output_text","text":""}}),
+        json!({"type":"response.content_part.delta","response_id":"resp_compatible","output_index":0,"content_index":0,"delta":"hello"}),
+        json!({"type":"response.output_item.done","response_id":"resp_compatible","output_index":0,
+            "item":{"type":"message","id":"msg_compatible","role":"assistant","status":"completed",
+                "content":[{"type":"output_text","text":"hello"}]}}),
+        json!({"type":"response.done","response":{"id":"resp_compatible","object":"response","status":"completed",
+            "usage":{"input_tokens":12,"output_tokens":3}}}),
+    ]
+}
+
+fn data_only_responses(frames: Vec<Value>) -> String {
+    let mut body = ": OPENROUTER PROCESSING\n\n".to_owned();
+    body.extend(frames.into_iter().map(|frame| format!("data: {frame}\n\n")));
+    body.push_str("data: [DONE]\n\n");
+    body
+}
+
+// The event names and nullable reasoning snapshot follow StepFun's published
+// /v1/responses SSE example. Generic part names cover the user-reported path
+// that previously rejected a reasoning item as a non-message.
+fn stepfun_responses_frames(generic_reasoning_parts: bool, tool: bool) -> Vec<Value> {
+    let added = if generic_reasoning_parts { "response.content_part.added" } else { "response.reasoning_part.added" };
+    let done = if generic_reasoning_parts { "response.content_part.done" } else { "response.reasoning_part.done" };
+    let mut frames = vec![
+        json!({"type":"response.created","response":{"id":"resp_step","status":"in_progress","output":[]}}),
+        json!({"type":"response.output_item.added","output_index":0,
+            "item":{"id":"rs_step","type":"reasoning","summary":[],"content":null,"encrypted_content":null,"status":"in_progress"}}),
+    ];
+    for (index, text) in ["用户要求问候。", "先核实工具结果。"].into_iter().enumerate() {
+        frames.extend([
+            json!({"type":added,"output_index":0,"item_id":"rs_step","content_index":index,"part":{"type":"reasoning_text","text":""}}),
+            json!({"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_step","content_index":index,"delta":text}),
+            json!({"type":"response.reasoning_text.done","output_index":0,"item_id":"rs_step","content_index":index,"text":text}),
+            json!({"type":done,"output_index":0,"item_id":"rs_step","content_index":index,"part":{"type":"reasoning_text","text":text}}),
+        ]);
+    }
+    let reasoning = json!({"id":"rs_step","type":"reasoning","summary":[],"content":null,"encrypted_content":null,"status":null});
+    frames.push(json!({"type":"response.output_item.done","output_index":0,"item":reasoning}));
+    let output = if tool {
+        let function = json!({"id":"fc_step","type":"function_call","call_id":"call_step","name":"get_weather",
+            "arguments":"{\"city\":\"北京\"}","status":"completed"});
+        frames.extend([
+            json!({"type":"response.output_item.added","output_index":1,
+                "item":{"id":"fc_step","type":"function_call","call_id":"call_step","name":"get_weather","arguments":"","status":"in_progress"}}),
+            json!({"type":"response.function_call_arguments.done","output_index":1,"item_id":"fc_step","name":"get_weather","arguments":"{\"city\":\"北京\"}"}),
+            json!({"type":"response.output_item.done","output_index":1,"item":function}),
+        ]);
+        function
+    } else {
+        let message = json!({"id":"msg_step","type":"message","role":"assistant","status":"completed",
+            "content":[{"type":"output_text","text":"你好","annotations":[]}]});
+        frames.extend([
+            json!({"type":"response.output_item.added","output_index":1,
+                "item":{"id":"msg_step","type":"message","role":"assistant","content":[],"status":"in_progress"}}),
+            json!({"type":"response.content_part.added","output_index":1,"item_id":"msg_step","content_index":0,
+                "part":{"type":"output_text","text":"","annotations":[]}}),
+            json!({"type":"response.output_text.delta","output_index":1,"item_id":"msg_step","content_index":0,"delta":"你好"}),
+            json!({"type":"response.output_text.done","output_index":1,"item_id":"msg_step","content_index":0,"text":"你好"}),
+            json!({"type":"response.content_part.done","output_index":1,"item_id":"msg_step","content_index":0,
+                "part":{"type":"output_text","text":"你好","annotations":[]}}),
+            json!({"type":"response.output_item.done","output_index":1,"item":message}),
+        ]);
+        message
+    };
+    frames.push(json!({"type":"response.completed","response":{"id":"resp_step","status":"completed","output":[reasoning,output],
+        "usage":{"input_tokens":14,"output_tokens":52,"output_tokens_details":{"reasoning_tokens":12}}}}));
+    for (sequence, frame) in frames.iter_mut().enumerate() { frame["sequence_number"] = json!(sequence); }
+    frames
+}
+
+fn named_responses(frames: Vec<Value>) -> String {
+    frames.into_iter().map(|frame| format!("event: {}\ndata: {frame}\n\n", frame["type"].as_str().unwrap())).collect()
+}
+
+#[tokio::test]
+async fn stepfun_reasoning_parts_and_nullable_snapshot_finish_without_reclassifying_them_as_messages() {
+    for generic in [false, true] {
+        let events = protocol_error_events(named_responses(stepfun_responses_frames(generic, false)), false).await;
+        assert!(!events.iter().any(|event| matches!(event, LlmEvent::Error(_))), "{events:?}");
+        let thinking = events.iter().filter_map(|event| match event {
+            LlmEvent::ThinkingDelta(text) => Some(text.as_str()), _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(thinking, ["用户要求问候。", "先核实工具结果。"]);
+        assert!(events.iter().any(|event| matches!(event, LlmEvent::TextDelta(text) if text == "你好")));
+        assert!(events.iter().any(|event| matches!(event, LlmEvent::Done {stop_reason:StopReason::EndTurn,..})));
+        let signature = events.iter().find_map(|event| match event { LlmEvent::ThinkingSignature(value) => Some(value), _ => None }).unwrap();
+        let native: Value = serde_json::from_str(signature.strip_prefix("openai.responses.reasoning.v1:").unwrap()).unwrap();
+        assert_eq!(native[0], json!({"id":"rs_step","type":"reasoning","summary":[],"content":null,"encrypted_content":null,"status":null}));
+        assert!(!signature.contains("用户要求问候"), "streamed text must not replace the provider's null content");
+    }
+}
+
+#[tokio::test]
+async fn reasoning_part_identity_order_and_completed_text_stay_strict() {
+    for mutation in 0..7 {
+        let mut frames = stepfun_responses_frames(true, false);
+        match mutation {
+            0 => frames[2]["item_id"] = json!("different-item"),
+            1 => frames[2]["part"]["type"] = json!("output_text"),
+            2 => frames[2]["content_index"] = json!(128),
+            3 => frames[5]["part"]["text"] = json!("changed completed text"),
+            4 => { frames[6] = frames[3].clone(); frames[6]["sequence_number"] = json!(6); }
+            5 => { frames[6] = frames[5].clone(); frames[6]["sequence_number"] = json!(6); }
+            6 => { frames.pop(); }
+            _ => unreachable!(),
+        }
+        let events = protocol_error_events(named_responses(frames), false).await;
+        assert_failed_without_commit(&events);
+    }
+}
+
+#[tokio::test]
+async fn stepfun_reasoning_then_tool_roundtrip_keeps_actual_null_state_and_commits_only_at_terminal() {
+    let server = MockServer::start().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let attempts = calls.clone();
+    Mock::given(method("POST")).and(path("/v1/responses"))
+        .respond_with(move |_: &Request| ResponseTemplate::new(200).set_body_raw(
+            named_responses(stepfun_responses_frames(false, attempts.fetch_add(1, Ordering::SeqCst) == 0)), "text/event-stream",
+        )).expect(2).mount(&server).await;
+    let mut settings = compat(false);
+    settings.extra_body = Some(json!({"include":null}).as_object().unwrap().clone());
+    let provider = OpenAIResponsesProvider::new("key", &server.uri(), settings);
+    let mut request = request(false);
+    request.model = "step-5-preview".into();
+    let first = collect(provider.stream(&request).await.unwrap()).await;
+    assert!(!first.iter().any(|event| matches!(event, LlmEvent::Error(_))), "{first:?}");
+    let signature = first.iter().find_map(|event| match event { LlmEvent::ThinkingSignature(value) => Some(value.clone()), _ => None }).unwrap();
+    let tool = first.iter().position(|event| matches!(event, LlmEvent::ToolUse {id,name,input,..}
+        if id=="call_step" && name=="get_weather" && input["city"]=="北京")).unwrap();
+    assert!(matches!(first[tool+1],LlmEvent::Done {stop_reason:StopReason::ToolUse,..}));
+    request.messages.extend([
+        Message::new(Role::Assistant,vec![
+            ContentBlock::Thinking {thinking:"用户要求问候。先核实工具结果。".into(),signature:Some(signature)},
+            ContentBlock::ToolUse {id:"call_step".into(),name:"get_weather".into(),input:json!({"city":"北京"}),extra:None},
+        ]),
+        Message::new(Role::Tool,vec![ContentBlock::ToolResult {
+            tool_use_id:"call_step".into(),content:"晴".into(),is_error:false,images:vec![],
+        }]),
+    ]);
+    let second = collect(provider.stream(&request).await.unwrap()).await;
+    assert!(second.iter().any(|event| matches!(event,LlmEvent::Done {stop_reason:StopReason::EndTurn,..})));
+    let received=server.received_requests().await.unwrap();
+    let body:Value=serde_json::from_slice(&received[1].body).unwrap();
+    assert_eq!(body["input"][1],json!({"id":"rs_step","type":"reasoning","summary":[],"content":null,"encrypted_content":null,"status":null}));
+    assert_eq!(body["input"][2]["type"],"function_call");
+    assert_eq!(body["input"][2]["call_id"],"call_step");
+    assert_eq!(body["input"][3],json!({"type":"function_call_output","call_id":"call_step","output":"晴"}));
+    assert!(body.get("include").is_none());
+}
+
+#[tokio::test]
+async fn incomplete_or_malformed_native_reasoning_wrappers_never_reach_transport() {
+    let server=MockServer::start().await;
+    let provider=OpenAIResponsesProvider::new("key",&server.uri(),compat(false));
+    for item in [
+        json!({"id":"rs_bad","type":"reasoning","status":"incomplete","content":null}),
+        json!({"id":"rs_bad","type":"reasoning","content":[{"type":"output_text","text":"not reasoning"}]}),
+        json!({"id":"rs_bad","type":"reasoning","content":[{"type":"reasoning_text","text":"x".repeat(512*1024)}]}),
+    ] {
+        let mut replay=request(false);
+        replay.messages=vec![Message::new(Role::Assistant,vec![ContentBlock::Thinking {
+            thinking:String::new(),signature:Some(format!("openai.responses.reasoning.v1:{}",json!([item]))),
+        }])];
+        assert!(matches!(provider.stream(&replay).await,Err(ProviderError::Config(_))));
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn compatible_data_only_content_parts_and_done_summary_complete_without_retention() {
+    let events = protocol_error_events(data_only_responses(compatible_responses_frames()), false).await;
+    assert!(!events.iter().any(|event| matches!(event, LlmEvent::Error(_))), "{events:?}");
+    assert!(events.iter().any(|event| matches!(event, LlmEvent::TextDelta(text) if text == "hello")));
+    assert!(events.iter().any(|event| matches!(event,
+        LlmEvent::Done { stop_reason:StopReason::EndTurn, usage } if usage.input_tokens == 12 && usage.output_tokens == 3)));
+    assert!(!events.iter().any(|event| matches!(event, LlmEvent::ProviderRoundId(_))));
+}
+
+#[tokio::test]
+async fn compatible_reasoning_without_encryption_never_manufactures_a_continuation() {
+    let events = protocol_error_events(data_only_responses(vec![
+        json!({"type":"response.created","response":{"id":"resp_plain_reasoning","status":"in_progress"}}),
+        json!({"type":"response.output_item.added","output_index":0,
+            "item":{"id":"rs_plain","type":"reasoning","summary":[]}}),
+        json!({"type":"response.reasoning_summary_text.done","output_index":0,"item_id":"rs_plain","summary_index":0,"text":"summary"}),
+        json!({"type":"response.output_item.done","output_index":0,
+            "item":{"id":"rs_plain","type":"reasoning","summary":[{"type":"summary_text","text":"summary"}]}}),
+        json!({"type":"response.done","response":{"id":"resp_plain_reasoning","status":"completed"}}),
+    ]), false).await;
+    assert!(!events.iter().any(|event| matches!(event, LlmEvent::Error(_))), "{events:?}");
+    assert!(events.iter().any(|event| matches!(event, LlmEvent::ThinkingDelta(text) if text == "summary")));
+    assert!(events.iter().any(|event| matches!(event, LlmEvent::Done { .. })));
+    assert!(!events.iter().any(|event| matches!(event, LlmEvent::ThinkingSignature(_) | LlmEvent::ProviderRoundId(_))));
+}
+
+#[tokio::test]
+async fn compatible_envelopes_do_not_invent_items_or_terminal_authority() {
+    for mutation in 0..5 {
+        let mut frames = compatible_responses_frames();
+        match mutation {
+            0 => { frames.remove(4); }
+            1 => { frames[3]["response_id"] = json!("other-response"); }
+            2 => { frames[3]["content_index"] = json!(1); }
+            3 => { frames.pop(); }
+            4 => { frames.push(json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_compatible","delta":"poison"})); }
+            _ => unreachable!(),
+        }
+        let events = protocol_error_events(data_only_responses(frames), false).await;
+        assert_failed_without_commit(&events);
+    }
+    // A compatible response without store:true cannot authorize a cursor.
+    let events = protocol_error_events(data_only_responses(compatible_responses_frames()), true).await;
+    assert_failed_without_commit(&events);
 }
 
 #[tokio::test]
@@ -1015,6 +1256,63 @@ async fn top_level_official_error_event_fails_without_a_terminal_commit() {
     assert!(events.iter().any(
         |event| matches!(event, LlmEvent::Error(message) if message.contains("request was rejected"))
     ));
+}
+
+fn structured_api_error(events: &[LlmEvent]) -> Value {
+    let message=events.iter().find_map(|event| match event {
+        LlmEvent::Error(message) => Some(message), _ => None,
+    }).expect("provider error event");
+    let body=message.strip_prefix("API error 422: ").expect("structured API error envelope");
+    serde_json::from_str(body).expect("complete machine-readable provider error JSON")
+}
+
+#[tokio::test]
+async fn responses_error_events_preserve_machine_codes_types_params_and_human_messages() {
+    for code in ["unsupported_protocol","authentication_error","insufficient_quota"] {
+        let original=json!({"type":"error","code":code,"message":"The upstream request was rejected.",
+            "param":"input","details":{"retry":false}});
+        let events=protocol_error_events(sse(vec![("error",original.clone())]),false).await;
+        assert_failed_without_commit(&events);
+        assert_eq!(structured_api_error(&events),json!({"error":original}));
+    }
+}
+
+#[tokio::test]
+async fn failed_responses_preserve_original_error_before_optional_output_validation() {
+    for original in [
+        json!({"code":"unsupported_protocol","type":"invalid_request_error",
+            "message":"This route does not implement Responses.","param":"input","details":{"supported":"chat"}}),
+        json!("The upstream rejected this request."),
+    ] {
+        let events=protocol_error_events(sse(vec![
+            created("resp_failed_machine",false),
+            ("response.failed",json!({"type":"response.failed","response":{
+                "id":"resp_failed_machine","status":"failed","error":original
+            }})),
+        ]),false).await;
+        assert_failed_without_commit(&events);
+        assert_eq!(structured_api_error(&events),json!({"error":original}));
+    }
+}
+
+#[tokio::test]
+async fn complete_responses_sse_error_json_is_redacted_without_losing_machine_evidence() {
+    let server=MockServer::start().await;
+    let secret="response-runtime-secret/+fixture";
+    let payload=json!({"type":"error","code":"unsupported_protocol","message":"Request rejected.",
+        "param":"input","credential_echo":secret});
+    Mock::given(method("POST")).and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse(vec![("error",payload)]),"text/event-stream"))
+        .expect(1).mount(&server).await;
+    let provider=OpenAIResponsesProvider::new(secret,&server.uri(),compat(false));
+    let events=collect(provider.stream(&request(false)).await.unwrap()).await;
+    assert_failed_without_commit(&events);
+    let body=structured_api_error(&events);
+    assert_eq!(body["error"]["code"],"unsupported_protocol");
+    assert_eq!(body["error"]["credential_echo"],"[REDACTED]");
+    assert!(!serde_json::to_string(&events.iter().filter_map(|event|match event {
+        LlmEvent::Error(message)=>Some(message),_=>None,
+    }).collect::<Vec<_>>()).unwrap().contains(secret));
 }
 
 #[tokio::test]

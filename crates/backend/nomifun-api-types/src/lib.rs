@@ -10,6 +10,8 @@ mod agent_platform;
 mod agnes_model;
 mod auth;
 mod channel;
+mod chat_protocol_detection;
+pub use chat_protocol_detection::*;
 mod connection_test;
 mod conversation;
 mod cron;
@@ -163,7 +165,7 @@ pub use mcp_bridge::{
     RequirementMcpConfig, ScopedMcpChildBootstrap, ScopedMcpChildConfig,
 };
 pub use model_protocol::{
-    AuthSchemeDescriptor, EndpointRootShape, ModelProtocolManifestResponse,
+    AuthSchemeDescriptor, EndpointRootShape, ModelConfigurationDefaults, ModelProtocolManifestResponse,
     PlatformPresetDescriptor, ProtocolDefaultConnection, ProtocolDescriptor,
     ProtocolEndpointDescriptor, ProtocolEndpointPurpose, ProtocolExecutorKind,
     ProtocolRecommendation, ProtocolScope, ProtocolTaskDescriptor, ProtocolTransportKind,

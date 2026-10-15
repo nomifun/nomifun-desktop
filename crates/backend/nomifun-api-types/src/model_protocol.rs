@@ -157,6 +157,32 @@ pub struct AuthSchemeDescriptor {
     pub parameterized: bool,
 }
 
+/// Advisory defaults for one exact documented model and protocol. These are
+/// configuration suggestions, never runtime routing or saved-model overrides.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+pub struct ModelConfigurationDefaults {
+    pub model: String,
+    pub protocol_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub context_limit: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub context_limit_kind: Option<crate::ModelContextLimitKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub output_limit: Option<i64>,
+    #[ts(type = "Record<string, unknown>")]
+    pub provider_params: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reasoning_efforts: Option<Vec<String>>,
+    pub sources: Vec<String>,
+    pub checked_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 pub struct ModelProtocolManifestResponse {
@@ -170,4 +196,7 @@ pub struct ModelProtocolManifestResponse {
     pub auth_schemes: Vec<AuthSchemeDescriptor>,
     pub recommendation: Option<ProtocolRecommendation>,
     pub protocols: Vec<ProtocolDescriptor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_defaults: Option<ModelConfigurationDefaults>,
 }

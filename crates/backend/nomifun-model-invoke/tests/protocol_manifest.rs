@@ -144,7 +144,7 @@ fn manifest_prioritizes_preset_protocols_and_installs_a_custom_compat_default() 
     let custom = protocol_manifest_for("custom", ModelTask::Chat);
     assert_eq!(
         custom.recommendation.as_ref().unwrap().protocol_id,
-        "openai.chat_text"
+        "openai.responses"
     );
     assert_eq!(
         custom
@@ -162,10 +162,10 @@ fn manifest_prioritizes_preset_protocols_and_installs_a_custom_compat_default() 
 }
 
 #[test]
-fn custom_presets_recommend_the_unique_registry_declared_compat_protocol_per_task() {
+fn custom_presets_prefer_responses_for_chat_and_unique_compat_protocols_for_other_tasks() {
     let registry = default_protocol_registry();
     for (task, expected_protocol) in [
-        (ModelTask::Chat, "openai.chat_text"),
+        (ModelTask::Chat, "openai.responses"),
         (ModelTask::ImageGeneration, "openai.images"),
         (ModelTask::ImageEdit, "openai.images"),
         (ModelTask::VideoGeneration, "openai.videos"),
@@ -183,7 +183,7 @@ fn custom_presets_recommend_the_unique_registry_declared_compat_protocol_per_tas
             })
             .collect::<Vec<_>>();
         assert_eq!(candidates.len(), 1, "{task:?} generic compatibility candidates");
-        assert_eq!(candidates[0].protocol_id, expected_protocol);
+        if task != ModelTask::Chat { assert_eq!(candidates[0].protocol_id, expected_protocol); }
 
         let view = protocol_manifest_for_model_connection(
             "custom",
@@ -202,7 +202,7 @@ fn custom_presets_recommend_the_unique_registry_declared_compat_protocol_per_tas
             .get(&recommendation.protocol_id)
             .expect("recommended protocol is registered");
         assert!(descriptor.supported_tasks.contains(&task));
-        assert!(descriptor.scopes.contains(&ProtocolScope::OfficialCompat));
+        if task != ModelTask::Chat { assert!(descriptor.scopes.contains(&ProtocolScope::OfficialCompat)); }
         assert!(descriptor.scopes.contains(&ProtocolScope::Custom));
         assert!(
             view.protocols
@@ -222,13 +222,15 @@ fn openai_prefers_responses_and_compatible_providers_can_select_it_explicitly() 
     assert_eq!(recommendation.default_base_url.as_deref(), Some("https://api.openai.com/v1"));
     assert!(openai.protocols.iter().any(|descriptor| descriptor.protocol_id == "openai.chat_text"));
 
-    for platform in ["custom", "new-api", "openrouter", "deepseek"] {
+    for (platform, expected) in [("custom","openai.responses"),("new-api","openai.responses"),
+        ("openrouter","openai.responses"),("deepseek","openai.chat_text")] {
         let manifest = protocol_manifest_for(platform, ModelTask::Chat);
-        assert_eq!(manifest.recommendation.unwrap().protocol_id, "openai.chat_text", "{platform}");
+        assert_eq!(manifest.recommendation.unwrap().protocol_id, expected, "{platform}");
         let responses = manifest.protocols.iter().find(|descriptor| descriptor.protocol_id == "openai.responses")
             .expect("Responses is an explicitly selectable serializer");
         assert!(responses.scopes.contains(&ProtocolScope::Custom));
-        assert!(responses.default_connections.is_empty(), "do not import OpenAI URLs into {platform}");
+        assert!(responses.default_connections.iter().all(|connection| !connection.base_url.contains("api.openai.com")),
+            "do not import OpenAI URLs into {platform}");
     }
 }
 
@@ -238,7 +240,7 @@ fn custom_recommendation_needs_no_model_hint_and_has_no_realtime_default() {
         let view = protocol_manifest_for_model_connection("custom", None, model, ModelTask::Chat);
         assert_eq!(
             view.recommendation.as_ref().map(|value| value.protocol_id.as_str()),
-            Some("openai.chat_text"),
+            Some("openai.responses"),
             "blank model hint {model:?}"
         );
     }
@@ -263,7 +265,7 @@ fn new_api_gets_the_generic_default_and_model_hint_does_not_change_built_in_reco
     );
     assert_eq!(
         new_api.recommendation.as_ref().map(|value| value.protocol_id.as_str()),
-        Some("openai.chat_text")
+        Some("openai.responses")
     );
 
     for preset in platform_presets()
@@ -448,7 +450,7 @@ fn all_recommended_lifecycle_urls_match_the_locked_official_matrix() {
         (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
     });
     assert_eq!(
-        hash, 13_308_157_315_014_894_705,
+        hash, 11_690_657_504_320_919_425,
         "recommendation URL snapshot changed:\n{snapshot}"
     );
 }

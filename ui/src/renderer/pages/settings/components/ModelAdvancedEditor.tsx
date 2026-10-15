@@ -74,6 +74,7 @@ const ModelAdvancedEditor: React.FC<ModelAdvancedEditorProps> = ({
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [protocolDetecting, setProtocolDetecting] = useState(false);
   const [scopeError, setScopeError] = useState<'unavailable' | 'changed' | 'metadata_changed'>();
   const [descriptionDraft, setDescriptionDraft] = useState(description ?? '');
   const [focusedCallConfigTask, setFocusedCallConfigTask] = useState<ModelTask>();
@@ -94,6 +95,7 @@ const ModelAdvancedEditor: React.FC<ModelAdvancedEditorProps> = ({
     preset,
     tasks: selectedTasks,
     baseUrlHint: providerBaseUrl,
+    modelHint: definition.model,
   });
   const connectionState = useProviderConnections(providerId, open);
   const validation = useMemo(
@@ -153,7 +155,7 @@ const ModelAdvancedEditor: React.FC<ModelAdvancedEditorProps> = ({
   }, [handleOpen, onOpenRequestHandled, openRequest]);
 
   const handleSave = async () => {
-    if (!validation.valid) return;
+    if (!validation.valid || protocolDetecting) return;
     const scopedSave = task
       ? mergeTaskCapabilityEdit(definition, capabilities, task, taskBaselineRef.current)
       : undefined;
@@ -242,7 +244,7 @@ const ModelAdvancedEditor: React.FC<ModelAdvancedEditorProps> = ({
             <Button
               type='primary'
               loading={saving}
-              disabled={!validation.valid || Boolean(scopeError)}
+              disabled={!validation.valid || Boolean(scopeError) || protocolDetecting}
               className='px-20px min-w-80px'
               style={{ borderRadius: 8 }}
               onClick={() => void handleSave()}
@@ -275,6 +277,8 @@ const ModelAdvancedEditor: React.FC<ModelAdvancedEditorProps> = ({
             providerBaseUrl={providerBaseUrl}
             providerAuthScheme={providerAuthScheme}
             providerLabel={providerName}
+            protocolDetection={open ? { providerId, platform: preset, baseUrl: providerBaseUrl, authScheme: providerAuthScheme } : undefined}
+            onProtocolDetectionPendingChange={setProtocolDetecting}
             manifests={manifests.manifests}
             manifestLoadingTasks={manifests.loadingTasks}
             manifestErrorTasks={manifests.errorTasks}

@@ -10,12 +10,16 @@ import type { ModelTaskSource } from '@/common/protocolBindings/ModelTaskSource'
 import type { ModelCatalogSource } from '@/common/protocolBindings/ModelCatalogSource';
 import type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
 import { ttsSupportsProviderParamVoice, ttsVoiceOptionsFor } from '@/renderer/components/model/ttsVoiceOptions';
+import { openExternalUrl } from '@/renderer/utils/platform';
 import { AutoComplete, Button, Checkbox, Input, Popconfirm, Select, Tag, Tooltip } from '@arco-design/web-react';
 import { CheckOne, Code, DeleteFour, Down, Left, LinkOne, Refresh, Right, Search, Shield, TagOne } from '@icon-park/react';
 import React, { useEffect, useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ContextLimitSelect } from './ContextLimitSelect';
 import { OutputLimitInput } from './OutputLimitInput';
+import ModelProtocolDetectionControl from './ModelProtocolDetectionControl';
+import { applyDetectedChatProtocol, chatProtocolDetectionSnapshot, isDetectableChatProtocol,
+  type ModelProtocolDetectionContext } from './modelProtocolDetection';
 import {
   compactCapabilityUrlSummary,
   createCapabilityDisclosureState,
@@ -36,6 +40,7 @@ import {
   acknowledgeCatalogTaskConflict,
   applyCatalogSuggestion,
   capabilityValidationMessageKey,
+  capabilityInputsFromDefinition,
   changeCapabilityProtocol,
   changeModelDefinitionId,
   effectiveBaseUrl,
@@ -51,7 +56,8 @@ import {
   providerParamReasoningEffort,
   providerParamStreamUsage,
   protocolDescriptorForDraft,
-  reasoningEffortsForProtocol,
+  reasoningEffortsForCapability,
+  modelConfigurationDefaultsFor,
   protocolSupportsReasoningEffort,
   providerParamVoice,
   reconcileCapabilityRecommendations,
@@ -99,6 +105,8 @@ export interface ModelDefinitionEditorProps {
   providerBaseUrl: string;
   providerAuthScheme: string;
   providerLabel?: string;
+  protocolDetection?: ModelProtocolDetectionContext;
+  onProtocolDetectionPendingChange?: (pending: boolean) => void;
   manifests: ModelProtocolManifestMap;
   manifestLoadingTasks?: readonly ModelTask[];
   manifestErrorTasks?: readonly ModelTask[];
@@ -370,18 +378,7 @@ const InlineConnectionEditor: React.FC<{
 const sameCapabilities = (
   left: readonly ModelCapabilityDraft[],
   right: readonly ModelCapabilityDraft[]
-): boolean =>
-  left.length === right.length &&
-  left.every((capability, index) => {
-    const candidate = right[index];
-    return (
-      candidate?.task === capability.task &&
-      candidate.transportSource === capability.transportSource &&
-      candidate.protocol === capability.protocol &&
-      candidate.connectionRole === capability.connectionRole &&
-      candidate.baseUrlOverride === capability.baseUrlOverride
-    );
-  });
+): boolean => JSON.stringify(left) === JSON.stringify(right);
 
 const EMPTY_TASKS: readonly ModelTask[] = [];
 const EMPTY_IDS: readonly string[] = [];
@@ -399,6 +396,8 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
   providerBaseUrl,
   providerAuthScheme,
   providerLabel,
+  protocolDetection,
+  onProtocolDetectionPendingChange,
   manifests,
   manifestLoadingTasks = EMPTY_TASKS,
   manifestErrorTasks = EMPTY_TASKS,
@@ -460,8 +459,8 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
     return ready;
   }, [manifestLoadingTasks, manifests]);
   const reconciledCapabilities = useMemo(
-    () => reconcileCapabilityRecommendations(value.capabilities, recommendationManifests),
-    [recommendationManifests, value.capabilities]
+    () => reconcileCapabilityRecommendations(value.capabilities, recommendationManifests, value.model),
+    [recommendationManifests, value.capabilities, value.model]
   );
   const recommendationPendingTasks = useMemo(
     () =>
@@ -513,6 +512,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
   const [protocolParamsOpenByTask, setProtocolParamsOpenByTask] = useState<
     Partial<Record<ModelTask, boolean>>
   >({});
+  const [protocolDetectionEpoch, setProtocolDetectionEpoch] = useState(0);
 
   useEffect(() => {
     if (recommendationPending) {
@@ -522,7 +522,8 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
       onChange((current) => {
         const capabilities = reconcileCapabilityRecommendations(
           current.capabilities,
-          recommendationManifests
+          recommendationManifests,
+          current.model
         );
         return sameCapabilities(current.capabilities, capabilities)
           ? current
@@ -587,6 +588,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
   };
 
   const finishCallConfig = (task: ModelTask, restoreBaseline: boolean) => {
+    if (restoreBaseline) setProtocolDetectionEpoch(epoch => epoch + 1);
     const baseline = callConfigBaselineByTask[task];
     if (restoreBaseline && baseline) {
       onChange((current) => ({
@@ -1121,7 +1123,10 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
         const reasoningEffort = providerParamReasoningEffort(capability.providerParamsJson);
         const maxTokensField = providerParamMaxTokensField(capability.providerParamsJson);
         const streamUsageMode = providerParamStreamUsage(capability.providerParamsJson);
-        const reasoningEffortOptions = reasoningEffortsForProtocol(capability.protocol);
+        const modelDefaults = modelConfigurationDefaultsFor(manifest, value.model);
+        const reasoningEffortOptions = reasoningEffortsForCapability(capability, manifest, value.model);
+        const reasoningEffortNotDocumented = reasoningEffort !== undefined &&
+          !reasoningEffortOptions.includes(reasoningEffort);
         const hasReasoningEffort =
           parsedProviderParams.ok &&
           (Object.prototype.hasOwnProperty.call(parsedProviderParams.value, 'reasoning_effort') ||
@@ -1332,12 +1337,63 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               </div>
             )}
 
+            {protocolDetection && capability.task === 'chat' &&
+              (isDetectableChatProtocol(capability.protocol) ||
+                (!capability.protocol && isDetectableChatProtocol(manifest?.recommendation?.protocol_id ?? ''))) && (
+              <ModelProtocolDetectionControl
+                key={protocolDetectionEpoch}
+                model={value.model}
+                capability={capabilityInputsFromDefinition({ model: value.model, capabilities: [capability] })?.[0]}
+                snapshot={chatProtocolDetectionSnapshot(value.model, capability)}
+                context={protocolDetection}
+                onSelect={(snapshot, selected) => onChange(current => applyDetectedChatProtocol(current, snapshot, selected))}
+                onPendingChange={onProtocolDetectionPendingChange}
+              />
+            )}
+
             {capability.task === 'chat' && (
               <div
                 hidden={focusedCallConfigTask !== undefined}
                 className='space-y-10px border-0 border-t border-solid border-[var(--color-border-2)] px-14px py-12px'
                 data-model-context-settings={capability.task}
               >
+                {modelDefaults && (
+                  <div className='space-y-4px text-11px text-t-secondary' data-model-configuration-evidence>
+                    <div>
+                      {t('settings.modelAdvanced.documentedDefaults', {
+                        defaultValue: '官方模型配置建议 · 核验于 {{date}}', date: modelDefaults.checked_at,
+                      })}
+                    </div>
+                    <div className='flex flex-wrap items-center gap-x-8px gap-y-2px'>
+                      <span>{modelDefaults.protocol_id}</span>
+                      {modelDefaults.context_limit !== undefined && <span>{t('settings.modelAdvanced.documentedContext', {
+                        defaultValue: '建议上下文：{{tokens}}', tokens: modelDefaults.context_limit.toLocaleString(),
+                      })}</span>}
+                      {modelDefaults.output_limit !== undefined && <span>{t('settings.modelAdvanced.documentedOutput', {
+                        defaultValue: '建议最大输出：{{tokens}}', tokens: modelDefaults.output_limit.toLocaleString(),
+                      })}</span>}
+                      {typeof modelDefaults.provider_params.reasoning_effort === 'string' && (
+                        <span>{t('settings.modelAdvanced.recommendedReasoning', {
+                          defaultValue: '默认思考：{{effort}}', effort: modelDefaults.provider_params.reasoning_effort,
+                        })}</span>
+                      )}
+                      {modelDefaults.sources.filter(source => /^https:\/\//i.test(source)).map((source, index) => (
+                        <a key={source} href={source} target='_blank' rel='noreferrer' className='text-primary-6'
+                          onClick={(event) => {
+                            event.preventDefault();
+                            void openExternalUrl(source).catch(error => {
+                              console.error('Failed to open model documentation:', error);
+                            });
+                          }}>
+                          {t('settings.modelAdvanced.documentationSource', { defaultValue: '来源 {{index}}', index: index + 1 })}
+                        </a>
+                      ))}
+                    </div>
+                    <div>{t('settings.modelAdvanced.documentedDefaultsHint', {
+                      defaultValue: '仅补充新建草稿的空白配置；已保存配置、手动修改和供应商目录声明值保持优先。',
+                    })}</div>
+                  </div>
+                )}
                 <div className='text-12px font-600 text-t-primary'>
                   {t('settings.modelAdvanced.contextSettingsTitle', { defaultValue: '上下文与输出' })}
                 </div>
@@ -2080,6 +2136,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                       {([
                         { value: undefined, key: 'auto' },
                         ...reasoningEffortOptions.map((value) => ({ value, key: value })),
+                        ...(reasoningEffortNotDocumented ? [{ value: reasoningEffort, key: reasoningEffort }] : []),
                       ] satisfies Array<{ value: ModelReasoningEffort | undefined; key: string }>).map((option) => {
                         const selected = option.value === undefined
                           ? !hasReasoningEffort
@@ -2099,6 +2156,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                             }`}
                             onClick={() =>
                               updateCapability(capability.task, {
+                                providerParamsEditedKeys: ['reasoning_effort', 'reasoning'],
                                 providerParamsJson: withProviderParamReasoningEffort(
                                   capability.providerParamsJson,
                                   option.value
@@ -2114,6 +2172,13 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                       })}
                     </div>
                   </div>
+                  {reasoningEffortNotDocumented && (
+                    <div className='text-11px text-warning-6' data-undocumented-reasoning-effort>
+                      {t('settings.modelAdvanced.undocumentedReasoning', {
+                        defaultValue: '当前已配置 {{effort}}，官方模型档位未声明此值；已保留，可按需改为支持的档位或自动。', effort: reasoningEffort,
+                      })}
+                    </div>
+                  )}
                   <div
                     className={`text-11px leading-4 ${
                       providerParamsValid && reasoningEffortProtocolSupported
@@ -2205,6 +2270,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   onClick={() =>
                     updateCapability(capability.task, {
                       ...(capability.task === 'chat' ? {} : { contextLimit: undefined, outputLimit: undefined }),
+                      providerParamsEditedKeys: ['reasoning_effort', 'reasoning'],
                       providerParamsJson: withProviderParamReasoningEffort(
                         capability.providerParamsJson,
                         undefined
@@ -2279,6 +2345,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                         : []),
                     ]}
                     onChange={(field: string) => updateCapability(capability.task, {
+                      providerParamsEditedKeys: ['max_tokens_field'],
                       providerParamsJson: withProviderParamMaxTokensField(capability.providerParamsJson, field),
                     })}
                     triggerProps={{ getPopupContainer: () => document.body }}
@@ -2308,6 +2375,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                     onChange={(mode: string) => {
                       if (mode !== 'default' && mode !== 'omit' && mode !== 'include') return;
                       updateCapability(capability.task, {
+                        providerParamsEditedKeys: ['stream_options'],
                         providerParamsJson: withProviderParamStreamUsage(capability.providerParamsJson, mode),
                       });
                     }}
@@ -2348,6 +2416,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   }))}
                   onChange={(voice?: string) =>
                     updateCapability(capability.task, {
+                      providerParamsEditedKeys: ['voice'],
                       providerParamsJson: withProviderParamVoice(
                         capability.providerParamsJson,
                         voice ?? ''
@@ -2381,6 +2450,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   disabled={!providerParamsValid}
                   onChange={(enabled) =>
                     updateCapability(capability.task, {
+                      providerParamsEditedKeys: ['chain_rounds'],
                       providerParamsJson: withProviderParamChainRounds(
                         capability.providerParamsJson,
                         enabled

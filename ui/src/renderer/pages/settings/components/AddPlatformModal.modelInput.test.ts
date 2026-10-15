@@ -58,10 +58,10 @@ describe('AddPlatformModal unified model input flow', () => {
     expect(editorSource.includes('capabilities: addCapabilityTask(current.capabilities, task)')).toBe(true);
   });
 
-  test('gets operational defaults only from the backend preset manifest', () => {
+  test('gets operational defaults and exact-model suggestions from the backend manifest', () => {
     expect(addSource.includes('useModelProtocolManifests({')).toBe(true);
     expect(addSource.includes("bootstrapTask: 'chat'")).toBe(true);
-    expect(addSource.includes('modelHint: definition.model')).toBe(false);
+    expect(addSource.includes('modelHint: definition.model')).toBe(true);
     expect(addSource.includes('providerManifest.platform_default_base_url')).toBe(true);
     expect(addSource.includes('providerManifest.default_auth_scheme')).toBe(true);
     expect(addSource.includes('providerManifest?.auth_schemes')).toBe(true);

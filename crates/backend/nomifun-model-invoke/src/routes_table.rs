@@ -23,10 +23,8 @@ const fn route(protocol: &'static str) -> Option<TaskRoute> {
 fn openai_route(task: ModelTask) -> Option<TaskRoute> {
     use ModelTask::*;
     match task {
-        // Responses is OpenAI's recommended generation API and is required by
-        // models whose tools/reasoning are not exposed through Chat Completions.
-        // This only prefills new capabilities; existing explicit routes stay put.
-        Chat => route("openai.responses"),
+        // Chat recommendations are owned by the documented model profiles.
+        Chat => None,
         // Persistent WebSocket sessions use the dedicated realtime registry;
         // they must never be coerced into the one-shot OpenAI HTTP adapter.
         RealtimeConversation => None,
@@ -57,6 +55,12 @@ fn openai_route(task: ModelTask) -> Option<TaskRoute> {
 pub fn preset_protocol_recommendation(platform: &str, task: ModelTask) -> Option<TaskRoute> {
     use ModelTask::*;
 
+    if task == Chat && !matches!(platform, "custom" | "new-api" | "nomifun-model-gateway") {
+        if let Some(protocol) = crate::model_profiles::recommended_chat_protocol(platform, None) {
+            return route(protocol);
+        }
+    }
+
     match (platform, task) {
         ("custom" | "new-api" | "nomifun-model-gateway", _) => None,
 
@@ -65,17 +69,11 @@ pub fn preset_protocol_recommendation(platform: &str, task: ModelTask) -> Option
 
         // Agnes media endpoints use provider-specific request fields and a
         // video_id-based polling endpoint. Chat remains OpenAI compatible.
-        ("agnes", Chat) => route("openai.chat_text"),
         ("agnes", ImageGeneration | ImageEdit) => route("agnes.images"),
         ("agnes", VideoGeneration) => route("agnes.video_jobs"),
 
         // Gemini native generateContent adapters.
         ("gemini", ImageGeneration | ImageEdit) => route("gemini.generate_content"),
-        ("gemini", Chat) => route("gemini.generate_text"),
-
-        // These Chat transports execute through the Nomi provider layer.
-        ("anthropic", Chat) => route("anthropic.messages"),
-        ("bedrock", Chat) => route("bedrock.anthropic_messages"),
 
         // Vertex Claude requires project_id and location/region URL segments
         // that the generic route target contract cannot inject independently.
@@ -155,51 +153,7 @@ pub fn preset_protocol_recommendation(platform: &str, task: ModelTask) -> Option
             route("generic.rerank")
         }
 
-        // These presets explicitly expose an OpenAI-compatible chat endpoint.
-        // Their other modalities are not inherited: each needs a verified
-        // task-specific entry above (or a future native adapter).
-        (
-            "deepseek"
-            | "mimo"
-            | "mimo-token-plan-cn"
-            | "mimo-token-plan-sgp"
-            | "mimo-token-plan-ams"
-            | "minimax"
-            | "minimax-code"
-            | "minimax-coding-plan"
-            | "novita"
-            | "openrouter"
-            | "dashscope"
-            | "alibaba"
-            | "dashscope-coding"
-            | "siliconflow"
-            | "zhipu"
-            | "glm-coding-plan"
-            | "moonshot-cn"
-            | "moonshot-global"
-            | "xai"
-            | "ark"
-            | "volcengine"
-            | "ark-coding-plan"
-            | "ark-agent-plan"
-            | "qianfan"
-            | "qianfan-coding-plan"
-            | "hunyuan"
-            | "hunyuan-global"
-            | "lingyi"
-            | "poe"
-            | "ppio"
-            | "modelscope"
-            | "infiniai"
-            | "ctyun"
-            | "stepfun"
-            | "stepfun-plan",
-            Chat,
-        ) => route("openai.chat_text"),
-
-        // Includes native-only presets without a shipped invoke adapter
-        // (Anthropic, Bedrock and Vertex AI), unknown platform values, and all
-        // unverified provider/task combinations.
+        // Unknown profiles and unverified provider/task combinations.
         _ => None,
     }
 }
@@ -264,7 +218,7 @@ mod tests {
 
     #[test]
     fn agnes_routes_media_to_its_native_contracts() {
-        assert_eq!(platform_route("agnes", Chat), plain("openai.chat_text"));
+        assert_eq!(platform_route("agnes", Chat), plain("openai.responses"));
         assert_eq!(
             platform_route("agnes", ImageGeneration),
             plain("agnes.images")
@@ -293,7 +247,7 @@ mod tests {
         assert_eq!(platform_route("deepgram", RealtimeConversation), None);
 
         for platform in ["dashscope", "alibaba"] {
-            assert_eq!(platform_route(platform, Chat), plain("openai.chat_text"));
+            assert_eq!(platform_route(platform, Chat), plain("openai.responses"));
             assert_eq!(platform_route(platform, ImageGeneration), plain("dashscope.images"));
             assert_eq!(platform_route(platform, Embedding), plain("dashscope.embeddings"));
             for task in [ImageEdit, VideoGeneration, SpeechSynthesis, SpeechRecognition, Rerank] {
@@ -310,7 +264,7 @@ mod tests {
     #[test]
     fn ark_and_volcengine_keep_native_routes_and_voice_role() {
         for platform in ["ark", "volcengine"] {
-            assert_eq!(platform_route(platform, Chat), plain("openai.chat_text"));
+            assert_eq!(platform_route(platform, Chat), plain("openai.responses"));
             assert_eq!(platform_route(platform, ImageGeneration), plain("ark.images"));
             assert_eq!(platform_route(platform, ImageEdit), plain("ark.images"));
             assert_eq!(platform_route(platform, VideoGeneration), plain("ark.video_jobs"));
@@ -337,7 +291,8 @@ mod tests {
             "moonshot-cn",
             "poe",
         ] {
-            assert_eq!(platform_route(platform, Chat), plain("openai.chat_text"), "{platform}");
+            let expected = if matches!(platform,"openrouter"|"poe") {"openai.responses"} else {"openai.chat_text"};
+            assert_eq!(platform_route(platform, Chat), plain(expected), "{platform}");
             assert_eq!(platform_route(platform, ImageEdit), None, "{platform}");
             assert_eq!(platform_route(platform, Rerank), None, "{platform}");
         }

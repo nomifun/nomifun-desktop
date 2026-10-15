@@ -1,0 +1,933 @@
+[
+  {
+    "platforms": [
+      "dashscope",
+      "alibaba"
+    ],
+    "chat_protocol": "openai.responses",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://help.aliyun.com/zh/model-studio/compatibility-with-openai-responses-api",
+      "https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-responses",
+      "https://help.aliyun.com/zh/model-studio/qwen3-8-max",
+      "https://help.aliyun.com/zh/model-studio/qwen3-8-flash",
+      "https://help.aliyun.com/zh/model-studio/qwen3-7-plus"
+    ],
+    "notes": "按量接口已明确支持 Responses；旧 /api/v2/apps/protocols 路径停维，新路径为 /compatible-mode/v1/responses。仅对文档精确列出的模型给出建议；地域和业务空间影响可用性，未知模型不推断窗口或档位。Qwen3.8 的输出上限包含思考与回答，旧系列规则不同。",
+    "models": [
+      {
+        "ids": [
+          "qwen3.8-max",
+          "qwen3.8-max-0902",
+          "qwen3.8-max-2026-09-02",
+          "qwen3.8-flash"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 131072,
+        "reasoning_efforts": [
+          "none",
+          "low",
+          "medium",
+          "xhigh"
+        ],
+        "provider_params": {
+          "reasoning_effort": "xhigh"
+        }
+      },
+      {
+        "ids": [
+          "qwen3.7-plus",
+          "qwen3.7-plus-2026-05-26"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 131072,
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "qwen3.7-max",
+          "qwen3.7-max-2026-05-20",
+          "qwen3.7-max-2026-06-08",
+          "qwen3.7-max-2026-05-17",
+          "qwen3.7-max-preview",
+          "qwen3.7-flash",
+          "qwen3.7-flash-2026-07-15",
+          "qwen3.6-plus",
+          "qwen3.6-plus-2026-04-02",
+          "qwen3.5-plus",
+          "qwen3.5-plus-2026-04-20",
+          "qwen3.5-plus-2026-02-15",
+          "qwen3.6-flash",
+          "qwen3.6-flash-2026-04-16",
+          "qwen3.5-flash",
+          "qwen3.5-flash-2026-02-23",
+          "kimi-k3"
+        ],
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "qwen3.8-2.4t-a95b",
+          "qwen3.8-27b"
+        ],
+        "reasoning_efforts": [
+          "none",
+          "low",
+          "medium",
+          "xhigh"
+        ],
+        "provider_params": {
+          "reasoning_effort": "xhigh"
+        }
+      },
+      {
+        "ids": [
+          "deepseek-v4-flash-0731",
+          "deepseek-v4-pro-0813",
+          "deepseek-v4.1-flash"
+        ],
+        "reasoning_efforts": [
+          "none",
+          "low",
+          "high",
+          "max"
+        ],
+        "provider_params": {
+          "reasoning_effort": "high"
+        }
+      },
+      {
+        "ids": [
+          "glm-5.3"
+        ],
+        "reasoning_efforts": [
+          "low",
+          "high",
+          "max"
+        ],
+        "provider_params": {
+          "reasoning_effort": "max"
+        }
+      },
+      {
+        "ids": [
+          "glm-5.2",
+          "deepseek-v4-pro"
+        ],
+        "reasoning_efforts": [
+          "none",
+          "high",
+          "max"
+        ],
+        "provider_params": {
+          "reasoning_effort": "high"
+        }
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "dashscope-coding"
+    ],
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://help.aliyun.com/zh/model-studio/coding-plan",
+      "https://help.aliyun.com/zh/model-studio/codex"
+    ],
+    "notes": "Coding Plan 明确仅支持 Chat Completions，不支持 Responses；不可套用按量或 Token Plan 能力。仅限列出的六个精确模型版本，专用密钥和 coding.dashscope.aliyuncs.com 地址；当前套餐页未声明各模型窗口和输出上限，故留空。",
+    "models": [
+      {
+        "ids": [
+          "qwen3.7-plus",
+          "qwen3.6-plus",
+          "qwen3.5-plus",
+          "kimi-k2.5",
+          "glm-5",
+          "MiniMax-M2.5"
+        ],
+        "provider_params": {}
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "ark",
+      "volcengine"
+    ],
+    "chat_protocol": "openai.responses",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://ark.volcengine.com/region:cn-beijing/docs/model-list",
+      "https://ark.volcengine.com/region:cn-beijing/docs/responses-api-deep-thinking",
+      "https://ark.volcengine.com/region:cn-beijing/docs/create-model-responses-api"
+    ],
+    "notes": "按量模型表直接列出 Responses/Chat 能力，采用 Responses。原生 model ID 与 Coding/Agent Plan 的模型名称不同。文档 1024k 按官方配置示例转录为 1024000，k 为 1000；思考与回答共同消耗输出预算。仅保留精确版本证据，不根据名称生成其他版本。其中 256k 上下文/256k 最大输出的 Seed2.1 旧版采用文档默认 4k 输出建议，避免把整窗作为输出预算。",
+    "models": [
+      {
+        "ids": [
+          "doubao-seed-evolving",
+          "doubao-seed-2-1-pro-260915",
+          "doubao-seed-2-1-lite-260915"
+        ],
+        "context_limit": 1024000,
+        "context_limit_kind": "combined",
+        "output_limit": 256000,
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
+        "provider_params": {
+          "reasoning_effort": "high"
+        }
+      },
+      {
+        "ids": [
+          "doubao-seed-2-1-pro-260628",
+          "doubao-seed-2-1-turbo-260628"
+        ],
+        "context_limit": 256000,
+        "context_limit_kind": "combined",
+        "output_limit": 4000,
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
+        "provider_params": {
+          "reasoning_effort": "high"
+        }
+      },
+      {
+        "ids": [
+          "doubao-seed-2-0-lite-260428",
+          "doubao-seed-2-0-mini-260428"
+        ],
+        "context_limit": 256000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
+        "provider_params": {
+          "reasoning_effort": "medium"
+        }
+      },
+      {
+        "ids": [
+          "glm-5-3-flash-260828"
+        ],
+        "context_limit": 1024000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "low",
+          "high",
+          "max"
+        ],
+        "provider_params": {
+          "reasoning_effort": "max"
+        }
+      },
+      {
+        "ids": [
+          "glm-5-2-260617"
+        ],
+        "context_limit": 1024000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "provider_params": {
+          "reasoning_effort": "high"
+        }
+      },
+      {
+        "ids": [
+          "deepseek-v4-1-flash-260910",
+          "deepseek-v4-pro-ga-260813",
+          "deepseek-v4-flash-ga-260731"
+        ],
+        "context_limit": 1024000,
+        "context_limit_kind": "combined",
+        "output_limit": 384000,
+        "provider_params": {
+          "reasoning_effort": "high"
+        }
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "ark-coding-plan"
+    ],
+    "chat_protocol": "openai.responses",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://ark.volcengine.com/region:cn-beijing/docs/coding-plan-personal-plan-overview",
+      "https://ark.volcengine.com/region:cn-beijing/docs/coding-plan-personal-ai-opencode"
+    ],
+    "notes": "Coding Plan 官方明确支持并推荐 Responses，专用 /api/coding/v3，不可切至按量端点。窗口/最大输出取套餐模型表，示例的较小输出预算不是模型上限。路由 ark-code-latest 的实际模型由控制台决定，不臆定窗口；套餐未声明精确档位默认，故不填。Kimi K2.8 文档最大输出为 1024k，此处采用官方 OpenCode 示例的 65536 输出预算建议。",
+    "models": [
+      {
+        "ids": [
+          "ark-code-latest"
+        ],
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "doubao-seed-evolving",
+          "doubao-seed-2.1-pro",
+          "doubao-seed-2.1-lite"
+        ],
+        "context_limit": 1024000,
+        "context_limit_kind": "combined",
+        "output_limit": 256000,
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "doubao-seed-2.0-mini"
+        ],
+        "context_limit": 256000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "glm-5.3",
+          "glm-5.3-flash",
+          "glm-latest",
+          "minimax-m3",
+          "kimi-k3"
+        ],
+        "context_limit": 1024000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "deepseek-v4.1-flash",
+          "deepseek-v4-flash",
+          "deepseek-v4-pro"
+        ],
+        "context_limit": 1024000,
+        "context_limit_kind": "combined",
+        "output_limit": 384000,
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "kimi-k2.8-preview"
+        ],
+        "context_limit": 1024000,
+        "context_limit_kind": "combined",
+        "output_limit": 65536,
+        "provider_params": {}
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "ark-agent-plan"
+    ],
+    "chat_protocol": "openai.responses",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://ark.volcengine.com/region:cn-beijing/docs/agent-plan-personal-plan-overview",
+      "https://ark.volcengine.com/region:cn-beijing/docs/agent-plan-personal-opencode"
+    ],
+    "notes": "Agent Plan 官方明确支持并推荐 Responses，专用 /api/plan/v3。Kimi K3 需 Medium 及以上，其他权限以当前套餐为准。GLM5.3、Kimi K3 不可关闭思考；Kimi K2.7-Code 即将下线，未推荐。路由实际模型由控制台决定，不臆定其窗口或档位。Kimi K2.8 文档最大输出为 1024k，此处采用官方 OpenCode 示例的 65536 输出预算建议。",
+    "models": [
+      {
+        "ids": [
+          "ark-code-latest"
+        ],
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "doubao-seed-evolving",
+          "doubao-seed-2.1-pro",
+          "doubao-seed-2.1-lite"
+        ],
+        "context_limit": 1024000,
+        "context_limit_kind": "combined",
+        "output_limit": 256000,
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "doubao-seed-2.0-mini"
+        ],
+        "context_limit": 256000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "glm-5.3",
+          "glm-5.3-flash",
+          "glm-latest",
+          "minimax-m3",
+          "kimi-k3"
+        ],
+        "context_limit": 1024000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "deepseek-v4.1-flash",
+          "deepseek-v4-flash",
+          "deepseek-v4-pro"
+        ],
+        "context_limit": 1024000,
+        "context_limit_kind": "combined",
+        "output_limit": 384000,
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "kimi-k2.8-preview"
+        ],
+        "context_limit": 1024000,
+        "context_limit_kind": "combined",
+        "output_limit": 65536,
+        "provider_params": {}
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "qianfan"
+    ],
+    "chat_protocol": "openai.responses",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://cloud.baidu.com/doc/qianfan-docs/s/4mi400l1m",
+      "https://cloud.baidu.com/doc/qianfan-docs/s/7m95lyy43",
+      "https://cloud.baidu.com/doc/qianfan-docs/s/Wm95lyynv",
+      "https://cloud.baidu.com/doc/qianfan-api/s/vmhejnuy8"
+    ],
+    "notes": "Responses 使用指南列出精确支持模型；ERNIE 未列入该清单，继续用 Chat。普通 Chat 请求 DeepSeek V4 默认 high、复杂 Agent 自动 max，但 Responses 档位字段映射未明确，故不生成默认参数。保留模型表真实上限，不套用其他平台的 DeepSeek 窗口或输出值。",
+    "models": [
+      {
+        "ids": [
+          "deepseek-v4-pro",
+          "deepseek-v4-flash"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 131072,
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "deepseek-v3.2"
+        ],
+        "context_limit": 128000,
+        "context_limit_kind": "combined",
+        "output_limit": 32000,
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "deepseek-v3.2-think",
+          "glm-5.1",
+          "glm-5",
+          "qwen3-14b",
+          "qwen3-8b"
+        ],
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "qwen3-coder-480b-a35b-instruct"
+        ],
+        "context_limit": 128000,
+        "context_limit_kind": "combined",
+        "output_limit": 65536,
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "qwen3-235b-a22b-instruct-2507"
+        ],
+        "context_limit": 128000,
+        "context_limit_kind": "combined",
+        "output_limit": 32768,
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "ernie-5.1",
+          "ernie-5.0",
+          "ernie-5.0-thinking-preview",
+          "ernie-5.0-thinking-latest"
+        ],
+        "chat_protocol": "openai.chat_text",
+        "context_limit": 128000,
+        "context_limit_kind": "combined",
+        "output_limit": 65536,
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "ernie-4.5-turbo-128k",
+          "ernie-4.5-turbo-20260402"
+        ],
+        "chat_protocol": "openai.chat_text",
+        "context_limit": 128000,
+        "context_limit_kind": "combined",
+        "output_limit": 12288,
+        "provider_params": {}
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "qianfan-coding-plan"
+    ],
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://cloud.baidu.com/doc/qianfan/s/imlg0beiu"
+    ],
+    "notes": "专用 /v2/coding/chat/completions，套餐页未确认 Responses，不套用常规 /v2/responses 能力。当前文档可直接指定 deepseek-v4-pro、glm-5.1，qianfan-code-latest 根据控制台路由。套餐未声明精确窗口、输出上限、推理档位，均不猜测。",
+    "models": [
+      {
+        "ids": [
+          "qianfan-code-latest",
+          "deepseek-v4-pro",
+          "glm-5.1"
+        ],
+        "provider_params": {}
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "hunyuan"
+    ],
+    "chat_protocol": "openai.responses",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://cloud.tencent.com/document/product/1823/130051",
+      "https://intl.cloud.tencent.com/jp/document/product/1300/78934",
+      "https://intl.cloud.tencent.com/jp/document/product/1300/80632",
+      "https://cloud.tencent.com/document/product/1823/131208"
+    ],
+    "notes": "TokenHub 通用协议矩阵已确认多数模型支持 Responses；Kimi K2.8/K2.7 Code 明确仅 Chat，逐模型覆盖。推理档位采用 2026-10-13 深度思考页，旧联网搜索页的 no_think 说明已不一致，不采用。模型可用性与账号及地区有关。Kimi K3/K2.8 最大输出与上下文同为 1M，K2.7 Code 同为 256k；未知安全默认输出，故不预设整窗输出预算。",
+    "models": [
+      {
+        "ids": [
+          "hy4-preview"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 64000,
+        "reasoning_efforts": [
+          "high",
+          "none"
+        ],
+        "provider_params": {
+          "reasoning_effort": "high"
+        }
+      },
+      {
+        "ids": [
+          "hy3"
+        ],
+        "context_limit": 256000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "low",
+          "high",
+          "none"
+        ],
+        "provider_params": {
+          "reasoning_effort": "high"
+        }
+      },
+      {
+        "ids": [
+          "deepseek-v4-flash",
+          "deepseek-v4-pro"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 384000,
+        "reasoning_efforts": [
+          "low",
+          "high",
+          "max"
+        ],
+        "provider_params": {
+          "reasoning_effort": "high"
+        }
+      },
+      {
+        "ids": [
+          "deepseek-v4.1-flash",
+          "deepseek-v4-flash-0731",
+          "deepseek-v4-pro-0813",
+          "deepseek/deepseek-flash",
+          "deepseek/deepseek-v4-flash-0731",
+          "deepseek/deepseek-v4-flash",
+          "deepseek/deepseek-v4-pro-0813",
+          "deepseek/deepseek-v4-pro",
+          "deepseek/deepseek-v4-flash-vision-exp"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 384000,
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "glm-5.3",
+          "glm-5.3-flash",
+          "glm-5.3-flashx"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "low",
+          "high",
+          "max"
+        ],
+        "provider_params": {
+          "reasoning_effort": "max"
+        }
+      },
+      {
+        "ids": [
+          "glm-5.2"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "provider_params": {
+          "reasoning_effort": "max"
+        }
+      },
+      {
+        "ids": [
+          "kimi-k3"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "reasoning_efforts": [
+          "low",
+          "high",
+          "max"
+        ],
+        "provider_params": {
+          "reasoning_effort": "max"
+        }
+      },
+      {
+        "ids": [
+          "kimi-k2.8-preview"
+        ],
+        "chat_protocol": "openai.chat_text",
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "kimi-k2.7-code",
+          "kimi-k2.7-code-highspeed"
+        ],
+        "chat_protocol": "openai.chat_text",
+        "context_limit": 256000,
+        "context_limit_kind": "combined",
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "minimax-m3"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "minimax-m2.7"
+        ],
+        "context_limit": 200000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "provider_params": {}
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "hunyuan-global"
+    ],
+    "base_url_override": "https://tokenhub-intl.tencentcloudmaas.com/v1",
+    "chat_protocol": "openai.responses",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://cloud.tencent.com/document/product/1823/130051",
+      "https://intl.cloud.tencent.com/jp/document/product/1300/78934",
+      "https://intl.cloud.tencent.com/jp/document/product/1300/80632",
+      "https://cloud.tencent.com/document/product/1823/131208"
+    ],
+    "notes": "国际 TokenHub 通用协议矩阵支持 Responses，Kimi K2.8/K2.7 Code 例外；当前官方域名为 tokenhub-intl.tencentcloudmaas.com，仓库旧预设缺少 cloud，需要单独修正。窗口取国际模型表；不纳入已在 10-08 下线的 GLM5/5.1。Kimi K3/K2.8 最大输出与上下文同为 1M，K2.7 Code 同为 256k；未知安全默认输出，故不预设整窗输出预算。",
+    "models": [
+      {
+        "ids": [
+          "hy4-preview"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 64000,
+        "reasoning_efforts": [
+          "high",
+          "none"
+        ],
+        "provider_params": {
+          "reasoning_effort": "high"
+        }
+      },
+      {
+        "ids": [
+          "hy3"
+        ],
+        "context_limit": 256000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "low",
+          "high",
+          "none"
+        ],
+        "provider_params": {
+          "reasoning_effort": "high"
+        }
+      },
+      {
+        "ids": [
+          "deepseek-v4-flash",
+          "deepseek-v4-pro"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 384000,
+        "reasoning_efforts": [
+          "low",
+          "high",
+          "max"
+        ],
+        "provider_params": {
+          "reasoning_effort": "high"
+        }
+      },
+      {
+        "ids": [
+          "deepseek-v4.1-flash",
+          "deepseek-v4-flash-0731",
+          "deepseek-v4-pro-0813",
+          "deepseek/deepseek-flash",
+          "deepseek/deepseek-v4-flash-0731",
+          "deepseek/deepseek-v4-flash",
+          "deepseek/deepseek-v4-pro-0813",
+          "deepseek/deepseek-v4-pro",
+          "deepseek/deepseek-v4-flash-vision-exp"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 384000,
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "glm-5.3",
+          "glm-5.3-flash",
+          "glm-5.3-flashx"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "low",
+          "high",
+          "max"
+        ],
+        "provider_params": {
+          "reasoning_effort": "max"
+        }
+      },
+      {
+        "ids": [
+          "glm-5.2"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "provider_params": {
+          "reasoning_effort": "max"
+        }
+      },
+      {
+        "ids": [
+          "kimi-k3"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "reasoning_efforts": [
+          "low",
+          "high",
+          "max"
+        ],
+        "provider_params": {
+          "reasoning_effort": "max"
+        }
+      },
+      {
+        "ids": [
+          "kimi-k2.8-preview"
+        ],
+        "chat_protocol": "openai.chat_text",
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "kimi-k2.7-code",
+          "kimi-k2.7-code-highspeed"
+        ],
+        "chat_protocol": "openai.chat_text",
+        "context_limit": 256000,
+        "context_limit_kind": "combined",
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "minimax-m3"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "provider_params": {}
+      },
+      {
+        "ids": [
+          "minimax-m2.7"
+        ],
+        "context_limit": 200000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "provider_params": {}
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "xai"
+    ],
+    "chat_protocol": "openai.responses",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://docs.x.ai/developers/models/grok-4.7",
+      "https://docs.x.ai/developers/models/grok-4.6",
+      "https://docs.x.ai/developers/models/grok-4.5",
+      "https://docs.x.ai/developers/models/grok-4.3",
+      "https://docs.x.ai/developers/model-capabilities/text/reasoning",
+      "https://docs.x.ai/developers/model-capabilities/text/best-practices"
+    ],
+    "notes": "官方明确推荐 Responses，Chat 为弃用的旧接口，多轮必须回传加密思考。输出推荐采用官方默认 128000，并不代表已核验模型最大值。4.5 的 xhigh 会映射 high，4.3 能力说明仅 none/low/medium/high；采用真实档位，不把映射档当新能力。",
+    "models": [
+      {
+        "ids": [
+          "grok-4.7",
+          "grok-4.6"
+        ],
+        "output_limit": 128000,
+        "context_limit": 500000,
+        "context_limit_kind": "combined",
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "provider_params": {
+          "reasoning_effort": "high"
+        }
+      },
+      {
+        "ids": [
+          "grok-4.5",
+          "grok-4.5-latest",
+          "grok-build-latest"
+        ],
+        "output_limit": 128000,
+        "context_limit": 500000,
+        "context_limit_kind": "combined",
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "provider_params": {
+          "reasoning_effort": "high"
+        }
+      },
+      {
+        "ids": [
+          "grok-4.3",
+          "grok-4.3-latest"
+        ],
+        "output_limit": 128000,
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "reasoning_efforts": [
+          "none",
+          "low",
+          "medium",
+          "high"
+        ],
+        "provider_params": {
+          "reasoning_effort": "low"
+        }
+      }
+    ]
+  }
+]

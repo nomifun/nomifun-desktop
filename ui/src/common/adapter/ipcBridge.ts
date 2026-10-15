@@ -13,6 +13,9 @@
  */
 
 import { bridge } from '@/platform';
+import type { DetectChatProtocolRequest } from '@/common/protocolBindings/DetectChatProtocolRequest';
+import type { DetectChatProtocolAnonymousRequest } from '@/common/protocolBindings/DetectChatProtocolAnonymousRequest';
+import type { DetectChatProtocolResponse } from '@/common/protocolBindings/DetectChatProtocolResponse';
 import type { TurnFileSummary } from '@/common/types/platform/turnFiles';
 import type { PrepareStorageRelocationRequest } from '@/common/protocolBindings/PrepareStorageRelocationRequest';
 import type { StorageRelocationOperationRequest } from '@/common/protocolBindings/StorageRelocationOperationRequest';
@@ -1678,6 +1681,14 @@ export const mode = {
   /** The same test for a proposed connection, before the provider is saved. */
   probeConnection: httpPost<ProbeProviderConnectionResponse, ProbeProviderConnectionAnonymousRequest>(
     '/api/providers/probe-connection'
+  ),
+  /** Explicit small actual-model requests. Never called by background reachability discovery. */
+  detectChatProtocol: httpPost<DetectChatProtocolResponse, DetectChatProtocolAnonymousRequest>(
+    '/api/providers/detect-chat-protocol'
+  ),
+  detectProviderChatProtocol: httpPost<DetectChatProtocolResponse, DetectChatProtocolRequest & { provider_id: ProviderId }>(
+    (p) => `/api/providers/${p.provider_id}/detect-chat-protocol`,
+    ({ model, capability }) => ({ model, capability })
   ),
 };
 

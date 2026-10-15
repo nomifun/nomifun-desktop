@@ -75,7 +75,7 @@ function mount(task: ModelTask, failSaves = 0, initialCapabilities = capabilitie
   const saved: ModelAdvancedPatch[] = [];
   const closed: boolean[] = [];
   const handled: string[] = [];
-  const requestKey = JSON.stringify(['preview', aliasProviderBaseUrl, [task]]);
+  const requestKey = JSON.stringify(['preview', aliasProviderBaseUrl, [task], 'same-model-id']);
   const config = {
     provider: () => new Map(), revalidateOnMount: false,
     fallback: {

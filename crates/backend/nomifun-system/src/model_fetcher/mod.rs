@@ -1,5 +1,6 @@
 mod fetchers;
 mod probe;
+mod protocol_detection;
 mod url_fixer;
 
 use std::sync::Arc;
@@ -202,6 +203,7 @@ fn prepare_catalog_models(platform: &str, models: &mut [ModelInfo]) {
         if platform.eq_ignore_ascii_case("bedrock") && model.tasks.is_empty() {
             continue;
         }
+        nomifun_model_invoke::model_profiles::supplement_documented_catalog_model(platform, model);
         let (tasks, traits) = infer_catalog_tasks_and_traits(platform, &model.id);
         if model.tasks.is_empty() {
             model.tasks = tasks;
@@ -822,5 +824,47 @@ mod tests {
         let response = fetch_models_response("mimo", models, ModelCatalogSource::OfficialDocumentation, None);
         assert_eq!(response.models[0].tasks_source, Some(ModelTaskSource::OfficialDocumentation));
         assert_eq!(response.models[1].tasks_source, Some(ModelTaskSource::Inferred));
+    }
+
+    #[test]
+    fn exact_documented_defaults_fill_missing_limits_without_overriding_native_evidence() {
+        let mut models: Vec<ModelInfo> = serde_json::from_value(serde_json::json!([
+            {"id":"deepseek-flash"},
+            {"id":"deepseek-v4-pro","tasks":["chat"],"tasks_source":"provider_declared",
+             "context_limit":64000,"output_limit":4096,
+             "token_limit_sources":{"context_limit":"context_length","output_limit":"max_output_tokens","context_limit_kind":"input_only"}},
+            {"id":"future-unlisted-model"}
+        ])).unwrap();
+        prepare_catalog_models("deepseek", &mut models);
+        assert_eq!(models[0].context_limit, Some(1_048_576));
+        assert_eq!(models[0].output_limit, Some(393_216));
+        assert_eq!(models[0].tasks_source, Some(ModelTaskSource::OfficialDocumentation));
+        assert!(models[0].token_limit_sources.as_ref().unwrap().context_limit.as_deref()
+            .unwrap().starts_with("official_documentation:https://api-docs.deepseek.com/"));
+        assert_eq!(models[1].context_limit, Some(64000));
+        assert_eq!(models[1].output_limit, Some(4096));
+        assert_eq!(models[1].tasks_source, Some(ModelTaskSource::ProviderDeclared));
+        assert_eq!(models[1].token_limit_sources.as_ref().unwrap().context_limit.as_deref(), Some("context_length"));
+        assert_eq!(models[1].token_limit_sources.as_ref().unwrap().context_limit_kind,
+            Some(nomifun_api_types::ModelContextLimitKind::InputOnly));
+        assert_eq!(models[2].id, "future-unlisted-model");
+        assert!(models[2].context_limit.is_none() && models[2].output_limit.is_none());
+        assert_eq!(models[2].tasks_source, Some(ModelTaskSource::Inferred));
+    }
+
+    #[test]
+    fn documentation_does_not_transplant_upstream_limits_or_change_declared_modalities() {
+        let known: ModelInfo = serde_json::from_value(serde_json::json!({"id":"deepseek-flash"})).unwrap();
+        for platform in ["custom", "openrouter"] {
+            let mut models = vec![known.clone()];
+            prepare_catalog_models(platform, &mut models);
+            assert!(models[0].context_limit.is_none() && models[0].output_limit.is_none(), "{platform}");
+        }
+        let mut models: Vec<ModelInfo> = serde_json::from_value(serde_json::json!([
+            {"id":"deepseek-flash","tasks":["speech_synthesis"],"tasks_source":"provider_declared"}
+        ])).unwrap();
+        prepare_catalog_models("deepseek", &mut models);
+        assert_eq!(models[0].tasks, vec![nomifun_api_types::ModelTask::SpeechSynthesis]);
+        assert!(models[0].context_limit.is_none() && models[0].output_limit.is_none());
     }
 }

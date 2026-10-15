@@ -109,6 +109,18 @@ draft edit starts a new action, without a separate persistent command ledger.
 
 Current-generation history, immutable Snapshots, model changes and explicit Agent transitions remain supported product semantics. They are verified against identity, sequence, binding and content integrity. Executable recovery requires the native checkpoint's exact build and binding. Closed read-only event history may cross an explicitly validated transition without gaining authority.
 
+Raw Responses reasoning returned by a provider uses the existing `ChatProviderReasoning`
+block to retain the exact item identity, content and extension fields in model context.
+The Broker binds it to the actual producing attempt's route digest; only that same
+Responses route can replay it. UI summaries never supply raw content, encryption or
+item identities. Actual reasoning text uses the existing reasoning events. Closed
+history, context clearing, compaction and native recovery keep their current content
+boundaries and exact build/binding fences, without another fact chain or ledger.
+Explicit provider `content: null` and nullable status fields remain unchanged.
+Validated streamed text can be displayed without filling native content,
+summaries or encryption from it. Replay uses the original item rather than
+reconstructing a second reasoning state from display-only thinking.
+
 ### Model tool rules and guidance
 
 Standard workspace tools are assembled once from the same Snapshot's authorized Actions,

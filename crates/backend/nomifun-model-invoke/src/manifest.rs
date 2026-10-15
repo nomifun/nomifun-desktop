@@ -293,9 +293,9 @@ const PRESETS: &[PresetSpec] = &[
     preset("MiMo-Token-Plan-CN", "mimo-token-plan-cn", "https://token-plan-cn.xiaomimimo.com/v1"),
     preset("MiMo-Token-Plan-SGP", "mimo-token-plan-sgp", "https://token-plan-sgp.xiaomimimo.com/v1"),
     preset("MiMo-Token-Plan-AMS", "mimo-token-plan-ams", "https://token-plan-ams.xiaomimimo.com/v1"),
-    preset("MiniMax", "minimax", "https://api.minimaxi.com/v1"),
+    preset("MiniMax", "minimax", "https://api.minimax.cn/v1"),
     preset("MiniMax-Code", "minimax-code", "https://api.minimax.io/v1"),
-    preset("MiniMax-Coding-Plan", "minimax-coding-plan", "https://api.minimaxi.com/v1"),
+    preset("MiniMax-Coding-Plan", "minimax-coding-plan", "https://api.minimax.cn/v1"),
     preset("Novita", "novita", "https://api.novita.ai/openai/v1"),
     preset("OpenRouter", "openrouter", "https://openrouter.ai/api/v1"),
     preset("Dashscope", "dashscope", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
@@ -313,7 +313,7 @@ const PRESETS: &[PresetSpec] = &[
     preset("Qianfan", "qianfan", "https://qianfan.baidubce.com/v2"),
     preset("Qianfan-Coding-Plan", "qianfan-coding-plan", "https://qianfan.baidubce.com/v2/coding"),
     preset("Hunyuan", "hunyuan", "https://tokenhub.tencentmaas.com/v1"),
-    preset("Hunyuan-Global", "hunyuan-global", "https://tokenhub-intl.tencentmaas.com/v1"),
+    preset("Hunyuan-Global", "hunyuan-global", "https://tokenhub-intl.tencentcloudmaas.com/v1"),
     preset("Lingyi", "lingyi", "https://api.lingyiwanwu.com/v1"),
     preset("Poe", "poe", "https://api.poe.com/v1"),
     preset("PPIO", "ppio", "https://api.ppio.com/openai/v1"),
@@ -915,11 +915,11 @@ pub fn validate_provider_params_for_protocol(
                 ));
             }
             if let Some(include) = object.get("include") {
-                if !include.as_array().is_some_and(|values| {
+                if !include.is_null() && !include.as_array().is_some_and(|values| {
                     values.iter().all(|value| value.as_str().is_some_and(|value| !value.trim().is_empty()))
                 }) {
                     return Err(InvokeError::config(
-                        "Responses provider_params.include must be an array of non-empty strings",
+                        "Responses provider_params.include must be null or an array of non-empty strings",
                     ));
                 }
             }
@@ -1117,13 +1117,28 @@ fn owned_endpoint(protocol_id: &str, spec: EndpointSpec) -> ProtocolEndpointDesc
 }
 
 fn owned_protocol(spec: ProtocolSpec) -> ProtocolDescriptor {
+    let mut platforms = spec.platforms.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>();
+    if spec.tasks.contains(&Chat) {
+        for provider in crate::model_profiles::provider_profiles() {
+            if provider.chat_protocol.as_deref() == Some(spec.id)
+                || provider.models.iter().any(|model| model.chat_protocol.as_deref() == Some(spec.id)) {
+                for platform in &provider.platforms {
+                    if matches!(platform.as_str(), "custom" | "new-api") { continue; }
+                    if !platforms.contains(platform) { platforms.push(platform.clone()); }
+                }
+            }
+        }
+    }
     let mut default_connections = Vec::new();
     for preset in PRESETS {
-        if !spec.platforms.contains(&preset.platform) {
+        if !platforms.iter().any(|platform| platform == preset.platform) {
             continue;
         }
         let override_connection = protocol_connection_override(spec.id, preset.platform);
-        let base_url = override_connection.map(|value| value.0).or(preset.base_url);
+        let documented_root = (spec.tasks.contains(&Chat)
+            && crate::model_profiles::recommended_chat_protocol(preset.platform, None) == Some(spec.id))
+            .then(|| crate::model_profiles::documented_chat_base_url(preset.platform, None)).flatten();
+        let base_url = documented_root.or(override_connection.map(|value| value.0)).or(preset.base_url);
         let auth_scheme = override_connection.map(|value| value.1).or(preset.auth_scheme);
         if let (Some(base_url), Some(auth_scheme)) = (base_url, auth_scheme) {
             default_connections.push(ProtocolDefaultConnection {
@@ -1161,7 +1176,7 @@ fn owned_protocol(spec: ProtocolSpec) -> ProtocolDescriptor {
             .map(|value| (*value).to_owned())
             .collect(),
         scopes: spec.scopes.to_vec(),
-        platforms: spec.platforms.iter().map(|value| (*value).to_owned()).collect(),
+        platforms,
         default_connections,
         endpoints,
         root_shape,
@@ -1304,10 +1319,12 @@ pub fn protocol_manifest_for_connection(
 pub fn protocol_manifest_for_model_connection(
     preset: &str,
     base_url_hint: Option<&str>,
-    _model_hint: Option<&str>,
+    model_hint: Option<&str>,
     task: ModelTask,
 ) -> ModelProtocolManifestResponse {
     let selected = resolve_preset(preset, base_url_hint);
+    let model_defaults = (task == Chat).then(|| model_hint.and_then(|model|
+        crate::model_profiles::documented_model_defaults(&selected.platform, model))).flatten();
     let custom_scope = matches!(selected.platform.as_str(), "custom" | "new-api");
     let registry = default_protocol_registry();
     let mut protocols = registry
@@ -1347,7 +1364,11 @@ pub fn protocol_manifest_for_model_connection(
     let recommendation = if custom_scope {
         generic_custom_protocol_recommendation(&registry, &selected, task)
     } else {
-        preset_protocol_recommendation(&selected.platform, task).and_then(|route| {
+        let documented_protocol = (task == Chat && selected.platform != "nomifun-model-gateway").then(||
+            crate::model_profiles::recommended_chat_protocol(&selected.platform, model_hint)).flatten();
+        let route = documented_protocol.map(|protocol| crate::routes_table::TaskRoute {protocol,connection_role:None})
+            .or_else(|| preset_protocol_recommendation(&selected.platform, task));
+        route.and_then(|route| {
             let descriptor = registry.get(route.protocol)?;
             if !descriptor.supported_tasks.contains(&task)
                 || !descriptor.platforms.iter().any(|platform| platform == &selected.platform)
@@ -1364,20 +1385,32 @@ pub fn protocol_manifest_for_model_connection(
                         .iter()
                         .find(|connection| connection.platform == selected.platform)
                 });
+            let documented_root = (task == Chat).then(||
+                crate::model_profiles::documented_chat_base_url(&selected.platform, model_hint)).flatten();
+            let custom_relay = documented_root.is_some() && base_url_hint
+                .and_then(normalized_base_url).is_some_and(|hint| {
+                    normalized_base_url(documented_root.unwrap()).as_deref() != Some(hint.as_str())
+                        && !PRESETS.iter().filter(|preset| preset.platform == selected.platform)
+                            .filter_map(|preset| preset.base_url).filter_map(normalized_base_url)
+                            .any(|official| official == hint)
+                });
+            let documented_root = documented_root.filter(|_| !custom_relay);
             Some(ProtocolRecommendation {
                 protocol_id: route.protocol.to_owned(),
                 connection_role: route.connection_role.map(str::to_owned),
-                default_base_url: connection
+                default_base_url: (custom_relay.then(|| base_url_hint.map(str::to_owned)).flatten())
+                    .or_else(|| documented_root.map(str::to_owned)).or_else(|| connection
                     .map(|value| value.base_url.clone())
-                    .or_else(|| selected.platform_default_base_url.clone()),
+                    .or_else(|| selected.platform_default_base_url.clone())),
                 default_auth_scheme: connection
                     .map(|value| value.auth_scheme.clone())
                     .or_else(|| selected.default_auth_scheme.clone()),
-                base_url_override_required: route.connection_role.is_none()
+                base_url_override_required: !custom_relay && (documented_root.is_some_and(|root|
+                    Some(root) != selected.platform_default_base_url.as_deref()) || (route.connection_role.is_none()
                     && connection.is_some_and(|connection| {
                         selected.platform_default_base_url.as_deref()
                             != Some(connection.base_url.as_str())
-                    }),
+                    }))),
             })
         })
     };
@@ -1393,6 +1426,7 @@ pub fn protocol_manifest_for_model_connection(
         auth_schemes: auth_scheme_descriptors(),
         recommendation,
         protocols,
+        model_defaults,
     }
 }
 
@@ -1405,6 +1439,17 @@ fn generic_custom_protocol_recommendation(
     selected: &PlatformPresetDescriptor,
     task: ModelTask,
 ) -> Option<ProtocolRecommendation> {
+    if task == Chat && let Some(descriptor) = registry.get("openai.responses")
+        && descriptor.supported_tasks.contains(&Chat) && descriptor.scopes.contains(&ProtocolScope::Custom) {
+        // The user's compatibility preference is Responses first. Discovery
+        // can confirm another serializer before saving; runtime never retries
+        // using a different protocol on its own.
+        return Some(ProtocolRecommendation {
+            protocol_id: descriptor.protocol_id.clone(), connection_role:None,
+            default_base_url:None, default_auth_scheme:selected.default_auth_scheme.clone(),
+            base_url_override_required:false,
+        });
+    }
     let mut candidates = registry.descriptors().filter(|descriptor| {
         descriptor.supported_tasks.contains(&task)
             && descriptor.scopes.contains(&ProtocolScope::OfficialCompat)
@@ -1972,7 +2017,7 @@ mod tests {
     fn custom_has_all_configurable_task_protocols_and_generic_default() {
         let view = protocol_manifest_for("custom", Chat);
         let recommendation = view.recommendation.expect("custom Chat recommendation");
-        assert_eq!(recommendation.protocol_id, "openai.chat_text");
+        assert_eq!(recommendation.protocol_id, "openai.responses");
         assert!(recommendation.default_base_url.is_none());
         assert_eq!(
             view.protocols.iter().map(|value| value.protocol_id.as_str()).collect::<Vec<_>>(),
@@ -2243,7 +2288,7 @@ mod tests {
             (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
         });
         assert_eq!(
-            hash, 13_308_157_315_014_894_705,
+            hash, 11_690_657_504_320_919_425,
             "recommendation URL snapshot changed:\n{snapshot}"
         );
     }

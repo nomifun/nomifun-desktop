@@ -4,7 +4,7 @@ import ModelAdvancedEditor from '../src/renderer/pages/settings/components/Model
 import { ThemeProvider } from '../src/renderer/hooks/context/ThemeContext';
 import { aliasCapability, aliasProtocolManifest, aliasProviderBaseUrl, aliasProviderId } from './fixtures/modelAliasEditor';
 
-const requestKey = JSON.stringify(['preview', aliasProviderBaseUrl, ['chat']]);
+const requestKey = JSON.stringify(['preview', aliasProviderBaseUrl, ['chat'], 'preview-model-id']);
 const config = {
   provider: () => new Map(), revalidateOnMount: false,
   fallback: {

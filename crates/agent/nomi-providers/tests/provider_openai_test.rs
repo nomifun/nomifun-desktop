@@ -1123,6 +1123,29 @@ async fn openai_extra_body_preserves_unknown_fields_but_typed_fields_win() {
 }
 
 #[tokio::test]
+async fn chat_sse_errors_preserve_machine_evidence_and_redact_the_full_error_object() {
+    for code in ["unsupported_protocol","authentication_error","insufficient_quota"] {
+        let server=MockServer::start().await;
+        let secret="chat-runtime-secret/+fixture";
+        let original=json!({"code":code,"type":"invalid_request_error","param":"messages",
+            "message":"The upstream request was rejected.","credential_echo":secret,"details":{"retry":false}});
+        let payload=json!({"error":original}).to_string();
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(build_sse_body(&[&payload]),"text/event-stream"))
+            .expect(1).mount(&server).await;
+        let provider=OpenAIProvider::new(secret,&server.uri(),ProviderCompat::openai_defaults());
+        let events=collect_events(provider.stream(&make_request()).await.unwrap()).await;
+        assert!(!events.iter().any(|event|matches!(event,LlmEvent::Done {..}|LlmEvent::ToolUse {..})));
+        let message=events.iter().find_map(|event|match event {LlmEvent::Error(message)=>Some(message),_=>None}).unwrap();
+        let body:serde_json::Value=serde_json::from_str(message.strip_prefix("API error 422: ").unwrap()).unwrap();
+        let mut expected=original;
+        expected["credential_echo"]=json!("[REDACTED]");
+        assert_eq!(body,json!({"error":expected}));
+        assert!(!message.contains(secret));
+    }
+}
+
+#[tokio::test]
 async fn chat_stream_options_can_disable_usage_or_omit_the_field_for_compatible_gateways() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

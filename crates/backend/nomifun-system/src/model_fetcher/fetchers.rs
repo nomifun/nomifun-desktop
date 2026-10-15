@@ -108,7 +108,7 @@ pub(crate) async fn fetch_for_platform(
             Ok(FetchedCatalog::documentation(ark_agent_plan_models()))
         }
         "stepfun-plan" => Ok(FetchedCatalog::documentation(stepfun_plan_models())),
-        "dashscope-coding" => Ok(FetchedCatalog::documentation(fallback_models(DASHSCOPE_MODELS))),
+        "dashscope-coding" => Ok(FetchedCatalog::documentation(documented_chat_models("dashscope-coding"))),
         "glm-coding-plan" => Ok(FetchedCatalog::documentation(glm_coding_plan_models())),
         "qianfan-coding-plan" => Ok(FetchedCatalog::documentation(qianfan_coding_plan_models())),
         _ => fetch_openai_compatible_with_auth(client, &config.base_url, &config.auth).await.map(FetchedCatalog::remote),
@@ -811,11 +811,7 @@ fn mimo_token_plan_models() -> Vec<ModelInfo> {
     // The regular API has a live catalog. Regional subscription gateways have
     // a separately documented model set; never fetch it with a plan key from
     // the pay-as-you-go host. Ultraspeed is not included in Token Plan.
-    fallback_models(&[
-        "mimo-v2.6-pro",
-        "mimo-v2.6-flash",
-        "mimo-v2.5-pro",
-        "mimo-v2.5",
+    documented_models_with_other_tasks("mimo-token-plan-cn", &[
         "mimo-v2.5-asr",
         "mimo-v2.5-tts",
         "mimo-v2.5-tts-voicedesign",
@@ -824,31 +820,12 @@ fn mimo_token_plan_models() -> Vec<ModelInfo> {
 }
 
 fn minimax_code_models() -> Vec<ModelInfo> {
-    fallback_models(&[
-        "MiniMax-M3",
-        "MiniMax-M2.7",
-        "MiniMax-M2.7-highspeed",
-    ])
+    documented_chat_models("minimax-coding-plan")
 }
 
-const ZHIPU_MODELS: &[&str] = &[
-    // Text / reasoning.
-    "glm-5.3",
-    "glm-5.2",
-    "glm-5.1",
-    "glm-5-turbo",
-    "glm-5",
-    "glm-4.7",
-    "glm-4.7-flash",
-    "glm-4.7-flashx",
-    "glm-4.6",
-    "glm-4.5-air",
-    "glm-4.5-airx",
-    "glm-4-flash-250414",
-    "glm-4-flashx-250414",
-    // Vision-language.
-    "glm-5.3-flash",
-    "glm-5.3-flashx",
+const ZHIPU_OTHER_MODELS: &[&str] = &[
+    // Separately documented visual/audio and non-Chat surfaces retain their
+    // own task inference. Chat defaults come from the reviewed profile registry.
     "glm-5v-turbo",
     "glm-4.6v",
     "autoglm-phone",
@@ -884,11 +861,11 @@ const ZHIPU_MODELS: &[&str] = &[
 /// has no public `GET /models` operation. Keep model IDs in their callable API
 /// form rather than the title casing used in parts of the documentation.
 fn zhipu_models() -> Vec<ModelInfo> {
-    fallback_models(ZHIPU_MODELS)
+    documented_models_with_other_tasks("zhipu", ZHIPU_OTHER_MODELS)
 }
 
 fn ark_coding_plan_models() -> Vec<ModelInfo> {
-    fallback_models(ARK_PLAN_MODELS)
+    documented_chat_models("ark-coding-plan")
 }
 
 // ---------------------------------------------------------------------------
@@ -898,29 +875,8 @@ fn ark_coding_plan_models() -> Vec<ModelInfo> {
 /// Account catalog APIs use Access Key HMAC authentication, not the inference
 /// API Key configured here. These documented suggestions are not an account
 /// entitlement list. Users can still type any model or router ID.
-/// Independently documented by the current Coding Plan and Agent Plan ZCode
-/// guides (2026-10-06). These are suggested model names, not guaranteed account
-/// entitlements or an exhaustive list of every modality offered by a plan.
-const ARK_PLAN_MODELS: &[&str] = &[
-    "ark-code-latest",
-    "doubao-seed-evolving",
-    "doubao-seed-2.1-pro",
-    "doubao-seed-2.1-lite",
-    "doubao-seed-2.0-mini",
-    "deepseek-v4.1-flash",
-    "deepseek-v4-flash",
-    "deepseek-v4-pro",
-    "glm-5.3",
-    "glm-5.3-flash",
-    "glm-latest",
-    "minimax-m3",
-    "kimi-k2.7-code",
-    "kimi-k3",
-    "kimi-k2.8-preview",
-];
-
 fn ark_agent_plan_models() -> Vec<ModelInfo> {
-    fallback_models(ARK_PLAN_MODELS)
+    documented_chat_models("ark-agent-plan")
 }
 
 fn is_official_ark_agent_plan_base_url(base_url: &str) -> bool {
@@ -932,21 +888,16 @@ fn is_official_ark_agent_plan_base_url(base_url: &str) -> bool {
 /// suggestions, not the account's live catalog: StepFun only documents the
 /// standard `/v1/models` endpoint, while plan calls use `/step_plan/v1`.
 /// https://platform.stepfun.com/docs/zh/step-plan/overview
-const STEPFUN_PLAN_MODELS: &[&str] = &[
-    "step-5-preview",
-    "step-3.7-flash",
-    "step-3.5-flash",
-    "step-3.5-flash-2603",
+const STEPFUN_PLAN_OTHER_MODELS: &[&str] = &[
     "stepaudio-2.5-realtime",
     "stepaudio-2.5-chat",
     "stepaudio-2.5-tts",
     "stepaudio-2.5-asr",
-    "step-router-v1",
     "step-image-edit-2",
 ];
 
 fn stepfun_plan_models() -> Vec<ModelInfo> {
-    fallback_models(STEPFUN_PLAN_MODELS)
+    documented_models_with_other_tasks("stepfun-plan", STEPFUN_PLAN_OTHER_MODELS)
 }
 
 // ---------------------------------------------------------------------------
@@ -961,12 +912,7 @@ fn stepfun_plan_models() -> Vec<ModelInfo> {
 ///
 /// Keep plan-only `step-router-v1` out of this list: it is not callable through
 /// the regular `https://api.stepfun.com/v1` billing endpoint.
-const STEPFUN_FALLBACK_MODELS: &[&str] = &[
-    // Chat / reasoning. `step-3.7-flash` accepts vision input.
-    "step-5-preview",
-    "step-3.7-flash",
-    "step-3.5-flash",
-    "step-3.5-flash-2603",
+const STEPFUN_OTHER_MODELS: &[&str] = &[
     // Realtime and audio chat use chat/realtime protocols rather than the
     // one-shot TTS or transcription tasks.
     "stepaudio-2.5-realtime",
@@ -982,6 +928,10 @@ const STEPFUN_FALLBACK_MODELS: &[&str] = &[
     "step-image-edit-2",
 ];
 
+fn stepfun_fallback_models() -> Vec<ModelInfo> {
+    documented_models_with_other_tasks("stepfun", STEPFUN_OTHER_MODELS)
+}
+
 async fn fetch_stepfun(
     client: &reqwest::Client,
     base_url: &str,
@@ -991,7 +941,7 @@ async fn fetch_stepfun(
         Ok(models) if !models.is_empty() => Ok(FetchedCatalog::remote(models)),
         Ok(_) if is_official_stepfun_base_url(base_url) => {
             warn!("StepFun models API returned an empty catalog, using fallback list");
-            Ok(FetchedCatalog::documentation(fallback_models(STEPFUN_FALLBACK_MODELS)))
+            Ok(FetchedCatalog::documentation(stepfun_fallback_models()))
         }
         Ok(models) => Ok(FetchedCatalog::remote(models)),
         Err(error)
@@ -1002,7 +952,7 @@ async fn fetch_stepfun(
                 error_code = error.error_code(),
                 "StepFun models API unavailable, using fallback list"
             );
-            Ok(FetchedCatalog::documentation(fallback_models(STEPFUN_FALLBACK_MODELS)))
+            Ok(FetchedCatalog::documentation(stepfun_fallback_models()))
         }
         Err(error) => Err(error),
     }
@@ -1030,20 +980,11 @@ fn is_catalog_availability_error(error: &AppError) -> bool {
 }
 
 fn glm_coding_plan_models() -> Vec<ModelInfo> {
-    fallback_models(&["glm-5.3", "glm-5.3-flash"])
+    documented_chat_models("glm-coding-plan")
 }
 
 fn qianfan_coding_plan_models() -> Vec<ModelInfo> {
-    fallback_models(&[
-        "qianfan-code-latest",
-        "kimi-k2.5",
-        "deepseek-v3.2",
-        "glm-5",
-        "minimax-m2.5",
-        "ernie-4.5-turbo-20260402",
-        "deepseek-v4-flash",
-        "glm-5.1",
-    ])
+    documented_chat_models("qianfan-coding-plan")
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,23 +1158,6 @@ async fn fetch_dashscope_native(
 }
 
 // ---------------------------------------------------------------------------
-// dashscope-coding (official documentation suggestions)
-// ---------------------------------------------------------------------------
-
-const DASHSCOPE_MODELS: &[&str] = &[
-    "qwen3.7-plus",
-    "qwen3.6-plus",
-    "kimi-k2.5",
-    "glm-5",
-    "MiniMax-M2.5",
-    "qwen3.5-plus",
-    "qwen3-max-2026-01-23",
-    "qwen3-coder-next",
-    "qwen3-coder-plus",
-    "glm-4.7",
-];
-
-// ---------------------------------------------------------------------------
 // Provider-declared context windows
 // ---------------------------------------------------------------------------
 
@@ -1325,6 +1249,39 @@ fn fallback_models(ids: &[&str]) -> Vec<ModelInfo> {
             token_limit_sources: None,
         })
         .collect()
+}
+
+/// One reviewed exact-ID source supplies Chat suggestions and configuration
+/// defaults. Preserve separately documented media profiles without duplicating
+/// a second maintained list of Chat model names here.
+fn documented_chat_models(platform: &str) -> Vec<ModelInfo> {
+    let Some(profile) = nomifun_model_invoke::model_profiles::provider_profile(platform) else {
+        return Vec::new();
+    };
+    let mut models = Vec::new();
+    for documented in &profile.models {
+        for id in &documented.ids {
+            if models.iter().any(|model: &ModelInfo| &model.id == id) {
+                continue;
+            }
+            let mut model = fallback_models(&[id.as_str()]).remove(0);
+            model.tasks = vec![ModelTask::Chat];
+            model.tasks_source = Some(ModelTaskSource::OfficialDocumentation);
+            nomifun_model_invoke::model_profiles::supplement_documented_catalog_model(platform, &mut model);
+            models.push(model);
+        }
+    }
+    models
+}
+
+fn documented_models_with_other_tasks(platform: &str, other_ids: &[&str]) -> Vec<ModelInfo> {
+    let mut models = documented_chat_models(platform);
+    for other in fallback_models(other_ids) {
+        if !models.iter().any(|model| model.id == other.id) {
+            models.push(other);
+        }
+    }
+    models
 }
 
 fn check_response_status(resp: &reqwest::Response) -> Result<(), AppError> {
@@ -1961,20 +1918,25 @@ mod tests {
 
     #[test]
     fn minimax_code_plan_models_include_current_coding_models() {
-        assert!(minimax_code_models().iter().any(|model| model.id == "MiniMax-M3"));
-        assert!(minimax_code_models().iter().any(|model| model.id == "MiniMax-M2.7-highspeed"));
-        assert_eq!(minimax_code_models().len(), 3);
+        let models = minimax_code_models();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "MiniMax-M3.1-Flash-Preview");
+        assert_eq!(models[0].context_limit, Some(1_000_000));
+        assert_eq!(models[0].tasks, vec![ModelTask::Chat]);
+        assert_eq!(models[0].tasks_source, Some(ModelTaskSource::OfficialDocumentation));
     }
 
     #[test]
-    fn zhipu_static_catalog_matches_verified_openapi_baseline() {
-        assert_eq!(
-            zhipu_models()
-                .into_iter()
-                .map(|model| model.id)
-                .collect::<Vec<_>>(),
-            ZHIPU_MODELS
-        );
+    fn zhipu_documented_chat_defaults_do_not_remove_other_modalities() {
+        let models = zhipu_models();
+        let latest = models.iter().find(|model| model.id == "glm-5.3").unwrap();
+        assert_eq!(latest.context_limit, Some(1_048_576));
+        assert_eq!(latest.output_limit, Some(131_072));
+        for id in ["glm-5.3-flash", "glm-5.3-flashx", "glm-image", "glm-tts", "embedding-3", "rerank"] {
+            assert!(models.iter().any(|model| model.id == id), "{id}");
+        }
+        let unique = models.iter().map(|model| &model.id).collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), models.len());
     }
 
     #[test]
@@ -1987,21 +1949,9 @@ mod tests {
 
     #[test]
     fn coding_plan_suggestions_match_current_official_documentation() {
-        assert_eq!(
-            DASHSCOPE_MODELS,
-            [
-                "qwen3.7-plus",
-                "qwen3.6-plus",
-                "kimi-k2.5",
-                "glm-5",
-                "MiniMax-M2.5",
-                "qwen3.5-plus",
-                "qwen3-max-2026-01-23",
-                "qwen3-coder-next",
-                "qwen3-coder-plus",
-                "glm-4.7",
-            ]
-        );
+        let dashscope = documented_chat_models("dashscope-coding");
+        assert!(dashscope.iter().any(|model| model.id == "qwen3.7-plus"));
+        assert!(!dashscope.iter().any(|model| model.id == "qwen3-max-2026-01-23"));
         assert_eq!(
             glm_coding_plan_models()
                 .into_iter()
@@ -2016,12 +1966,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "qianfan-code-latest",
-                "kimi-k2.5",
-                "deepseek-v3.2",
-                "glm-5",
-                "minimax-m2.5",
-                "ernie-4.5-turbo-20260402",
-                "deepseek-v4-flash",
+                "deepseek-v4-pro",
                 "glm-5.1",
             ]
         );
@@ -2035,11 +1980,11 @@ mod tests {
                 "step-3.7-flash",
                 "step-3.5-flash",
                 "step-3.5-flash-2603",
+                "step-router-v1",
                 "stepaudio-2.5-realtime",
                 "stepaudio-2.5-chat",
                 "stepaudio-2.5-tts",
                 "stepaudio-2.5-asr",
-                "step-router-v1",
                 "step-image-edit-2",
             ]
         );
@@ -2060,14 +2005,14 @@ mod tests {
         .unwrap();
         assert_eq!(
             catalog.models.into_iter().map(|model| model.id).collect::<Vec<_>>(),
-            DASHSCOPE_MODELS
+            documented_chat_models("dashscope-coding").into_iter().map(|model| model.id).collect::<Vec<_>>()
         );
         assert_eq!(catalog.source, ModelCatalogSource::OfficialDocumentation);
     }
 
     #[test]
     fn stepfun_fallback_has_public_models_but_not_plan_only_router() {
-        let models = fallback_models(STEPFUN_FALLBACK_MODELS);
+        let models = stepfun_fallback_models();
         assert_eq!(
             models.into_iter().map(|model| model.id).collect::<Vec<_>>(),
             [
@@ -2083,7 +2028,7 @@ mod tests {
                 "step-image-edit-2",
             ]
         );
-        let models = fallback_models(STEPFUN_FALLBACK_MODELS);
+        let models = stepfun_fallback_models();
         assert!(!models.iter().any(|model| model.id == "step-router-v1"));
     }
 
@@ -2092,7 +2037,7 @@ mod tests {
         // Without ASR/TTS ids here, a first-run/offline install has no speech
         // model to select, so the robot's `voice.asr` / `voice.tts` slots stay
         // empty and the device is silent. See the 2026-08-08 stepfun-robot spec.
-        let models = fallback_models(STEPFUN_FALLBACK_MODELS);
+        let models = stepfun_fallback_models();
         for id in ["stepaudio-2.5-asr", "stepaudio-2.5-tts"] {
             assert!(
                 models.iter().any(|model| model.id == id),

@@ -6,6 +6,7 @@ use axum::routing::{delete, get, post};
 use std::path::PathBuf;
 
 use nomifun_api_types::{
+    DetectChatProtocolAnonymousRequest, DetectChatProtocolRequest, DetectChatProtocolResponse,
     ApiResponse, ClientPreferencesResponse, CloneProviderRequest, CreateProviderRequest,
     FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse, ModelTask,
     SaveProviderConnectionRequest,
@@ -87,6 +88,7 @@ pub fn system_routes(state: SystemRouterState) -> Router {
         // provider id.
         .route("/api/providers/fetch-models", post(fetch_models_anonymous))
         .route("/api/providers/probe-connection", post(probe_connection_anonymous))
+        .route("/api/providers/detect-chat-protocol", post(detect_chat_protocol_anonymous))
         .route("/api/providers/model-gateway/meta", post(gateway_meta_anonymous))
         .route("/api/providers/model-gateway/catalog", post(gateway_catalog_anonymous))
         .route("/api/providers/model-gateway/create", post(create_model_gateway))
@@ -123,6 +125,7 @@ pub fn system_routes(state: SystemRouterState) -> Router {
             "/api/providers/{provider_id}/probe-connection",
             post(probe_connection),
         )
+        .route("/api/providers/{provider_id}/detect-chat-protocol", post(detect_chat_protocol))
         // One configuration write surface: PUT atomically saves model metadata
         // and replaces its complete task-capability set.
         .route(
@@ -237,6 +240,28 @@ mod protocol_manifest_tests {
         assert_eq!(recommendation.protocol_id, "openai.images");
         assert_eq!(recommendation.connection_role, None);
         assert_eq!(recommendation.default_base_url, None);
+    }
+
+    #[tokio::test]
+    async fn model_protocol_manifest_handler_returns_exact_model_defaults_without_inventing_unknown_limits() {
+        for model in ["gpt-6.1-sol", "user-entered-future-model"] {
+            let Json(response) = list_model_protocols(Query(ModelProtocolManifestQuery {
+                preset:Some("OpenAI".to_owned()), platform:None, base_url:None,
+                model:Some(model.to_owned()), task:ModelTask::Chat,
+            })).await.expect("model manifest");
+            let data = response.data.expect("manifest data");
+            assert_eq!(data.recommendation.unwrap().protocol_id,"openai.responses");
+            if model == "gpt-6.1-sol" {
+                let defaults = data.model_defaults.expect("documented exact model");
+                assert_eq!(defaults.model,model);
+                assert_eq!(defaults.context_limit,Some(1050000));
+                assert_eq!(defaults.output_limit,Some(128000));
+                assert_eq!(defaults.provider_params["reasoning_effort"],"medium");
+                assert!(!defaults.sources.is_empty());
+            } else {
+                assert!(data.model_defaults.is_none());
+            }
+        }
     }
 
     #[tokio::test]
@@ -432,6 +457,26 @@ async fn probe_connection_anonymous(
         .model_fetch_service
         .probe_connection_anonymous(&req)
         .await?;
+    Ok(Json(ApiResponse::ok(result)))
+}
+
+async fn detect_chat_protocol(
+    State(state): State<SystemRouterState>,
+    Path(provider_id): Path<String>,
+    body: Result<Json<DetectChatProtocolRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<DetectChatProtocolResponse>>, AppError> {
+    let Json(req) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let result = state.model_fetch_service.detect_chat_protocol(
+        &provider_id, &req, &state.provider_connection_service).await?;
+    Ok(Json(ApiResponse::ok(result)))
+}
+
+async fn detect_chat_protocol_anonymous(
+    State(state): State<SystemRouterState>,
+    body: Result<Json<DetectChatProtocolAnonymousRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<DetectChatProtocolResponse>>, AppError> {
+    let Json(req) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let result = state.model_fetch_service.detect_chat_protocol_anonymous(&req).await?;
     Ok(Json(ApiResponse::ok(result)))
 }
 

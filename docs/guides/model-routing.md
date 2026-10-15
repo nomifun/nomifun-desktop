@@ -60,7 +60,7 @@ credentials or the model's complete set of invocation routes.
 New Chat routes under the official OpenAI preset recommend **OpenAI Responses**
 (`openai.responses`, `/v1/responses`). Custom providers and compatible gateways
 can explicitly select it when their server implements Responses. Chat Completions
-support alone does not establish Responses support. **Auto detection** supplies
+support alone does not establish Responses support. Basic endpoint discovery supplies
 configuration suggestions without calling a paid model or replacing saved routes.
 
 For a service implementing `/v1/chat/completions`, choose **OpenAI Chat Completions**
@@ -68,6 +68,21 @@ For a service implementing `/v1/chat/completions`, choose **OpenAI Chat Completi
 tools. Check the [official OpenAI migration guide](https://developers.openai.com/api/docs/guides/migrate-to-responses)
 and the model or gateway documentation. To migrate an existing model, explicitly
 change its invocation protocol and save. Catalog refresh does not migrate saved routes.
+
+Presets now follow each provider's official documentation. Services confirming
+and recommending Responses prefer it; services primarily or only supporting
+Chat Completions retain that protocol. Plans and exact models can differ,
+including Alibaba metered versus Coding Plan and Kimi K3 versus K2.x. Check the
+URL alongside the protocol: some Zhipu Responses models use `/api/v1` rather
+than the Chat `/api/paas/v4` root.
+
+After an exact model ID is entered, the editor offers verified context, output
+and reasoning suggestions with official sources and a review date. Native
+catalog declarations take priority. Suggestions apply to new or still-managed
+fields while preserving manual edits, explicit clears and saved configuration.
+Unknown values remain unset and can be configured manually. Recommended output
+uses a verified synchronous/default limit, not every background, batch or
+theoretical maximum the model may support.
 
 Chat Completions advanced settings expose the output token field: newer official
 models use `max_completion_tokens`, while some compatible servers use `max_tokens`.
@@ -86,6 +101,18 @@ A connection probe checks the address, authentication and endpoint response only
 Loading the model list or observing a reachable endpoint does not verify that a
 particular model can generate an answer or call tools. Run the model health check
 against the saved route.
+
+For an OpenAI Chat route, choose **Detect and select a working protocol** to send
+a small real request with the current model, connection and parameters. This
+verifies visible output and a valid stream terminal through the application's
+actual decoder. It checks the current protocol first, trying the other OpenAI
+interface only on confirmed incompatibility. Authentication, quota, throttling
+and timeout failures do not establish that another protocol works. This action
+may incur small model usage and checks at most two protocols; typing an ID never
+starts a paid request. A verified selection updates the draft and takes effect
+only after saving. Background discovery does not replace a working manual choice.
+If protocol-specific output or thinking options cannot be transferred safely, the
+check preserves the draft and asks you to configure those options explicitly.
 
 ## Add models from a conversation
 

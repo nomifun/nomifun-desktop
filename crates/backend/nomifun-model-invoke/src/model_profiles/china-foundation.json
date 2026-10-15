@@ -1,0 +1,341 @@
+[
+  {
+    "platforms": ["deepseek"],
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://api-docs.deepseek.com/quick_start/pricing/",
+      "https://api-docs.deepseek.com/quick_start/agent_integrations/codex/",
+      "https://api-docs.deepseek.com/api/create-chat-completion/",
+      "https://api-docs.deepseek.com/api/create-response/",
+      "https://api-docs.deepseek.com/guides/responses_api/",
+      "https://api-docs.deepseek.com/guides/thinking_mode/"
+    ],
+    "notes": "当前公开型号为 deepseek-flash（V4.1）与 deepseek-v4-pro；文档明确支持 Responses，精确型号优先选用。旧 v4-flash 别名虽仍接受，但已转发到新 Flash，不作为新目录建议。1M 的精确值取官方 Codex 目录 1048576，384K 输出上限取 API 明示值 393216。默认思考为 high。Responses 无服务端保留状态，previous_response_id、store、include、background、conversation 等不支持但会静默忽略；reasoning 只支持明文 content，不支持 encrypted_content/summary。必须重放完整原生 reasoning/function 项；禁止开启链式轮次。",
+    "models": [
+      {
+        "ids": ["deepseek-flash", "deepseek-v4-pro"],
+        "chat_protocol": "openai.responses",
+        "context_limit": 1048576,
+        "context_limit_kind": "combined",
+        "output_limit": 393216,
+        "reasoning_efforts": ["none", "low", "high", "max"],
+        "provider_params": {"reasoning_effort": "high", "chain_rounds": false, "include": null}
+      }
+    ]
+  },
+  {
+    "platforms": ["mimo"],
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://mimo.mi.com/docs/en-US/api/chat/responses",
+      "https://mimo.mi.com/docs/en-US/quick-start/summary/model",
+      "https://mimo.mi.com/docs/en-US/tokenplan/integration/codex-configuration",
+      "https://example-files.cnbj1.mi-fds.com/example-files/configs/model-catalogs.json"
+    ],
+    "notes": "Responses 明确列出 V2.6 三款与 V2.5 两款。精确上下文取官方 Codex 目录，输出最大值取 Responses 参数范围；V2.5 普通版的 32768 是接口缺省值，不是最大能力。none 关闭思考，其余 effort 均启用相同思考行为，并不代表八档真实强度。多轮应回传原生 reasoning 项。background、previous_response_id、context_management 不支持，可能忽略或报错；文档未声明 include/store 支持，省略 include 并关闭链式轮次。V2.5-pro 与 V2.5 计划于 2026-10-21 10:00 北京时间下线，当前仍可配置，不扩充已退役 V2 型号。",
+    "models": [
+      {
+        "ids": ["mimo-v2.6-pro", "mimo-v2.6-flash", "mimo-v2.6-pro-ultraspeed", "mimo-v2.5-pro", "mimo-v2.5"],
+        "chat_protocol": "openai.responses",
+        "context_limit": 1048576,
+        "context_limit_kind": "combined",
+        "output_limit": 131072,
+        "reasoning_efforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+        "provider_params": {"chain_rounds": false, "include": null}
+      }
+    ]
+  },
+  {
+    "platforms": ["mimo-token-plan-cn", "mimo-token-plan-sgp", "mimo-token-plan-ams"],
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://mimo.mi.com/docs/en-US/tokenplan/Token%20Plan/subscription",
+      "https://mimo.mi.com/docs/en-US/quick-start/faq/token-plan/Usage%26Quota",
+      "https://mimo.mi.com/docs/en-US/tokenplan/integration/codex-configuration",
+      "https://mimo.mi.com/docs/en-US/api/chat/responses",
+      "https://example-files.cnbj1.mi-fds.com/example-files/configs/model-catalogs.json"
+    ],
+    "notes": "官方列出中国、新加坡、欧洲三集群独立 Token Plan 地址与专属凭据，格式与按量 API 一致；Codex 指南确认 Token Plan Responses。套餐用量表只列 V2.6-pro、V2.6-flash、V2.5-pro、V2.5，不把 ultraspeed 自动授予订阅通道。上下文与输出取相同型号官方元数据，地区账号实际可用性仍由原生目录及权限决定。Responses 为完整历史重放，省略未声明的 include，关闭链式轮次；八个 effort 字符串实际只区分关闭与开启思考。V2.5 两型号将于 2026-10-21 下线。",
+    "models": [
+      {
+        "ids": ["mimo-v2.6-pro", "mimo-v2.6-flash", "mimo-v2.5-pro", "mimo-v2.5"],
+        "chat_protocol": "openai.responses",
+        "context_limit": 1048576,
+        "context_limit_kind": "combined",
+        "output_limit": 131072,
+        "reasoning_efforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+        "provider_params": {"chain_rounds": false, "include": null}
+      }
+    ]
+  },
+  {
+    "platforms": ["minimax", "minimax-code"],
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://platform.minimax.cn/docs/api-reference/text-openai-api",
+      "https://platform.minimax.io/docs/api-reference/text-openai-api",
+      "https://platform.minimax.cn/docs/api-reference/responses-create",
+      "https://platform.minimax.io/docs/api-reference/responses-create"
+    ],
+    "notes": "中国与国际文档均公布 Responses，并说明 M3 与 M2.x 的行为，故这些精确型号优先 Responses。中国新文档使用 api.minimax.cn，已有 api.minimaxi.com 连接不自动迁移。M3.1-Flash-Preview 当前只对 M Plan / MiniMax Code 开放，不添加到普通按量目录。M3 Responses 在省略 effort 时关闭思考；M2.x 无法关闭且不提供真实强度调节。未找到这些 Responses 型号明确最大输出数，不从请求示例 4096 或旧 M2 的 128k 外推。store、parallel_tool_calls、truncation 被忽略并固定返回 false/true/disabled；include 与 previous_response_id 未声明支持，使用完整原生输出项重放。",
+    "models": [
+      {
+        "ids": ["MiniMax-M3"],
+        "chat_protocol": "openai.responses",
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "reasoning_efforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        "provider_params": {"chain_rounds": false, "include": null}
+      },
+      {
+        "ids": ["MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5", "MiniMax-M2.5-highspeed", "MiniMax-M2.1", "MiniMax-M2.1-highspeed", "MiniMax-M2"],
+        "chat_protocol": "openai.responses",
+        "context_limit": 204800,
+        "context_limit_kind": "combined",
+        "reasoning_efforts": [],
+        "provider_params": {"chain_rounds": false, "include": null}
+      }
+    ]
+  },
+  {
+    "platforms": ["minimax-coding-plan"],
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://platform.minimax.cn/docs/m-plan/intro",
+      "https://platform.minimax.cn/docs/m-plan/quickstart",
+      "https://platform.minimax.cn/docs/m-plan/codex",
+      "https://platform.minimax.cn/docs/token-plan/codex",
+      "https://platform.minimax.cn/docs/api-reference/responses-create",
+      "https://platform.minimax.io/docs/coding-plan/intro"
+    ],
+    "notes": "旧 Coding/Token Plan 文档已升级到 M Plan；当前套餐模型表与快速接入明确提供 MiniMax-M3.1-Flash-Preview，Codex 使用 Responses。只建议该精确套餐型号，不把普通按量目录全部复制到套餐。真实上下文为 1000000，官方客户端建议 512K 是费用优化配置而非模型容量。effort 默认 max，支持 low/medium/high/xhigh/max，none 会报 400。未找到明确最大输出数，保持未知。include/previous_response_id 未声明支持，关闭链式轮次并省略 include；store 传入会忽略且返回 false。",
+    "models": [
+      {
+        "ids": ["MiniMax-M3.1-Flash-Preview"],
+        "chat_protocol": "openai.responses",
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+        "provider_params": {"reasoning_effort": "max", "chain_rounds": false, "include": null}
+      }
+    ]
+  },
+  {
+    "platforms": ["moonshot-cn", "moonshot-global"],
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://platform.kimi.com/docs/models",
+      "https://platform.kimi.ai/docs/models",
+      "https://platform.kimi.com/docs/api/responses",
+      "https://platform.kimi.ai/docs/api/responses",
+      "https://platform.kimi.ai/docs/api/models-overview",
+      "https://platform.kimi.ai/docs/guide/codex-kimi",
+      "https://platform.kimi.ai/docs/guide/kimi-k2-7-code-quickstart",
+      "https://platform.kimi.ai/docs/api/chat"
+    ],
+    "notes": "CN/global 官方文档均确认 Responses，接口 model 字段当前明确仅支持 kimi-k3；K2.6/K2.7 Code 保留 Chat，不能因同品牌强行切换。K3 上下文精确值取官方 Codex 指南，输出推荐值采用明确默认 131072（接口最大允许 1048576，不能全部预留为输出）。K2.x 上下文仅标 256K，未在所读文档找到整数表达与独立输出上限，暂不填数。K2.x 不支持 reasoning_effort；K2.7 始终保留完整思考。Kimi Responses 的 include 仅支持联网搜索来源，不声明加密推理 include；云端会话字段兼容范围未确认，关闭链式轮次并完整重放 output。kimi-k2.5、moonshot-v1、旧 kimi-k2 系列已下线，不作为新目录建议。",
+    "models": [
+      {
+        "ids": ["kimi-k3"],
+        "chat_protocol": "openai.responses",
+        "context_limit": 1048576,
+        "context_limit_kind": "combined",
+        "output_limit": 131072,
+        "reasoning_efforts": ["low", "high", "max"],
+        "provider_params": {"reasoning_effort": "max", "chain_rounds": false, "include": null}
+      },
+      {
+        "ids": ["kimi-k2.6", "kimi-k2.7-code", "kimi-k2.7-code-highspeed"],
+        "chat_protocol": "openai.chat_text",
+        "reasoning_efforts": [],
+        "provider_params": {"max_tokens_field": "max_completion_tokens"}
+      }
+    ]
+  },
+  {
+    "platforms": ["stepfun"],
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://platform.stepfun.com/docs/zh/api-reference/responses/responses-create",
+      "https://platform.stepfun.com/docs/zh/guides/models/step-5-preview",
+      "https://platform.stepfun.com/docs/zh/guides/models/step-3.7-flash",
+      "https://platform.stepfun.com/docs/zh/guides/models/step-3.5-flash",
+      "https://platform.stepfun.com/docs/zh/guides/developer/reasoning",
+      "https://platform.stepfun.com/docs/zh/guides/developer/integrations/codex",
+      "https://platform.stepfun.com/docs/zh/api-reference/chat/chat-completion-create",
+      "https://platform.stepfun.com/docs/zh/step-plan/overview"
+    ],
+    "notes": "Responses 参考当前明确支持 step-5-preview 与 step-3.7-flash；Codex 集成确认 Step Plan 的 /step_plan/v1/responses 也可用。虽 Codex 示例目录包含 3.5，Responses API 的明确支持列表没有 3.5，因此旧型号保留 Chat。上下文整数取官方 Codex 配置（1000000/256000）；Step 5 最大输出只标 64k，未找到明确整数或单独默认输出，暂不填。Step 默认推荐 medium；2603 只支持 low/high。Responses 未声明 store/include/previous_response_id，关闭链式轮次并省略 include，按工具示例完整重放 reasoning/function 项。语音与图片模型不套用这些 Chat 参数。",
+    "models": [
+      {
+        "ids": ["step-5-preview"],
+        "chat_protocol": "openai.responses",
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "reasoning_efforts": ["low", "medium", "high"],
+        "provider_params": {"reasoning_effort": "medium", "chain_rounds": false, "include": null}
+      },
+      {
+        "ids": ["step-3.7-flash"],
+        "chat_protocol": "openai.responses",
+        "context_limit": 256000,
+        "context_limit_kind": "combined",
+        "reasoning_efforts": ["low", "medium", "high"],
+        "provider_params": {"reasoning_effort": "medium", "chain_rounds": false, "include": null}
+      },
+      {
+        "ids": ["step-3.5-flash"],
+        "chat_protocol": "openai.chat_text",
+        "context_limit": 256000,
+        "context_limit_kind": "combined",
+        "provider_params": {}
+      },
+      {
+        "ids": ["step-3.5-flash-2603"],
+        "chat_protocol": "openai.chat_text",
+        "reasoning_efforts": ["low", "high"],
+        "provider_params": {}
+      }
+    ]
+  },
+  {
+    "platforms": ["stepfun-plan"],
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://platform.stepfun.com/docs/zh/guides/models/step-router",
+      "https://platform.stepfun.com/docs/zh/api-reference/chat/chat-completion-create",
+      "https://platform.stepfun.com/docs/zh/step-plan/integrations/reasoning-api"
+    ],
+    "notes": "官方 Codex 指南确认 /step_plan/v1/responses；API 支持列表明确 step-5-preview 与 step-3.7-flash，3.5 仍保留 Chat，不能只据客户端目录扩大支持范围。上下文整数与默认 medium 取官方配置；输出只有 64k 等缩写，未填未经确认的整数。未声明 store/include/previous_response_id，省略 include 并关闭链式轮次。step-router-v1 仅在 Step Plan 可用，按请求路由到不同引擎；不能把某个引擎容量当成路由器统一容量。250K 是该通道输出上限的缩写，未找到明确整数，保持未知，未确认 Responses。",
+    "models": [
+      {
+        "ids": ["step-5-preview"],
+        "chat_protocol": "openai.responses",
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "reasoning_efforts": ["low", "medium", "high"],
+        "provider_params": {"reasoning_effort": "medium", "chain_rounds": false, "include": null}
+      },
+      {
+        "ids": ["step-3.7-flash"],
+        "chat_protocol": "openai.responses",
+        "context_limit": 256000,
+        "context_limit_kind": "combined",
+        "reasoning_efforts": ["low", "medium", "high"],
+        "provider_params": {"reasoning_effort": "medium", "chain_rounds": false, "include": null}
+      },
+      {
+        "ids": ["step-3.5-flash"],
+        "chat_protocol": "openai.chat_text",
+        "context_limit": 256000,
+        "context_limit_kind": "combined",
+        "provider_params": {}
+      },
+      {
+        "ids": ["step-3.5-flash-2603"],
+        "chat_protocol": "openai.chat_text",
+        "reasoning_efforts": ["low", "high"],
+        "provider_params": {}
+      },
+      {"ids": ["step-router-v1"], "chat_protocol": "openai.chat_text", "provider_params": {}}
+    ]
+  },
+  {
+    "platforms": ["zhipu"],
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+      "https://docs.bigmodel.cn/api-reference/模型-api/对话补全",
+      "https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3",
+      "https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash",
+      "https://docs.bigmodel.cn/cn/guide/models/text/glm-5.2",
+      "https://docs.bigmodel.cn/cn/guide/develop/responses/introduction",
+      "https://docs.bigmodel.cn/api-reference/response/创建-response",
+      "https://docs.bigmodel.cn/cn/coding-plan/tool/codex",
+      "https://docs.bigmodel.cn/cn/coding-plan/latest-model"
+    ],
+    "notes": "GLM-5.3 官方明确支持 Responses，必须使用 /api/v1 而非 Chat 的 /api/paas/v4；官方 Codex 目录还明确列出 glm-5-turbo。当前模型页与套餐切换指南确认 GLM-5.3-Flash，FlashX 仅按量可用。上下文精确 1048576/204800 取官方 Codex 目录；输出 131072 取 Responses schema。GLM5.3 始终思考，默认 max；generic Responses 接口的 none 不能覆盖型号限制。include 未声明，省略；服务端 store 与 previous_response_id 支持但默认不保留，仍以完整原生 reasoning/function 项重放为默认。GLM-5.2 当前文档只确认 Chat 调用，暂不升级协议；其窗口只标 1M，未找到整数，不借用邻近型号容量。",
+    "models": [
+      {
+        "ids": ["glm-5.3"],
+        "chat_protocol": "openai.responses",
+        "base_url_override": "https://open.bigmodel.cn/api/v1",
+        "context_limit": 1048576,
+        "context_limit_kind": "combined",
+        "output_limit": 131072,
+        "reasoning_efforts": ["low", "high", "max"],
+        "provider_params": {"reasoning_effort": "max", "chain_rounds": false, "include": null}
+      },
+      {
+        "ids": ["glm-5.3-flash", "glm-5.3-flashx"],
+        "chat_protocol": "openai.responses",
+        "base_url_override": "https://open.bigmodel.cn/api/v1",
+        "output_limit": 131072,
+        "reasoning_efforts": ["low", "high", "max"],
+        "provider_params": {"reasoning_effort": "max", "chain_rounds": false, "include": null}
+      },
+      {
+        "ids": ["glm-5-turbo"],
+        "chat_protocol": "openai.responses",
+        "base_url_override": "https://open.bigmodel.cn/api/v1",
+        "context_limit": 204800,
+        "context_limit_kind": "combined",
+        "output_limit": 131072,
+        "provider_params": {"chain_rounds": false, "include": null}
+      },
+      {
+        "ids": ["glm-5.2", "glm-5.1", "glm-5", "glm-4.7", "glm-4.7-flash", "glm-4.7-flashx", "glm-4.6"],
+        "chat_protocol": "openai.chat_text",
+        "output_limit": 131072,
+        "provider_params": {}
+      },
+      {
+        "ids": ["glm-4.5-air", "glm-4.5-airx", "glm-4.5-flash", "glm-4-flash-250414", "glm-4-flashx-250414"],
+        "chat_protocol": "openai.chat_text",
+        "provider_params": {}
+      }
+    ]
+  },
+  {
+    "platforms": ["glm-coding-plan"],
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://docs.bigmodel.cn/cn/coding-plan/latest-model",
+      "https://docs.bigmodel.cn/cn/coding-plan/tool/codex",
+      "https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3",
+      "https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash",
+      "https://docs.bigmodel.cn/api-reference/response/创建-response"
+    ],
+    "notes": "GLM Coding Plan 当前全量开放 GLM-5.3 与 GLM-5.3-Flash，不开放 FlashX。Codex 采用独立 Responses 根路径 /api/v1，其他 Chat 客户端仍用 /api/coding/paas/v4，不能把协议改了却保留错误根路径。套餐指南明确默认 max，模型关闭思考请求会映射 low，但标准建议保留型号支持的 low/high/max。上下文与输出按相同精确型号文档补全，账号套餐权限仍由实际服务决定；不套用 Claude 专有 [1m] 型号后缀。",
+    "models": [
+      {
+        "ids": ["glm-5.3"],
+        "chat_protocol": "openai.responses",
+        "base_url_override": "https://open.bigmodel.cn/api/v1",
+        "context_limit": 1048576,
+        "context_limit_kind": "combined",
+        "output_limit": 131072,
+        "reasoning_efforts": ["low", "high", "max"],
+        "provider_params": {"reasoning_effort": "max", "chain_rounds": false, "include": null}
+      },
+      {
+        "ids": ["glm-5.3-flash"],
+        "chat_protocol": "openai.responses",
+        "base_url_override": "https://open.bigmodel.cn/api/v1",
+        "output_limit": 131072,
+        "reasoning_efforts": ["low", "high", "max"],
+        "provider_params": {"reasoning_effort": "max", "chain_rounds": false, "include": null}
+      }
+    ]
+  }
+]

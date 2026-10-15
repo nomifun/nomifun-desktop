@@ -495,9 +495,11 @@ impl ChatModelInput {
                             required.insert(ChatModelFeature::ReasoningSignature);
                         }
                     }
-                    ChatContentPart::ProviderReasoning { .. } => {
+                    ChatContentPart::ProviderReasoning { block } => {
                         required.insert(ChatModelFeature::Reasoning);
-                        required.insert(ChatModelFeature::ReasoningSignature);
+                        if !matches!(block, ChatProviderReasoning::OpenaiResponsesReasoning { .. }) {
+                            required.insert(ChatModelFeature::ReasoningSignature);
+                        }
                     }
                     ChatContentPart::Text { .. } => {}
                 }

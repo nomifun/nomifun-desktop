@@ -28,6 +28,28 @@ pub struct ProviderConnectionService {
 }
 
 impl ProviderConnectionService {
+    /// Resolve an existing named connection only inside the setup probe. The
+    /// write-only credential material never enters its HTTP response.
+    pub(crate) async fn resolve_detection_connection(
+        &self,
+        provider_id: &str,
+        role: &str,
+    ) -> Result<nomifun_model_invoke::ResolvedConnection, AppError> {
+        self.require_provider(provider_id).await?;
+        let row = self.repo.get(provider_id, role).await?.ok_or_else(|| {
+            AppError::BadRequest(format!("connection role {role:?} does not exist"))
+        })?;
+        Ok(nomifun_model_invoke::ResolvedConnection {
+            role: row.role,
+            base_url: row.base_url,
+            auth: AuthMaterial {
+                scheme: AuthScheme::parse(&row.auth_scheme).map_err(|error| AppError::BadRequest(error.message))?,
+                credentials: decrypt_credentials(&row.credentials_encrypted, &self.encryption_key)?,
+            },
+            extra: serde_json::from_str(&row.extra).map_err(|_| AppError::BadRequest("connection extra must be JSON".into()))?,
+        })
+    }
+
     pub fn new(
         repo: Arc<dyn IProviderConnectionRepository>,
         provider_repo: Arc<dyn IProviderRepository>,

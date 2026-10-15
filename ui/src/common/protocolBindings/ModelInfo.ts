@@ -15,10 +15,10 @@ export type ModelInfo = { id: string, name: string | null, tasks?: Array<ModelTa
  */
 tasks_source?: ModelTaskSource, traits?: Array<ModelTrait>,
 /**
- * Input context window the provider's own catalog declared for this model,
- * in tokens. This is the only automatic source for the value a user would
- * otherwise have to type into the chat capability's `context_limit`, so it
- * deliberately reuses that name.
+ * Advisory context in tokens, declared by the native catalog or filled
+ * from an exact official-document profile when the catalog omits it.
+ * Native values take priority. This deliberately reuses the capability's
+ * `context_limit` name and never comes from model-name inference.
  *
  * Absent — never `null` — when the catalog said nothing, so a client can
  * distinguish "the provider did not declare a window" from a declared
@@ -27,7 +27,7 @@ tasks_source?: ModelTaskSource, traits?: Array<ModelTrait>,
  */
 context_limit?: number,
 /**
- * Provider-declared maximum output tokens. Absent when unknown; this is
+ * Provider-declared or exact documented recommended output tokens. Absent when unknown; this is
  * an import suggestion, never permission to replace an existing manual
  * ceiling or an explicit provider-default (`None`) configuration.
  */

@@ -174,7 +174,7 @@ const orderedDescriptors = (
   const preferredIds = [
     currentProtocol.trim(),
     manifest.recommendation?.protocol_id ?? '',
-    manifest.platform === 'new-api' && task === 'chat' ? 'openai.chat_text' : '',
+    (manifest.platform === 'new-api' || manifest.platform === 'custom') && task === 'chat' ? 'openai.responses' : '',
   ].filter(Boolean);
   const ordered: ProtocolDescriptor[] = [];
   for (const protocolId of preferredIds) {

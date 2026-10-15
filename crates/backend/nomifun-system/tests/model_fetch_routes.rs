@@ -303,13 +303,17 @@ async fn fetch_models_minimax_coding_plan_falls_back_to_supported_coding_models(
     assert_eq!(resp.status(), StatusCode::OK);
 
     let json = body_json(resp).await;
+    assert_eq!(json["data"]["catalog_source"], "official_documentation");
     let models = json["data"]["models"].as_array().unwrap();
-    assert!(models.iter().any(|model| model["id"] == "MiniMax-M3"));
-    assert!(
-        models
-            .iter()
-            .any(|model| model["id"] == "MiniMax-M2.7-highspeed")
-    );
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0]["id"], "MiniMax-M3.1-Flash-Preview");
+    assert_eq!(models[0]["tasks"], json!(["chat"]));
+    assert_eq!(models[0]["tasks_source"], "official_documentation");
+    assert_eq!(models[0]["context_limit"], 1_000_000);
+    assert_eq!(models[0]["token_limit_sources"]["context_limit_kind"], "combined");
+    assert!(models[0]["token_limit_sources"]["context_limit"].as_str().unwrap()
+        .starts_with("official_documentation:https://platform.minimax.cn/"));
+    assert!(models[0].get("output_limit").is_none());
 }
 
 #[tokio::test]
@@ -392,14 +396,15 @@ async fn fetch_models_qianfan_coding_plan_falls_back_to_supported_coding_models(
     assert_eq!(resp.status(), StatusCode::OK);
 
     let json = body_json(resp).await;
+    assert_eq!(json["data"]["catalog_source"], "official_documentation");
     let models = json["data"]["models"].as_array().unwrap();
-    assert!(
-        models
-            .iter()
-            .any(|model| model["id"] == "qianfan-code-latest")
-    );
-    assert!(models.iter().any(|model| model["id"] == "kimi-k2.5"));
-    assert!(models.iter().any(|model| model["id"] == "glm-5"));
+    assert_eq!(models.iter().map(|model| model["id"].as_str().unwrap()).collect::<Vec<_>>(),
+        ["qianfan-code-latest", "deepseek-v4-pro", "glm-5.1"]);
+    assert!(models.iter().all(|model| model["tasks_source"] == "official_documentation"));
+    // This billing channel does not publish these limits; same-named upstream
+    // models must not supply undocumented subscription capacities.
+    assert!(models.iter().all(|model| model.get("context_limit").is_none()
+        && model.get("output_limit").is_none() && model.get("token_limit_sources").is_none()));
 }
 
 #[tokio::test]
@@ -522,7 +527,8 @@ async fn fetch_models_openai_compatible_success() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": [
                 {"id": "gpt-4o", "object": "model"},
-                {"id": "gpt-4o-mini", "object": "model"}
+                {"id": "gpt-4o-mini", "object": "model", "context_length":64000, "max_output_tokens":4096},
+                {"id": "future-unknown-model", "object": "model"}
             ]
         })))
         .mount(&mock_server)
@@ -540,10 +546,21 @@ async fn fetch_models_openai_compatible_success() {
 
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
-    assert_eq!(models.len(), 2);
+    assert_eq!(models.len(), 3);
     assert_eq!(models[0]["id"], "gpt-4o");
     assert_eq!(models[1]["id"], "gpt-4o-mini");
-    assert!(models.iter().all(|model| model["tasks_source"] == "inferred"));
+    assert!(models[..2].iter().all(|model| model["tasks_source"] == "official_documentation"));
+    assert_eq!(models[0]["context_limit"], 128_000);
+    assert_eq!(models[0]["output_limit"], 16_384);
+    assert_eq!(models[0]["token_limit_sources"]["context_limit"],
+        "official_documentation:https://developers.openai.com/api/docs/models/gpt-4o");
+    assert_eq!(models[1]["context_limit"], 64000);
+    assert_eq!(models[1]["output_limit"], 4096);
+    assert_eq!(models[1]["token_limit_sources"]["context_limit"], "context_length");
+    assert_eq!(models[1]["token_limit_sources"]["output_limit"], "max_output_tokens");
+    assert_eq!(models[2]["id"], "future-unknown-model");
+    assert_eq!(models[2]["tasks_source"], "inferred");
+    assert!(models[2].get("context_limit").is_none() && models[2].get("output_limit").is_none());
 }
 
 #[tokio::test]

@@ -8,6 +8,7 @@ import { MODEL_TRAIT_ORDER } from '@/common/modelCapabilities';
 import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import type { ModelTaskSource } from '@/common/protocolBindings/ModelTaskSource';
 import type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
+import type { ModelConfigurationDefaults } from '@/common/protocolBindings/ModelConfigurationDefaults';
 import type {
 EndpointRootShape,
 ModelProtocolManifestResponse,
@@ -70,12 +71,20 @@ export interface ModelCapabilityDraft {
   /** Includes an explicit choice to remove a limit and use provider defaults. */
   contextLimitSource?: 'user';
   outputLimitSource?: 'user';
+  providerParamsSource?: 'user';
+  /** Advisory values owned by one exact model; never serialized. */
+  modelDefaults?: {
+    model: string;
+    contextLimit?: number;
+    outputLimit?: number;
+    providerParams: Record<string, unknown>;
+  };
   compactionThresholdPct?: number;
 }
 
 export type ModelCapabilityDraftPatch = Partial<
-  Omit<ModelCapabilityDraft, 'task' | 'routeSource' | 'transportSource'>
->;
+  Omit<ModelCapabilityDraft, 'task' | 'routeSource' | 'transportSource' | 'modelDefaults' | 'providerParamsSource'>
+> & { providerParamsEditedKeys?: readonly string[] };
 
 export interface ModelDefinitionDraft {
   model: string;
@@ -223,7 +232,8 @@ export const changeModelDefinitionId = (
   if (normalizeModelId(model) === normalizeModelId(definition.model)) return { ...definition, model };
   return {
     model,
-    capabilities: definition.capabilities.filter((capability) => capability.routeSource !== 'automatic'),
+    capabilities: definition.capabilities.filter((capability) => capability.routeSource !== 'automatic')
+      .map(removeModelConfigurationDefaults),
   };
 };
 
@@ -397,9 +407,42 @@ const withDeclaredContextKind = (raw: string, kind: CatalogCapabilitySuggestion[
  * Token windows and traits are advisory metadata, never capability switches.
  */
 export const applyCatalogSuggestion = (
-  definition: ModelDefinitionDraft,
+  previousDefinition: ModelDefinitionDraft,
   suggestion: CatalogCapabilitySuggestion
 ): ModelDefinitionDraft => {
+  // Provider-declared catalog facts outrank advisory model defaults, including
+  // catalogs that arrive after the documentation request.
+  const definition = {
+    ...previousDefinition,
+    capabilities: previousDefinition.capabilities.map((capability) => {
+      if (normalizeModelId(previousDefinition.model) !== normalizeModelId(suggestion.model)) {
+        return removeModelConfigurationDefaults(capability);
+      }
+      const previous = capability.modelDefaults;
+      if (!previous || !suggestion.tasks.includes(capability.task)) return capability;
+      const next = { ...capability };
+      const owned = { ...previous, providerParams: { ...previous.providerParams } };
+      if (isValidModelTokenLimit(suggestion.contextLimit) && next.contextLimitSource !== 'user' &&
+        previous.contextLimit !== undefined && next.contextLimit === previous.contextLimit) {
+        next.contextLimit = undefined;
+        delete owned.contextLimit;
+        const parsed = parseProviderParams(next.providerParamsJson);
+        if (parsed.ok && Object.prototype.hasOwnProperty.call(owned.providerParams, '_nomifun_context_limit_kind') &&
+          sameJson(parsed.value._nomifun_context_limit_kind, owned.providerParams._nomifun_context_limit_kind)) {
+          const params = { ...parsed.value }; delete params._nomifun_context_limit_kind;
+          next.providerParamsJson = Object.keys(params).length > 0 ? JSON.stringify(params, null, 2) : '';
+          delete owned.providerParams._nomifun_context_limit_kind;
+        }
+      }
+      if (isValidModelTokenLimit(suggestion.outputLimit) && next.outputLimitSource !== 'user' &&
+        previous.outputLimit !== undefined && next.outputLimit === previous.outputLimit) {
+        next.outputLimit = undefined;
+        delete owned.outputLimit;
+      }
+      next.modelDefaults = owned;
+      return next;
+    }),
+  };
   const metadataTasks = [...new Set(suggestion.tasks)];
   const declaredTasks = catalogTasksAreVerified(suggestion) ? metadataTasks : [];
   const adoptsCatalogRoutes = definition.capabilities.every((capability) =>
@@ -464,7 +507,8 @@ export const applyCatalogSuggestion = (
  */
 export const reconcileCapabilityRecommendations = (
   capabilities: readonly ModelCapabilityDraft[],
-  manifests: ModelProtocolManifestMap
+  manifests: ModelProtocolManifestMap,
+  model?: string,
 ): ModelCapabilityDraft[] =>
   capabilities.map((capability) => {
     const manifest = manifests[capability.task];
@@ -472,6 +516,9 @@ export const reconcileCapabilityRecommendations = (
     // manifest with an explicit null recommendation may withdraw an automatic
     // value; transient transport state must not mutate the user's draft.
     if (!manifest) return capability;
+    if (model !== undefined && manifest.model_defaults && manifest.model_defaults.model.trim() !== model.trim()) {
+      return capability;
+    }
     const recommendation = manifest.recommendation;
     if (capability.transportSource === 'user' || capability.transportSource === 'persisted') {
       return capability;
@@ -495,7 +542,7 @@ export const reconcileCapabilityRecommendations = (
     const base = protocolChanged
       ? resetCapabilityTransport(capability, 'recommendation')
       : capability;
-    return base.protocol === protocol &&
+    const recommended: ModelCapabilityDraft = base.protocol === protocol &&
       base.connectionRole === connectionRole &&
       base.baseUrlOverride === baseUrlOverride &&
       base.transportSource === 'recommendation'
@@ -507,7 +554,91 @@ export const reconcileCapabilityRecommendations = (
           baseUrlOverride,
           transportSource: 'recommendation',
         };
+    const defaults = modelConfigurationDefaultsFor(manifest, model, recommended.protocol);
+    return defaults ? applyModelConfigurationDefaults(recommended, defaults) : recommended;
   });
+
+/** Exact IDs and protocols only: neither aliases nor model-name heuristics resolve defaults. */
+export const modelConfigurationDefaultsFor = (
+  manifest: ModelProtocolManifest | undefined,
+  model: string | undefined,
+  protocol?: string,
+): ModelConfigurationDefaults | undefined => {
+  const defaults = manifest?.model_defaults;
+  return defaults && defaults.model.trim() === model?.trim() &&
+    (protocol === undefined || defaults.protocol_id === protocol) ? defaults : undefined;
+};
+
+const sameJson = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right);
+
+/** Remove only values still owned by an earlier model recommendation. */
+export const removeModelConfigurationDefaults = (capability: ModelCapabilityDraft): ModelCapabilityDraft => {
+  const previous = capability.modelDefaults;
+  if (!previous) return capability;
+  const { modelDefaults: _previousDefaults, ...next } = capability;
+  if (previous.contextLimit !== undefined && next.contextLimitSource !== 'user' && next.contextLimit === previous.contextLimit) {
+    next.contextLimit = undefined;
+  }
+  if (previous.outputLimit !== undefined && next.outputLimitSource !== 'user' && next.outputLimit === previous.outputLimit) {
+    next.outputLimit = undefined;
+  }
+  if (Object.keys(previous.providerParams).length > 0) {
+    const parsed = parseProviderParams(next.providerParamsJson);
+    if (parsed.ok) {
+      const params = { ...parsed.value };
+      for (const [key, value] of Object.entries(previous.providerParams)) {
+        if (sameJson(params[key], value)) delete params[key];
+      }
+      next.providerParamsJson = Object.keys(params).length > 0 ? JSON.stringify(params, null, 2) : '';
+    }
+  }
+  return next;
+};
+
+const applyModelConfigurationDefaults = (
+  capability: ModelCapabilityDraft,
+  defaults: ModelConfigurationDefaults,
+): ModelCapabilityDraft => {
+  if (capability.transportSource === 'user' || capability.transportSource === 'persisted') return capability;
+  const next = { ...removeModelConfigurationDefaults(capability) };
+  const owned: NonNullable<ModelCapabilityDraft['modelDefaults']> = { model: defaults.model, providerParams: {} };
+  if (next.contextLimit === undefined && next.contextLimitSource !== 'user' && isValidModelTokenLimit(defaults.context_limit)) {
+    next.contextLimit = defaults.context_limit;
+    owned.contextLimit = defaults.context_limit;
+  }
+  if (next.outputLimit === undefined && next.outputLimitSource !== 'user' && isValidModelTokenLimit(defaults.output_limit)) {
+    next.outputLimit = defaults.output_limit;
+    owned.outputLimit = defaults.output_limit;
+  }
+  const parsed = parseProviderParams(next.providerParamsJson);
+  if (parsed.ok && next.providerParamsSource !== 'user') {
+    const params = { ...parsed.value };
+    const suggestions = {
+      ...defaults.provider_params,
+      ...(owned.contextLimit !== undefined && defaults.context_limit_kind
+        ? { _nomifun_context_limit_kind: defaults.context_limit_kind } : {}),
+    };
+    for (const [key, value] of Object.entries(suggestions)) {
+      if (!Object.prototype.hasOwnProperty.call(params, key)) {
+        params[key] = value;
+        owned.providerParams[key] = value;
+      }
+    }
+    next.providerParamsJson = Object.keys(params).length > 0 ? JSON.stringify(params, null, 2) : '';
+  }
+  return { ...next, modelDefaults: owned };
+};
+
+export const reasoningEffortsForCapability = (
+  capability: ModelCapabilityDraft,
+  manifest: ModelProtocolManifest | undefined,
+  model: string,
+): readonly ModelReasoningEffort[] => {
+  const defaults = modelConfigurationDefaultsFor(manifest, model, capability.protocol);
+  return defaults?.reasoning_efforts === undefined
+    ? reasoningEffortsForProtocol(capability.protocol)
+    : defaults.reasoning_efforts.filter(isSessionReasoningEffort);
+};
 
 const resetCapabilityTransport = (
   capability: ModelCapabilityDraft,
@@ -545,19 +676,34 @@ const TRANSPORT_DRAFT_FIELDS = new Set<keyof ModelCapabilityDraft>([
 export const patchCapabilityDraft = (
   capability: ModelCapabilityDraft,
   patch: ModelCapabilityDraftPatch
-): ModelCapabilityDraft => ({
+): ModelCapabilityDraft => {
+  const { providerParamsEditedKeys, ...fields } = patch;
+  const paramsEdited = Object.prototype.hasOwnProperty.call(fields, 'providerParamsJson');
+  const previousDefaults = capability.modelDefaults;
+  // Raw JSON edits own the whole object. A structured control owns only its
+  // key, so untouched automatic context metadata can still be retired later.
+  const modelDefaults = previousDefaults && paramsEdited ? {
+    ...previousDefaults,
+    providerParams: providerParamsEditedKeys
+      ? Object.fromEntries(Object.entries(previousDefaults.providerParams).filter(([key]) => !providerParamsEditedKeys.includes(key)))
+      : {},
+  } : previousDefaults;
+  return {
   ...capability,
-  ...patch,
+  ...fields,
+  ...(modelDefaults ? { modelDefaults } : {}),
   task: capability.task,
   routeSource: 'user',
-  ...(Object.prototype.hasOwnProperty.call(patch, 'contextLimit') ? { contextLimitSource: 'user' as const } : {}),
-  ...(Object.prototype.hasOwnProperty.call(patch, 'outputLimit') ? { outputLimitSource: 'user' as const } : {}),
-  ...(Object.keys(patch).some((key) =>
+  ...(Object.prototype.hasOwnProperty.call(fields, 'contextLimit') ? { contextLimitSource: 'user' as const } : {}),
+  ...(Object.prototype.hasOwnProperty.call(fields, 'outputLimit') ? { outputLimitSource: 'user' as const } : {}),
+  ...(paramsEdited ? { providerParamsSource: 'user' as const } : {}),
+  ...(Object.keys(fields).some((key) =>
     TRANSPORT_DRAFT_FIELDS.has(key as keyof ModelCapabilityDraft)
   )
     ? { transportSource: 'user' as const }
     : {}),
-});
+  };
+};
 
 /**
  * Switch protocols as one atomic edit. Transport-owned fields from the old

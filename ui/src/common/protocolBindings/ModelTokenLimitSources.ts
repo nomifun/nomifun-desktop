@@ -2,7 +2,8 @@
 import type { ModelContextLimitKind } from "./ModelContextLimitKind";
 
 /**
- * Field-level origin of advisory token limits from a provider catalog.
- * These are response field paths, not inferred limits or user preferences.
+ * Field-level origin of advisory token limits. Native catalog response paths
+ * or `official_documentation:` source URLs; never model-name inferred limits
+ * or user preferences.
  */
 export type ModelTokenLimitSources = { context_limit?: string, output_limit?: string, context_limit_kind?: ModelContextLimitKind, };

@@ -115,7 +115,7 @@ function mount(modality: ModalityKey = 'chat', failFirstSave = false, limitedTas
   const taskSets = [provider.models[0].capabilities.map(({ task }) => task),
     ...provider.models[0].capabilities.map(({ task }) => [task])];
   for (const tasks of taskSets) {
-    const requestKey = JSON.stringify(['preview', scenarioProviderBaseUrl, tasks]);
+    const requestKey = JSON.stringify(['preview', scenarioProviderBaseUrl, tasks, provider.models[0].model]);
     fallback[unstable_serialize(['model-protocol-manifests', requestKey])] = {
       requestKey,
       manifests: Object.fromEntries(tasks.map((task) => [task, scenarioManifests[task]])),

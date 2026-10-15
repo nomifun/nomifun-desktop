@@ -360,8 +360,9 @@ pub enum ModelContextLimitKind {
     Combined,
 }
 
-/// Field-level origin of advisory token limits from a provider catalog.
-/// These are response field paths, not inferred limits or user preferences.
+/// Field-level origin of advisory token limits. Native catalog response paths
+/// or `official_documentation:` source URLs; never model-name inferred limits
+/// or user preferences.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, ts_rs::TS)]
 #[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(deny_unknown_fields)]
@@ -407,10 +408,10 @@ pub struct ModelInfo {
     pub tasks_source: Option<ModelTaskSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub traits: Vec<ModelTrait>,
-    /// Input context window the provider's own catalog declared for this model,
-    /// in tokens. This is the only automatic source for the value a user would
-    /// otherwise have to type into the chat capability's `context_limit`, so it
-    /// deliberately reuses that name.
+    /// Advisory context in tokens, declared by the native catalog or filled
+    /// from an exact official-document profile when the catalog omits it.
+    /// Native values take priority. This deliberately reuses the capability's
+    /// `context_limit` name and never comes from model-name inference.
     ///
     /// Absent — never `null` — when the catalog said nothing, so a client can
     /// distinguish "the provider did not declare a window" from a declared
@@ -419,7 +420,7 @@ pub struct ModelInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub context_limit: Option<i64>,
-    /// Provider-declared maximum output tokens. Absent when unknown; this is
+    /// Provider-declared or exact documented recommended output tokens. Absent when unknown; this is
     /// an import suggestion, never permission to replace an existing manual
     /// ceiling or an explicit provider-default (`None`) configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]

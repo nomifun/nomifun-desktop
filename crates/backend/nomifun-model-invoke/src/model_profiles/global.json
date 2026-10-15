@@ -1,0 +1,933 @@
+[
+  {
+    "platforms": [
+      "openai"
+    ],
+    "chat_protocol": "openai.responses",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://developers.openai.com/api/docs/models",
+      "https://developers.openai.com/api/docs/guides/latest-model",
+      "https://developers.openai.com/api/docs/guides/reasoning"
+    ],
+    "notes": "官方新版模型优先 Responses；模型页给出 context/output 的精确 token 值。未知模型不继承已知家族上限。128K 输出含推理；保留未文档化的默认 effort。此配置仅用于新建建议，不迁移已保存模型。",
+    "models": [
+      {
+        "ids": [
+          "gpt-6-astra"
+        ],
+        "context_limit": 1050000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "provider_params": {
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-6-astra"
+        ]
+      },
+      {
+        "ids": [
+          "gpt-6.1-sol"
+        ],
+        "context_limit": 1050000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "provider_params": {
+          "reasoning_effort": "medium",
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-6.1-sol"
+        ]
+      },
+      {
+        "ids": [
+          "gpt-6-sol"
+        ],
+        "context_limit": 1050000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "provider_params": {
+          "reasoning_effort": "medium",
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-6-sol"
+        ]
+      },
+      {
+        "ids": [
+          "gpt-6-luna"
+        ],
+        "context_limit": 1050000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "provider_params": {
+          "reasoning_effort": "medium",
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-6-luna"
+        ]
+      },
+      {
+        "ids": [
+          "gpt-5.6",
+          "gpt-5.6-sol"
+        ],
+        "context_limit": 1050000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "provider_params": {
+          "reasoning_effort": "medium",
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-5.6-sol"
+        ]
+      },
+      {
+        "ids": [
+          "gpt-5.6-terra"
+        ],
+        "context_limit": 1050000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "provider_params": {
+          "reasoning_effort": "medium",
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-5.6-terra"
+        ]
+      },
+      {
+        "ids": [
+          "gpt-5.6-luna"
+        ],
+        "context_limit": 1050000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "provider_params": {
+          "reasoning_effort": "medium",
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-5.6-luna"
+        ]
+      },
+      {
+        "ids": [
+          "gpt-5.5"
+        ],
+        "context_limit": 1050000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "provider_params": {
+          "reasoning_effort": "medium",
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-5.5"
+        ]
+      },
+      {
+        "ids": [
+          "gpt-5.4"
+        ],
+        "context_limit": 1050000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "provider_params": {
+          "reasoning_effort": "none",
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-5.4"
+        ]
+      },
+      {
+        "ids": [
+          "gpt-5.4-mini"
+        ],
+        "context_limit": 400000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "provider_params": {
+          "reasoning_effort": "none",
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-5.4-mini"
+        ]
+      },
+      {
+        "ids": [
+          "gpt-5.4-nano"
+        ],
+        "context_limit": 400000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "provider_params": {
+          "reasoning_effort": "none",
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-5.4-nano"
+        ]
+      },
+      {
+        "ids": [
+          "gpt-5.2"
+        ],
+        "context_limit": 400000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "provider_params": {
+          "reasoning_effort": "none",
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-5.2"
+        ]
+      },
+      {
+        "ids": [
+          "gpt-5.1"
+        ],
+        "context_limit": 400000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "none",
+          "low",
+          "medium",
+          "high"
+        ],
+        "provider_params": {
+          "reasoning_effort": "none",
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-5.1"
+        ]
+      },
+      {
+        "ids": [
+          "gpt-5"
+        ],
+        "context_limit": 400000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
+        "provider_params": {
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-5"
+        ]
+      },
+      {
+        "ids": [
+          "gpt-5-mini"
+        ],
+        "context_limit": 400000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "provider_params": {
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-5-mini"
+        ]
+      },
+      {
+        "ids": [
+          "gpt-5-nano"
+        ],
+        "context_limit": 400000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "provider_params": {
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-5-nano"
+        ]
+      },
+      {
+        "ids": [
+          "gpt-4.1"
+        ],
+        "context_limit": 1047576,
+        "context_limit_kind": "combined",
+        "output_limit": 32768,
+        "reasoning_efforts": [],
+        "provider_params": {
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-4.1"
+        ]
+      },
+      {
+        "ids": [
+          "gpt-4.1-mini"
+        ],
+        "context_limit": 1047576,
+        "context_limit_kind": "combined",
+        "output_limit": 32768,
+        "reasoning_efforts": [],
+        "provider_params": {
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-4.1-mini"
+        ]
+      },
+      {
+        "ids": [
+          "gpt-4.1-nano"
+        ],
+        "context_limit": 1047576,
+        "context_limit_kind": "combined",
+        "output_limit": 32768,
+        "reasoning_efforts": [],
+        "provider_params": {
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-4.1-nano"
+        ]
+      },
+      {
+        "ids": [
+          "gpt-4o"
+        ],
+        "context_limit": 128000,
+        "context_limit_kind": "combined",
+        "output_limit": 16384,
+        "reasoning_efforts": [],
+        "provider_params": {
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-4o"
+        ]
+      },
+      {
+        "ids": [
+          "gpt-4o-mini"
+        ],
+        "context_limit": 128000,
+        "context_limit_kind": "combined",
+        "output_limit": 16384,
+        "reasoning_efforts": [],
+        "provider_params": {
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/gpt-4o-mini"
+        ]
+      },
+      {
+        "ids": [
+          "o3"
+        ],
+        "context_limit": 200000,
+        "context_limit_kind": "combined",
+        "output_limit": 100000,
+        "provider_params": {
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/o3"
+        ]
+      },
+      {
+        "ids": [
+          "o4-mini"
+        ],
+        "context_limit": 200000,
+        "context_limit_kind": "combined",
+        "output_limit": 100000,
+        "provider_params": {
+          "chain_rounds": false
+        },
+        "sources": [
+          "https://developers.openai.com/api/docs/models/o4-mini"
+        ]
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "anthropic"
+    ],
+    "chat_protocol": "anthropic.messages",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://platform.claude.com/docs/en/models/overview",
+      "https://platform.claude.com/docs/en/build-with-claude/context-windows",
+      "https://platform.claude.com/docs/en/build-with-claude/effort"
+    ],
+    "notes": "原生 Messages；当前 Claude 同步 API 的 1M/128K 分别按官方十进制 token 表述。原生 Models API 返回的精确上限优先；不启用批处理专用 300K。adaptive 和 output_config.effort 使用原生配置，不能当 OpenAI reasoning_effort。",
+    "models": [
+      {
+        "ids": [
+          "claude-fable-5-1"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "provider_params": {
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "high"
+          }
+        }
+      },
+      {
+        "ids": [
+          "claude-opus-5-5"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "provider_params": {
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "medium"
+          }
+        }
+      },
+      {
+        "ids": [
+          "claude-sonnet-5-5"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "provider_params": {
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "high"
+          }
+        }
+      },
+      {
+        "ids": [
+          "claude-haiku-5-5"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "provider_params": {
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "medium"
+          }
+        }
+      },
+      {
+        "ids": [
+          "claude-opus-5"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "provider_params": {
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "high"
+          }
+        }
+      },
+      {
+        "ids": [
+          "claude-sonnet-5"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "provider_params": {
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "high"
+          }
+        }
+      },
+      {
+        "ids": [
+          "claude-opus-4-8"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "provider_params": {
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "high"
+          }
+        }
+      },
+      {
+        "ids": [
+          "claude-opus-4-7"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "provider_params": {
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "high"
+          }
+        }
+      },
+      {
+        "ids": [
+          "claude-opus-4-6"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high",
+          "max"
+        ],
+        "provider_params": {
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "high"
+          }
+        }
+      },
+      {
+        "ids": [
+          "claude-sonnet-4-6"
+        ],
+        "context_limit": 1000000,
+        "context_limit_kind": "combined",
+        "output_limit": 128000,
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high",
+          "max"
+        ],
+        "provider_params": {
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "high"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "gemini"
+    ],
+    "chat_protocol": "gemini.generate_text",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://ai.google.dev/gemini-api/docs/models",
+      "https://ai.google.dev/gemini-api/docs/generate-content/thinking",
+      "https://ai.google.dev/gemini-api/docs/generate-content/latest-model"
+    ],
+    "notes": "使用已实现的原生 GenerateContent；Gemini4 为共享上下文、同步上限65536，其他卡片明确给出独立输入上限。Gemini2.5保留动态/预算式思考，不推荐3/4专属 thinkingLevel。Interactions/后台长输出不由本同步协议假装支持。",
+    "models": [
+      {
+        "ids": [
+          "gemini-4-argon"
+        ],
+        "context_limit": 1048576,
+        "context_limit_kind": "combined",
+        "output_limit": 65536,
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "provider_params": {
+          "reasoning_effort": "medium"
+        },
+        "sources": [
+          "https://ai.google.dev/gemini-api/docs/models/gemini-4-argon"
+        ]
+      },
+      {
+        "ids": [
+          "gemini-3.8-flash"
+        ],
+        "context_limit": 1048576,
+        "context_limit_kind": "input_only",
+        "output_limit": 65536,
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "provider_params": {
+          "reasoning_effort": "medium"
+        },
+        "sources": [
+          "https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash"
+        ]
+      },
+      {
+        "ids": [
+          "gemini-3.6-flash"
+        ],
+        "context_limit": 1048576,
+        "context_limit_kind": "input_only",
+        "output_limit": 65536,
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
+        "provider_params": {
+          "reasoning_effort": "medium"
+        },
+        "sources": [
+          "https://ai.google.dev/gemini-api/docs/models/gemini-3.6-flash"
+        ]
+      },
+      {
+        "ids": [
+          "gemini-3.5-flash-lite"
+        ],
+        "context_limit": 1048576,
+        "context_limit_kind": "input_only",
+        "output_limit": 65536,
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
+        "provider_params": {
+          "reasoning_effort": "minimal"
+        },
+        "sources": [
+          "https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite"
+        ]
+      },
+      {
+        "ids": [
+          "gemini-3.1-flash-lite"
+        ],
+        "context_limit": 1048576,
+        "context_limit_kind": "input_only",
+        "output_limit": 65536,
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
+        "provider_params": {
+          "reasoning_effort": "minimal"
+        },
+        "sources": [
+          "https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite"
+        ]
+      },
+      {
+        "ids": [
+          "gemini-3.1-pro-preview"
+        ],
+        "context_limit": 1048576,
+        "context_limit_kind": "input_only",
+        "output_limit": 65536,
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "provider_params": {
+          "reasoning_effort": "high"
+        },
+        "sources": [
+          "https://ai.google.dev/gemini-api/docs/models/gemini-3.1-pro-preview"
+        ]
+      },
+      {
+        "ids": [
+          "gemini-3-flash-preview"
+        ],
+        "context_limit": 1048576,
+        "context_limit_kind": "input_only",
+        "output_limit": 65536,
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
+        "provider_params": {
+          "reasoning_effort": "high"
+        },
+        "sources": [
+          "https://ai.google.dev/gemini-api/docs/models/gemini-3-flash-preview"
+        ]
+      },
+      {
+        "ids": [
+          "gemini-2.5-pro"
+        ],
+        "context_limit": 1048576,
+        "context_limit_kind": "input_only",
+        "output_limit": 65536,
+        "reasoning_efforts": [],
+        "provider_params": {},
+        "sources": [
+          "https://ai.google.dev/gemini-api/docs/models/gemini-2.5-pro"
+        ]
+      },
+      {
+        "ids": [
+          "gemini-2.5-flash"
+        ],
+        "context_limit": 1048576,
+        "context_limit_kind": "input_only",
+        "output_limit": 65536,
+        "reasoning_efforts": [],
+        "provider_params": {},
+        "sources": [
+          "https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash"
+        ]
+      },
+      {
+        "ids": [
+          "gemini-2.5-flash-lite"
+        ],
+        "context_limit": 1048576,
+        "context_limit_kind": "input_only",
+        "output_limit": 65536,
+        "reasoning_efforts": [],
+        "provider_params": {},
+        "sources": [
+          "https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-lite"
+        ]
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "bedrock"
+    ],
+    "chat_protocol": "bedrock.anthropic_messages",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-claude.html",
+      "https://platform.claude.com/docs/en/build-with-claude/claude-in-amazon-bedrock"
+    ],
+    "notes": "当前仅实现旧 Bedrock Runtime InvokeModel/InvokeModelWithResponseStream 的 Anthropic Messages SDK 路由，实际可用模型和区域授权以该原生目录为准。Opus 4.7 及更新 Claude（含 Fable 5.1、Opus/Sonnet/Haiku 5.5）使用独立 bedrock-mantle.{region}.api.aws/anthropic/v1/messages、标准 SSE 和不同签名目标；本程序尚未实现该 Mantle transport，不能把这些新模型的首方配置作为旧 SDK 的可执行建议。也不按 us/eu/global 包装名复制限额或把 Converse/OpenAI API 当作已实现 serializer。",
+    "models": []
+  },
+  {
+    "platforms": [
+      "gemini-vertex-ai",
+      "vertex-ai",
+      "vertex"
+    ],
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://docs.cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude",
+      "https://platform.claude.com/docs/en/build-with-claude/claude-on-vertex-ai"
+    ],
+    "notes": "官方 Vertex/Google Cloud 需要项目及区域目标；当前 Desktop 通用配置缺少完整目标合同，继续不自动推荐不可执行 Chat 路由。不能因同名Claude复制另一个平台能力。",
+    "models": []
+  },
+  {
+    "platforms": [
+      "custom",
+      "new-api",
+      "nomifun-model-gateway"
+    ],
+    "chat_protocol": "openai.responses",
+    "checked_at": "2026-10-15",
+    "sources": [
+      "https://developers.openai.com/api/docs/guides/migrate-to-responses"
+    ],
+    "notes": "用户指定 OpenAI 兼容优先 Responses；自定义地址没有官方供应商目录可核验，协议探测优先 Responses，确认后保存；未确认模型上限和推理档位留空。NomiFun网关仍使用自身声明的精确模型协议，不重写其目录。",
+    "models": []
+  }
+]

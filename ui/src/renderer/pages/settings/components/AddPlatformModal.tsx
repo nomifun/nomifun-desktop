@@ -95,6 +95,7 @@ const AddPlatformModal = ModalHOC<{
   const [baseUrlDirty, setBaseUrlDirty] = useState(false);
   const [authSchemeDirty, setAuthSchemeDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [protocolDetecting, setProtocolDetecting] = useState(false);
   const [focusedCallConfigTask, setFocusedCallConfigTask] = useState<ModelTask>();
   const [compatibilityMode, setCompatibilityMode] =
     useState<ProviderCompatibilityMode>('auto');
@@ -121,6 +122,7 @@ const AddPlatformModal = ModalHOC<{
     preset,
     tasks,
     bootstrapTask: 'chat',
+    modelHint: definition.model,
   });
   const providerManifest =
     manifestState.loadingTasks.length > 0
@@ -404,6 +406,7 @@ const AddPlatformModal = ModalHOC<{
   };
 
   const submit = async () => {
+    if (protocolDetecting) return;
     if (autoConfiguration.isLoading) {
       message.warning(
         t('settings.providerAutoConfiguration.detecting', {
@@ -527,7 +530,7 @@ const AddPlatformModal = ModalHOC<{
       onOk={() => void submit()}
       confirmLoading={saving}
       okButtonProps={{
-        disabled: !validation.valid || autoConfiguration.isLoading,
+        disabled: !validation.valid || autoConfiguration.isLoading || protocolDetecting,
       }}
       okText={t('common.confirm')}
       cancelText={t('common.cancel')}
@@ -720,6 +723,12 @@ const AddPlatformModal = ModalHOC<{
           providerBaseUrl={baseUrl}
           providerAuthScheme={authScheme}
           providerLabel={providerName || selectedPlatform?.name || preset || ''}
+          protocolDetection={modalProps.visible ? {
+            platform: runtimePlatform, baseUrl, authScheme,
+            ...(credentialsResult.ok && credentialsResult.credentials !== undefined ? { credentials: credentialsResult.credentials } : {}),
+            connections: pendingConnections,
+          } : undefined}
+          onProtocolDetectionPendingChange={setProtocolDetecting}
           manifests={manifestState.manifests}
           manifestLoadingTasks={manifestState.loadingTasks}
           manifestErrorTasks={manifestState.errorTasks}

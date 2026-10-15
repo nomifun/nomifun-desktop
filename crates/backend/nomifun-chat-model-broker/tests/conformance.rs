@@ -1448,6 +1448,66 @@ async fn anthropic_typed_reasoning_round_trips_actual_broker_route_and_rejects_c
     }
 }
 
+#[tokio::test]
+async fn raw_responses_reasoning_round_trips_exactly_and_is_bound_to_the_producing_route() {
+    use nomifun_chat_model_broker::ChatProviderReasoning;
+    let producing = route(ChatProtocol::OpenaiResponses, "raw-responses-producer", 1);
+    let raw = serde_json::json!({"id":"rs_native", "type":"reasoning", "status":"completed",
+        "content":[{"type":"reasoning_text","text":"actual native reasoning"}],
+        "provider_extension":{"mode":"preserve-exactly"}});
+    let frames = [
+        ("response.created", serde_json::json!({"type":"response.created","response":{"id":"resp_native","status":"in_progress"}})),
+        ("response.output_item.added", serde_json::json!({"type":"response.output_item.added","output_index":0,
+            "item":{"id":"rs_native","type":"reasoning","content":[]}})),
+        ("response.reasoning_text.delta", serde_json::json!({"type":"response.reasoning_text.delta","output_index":0,
+            "item_id":"rs_native","content_index":0,"delta":"actual native reasoning"})),
+        ("response.reasoning_text.done", serde_json::json!({"type":"response.reasoning_text.done","output_index":0,
+            "item_id":"rs_native","content_index":0,"text":"actual native reasoning"})),
+        ("response.output_item.done", serde_json::json!({"type":"response.output_item.done","output_index":0,"item":raw})),
+        ("response.completed", serde_json::json!({"type":"response.completed","response":{
+            "id":"resp_native","status":"completed","output":[raw]}})),
+    ];
+    let transport = ScriptedTransport::new([TransportScript::Frames(
+        frames.into_iter().map(|(event, data)| frame(event, data)).collect(),
+    )]);
+    let transports = transport_map([(ChatProtocol::OpenaiResponses, provider_transport(&transport))]);
+    let owner = broker(StaticCausalityGate::allow(),
+        ResolvedChatRouteSet {primary:producing.clone(),failovers:vec![]},
+        Arc::new(StaticCredentialStore {mismatch:false}), &transports,
+        BrokerRetryPolicy {max_total_attempts:1,max_attempts_per_route:1});
+    let events = owner.open_stream(basic_request(&producing)).await.unwrap()
+        .map(|event| event.unwrap().event).collect::<Vec<_>>().await;
+    let block = events.into_iter().find_map(|event| match event {
+        ChatModelEvent::ProviderReasoningBlock {block} => Some(block), _ => None,
+    }).expect("typed native reasoning block");
+    assert_eq!(block, ChatProviderReasoning::OpenaiResponsesReasoning {
+        item:raw.clone(),route_digest:Some(nomifun_agent_contracts::digest_payload(&producing).unwrap()),
+    });
+    let block: ChatProviderReasoning = serde_json::from_value(serde_json::to_value(block).unwrap()).unwrap();
+    let mut continuation = basic_request(&producing);
+    continuation.input.messages.push(ChatMessage {role:ChatRole::Assistant,provider_round_id:None,
+        content:vec![ChatContentPart::ProviderReasoning {block}]});
+    let adapter = OpenAiResponsesAdapter::new(ScriptedTransport::new([]));
+    let lease = CredentialLease::new(producing.credential_ref.clone(), CredentialTarget::for_route(&producing), "fixture-handle");
+    let body = adapter.encode_request(&continuation, &producing, &lease).unwrap().body;
+    assert_eq!(body["input"][1], raw);
+    assert!(!body.to_string().contains("route_digest"));
+    assert!(body["input"][1].get("encrypted_content").is_none());
+    assert!(body["input"][1].get("summary").is_none());
+    for protocol in [ChatProtocol::OpenaiChat, ChatProtocol::Anthropic, ChatProtocol::OpenaiResponses] {
+        let changed = route(protocol,"different-producing-route",2);
+        let adapter: Box<dyn ChatProtocolAdapter> = match protocol {
+            ChatProtocol::OpenaiChat => Box::new(OpenAiChatAdapter::new(ScriptedTransport::new([]))),
+            ChatProtocol::Anthropic => Box::new(AnthropicAdapter::new(ScriptedTransport::new([]))),
+            _ => Box::new(OpenAiResponsesAdapter::new(ScriptedTransport::new([]))),
+        };
+        let lease = CredentialLease::new(changed.credential_ref.clone(), CredentialTarget::for_route(&changed), "fixture-handle");
+        let error = adapter.encode_request(&continuation, &changed, &lease).unwrap_err();
+        assert_eq!(error.code, ChatModelErrorCode::UnsupportedFeature);
+        assert_eq!(error.retry, ChatRetryDirective::Never);
+    }
+}
+
 #[test]
 fn gemini_empty_text_signature_frame_is_not_dropped() {
     let adapter = GeminiAdapter::new(ScriptedTransport::new([]));

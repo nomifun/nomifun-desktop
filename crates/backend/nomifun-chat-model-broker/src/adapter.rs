@@ -980,6 +980,8 @@ fn anthropic_content(content: &[ChatContentPart]) -> Vec<Value> {
                     json!({"type":"thinking", "thinking":text, "signature":signature}),
                 crate::ChatProviderReasoning::AnthropicRedactedThinking { data, .. } =>
                     json!({"type":"redacted_thinking", "data":data}),
+                // Exact route validation rejects this before transport.
+                crate::ChatProviderReasoning::OpenaiResponsesReasoning { .. } => Value::Null,
             },
         })
         .collect()
@@ -1143,7 +1145,12 @@ fn responses_items(messages: &[ChatMessage]) -> Vec<Value> {
     messages
         .iter()
         .flat_map(|message| {
-            message.content.iter().map(move |part| match part {
+            let exact_null_reasoning = message.content.iter().any(|part| matches!(part,
+                ChatContentPart::ProviderReasoning {block:crate::ChatProviderReasoning::OpenaiResponsesReasoning {item,..}}
+                    if item.get("content").is_some_and(Value::is_null)));
+            message.content.iter().filter(move |part| !exact_null_reasoning || !matches!(part,
+                ChatContentPart::Reasoning {signature:None,encrypted_content:None,..}))
+            .map(move |part| match part {
                 ChatContentPart::Text { text } => json!({
                     "type": "message",
                     "role": match message.role {
@@ -1215,7 +1222,10 @@ fn responses_items(messages: &[ChatMessage]) -> Vec<Value> {
                 }
                 // AdapterCore rejects typed foreign reasoning before using
                 // this body. No Anthropic signature -> encrypted_content cast.
-                ChatContentPart::ProviderReasoning { .. } => Value::Null,
+                ChatContentPart::ProviderReasoning { block } => match block {
+                    crate::ChatProviderReasoning::OpenaiResponsesReasoning { item, .. } => item.clone(),
+                    _ => Value::Null,
+                },
             })
         })
         .collect()
@@ -2289,6 +2299,22 @@ fn extract_openai_raw_reasoning(delta: &Map<String, Value>) -> Option<String> {
 #[cfg(test)]
 mod private_chat_replay_tests {
     use super::*;
+
+    #[test]
+    fn stepfun_nullable_native_reasoning_replay_does_not_reconstruct_its_streamed_text() {
+        let item = json!({"id":"rs_step", "type":"reasoning", "content":null,"summary":[],"encrypted_content":null,"status":null});
+        let message = ChatMessage {role:ChatRole::Assistant,provider_round_id:None,content:vec![
+            ChatContentPart::Reasoning {text:"ACTUAL_PRIVATE_STREAM_TEXT".into(),signature:None,encrypted_content:None},
+            ChatContentPart::ProviderReasoning {block:crate::ChatProviderReasoning::OpenaiResponsesReasoning {
+                item:item.clone(),route_digest:None}},
+            ChatContentPart::Text {text:"Visible answer".into()},
+        ]};
+        let encoded = responses_items(&[message]);
+        assert_eq!(encoded.len(),2);
+        assert_eq!(encoded[0],item);
+        assert_eq!(encoded[1]["content"][0]["text"],"Visible answer");
+        assert!(!serde_json::to_string(&encoded).unwrap().contains("ACTUAL_PRIVATE_STREAM_TEXT"));
+    }
 
     #[test]
     fn chat_tool_history_uses_only_wire_fields_and_defers_media_until_the_batch_finishes() {

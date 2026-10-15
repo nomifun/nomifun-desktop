@@ -102,7 +102,12 @@ impl ResponsesDecoder {
         if !native {
             return None;
         }
-        let kind = if matches!(named.as_str(), "message" | "json") {
+        if named == "done" && self.native == Some(true) {
+            return Some(if self.terminal { Ok(Vec::new()) } else {
+                Err(invalid("Responses sentinel cannot replace a terminal response"))
+            });
+        }
+        let kind = if matches!(named.as_str(), "" | "message" | "json") {
             declared.unwrap_or(&named)
         } else {
             if declared.is_some_and(|kind| kind != named) {
@@ -182,7 +187,9 @@ impl ResponsesDecoder {
                     events.extend(self.decode_native(event, &data)?);
                 }
             } else if kind == "reasoning" {
-                for (summary_index, part) in array(item, "summary")?.iter().enumerate() {
+                let empty = Vec::new();
+                let summary = if item.get("summary").is_none() { &empty } else { array(item, "summary")? };
+                for (summary_index, part) in summary.iter().enumerate() {
                     if identity(part, "type")? != "summary_text" {
                         return Err(invalid("Unsupported complete Responses reasoning part"));
                     }
@@ -256,6 +263,50 @@ impl ResponsesDecoder {
         if self.response_id.is_none() {
             return Err(invalid("Responses event before creation"));
         }
+        if data.get("response_id").is_some()
+            && data.get("response_id").and_then(Value::as_str) != self.response_id.as_deref()
+        {
+            return Err(invalid("Responses response_id changed"));
+        }
+        let mut normalized = data.clone();
+        if matches!(kind, "response.content_part.added" | "response.content_part.done" | "response.content_part.delta")
+            && normalized.get("item_id").is_none()
+        {
+            if normalized.get("response_id").and_then(Value::as_str) != self.response_id.as_deref() {
+                return Err(invalid("Responses content event omitted item and response identity"));
+            }
+            let item = self.items.get(index(data, "output_index")?)
+                .ok_or_else(|| invalid("Unknown Responses content item"))?;
+            normalized["item_id"] = Value::String(item.id.clone());
+        }
+        let kind = if kind == "response.content_part.delta" {
+            let item = self.items.get(index(data, "output_index")?)
+                .ok_or_else(|| invalid("Unknown Responses content item"))?;
+            let content_index = index(data, "content_index")?;
+            let part_kind = item.added_parts.iter().find(|(_, index)| *index == content_index)
+                .map(|(kind, _)| kind.as_str());
+            match part_kind {
+                Some("output_text") => "response.output_text.delta",
+                Some("refusal") => "response.refusal.delta",
+                Some("reasoning_text") if item.kind == "reasoning" => "response.reasoning_text.delta",
+                _ => return Err(invalid("Responses content delta has no announced text part")),
+            }
+        } else if kind == "response.done" {
+            let status = string(field(data, "response")?, "status")?;
+            let terminal = match status {
+                "completed" => "response.completed",
+                "incomplete" => "response.incomplete",
+                _ => return Err(invalid("Responses response.done is not a supported terminal")),
+            };
+            if normalized["response"].get("output").is_none() {
+                let output = self.items.iter().map(|item| item.snapshot.clone()
+                    .ok_or_else(|| invalid("Responses terminal omitted an unfinished item")))
+                    .collect::<Result<Vec<_>, _>>()?;
+                normalized["response"]["output"] = Value::Array(output);
+            }
+            terminal
+        } else { kind };
+        let data = &normalized;
         match kind {
             "response.in_progress" | "response.queued" => {
                 self.check_response(field(data, "response")?)?;
@@ -294,28 +345,39 @@ impl ResponsesDecoder {
             | "response.refusal.delta"
             | "response.refusal.done"
             | "response.reasoning_summary_text.delta"
-            | "response.reasoning_summary_text.done" => self.text_event(kind, data),
+            | "response.reasoning_summary_text.done"
+            | "response.reasoning_text.delta"
+            | "response.reasoning_text.done" => self.text_event(kind, data),
             "response.content_part.added"
             | "response.content_part.done"
+            | "response.reasoning_part.added"
+            | "response.reasoning_part.done"
             | "response.reasoning_summary_part.added"
             | "response.reasoning_summary_part.done" => {
-                let reasoning = kind.starts_with("response.reasoning_summary");
+                let summary = kind.starts_with("response.reasoning_summary");
                 let item = self.open_item(data)?;
+                let raw_reasoning = !summary && item.kind == "reasoning";
                 let index = index(
                     data,
-                    if reasoning {
+                    if summary {
                         "summary_index"
                     } else {
                         "content_index"
                     },
                 )?;
                 if index >= MAX_PARTS
-                    || item.kind != if reasoning { "reasoning" } else { "message" }
+                    || item.kind != if summary || raw_reasoning { "reasoning" } else { "message" }
+                    || (kind.starts_with("response.reasoning_part") && !raw_reasoning)
                 {
                     return Err(invalid("Invalid Responses content part"));
                 }
                 let part = field(data, "part")?;
-                let (part_kind, text) = part_text(part, reasoning)?;
+                let (part_kind, text) = if raw_reasoning {
+                    if string(part,"type")? != "reasoning_text" {
+                        return Err(invalid("Invalid raw Responses reasoning part"));
+                    }
+                    ("reasoning_text",string(part,"text")?)
+                } else { part_text(part, summary)? };
                 let key = (part_kind.to_owned(), index);
                 if kind.ends_with(".done") {
                     if !item.closed_parts.insert(key.clone())
@@ -396,7 +458,9 @@ impl ResponsesDecoder {
             if string(value, "role")? != "assistant" || !array(value, "content")?.is_empty() {
                 return Err(invalid("Invalid initial Responses assistant message"));
             }
-        } else if item.kind == "reasoning" && !array(value, "summary")?.is_empty() {
+        } else if item.kind == "reasoning" && value.get("summary").is_some_and(|summary| {
+            !summary.as_array().is_some_and(Vec::is_empty)
+        }) {
             return Err(invalid("Invalid initial Responses reasoning summary"));
         }
         self.items.push(item);
@@ -430,9 +494,12 @@ impl ResponsesDecoder {
         kind: &str,
         data: &Value,
     ) -> Result<Vec<ChatModelEvent>, ChatModelError> {
-        let reasoning = kind.starts_with("response.reasoning_summary_text");
+        let raw_reasoning = kind.starts_with("response.reasoning_text");
+        let reasoning = raw_reasoning || kind.starts_with("response.reasoning_summary_text");
         let refusal = kind.starts_with("response.refusal");
-        let part_kind = if reasoning {
+        let part_kind = if raw_reasoning {
+            "reasoning_text"
+        } else if reasoning {
             "summary_text"
         } else if refusal {
             "refusal"
@@ -445,7 +512,7 @@ impl ResponsesDecoder {
         }
         let part_index = index(
             data,
-            if reasoning {
+            if reasoning && !raw_reasoning {
                 "summary_index"
             } else {
                 "content_index"
@@ -555,7 +622,10 @@ impl ResponsesDecoder {
                         _ => return Err(invalid("Invalid reasoning item status")),
                     }
                 }
-                let parts = array(value, if reasoning { "summary" } else { "content" })?;
+                let empty = Vec::new();
+                let parts = if reasoning && value.get("summary").is_none() {
+                    &empty
+                } else { array(value, if reasoning { "summary" } else { "content" })? };
                 if parts.len() > MAX_PARTS {
                     return Err(invalid("Responses content count limit exceeded"));
                 }
@@ -579,6 +649,41 @@ impl ResponsesDecoder {
                     expected.insert(key, text.to_owned());
                     summary.push(text);
                 }
+                let null_raw = reasoning && value.get("content").is_some_and(Value::is_null)
+                    && value.get("encrypted_content").is_none_or(Value::is_null);
+                let raw = if reasoning { value.get("content").filter(|value| !value.is_null()) } else { None };
+                if let Some(raw) = raw {
+                    let raw = raw.as_array().ok_or_else(|| invalid("Invalid raw Responses reasoning content"))?;
+                    if raw.len() > MAX_PARTS { return Err(invalid("Raw reasoning part count limit exceeded")); }
+                    for (index, part) in raw.iter().enumerate() {
+                        if string(part, "type")? != "reasoning_text" {
+                            return Err(invalid("Unsupported raw Responses reasoning part"));
+                        }
+                        let text = string(part, "text")?;
+                        let key = ("reasoning_text".to_owned(), index);
+                        if item.parts.get(&key).is_some_and(|streamed| streamed != text) {
+                            return Err(invalid("Completed raw reasoning contradicts its deltas"));
+                        }
+                        expected.insert(key, text.to_owned());
+                    }
+                }
+                if null_raw {
+                    // StepFun closes reasoning with content:null even after
+                    // streaming actual reasoning_text parts. Corroborate the
+                    // stream locally; never insert that text into its snapshot.
+                    for (key,text) in &item.parts {
+                        if key.0 == "reasoning_text" { expected.insert(key.clone(),text.clone()); }
+                    }
+                    for key in item.added_parts.iter().chain(&item.closed_parts) {
+                        if key.0 == "reasoning_text" { expected.entry(key.clone()).or_default(); }
+                    }
+                    let incomplete = matches!(value.get("status").and_then(Value::as_str),Some("incomplete" | "in_progress"));
+                    for key in expected.keys() {
+                        if !incomplete && key.0 == "reasoning_text" && !item.finished_parts.contains(key) && !item.closed_parts.contains(key) {
+                            return Err(invalid("Null reasoning snapshot closed an unfinished text part"));
+                        }
+                    }
+                }
                 if item
                     .parts
                     .keys()
@@ -589,14 +694,36 @@ impl ResponsesDecoder {
                     return Err(invalid("Completed item omitted streamed content"));
                 }
                 if reasoning {
-                    let encrypted_content = optional_text(value, "encrypted_content")?;
-                    self.last_frame_semantic_progress |= encrypted_content.is_some();
-                    let text = summary.join("\n\n");
-                    if !text.is_empty() || encrypted_content.is_some() {
-                        events.push(ChatModelEvent::ReasoningBlock {
-                            text,
-                            encrypted_content,
-                        });
+                    if null_raw || raw.is_some_and(|content| content.as_array().is_some_and(|parts| !parts.is_empty())) {
+                        // Incomplete reasoning is observed but cannot become
+                        // replayable continuation. The terminal retains the
+                        // normal output-limit/refusal classification.
+                        if matches!(value.get("status").and_then(Value::as_str), Some("incomplete" | "in_progress")) {
+                            self.last_frame_semantic_progress = true;
+                        } else {
+                        if null_raw {
+                            let mut text = item.parts.iter().filter(|((kind,_),_)| kind == "reasoning_text")
+                                .map(|(_,text)|text.as_str()).collect::<Vec<_>>().join("\n\n");
+                            if text.is_empty() { text = summary.join("\n\n"); }
+                            if !text.is_empty() { events.push(ChatModelEvent::ReasoningDelta {text}); }
+                        }
+                        let block = crate::ChatProviderReasoning::OpenaiResponsesReasoning {
+                            item:value.clone(), route_digest:None,
+                        };
+                        block.validate().map_err(invalid)?;
+                        self.last_frame_semantic_progress = true;
+                        events.push(ChatModelEvent::ProviderReasoningBlock { block });
+                        }
+                    } else {
+                        let encrypted_content = optional_text(value, "encrypted_content")?;
+                        self.last_frame_semantic_progress |= encrypted_content.is_some();
+                        let text = summary.join("\n\n");
+                        if !text.is_empty() || encrypted_content.is_some() {
+                            events.push(ChatModelEvent::ReasoningBlock {
+                                text,
+                                encrypted_content,
+                            });
+                        }
                     }
                 }
             }
@@ -748,6 +875,156 @@ mod tests {
 
     fn native(decoder: &mut ResponsesDecoder, kind: &str, data: Value) -> Result<Vec<ChatModelEvent>, ChatModelError> {
         decoder.decode(&ProviderWireFrame {event:kind.into(),data,diagnostic:None}).unwrap()
+    }
+
+    fn stepfun_frames(reasoning_part: &str) -> Vec<Value> {
+        let reasoning = serde_json::json!({"id":"reasoning", "type":"reasoning", "summary":[],
+            "content":null, "encrypted_content":null,"status":null});
+        let message = serde_json::json!({"id":"message", "type":"message", "role":"assistant", "status":"completed",
+            "content":[{"type":"output_text","text":"OK","annotations":[]}]});
+        vec![
+            serde_json::json!({"type":"response.created","response":{"id":"resp_step","status":"in_progress"}}),
+            serde_json::json!({"type":"response.output_item.added","output_index":0,"item":reasoning}),
+            serde_json::json!({"type":format!("response.{reasoning_part}.added"),"output_index":0,"item_id":"reasoning","content_index":0,"part":{"type":"reasoning_text","text":""}}),
+            serde_json::json!({"type":"response.reasoning_text.delta","output_index":0,"item_id":"reasoning","content_index":0,"delta":"Actual reasoning"}),
+            serde_json::json!({"type":"response.reasoning_text.done","output_index":0,"item_id":"reasoning","content_index":0,"text":"Actual reasoning"}),
+            serde_json::json!({"type":format!("response.{reasoning_part}.done"),"output_index":0,"item_id":"reasoning","content_index":0,"part":{"type":"reasoning_text","text":"Actual reasoning"}}),
+            serde_json::json!({"type":"response.output_item.done","output_index":0,"item":reasoning}),
+            serde_json::json!({"type":"response.output_item.added","output_index":1,"item":{"id":"message","type":"message","role":"assistant","status":"in_progress","content":[]}}),
+            serde_json::json!({"type":"response.content_part.added","output_index":1,"item_id":"message","content_index":0,"part":{"type":"output_text","text":""}}),
+            serde_json::json!({"type":"response.output_text.delta","output_index":1,"item_id":"message","content_index":0,"delta":"OK"}),
+            serde_json::json!({"type":"response.output_text.done","output_index":1,"item_id":"message","content_index":0,"text":"OK"}),
+            serde_json::json!({"type":"response.content_part.done","output_index":1,"item_id":"message","content_index":0,"part":{"type":"output_text","text":"OK"}}),
+            serde_json::json!({"type":"response.output_item.done","output_index":1,"item":message}),
+            serde_json::json!({"type":"response.completed","response":{"id":"resp_step","status":"completed","output":[reasoning,message]}}),
+        ]
+    }
+
+    #[test]
+    fn stepfun_live_reasoning_content_parts_and_documented_alias_keep_exact_null_snapshot() {
+        for part in ["content_part","reasoning_part"] {
+            let mut decoder = ResponsesDecoder::with_argument_parser(false, std::sync::Arc::new(crate::JsonToolArgumentParser));
+            let mut events = Vec::new();
+            let frames = stepfun_frames(part);
+            for frame in &frames {
+                events.extend(native(&mut decoder,frame["type"].as_str().unwrap(),frame.clone()).unwrap());
+            }
+            assert!(events.iter().any(|event| matches!(event,ChatModelEvent::ReasoningDelta {text} if text == "Actual reasoning")));
+            let block = events.iter().find_map(|event| match event {
+                ChatModelEvent::ProviderReasoningBlock {block} => Some(block), _ => None,
+            }).unwrap();
+            assert_eq!(block,&crate::ChatProviderReasoning::OpenaiResponsesReasoning {item:frames[6]["item"].clone(),route_digest:None});
+            assert!(events.iter().any(|event| matches!(event,ChatModelEvent::OutputTextDelta {text} if text == "OK")));
+            assert!(events.last().unwrap().is_terminal());
+        }
+    }
+
+    #[test]
+    fn stepfun_reasoning_part_identity_kind_and_finished_text_are_still_verified() {
+        for (index,key,replacement) in [
+            (2,"item_id",serde_json::json!("wrong")),
+            (2,"part",serde_json::json!({"type":"output_text","text":""})),
+            (5,"part",serde_json::json!({"type":"reasoning_text","text":"contradiction"})),
+            (5,"content_index",serde_json::json!(5000)),
+        ] {
+            let mut decoder = ResponsesDecoder::with_argument_parser(false,std::sync::Arc::new(crate::JsonToolArgumentParser));
+            let mut frames = stepfun_frames("content_part");
+            frames[index][key] = replacement;
+            let mut failed = false;
+            for frame in frames {
+                if native(&mut decoder,frame["type"].as_str().unwrap(),frame.clone()).is_err() { failed = true; break; }
+            }
+            assert!(failed,"accepted invalid StepFun event at {index}/{key}");
+        }
+    }
+
+    fn compatible_frames() -> Vec<Value> {
+        vec![
+            serde_json::json!({"type":"response.created","response":{"id":"resp_compat","status":"in_progress"}}),
+            serde_json::json!({"type":"response.output_item.added","response_id":"resp_compat","output_index":0,
+                "item":{"id":"message","type":"message","role":"assistant","content":[]}}),
+            serde_json::json!({"type":"response.content_part.added","response_id":"resp_compat","output_index":0,"content_index":0,
+                "part":{"type":"output_text","text":""}}),
+            serde_json::json!({"type":"response.content_part.delta","response_id":"resp_compat","output_index":0,"content_index":0,"delta":"hello"}),
+            serde_json::json!({"type":"response.output_item.done","response_id":"resp_compat","output_index":0,
+                "item":{"id":"message","type":"message","role":"assistant","status":"completed",
+                    "content":[{"type":"output_text","text":"hello"}]}}),
+            serde_json::json!({"type":"response.done","response":{"id":"resp_compat","status":"completed",
+                "usage":{"input_tokens":12,"output_tokens":3}}}),
+        ]
+    }
+
+    #[test]
+    fn compatible_data_only_frames_require_real_item_snapshots_and_a_terminal() {
+        let mut decoder = ResponsesDecoder::with_argument_parser(false, Arc::new(crate::JsonToolArgumentParser));
+        let mut events = Vec::new();
+        for frame in compatible_frames() {
+            events.extend(native(&mut decoder, "message", frame).unwrap());
+        }
+        assert!(events.iter().any(|event| matches!(event,
+            ChatModelEvent::OutputTextDelta { text } if text == "hello")));
+        assert!(events.iter().any(|event| matches!(event, ChatModelEvent::Completed { .. })));
+        assert!(native(&mut decoder, "done", serde_json::json!({})).unwrap().is_empty());
+        assert!(native(&mut decoder, "message", compatible_frames()[3].clone()).is_err());
+
+        for mutation in 0..4 {
+            let mut decoder = ResponsesDecoder::with_argument_parser(false, Arc::new(crate::JsonToolArgumentParser));
+            let mut frames = compatible_frames();
+            match mutation {
+                0 => { frames.remove(4); }
+                1 => { frames[3]["response_id"] = serde_json::json!("other"); }
+                2 => { frames[3]["content_index"] = serde_json::json!(1); }
+                3 => { frames.pop(); }
+                _ => unreachable!(),
+            }
+            let mut failed = false;
+            for frame in frames {
+                match native(&mut decoder, "message", frame) {
+                    Ok(events) => assert!(!events.iter().any(|event| matches!(event, ChatModelEvent::Completed { .. }))),
+                    Err(_) => { failed = true; break; }
+                }
+            }
+            if !failed { assert!(native(&mut decoder, "done", serde_json::json!({})).is_err()); }
+        }
+    }
+
+    #[test]
+    fn raw_reasoning_must_match_its_stream_and_does_not_forge_a_summary_or_cipher() {
+        for changed in [false, true] {
+            let mut decoder = ResponsesDecoder::with_argument_parser(false, Arc::new(crate::JsonToolArgumentParser));
+            native(&mut decoder,"response.created",serde_json::json!({"type":"response.created","response":{"id":"resp_raw"}})).unwrap();
+            native(&mut decoder,"response.output_item.added",serde_json::json!({"type":"response.output_item.added","output_index":0,
+                "item":{"id":"raw","type":"reasoning","content":[]}})).unwrap();
+            native(&mut decoder,"response.reasoning_text.delta",serde_json::json!({"type":"response.reasoning_text.delta",
+                "output_index":0,"item_id":"raw","content_index":0,"delta":"actual text"})).unwrap();
+            assert!(decoder.has_deferred_semantic_progress());
+            let item=serde_json::json!({"id":"raw","type":"reasoning","content":[{
+                "type":"reasoning_text","text":if changed {"changed text"} else {"actual text"}
+            }]});
+            let result=native(&mut decoder,"response.output_item.done",serde_json::json!({"type":"response.output_item.done","output_index":0,"item":item}));
+            if changed { assert!(result.is_err()); }
+            else {
+                assert!(matches!(result.unwrap().as_slice(),[ChatModelEvent::ProviderReasoningBlock {
+                    block:crate::ChatProviderReasoning::OpenaiResponsesReasoning {item:actual,route_digest:None}
+                }] if actual==&item));
+            }
+        }
+    }
+
+    #[test]
+    fn incomplete_raw_reasoning_is_not_replayable_and_keeps_the_output_limit_terminal() {
+        let mut decoder = ResponsesDecoder::with_argument_parser(false, Arc::new(crate::JsonToolArgumentParser));
+        native(&mut decoder,"response.created",serde_json::json!({"type":"response.created","response":{"id":"resp_cutoff"}})).unwrap();
+        native(&mut decoder,"response.output_item.added",serde_json::json!({"type":"response.output_item.added","output_index":0,
+            "item":{"id":"raw_cutoff","type":"reasoning","content":[]}})).unwrap();
+        let item=serde_json::json!({"id":"raw_cutoff","type":"reasoning","status":"incomplete",
+            "content":[{"type":"reasoning_text","text":"unfinished reasoning"}]});
+        let events=native(&mut decoder,"response.output_item.done",serde_json::json!({"type":"response.output_item.done","output_index":0,"item":item})).unwrap();
+        assert!(!events.iter().any(|event| matches!(event, ChatModelEvent::ProviderReasoningBlock {..})));
+        let events=native(&mut decoder,"response.incomplete",serde_json::json!({"type":"response.incomplete","response":{
+            "id":"resp_cutoff","status":"incomplete","output":[item],"incomplete_details":{"reason":"max_output_tokens"}
+        }})).unwrap();
+        assert!(matches!(events.last(),Some(ChatModelEvent::Completed {finish_reason:ChatFinishReason::MaxOutputTokens})));
     }
 
     fn reasoning_decoder() -> ResponsesDecoder {

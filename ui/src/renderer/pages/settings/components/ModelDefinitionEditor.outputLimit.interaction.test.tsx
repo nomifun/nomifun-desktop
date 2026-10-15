@@ -45,7 +45,7 @@ await i18n.use(initReactI18next).init({
   resources: { 'zh-CN': { translation: { settings: zhSettings, common: zhCommon } } },
   interpolation: { escapeValue: false },
 });
-const requestKey = JSON.stringify(['preview', aliasProviderBaseUrl, ['chat']]);
+const requestKey = JSON.stringify(['preview', aliasProviderBaseUrl, ['chat'], 'immutable-model-id']);
 
 function mount(initialOutput?: number) {
   const saved: ModelAdvancedPatch[] = [];

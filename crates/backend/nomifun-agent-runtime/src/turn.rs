@@ -1210,9 +1210,9 @@ pub(crate) async fn run_turn(
                     // Only ordinary thinking text reaches the event journal
                     // and UI. Signed/hidden payload stays in live context.
                     if let Some(text) = block.visible_text() {
-                        reasoning_text.push_str(text);
+                        reasoning_text.push_str(text.as_ref());
                         event_sink.emit(AgentEngineEvent::ReasoningDelta {
-                            step: model_steps, text: text.to_owned(),
+                            step: model_steps, text: text.into_owned(),
                         }).await?;
                     }
                     step.assistant_content.push(ChatContentPart::ProviderReasoning { block });
@@ -5952,6 +5952,10 @@ mod tests {
                 text:"PRIVATE_THOUGHT_BODY".repeat(500), signature:"PRIVATE_SIGNATURE".into(),route_digest:None}},
             ChatContentPart::ProviderReasoning {block:nomifun_chat_model_broker::ChatProviderReasoning::AnthropicRedactedThinking {
                 data:"PRIVATE_REDACTED_BODY".repeat(500),route_digest:None}},
+            ChatContentPart::ProviderReasoning {block:nomifun_chat_model_broker::ChatProviderReasoning::OpenaiResponsesReasoning {
+                item:json!({"id":"rs_private", "type":"reasoning", "content":[{
+                    "type":"reasoning_text", "text":"PRIVATE_THOUGHT_BODY".repeat(500)
+                }]}),route_digest:None}},
         ];
         for (private_index,private) in private_parts.into_iter().enumerate() {
             let model=Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![text_step("Earlier observations retained; no new execution.")]),
@@ -10240,9 +10244,15 @@ mod tests {
         }
         let mut write = control_step("write", "write_file", json!({"path":"a","content":"PRIVATE_FILE_BODY"}));
         write.insert(0, Ok(ChatModelEvent::ReasoningDelta { text: "PRIVATE_MODEL_THOUGHT".into() }));
+        let raw = nomifun_chat_model_broker::ChatProviderReasoning::OpenaiResponsesReasoning {
+            item:json!({"id":"rs_checkpoint", "type":"reasoning", "content":[{
+                "type":"reasoning_text", "text":"PRIVATE_RAW_MODEL_THOUGHT"
+            }]}), route_digest:None,
+        };
+        write.insert(0, Ok(ChatModelEvent::ProviderReasoningBlock {block:raw.clone()}));
         let model = Arc::new(ObservingModel { steps: std::sync::Mutex::new(vec![write, text_step("done")]), requests: Default::default() });
         let sink = Arc::new(Sink::default());
-        let result = run_turn(binding(), model, Arc::new(EchoTool), sink.clone(),
+        let result = run_turn(binding(), model.clone(), Arc::new(EchoTool), sink.clone(),
             AgentTurnRequest::new(request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0),
             AgentContextBudget::default(), CancellationToken::new()).await.unwrap();
         assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
@@ -10254,6 +10264,12 @@ mod tests {
         let encoded = serde_json::to_string(&*checkpoints).unwrap();
         assert!(!encoded.contains("PRIVATE_FILE_BODY"));
         assert!(!encoded.contains("PRIVATE_MODEL_THOUGHT"));
+        assert!(!encoded.contains("PRIVATE_RAW_MODEL_THOUGHT"));
+        let requests = model.requests.lock().unwrap();
+        assert!(requests[1].input.messages.iter().flat_map(|message| &message.content).any(|part|
+            matches!(part, ChatContentPart::ProviderReasoning {block} if block == &raw)));
+        let restored: ChatModelRequest = serde_json::from_slice(&serde_json::to_vec(&requests[1]).unwrap()).unwrap();
+        assert_eq!(restored.input, requests[1].input);
     }
 
     #[tokio::test]

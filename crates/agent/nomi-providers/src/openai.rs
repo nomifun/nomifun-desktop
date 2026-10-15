@@ -729,6 +729,7 @@ struct StreamState {
     /// untrustworthy. Once poisoned, no later chunk or `[DONE]` sentinel may
     /// resurrect accumulated calls or commit a terminal Done.
     fatal_error: bool,
+    error_redactor: nomifun_net::secret_redaction::SecretRedactor,
 }
 
 impl StreamState {
@@ -744,6 +745,7 @@ impl StreamState {
             finish_seen: false,
             auto_tool_id: false,
             fatal_error: false,
+            error_redactor: Default::default(),
         }
     }
 
@@ -751,7 +753,7 @@ impl StreamState {
         self.tool_calls.clear();
         self.pending_done = None;
         self.fatal_error = true;
-        vec![LlmEvent::Error(message.into())]
+        vec![LlmEvent::Error(self.error_redactor.redact(&message.into()))]
     }
 
     fn fatal_error(&self) -> bool {
@@ -966,7 +968,7 @@ impl LlmProvider for OpenAIProvider {
         tokio::spawn(async move {
             let Some(outcome) = crate::retry::until_receiver_closed(
                 &tx,
-                process_sse_stream(response, &tx, auto_tool_id),
+                process_sse_stream_redacted(response, &tx, auto_tool_id, &redactor),
             )
             .await
             else {
@@ -984,7 +986,7 @@ impl LlmProvider for OpenAIProvider {
                         &redactor,
                     )
                 },
-                |resp| process_sse_stream(resp, &tx, auto_tool_id),
+                |resp| process_sse_stream_redacted(resp, &tx, auto_tool_id, &redactor),
             )
             .await;
         });
@@ -993,14 +995,25 @@ impl LlmProvider for OpenAIProvider {
     }
 }
 
+#[cfg(test)]
 async fn process_sse_stream(
     response: reqwest::Response,
     tx: &mpsc::Sender<LlmEvent>,
     auto_tool_id: bool,
 ) -> StreamOutcome {
+    process_sse_stream_redacted(response, tx, auto_tool_id, &Default::default()).await
+}
+
+async fn process_sse_stream_redacted(
+    response: reqwest::Response,
+    tx: &mpsc::Sender<LlmEvent>,
+    auto_tool_id: bool,
+    redactor: &nomifun_net::secret_redaction::SecretRedactor,
+) -> StreamOutcome {
     use futures::StreamExt;
 
     let mut state = StreamState::new();
+    state.error_redactor = redactor.clone();
     // Keep raw bytes until a complete SSE line is available. HTTP chunks may
     // split a multi-byte UTF-8 scalar; decoding each chunk independently would
     // inject U+FFFD into Chinese/tool arguments or corrupt otherwise valid JSON.
@@ -1540,14 +1553,6 @@ fn is_accounting_metadata(json: &Value) -> bool {
         || json.get("x-opencode-type").and_then(Value::as_str) == Some("inference-cost")
 }
 
-fn provider_error_detail(error: &Value) -> String {
-    error
-        .as_str()
-        .or_else(|| error.get("message").and_then(Value::as_str))
-        .map(str::to_owned)
-        .unwrap_or_else(|| error.to_string())
-}
-
 fn normalize_finish_reason(reason: &str) -> Result<&'static str, String> {
     if reason.eq_ignore_ascii_case("stop")
         || reason.eq_ignore_ascii_case("end_turn")
@@ -1596,10 +1601,10 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> V
     }
 
     if let Some(error) = json.get("error").filter(|error| !error.is_null()) {
-        return state.poison(format!(
-            "OpenAI-compatible provider returned an error: {}",
-            provider_error_detail(error)
-        ));
+        return state.poison(ProviderError::Api {
+            status:422,
+            message:json!({"error":error}).to_string(),
+        }.to_string());
     }
 
     if let Err(error) = update_stream_usage(&json, state) {

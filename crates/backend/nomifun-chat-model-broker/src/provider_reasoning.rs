@@ -114,13 +114,18 @@ impl ProviderReasoningRoute for ChatProviderReasoning {
     /// Decoder or remote-supplied origins are never accepted as authority.
     fn bind_route(&mut self, route: &ResolvedChatRoute) -> Result<(), &'static str> {
         self.validate()?;
-        if !route.protocol.uses_anthropic_messages() || route.validate().is_err() {
+        let compatible = match self {
+            Self::OpenaiResponsesReasoning { .. } => route.protocol == ChatProtocol::OpenaiResponses,
+            _ => route.protocol.uses_anthropic_messages(),
+        };
+        if !compatible || route.validate().is_err() {
             return Err("provider reasoning is incompatible with the attempted route");
         }
         let digest = digest_payload(route).map_err(|_| "cannot bind provider reasoning route")?;
         let origin = match self {
             Self::AnthropicThinking { route_digest, .. }
-            | Self::AnthropicRedactedThinking { route_digest, .. } => route_digest,
+            | Self::AnthropicRedactedThinking { route_digest, .. }
+            | Self::OpenaiResponsesReasoning { route_digest, .. } => route_digest,
         };
         if origin.is_some() {
             return Err("provider decoder supplied an unexpected reasoning origin");
@@ -133,11 +138,16 @@ impl ProviderReasoningRoute for ChatProviderReasoning {
     /// Engine may explicitly rebuild context without it; no transparent failover
     /// can send a signature to another route or turn it into ordinary text.
     fn matches_route(&self, route: &ResolvedChatRoute) -> bool {
+        let compatible = match self {
+            Self::OpenaiResponsesReasoning { .. } => route.protocol == ChatProtocol::OpenaiResponses,
+            _ => route.protocol.uses_anthropic_messages(),
+        };
         let origin = match self {
             Self::AnthropicThinking { route_digest, .. }
-            | Self::AnthropicRedactedThinking { route_digest, .. } => route_digest,
+            | Self::AnthropicRedactedThinking { route_digest, .. }
+            | Self::OpenaiResponsesReasoning { route_digest, .. } => route_digest,
         };
-        route.protocol.uses_anthropic_messages()
+        compatible
             && origin
                 .as_ref()
                 .is_some_and(|origin| digest_payload(route).is_ok_and(|digest| digest == *origin))

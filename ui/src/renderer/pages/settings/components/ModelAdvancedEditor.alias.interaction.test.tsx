@@ -30,7 +30,7 @@ await i18n.use(initReactI18next).init({
   interpolation: { escapeValue: false },
 });
 const capabilities = [aliasCapability];
-const requestKey = JSON.stringify(['preview', aliasProviderBaseUrl, ['chat']]);
+const requestKey = JSON.stringify(['preview', aliasProviderBaseUrl, ['chat'], 'immutable-model-id']);
 const aliasLabel = zhSettings.modelDisplayNameTitle;
 afterEach(() => { cleanup(); restoreTransport(); });
 
