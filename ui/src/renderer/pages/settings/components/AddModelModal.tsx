@@ -269,10 +269,10 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
               providerBaseUrl={data?.base_url ?? ''}
               providerAuthScheme={data?.auth_scheme ?? ''}
               providerLabel={data?.name ?? data?.platform ?? ''}
-              protocolDetection={data && modalProps.visible ? {
+              protocolDiscovery={data && modalProps.visible ? {
                 providerId: data.id, platform: data.platform, baseUrl: data.base_url, authScheme: data.auth_scheme,
               } : undefined}
-              onProtocolDetectionPendingChange={setProtocolDetecting}
+              onProtocolDiscoveryPendingChange={setProtocolDetecting}
               manifests={manifests.manifests}
               manifestLoadingTasks={manifests.loadingTasks}
               manifestErrorTasks={manifests.errorTasks}

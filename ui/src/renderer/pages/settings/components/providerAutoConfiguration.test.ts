@@ -118,6 +118,30 @@ describe('provider auto configuration', () => {
     expect(isAutoConfigurationPlatform('OpenAI')).toBe(false);
   });
 
+  test('unknown Custom and New API templates default to Chat without changing explicit or recommended protocols', () => {
+    const responses = descriptor('openai.responses', ['bearer']);
+    const chat = descriptor('openai.chat_text', ['bearer']);
+    const definition = { model: 'unlisted/future-model', capabilities: [emptyCapabilityDraft('chat')] };
+    for (const platform of ['custom', 'new-api']) {
+      const unknown = { ...manifest([responses, chat], ''), platform };
+      const target = buildProviderAutoConfigurationTargets(definition, { chat: unknown }, 'bearer', false)[0]!;
+      expect(target.candidates.map(candidate => candidate.descriptor.protocol_id)).toEqual(['openai.chat_text', 'openai.responses']);
+      expect(selectProviderAutoConfiguration(target, [])?.protocol).toBe('openai.chat_text');
+
+      const explicit = buildProviderAutoConfigurationTargets(definition, { chat: unknown }, 'bearer', false,
+        providerCompatibilityProtocolPreferences('openai-responses'))[0]!;
+      expect(explicit.candidates.map(candidate => candidate.descriptor.protocol_id)).toEqual(['openai.responses']);
+
+      const recommended = buildProviderAutoConfigurationTargets(definition,
+        { chat: { ...manifest([responses, chat]), platform } }, 'bearer', false)[0]!;
+      expect(recommended.candidates[0]?.descriptor.protocol_id).toBe('openai.responses');
+
+      const recommendedChat = buildProviderAutoConfigurationTargets(definition,
+        { chat: { ...manifest([responses, chat], 'openai.chat_text'), platform } }, 'bearer', false)[0]!;
+      expect(recommendedChat.candidates.map(candidate => candidate.descriptor.protocol_id)).toEqual(['openai.chat_text', 'openai.responses']);
+    }
+  });
+
   test('keeps a compatible user scheme and concretizes parameterized schemes', () => {
     const generic = descriptor('generic.chat', [
       'bearer',

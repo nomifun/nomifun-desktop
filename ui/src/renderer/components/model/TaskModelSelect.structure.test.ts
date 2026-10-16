@@ -94,6 +94,9 @@ describe('tts voice candidates', () => {
       TTS_VOICE_OPTIONS_BY_PROTOCOL['openai.audio_speech']
     );
     expect(ttsVoiceOptionsFor('openai.audio_speech').includes('alloy')).toBe(true);
+    expect(ttsVoiceOptionsFor('openai.audio_speech', 'glm-tts')).toEqual(['tongtong']);
+    expect(ttsVoiceOptionsFor('zhipu.audio_speech', 'glm-tts')).toEqual(['tongtong']);
+    expect(ttsVoiceOptionsFor('gemini.interactions_tts').includes('Kore')).toBe(true);
     // StepFun voices are verified against its live system-voices API, so they
     // are offered as suggestions (still free text for cloned/newer ids).
     expect(ttsVoiceOptionsFor('stepfun.audio_speech').includes('cixingnansheng')).toBe(true);

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use nomifun_api_types::{ModelCatalogSource, ModelContextLimitKind, ModelInfo, ModelTask, ModelTaskSource, ModelTokenLimitSources};
+use nomifun_api_types::{ModelCatalogSource, ModelContextLimitKind, ModelInfo, ModelTask, ModelTaskSource, ModelTokenLimitSources, ModelTrait};
 use nomifun_common::AppError;
 use nomifun_model_invoke::{AuthMaterial, AuthScheme};
 use serde::Deserialize;
@@ -380,6 +380,10 @@ struct OpenAiModel {
     max_output_length: Option<i64>,
     #[serde(default)]
     top_provider: Option<OpenAiTopProvider>,
+    /// Preserve native task/architecture metadata instead of guessing a task
+    /// from the opaque model ID. Unknown vendor fields remain non-fatal.
+    #[serde(flatten)]
+    metadata: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -392,6 +396,8 @@ struct OpenAiTopProvider {
 
 impl OpenAiModel {
     fn into_info(self) -> ModelInfo {
+        let (tasks, traits) = declared_catalog_metadata(&self.metadata);
+        let tasks_source = (!tasks.is_empty()).then_some(ModelTaskSource::ProviderDeclared);
         let context = [
             (self.context_length, "context_length"),
             (self.context_window, "context_window"),
@@ -411,7 +417,7 @@ impl OpenAiModel {
             output_limit,
             output.map(|(_, field)| field).unwrap_or_default(),
         );
-        ModelInfo { id: self.id, name: self.name.or(self.title), tasks: Vec::new(), tasks_source: None, traits: Vec::new(),
+        ModelInfo { id: self.id, name: self.name.or(self.title), tasks, tasks_source, traits,
             context_limit, output_limit, token_limit_sources: sources }
     }
 }
@@ -814,8 +820,6 @@ fn mimo_token_plan_models() -> Vec<ModelInfo> {
     documented_models_with_other_tasks("mimo-token-plan-cn", &[
         "mimo-v2.5-asr",
         "mimo-v2.5-tts",
-        "mimo-v2.5-tts-voicedesign",
-        "mimo-v2.5-tts-voiceclone",
     ])
 }
 
@@ -876,7 +880,12 @@ fn ark_coding_plan_models() -> Vec<ModelInfo> {
 /// API Key configured here. These documented suggestions are not an account
 /// entitlement list. Users can still type any model or router ID.
 fn ark_agent_plan_models() -> Vec<ModelInfo> {
-    documented_chat_models("ark-agent-plan")
+    documented_models_with_other_tasks("ark-agent-plan", &[
+        "doubao-seedream-5-0-pro",
+        "doubao-seedance-2.0",
+        "doubao-seedance-2.0-fast",
+        "doubao-seedance-2.5",
+    ])
 }
 
 fn is_official_ark_agent_plan_base_url(base_url: &str) -> bool {
@@ -884,7 +893,7 @@ fn is_official_ark_agent_plan_base_url(base_url: &str) -> bool {
 }
 
 /// Suggestions verified against the official Chinese Step Plan overview and
-/// reasoning/audio integration guides on 2026-10-06. These are documentation
+/// reasoning/audio integration guides on 2026-10-16. These are documentation
 /// suggestions, not the account's live catalog: StepFun only documents the
 /// standard `/v1/models` endpoint, while plan calls use `/step_plan/v1`.
 /// https://platform.stepfun.com/docs/zh/step-plan/overview
@@ -893,7 +902,6 @@ const STEPFUN_PLAN_OTHER_MODELS: &[&str] = &[
     "stepaudio-2.5-chat",
     "stepaudio-2.5-tts",
     "stepaudio-2.5-asr",
-    "step-image-edit-2",
 ];
 
 fn stepfun_plan_models() -> Vec<ModelInfo> {
@@ -904,8 +912,9 @@ fn stepfun_plan_models() -> Vec<ModelInfo> {
 // StepFun (remote catalog with an official-host fallback)
 // ---------------------------------------------------------------------------
 
-/// Public StepFun baseline refreshed from official docs on 2026-10-06. It spans chat,
-/// realtime speech, audio chat, dedicated TTS/ASR, and image generation/edit.
+/// Public StepFun baseline refreshed from official docs on 2026-10-16. It spans
+/// chat and the exact speech models supported by the implemented codecs. All
+/// public and plan image endpoints stopped service on 2026-10-10.
 /// The live `/v1/models` catalog remains authoritative and every model it
 /// returns (including unknown future IDs) is preserved. This list is only used
 /// when the official host is temporarily unavailable or returns an empty list.
@@ -913,6 +922,9 @@ fn stepfun_plan_models() -> Vec<ModelInfo> {
 /// Keep plan-only `step-router-v1` out of this list: it is not callable through
 /// the regular `https://api.stepfun.com/v1` billing endpoint.
 const STEPFUN_OTHER_MODELS: &[&str] = &[
+    "stepaudio-3-realtime-preview",
+    "stepaudio-3-tts",
+    "stepaudio-3-asr-max",
     // Realtime and audio chat use chat/realtime protocols rather than the
     // one-shot TTS or transcription tasks.
     "stepaudio-2.5-realtime",
@@ -924,8 +936,6 @@ const STEPFUN_OTHER_MODELS: &[&str] = &[
     // catalog fetch failed could not select it at all, even though it serves
     // the same `stepfun.audio_speech` protocol.
     "step-tts-mini",
-    // Image generation plus editing.
-    "step-image-edit-2",
 ];
 
 fn stepfun_fallback_models() -> Vec<ModelInfo> {
@@ -1036,6 +1046,8 @@ struct DashscopeModel {
     name: Option<String>,
     #[serde(default)]
     model_info: Option<DashscopeModelLimits>,
+    #[serde(flatten)]
+    metadata: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -1050,6 +1062,8 @@ struct DashscopeModelLimits {
 
 impl DashscopeModel {
     fn into_info(self) -> ModelInfo {
+        let (tasks, traits) = declared_catalog_metadata(&self.metadata);
+        let tasks_source = (!tasks.is_empty()).then_some(ModelTaskSource::ProviderDeclared);
         let limits = self.model_info;
         let combined = limits.as_ref().and_then(|limits| limits.context_window);
         let context_limit = combined.or_else(|| limits.as_ref().and_then(|limits| limits.max_input_tokens));
@@ -1062,9 +1076,9 @@ impl DashscopeModel {
         ModelInfo {
             id: self.model,
             name: self.name,
-            tasks: Vec::new(),
-            tasks_source: None,
-            traits: Vec::new(),
+            tasks,
+            tasks_source,
+            traits,
             context_limit,
             output_limit,
             token_limit_sources,
@@ -1214,6 +1228,13 @@ fn token_limit_sources(context_limit: Option<i64>, context_field: &str,
 }
 
 fn merge_declared_limits(existing: &mut ModelInfo, candidate: &ModelInfo) {
+    if existing.tasks.is_empty() && !candidate.tasks.is_empty() {
+        existing.tasks = candidate.tasks.clone();
+        existing.tasks_source = candidate.tasks_source;
+    }
+    if existing.traits.is_empty() && !candidate.traits.is_empty() {
+        existing.traits = candidate.traits.clone();
+    }
     let mut sources = existing.token_limit_sources.clone().unwrap_or_default();
     if existing.context_limit.is_none() {
         existing.context_limit = candidate.context_limit;
@@ -1235,6 +1256,98 @@ fn merge_declared_limits(existing: &mut ModelInfo, candidate: &ModelInfo) {
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+fn catalog_strings(value: Option<&serde_json::Value>) -> Vec<&str> {
+    match value {
+        Some(serde_json::Value::String(value)) => vec![value],
+        Some(serde_json::Value::Array(values)) => values.iter().filter_map(serde_json::Value::as_str).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn declared_catalog_task(value: &str) -> Option<ModelTask> {
+    use ModelTask::*;
+    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "chat" | "text_generation" | "text2text" | "text_to_text" => Some(Chat),
+        "image_generation" | "text2image" | "text_to_image" => Some(ImageGeneration),
+        "image_edit" | "image2image" | "image_to_image" => Some(ImageEdit),
+        "video_generation" | "text2video" | "image2video" | "text_to_video" | "image_to_video" => Some(VideoGeneration),
+        "music_generation" | "text2music" | "text_to_music" => Some(MusicGeneration),
+        "speech_recognition" | "automatic_speech_recognition" | "speech_to_text" | "asr" => Some(SpeechRecognition),
+        "speech_synthesis" | "text_to_speech" | "tts" => Some(SpeechSynthesis),
+        "embedding" | "embeddings" | "text_embedding" => Some(Embedding),
+        "rerank" | "text_reranking" => Some(Rerank),
+        "realtime_conversation" => Some(RealtimeConversation),
+        _ => None,
+    }
+}
+
+/// Native task declarations outrank architecture-derived suggestions. The
+/// documented Qianfan `type` and OpenRouter `architecture` shapes are accepted
+/// without treating their model IDs as a source of truth. Unrecognized task
+/// declarations remain unknown instead of degrading into a guessed Chat row.
+fn declared_catalog_metadata(metadata: &serde_json::Map<String, serde_json::Value>) -> (Vec<ModelTask>, Vec<ModelTrait>) {
+    use ModelTask::*;
+    let mut tasks = Vec::new();
+    let mut traits = Vec::new();
+    let explicit = ["tasks", "supported_tasks", "task", "model_type", "type"]
+        .into_iter().map(|key| catalog_strings(metadata.get(key)))
+        .find(|values| values.iter().any(|value| !value.trim().is_empty() && *value != "model"));
+    if let Some(values) = &explicit {
+        for value in values {
+            if let Some(task) = declared_catalog_task(value) {
+                if !tasks.contains(&task) { tasks.push(task); }
+            }
+        }
+    }
+
+    let architecture = metadata.get("architecture");
+    let input_value = architecture.and_then(|value| value.get("input_modalities")).or_else(|| metadata.get("input_modalities"));
+    let output_value = architecture.and_then(|value| value.get("output_modalities")).or_else(|| metadata.get("output_modalities"));
+    let mut inputs = catalog_strings(input_value);
+    let mut outputs = catalog_strings(output_value);
+    if let Some((input, output)) = architecture.and_then(|value| value.get("modality"))
+        .and_then(serde_json::Value::as_str).and_then(|value| value.split_once("->")) {
+        if inputs.is_empty() { inputs.extend(input.split('+').map(str::trim)); }
+        if outputs.is_empty() { outputs.extend(output.split('+').map(str::trim)); }
+    }
+    if explicit.is_none() {
+        let mut add = |task| { if !tasks.contains(&task) { tasks.push(task); } };
+        if outputs.contains(&"embedding") { add(Embedding); }
+        if outputs.contains(&"image") {
+            add(ImageGeneration);
+            if inputs.contains(&"image") { add(ImageEdit); }
+        }
+        if outputs.contains(&"video") { add(VideoGeneration); }
+        if outputs.contains(&"music") { add(MusicGeneration); }
+        if outputs.contains(&"text") {
+            if inputs.contains(&"audio") && !inputs.contains(&"text") && !outputs.contains(&"audio") {
+                add(SpeechRecognition);
+            } else { add(Chat); }
+        } else if outputs.contains(&"audio") && inputs.contains(&"text") && !inputs.contains(&"audio") {
+            add(SpeechSynthesis);
+        }
+    }
+
+    for value in catalog_strings(metadata.get("traits")) {
+        let model_trait = match value {
+            "vision_input" => Some(ModelTrait::VisionInput),
+            "audio_input" => Some(ModelTrait::AudioInput),
+            "video_input" => Some(ModelTrait::VideoInput),
+            "web_search" => Some(ModelTrait::WebSearch),
+            _ => None,
+        };
+        if let Some(model_trait) = model_trait {
+            if !traits.contains(&model_trait) { traits.push(model_trait); }
+        }
+    }
+    if tasks.contains(&Chat) {
+        for (input, model_trait) in [("image", ModelTrait::VisionInput), ("audio", ModelTrait::AudioInput), ("video", ModelTrait::VideoInput)] {
+            if inputs.contains(&input) && !traits.contains(&model_trait) { traits.push(model_trait); }
+        }
+    }
+    (tasks, traits)
+}
 
 fn fallback_models(ids: &[&str]) -> Vec<ModelInfo> {
     ids.iter()
@@ -1276,8 +1389,13 @@ fn documented_chat_models(platform: &str) -> Vec<ModelInfo> {
 
 fn documented_models_with_other_tasks(platform: &str, other_ids: &[&str]) -> Vec<ModelInfo> {
     let mut models = documented_chat_models(platform);
-    for other in fallback_models(other_ids) {
+    for mut other in fallback_models(other_ids) {
         if !models.iter().any(|model| model.id == other.id) {
+            if let Some((tasks, traits)) = nomifun_api_types::verified_catalog_tasks_and_traits(platform, &other.id) {
+                other.tasks_source = (!tasks.is_empty()).then_some(ModelTaskSource::OfficialDocumentation);
+                other.tasks = tasks;
+                other.traits = traits;
+            }
             models.push(other);
         }
     }
@@ -1374,6 +1492,35 @@ mod tests {
         assert!(models[3].context_limit.is_none());
         assert!(models[3].output_limit.is_none());
         assert!(!server.received_requests().await.unwrap()[0].headers.contains_key("authorization"));
+    }
+
+    #[tokio::test]
+    async fn compatible_catalog_preserves_native_tasks_before_model_name_suggestions() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data":[
+                {"id":"step-5-preview","type":"embeddings","architecture":{"input_modalities":["text","image"],"output_modalities":["text"]}},
+                {"id":"future-image","architecture":{"modality":"text+image->image"}},
+                {"id":"opaque-chat","architecture":{"input_modalities":["text","image"],"output_modalities":["text"]}},
+                {"id":"opaque-new-task","tasks":["not-a-supported-task"],"architecture":{"modality":"text->text"}},
+                {"id":"opaque-unknown","tasks":17,"architecture":"not-an-object"},
+                {"id":"opaque-asr","type":"speech_recognition"}
+            ]}))).expect(1).mount(&server).await;
+        let models = fetch_openai_public_catalog(&no_proxy_client(), &server.uri()).await.unwrap();
+        assert_eq!(models.len(),6);
+        assert_eq!(models[0].tasks,vec![ModelTask::Embedding]);
+        assert!(models[0].traits.is_empty(),"native non-Chat metadata wins over a known vision model ID");
+        assert_eq!(models[1].tasks,vec![ModelTask::ImageGeneration,ModelTask::ImageEdit]);
+        assert_eq!(models[2].tasks,vec![ModelTask::Chat]);
+        assert_eq!(models[2].traits,vec![ModelTrait::VisionInput]);
+        for model in [&models[3],&models[4]] {
+            assert!(model.tasks.is_empty(),"unknown declarations never default to Chat");
+            assert_eq!(model.tasks_source,None);
+        }
+        assert_eq!(models[5].tasks,vec![ModelTask::SpeechRecognition]);
+        for model in [&models[0],&models[1],&models[2],&models[5]] {
+            assert_eq!(model.tasks_source,Some(ModelTaskSource::ProviderDeclared));
+        }
     }
 
     #[tokio::test]
@@ -1792,8 +1939,8 @@ mod tests {
         use wiremock::matchers::query_param;
         let server = MockServer::start().await;
         for (page, data) in [
-            ("1", serde_json::json!([{"model": "qwen-current", "name": "Current", "model_info": {"context_window": 1000000, "max_output_tokens": 128000}}])),
-            ("2", serde_json::json!([{"model": "future-modality-model", "model_info": {"max_input_tokens": "64000", "max_output_tokens": null}}])),
+            ("1", serde_json::json!([{"model": "qwen-current", "name": "Current", "task":"text-generation", "model_info": {"context_window": 1000000, "max_output_tokens": 128000}}])),
+            ("2", serde_json::json!([{"model": "future-modality-model", "type":"text2image", "model_info": {"max_input_tokens": "64000", "max_output_tokens": null}}])),
         ] {
             Mock::given(method("GET"))
                 .and(path("/api/v1/models"))
@@ -1809,6 +1956,9 @@ mod tests {
             &AuthMaterial { scheme: AuthScheme::Bearer, credentials: serde_json::json!({"api_keys": ["catalog-key"]}) }).await.unwrap();
         assert_eq!(models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(), ["qwen-current", "future-modality-model"]);
         assert_eq!(models[0].name.as_deref(), Some("Current"));
+        assert_eq!(models[0].tasks,vec![ModelTask::Chat]);
+        assert_eq!(models[1].tasks,vec![ModelTask::ImageGeneration]);
+        assert!(models.iter().all(|model| model.tasks_source == Some(ModelTaskSource::ProviderDeclared)));
         assert_eq!(models[0].context_limit, Some(1000000));
         assert_eq!(models[0].output_limit, Some(128000));
         assert_eq!(models[0].token_limit_sources.as_ref().unwrap().context_limit_kind, Some(ModelContextLimitKind::Combined));
@@ -1910,8 +2060,6 @@ mod tests {
                 "mimo-v2.5",
                 "mimo-v2.5-asr",
                 "mimo-v2.5-tts",
-                "mimo-v2.5-tts-voicedesign",
-                "mimo-v2.5-tts-voiceclone",
             ]
         );
     }
@@ -1985,7 +2133,6 @@ mod tests {
                 "stepaudio-2.5-chat",
                 "stepaudio-2.5-tts",
                 "stepaudio-2.5-asr",
-                "step-image-edit-2",
             ]
         );
     }
@@ -2020,12 +2167,14 @@ mod tests {
                 "step-3.7-flash",
                 "step-3.5-flash",
                 "step-3.5-flash-2603",
+                "stepaudio-3-realtime-preview",
+                "stepaudio-3-tts",
+                "stepaudio-3-asr-max",
                 "stepaudio-2.5-realtime",
                 "stepaudio-2.5-chat",
                 "stepaudio-2.5-tts",
                 "stepaudio-2.5-asr",
                 "step-tts-mini",
-                "step-image-edit-2",
             ]
         );
         let models = stepfun_fallback_models();
@@ -2038,7 +2187,7 @@ mod tests {
         // model to select, so the robot's `voice.asr` / `voice.tts` slots stay
         // empty and the device is silent. See the 2026-08-08 stepfun-robot spec.
         let models = stepfun_fallback_models();
-        for id in ["stepaudio-2.5-asr", "stepaudio-2.5-tts"] {
+        for id in ["stepaudio-3-asr-max", "stepaudio-3-tts", "stepaudio-2.5-asr", "stepaudio-2.5-tts"] {
             assert!(
                 models.iter().any(|model| model.id == id),
                 "StepFun fallback list must offer {id} so the voice slots are fillable"
@@ -2066,10 +2215,10 @@ mod tests {
             let (tasks, traits) =
                 infer_catalog_tasks_and_traits(platform, "stepaudio-2.5-chat");
             assert_eq!(tasks, vec![ModelTask::Chat]);
-            assert_eq!(traits, vec![ModelTrait::AudioInput]);
+            assert_eq!(traits, if platform == "stepfun" { vec![ModelTrait::AudioInput] } else { vec![] });
             assert_eq!(
                 infer_catalog_tasks_and_traits(platform, "step-image-edit-2").0,
-                vec![ModelTask::ImageGeneration, ModelTask::ImageEdit]
+                vec![], "the image service has been retired"
             );
         }
 

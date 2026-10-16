@@ -1,0 +1,2823 @@
+[
+  {
+    "platforms": [
+      "stepfun"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://platform.stepfun.com/docs/zh/api-reference/responses/responses-create.md",
+      "https://platform.stepfun.com/docs/zh/announcements/image-model-retirement.md",
+      "https://platform.stepfun.com/docs/zh/api-reference/audio/asr-sse.md",
+      "https://platform.stepfun.com/docs/zh/api-reference/audio/create-audio.md",
+      "https://platform.stepfun.com/docs/zh/api-reference/realtime/chat.md",
+      "https://platform.stepfun.com/docs/zh/api-reference/audio/music.md"
+    ],
+    "notes": "本轮直接读取官方Markdown及完整索引；Responses只按官方列出的文本型号推荐，语音3系列逐一对照现有原生codec。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "Responses官方仅列step-5-preview/step-3.7-flash；3.5及音频Chat保留Chat。文本、图片由现有Chat/Responses内容块支持；视频输入尚无本产品typed内容块，不据文档额外承诺。",
+        "model_ids": [
+          "step-5-preview",
+          "step-3.7-flash",
+          "step-3.5-flash",
+          "step-3.5-flash-2603",
+          "stepaudio-2.5-chat"
+        ],
+        "provider_params": {
+          "include": null
+        },
+        "protocol_model_ids": {
+          "openai.responses": [
+            "step-5-preview",
+            "step-3.7-flash"
+          ]
+        }
+      },
+      {
+        "task": "image_generation",
+        "status": "retired",
+        "protocols": [],
+        "notes": "官方明确图像模型及文生图、图生图、编辑接口在国内、海外和Step Plan同步停服；前两者2026-10-10下线，step-1x-edit更早停服。保留历史配置不等于可新推荐。",
+        "model_ids": [
+          "step-2x-large",
+          "step-image-edit-2",
+          "step-1x-edit"
+        ],
+        "sources": [
+          "https://platform.stepfun.com/docs/zh/announcements/image-model-retirement.md"
+        ]
+      },
+      {
+        "task": "image_edit",
+        "status": "retired",
+        "protocols": [],
+        "notes": "官方确认2026-10-10前后全部停服，不再推荐stepfun.images。",
+        "model_ids": [
+          "step-image-edit-2",
+          "step-1x-edit"
+        ],
+        "sources": [
+          "https://platform.stepfun.com/docs/zh/announcements/image-model-retirement.md"
+        ]
+      },
+      {
+        "task": "video_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "模型文档中的视频指视频理解输入，本轮未确认独立视频生成API。"
+      },
+      {
+        "task": "music_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方/v1/audio/music（及submit/query）使用model_id而非通用model，含专用任务契约；当前没有Step音乐serializer。",
+        "model_ids": [
+          "stepaudio-3-music-preview"
+        ]
+      },
+      {
+        "task": "speech_recognition",
+        "status": "supported",
+        "protocols": [
+          "stepfun.asr_sse"
+        ],
+        "notes": "HTTP+SSE：audio.data Base64、audio.input.transcription.model、format，与现codec一致；delta/done文本事件一致。双向ASR WebSocket不属于此能力。",
+        "model_ids": [
+          "stepaudio-3-asr-max",
+          "stepaudio-2.5-asr",
+          "stepaudio-2-asr-pro"
+        ]
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "supported",
+        "protocols": [
+          "stepfun.audio_speech"
+        ],
+        "notes": "JSON model/input/voice、原始音频或return_url/SSE返回已实现；必须选官方voice。2.5/3不接受voice_label，情绪用instruction。",
+        "model_ids": [
+          "stepaudio-3-tts",
+          "stepaudio-2.5-tts",
+          "step-tts-2",
+          "step-tts-mini"
+        ]
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "向量库管理与检索接口不等于可用的Embedding模型接口；未核得本产品可发送的公开模型调用契约。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未从当前官方API目录核得独立Rerank模型接口。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "supported",
+        "protocols": [
+          "stepfun.realtime_s2s"
+        ],
+        "notes": "官方统一/realtime和session/conversation/response事件；现有专用WebSocket会话codec支持，PCM16音频。3预览版有后续下线风险，以模型目录为准。",
+        "model_ids": [
+          "stepaudio-3-realtime-preview",
+          "stepaudio-2.5-realtime"
+        ]
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "stepfun-plan"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://platform.stepfun.com/docs/zh/step-plan/overview.md",
+      "https://platform.stepfun.com/docs/zh/step-plan/integrations/reasoning-api.md",
+      "https://platform.stepfun.com/docs/zh/step-plan/integrations/audio-api.md",
+      "https://platform.stepfun.com/docs/zh/announcements/image-model-retirement.md"
+    ],
+    "notes": "Step Plan额度与密钥独立，专属/step_plan/v1；不得把按量API新语音3系列自动套用到套餐。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.chat_text"
+        ],
+        "notes": "套餐官方接入页明确Chat Completions与Messages，未在套餐页确认Responses路径，因此保留Chat；stepaudio-2.5-chat仅text modalities。",
+        "model_ids": [
+          "step-5-preview",
+          "step-3.7-flash",
+          "step-3.5-flash",
+          "step-3.5-flash-2603",
+          "step-router-v1",
+          "stepaudio-2.5-chat"
+        ],
+        "base_url_override": "https://api.stepfun.com/step_plan/v1"
+      },
+      {
+        "task": "image_generation",
+        "status": "retired",
+        "protocols": [],
+        "notes": "官方明确图像模型及文生图、图生图、编辑接口在国内、海外和Step Plan同步停服；前两者2026-10-10下线，step-1x-edit更早停服。保留历史配置不等于可新推荐。",
+        "model_ids": [
+          "step-2x-large",
+          "step-image-edit-2",
+          "step-1x-edit"
+        ],
+        "sources": [
+          "https://platform.stepfun.com/docs/zh/announcements/image-model-retirement.md"
+        ]
+      },
+      {
+        "task": "image_edit",
+        "status": "retired",
+        "protocols": [],
+        "notes": "官方确认2026-10-10前后全部停服，不再推荐stepfun.images。",
+        "model_ids": [
+          "step-image-edit-2",
+          "step-1x-edit"
+        ],
+        "sources": [
+          "https://platform.stepfun.com/docs/zh/announcements/image-model-retirement.md"
+        ]
+      },
+      {
+        "task": "video_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "模型文档中的视频指视频理解输入，本轮未确认独立视频生成API。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "当前套餐模型与音频接入页未列StepAudio3音乐，不能从普通API推断套餐授权。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "supported",
+        "protocols": [
+          "stepfun.asr_sse"
+        ],
+        "notes": "套餐明确HTTP+SSE专属/audio/asr/sse与2.5模型；不将普通API 3-asr-max继承进来。",
+        "model_ids": [
+          "stepaudio-2.5-asr"
+        ]
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "supported",
+        "protocols": [
+          "stepfun.audio_speech"
+        ],
+        "notes": "套餐明确/audio/speech，参数与普通API一致，现原生codec可用；需配置官方音色。",
+        "model_ids": [
+          "stepaudio-2.5-tts"
+        ]
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "向量库管理与检索接口不等于可用的Embedding模型接口；未核得本产品可发送的公开模型调用契约。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未从当前官方API目录核得独立Rerank模型接口。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "supported",
+        "protocols": [
+          "stepfun.realtime_s2s"
+        ],
+        "notes": "套餐官方给wss://api.stepfun.com/step_plan/v1/realtime，现会话codec匹配；不能与流式ASR/TTS socket混用。",
+        "model_ids": [
+          "stepaudio-2.5-realtime"
+        ]
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "deepseek"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://api-docs.deepseek.com/api/create-response/",
+      "https://api-docs.deepseek.com/guides/responses_api/",
+      "https://api-docs.deepseek.com/guides/vision/",
+      "https://api-docs.deepseek.com/quick_start/pricing/"
+    ],
+    "notes": "本轮实际打开官方Responses/视觉文档；仅deepseek-flash有视觉，旧Flash/VisionExp为退役兼容别名。其他任务未凭开源论文推断在线API。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "Responses无服务端状态，逐轮带完整input并原样保留实际reasoning_text；现route-bound typed reasoning已实现。deepseek-flash接受input_image，Pro不支持图像。",
+        "model_ids": [
+          "deepseek-flash",
+          "deepseek-v4-pro"
+        ],
+        "provider_params": {
+          "include": null,
+          "chain_rounds": false
+        }
+      },
+      {
+        "task": "image_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "video_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "moonshot-cn"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://platform.kimi.com/docs/llms.txt",
+      "https://platform.kimi.com/docs/api/responses.md",
+      "https://platform.kimi.com/docs/api/chat",
+      "https://platform.kimi.com/docs/models.md"
+    ],
+    "notes": "本轮分别读取中国与国际官方站API/索引；图像视频理解归Chat输入，非图像/视频生成；没有凭模型名称补九类任务。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "Responses目前仅kimi-k3；K2.7/K2.6仍Chat。K3 reasoning effort low/high/max默认max。include仅web_search来源字段，因此省略默认encrypted_content；store固定false且previous_response_id固定null。现有codec支持文本/图片输入，尚无typed视频输入。",
+        "model_ids": [
+          "kimi-k3",
+          "kimi-k2.7-code",
+          "kimi-k2.7-code-highspeed",
+          "kimi-k2.6"
+        ],
+        "base_url_override": "https://api.moonshot.cn/v1",
+        "provider_params": {
+          "include": null,
+          "chain_rounds": false
+        },
+        "protocol_model_ids": {
+          "openai.responses": [
+            "kimi-k3"
+          ]
+        }
+      },
+      {
+        "task": "image_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "video_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "moonshot-global"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://platform.kimi.ai/docs/llms.txt",
+      "https://platform.kimi.ai/docs/api/responses.md",
+      "https://platform.kimi.ai/docs/api/chat",
+      "https://platform.kimi.ai/docs/models.md"
+    ],
+    "notes": "本轮分别读取中国与国际官方站API/索引；图像视频理解归Chat输入，非图像/视频生成；没有凭模型名称补九类任务。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "Responses目前仅kimi-k3；K2.7/K2.6仍Chat。K3 reasoning effort low/high/max默认max。include仅web_search来源字段，因此省略默认encrypted_content；store固定false且previous_response_id固定null。现有codec支持文本/图片输入，尚无typed视频输入。",
+        "model_ids": [
+          "kimi-k3",
+          "kimi-k2.7-code",
+          "kimi-k2.7-code-highspeed",
+          "kimi-k2.6"
+        ],
+        "base_url_override": "https://api.moonshot.ai/v1",
+        "provider_params": {
+          "include": null,
+          "chain_rounds": false
+        },
+        "protocol_model_ids": {
+          "openai.responses": [
+            "kimi-k3"
+          ]
+        }
+      },
+      {
+        "task": "image_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "video_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "zhipu"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://docs.bigmodel.cn/llms.txt",
+      "https://docs.bigmodel.cn/cn/guide/develop/responses/introduction.md",
+      "https://docs.bigmodel.cn/api-reference/response/创建-response.md",
+      "https://docs.bigmodel.cn/api-reference/模型-api/图像生成.md",
+      "https://docs.bigmodel.cn/api-reference/模型-api/视频生成异步.md",
+      "https://docs.bigmodel.cn/api-reference/模型-api/语音转文本.md",
+      "https://docs.bigmodel.cn/api-reference/模型-api/文本转语音.md",
+      "https://docs.bigmodel.cn/api-reference/模型-api/文本嵌入.md",
+      "https://docs.bigmodel.cn/api-reference/模型-api/文本重排序.md"
+    ],
+    "notes": "本轮逐个读取官方API OpenAPI Markdown，与现有wire逐字段比较；Chat与Responses基址不同，不能只切协议沿用旧路径。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "Responses官方base为https://open.bigmodel.cn/api/v1，Chat为/api/paas/v4。Responses schema未列include，省略默认cipher请求；store默认false，可显式true+previous_response_id续轮。具体模型优先沿用model_profiles的精确协议。",
+        "model_ids": [
+          "glm-5.3",
+          "glm-5.3-flash",
+          "glm-5-turbo"
+        ],
+        "provider_params": {
+          "include": null
+        },
+        "protocol_model_ids": {
+          "openai.responses": [
+            "glm-5.3",
+            "glm-5.3-flash",
+            "glm-5-turbo"
+          ]
+        },
+        "protocol_base_url_overrides": {
+          "openai.responses": "https://open.bigmodel.cn/api/v1"
+        },
+        "sources": [
+          "https://docs.bigmodel.cn/cn/coding-plan/tool/codex.md",
+          "https://docs.bigmodel.cn/llms.txt",
+          "https://docs.bigmodel.cn/cn/guide/develop/responses/introduction.md",
+          "https://docs.bigmodel.cn/api-reference/response/创建-response.md",
+          "https://docs.bigmodel.cn/api-reference/模型-api/图像生成.md",
+          "https://docs.bigmodel.cn/api-reference/模型-api/视频生成异步.md",
+          "https://docs.bigmodel.cn/api-reference/模型-api/语音转文本.md",
+          "https://docs.bigmodel.cn/api-reference/模型-api/文本转语音.md",
+          "https://docs.bigmodel.cn/api-reference/模型-api/文本嵌入.md",
+          "https://docs.bigmodel.cn/api-reference/模型-api/文本重排序.md"
+        ]
+      },
+      {
+        "task": "image_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方生成接口无n/response_format；现openai.images强行注入二者，不能仅凭/images/generations路径相同推荐。GLM-Image另有异步接口也未实现。",
+        "model_ids": [
+          "glm-image",
+          "cogview-4-250304",
+          "cogview-4",
+          "cogview-3-flash"
+        ]
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮图像生成schema不构成图像编辑API证据，未核得本产品可发送的编辑契约。"
+      },
+      {
+        "task": "video_generation",
+        "status": "supported",
+        "protocols": [
+          "zhipu.video_jobs"
+        ],
+        "notes": "JSON/videos/generations→id，GET/async-result/{id}的task_status/video_result契约由专用adapter实现。",
+        "model_ids": [
+          "cogvideox-3",
+          "cogvideox-2",
+          "cogvideox-flash"
+        ]
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "supported",
+        "protocols": [
+          "zhipu.audio_transcriptions"
+        ],
+        "notes": "本轮新增原生同步codec已通过定向测试：multipart file/model/prompt，绝不注入language或response_format；官方无typed language时本地拒绝。热词数组未猜测编码，需另核官方multipart表示。仅同步{text}，非ASR SSE。",
+        "model_ids": [
+          "glm-asr-2512"
+        ],
+        "protocol_model_ids": {
+          "zhipu.audio_transcriptions": [
+            "glm-asr-2512"
+          ]
+        }
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "supported",
+        "protocols": [
+          "zhipu.audio_speech"
+        ],
+        "notes": "Native GLM-TTS JSON-to-audio: protocol defaults tongtong/wav/stream:false, even when the user clears optional recommendation JSON. Only documented WAV/PCM are accepted; voice and native options preserve explicit user settings.",
+        "model_ids": [
+          "glm-tts"
+        ],
+        "provider_params": {},
+        "sources": [
+          "https://docs.bigmodel.cn/api-reference/模型-api/文本转语音.md"
+        ]
+      },
+      {
+        "task": "embedding",
+        "status": "supported",
+        "protocols": [
+          "openai.embeddings"
+        ],
+        "notes": "官方/embeddings的model/input与data[].embedding相符；仅推荐dense数值向量。",
+        "model_ids": [
+          "embedding-2",
+          "embedding-3"
+        ]
+      },
+      {
+        "task": "rerank",
+        "status": "supported",
+        "protocols": [
+          "generic.rerank"
+        ],
+        "notes": "官方flat model/query/documents/top_n和results[].index/relevance_score与现serializer匹配。",
+        "model_ids": [
+          "rerank"
+        ]
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方WebSocket音视频会话存在，现仅有StepFun专用Realtime adapter，不能借OpenAI或Step事件codec。",
+        "model_ids": [
+          "glm-realtime"
+        ],
+        "sources": [
+          "https://docs.bigmodel.cn/cn/asyncapi/realtime.md"
+        ]
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "glm-coding-plan"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://docs.bigmodel.cn/cn/coding-plan/overview.md",
+      "https://docs.bigmodel.cn/cn/coding-plan/tool/codex.md",
+      "https://docs.bigmodel.cn/cn/coding-plan/latest-model.md"
+    ],
+    "notes": "GLM Coding套餐额度、适用工具与普通按量服务区分；视觉MCP不等于批量图像生成或通用语音模型授权。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses"
+        ],
+        "notes": "官方Codex使用Responses的/api/v1基址和glm-5.3，effort默认max；当前套餐模型为5.3及5.3-Flash，历史5.2/5.1映射5.3，5-Turbo/4.7映射Flash。Chat需另按官方套餐Chat基址配置。",
+        "model_ids": [
+          "glm-5.3",
+          "glm-5.3-flash"
+        ],
+        "base_url_override": "https://open.bigmodel.cn/api/v1",
+        "provider_params": {
+          "include": null
+        }
+      },
+      {
+        "task": "image_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "video_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "minimax"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://platform.minimax.cn/docs/api-reference/responses-create.md",
+      "https://platform.minimax.cn/docs/api-reference/image-generation-t2i.md",
+      "https://platform.minimax.cn/docs/api-reference/video-generation-v2-create.md",
+      "https://platform.minimax.cn/docs/api-reference/speech-to-text.md",
+      "https://platform.minimax.cn/docs/api-reference/speech-t2a-http.md",
+      "https://platform.minimax.cn/docs/api-reference/music-generation.md"
+    ],
+    "notes": "本轮分别抓取国内与国际官方Markdown；国内新站及API域为minimax.cn，国际io密钥与额度独立。现有TTS/Music原生codec不可推及image/video/ASR。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "Responses为官方主接口。M3默认不思考，非none effort仅开关；M2.x始终思考。store被忽略且固定false，需完整input历史；未列include cipher字段。M3.1预览仅M Plan/Code，不假定普通账户可用。",
+        "model_ids": [
+          "MiniMax-M3",
+          "MiniMax-M2.7",
+          "MiniMax-M2.7-highspeed",
+          "MiniMax-M2.5"
+        ],
+        "base_url_override": "https://api.minimax.cn/v1",
+        "provider_params": {
+          "include": null,
+          "chain_rounds": false
+        }
+      },
+      {
+        "task": "image_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方/v1/image_generation使用aspect_ratio、image_urls/base64返回，现无MiniMax原生图像codec，generic Images的n/b64_json/data[]不匹配。",
+        "model_ids": [
+          "image-01",
+          "image-01-live"
+        ]
+      },
+      {
+        "task": "image_edit",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方主体参考图生图使用subject_reference等JSON字段，现无对应编辑serializer；不把普通图片理解当编辑。",
+        "model_ids": [
+          "image-01",
+          "image-01-live"
+        ]
+      },
+      {
+        "task": "video_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方/v2/video_generation的content和任务查询/下载接口无现成MiniMax adapter，不能沿用OpenAI/Ark任务生命周期。",
+        "model_ids": [
+          "MiniMax-H3",
+          "MiniMax-H3-Max"
+        ]
+      },
+      {
+        "task": "music_generation",
+        "status": "catalog_required",
+        "protocols": [
+          "minimax.music"
+        ],
+        "notes": "专用music_generation与现hex完整曲目codec一致，但2026-08-20后付费接口仅历史付费用户可用、新用户停开；必须目录和账户权限确认。free系列已停服，不推荐。",
+        "model_ids": [
+          "music-3.0",
+          "music-2.6"
+        ]
+      },
+      {
+        "task": "speech_recognition",
+        "status": "supported",
+        "protocols": [
+          "minimax.speech_to_text"
+        ],
+        "notes": "本轮新增原生同步multipart codec已通过定向测试：asr-1.0、file、response_format=json/verbose_json，language明确写HTTP头；不支持typed prompt或stream=true时本地拒绝。回{text,duration}，不借OpenAI转写路径。",
+        "model_ids": [
+          "asr-1.0"
+        ],
+        "protocol_model_ids": {
+          "minimax.speech_to_text": [
+            "asr-1.0"
+          ]
+        }
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "supported",
+        "protocols": [
+          "minimax.t2a"
+        ],
+        "notes": "官方/v1/t2a_v2，voice_setting/audio_setting及data.audio hex+base_resp.status_code由现原生codec处理；推荐同步hex模式。",
+        "model_ids": [
+          "speech-2.8-hd",
+          "speech-2.8-turbo"
+        ]
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "TTS WebSocket与ASR SSE不能证明双向语音会话；未核得本产品可执行的MiniMax Realtime协议。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "minimax-code"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://platform.minimax.io/docs/api-reference/responses-create.md",
+      "https://platform.minimax.io/docs/api-reference/image-generation-t2i.md",
+      "https://platform.minimax.io/docs/api-reference/video-generation-v2-create.md",
+      "https://platform.minimax.io/docs/api-reference/speech-to-text.md",
+      "https://platform.minimax.io/docs/api-reference/speech-t2a-http.md",
+      "https://platform.minimax.io/docs/api-reference/music-generation.md"
+    ],
+    "notes": "本轮分别抓取国内与国际官方Markdown；国内新站及API域为minimax.cn，国际io密钥与额度独立。现有TTS/Music原生codec不可推及image/video/ASR。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "Responses为官方主接口。M3默认不思考，非none effort仅开关；M2.x始终思考。store被忽略且固定false，需完整input历史；未列include cipher字段。M3.1预览仅M Plan/Code，不假定普通账户可用。",
+        "model_ids": [
+          "MiniMax-M3",
+          "MiniMax-M2.7",
+          "MiniMax-M2.7-highspeed",
+          "MiniMax-M2.5"
+        ],
+        "base_url_override": "https://api.minimax.io/v1",
+        "provider_params": {
+          "include": null,
+          "chain_rounds": false
+        }
+      },
+      {
+        "task": "image_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方/v1/image_generation使用aspect_ratio、image_urls/base64返回，现无MiniMax原生图像codec，generic Images的n/b64_json/data[]不匹配。",
+        "model_ids": [
+          "image-01"
+        ]
+      },
+      {
+        "task": "image_edit",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方主体参考图生图使用subject_reference等JSON字段，现无对应编辑serializer；不把普通图片理解当编辑。",
+        "model_ids": [
+          "image-01"
+        ]
+      },
+      {
+        "task": "video_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方/v2/video_generation的content和任务查询/下载接口无现成MiniMax adapter，不能沿用OpenAI/Ark任务生命周期。",
+        "model_ids": [
+          "MiniMax-H3",
+          "MiniMax-H3-Max"
+        ]
+      },
+      {
+        "task": "music_generation",
+        "status": "catalog_required",
+        "protocols": [
+          "minimax.music"
+        ],
+        "notes": "专用music_generation与现hex完整曲目codec一致，但2026-08-20后付费接口仅历史付费用户可用、新用户停开；必须目录和账户权限确认。free系列已停服，不推荐。",
+        "model_ids": [
+          "music-3.0",
+          "music-2.6"
+        ]
+      },
+      {
+        "task": "speech_recognition",
+        "status": "supported",
+        "protocols": [
+          "minimax.speech_to_text"
+        ],
+        "notes": "本轮新增原生同步multipart codec已通过定向测试：asr-1.0、file、response_format=json/verbose_json，language明确写HTTP头；不支持typed prompt或stream=true时本地拒绝。回{text,duration}，不借OpenAI转写路径。",
+        "model_ids": [
+          "asr-1.0"
+        ],
+        "protocol_model_ids": {
+          "minimax.speech_to_text": [
+            "asr-1.0"
+          ]
+        }
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "supported",
+        "protocols": [
+          "minimax.t2a"
+        ],
+        "notes": "官方/v1/t2a_v2，voice_setting/audio_setting及data.audio hex+base_resp.status_code由现原生codec处理；推荐同步hex模式。",
+        "model_ids": [
+          "speech-2.8-hd",
+          "speech-2.8-turbo"
+        ]
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "TTS WebSocket与ASR SSE不能证明双向语音会话；未核得本产品可执行的MiniMax Realtime协议。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "minimax-coding-plan"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://platform.minimax.cn/docs/m-plan/intro.md",
+      "https://platform.minimax.cn/docs/m-plan/quickstart.md",
+      "https://platform.minimax.cn/docs/m-plan/codex.md",
+      "https://platform.minimax.cn/docs/api-reference/responses-create.md"
+    ],
+    "notes": "现中国套餐文档已转M Plan，专用订阅密钥与普通按量账户不同；本轮只确认新M Plan文本契约，不把旧Token Plan宣传中的媒体额度转成当前可用路由。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "官方Codex wire_api=responses，模型仅MiniMax-M3.1-Flash-Preview，默认effort=max，支持low/medium/high/xhigh/max且禁止none；完整input原样回放真实reasoning。",
+        "model_ids": [
+          "MiniMax-M3.1-Flash-Preview"
+        ],
+        "base_url_override": "https://api.minimax.cn/v1",
+        "provider_params": {
+          "include": null,
+          "chain_rounds": false
+        }
+      },
+      {
+        "task": "image_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "video_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "dashscope",
+      "alibaba"
+    ],
+    "official_origins": [
+      "https://dashscope.aliyuncs.com",
+      "https://dashscope-intl.aliyuncs.com",
+      "https://dashscope-us.aliyuncs.com",
+      "https://cn-hongkong.dashscope.aliyuncs.com"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://help.aliyun.com/zh/model-studio/compatibility-with-openai-responses-api",
+      "https://help.aliyun.com/zh/model-studio/qwen-image-api",
+      "https://help.aliyun.com/zh/model-studio/text-to-image-v2-api-reference",
+      "https://help.aliyun.com/zh/model-studio/qwen-image-generation-and-editing-api-reference",
+      "https://help.aliyun.com/zh/model-studio/text-to-video-api-reference",
+      "https://help.aliyun.com/zh/model-studio/asr-model",
+      "https://help.aliyun.com/zh/model-studio/qwen-tts-api",
+      "https://help.aliyun.com/zh/model-studio/text-embedding-synchronous-api",
+      "https://help.aliyun.com/zh/model-studio/rerank",
+      "https://help.aliyun.com/zh/model-studio/fun-music-api",
+      "https://help.aliyun.com/en/model-studio/realtime",
+      "https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-responses",
+      "https://www.alibabacloud.com/help/en/model-studio/base-url"
+    ],
+    "notes": "本轮打开阿里官方各任务API页，并实际HTTP解析SSR核对Rerank双接口；官方地域页已核北京/新加坡/美国Virginia/香港四个共享origin，原生路径仅在这些精确域保留地域并转换。新Workspace专属域须保留用户地域和Workspace，不能写入占位符或泛化域名白名单。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "普通百炼支持Responses，官方推荐新接口；精确型号例外、effort按model_profiles。文本与图片可用；文档音视频、文件与内置工具不等于当前generic Chat内容块全部实现。",
+        "model_ids": [
+          "qwen3.8-max",
+          "qwen3.8-flash",
+          "qwen3.7-max",
+          "qwen3.7-plus"
+        ],
+        "provider_params": {
+          "include": null
+        }
+      },
+      {
+        "task": "image_generation",
+        "status": "supported",
+        "protocols": [
+          "dashscope.images"
+        ],
+        "notes": "仅官方异步text2image/image-synthesis、input.prompt、parameters.n/size与output.task_id→results.url分支匹配现adapter。同步multimodal-generation/messages分支未实现，size需官方宽*高。",
+        "model_ids": [
+          "qwen-image-3.0-pro",
+          "qwen-image-3.0",
+          "wan2.5-t2i-preview"
+        ]
+      },
+      {
+        "task": "image_edit",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "新版编辑为multimodal input.messages/content图片，现dashscope.images只支持ImageGeneration并写input.prompt；不可用于编辑。",
+        "model_ids": [
+          "qwen-image-3.0-pro",
+          "qwen-image-3.0"
+        ]
+      },
+      {
+        "task": "video_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方video-generation/video-synthesis与任务轮询存在，现registry没有DashScope视频serializer。",
+        "model_ids": [
+          "wan2.7-t2v",
+          "wan2.7-t2v-2026-06-12"
+        ]
+      },
+      {
+        "task": "music_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方/api/v1/services/audio/music/generation使用input.prompt/lyrics、output.audio及专用SSE头，现无对应serializer；邀测权限另需开通。",
+        "model_ids": [
+          "fun-music-v1",
+          "fun-music-preview"
+        ]
+      },
+      {
+        "task": "speech_recognition",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方HTTP URL/Base64与WebSocket原生ASR接口均需独立codec，现无DashScope ASR adapter；不可借OpenAI multipart路径。",
+        "model_ids": [
+          "fun-asr-flash-2026-06-15"
+        ]
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方multimodal-generation的input.text/voice和output.audio.url/Base64，不是openai.audio_speech的input+binary；现未实现。",
+        "model_ids": [
+          "qwen3-tts-flash"
+        ]
+      },
+      {
+        "task": "embedding",
+        "status": "supported",
+        "protocols": [
+          "dashscope.embeddings"
+        ],
+        "notes": "官方native input.texts、parameters、output.embeddings[].embedding/text_index与现codec一致；仅dense向量，不承诺sparse结果。",
+        "model_ids": [
+          "qwen3.7-text-embedding",
+          "text-embedding-v4",
+          "text-embedding-v3"
+        ]
+      },
+      {
+        "task": "rerank",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方/rerank使用指南有flat兼容body+results、但路径是Workspace host的/compatible-api/v1/reranks；native API另为input/parameters+output.results。当前generic.rerank默认/rerank且基址路径不同，需配置层保留origin并切固定basepath政策后才能推荐，不能写未替换WorkspaceId。qwen3-vl-rerank仅native，无现serializer。",
+        "model_ids": [
+          "qwen3-rerank"
+        ]
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方/api-ws/v1/realtime独立WebSocket会话存在，registry现无Qwen会话codec；不能借StepFun协议。",
+        "model_ids": [
+          "qwen3.8-omni-flash-realtime",
+          "qwen3.5-omni-plus-realtime",
+          "qwen3.5-omni-flash-realtime"
+        ]
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "dashscope-coding"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://help.aliyun.com/zh/model-studio/coding-plan",
+      "https://help.aliyun.com/zh/model-studio/codex"
+    ],
+    "notes": "单独核对Coding Plan官方Codex接入；普通百炼多模态与新Token Plan Team权益不自动属于此现有preset。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.chat_text"
+        ],
+        "notes": "官方当前明确Coding Plan仅Chat/Completions；保留Chat并用专属coding基址。不可因普通百炼支持Responses而替套餐切换。",
+        "model_ids": [
+          "qwen3.7-plus",
+          "qwen3.6-plus",
+          "qwen3.5-plus",
+          "kimi-k2.5",
+          "glm-5",
+          "MiniMax-M2.5"
+        ],
+        "base_url_override": "https://coding.dashscope.aliyuncs.com/v1"
+      },
+      {
+        "task": "image_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "video_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "ark",
+      "volcengine"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://docs.volcengine.com/docs/ark/model-list?lang=zh&redirect=1",
+      "https://ark.volcengine.com/region:cn-beijing/docs/create-model-responses-api",
+      "https://docs.volcengine.com/docs/ark/image-generation-api?lang=zh&redirect=1",
+      "https://ark.volcengine.com/region:cn-beijing/docs/create-video-generation-task-api",
+      "https://ark.volcengine.com/region:cn-beijing/docs/multimodal-vectorization-api",
+      "https://docs.volcengine.com/docs/DoubaoVoice/task-submission-http-1?lang=zh",
+      "https://docs.volcengine.com/docs/DoubaoVoice/unidirectional-streaming-text-to-speech-http?lang=zh",
+      "https://ark.volcengine.com/region:cn-beijing/docs/create-model-responses-api.md"
+    ],
+    "notes": "逐项区分方舟API与openspeech语音域，后者密钥及协议独立；现有adapter存在不代表本轮官方字段已匹配。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "官方模型列表明确Responses/Chat，推荐Responses；effort与store/缓存按精确模型配置。当前typed内容仅已实现文本/图片，不把音视频/文档输入标为完整可用。",
+        "model_ids": [
+          "doubao-seed-evolving",
+          "doubao-seed-2-1-pro-260915",
+          "doubao-seed-2-1-lite-260915",
+          "deepseek-v4-1-flash-260910"
+        ],
+        "provider_params": {
+          "include": null
+        }
+      },
+      {
+        "task": "image_generation",
+        "status": "supported",
+        "protocols": [
+          "ark.images"
+        ],
+        "notes": "官方同/images/generations，model/prompt/image/size/response_format=b64_json与现JSON serializer匹配。推荐单产物基本生成/参考编辑，不含图层拆分、批量组图、独立mask；现实现最多8图和10MiB/图是本地上限。",
+        "model_ids": [
+          "doubao-seedream-5-0-pro-260628",
+          "doubao-seedream-5-0-flash-260915"
+        ]
+      },
+      {
+        "task": "image_edit",
+        "status": "supported",
+        "protocols": [
+          "ark.images"
+        ],
+        "notes": "官方同/images/generations，model/prompt/image/size/response_format=b64_json与现JSON serializer匹配。推荐单产物基本生成/参考编辑，不含图层拆分、批量组图、独立mask；现实现最多8图和10MiB/图是本地上限。 编辑用同一endpoint的image字符串/数组。",
+        "model_ids": [
+          "doubao-seedream-5-0-pro-260628",
+          "doubao-seedream-5-0-flash-260915"
+        ]
+      },
+      {
+        "task": "video_generation",
+        "status": "supported",
+        "protocols": [
+          "ark.video_jobs"
+        ],
+        "notes": "官方contents/generations/tasks submit→GET{id}、content.video_url与现codec一致；支持已实现的文字/首帧基础生成。多视频/多音频参考、编辑/续写、draft_task不因文档支持而自动承诺。",
+        "model_ids": [
+          "doubao-seedance-2-5-260628",
+          "doubao-seedance-2-0-260128",
+          "doubao-seedance-2-0-fast-260128",
+          "doubao-seedance-2-0-mini-260615"
+        ]
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "当前volc.asr_file发Base64 audio.data且无必需audio.url和X-Api-Sequence:-1；当前及旧官方标准版均要求URL，不可新推荐至修复。openspeech新APIKey或旧App/Access/Resource认证独立于Ark。",
+        "model_ids": [
+          "bigmodel"
+        ]
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "volc.tts_v3现未将typed format写入req_params.audio_params.format，且强行写model、无speaker必填验证；格式只改变结果MIME，存在错标。当前文档model仅复刻音色场景可传，需修复原生serializer。",
+        "model_ids": [
+          "seed-tts-2.0-standard"
+        ]
+      },
+      {
+        "task": "embedding",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "当前官方目录为多模态/embeddings/multimodal，input内容块且data对象，不符合openai.embeddings的string[]和data[]；现无Ark多模态embedding serializer。",
+        "model_ids": [
+          "doubao-embedding-vision-251215"
+        ]
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "检索到ContextSearch/VikingDB重排独立产品证据，未确认可用同一Ark preset与现generic codec的公开契约。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "豆包端到端Realtime是独立WebSocket二进制header/event/payload协议，现无Volc会话codec；不得映射StepFun JSON Realtime。",
+        "sources": [
+          "https://docs.volcengine.com/docs/DoubaoVoice/End-to-endreal-timespeechlargemodelAPIaccessdocument?lang=zh"
+        ]
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "ark-coding-plan"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://docs.volcengine.com/docs/ark/coding-plan-personal-plan-overview?lang=zh",
+      "https://ark.volcengine.com/region:cn-beijing/docs/coding-plan-personal-ai-opencode"
+    ],
+    "notes": "Coding Plan与Agent Plan是不同套餐；只按当前套餐文本模型与官方工具接入声明，不继承Agent Plan媒体权益。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "使用官方套餐base与专属key；精确Responses型号、Chat例外以model_profiles为准，不能借上游同名型号复制限额或effort。include仅泛定义没有已核cipher字符串，省略encrypted_content扩展。",
+        "model_ids": [
+          "ark-code-latest",
+          "doubao-seed-evolving",
+          "doubao-seed-2.1-pro",
+          "glm-5.3",
+          "kimi-k3",
+          "deepseek-v4.1-flash"
+        ],
+        "provider_params": {
+          "include": null
+        }
+      },
+      {
+        "task": "image_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "video_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "ark-agent-plan"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://docs.volcengine.com/docs/ark/agent-plan-personal-plan-overview?lang=zh",
+      "https://docs.volcengine.com/docs/ark/agent-plan-personal-visual-models?lang=zh",
+      "https://docs.volcengine.com/docs/ark/agent-plan-personal-voice-model?lang=zh"
+    ],
+    "notes": "已分别打开Agent Plan套餐、图像/视频API与语音页；专用key和/plan路径不可与Coding/PAYG混用，部分模型受套餐档位限制。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "按官方套餐文本接入及精确model_profiles推荐Responses；API key须Agent Plan专用，模型限额与PAYG不可互相照搬。",
+        "model_ids": [
+          "ark-code-latest",
+          "doubao-seed-evolving",
+          "doubao-seed-2.1-pro",
+          "glm-5.3",
+          "kimi-k3",
+          "deepseek-v4.1-flash"
+        ],
+        "provider_params": {
+          "include": null
+        }
+      },
+      {
+        "task": "image_generation",
+        "status": "supported",
+        "protocols": [
+          "ark.images"
+        ],
+        "notes": "当前套餐表精确ID为doubao-seedream-5-0-pro，官方media接入用/api/plan/v3；请求/返回与现ark.images一致，仍限单产物基本生成。旧教程示例还列5.0-lite，以当前套餐/目录授权为准。",
+        "model_ids": [
+          "doubao-seedream-5-0-pro"
+        ],
+        "base_url_override": "https://ark.cn-beijing.volces.com/api/plan/v3",
+        "endpoint": "/images/generations"
+      },
+      {
+        "task": "image_edit",
+        "status": "supported",
+        "protocols": [
+          "ark.images"
+        ],
+        "notes": "官方Plan模型提供参考图编辑且沿用images/generations image字段，基本JSON编辑已实现；独立mask/图层拆分不在推荐能力。",
+        "model_ids": [
+          "doubao-seedream-5-0-pro"
+        ],
+        "base_url_override": "https://ark.cn-beijing.volces.com/api/plan/v3",
+        "endpoint": "/images/generations"
+      },
+      {
+        "task": "video_generation",
+        "status": "supported",
+        "protocols": [
+          "ark.video_jobs"
+        ],
+        "notes": "官方Plan明确这些精确ID与相同任务生命周期，仅Large/Max可用。2.0-mini虽官方支持但当前本地校验误当PAYG展示名拒绝，暂不列可执行推荐至校验修复。",
+        "model_ids": [
+          "doubao-seedance-2.0",
+          "doubao-seedance-2.0-fast",
+          "doubao-seedance-2.5"
+        ],
+        "base_url_override": "https://ark.cn-beijing.volces.com/api/plan/v3",
+        "endpoint": "/contents/generations/tasks",
+        "poll_endpoint": "/contents/generations/tasks/{id}"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "Plan官方为/api/v3/plan/sauc等WebSocket二进制流式识别，X-Api-Key专用key+ResourceId；现volc.asr_file HTTP URL任务serializer不适用。",
+        "model_ids": [
+          "doubao-seed-asr-2.0"
+        ]
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方/api/v3/plan/tts/unidirectional与X-Api-Key、seed-tts-2.0资源头；当前volc_voice只旧AppKey/AccessKey认证且typed format未写audio_params，需要完整适配再推荐。",
+        "model_ids": [
+          "doubao-seed-tts-2.0"
+        ]
+      },
+      {
+        "task": "embedding",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "Plan目录有精确多模态embedding，但无本产品对应内容块/data-object serializer；不可继承OpenAI文本embedding。",
+        "model_ids": [
+          "doubao-embedding-vision"
+        ]
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "套餐ASR/TTS流式WebSocket不等于端到端Realtime会话；本轮未证实Plan公开此任务授权。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "qianfan"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://cloud.baidu.com/doc/qianfan-docs/s/4mi400l1m",
+      "https://cloud.baidu.com/doc/qianfan-api/s/vmhejnuy8",
+      "https://cloud.baidu.com/doc/qianfan-api/s/Dmba8k71y",
+      "https://cloud.baidu.com/doc/qianfan-api/s/Fm7u3ropn",
+      "https://cloud.baidu.com/doc/qianfan-api/s/2m7u4zt74",
+      "https://cloud.baidu.com/doc/qianfan-api/s/8m7u6un8a",
+      "https://cloud.baidu.com/doc/qianfan-api/s/Imo9g5a6a",
+      "https://cloud.baidu.com/doc/qianfan-api/s/Amg0lgcx4",
+      "https://cloud.baidu.com/doc/qianfan-api/s/5m7stbv04",
+      "https://cloud.baidu.com/doc/qianfan-api/s/Dmtijam2s",
+      "https://cloud.baidu.com/doc/qianfan-api/s/mm7vo6ny7"
+    ],
+    "notes": "本轮实际打开千帆API与Responses指南，按量API Key与独立AI开放能力域区分。动态模型目录声明type和architecture为权威，不把上游型号能力复制到路由ID。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "官方Responses指南精确列支持模型，/v2/responses支持store与previous_response_id。创建schema未列include，不自动请求cipher；工具思考用原始reasoning_text数组。其他模型只按精确profile或目录确认。",
+        "model_ids": [
+          "deepseek-v4-pro",
+          "deepseek-v4-flash",
+          "deepseek-v3.2",
+          "deepseek-v3.2-think",
+          "glm-5.1",
+          "glm-5",
+          "qwen3-coder-480b-a35b-instruct",
+          "qwen3-235b-a22b-instruct-2507",
+          "qwen3-14b",
+          "qwen3-8b"
+        ],
+        "provider_params": {
+          "include": null
+        },
+        "protocol_model_ids": {
+          "openai.responses": [
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "deepseek-v3.2",
+            "deepseek-v3.2-think",
+            "glm-5.1",
+            "glm-5",
+            "qwen3-coder-480b-a35b-instruct",
+            "qwen3-235b-a22b-instruct-2507",
+            "qwen3-14b",
+            "qwen3-8b"
+          ]
+        }
+      },
+      {
+        "task": "image_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "通用JSON生成与Ernie专用路径不同；官方schema未列response_format而现openai.images强注b64_json，Ernie专用也无n，不能借路径/部分字段相似推荐。",
+        "model_ids": [
+          "flux.1-schnell",
+          "qwen-image",
+          "ernie-image",
+          "ernie-image-turbo"
+        ]
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "目录支持image2image类型，但本轮未取得与现serializer完整匹配的编辑请求及返回契约；不从text2image补编辑。"
+      },
+      {
+        "task": "video_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方/video/generations采用content和专用异步任务生命周期，registry无千帆视频codec，不等同openai.videos或ark.video_jobs。",
+        "model_ids": [
+          "musesteamer-air-i2v"
+        ]
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方短语音vop.baidu.com/pro_api是JSON音频与format/rate等原生字段，不是OpenAI multipart；无本产品百度ASR adapter。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方tsn.baidu.com/text2audio为x-www-form-urlencoded并有百度音色编号/参数，无对应serializer；不能使用OpenAI JSON。"
+      },
+      {
+        "task": "embedding",
+        "status": "supported",
+        "protocols": [
+          "openai.embeddings"
+        ],
+        "notes": "官方/v2/embeddings model/input字符串数组与data[].embedding可由现codec发送并解析；多模态输入未实现。",
+        "model_ids": [
+          "embedding-v1"
+        ]
+      },
+      {
+        "task": "rerank",
+        "status": "supported",
+        "protocols": [
+          "generic.rerank"
+        ],
+        "notes": "官方/v2/rerank flat query/documents，results[].index/relevance_score与现codec一致；其他模型先看原生目录type声明。",
+        "model_ids": [
+          "bce-reranker-base"
+        ]
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方端到端语音为aip.baidubce.com专用WebSocket会话与鉴权，registry无百度会话codec。",
+        "model_ids": [
+          "audio-mini-realtime-near",
+          "audio-mini-realtime-far",
+          "audio-realtime-near",
+          "audio-realtime-far"
+        ]
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "qianfan-coding-plan"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://cloud.baidu.com/doc/qianfan/s/imlg0beiu"
+    ],
+    "notes": "本轮独立打开套餐文档；专属key只能用于coding接口，不能复用到非套餐媒体或普通API。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.chat_text"
+        ],
+        "notes": "官方给完整/coding/chat/completions，未给套餐Responses；当前FAQ明确套餐模型尚不支持图片理解，不能继承上游视觉输入。",
+        "model_ids": [
+          "qianfan-code-latest",
+          "deepseek-v4-pro",
+          "glm-5.1"
+        ],
+        "base_url_override": "https://qianfan.baidubce.com/v2/coding"
+      },
+      {
+        "task": "image_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "video_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "hunyuan"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://cloud.tencent.com/document/product/1823/130078",
+      "https://cloud.tencent.com/document/product/1823/135873",
+      "https://cloud.tencent.com/document/product/1823/133515",
+      "https://cloud.tencent.com/document/product/1823/135744",
+      "https://cloud.tencent.com/document/product/1823/137202"
+    ],
+    "notes": "现preset对应腾讯TokenHub统一模型服务，非旧混元TC3签名API；本轮分别核对国内/国际协议矩阵与字段说明，聚合目录决定账户可用模型。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "官方矩阵支持Responses；hy3及兼容模型明确不支持previous_response_id，完整input回放。include接受且列cipher，但compat实际忽略include/store，不能假定已获得加密推理。精确profile决定推荐与effort，型号目录优先。",
+        "model_ids": [
+          "hy4-preview",
+          "hy3",
+          "deepseek-v4-flash",
+          "deepseek-v4-pro",
+          "glm-5.2",
+          "kimi-k3"
+        ],
+        "provider_params": {
+          "chain_rounds": false
+        }
+      },
+      {
+        "task": "image_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "TokenHub的WAND/hunyuan-image原生JSON字段及返回不同，现无TokenHub图像serializer，不能因OpenAI Chat兼容使用openai.images。",
+        "model_ids": [
+          "hy-image-v3.5-preview",
+          "hy-image-v3"
+        ]
+      },
+      {
+        "task": "image_edit",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方参考生图/编辑属WAND原生能力，现无对应image输入codec与任务契约；不可与Chat图像理解混同。",
+        "model_ids": [
+          "hy-image-v3.5-preview",
+          "hy-image-v3"
+        ]
+      },
+      {
+        "task": "video_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方/v1/wand/hunyuan-video/generation及任务查询是专用接口，现无serializer。其他Vidu/Kling/PixVerse目录型号同样不能继承Ark/OpenAI codec。",
+        "model_ids": [
+          "hy-video-v1.5"
+        ]
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮TokenHub目录/调用指南未确认ASR端点；腾讯云独立ASR产品采用不同鉴权，不能继承同一preset。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未从TokenHub官方接口核得可用TTS任务；独立腾讯语音合成服务不代表TokenHub同key可调。"
+      },
+      {
+        "task": "embedding",
+        "status": "supported",
+        "protocols": [
+          "openai.embeddings"
+        ],
+        "notes": "官方/v1/embeddings对文本OpenAI兼容；固定维度不可任意调。kinfra-vl-*走/embeddings/multimodal内容块，无现serializer，不包括在可执行列表。",
+        "model_ids": [
+          "kinfra-text-embedding-0.6b",
+          "kinfra-text-embedding-4b"
+        ],
+        "provider_params": {
+          "encoding_format": "float"
+        }
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮TokenHub公开目录与接口未核得独立Rerank契约；不能拿向量相似度计算冒充rerank模型。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核得TokenHub双向会话接口；Chat语音理解或腾讯云独立语音服务不构成本产品Realtime codec证据。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "hunyuan-global"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://intl.cloud.tencent.com/jp/document/product/1300/80632",
+      "https://intl.cloud.tencent.com/jp/document/product/1300/82346",
+      "https://intl.cloud.tencent.com/jp/document/product/1300/81385",
+      "https://intl.cloud.tencent.com/jp/document/product/1300/78934",
+      "https://www.tencentcloud.com/document/product/1300/81297"
+    ],
+    "notes": "现preset对应腾讯TokenHub统一模型服务，非旧混元TC3签名API；本轮分别核对国内/国际协议矩阵与字段说明，聚合目录决定账户可用模型。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "官方矩阵支持Responses；hy3及兼容模型明确不支持previous_response_id，完整input回放。include接受且列cipher，但compat实际忽略include/store，不能假定已获得加密推理。精确profile决定推荐与effort，型号目录优先。",
+        "model_ids": [
+          "hy4-preview",
+          "hy3",
+          "deepseek-v4-flash",
+          "deepseek-v4-pro",
+          "glm-5.2",
+          "kimi-k3"
+        ],
+        "provider_params": {
+          "chain_rounds": false
+        }
+      },
+      {
+        "task": "image_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "TokenHub的WAND/hunyuan-image原生JSON字段及返回不同，现无TokenHub图像serializer，不能因OpenAI Chat兼容使用openai.images。",
+        "model_ids": [
+          "hy-image-v3.5-preview",
+          "hy-image-v3"
+        ]
+      },
+      {
+        "task": "image_edit",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方参考生图/编辑属WAND原生能力，现无对应image输入codec与任务契约；不可与Chat图像理解混同。",
+        "model_ids": [
+          "hy-image-v3.5-preview",
+          "hy-image-v3"
+        ]
+      },
+      {
+        "task": "video_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方/v1/wand/hunyuan-video/generation及任务查询是专用接口，现无serializer。其他Vidu/Kling/PixVerse目录型号同样不能继承Ark/OpenAI codec。",
+        "model_ids": [
+          "hy-video-v1.5"
+        ]
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮TokenHub目录/调用指南未确认ASR端点；腾讯云独立ASR产品采用不同鉴权，不能继承同一preset。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未从TokenHub官方接口核得可用TTS任务；独立腾讯语音合成服务不代表TokenHub同key可调。"
+      },
+      {
+        "task": "embedding",
+        "status": "supported",
+        "protocols": [
+          "openai.embeddings"
+        ],
+        "notes": "官方/v1/embeddings对文本OpenAI兼容；固定维度不可任意调。kinfra-vl-*走/embeddings/multimodal内容块，无现serializer，不包括在可执行列表。",
+        "model_ids": [
+          "kinfra-text-embedding-0.6b",
+          "kinfra-text-embedding-4b"
+        ],
+        "provider_params": {
+          "encoding_format": "float"
+        }
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮TokenHub公开目录与接口未核得独立Rerank契约；不能拿向量相似度计算冒充rerank模型。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核得TokenHub双向会话接口；Chat语音理解或腾讯云独立语音服务不构成本产品Realtime codec证据。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "siliconflow"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://docs.siliconflow.cn/docs/api/chat-completions-post",
+      "https://docs.siliconflow.cn/docs/api/images-generations-post",
+      "https://docs.siliconflow.cn/docs/api/audio-speech-post",
+      "https://docs.siliconflow.cn/docs/api/audio-transcriptions-post",
+      "https://docs.siliconflow.cn/docs/api/embeddings-post",
+      "https://docs.siliconflow.cn/docs/api/rerank-post",
+      "https://docs.siliconflow.com/en/api-reference/chat-completions/chat-completions",
+      "https://docs.siliconflow.com/en/api-reference/images/images-generations.md",
+      "https://docs.siliconflow.com/en/api-reference/audio/create-speech",
+      "https://docs.siliconflow.com/en/api-reference/audio/create-audio-transcriptions.md",
+      "https://docs.siliconflow.com/en/api-reference/videos/videos_submit",
+      "https://docs.siliconflow.com/en/api-reference/embeddings/create-embeddings",
+      "https://docs.siliconflow.com/en/api-reference/rerank/create-rerank"
+    ],
+    "notes": "现CN与国际preset共享siliconflow平台ID；本轮分别打开两域官方任务schema，地域目录/上下线/模型字段为准，不将CN专属型号/effort照搬国际。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "catalog_required",
+        "protocols": [
+          "openai.chat_text"
+        ],
+        "notes": "当前官方主接口为Chat Completions及Messages，未核得Responses。实际目录须声明Chat；CN high/max effort仅文档列的DeepSeekV4/GLM5.2族，不泛化所有型号或国际站。"
+      },
+      {
+        "task": "image_generation",
+        "status": "catalog_required",
+        "protocols": [
+          "siliconflow.images"
+        ],
+        "notes": "需原生目录声明生成任务。当前JSON prompt/image_size/batch_size、images[].url与专用codec相符；Qwen Edit不接受image_size，多输出仅支持声明批量的模型。"
+      },
+      {
+        "task": "image_edit",
+        "status": "catalog_required",
+        "protocols": [
+          "siliconflow.images"
+        ],
+        "notes": "仅目录明确支持编辑且官方image/image2/image3参考JSON分支；现codec单产物、至多3图，不能把任一image模型名称当编辑证据。"
+      },
+      {
+        "task": "video_generation",
+        "status": "catalog_required",
+        "protocols": [
+          "siliconflow.video_jobs"
+        ],
+        "notes": "官方/video/submit返回requestId，POST/video/status以status+results.videos给产物；codec已实现，型号须区域目录明确视频任务。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "当前公开API目录未核得独立音乐生成endpoint/任务模型；TTS、MOSS播客与带声视频不等于音乐模型。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "supported",
+        "protocols": [
+          "siliconflow.audio_transcriptions"
+        ],
+        "notes": "本轮新增原生同步codec已通过定向测试：multipart file/model，回{text}；typed language/prompt与无文档response_format明确拒绝，避免旧generic ASR强加OpenAI字段。地域目录仍决定这两个精确ID的可用性。",
+        "model_ids": [
+          "FunAudioLLM/SenseVoiceSmall",
+          "TeleAI/TeleSpeechASR"
+        ],
+        "protocol_model_ids": {
+          "siliconflow.audio_transcriptions": [
+            "FunAudioLLM/SenseVoiceSmall",
+            "TeleAI/TeleSpeechASR"
+          ]
+        }
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "catalog_required",
+        "protocols": [
+          "siliconflow.audio_speech"
+        ],
+        "notes": "官方原始音频返回、model/input与scoped voice或references由专用codec实现，须目录声明TTS。MOSS双人对话仍属语音、非音乐生成。"
+      },
+      {
+        "task": "embedding",
+        "status": "catalog_required",
+        "protocols": [
+          "openai.embeddings"
+        ],
+        "notes": "仅原生目录声明的文本embedding，flat input字符串数组→data[].embedding匹配；VL embedding内容块不在现serializer支持范围。",
+        "provider_params": {
+          "encoding_format": "float"
+        }
+      },
+      {
+        "task": "rerank",
+        "status": "catalog_required",
+        "protocols": [
+          "generic.rerank"
+        ],
+        "notes": "目录声明的文本重排flat query/documents→results[].index/relevance_score可用；最新VL图片/视频query及documents对象不在typed字符串serializer内。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮两域公开API未核得可供现会话codec使用的双向Realtime协议。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "mimo"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://mimo.mi.com/docs/en-US/api/chat/responses",
+      "https://mimo.mi.com/docs/en-US/api/audio/Speech-Recognition",
+      "https://mimo.mi.com/docs/en-US/api/audio/tts",
+      "https://mimo.mi.com/docs/en-US/quick-start/summary/model"
+    ],
+    "notes": "本轮打开当前MiMo文本与音频API；多模态理解不等于图片/视频生成。2.6为新文本族，2.5文本计划2026-10-21 10:00北京下线，此时尚未退役。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "Responses原生支持五个精确型号，previous_response_id不支持，未列include且未知参数可能报错，省略cipher请求；逐轮保留实际reasoning_text。effort除none外当前仅开关，不能宣称强度差异。现typed文本/图片可用，视频内容块尚未实现。",
+        "model_ids": [
+          "mimo-v2.6-pro",
+          "mimo-v2.6-flash",
+          "mimo-v2.6-pro-ultraspeed",
+          "mimo-v2.5-pro",
+          "mimo-v2.5"
+        ],
+        "provider_params": {
+          "include": null,
+          "chain_rounds": false
+        },
+        "protocol_model_ids": {
+          "openai.responses": [
+            "mimo-v2.6-pro",
+            "mimo-v2.6-flash",
+            "mimo-v2.6-pro-ultraspeed",
+            "mimo-v2.5-pro",
+            "mimo-v2.5"
+          ]
+        }
+      },
+      {
+        "task": "image_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "video_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "supported",
+        "protocols": [
+          "mimo.chat_asr"
+        ],
+        "notes": "专用Chat ASR serializer发送单input_audio Base64+format、asr_options.language，非流式choices[0].message.content；仅MP3/WAV，现codec匹配。",
+        "model_ids": [
+          "mimo-v2.5-asr"
+        ],
+        "sources": [
+          "https://mimo.mi.com/docs/en-US/api/audio/Speech-Recognition"
+        ],
+        "protocol_model_ids": {
+          "mimo.chat_asr": [
+            "mimo-v2.5-asr"
+          ]
+        }
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "supported",
+        "protocols": [
+          "mimo.chat_tts"
+        ],
+        "notes": "官方普通TTS为assistant文本+audio配置，返回message.audio.data Base64，现专用codec完整实现。voicedesign/voiceclone虽可用高级JSON前置messages表达，但缺typed设计/参考音频采集，不自动推荐。",
+        "model_ids": [
+          "mimo-v2.5-tts"
+        ],
+        "sources": [
+          "https://mimo.mi.com/docs/en-US/api/audio/tts"
+        ],
+        "protocol_model_ids": {
+          "mimo.chat_tts": [
+            "mimo-v2.5-tts"
+          ]
+        }
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "mimo-token-plan-cn"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://mimo.mi.com/docs/en-US/tokenplan/Token%20Plan/quick-access",
+      "https://mimo.mi.com/docs/en-US/tokenplan/Token%20Plan/subscription",
+      "https://mimo.mi.com/docs/en-US/quick-start/faq/token-plan/Usage%26Quota",
+      "https://mimo.mi.com/docs/en-US/api/chat/responses",
+      "https://mimo.mi.com/docs/en-US/api/audio/Speech-Recognition",
+      "https://mimo.mi.com/docs/en-US/api/audio/tts"
+    ],
+    "notes": "本轮独立核对Token Plan三地域base和同API音频权益；tp-/ttp-套餐key与sk-按量key不可互换，目录/套餐权限为准。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "官方套餐支持这四文本型号且同Responses兼容。套餐未列2.6-Pro-Ultraspeed，不能继承普通API型号；2.5文本型号将在2026-10-21下线。完整原始reasoning回放，不使用previous_response_id。",
+        "model_ids": [
+          "mimo-v2.6-pro",
+          "mimo-v2.6-flash",
+          "mimo-v2.5-pro",
+          "mimo-v2.5"
+        ],
+        "base_url_override": "https://token-plan-cn.xiaomimimo.com/v1",
+        "provider_params": {
+          "include": null,
+          "chain_rounds": false
+        },
+        "protocol_model_ids": {
+          "openai.responses": [
+            "mimo-v2.6-pro",
+            "mimo-v2.6-flash",
+            "mimo-v2.5-pro",
+            "mimo-v2.5"
+          ]
+        }
+      },
+      {
+        "task": "image_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "video_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "supported",
+        "protocols": [
+          "mimo.chat_asr"
+        ],
+        "notes": "专用Chat ASR serializer发送单input_audio Base64+format、asr_options.language，非流式choices[0].message.content；仅MP3/WAV，现codec匹配。",
+        "model_ids": [
+          "mimo-v2.5-asr"
+        ],
+        "sources": [
+          "https://mimo.mi.com/docs/en-US/api/audio/Speech-Recognition"
+        ],
+        "protocol_model_ids": {
+          "mimo.chat_asr": [
+            "mimo-v2.5-asr"
+          ]
+        }
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "supported",
+        "protocols": [
+          "mimo.chat_tts"
+        ],
+        "notes": "官方普通TTS为assistant文本+audio配置，返回message.audio.data Base64，现专用codec完整实现。voicedesign/voiceclone虽可用高级JSON前置messages表达，但缺typed设计/参考音频采集，不自动推荐。",
+        "model_ids": [
+          "mimo-v2.5-tts"
+        ],
+        "sources": [
+          "https://mimo.mi.com/docs/en-US/api/audio/tts"
+        ],
+        "protocol_model_ids": {
+          "mimo.chat_tts": [
+            "mimo-v2.5-tts"
+          ]
+        }
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "mimo-token-plan-sgp"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://mimo.mi.com/docs/en-US/tokenplan/Token%20Plan/quick-access",
+      "https://mimo.mi.com/docs/en-US/tokenplan/Token%20Plan/subscription",
+      "https://mimo.mi.com/docs/en-US/quick-start/faq/token-plan/Usage%26Quota",
+      "https://mimo.mi.com/docs/en-US/api/chat/responses",
+      "https://mimo.mi.com/docs/en-US/api/audio/Speech-Recognition",
+      "https://mimo.mi.com/docs/en-US/api/audio/tts"
+    ],
+    "notes": "本轮独立核对Token Plan三地域base和同API音频权益；tp-/ttp-套餐key与sk-按量key不可互换，目录/套餐权限为准。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "官方套餐支持这四文本型号且同Responses兼容。套餐未列2.6-Pro-Ultraspeed，不能继承普通API型号；2.5文本型号将在2026-10-21下线。完整原始reasoning回放，不使用previous_response_id。",
+        "model_ids": [
+          "mimo-v2.6-pro",
+          "mimo-v2.6-flash",
+          "mimo-v2.5-pro",
+          "mimo-v2.5"
+        ],
+        "base_url_override": "https://token-plan-sgp.xiaomimimo.com/v1",
+        "provider_params": {
+          "include": null,
+          "chain_rounds": false
+        },
+        "protocol_model_ids": {
+          "openai.responses": [
+            "mimo-v2.6-pro",
+            "mimo-v2.6-flash",
+            "mimo-v2.5-pro",
+            "mimo-v2.5"
+          ]
+        }
+      },
+      {
+        "task": "image_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "video_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "supported",
+        "protocols": [
+          "mimo.chat_asr"
+        ],
+        "notes": "专用Chat ASR serializer发送单input_audio Base64+format、asr_options.language，非流式choices[0].message.content；仅MP3/WAV，现codec匹配。",
+        "model_ids": [
+          "mimo-v2.5-asr"
+        ],
+        "sources": [
+          "https://mimo.mi.com/docs/en-US/api/audio/Speech-Recognition"
+        ],
+        "protocol_model_ids": {
+          "mimo.chat_asr": [
+            "mimo-v2.5-asr"
+          ]
+        }
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "supported",
+        "protocols": [
+          "mimo.chat_tts"
+        ],
+        "notes": "官方普通TTS为assistant文本+audio配置，返回message.audio.data Base64，现专用codec完整实现。voicedesign/voiceclone虽可用高级JSON前置messages表达，但缺typed设计/参考音频采集，不自动推荐。",
+        "model_ids": [
+          "mimo-v2.5-tts"
+        ],
+        "sources": [
+          "https://mimo.mi.com/docs/en-US/api/audio/tts"
+        ],
+        "protocol_model_ids": {
+          "mimo.chat_tts": [
+            "mimo-v2.5-tts"
+          ]
+        }
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "mimo-token-plan-ams"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://mimo.mi.com/docs/en-US/tokenplan/Token%20Plan/quick-access",
+      "https://mimo.mi.com/docs/en-US/tokenplan/Token%20Plan/subscription",
+      "https://mimo.mi.com/docs/en-US/quick-start/faq/token-plan/Usage%26Quota",
+      "https://mimo.mi.com/docs/en-US/api/chat/responses",
+      "https://mimo.mi.com/docs/en-US/api/audio/Speech-Recognition",
+      "https://mimo.mi.com/docs/en-US/api/audio/tts"
+    ],
+    "notes": "本轮独立核对Token Plan三地域base和同API音频权益；tp-/ttp-套餐key与sk-按量key不可互换，目录/套餐权限为准。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "官方套餐支持这四文本型号且同Responses兼容。套餐未列2.6-Pro-Ultraspeed，不能继承普通API型号；2.5文本型号将在2026-10-21下线。完整原始reasoning回放，不使用previous_response_id。",
+        "model_ids": [
+          "mimo-v2.6-pro",
+          "mimo-v2.6-flash",
+          "mimo-v2.5-pro",
+          "mimo-v2.5"
+        ],
+        "base_url_override": "https://token-plan-ams.xiaomimimo.com/v1",
+        "provider_params": {
+          "include": null,
+          "chain_rounds": false
+        },
+        "protocol_model_ids": {
+          "openai.responses": [
+            "mimo-v2.6-pro",
+            "mimo-v2.6-flash",
+            "mimo-v2.5-pro",
+            "mimo-v2.5"
+          ]
+        }
+      },
+      {
+        "task": "image_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "video_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "supported",
+        "protocols": [
+          "mimo.chat_asr"
+        ],
+        "notes": "专用Chat ASR serializer发送单input_audio Base64+format、asr_options.language，非流式choices[0].message.content；仅MP3/WAV，现codec匹配。",
+        "model_ids": [
+          "mimo-v2.5-asr"
+        ],
+        "sources": [
+          "https://mimo.mi.com/docs/en-US/api/audio/Speech-Recognition"
+        ],
+        "protocol_model_ids": {
+          "mimo.chat_asr": [
+            "mimo-v2.5-asr"
+          ]
+        }
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "supported",
+        "protocols": [
+          "mimo.chat_tts"
+        ],
+        "notes": "官方普通TTS为assistant文本+audio配置，返回message.audio.data Base64，现专用codec完整实现。voicedesign/voiceclone虽可用高级JSON前置messages表达，但缺typed设计/参考音频采集，不自动推荐。",
+        "model_ids": [
+          "mimo-v2.5-tts"
+        ],
+        "sources": [
+          "https://mimo.mi.com/docs/en-US/api/audio/tts"
+        ],
+        "protocol_model_ids": {
+          "mimo.chat_tts": [
+            "mimo-v2.5-tts"
+          ]
+        }
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "deepgram"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://developers.deepgram.com/docs/models-languages-overview/",
+      "https://developers.deepgram.com/reference/text-to-speech/speak-request",
+      "https://developers.deepgram.com/docs/tts-models",
+      "https://developers.deepgram.com/docs/flux-tts/voices",
+      "https://developers.deepgram.com/docs/flux-tts/batch",
+      "https://developers.deepgram.com/reference/voice-agent/voice-agent",
+      "https://developers.deepgram.com/docs/voice-agent-message-flow"
+    ],
+    "notes": "本轮分别打开预录音ASR、Aura REST TTS、Flux新/v2 TTS和Voice Agent；独立Realtime、ASR streaming和TTS streaming不混为一项。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "Voice Agent可配置外部LLM并非Deepgram独立Chat/Responses服务；当前preset只推荐真实ASR/TTS。"
+      },
+      {
+        "task": "image_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "video_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "语音合成与音频智能不等于音乐生成，公开任务文档未确认音乐模型API。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "supported",
+        "protocols": [
+          "deepgram.listen"
+        ],
+        "notes": "官方/v1/listen原始音频+query模型/语言、results.channels[].alternatives[].transcript，与现codec一致。Flux ASR仅/v2/listen streaming，不可路由给此预录音REST任务。",
+        "model_ids": [
+          "nova-3",
+          "nova-3-general",
+          "nova-3-medical",
+          "nova-3-pharma",
+          "nova-2",
+          "nova-2-general"
+        ]
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "supported",
+        "protocols": [
+          "deepgram.speak_rest"
+        ],
+        "notes": "官方明确Aura命名[modelname]-[voicename]-[language]且/v1/speak，JSON{text}→binary audio已实现。Flux TTS的flux-*仅/v2/speak，虽基本body可复用但现默认仍/v1，未混入此可执行选择器。",
+        "model_prefixes": [
+          "aura-2-"
+        ],
+        "model_ids": [
+          "aura-asteria-en"
+        ],
+        "protocol_model_ids": {
+          "deepgram.speak_rest": [
+            "aura-asteria-en"
+          ]
+        },
+        "protocol_model_prefixes": {
+          "deepgram.speak_rest": [
+            "aura-2-"
+          ]
+        }
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "本轮官方公开API文档未确认此任务的可调用模型与兼容接口；不据此推断厂商完全不提供。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "Voice Agent官方WebSocket需Settings/SettingsApplied、PCM、listen/think/speak及独立事件契约；当前Realtime registry没有Deepgram adapter。不能把REST listen/speak拼接成已实现Realtime。"
+      }
+    ]
+  }
+]

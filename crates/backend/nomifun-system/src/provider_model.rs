@@ -326,18 +326,6 @@ pub(crate) fn validate_known_provider_model_task(
         && task == ModelTask::VideoGeneration
     {
         let normalized = model.trim().to_ascii_lowercase().replace('_', "-");
-        let model_id = match normalized.as_str() {
-            "doubao-seedance-1.5-pro" => Some("doubao-seedance-1-5-pro-251215"),
-            "doubao-seedance-2.0-mini" => Some("doubao-seedance-2-0-mini-260615"),
-            _ => None,
-        };
-        if let Some(model_id) = model_id {
-            return Err(AppError::BadRequest(format!(
-                "Ark video model {model:?} is a console display name, not an API Model ID; \
-                 use {model_id:?} exactly or an \"ep-\" inference endpoint ID shown in \
-                 the Ark console"
-            )));
-        }
         if normalized.starts_with("doubao-seed-")
             && !normalized.starts_with("doubao-seedance-")
         {
@@ -1032,26 +1020,15 @@ mod tests {
     }
 
     #[test]
-    fn ark_video_rejects_console_display_names_with_exact_api_id_hint() {
-        for (display_name, model_id) in [
-            (
-                "Doubao-Seedance-1.5-pro",
-                "doubao-seedance-1-5-pro-251215",
-            ),
-            (
-                "Doubao-Seedance-2.0-mini",
-                "doubao-seedance-2-0-mini-260615",
-            ),
+    fn ark_video_accepts_provider_scoped_seedance_ids_without_payg_alias_assumptions() {
+        for (platform, model) in [
+            ("ark","doubao-seedance-2.0-mini"),
+            ("ark-agent-plan","doubao-seedance-2.0-mini"),
+            ("ctyun","doubao-seedance-1-5-pro"),
+            ("ark","doubao-seedance-1.5-pro"),
+            ("ark","doubao-seedance-2-0-mini-260615"),
         ] {
-            let error = validate_known_provider_model_task(
-                "ark",
-                display_name,
-                ModelTask::VideoGeneration,
-            )
-            .unwrap_err();
-            assert!(
-                matches!(error, AppError::BadRequest(message) if message.contains("console display name") && message.contains(model_id))
-            );
+            validate_known_provider_model_task(platform,model,ModelTask::VideoGeneration).unwrap();
         }
     }
 

@@ -1,32 +1,44 @@
 [
   {
-    "platforms": ["openrouter"],
-    "chat_protocol": "openai.responses",
-    "checked_at": "2026-10-15",
-    "sources": [
-      "https://openrouter.ai/docs/api_reference/responses/overview",
-      "https://openrouter.ai/docs/api_reference/responses/basic-usage",
-      "https://openrouter.ai/docs/api_reference/responses/reasoning",
-      "https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties"
+    "platforms": [
+      "openrouter"
     ],
-    "notes": "官方提供 Responses，优先使用；仅支持无状态请求，store:true 和 previous_response_id 会被拒绝，不能开启 chain_rounds。模型及 context_length、top_provider.max_completion_tokens、supported_parameters、default_parameters 以原生目录为准，不套用上游同名模型的限制。文档流式示例包含 data-only SSE、content_part.delta、response.done；适配器须兼容这些信封。推理强度和支持范围逐模型确定，不设置全平台 effort 默认值。",
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://openrouter.ai/docs/llms.txt",
+      "https://openrouter.ai/docs/api_reference/responses/overview.md",
+      "https://openrouter.ai/docs/api/api-reference/images/generate-an-image.md",
+      "https://openrouter.ai/api/v1/images/models",
+      "https://openrouter.ai/docs/api/api-reference/video-generation/submit-a-video-generation-request.md",
+      "https://openrouter.ai/docs/api/api-reference/tts/create-speech.md",
+      "https://openrouter.ai/docs/api/api-reference/stt/create-transcription.md",
+      "https://openrouter.ai/docs/api/api-reference/rerank/submit-a-rerank-request.md",
+      "https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion.md"
+    ],
+    "notes": "已实际读取最新官方OpenAPI、SDK文档和公开原生图像目录。Responses为无状态接口，拒绝store:true及非空previous_response_id；不得开启服务端响应ID续接。代理模型的上游名称不建立用途或参数能力，仍需当前目录声明；媒体新接口不直接继承OpenAI同名接口。 官方提供Responses及Chat；Responses仅无状态，必须发送完整历史，不能使用chain_rounds服务端响应ID续接。实际对话与工具往返决定可用性。 系统与手动默认模板采用 Chat Completions；上述 Responses 支持及其专属约束仍保留，供明确选择该协议时使用，不向 Chat 默认参数注入 include 或 chain_rounds。",
     "models": []
   },
   {
-    "platforms": ["novita"],
+    "platforms": [
+      "novita"
+    ],
     "chat_protocol": "openai.chat_text",
-    "checked_at": "2026-10-15",
+    "checked_at": "2026-10-16",
     "sources": [
       "https://docs.novita.ai/llms.txt",
       "https://docs.novita.ai/api-reference/model-apis-llm-create-chat-completion",
-      "https://docs.novita.ai/api-reference/model-apis-llm-list-models",
-      "https://docs.novita.ai/guides/llm-reasoning"
+      "https://docs.novita.ai/api-reference/model-apis-llm-create-embeddings",
+      "https://docs.novita.ai/api-reference/model-apis-llm-create-rerank",
+      "https://docs.novita.ai/api-reference/model-apis-minimax-speech-2.8-hd.md"
     ],
-    "notes": "已逐项核对官方接口和推理指南，公开接入路径为 /openai/v1/chat/completions，使用 max_tokens 和可选 stream_options.include_usage；本次未找到可核实的 Responses 接口。动态模型目录的精确 ID、context_size 优先，输出上限及 effort 未公布的条目保持未知，不从模型名猜测或复制原厂限制。",
+    "notes": "已实际读取当前官方索引、Chat/Embedding/Rerank及MiniMax语音协议。LLM根为https://api.novita.ai/openai/v1；媒体使用其他原生路径，不能因模型来自相同上游就继承其协议。动态模型必须由当前目录确认用途；未找到可核实的Responses协议。旧txt2img/img2img页面现为404，不将旧搜索缓存当作当前可配置接口。 官方公开Chat Completions JSON/SSE协议；模型与工具能力需由当前目录和真实工具往返检查确认，不按名字推断。",
     "models": []
   },
   {
-    "platforms": ["siliconflow"],
+    "platforms": [
+      "siliconflow"
+    ],
     "chat_protocol": "openai.chat_text",
     "checked_at": "2026-10-15",
     "sources": [
@@ -39,97 +51,141 @@
     "models": []
   },
   {
-    "platforms": ["ppio"],
-    "chat_protocol": "openai.chat_text",
-    "checked_at": "2026-10-15",
-    "sources": [
-      "https://ppio.com/model/deepseek/deepseek-v4-pro"
+    "platforms": [
+      "ppio"
     ],
-    "notes": "官方模型页确认 /openai/v1/chat/completions，并另列 Anthropic Messages 入口；未核实 Responses。deepseek/deepseek-v4-pro 页面显示 1M 上下文和 393.2K 最大输出，但仅为缩写展示，未据此猜测精确整数或推理档位。模型清单及其路由限制优先使用原生目录，不继承原厂 DeepSeek 别名的限额。",
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://ppio.com/docs/llms.txt",
+      "https://ppio.com/docs/models/reference-llm-create-chat-completion.md",
+      "https://ppio.com/docs/third-party/codex.md",
+      "https://ppio.com/docs/models/reference-llm-create-embeddings",
+      "https://ppio.com/docs/models/reference-llm-create-rerank",
+      "https://ppio.com/docs/model/llm-anthropic-compatibility.md",
+      "https://ppio.com/docs/models/reference-minimax-h3.md",
+      "https://ppio.com/docs/models/reference-minimax-speech-2.8-hd.md"
+    ],
+    "notes": "已实际读取当前官方文档：通用根为https://api.ppio.com/openai/v1，旧api.ppinfra.com/v3地址不作为新默认。Chat为主要公开请求规范，官方Codex指南另明确Responses接入。Anthropic兼容服务另用/anthropic根并要求Authorization Bearer覆盖SDK头，不能把现连接静默换成x-api-key。动态模型用途需目录确认。 主要接口为Chat；已实际读取官方Codex指南的wire_api=responses及同一/openai/v1根，因此Responses可作为实测候选。Anthropic不同根/鉴权需单独配置连接，不混入本行共享路由。 系统与手动默认模板采用 Chat Completions；上述 Responses 支持及其专属约束仍保留，供明确选择该协议时使用，不向 Chat 默认参数注入 include 或 chain_rounds。",
     "models": []
   },
   {
-    "platforms": ["modelscope"],
+    "platforms": [
+      "modelscope"
+    ],
     "chat_protocol": "openai.chat_text",
-    "checked_at": "2026-10-15",
+    "checked_at": "2026-10-16",
     "sources": [
       "https://www.modelscope.cn/docs/model-service/API-Inference/intro",
-      "https://www.modelscope.cn/models?filter=inference_type&page=1&sort=default&tabKey=task",
-      "https://www.modelscope.cn/models/Shanghai_AI_Laboratory/Intern-S2-Preview/summary"
+      "https://resouces.modelscope.cn/document/docdata/2026-9-28_15-49-CN/dist/model-service/API-Inference/intro/intro_CN.md"
     ],
-    "notes": "官方 API 推理文档已尝试获取，但正文为动态页面，不能据此确认新协议或精确限制；官方托管模型页的 API-Inference 示例确认 OpenAI Chat Completions 兼容。仅为当前可用 API-Inference 模型使用其精确组织/模型 ID。免费推理和带提供方后缀的 API-Provider 不等同于原厂规格，模型名单、上下文、输出和 effort 缺失时保留未知，未核实 Responses。",
+    "notes": "已实际读取官方页面引用的2026-09-28中文静态文档全文。模型示例可能下线，必须以模型页面/当前API目录声明的用途为准。Chat和Anthropic beta已有示例，Responses明确仅Qwen3.5系列；AIGC需专属异步头与任务查询，不能套同步OpenAI Images。 官方Chat兼容接口已核实；Responses仅Create接口且明确只支持Qwen3.5系列，按官方namespace/family精确限制。Anthropic beta有独立原生鉴权示例，需对应连接，未与默认Bearer候选合并。",
     "models": []
   },
   {
-    "platforms": ["infiniai"],
-    "chat_protocol": "openai.chat_text",
-    "checked_at": "2026-10-15",
-    "sources": [
-      "https://docs.infini-ai.com/gen-studio/models/",
-      "https://docs.infini-ai.com/shared/gen-studio/coding-tools/gs-use-vs-code-copilot.html",
-      "https://docs.infini-ai.com/gen-studio/api/text-generation/tutorial-reasoning/deepseek.html"
+    "platforms": [
+      "infiniai"
     ],
-    "notes": "GenStudio 官方文档列出 /maas/v1/models、Chat Completions 和 Messages，未核实 Responses。模型卡片或发现端点是租户实际模型和限制的依据。DeepSeek V4 系列明确提供 low/high/max，默认 high；medium/xhigh 兼容映射不作为独立档位。思考开关使用 thinking.type，关闭思考时不同时发送 effort；工具调用须回传真实 reasoning_content，不制造占位内容。",
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://docs.infini-ai.com/llms.txt",
+      "https://docs.infini-ai.com/_copy/gen-studio/api/text-generation/tutorial.md",
+      "https://docs.infini-ai.com/_copy/gen-studio/api/retrieval/tutorial-embeddings.md",
+      "https://docs.infini-ai.com/_copy/gen-studio/api/retrieval/tutorial-rerank.md",
+      "https://docs.infini-ai.com/_copy/gen-studio/api/multimodal/image-generation.md",
+      "https://docs.infini-ai.com/_copy/gen-studio/api/multimodal/video-generation.md"
+    ],
+    "notes": "已实际读取官方GenStudio文档。文本/检索统一根为https://cloud.infini-ai.com/maas/v1；闭源图片和视频采用原厂透传，需模型广场逐模型提供专用Base URL，不能用统一LLM根自动继承上游协议。当前未核实Responses服务。 官方Chat Completions教程和模型目录为依据；每模型思考/工具参数由该网关文档及实际调用确认，不复用原厂同名模型能力。",
     "models": [
       {
-        "ids": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4.1-flash"],
-        "reasoning_efforts": ["low", "high", "max"],
-        "provider_params": {"reasoning_effort": "high"}
+        "ids": [
+          "deepseek-v4-pro",
+          "deepseek-v4-flash",
+          "deepseek-v4.1-flash"
+        ],
+        "reasoning_efforts": [
+          "low",
+          "high",
+          "max"
+        ],
+        "provider_params": {
+          "reasoning_effort": "high"
+        }
       }
     ]
   },
   {
-    "platforms": ["ctyun"],
+    "platforms": [
+      "ctyun"
+    ],
     "chat_protocol": "openai.chat_text",
-    "checked_at": "2026-10-15",
+    "checked_at": "2026-10-16",
     "sources": [
       "https://www.ctyun.cn/document/11061839/11099156",
-      "https://www.ctyun.cn/document/11061839/11062357",
-      "https://www.ctyun.cn/document/11061839/11099117"
+      "https://www.ctyun.cn/document/11061839/11099117",
+      "https://www.ctyun.cn/document/11061839/11099154",
+      "https://www.ctyun.cn/document/11061839/11099137",
+      "https://www.ctyun.cn/document/11061839/11099410",
+      "https://www.ctyun.cn/document/11061839/11062291",
+      "https://www.ctyun.cn/document/11061839/11099291",
+      "https://www.ctyun.cn/document/11061839/11075357",
+      "https://www.ctyun.cn/document/11061839/11099147"
     ],
-    "notes": "星辰 TokenHub 官方新接口为 /v1/chat/completions，另支持 Anthropic Messages；本次未核实 Responses。模型列表 API 只保证返回可授权 ID，不提供通用上下文或输出限制；实际规格及区域入口以模型详情和租户目录为准。Chat 文档支持 stream_options.include_usage，不设置未公布的全平台 effort 或同名上游限制。",
+    "notes": "已实际读取2026-09更新的TokenHub官方协议，旧Image通用页已404。国内根https://ai.ctaigw.cn/v1，全球分区另有/amer、/eu、/as地址，不能静默换区或混用凭据。Seedream/Seedance仅对官方请求示例的精确ID复用原生codec；Qwen/Wan/Minimax等其他媒体报文不共享该codec。BGE与阿里检索还存在路径/字段差异。 新版官方同时声明OpenAI Chat与Anthropic Messages，JSON/SSE及工具契约已核实。Chat用Bearer APP Key；Messages文档流式示例要求x-api-key，必须有真实对应连接，不能自动改头投递。未核实Responses。",
     "models": []
   },
   {
-    "platforms": ["lingyi"],
-    "chat_protocol": "openai.chat_text",
-    "checked_at": "2026-10-15",
-    "sources": [
-      "https://platform.lingyiwanwu.com/docs",
-      "https://platform.lingyiwanwu.com/docs/api-reference",
-      "https://platform.lingyiwanwu.com/useragreement"
+    "platforms": [
+      "lingyi"
     ],
-    "notes": "官方页面的服务端数据已核对，当前模型计费表为 yi-lightning 和 yi-vision-v2，均标为 16K 上下文；两者是可能路由到第三方模型的服务，不能继续套用历史 Yi-Large 或原厂上游限制。接口为 /v1/chat/completions；未核实 Responses、精确输出上限或 effort 枚举。16K 未展开为精确整数，限制保持未知并等待目录或模型详情确认。",
-    "models": [
-      {"ids": ["yi-lightning", "yi-vision-v2"]}
-    ]
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://platform.lingyiwanwu.com/",
+      "https://platform.lingyiwanwu.com/_next/static/chunks/app/page-276ce40cfdd8932a.js"
+    ],
+    "notes": "已实际读取官方首页所加载的公告脚本全文：2026-08-03公告停止新注册与充值，2026-09-03 24:00停止模型体验和API调用，退款窗口至2026-12-03 24:00。作为托管服务整体退役，不再为任何用途产生新推荐；不删除用户已保存配置。 该官方托管平台已于2026-09-03停止API调用；开放权重或第三方继续托管Yi模型不属于本平台服务。",
+    "models": []
   },
   {
-    "platforms": ["poe"],
-    "chat_protocol": "openai.responses",
-    "checked_at": "2026-10-15",
+    "platforms": [
+      "poe"
+    ],
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-16",
     "sources": [
       "https://creator.poe.com/docs/external-applications/openai-compatible-api"
     ],
-    "notes": "官方明确同时提供 Chat Completions 和 /v1/responses，优先 Responses；后者支持 reasoning、text.format 和 previous_response_id。模型 ID 是 Poe bot 名称，参数传递为尽力支持，并非所有 bot 都有推理能力。公共 bot 及其上下文、输出和 effort 以原生目录/详情为准，不按原厂相似名称推导；保留默认无状态模式，不自动启用保留会话。",
+    "notes": "已实际读取Poe官方OpenAI兼容文档：支持/v1/chat/completions与/v1/responses。图片、视频、音频bot的示例仍通过Chat消息与流返回内容，不能当成独立Images/Videos/Audio端点；动态bot必须由Poe当前原生目录确认用途及接口支持。 官方提供Responses（reasoning/text.format/tools/previous_response_id）及Chat；具体bot是否支持工具和所选协议须实际工具往返，不照搬其上游模型名称。 系统与手动默认模板采用 Chat Completions；上述 Responses 支持及其专属约束仍保留，供明确选择该协议时使用，不向 Chat 默认参数注入 include 或 chain_rounds。",
     "models": []
   },
   {
-    "platforms": ["agnes"],
-    "chat_protocol": "openai.responses",
-    "checked_at": "2026-10-15",
+    "platforms": [
+      "agnes"
+    ],
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-16",
     "sources": [
       "https://agnes-ai.com/zh-Hans/docs/agnes-25-flash",
-      "https://agnes-ai.com/en/docs/agnes-20-flash",
-      "https://raw.githubusercontent.com/AgnesAI-Labs/AgnesAI-Models/main/MODEL_CATALOG.md"
+      "https://raw.githubusercontent.com/AgnesAI-Labs/AgnesAI-Models/main/MODEL_CATALOG.md",
+      "https://raw.githubusercontent.com/AgnesAI-Labs/skills/main/agnes-ai-models/references/model_catalog.md",
+      "https://agnes-ai.com/en/docs/agnes-image-25-flash",
+      "https://agnes-ai.com/en/docs/agnes-video-25"
     ],
-    "notes": "最新官方 Agnes 2.5 Flash 页面同时声明 Responses、Messages、Chat Completions，优先 Responses。2.0 已废弃，不作为新模型回退。2.5 Flash 的上下文/输出只显示 512K/65.5K，未据缩写猜测整数；旧目录与已废弃 2.0 详情存在限制差异，原生目录优先。Thinking 示例属于各自协议扩展，未公布 Responses effort 枚举或默认值，不强加 high 等设置；省略未声明支持的加密 include，使用实际原生 reasoning 项续传。",
+    "notes": "Official current Agnes 2.5 Flash reference documents Responses, Chat Completions and Messages, including tools. Default templates use Chat Completions; Responses remains available for explicit selection after verification. 2.0 is deprecated and is not a fallback recommendation. Native catalogs and account permissions remain authoritative; abbreviated context/output sizes are not expanded into invented precise limits. Do not inject undocumented encrypted reasoning include.",
     "models": [
-      {"ids": ["agnes-2.5-flash"], "provider_params": {"include": null}}
+      {
+        "ids": [
+          "agnes-2.5-flash"
+        ],
+        "provider_params": {}
+      }
     ]
   },
   {
-    "platforms": ["deepgram"],
+    "platforms": [
+      "deepgram"
+    ],
     "checked_at": "2026-10-15",
     "sources": [
       "https://developers.deepgram.com/docs/models-languages-overview",

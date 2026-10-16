@@ -175,10 +175,10 @@ const orderedDescriptors = (
   const preferredIds = [
     currentProtocol.trim(),
     manifest.recommendation?.protocol_id ?? '',
-    (manifest.platform === 'new-api' || manifest.platform === 'custom') && task === 'chat' ? 'openai.responses' : '',
+    (manifest.platform === 'new-api' || manifest.platform === 'custom') && task === 'chat' ? 'openai.chat_text' : '',
   ].filter(Boolean);
   const ordered: ProtocolDescriptor[] = [];
-  for (const protocolId of preferredIds) {
+  for (const protocolId of new Set(preferredIds)) {
     const descriptor = byId.get(protocolId);
     if (descriptor && protocolCanBeProbed(descriptor, task)) ordered.push(descriptor);
   }
@@ -342,6 +342,8 @@ export const applyProviderCompatibilityMode = (
         return {
           ...capability,
           transportSource: 'blank',
+          protocolSelectionSource: 'automatic',
+          protocolDiscoveryModel: undefined,
           protocol: '',
           connectionRole: 'default',
           baseUrlOverride: '',

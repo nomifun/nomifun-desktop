@@ -114,6 +114,13 @@ impl ProtocolAdapter for MiMoChatAsrAdapter {
             ));
         };
 
+        if req.prompt.as_deref().is_some_and(|prompt| !prompt.trim().is_empty()) {
+            return Err(InvokeError::new(
+                InvokeErrorKind::InvalidParams,
+                "mimo.chat_asr does not support the typed prompt parameter",
+            ));
+        }
+
         let format = audio_input_format(&req.audio.mime)?;
         let encoded = encode_b64(&req.audio.bytes);
         if encoded.len() > MAX_ASR_BASE64_BYTES {
@@ -358,6 +365,19 @@ mod tests {
         for key in crate::adapters::LOCAL_TRANSPORT_PARAM_KEYS {
             assert!(body.get(*key).is_none(), "local key {key} leaked into MiMo body");
         }
+    }
+
+    #[tokio::test]
+    async fn asr_rejects_unsupported_typed_prompt_without_sending_audio() {
+        let server=MockServer::start().await;
+        let mut request=asr("audio/wav",None);
+        let TaskRequest::SpeechRecognition(req)=&mut request else {unreachable!();};
+        req.prompt=Some("context that must not silently disappear".into());
+        let call=mimo_asr_call(&server.uri(),"mimo-v2.5-asr",request);
+        let error=MiMoChatAsrAdapter.submit(&test_http(),&call).await.unwrap_err();
+        assert_eq!(error.kind,InvokeErrorKind::InvalidParams);
+        assert!(error.message.contains("prompt"));
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]

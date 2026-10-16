@@ -374,6 +374,8 @@ export function isBackendRequestError(error: unknown): error is BackendRequestEr
  * caller's existing try/catch keeps working.
  */
 export type HttpRequestOptions = {
+  /** Caller cancellation for replaceable reads/setup checks. Never serialized. */
+  signal?: AbortSignal;
   silentStatuses?: number[];
   /** Binary uploads share the ordinary auth, CSRF retry and error path. */
   rawBody?: Blob;
@@ -530,7 +532,10 @@ export async function httpRequest<T>(
     // Optional client-side deadline (opt-in via options.timeoutMs). Aborts a
     // request that outlives it so a hung/unreachable backend surfaces a legible
     // error instead of the opaque platform network timeout minutes later.
-    const controller = options?.timeoutMs != null ? new AbortController() : undefined;
+    const controller = options?.timeoutMs != null || options?.signal ? new AbortController() : undefined;
+    const cancel = () => controller?.abort();
+    if (options?.signal?.aborted) cancel();
+    else options?.signal?.addEventListener('abort', cancel, { once: true });
     const timeoutHandle =
       controller && options?.timeoutMs != null
         ? setTimeout(() => controller.abort(), options.timeoutMs)
@@ -553,6 +558,7 @@ export async function httpRequest<T>(
         cache: method.toUpperCase() === 'GET' ? 'no-store' : undefined,
       });
     } catch (e) {
+      if (options?.signal?.aborted) throw new DOMException('Request cancelled', 'AbortError');
       // No HTTP response was produced: our own timeout abort, or a transport
       // failure (backend unreachable / connection reset). WKWebView renders the
       // latter as an opaque "TypeError: Load failed"; rethrow something the UI
@@ -570,6 +576,7 @@ export async function httpRequest<T>(
       );
     } finally {
       if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+      options?.signal?.removeEventListener('abort', cancel);
     }
 
     if (!response.ok) {
@@ -708,6 +715,19 @@ export function httpPost<Data, Params = undefined>(
       const body = mapBody ? mapBody(params!) : params;
       return httpRequest<Data>('POST', resolvedPath, body, options);
     }) as ProviderLike<Data, Params>['invoke'],
+  };
+}
+
+/** Replaceable setup checks can be cancelled when their local draft changes. */
+export function httpPostAbortable<Data, Params>(
+  path: string | ((params: Params) => string),
+  mapBody?: (params: Params) => unknown
+) {
+  return {
+    provider: () => {},
+    invoke: (params: Params, signal?: AbortSignal): Promise<Data> => httpRequest<Data>(
+      'POST', typeof path === 'function' ? path(params) : path, mapBody ? mapBody(params) : params, { signal }
+    ),
   };
 }
 

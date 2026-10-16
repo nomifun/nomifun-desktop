@@ -4,8 +4,8 @@
       "dashscope",
       "alibaba"
     ],
-    "chat_protocol": "openai.responses",
-    "checked_at": "2026-10-15",
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-16",
     "sources": [
       "https://help.aliyun.com/zh/model-studio/compatibility-with-openai-responses-api",
       "https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-responses",
@@ -13,7 +13,7 @@
       "https://help.aliyun.com/zh/model-studio/qwen3-8-flash",
       "https://help.aliyun.com/zh/model-studio/qwen3-7-plus"
     ],
-    "notes": "按量接口已明确支持 Responses；旧 /api/v2/apps/protocols 路径停维，新路径为 /compatible-mode/v1/responses。仅对文档精确列出的模型给出建议；地域和业务空间影响可用性，未知模型不推断窗口或档位。Qwen3.8 的输出上限包含思考与回答，旧系列规则不同。",
+    "notes": "按量接口已明确支持 Responses；旧 /api/v2/apps/protocols 路径停维，新路径为 /compatible-mode/v1/responses。仅对文档精确列出的模型给出建议；地域和业务空间影响可用性，未知模型不推断窗口或档位。Qwen3.8 的输出上限包含思考与回答，旧系列规则不同。 当前 Responses 参数文档未声明 reasoning.encrypted_content，省略该附加请求，不假定有加密推理返回。 系统与手动默认模板采用 Chat Completions；上述 Responses 支持及其专属约束仍保留，供明确选择该协议时使用，不向 Chat 默认参数注入 include 或 chain_rounds。",
     "models": [
       {
         "ids": [
@@ -157,14 +157,14 @@
       "ark",
       "volcengine"
     ],
-    "chat_protocol": "openai.responses",
-    "checked_at": "2026-10-15",
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-16",
     "sources": [
       "https://ark.volcengine.com/region:cn-beijing/docs/model-list",
       "https://ark.volcengine.com/region:cn-beijing/docs/responses-api-deep-thinking",
       "https://ark.volcengine.com/region:cn-beijing/docs/create-model-responses-api"
     ],
-    "notes": "按量模型表直接列出 Responses/Chat 能力，采用 Responses。原生 model ID 与 Coding/Agent Plan 的模型名称不同。文档 1024k 按官方配置示例转录为 1024000，k 为 1000；思考与回答共同消耗输出预算。仅保留精确版本证据，不根据名称生成其他版本。其中 256k 上下文/256k 最大输出的 Seed2.1 旧版采用文档默认 4k 输出建议，避免把整窗作为输出预算。",
+    "notes": "按量模型表直接列出 Responses/Chat 能力，两种协议均保留可选。原生 model ID 与 Coding/Agent Plan 的模型名称不同。文档 1024k 按官方配置示例转录为 1024000，k 为 1000；思考与回答共同消耗输出预算。仅保留精确版本证据，不根据名称生成其他版本。其中 256k 上下文/256k 最大输出的 Seed2.1 旧版采用文档默认 4k 输出建议，避免把整窗作为输出预算。 include 虽有泛型字段，但未证实 reasoning.encrypted_content 的取值或返回，默认省略；实际原生推理项仍按已有完整历史回放。 系统与手动默认模板采用 Chat Completions；上述 Responses 支持及其专属约束仍保留，供明确选择该协议时使用，不向 Chat 默认参数注入 include 或 chain_rounds。",
     "models": [
       {
         "ids": [
@@ -267,13 +267,13 @@
     "platforms": [
       "ark-coding-plan"
     ],
-    "chat_protocol": "openai.responses",
-    "checked_at": "2026-10-15",
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-16",
     "sources": [
       "https://ark.volcengine.com/region:cn-beijing/docs/coding-plan-personal-plan-overview",
       "https://ark.volcengine.com/region:cn-beijing/docs/coding-plan-personal-ai-opencode"
     ],
-    "notes": "Coding Plan 官方明确支持并推荐 Responses，专用 /api/coding/v3，不可切至按量端点。窗口/最大输出取套餐模型表，示例的较小输出预算不是模型上限。路由 ark-code-latest 的实际模型由控制台决定，不臆定窗口；套餐未声明精确档位默认，故不填。Kimi K2.8 文档最大输出为 1024k，此处采用官方 OpenCode 示例的 65536 输出预算建议。",
+    "notes": "Coding Plan 官方明确支持 Responses，相关 OpenCode/Codex 接入示例不作为通用默认协议依据，专用 /api/coding/v3，不可切至按量端点。窗口/最大输出取套餐模型表，示例的较小输出预算不是模型上限。路由 ark-code-latest 的实际模型由控制台决定，不臆定窗口；套餐未声明精确档位默认，故不填。Kimi K2.8 文档最大输出为 1024k，此处采用官方 OpenCode 示例的 65536 输出预算建议。 include 虽有泛型字段，但未证实 reasoning.encrypted_content 的取值或返回，默认省略；实际原生推理项仍按已有完整历史回放。 系统与手动默认模板采用 Chat Completions；上述 Responses 支持及其专属约束仍保留，供明确选择该协议时使用，不向 Chat 默认参数注入 include 或 chain_rounds。",
     "models": [
       {
         "ids": [
@@ -340,13 +340,13 @@
     "platforms": [
       "ark-agent-plan"
     ],
-    "chat_protocol": "openai.responses",
-    "checked_at": "2026-10-15",
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-16",
     "sources": [
       "https://ark.volcengine.com/region:cn-beijing/docs/agent-plan-personal-plan-overview",
       "https://ark.volcengine.com/region:cn-beijing/docs/agent-plan-personal-opencode"
     ],
-    "notes": "Agent Plan 官方明确支持并推荐 Responses，专用 /api/plan/v3。Kimi K3 需 Medium 及以上，其他权限以当前套餐为准。GLM5.3、Kimi K3 不可关闭思考；Kimi K2.7-Code 即将下线，未推荐。路由实际模型由控制台决定，不臆定其窗口或档位。Kimi K2.8 文档最大输出为 1024k，此处采用官方 OpenCode 示例的 65536 输出预算建议。",
+    "notes": "Agent Plan 官方明确支持 Responses，相关 OpenCode/Codex 接入示例不作为通用默认协议依据，专用 /api/plan/v3。Kimi K3 需 Medium 及以上，其他权限以当前套餐为准。GLM5.3、Kimi K3 不可关闭思考；Kimi K2.7-Code 即将下线，未推荐。路由实际模型由控制台决定，不臆定其窗口或档位。Kimi K2.8 文档最大输出为 1024k，此处采用官方 OpenCode 示例的 65536 输出预算建议。 include 虽有泛型字段，但未证实 reasoning.encrypted_content 的取值或返回，默认省略；实际原生推理项仍按已有完整历史回放。 系统与手动默认模板采用 Chat Completions；上述 Responses 支持及其专属约束仍保留，供明确选择该协议时使用，不向 Chat 默认参数注入 include 或 chain_rounds。",
     "models": [
       {
         "ids": [
@@ -413,15 +413,15 @@
     "platforms": [
       "qianfan"
     ],
-    "chat_protocol": "openai.responses",
-    "checked_at": "2026-10-15",
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-16",
     "sources": [
       "https://cloud.baidu.com/doc/qianfan-docs/s/4mi400l1m",
       "https://cloud.baidu.com/doc/qianfan-docs/s/7m95lyy43",
       "https://cloud.baidu.com/doc/qianfan-docs/s/Wm95lyynv",
       "https://cloud.baidu.com/doc/qianfan-api/s/vmhejnuy8"
     ],
-    "notes": "Responses 使用指南列出精确支持模型；ERNIE 未列入该清单，继续用 Chat。普通 Chat 请求 DeepSeek V4 默认 high、复杂 Agent 自动 max，但 Responses 档位字段映射未明确，故不生成默认参数。保留模型表真实上限，不套用其他平台的 DeepSeek 窗口或输出值。",
+    "notes": "Responses 使用指南列出精确支持模型；ERNIE 未列入该清单，继续用 Chat。普通 Chat 请求 DeepSeek V4 默认 high、复杂 Agent 自动 max，但 Responses 档位字段映射未明确，故不生成默认参数。保留模型表真实上限，不套用其他平台的 DeepSeek 窗口或输出值。 当前指南逐项确认这十个 Responses 型号；创建接口未列 include，默认省略 reasoning.encrypted_content，保留真实 reasoning_text 项。 系统与手动默认模板采用 Chat Completions；上述 Responses 支持及其专属约束仍保留，供明确选择该协议时使用，不向 Chat 默认参数注入 include 或 chain_rounds。",
     "models": [
       {
         "ids": [
@@ -431,7 +431,8 @@
         "context_limit": 1000000,
         "context_limit_kind": "combined",
         "output_limit": 131072,
-        "provider_params": {}
+        "provider_params": {},
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -440,7 +441,8 @@
         "context_limit": 128000,
         "context_limit_kind": "combined",
         "output_limit": 32000,
-        "provider_params": {}
+        "provider_params": {},
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -450,7 +452,8 @@
           "qwen3-14b",
           "qwen3-8b"
         ],
-        "provider_params": {}
+        "provider_params": {},
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -459,7 +462,8 @@
         "context_limit": 128000,
         "context_limit_kind": "combined",
         "output_limit": 65536,
-        "provider_params": {}
+        "provider_params": {},
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -468,7 +472,8 @@
         "context_limit": 128000,
         "context_limit_kind": "combined",
         "output_limit": 32768,
-        "provider_params": {}
+        "provider_params": {},
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -521,15 +526,16 @@
     "platforms": [
       "hunyuan"
     ],
-    "chat_protocol": "openai.responses",
-    "checked_at": "2026-10-15",
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-16",
     "sources": [
       "https://cloud.tencent.com/document/product/1823/130051",
       "https://intl.cloud.tencent.com/jp/document/product/1300/78934",
       "https://intl.cloud.tencent.com/jp/document/product/1300/80632",
-      "https://cloud.tencent.com/document/product/1823/131208"
+      "https://cloud.tencent.com/document/product/1823/131208",
+      "https://cloud.tencent.com/document/product/1823/135873"
     ],
-    "notes": "TokenHub 通用协议矩阵已确认多数模型支持 Responses；Kimi K2.8/K2.7 Code 明确仅 Chat，逐模型覆盖。推理档位采用 2026-10-13 深度思考页，旧联网搜索页的 no_think 说明已不一致，不采用。模型可用性与账号及地区有关。Kimi K3/K2.8 最大输出与上下文同为 1M，K2.7 Code 同为 256k；未知安全默认输出，故不预设整窗输出预算。",
+    "notes": "TokenHub 通用协议矩阵已确认多数模型支持 Responses；Kimi K2.8/K2.7 Code 明确仅 Chat，逐模型覆盖。推理档位采用 2026-10-13 深度思考页，旧联网搜索页的 no_think 说明已不一致，不采用。模型可用性与账号及地区有关。Kimi K3/K2.8 最大输出与上下文同为 1M，K2.7 Code 同为 256k；未知安全默认输出，故不预设整窗输出预算。 当前 Responses 文档明确 hy3 及兼容模型不支持 previous_response_id，默认关闭链式轮次并完整重放 input。include 被接受，但兼容模式忽略附加输出与 store，不保证返回加密推理。 系统与手动默认模板采用 Chat Completions；上述 Responses 支持及其专属约束仍保留，供明确选择该协议时使用，不向 Chat 默认参数注入 include 或 chain_rounds。",
     "models": [
       {
         "ids": [
@@ -544,7 +550,8 @@
         ],
         "provider_params": {
           "reasoning_effort": "high"
-        }
+        },
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -560,7 +567,8 @@
         ],
         "provider_params": {
           "reasoning_effort": "high"
-        }
+        },
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -577,7 +585,8 @@
         ],
         "provider_params": {
           "reasoning_effort": "high"
-        }
+        },
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -594,7 +603,8 @@
         "context_limit": 1000000,
         "context_limit_kind": "combined",
         "output_limit": 384000,
-        "provider_params": {}
+        "provider_params": {},
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -612,7 +622,8 @@
         ],
         "provider_params": {
           "reasoning_effort": "max"
-        }
+        },
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -632,7 +643,8 @@
         ],
         "provider_params": {
           "reasoning_effort": "max"
-        }
+        },
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -647,7 +659,8 @@
         ],
         "provider_params": {
           "reasoning_effort": "max"
-        }
+        },
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -674,7 +687,8 @@
         ],
         "context_limit": 1000000,
         "context_limit_kind": "combined",
-        "provider_params": {}
+        "provider_params": {},
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -683,7 +697,8 @@
         "context_limit": 200000,
         "context_limit_kind": "combined",
         "output_limit": 128000,
-        "provider_params": {}
+        "provider_params": {},
+        "chat_protocol": "openai.chat_text"
       }
     ]
   },
@@ -692,15 +707,17 @@
       "hunyuan-global"
     ],
     "base_url_override": "https://tokenhub-intl.tencentcloudmaas.com/v1",
-    "chat_protocol": "openai.responses",
-    "checked_at": "2026-10-15",
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-16",
     "sources": [
       "https://cloud.tencent.com/document/product/1823/130051",
       "https://intl.cloud.tencent.com/jp/document/product/1300/78934",
       "https://intl.cloud.tencent.com/jp/document/product/1300/80632",
-      "https://cloud.tencent.com/document/product/1823/131208"
+      "https://cloud.tencent.com/document/product/1823/131208",
+      "https://intl.cloud.tencent.com/jp/document/product/1300/82346",
+      "https://intl.cloud.tencent.com/jp/document/product/1300/81385"
     ],
-    "notes": "国际 TokenHub 通用协议矩阵支持 Responses，Kimi K2.8/K2.7 Code 例外；当前官方域名为 tokenhub-intl.tencentcloudmaas.com，仓库旧预设缺少 cloud，需要单独修正。窗口取国际模型表；不纳入已在 10-08 下线的 GLM5/5.1。Kimi K3/K2.8 最大输出与上下文同为 1M，K2.7 Code 同为 256k；未知安全默认输出，故不预设整窗输出预算。",
+    "notes": "国际 TokenHub 通用协议矩阵支持 Responses，Kimi K2.8/K2.7 Code 例外；当前官方域名为 tokenhub-intl.tencentcloudmaas.com，仓库旧预设缺少 cloud，需要单独修正。窗口取国际模型表；不纳入已在 10-08 下线的 GLM5/5.1。Kimi K3/K2.8 最大输出与上下文同为 1M，K2.7 Code 同为 256k；未知安全默认输出，故不预设整窗输出预算。 当前 Responses 文档明确 hy3 及兼容模型不支持 previous_response_id，默认关闭链式轮次并完整重放 input。include 被接受，但兼容模式忽略附加输出与 store，不保证返回加密推理。 系统与手动默认模板采用 Chat Completions；上述 Responses 支持及其专属约束仍保留，供明确选择该协议时使用，不向 Chat 默认参数注入 include 或 chain_rounds。",
     "models": [
       {
         "ids": [
@@ -715,7 +732,8 @@
         ],
         "provider_params": {
           "reasoning_effort": "high"
-        }
+        },
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -731,7 +749,8 @@
         ],
         "provider_params": {
           "reasoning_effort": "high"
-        }
+        },
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -748,7 +767,8 @@
         ],
         "provider_params": {
           "reasoning_effort": "high"
-        }
+        },
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -765,7 +785,8 @@
         "context_limit": 1000000,
         "context_limit_kind": "combined",
         "output_limit": 384000,
-        "provider_params": {}
+        "provider_params": {},
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -783,7 +804,8 @@
         ],
         "provider_params": {
           "reasoning_effort": "max"
-        }
+        },
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -803,7 +825,8 @@
         ],
         "provider_params": {
           "reasoning_effort": "max"
-        }
+        },
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -818,7 +841,8 @@
         ],
         "provider_params": {
           "reasoning_effort": "max"
-        }
+        },
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -845,7 +869,8 @@
         ],
         "context_limit": 1000000,
         "context_limit_kind": "combined",
-        "provider_params": {}
+        "provider_params": {},
+        "chat_protocol": "openai.chat_text"
       },
       {
         "ids": [
@@ -854,7 +879,8 @@
         "context_limit": 200000,
         "context_limit_kind": "combined",
         "output_limit": 128000,
-        "provider_params": {}
+        "provider_params": {},
+        "chat_protocol": "openai.chat_text"
       }
     ]
   },

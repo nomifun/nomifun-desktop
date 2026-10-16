@@ -639,7 +639,7 @@ async fn provider_clone_preserves_manual_and_default_model_token_limits() {
 }
 
 #[tokio::test]
-async fn mixed_case_ark_platforms_reject_invalid_video_models_before_persistence() {
+async fn mixed_case_ark_platforms_reject_seed_chat_but_preserve_legal_video_model_ids() {
     let db = init_database_memory().await.unwrap();
     let app = system_routes(build_state(&db));
     for platform in ["ArK", "VOLCENGINE"] {
@@ -658,7 +658,6 @@ async fn mixed_case_ark_platforms_reject_invalid_video_models_before_persistence
             })
         };
         for (model, expected_error) in [
-            ("doubao-seedance-1.5-pro", "console display name"),
             ("doubao-seed-2-0-mini-260428", "Seed and Seedance"),
         ] {
             let response = app
@@ -684,22 +683,25 @@ async fn mixed_case_ark_platforms_reject_invalid_video_models_before_persistence
         assert_eq!(listed["data"].as_array().unwrap().len(), 1);
         assert_eq!(listed["data"][0]["model"], "seed-chat");
 
-        let model = "doubao-seedance-2-0-mini-260615";
-        let response = app
+        for model in ["doubao-seedance-2.0-mini","doubao-seedance-1-5-pro","doubao-seedance-2-0-mini-260615"] {
+            let response = app
             .clone()
             .oneshot(request("PUT", "/api/provider-models", Some(save(model))))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let resolved = build_invoke(&db)
+            let saved=body_json(response).await;
+            assert_eq!(saved["data"]["model"],model);
+            let resolved = build_invoke(&db)
             .resolve_task_config(
-                &ModelRef { provider_id, model: model.to_owned() },
+                &ModelRef { provider_id:provider_id.clone(), model: model.to_owned() },
                 ModelTask::VideoGeneration,
             )
             .await
             .unwrap();
         assert_eq!(resolved.protocol, "ark.video_jobs");
         assert_eq!(resolved.model, model);
+        }
     }
 }
 

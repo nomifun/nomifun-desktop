@@ -24,10 +24,10 @@
 `provider_params` 使用协议自己的严格编码契约，不能包含凭据或本地 transport 字段；无法无损编码的值在保存时拒绝。响应只暴露 `has_credentials`，不回显秘密。调用图变化原子递增 `config_revision`；解析、异步任务和健康结果使用一致修订，旧探测结果不能覆盖新配置。
 
 Chat 推荐由 [官方文档 profile](../../crates/backend/nomifun-model-invoke/src/model_profiles.rs)
-统一生成，当前逐家核验日期为 2026-10-15。官方确认并推荐 Responses 的服务优先
-`openai.responses`；仍主推或只确认支持 Chat Completions 的服务保持 `openai.chat_text`。
-同品牌的按量、套餐、地区和具体型号分别匹配，不根据名称扩大支持范围。Custom/New API
-探测优先 Responses；NomiFun 网关目录的已声明协议仍为确切来源。已保存协议不自动重写。Responses 的输入、
+统一生成。系统预设及手动添加时，通用 OpenAI 兼容对话模板默认 `openai.chat_text`；
+OpenAI 官方、MiniMax 和 xAI 保留文档明确的 Responses 默认。仅支持 Responses 不会自动提升模板优先级。
+这里只调整默认模板及对应参数，既有自动检测、自动填写和用户手选流程保持；NomiFun 网关仍以目录声明为准。
+已保存协议不自动重写。Responses 的输入、
 函数调用和流事件使用自己的 typed serializer；工具 schema 显式 `strict: false`，保留
 平台可选参数的语义。多段推理摘要按 item 与 summary/content index 独立校验。
 
@@ -62,18 +62,36 @@ Gemini 4 的共享窗口与旧代独立输入窗口分别记录；用户明确�
 阿里 Coding Plan 仍用 Chat Completions；Bedrock 新 Mantle 接口不冒充已实现的旧 InvokeModel 路由。
 同样，聚合网关的实际目录、权限和部署限制不能从原厂同名模型推断。
 
+任务与协议的逐供应商核验另见 [国际平台](../../crates/backend/nomifun-model-invoke/src/provider_protocol_audit/global-and-gateways.json)、
+[国内平台、套餐与语音](../../crates/backend/nomifun-model-invoke/src/provider_protocol_audit/china-and-voice.json) 和
+[聚合服务](../../crates/backend/nomifun-model-invoke/src/provider_protocol_audit/gateways.json)。每组覆盖全部十类用途，记录
+已实现、需目录声明、尚未实现、证据不足及退役状态。型号限制按各平台/区域/套餐核对，不继承上游同名模型。
+当前原生补齐包括 Gemini Interactions 图像与语音、Gemini batch embeddings、MiniMax/智谱/硅基流动 ASR
+、智谱 TTS 及 InfiniAI 重排。火山语音的新鉴权/URL音频输入、部分厂商视频/音乐/实时能力仍需专门实现，不能用相近的
+OpenAI serializer 作为可用默认值。原生目录缺少用途时，未知型号保持待配置，不再无条件归入对话。
+
 ## 设置期实际协议验证
 
-显式检测动作通过 `/api/providers/detect-chat-protocol` 或已保存供应商的同名子路径
-读取当前模型与完整 capability 草稿，复用生产 OpenAI/Responses serializer 和流解码器。
-先验证当前协议，只有接口或协议解析明确不兼容时尝试另一项；可达状态、空 JSON 探测、
-认证、额度或瞬态故障不能产生已验证选择。返回的 capability 正是实际测试过的连接地址、
-端点和参数，保持原模型限额，另声明检测请求的有界输出预算。
+模型选择完成后，界面通过 `/api/providers/discover-model-protocols` 或
+`/api/providers/{provider_id}/discover-model-protocols` 提交精确模型与 capability 草稿。
+对话候选复用生产 OpenAI、Responses、Anthropic、Gemini 和 Bedrock provider，验证流式
+工具调用、真实工具结果回传及最终可见回答；不创建 Session、不执行用户工具。每个候选有
+输出和时长预算；生产 HTTP 层可能执行有限重试。所有候选均记录结果，已有可用选择优先，
+否则选择已验证的文档推荐项，再回退到第一个可用项。全局鉴权、额度和限流失败停止后续请求。
 
-该动作不创建 Session、不写模型目录，也不授予运行时协议故障转移。已有供应商使用服务端
-加密凭据和修订围栏；新供应商使用本次显式提供的连接。界面保存结果前复核草稿快照，
-检测期间阻止重复提交，过期结果不覆盖模型、凭据或手工调整。检测明确提示用量并由用户点击，
-普通键入及基础可达性探测不自动发起付费模型请求。
+多模态候选使用 [供应商协议审计](../../crates/backend/nomifun-model-invoke/src/provider_protocol_audit.rs)
+的精确型号或原生目录任务声明，并绑定对应 codec、根地址、端点和专属参数。仅注册 serializer
+不等于供应商支持；每型号协议限制不能被目录中的泛化任务标签绕过。证据区分实测、官方型号、
+目录声明和未确认状态，自动流程不提交图片、视频、音乐等生成任务。
+
+该动作不写模型目录，也不授予运行时协议故障转移。已有供应商使用服务端加密凭据和修订围栏，
+新供应商使用当前表单连接；自定义中转地址不被官方默认地址替换。已核实的官方区域连接可切换原生根路径，
+同时保留原区域域名，不跨区发送凭据。界面在目录选中、Enter 或失焦
+后开始检查，300ms 去抖并仅在本次编辑缓存相同配置；改动参数或凭据会取消旧请求。应用结果前
+复核草稿快照，所有用途检查结束前阻止保存，别名编辑不触发检查。正常状态仅显示连接结果；协议列表在“连接设置”中按需查看，备选失败的原始信息再收进“技术诊断”。
+可选数值的 API 空值统一视为未设置，不得将“使用模型默认输出上限”误判为非法值；真实输入错误仅在对应字段提示。
+已保存或手工修改的参数使用 `apply_recommended_defaults: false`，避免检查重新补回用户明确删除的字段；
+推荐缺省只补新建且尚未手改的草稿。自动值仅归属当前模型，切换型号后释放，手改及持久化值保留。
 OpenAI 协议参数转换使用前后端共享的测试向量：`response_format` 与 `text.format` 按
 官方 schema 包装转换，回答详略和思考档位保留语义；推理强度在本地仍以顶层
 `reasoning_effort` 为唯一配置入口。供应商未知扩展保持原值，不能凭字段名称推断不支持。

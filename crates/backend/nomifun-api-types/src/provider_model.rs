@@ -164,15 +164,15 @@ pub struct ProviderModelCapabilityInput {
     #[serde(default = "empty_object")]
     #[ts(optional = nullable, type = "unknown")]
     pub provider_params: serde_json::Value,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub context_limit: Option<i64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub output_limit: Option<i64>,
     /// Chat context occupancy percentage that triggers automatic compaction.
     /// Omission retains the runtime's 75% policy.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub compaction_threshold_pct: Option<u8>,
 }
@@ -508,6 +508,33 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn discovery_capabilities_omit_unset_limits_and_preserve_explicit_values() {
+        for limits in [
+            json!({"context_limit":null,"output_limit":null,"compaction_threshold_pct":null}),
+            json!({"context_limit":1000000,"output_limit":4096,"compaction_threshold_pct":75}),
+        ] {
+            let mut capability = json!({"task":"chat","protocol":"openai.chat_text","connection_role":"default"});
+            capability.as_object_mut().unwrap().extend(limits.as_object().unwrap().clone());
+            let response: crate::DiscoverModelProtocolsResponse = serde_json::from_value(json!({
+                "selected_protocol":"openai.chat_text","selected_capability":capability,
+                "candidates":[{"protocol":"openai.chat_text","capability":capability,
+                    "status":"available","evidence":"verified_stream","recommended":true,"elapsed_ms":0}],
+                "elapsed_ms":0
+            })).unwrap();
+            let response = serde_json::to_value(response).unwrap();
+            for capability in [&response["selected_capability"], &response["candidates"][0]["capability"]] {
+                for (key,value) in limits.as_object().unwrap() {
+                    if value.is_null() {
+                        assert!(capability.get(key).is_none(), "unset {key} must not become a null draft value");
+                    } else {
+                        assert_eq!(capability.get(key),Some(value));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

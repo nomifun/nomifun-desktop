@@ -922,12 +922,12 @@
       "new-api",
       "nomifun-model-gateway"
     ],
-    "chat_protocol": "openai.responses",
+    "chat_protocol": "openai.chat_text",
     "checked_at": "2026-10-15",
     "sources": [
       "https://developers.openai.com/api/docs/guides/migrate-to-responses"
     ],
-    "notes": "用户指定 OpenAI 兼容优先 Responses；自定义地址没有官方供应商目录可核验，协议探测优先 Responses，确认后保存；未确认模型上限和推理档位留空。NomiFun网关仍使用自身声明的精确模型协议，不重写其目录。",
+    "notes": "系统与手动 OpenAI 兼容默认模板采用 Chat Completions；自定义地址没有官方供应商目录可核验，Responses 仍可显式选择并验证。未知模型上限和推理档位留空；新默认不迁移已保存配置或覆盖用户选择。 NomiFun gateway keeps the explicit catalog protocol; this generic template never rewrites saved capabilities.",
     "models": []
   }
 ]

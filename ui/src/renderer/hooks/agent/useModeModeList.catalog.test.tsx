@@ -51,6 +51,19 @@ test('refresh displays newly returned IDs even when the catalog declares no task
   }
 });
 
+test('native non-chat declarations and missing task metadata never acquire a guessed Chat purpose', async () => {
+  const fetch = spyOn(ipcBridge.mode.fetchProviderModels, 'invoke').mockResolvedValue({ models: [
+    { id: 'gemini-embedding-2', name: null, tasks: ['embedding'], tasks_source: 'provider_declared', traits: [] },
+    { id: 'unknown-future-model', name: null, tasks: [], traits: [] },
+  ] });
+  try {
+    const hook = renderHook(() => useModeModeList({ platform: 'gemini', providerId }), { wrapper: createWrapper() });
+    await waitFor(() => expect(hook.result.current.data?.models).toHaveLength(2));
+    expect(hook.result.current.data?.models.find(model => model.value === 'gemini-embedding-2')).toMatchObject({ tasks: ['embedding'], tasksSource: 'provider_declared', traits: [] });
+    expect(hook.result.current.data?.models.find(model => model.value === 'unknown-future-model')).toMatchObject({ tasks: [], traits: [] });
+  } finally { fetch.mockRestore(); }
+});
+
 test('a late catalog response from the previous provider does not replace the current list', async () => {
   let resolvePrevious!: (value: FetchModelsResponse) => void;
   const previous = new Promise<FetchModelsResponse>((resolve) => { resolvePrevious = resolve; });

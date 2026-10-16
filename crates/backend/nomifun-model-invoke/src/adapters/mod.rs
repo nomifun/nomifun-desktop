@@ -237,10 +237,13 @@ pub mod ark;
 pub mod dashscope;
 pub mod deepgram;
 pub mod gemini;
+pub mod gemini_native;
 pub mod generic_rerank;
+pub mod infiniai;
 pub mod minimax;
 pub mod minimax_music;
 pub mod mimo;
+pub mod native_transcriptions;
 pub mod openai_audio;
 pub mod openai_embeddings;
 pub mod openai_images;
@@ -252,6 +255,7 @@ pub mod stepfun_realtime;
 pub mod volc_voice;
 pub mod xai;
 pub mod zhipu;
+pub mod zhipu_speech;
 
 /// Build the standard adapter set registered on the service at assembly time.
 /// Adapters are stateless — the shared HTTP client is passed per call by the
@@ -264,9 +268,16 @@ pub fn default_adapters() -> Vec<Arc<dyn ProtocolAdapter>> {
         Arc::new(openai_videos::OpenAiVideosAdapter),
         Arc::new(openai_embeddings::OpenAiEmbeddingsAdapter),
         Arc::new(generic_rerank::GenericRerankAdapter),
+        Arc::new(infiniai::InfiniAiRerankAdapter),
         Arc::new(openai_audio::OpenAiAudioTranscriptionsAdapter),
         Arc::new(openai_audio::OpenAiAudioSpeechAdapter),
+        Arc::new(native_transcriptions::MiniMaxSpeechToTextAdapter),
+        Arc::new(native_transcriptions::ZhipuAudioTranscriptionsAdapter),
+        Arc::new(native_transcriptions::SiliconFlowAudioTranscriptionsAdapter),
         Arc::new(gemini::GeminiGenerateContentAdapter),
+        Arc::new(gemini_native::GeminiEmbeddingsAdapter),
+        Arc::new(gemini_native::GeminiInteractionsImagesAdapter),
+        Arc::new(gemini_native::GeminiInteractionsTtsAdapter),
         Arc::new(deepgram::DeepgramListenAdapter),
         Arc::new(deepgram::DeepgramSpeakRestAdapter),
         Arc::new(ark::ArkImagesAdapter),
@@ -290,6 +301,7 @@ pub fn default_adapters() -> Vec<Arc<dyn ProtocolAdapter>> {
         Arc::new(xai::XaiTtsAdapter),
         Arc::new(xai::XaiSttAdapter),
         Arc::new(zhipu::ZhipuVideoJobsAdapter),
+        Arc::new(zhipu_speech::ZhipuAudioSpeechAdapter),
     ]
 }
 
@@ -523,7 +535,7 @@ mod tests {
             let adapter = registry.get(protocol, task).expect("registered + supported");
             assert_eq!(adapter.id(), protocol);
         }
-        assert_eq!(default_adapters().len(), 32);
+        assert_eq!(default_adapters().len(), 40);
         // Tasks outside an adapter's declared support are refused.
         assert!(registry.get("agnes.images", ModelTask::Chat).is_err());
         assert!(registry.get("agnes.video_jobs", ModelTask::ImageGeneration).is_err());

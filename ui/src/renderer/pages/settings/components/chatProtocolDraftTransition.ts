@@ -1,5 +1,6 @@
 import type { ModelCapabilityDraft } from './providerModelAdvanced';
 import { equalProtocolParamValue, isOpenAIChatProtocol, transitionChatProtocolParams, type ChatProtocolTransitionIssue } from './chatProtocolTransition';
+import { isLocalProviderTransportParameter } from './providerParameterValidation';
 
 export interface ProtocolParameterTransitionNotice {
   source: string;
@@ -68,7 +69,12 @@ function migratedKeys(before: Record<string, unknown>, after: Record<string, unk
 }
 
 /** Parameter-only state. Addresses, connection roles, limits and credentials are never cached here. */
-export function transitionCapabilityParams(capability: ModelCapabilityDraft, target: string, options: { restoreTarget?: boolean } = {}): ModelCapabilityDraft {
+export interface CapabilityProtocolTransitionOptions {
+  restoreTarget?: boolean;
+  /** Explicit user choice; native options have no universal equivalent mapping. */
+  suspendNativeParams?: boolean;
+}
+export function transitionCapabilityParams(capability: ModelCapabilityDraft, target: string, options: CapabilityProtocolTransitionOptions = {}): ModelCapabilityDraft {
   const source = capability.protocol.trim(); target = target.trim();
   if (source === target && capability.protocolParameterTransition?.issues.length) return refreshCapabilityTransitionIssues(capability);
   const parsed = parse(capability.providerParamsJson);
@@ -81,7 +87,12 @@ export function transitionCapabilityParams(capability: ModelCapabilityDraft, tar
       target, issues: [], suspendedKeys: [], restoredKeys: [], mappedKeys: [], invalidJson: true,
     } };
   }
-  const converted = transitionChatProtocolParams(parsed, source, target);
+  const retained = (key: string) => key === '_nomifun_context_limit_kind' || key === '_nomifun_gateway_catalog_baseline' || isLocalProviderTransportParameter(key);
+  const converted = options.suspendNativeParams && source !== target
+    ? { params: Object.fromEntries(Object.entries(parsed).filter(([key]) => retained(key))),
+        suspended: Object.fromEntries(Object.entries(parsed).filter(([key]) => !retained(key))),
+        issues: [] }
+    : transitionChatProtocolParams(parsed, source, target);
   if (source !== target) Object.assign(converted.suspended, suspendScopedControls(converted.params, target));
   const stash = structuredClone(capability.protocolParameterStash ?? {});
   stashValues(stash, source, converted.suspended);
@@ -98,14 +109,14 @@ export function transitionCapabilityParams(capability: ModelCapabilityDraft, tar
       else delete stash[target];
     }
   }
-  const mappedKeys = migratedKeys(parsed, converted.params, converted.suspended, source, target);
+  const mappedKeys = options.suspendNativeParams ? [] : migratedKeys(parsed, converted.params, converted.suspended, source, target);
   const changed = !equalProtocolParamValue(parsed, params);
   const notice = converted.issues.length || Object.keys(converted.suspended).length || restoredKeys.length || mappedKeys.length
     ? { source, target, issues: converted.issues, suspendedKeys: Object.keys(converted.suspended), restoredKeys, mappedKeys }
     : undefined;
   return { ...capability,
     providerParamsJson: changed ? write(params) : capability.providerParamsJson,
-    providerParamsSource: changed ? 'user' : capability.providerParamsSource,
+    providerParamsSource: options.suspendNativeParams && source !== target ? undefined : changed ? 'user' : capability.providerParamsSource,
     protocolParameterStash: Object.keys(stash).length ? stash : undefined,
     protocolParameterTransition: notice,
     // Explicit protocol conversion owns native parameters. Keep only automatic

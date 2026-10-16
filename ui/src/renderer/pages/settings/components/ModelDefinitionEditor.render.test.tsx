@@ -126,6 +126,30 @@ const render = (
   );
 
 describe('unified model definition editor rendering and interactions', () => {
+  test('automatic configuration keeps normal Chat chrome quiet', () => {
+    const html = render({model:'step-5-preview',capabilities:[{
+      ...emptyCapabilityDraft('chat'),transportSource:'persisted',protocol:'stepfun.chat',contextLimit:1_000_000,
+    }]},manifests,'bearer',[],{protocolDiscovery:{platform:'stepfun',baseUrl:'https://api.stepfun.com/v1',authScheme:'bearer',credentials:{api_keys:['fixture']}}});
+    expect(html.includes('data-capability-summary="chat"')).toBe(false);
+    const cardTop = html.slice(html.indexOf('data-capability-card-header="chat"'),html.indexOf('data-model-context-settings="chat"'));
+    expect(cardTop.includes('默认配置已就绪')).toBe(false);
+    expect(cardTop.includes('待处理')).toBe(false);
+    expect(cardTop.includes('data-capability-error-list')).toBe(false);
+    expect(html.includes(zhSettings.modelAdvanced.contextLimitCompactHint)).toBe(false);
+    expect(html.includes(zhSettings.modelAdvanced.compactionThresholdHint)).toBe(false);
+  });
+
+  test('genuine invalid Chat limits stay beside their controls instead of a card alarm', () => {
+    const html = render({model:'step-5-preview',capabilities:[{
+      ...emptyCapabilityDraft('chat'),transportSource:'persisted',protocol:'stepfun.chat',contextLimit:-1,
+    }]},manifests,'bearer',[{task:'chat',code:'invalid_token_limit'}],{protocolDiscovery:{platform:'stepfun',baseUrl:'https://api.stepfun.com/v1',authScheme:'bearer',credentials:{api_keys:['fixture']}}});
+    expect(html.includes('data-capability-error-list')).toBe(false);
+    expect(html.includes('data-capability-error="invalid_token_limit"')).toBe(true);
+    expect(html.indexOf('data-capability-error="invalid_token_limit"')).toBeGreaterThan(html.indexOf('data-model-context-settings="chat"'));
+    const header = html.slice(html.indexOf('data-capability-card-header="chat"'),html.indexOf('data-model-context-settings="chat"'));
+    expect(header.includes('待处理')).toBe(false);
+  });
+
   test('keeps every canonical capability intact when editing an existing model', () => {
     const definition: ModelDefinitionDraft = {
       model: 'user-entered/model-not-in-catalog',
@@ -708,20 +732,28 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(deepgramHtml.includes('默认音色')).toBe(false);
 
     // These adapters read a differently-named field (voice_setting.voice_id,
-    // speaker, voice_id) or overwrite provider params with a typed default, so
+    // speaker, voice_id or native audio configuration), so
     // a saved `voice` key would silently never take effect.
     for (const protocol of [
       'minimax.t2a',
       'volc.tts_v3',
       'xai.tts',
       'mimo.chat_tts',
-      'openai.audio_speech',
     ]) {
       const html = render({
         model: 'some-tts-model',
         capabilities: [{ ...emptyCapabilityDraft('speech_synthesis'), protocol }],
       });
       expect(html.includes('默认音色')).toBe(false);
+    }
+  });
+
+  test('offers persisted provider voices for OpenAI and native Gemini Interactions TTS', () => {
+    for (const [protocol, voice] of [['openai.audio_speech','nova'],['gemini.interactions_tts','Kore']]) {
+      const html = render({ model: 'documented-tts-model', capabilities: [{ ...emptyCapabilityDraft('speech_synthesis'), protocol,
+        providerParamsJson: JSON.stringify({ voice }) }] });
+      expect(html.includes('默认音色')).toBe(true);
+      expect(html.includes(voice)).toBe(true);
     }
   });
 

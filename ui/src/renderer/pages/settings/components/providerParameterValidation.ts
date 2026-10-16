@@ -28,6 +28,8 @@ const RESERVED_OUTPUT_FIELDS = new Set([
 ]);
 const OUTPUT_LIMIT_FIELDS = ['max_tokens', 'max_completion_tokens', 'maxOutputTokens', 'max_output_tokens'];
 
+export const isLocalProviderTransportParameter = (key: string): boolean => LOCAL_TRANSPORT_KEYS.includes(key);
+
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 const owns = (value: Record<string, unknown>, key: string): boolean =>

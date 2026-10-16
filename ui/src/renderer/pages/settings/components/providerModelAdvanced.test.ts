@@ -849,12 +849,14 @@ describe('model definition capability selection', () => {
       ...current,
       routeSource: 'user',
       transportSource: 'user',
+      protocolSelectionSource: 'manual',
     });
     const changed = changeCapabilityProtocol(current, 'openai.audio_speech', taskManifest);
     expect(changed).toEqual({
       ...current,
       routeSource: 'user',
       transportSource: 'user',
+      protocolSelectionSource: 'manual',
       protocol: 'openai.audio_speech',
       connectionRole: 'default',
       baseUrlOverride: '',
@@ -1096,6 +1098,71 @@ describe('capability validation and serialization', () => {
     expect(restored.compactionThresholdPct).toBe(60);
   });
 
+  test('normalizes nullable Step5 discovery limits without inventing an output ceiling', () => {
+    const capability = capabilityDraftFromResponse({
+      task: 'chat',
+      protocol: 'openai.responses',
+      connection_role: 'default',
+      base_url_override: null,
+      endpoint: null,
+      poll_endpoint: null,
+      content_endpoint: null,
+      realtime_endpoint: null,
+      context_limit: 1_000_000,
+      output_limit: null,
+      compaction_threshold_pct: null,
+      provider_params: { reasoning_effort: 'medium', chain_rounds: false, include: null },
+    });
+    expect(capability.contextLimit).toBe(1_000_000);
+    expect(capability.outputLimit).toBeUndefined();
+    expect(capability.compactionThresholdPct).toBeUndefined();
+    expect(capability.baseUrlOverride).toBe('');
+    expect(capability.endpoint).toBe('');
+    expect(capability.pollEndpoint).toBe('');
+    expect(capability.contentEndpoint).toBe('');
+    expect(capability.realtimeEndpoint).toBe('');
+    const definition = { model: 'step-5-preview', capabilities: [capability] };
+    expect(validateModelDefinition(definition, { chat: manifest('chat', 'openai.responses') }, 'https://api.stepfun.com/v1'))
+      .toEqual({ valid: true, errors: [] });
+    const input = capabilityInputsFromDefinition(definition)![0];
+    expect(input.context_limit).toBe(1_000_000);
+    expect(input).not.toHaveProperty('output_limit');
+    expect(input).not.toHaveProperty('compaction_threshold_pct');
+    expect(input.provider_params).toEqual({ reasoning_effort: 'medium', chain_rounds: false, include: null });
+  });
+
+  test('nullable optional numeric response fields stay absent when saving', () => {
+    const capability = capabilityDraftFromResponse({
+      task: 'chat', protocol: 'openai.responses', connection_role: 'default',
+      context_limit: null, output_limit: null, compaction_threshold_pct: null,
+    });
+    expect(capability.contextLimit).toBeUndefined();
+    expect(capability.outputLimit).toBeUndefined();
+    expect(capability.compactionThresholdPct).toBeUndefined();
+    const input = capabilityInputsFromDefinition({ model: 'model', capabilities: [capability] })![0];
+    for (const field of ['context_limit', 'output_limit', 'compaction_threshold_pct']) {
+      expect(input).not.toHaveProperty(field);
+    }
+  });
+
+  test('response normalization preserves explicit invalid token values for validation', () => {
+    for (const [wireField, draftField] of [
+      ['context_limit', 'contextLimit'], ['output_limit', 'outputLimit'],
+    ] as const) {
+      for (const value of [0, -1, NaN, Infinity, 0.5, 0x1_0000_0000]) {
+        const capability = capabilityDraftFromResponse({
+          task: 'chat', protocol: 'openai.responses', connection_role: 'default',
+          context_limit: null, output_limit: null, [wireField]: value,
+        });
+        expect(capability[draftField]).toBe(value);
+        expect(validateModelDefinition(
+          { model: 'model', capabilities: [capability] },
+          { chat: manifest('chat', 'openai.responses') }, 'https://api.stepfun.com/v1',
+        ).errors).toContainEqual({ task: 'chat', code: 'invalid_token_limit' });
+      }
+    }
+  });
+
   test('round-trips one persisted capability into the typed editor draft', () => {
     expect(
       capabilityDraftFromResponse({
@@ -1115,6 +1182,8 @@ describe('capability validation and serialization', () => {
       traits: [],
       routeSource: 'persisted',
       transportSource: 'persisted',
+      providerParamsSource: 'user',
+      protocolSelectionSource: 'manual',
       protocol: 'stepfun.audio_speech',
       connectionRole: 'voice',
       baseUrlOverride: 'https://voice.example/v1',

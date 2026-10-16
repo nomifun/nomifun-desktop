@@ -534,19 +534,30 @@ const PROTOCOL_SPECS: &[ProtocolSpec] = &[
     ] },
     ProtocolSpec { id: "openai.embeddings", tasks: &[Embedding], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "novita", "openrouter", "siliconflow", "ppio", "infiniai", "qianfan", "hunyuan", "hunyuan-global", "ctyun", "zhipu", "nomifun-model-gateway"], connection_role: None, endpoints: &[endpoint(Embedding, "endpoint", Submit, "POST", "/embeddings")] },
     ProtocolSpec { id: "generic.rerank", tasks: &[Rerank], executor: ModelInvoke, transport: Http, scopes: COMPAT_CUSTOM, platforms: &["siliconflow", "ppio", "qianfan", "ctyun", "zhipu", "nomifun-model-gateway"], connection_role: None, endpoints: &[endpoint(Rerank, "endpoint", Submit, "POST", "/rerank")] },
+    ProtocolSpec { id: "infiniai.rerank", tasks: &[Rerank], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["infiniai"], connection_role: None, endpoints: &[endpoint(Rerank, "endpoint", Submit, "POST", "/rerank")] },
     ProtocolSpec { id: "openai.audio_transcriptions", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "siliconflow", "nomifun-model-gateway"], connection_role: None, endpoints: &[endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/audio/transcriptions")] },
+    ProtocolSpec { id: "minimax.speech_to_text", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["minimax", "minimax-code"], connection_role: None, endpoints: &[endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/speech_to_text")] },
+    ProtocolSpec { id: "zhipu.audio_transcriptions", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["zhipu"], connection_role: None, endpoints: &[endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/audio/transcriptions")] },
+    ProtocolSpec { id: "zhipu.audio_speech", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["zhipu"], connection_role: None, endpoints: &[endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/audio/speech")] },
+    ProtocolSpec { id: "siliconflow.audio_transcriptions", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["siliconflow"], connection_role: None, endpoints: &[endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/audio/transcriptions")] },
     ProtocolSpec { id: "openai.audio_speech", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "nomifun-model-gateway"], connection_role: None, endpoints: &[endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/audio/speech")] },
     ProtocolSpec { id: "gemini.generate_content", tasks: &[ImageGeneration, ImageEdit], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["gemini"], connection_role: None, endpoints: &[
         origin_endpoint(ImageGeneration, "endpoint", Submit, "POST", "/v1beta/models/{model}:generateContent"),
         origin_endpoint(ImageEdit, "endpoint", Submit, "POST", "/v1beta/models/{model}:generateContent"),
     ] },
+    ProtocolSpec { id: "gemini.embeddings", tasks: &[Embedding], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["gemini"], connection_role: None, endpoints: &[origin_endpoint(Embedding, "endpoint", Submit, "POST", "/v1beta/models/{model}:batchEmbedContents")] },
+    ProtocolSpec { id: "gemini.interactions_images", tasks: &[ImageGeneration, ImageEdit], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["gemini"], connection_role: None, endpoints: &[
+        origin_endpoint(ImageGeneration, "endpoint", Submit, "POST", "/v1beta/interactions"),
+        origin_endpoint(ImageEdit, "endpoint", Submit, "POST", "/v1beta/interactions"),
+    ] },
+    ProtocolSpec { id: "gemini.interactions_tts", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["gemini"], connection_role: None, endpoints: &[origin_endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/v1beta/interactions")] },
     ProtocolSpec { id: "deepgram.listen", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["deepgram"], connection_role: None, endpoints: &[origin_endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/v1/listen")] },
     ProtocolSpec { id: "deepgram.speak_rest", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["deepgram"], connection_role: None, endpoints: &[origin_endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/v1/speak")] },
-    ProtocolSpec { id: "ark.images", tasks: &[ImageGeneration, ImageEdit], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["ark", "volcengine"], connection_role: None, endpoints: &[
+    ProtocolSpec { id: "ark.images", tasks: &[ImageGeneration, ImageEdit], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["ark", "volcengine", "ark-agent-plan", "ctyun"], connection_role: None, endpoints: &[
         endpoint(ImageGeneration, "endpoint", Submit, "POST", "/images/generations"),
         endpoint(ImageEdit, "endpoint", Submit, "POST", "/images/generations"),
     ] },
-    ProtocolSpec { id: "ark.video_jobs", tasks: &[VideoGeneration], executor: AsyncJob, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["ark", "volcengine"], connection_role: None, endpoints: &[
+    ProtocolSpec { id: "ark.video_jobs", tasks: &[VideoGeneration], executor: AsyncJob, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["ark", "volcengine", "ark-agent-plan", "ctyun"], connection_role: None, endpoints: &[
         endpoint(VideoGeneration, "endpoint", Submit, "POST", "/contents/generations/tasks"),
         endpoint(VideoGeneration, "poll_endpoint", Poll, "GET", "/contents/generations/tasks/{id}"),
     ] },
@@ -562,8 +573,8 @@ const PROTOCOL_SPECS: &[ProtocolSpec] = &[
     ProtocolSpec { id: "dashscope.embeddings", tasks: &[Embedding], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["dashscope"], connection_role: None, endpoints: &[origin_endpoint(Embedding, "endpoint", Submit, "POST", "/api/v1/services/embeddings/text-embedding/text-embedding")] },
     ProtocolSpec { id: "minimax.t2a", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["minimax"], connection_role: None, endpoints: &[endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/t2a_v2")] },
     ProtocolSpec { id: "minimax.music", tasks: &[MusicGeneration], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["minimax"], connection_role: None, endpoints: &[endpoint(MusicGeneration, "endpoint", Submit, "POST", "/music_generation")] },
-    ProtocolSpec { id: "mimo.chat_asr", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["mimo"], connection_role: None, endpoints: &[endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/chat/completions")] },
-    ProtocolSpec { id: "mimo.chat_tts", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["mimo"], connection_role: None, endpoints: &[endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/chat/completions")] },
+    ProtocolSpec { id: "mimo.chat_asr", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["mimo", "mimo-token-plan-cn", "mimo-token-plan-sgp", "mimo-token-plan-ams"], connection_role: None, endpoints: &[endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/chat/completions")] },
+    ProtocolSpec { id: "mimo.chat_tts", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["mimo", "mimo-token-plan-cn", "mimo-token-plan-sgp", "mimo-token-plan-ams"], connection_role: None, endpoints: &[endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/chat/completions")] },
     ProtocolSpec { id: "siliconflow.audio_speech", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["siliconflow"], connection_role: None, endpoints: &[endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/audio/speech")] },
     ProtocolSpec { id: "siliconflow.images", tasks: &[ImageGeneration, ImageEdit], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["siliconflow"], connection_role: None, endpoints: &[
         endpoint(ImageGeneration, "endpoint", Submit, "POST", "/images/generations"),
@@ -601,6 +612,7 @@ fn protocol_connection_override(
     platform: &str,
 ) -> Option<(&'static str, &'static str)> {
     match (protocol_id, platform) {
+        ("anthropic.messages", "ctyun") => Some(("https://ai.ctaigw.cn", "header_key:x-api-key")),
         ("dashscope.images" | "dashscope.embeddings", "dashscope") => {
             Some(("https://dashscope.aliyuncs.com", "bearer"))
         }
@@ -771,7 +783,10 @@ fn provider_params_encoding(
         | ("deepgram.listen", SpeechRecognition)
         | ("deepgram.speak_rest", SpeechSynthesis)
         | ("stepfun.images", ImageEdit)
-        | ("xai.stt", SpeechRecognition) => ScalarFields,
+        | ("xai.stt", SpeechRecognition)
+        | ("minimax.speech_to_text", SpeechRecognition)
+        | ("zhipu.audio_transcriptions", SpeechRecognition)
+        | ("siliconflow.audio_transcriptions", SpeechRecognition) => ScalarFields,
 
         ("openai.chat_text", Chat)
         | ("openai.responses", Chat)
@@ -783,8 +798,13 @@ fn provider_params_encoding(
         | ("agnes.images", ImageGeneration | ImageEdit)
         | ("agnes.video_jobs", VideoGeneration)
         | ("generic.rerank", Rerank)
+        | ("infiniai.rerank", Rerank)
         | ("openai.audio_speech", SpeechSynthesis)
+        | ("zhipu.audio_speech", SpeechSynthesis)
         | ("gemini.generate_content", ImageGeneration | ImageEdit)
+        | ("gemini.embeddings", Embedding)
+        | ("gemini.interactions_images", ImageGeneration | ImageEdit)
+        | ("gemini.interactions_tts", SpeechSynthesis)
         | ("ark.images", ImageGeneration | ImageEdit)
         | ("ark.video_jobs", VideoGeneration)
         | ("volc.asr_file", SpeechRecognition)
@@ -1118,6 +1138,16 @@ fn owned_endpoint(protocol_id: &str, spec: EndpointSpec) -> ProtocolEndpointDesc
 
 fn owned_protocol(spec: ProtocolSpec) -> ProtocolDescriptor {
     let mut platforms = spec.platforms.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>();
+    for audit in crate::provider_protocol_audit::provider_protocol_audits() {
+        if audit.tasks.iter().any(|task| spec.tasks.contains(&task.task)
+            && task.protocols.iter().any(|protocol| protocol == spec.id)) {
+            for platform in &audit.platforms {
+                if !matches!(platform.as_str(), "custom" | "new-api") && !platforms.contains(platform) {
+                    platforms.push(platform.clone());
+                }
+            }
+        }
+    }
     if spec.tasks.contains(&Chat) {
         for provider in crate::model_profiles::provider_profiles() {
             if provider.chat_protocol.as_deref() == Some(spec.id)
@@ -1336,6 +1366,23 @@ pub fn protocol_manifest_for_model_connection(
         })
         .cloned()
         .map(|mut descriptor| {
+            // Compatible providers can retain the codec while publishing a
+            // different path (OpenRouter Images, CTYun reranks). Configuration
+            // must display that path; discovery persists the explicit override.
+            if let Some(document) = crate::provider_protocol_audit::provider_protocol_audit(&selected.platform)
+                .and_then(|audit| audit.tasks.iter().find(|entry| entry.task == task
+                    && entry.protocols.contains(&descriptor.protocol_id))) {
+                for endpoint in descriptor.endpoints.iter_mut().filter(|endpoint| endpoint.task == task) {
+                    let value = match endpoint.field.as_str() {
+                        "endpoint" => &document.endpoint,
+                        "poll_endpoint" => &document.poll_endpoint,
+                        "content_endpoint" => &document.content_endpoint,
+                        "realtime_endpoint" => &document.realtime_endpoint,
+                        _ => continue,
+                    };
+                    if let Some(value) = value { endpoint.default_value = value.clone(); }
+                }
+            }
             let platform_match = descriptor
                 .platforms
                 .iter()
@@ -1363,54 +1410,72 @@ pub fn protocol_manifest_for_model_connection(
 
     let recommendation = if custom_scope {
         generic_custom_protocol_recommendation(&registry, &selected, task)
+    } else if selected.platform == "nomifun-model-gateway" {
+        // This catalog supplies its own explicit protocol per capability.
+        None
     } else {
-        let documented_protocol = (task == Chat && selected.platform != "nomifun-model-gateway").then(||
-            crate::model_profiles::recommended_chat_protocol(&selected.platform, model_hint)).flatten();
-        let route = documented_protocol.map(|protocol| crate::routes_table::TaskRoute {protocol,connection_role:None})
-            .or_else(|| preset_protocol_recommendation(&selected.platform, task));
-        route.and_then(|route| {
-            let descriptor = registry.get(route.protocol)?;
+        let documents = model_hint.map(|model| crate::provider_protocol_audit::documented_protocol_candidates(
+            &selected.platform, model, task, false)).unwrap_or_default();
+        let document = documents.first();
+        let fallback = (task == Chat || model_hint.is_none())
+            .then(|| preset_protocol_recommendation(&selected.platform, task)).flatten();
+        let protocol = model_defaults.as_ref().map(|defaults| defaults.protocol_id.as_str())
+            .or_else(|| (task == Chat).then(|| crate::model_profiles::recommended_chat_protocol(
+                &selected.platform,model_hint)).flatten())
+            // Supported dialects are evidence for discovery, not template
+            // preferences. A provider's Chat default must not be upgraded
+            // merely because its audit also lists Responses first.
+            .or_else(|| document.map(|document| document.protocol.as_str()))
+            .or_else(|| fallback.map(|route| route.protocol));
+        protocol.and_then(|protocol| {
+            let document = documents.iter().find(|document| document.protocol == protocol);
+            let descriptor = registry.get(protocol)?;
             if !descriptor.supported_tasks.contains(&task)
-                || !descriptor.platforms.iter().any(|platform| platform == &selected.platform)
-            {
+                || !descriptor.platforms.iter().any(|platform| platform == &selected.platform) {
                 return None;
             }
-            let connection = descriptor
-                .default_connections
-                .iter()
+            let connection = descriptor.default_connections.iter()
                 .find(|connection| connection.preset == selected.preset)
-                .or_else(|| {
-                    descriptor
-                        .default_connections
-                        .iter()
-                        .find(|connection| connection.platform == selected.platform)
-                });
-            let documented_root = (task == Chat).then(||
-                crate::model_profiles::documented_chat_base_url(&selected.platform, model_hint)).flatten();
-            let custom_relay = documented_root.is_some() && base_url_hint
-                .and_then(normalized_base_url).is_some_and(|hint| {
-                    normalized_base_url(documented_root.unwrap()).as_deref() != Some(hint.as_str())
-                        && !PRESETS.iter().filter(|preset| preset.platform == selected.platform)
-                            .filter_map(|preset| preset.base_url).filter_map(normalized_base_url)
-                            .any(|official| official == hint)
-                });
+                .or_else(|| descriptor.default_connections.iter().find(|connection| connection.platform == selected.platform));
+            // Origin-root native endpoints own their full API path. Retain a
+            // documented regional host instead of attaching that path to the
+            // Chat root or sending a regional key to the domestic preset.
+            // Separately authenticated services (e.g. Volcengine Voice) keep
+            // their explicit connection; relays keep their user-owned path.
+            let native_official_root = base_url_hint.filter(|root| task != Chat
+                && descriptor.root_shape == Some(EndpointRootShape::OriginRoot)
+                && descriptor.scopes.contains(&ProtocolScope::Native)
+                && connection.is_some_and(|connection| connection.connection_role.is_none()
+                    && crate::provider_protocol_audit::is_official_provider_origin(&selected.platform, &connection.base_url))
+                && crate::provider_protocol_audit::is_official_provider_origin(&selected.platform, root))
+                .and_then(|root| reqwest::Url::parse(root.trim()).ok())
+                .map(|root| root.origin().ascii_serialization());
+            let documented_root = native_official_root.as_deref()
+                .or_else(|| document.and_then(|document| document.base_url_override.as_deref()))
+                .or_else(|| (task == Chat).then(|| crate::model_profiles::documented_chat_base_url(
+                    &selected.platform, model_hint)).flatten());
+            // Vendor defaults may change paths on the vendor's own hosts. A
+            // relay keeps its configured origin, credentials and routing root.
+            let custom_relay = native_official_root.is_none() && base_url_hint.and_then(normalized_base_url).is_some_and(|hint| {
+                !PRESETS.iter().filter(|preset| preset.platform == selected.platform)
+                    .filter_map(|preset| preset.base_url).filter_map(normalized_base_url)
+                    .chain(documented_root.and_then(normalized_base_url))
+                    .any(|official| official == hint)
+            });
             let documented_root = documented_root.filter(|_| !custom_relay);
             Some(ProtocolRecommendation {
-                protocol_id: route.protocol.to_owned(),
-                connection_role: route.connection_role.map(str::to_owned),
-                default_base_url: (custom_relay.then(|| base_url_hint.map(str::to_owned)).flatten())
-                    .or_else(|| documented_root.map(str::to_owned)).or_else(|| connection
-                    .map(|value| value.base_url.clone())
-                    .or_else(|| selected.platform_default_base_url.clone())),
-                default_auth_scheme: connection
-                    .map(|value| value.auth_scheme.clone())
+                protocol_id:protocol.to_owned(),
+                connection_role:document.and_then(|document| document.connection_role.clone())
+                    .or_else(|| fallback.and_then(|route| route.connection_role.map(str::to_owned))),
+                default_base_url:(custom_relay.then(|| base_url_hint.map(str::to_owned)).flatten())
+                    .or_else(|| documented_root.map(str::to_owned))
+                    .or_else(|| connection.map(|connection| connection.base_url.clone()))
+                    .or_else(|| selected.platform_default_base_url.clone()),
+                default_auth_scheme:connection.map(|connection| connection.auth_scheme.clone())
                     .or_else(|| selected.default_auth_scheme.clone()),
-                base_url_override_required: !custom_relay && (documented_root.is_some_and(|root|
-                    Some(root) != selected.platform_default_base_url.as_deref()) || (route.connection_role.is_none()
-                    && connection.is_some_and(|connection| {
-                        selected.platform_default_base_url.as_deref()
-                            != Some(connection.base_url.as_str())
-                    }))),
+                base_url_override_required:!custom_relay && (documented_root.is_some_and(|root|
+                    Some(root) != selected.platform_default_base_url.as_deref()) || connection.is_some_and(|connection|
+                    connection.connection_role.is_none() && selected.platform_default_base_url.as_deref() != Some(connection.base_url.as_str()))),
             })
         })
     };
@@ -1439,17 +1504,6 @@ fn generic_custom_protocol_recommendation(
     selected: &PlatformPresetDescriptor,
     task: ModelTask,
 ) -> Option<ProtocolRecommendation> {
-    if task == Chat && let Some(descriptor) = registry.get("openai.responses")
-        && descriptor.supported_tasks.contains(&Chat) && descriptor.scopes.contains(&ProtocolScope::Custom) {
-        // The user's compatibility preference is Responses first. Discovery
-        // can confirm another serializer before saving; runtime never retries
-        // using a different protocol on its own.
-        return Some(ProtocolRecommendation {
-            protocol_id: descriptor.protocol_id.clone(), connection_role:None,
-            default_base_url:None, default_auth_scheme:selected.default_auth_scheme.clone(),
-            base_url_override_required:false,
-        });
-    }
     let mut candidates = registry.descriptors().filter(|descriptor| {
         descriptor.supported_tasks.contains(&task)
             && descriptor.scopes.contains(&ProtocolScope::OfficialCompat)
@@ -2017,7 +2071,7 @@ mod tests {
     fn custom_has_all_configurable_task_protocols_and_generic_default() {
         let view = protocol_manifest_for("custom", Chat);
         let recommendation = view.recommendation.expect("custom Chat recommendation");
-        assert_eq!(recommendation.protocol_id, "openai.responses");
+        assert_eq!(recommendation.protocol_id, "openai.chat_text");
         assert!(recommendation.default_base_url.is_none());
         assert_eq!(
             view.protocols.iter().map(|value| value.protocol_id.as_str()).collect::<Vec<_>>(),
@@ -2241,7 +2295,7 @@ mod tests {
             for task in ALL_MODEL_TASKS {
                 let view = protocol_manifest_for(&preset.preset, task);
                 if let Some(recommendation) = &view.recommendation {
-                    let descriptor = protocol_task_descriptor(&recommendation.protocol_id, task)
+                    let descriptor = view.protocols.iter().find(|protocol| protocol.protocol_id == recommendation.protocol_id)
                         .expect("recommended protocol descriptor");
                     if descriptor.transport == Sdk {
                         lines.push(format!(
@@ -2260,7 +2314,7 @@ mod tests {
                         );
                         continue;
                     };
-                    for endpoint in &descriptor.endpoints {
+                    for endpoint in descriptor.endpoints.iter().filter(|endpoint| endpoint.task == task) {
                         let url = joined_recommendation_url(&view, endpoint);
                         for duplicated in [
                             "/v1/v1/",
@@ -2288,7 +2342,7 @@ mod tests {
             (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
         });
         assert_eq!(
-            hash, 11_690_657_504_320_919_425,
+            hash, 15_772_525_078_110_188_208,
             "recommendation URL snapshot changed:\n{snapshot}"
         );
     }
@@ -2303,10 +2357,10 @@ mod tests {
         assert!(dashscope_image.base_url_override_required);
         assert_eq!(dashscope_image.default_base_url.as_deref(), Some("https://dashscope.aliyuncs.com"));
 
-        let ark_voice = protocol_manifest_for("Ark", SpeechSynthesis).recommendation.unwrap();
-        assert_eq!(ark_voice.connection_role.as_deref(), Some("voice"));
-        assert!(!ark_voice.base_url_override_required);
-        assert_eq!(ark_voice.default_auth_scheme.as_deref(), Some("volc_voice"));
+        // The old voice credential contract is not compatible with current
+        // TTS/ASR authentication. Do not advertise a working default for it.
+        assert!(protocol_manifest_for("Ark", SpeechSynthesis).recommendation.is_none());
+        assert!(protocol_manifest_for("Ark", SpeechRecognition).recommendation.is_none());
     }
 
     #[test]
@@ -2337,9 +2391,11 @@ mod tests {
     }
 
     #[test]
-    fn stepfun_plan_defaults_cover_images_tts_and_realtime() {
+    fn stepfun_plan_keeps_native_voice_without_retired_image_defaults() {
+        for task in [ImageGeneration,ImageEdit] {
+            assert!(protocol_manifest_for("StepFun-Plan",task).recommendation.is_none());
+        }
         for (task, protocol) in [
-            (ImageGeneration, "stepfun.images"),
             (SpeechSynthesis, "stepfun.audio_speech"),
             (RealtimeConversation, "stepfun.realtime_s2s"),
         ] {
