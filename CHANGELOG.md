@@ -5,6 +5,8 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.11 - 2026-10-16
+
 - Unify Chat protocol discovery and saved-capability health checks on the exact
   Agent wire stack (broker serializers, provider-parameter merge, single-attempt
   streaming executor, per-attempt decoders and event-sequence rules), and make
