@@ -25,6 +25,8 @@ mod steering;
 mod voice_correction;
 #[path = "runtime_history_port.rs"]
 mod history_port;
+#[path = "robot_interaction.rs"]
+mod robot_interaction;
 
 fn error(value: impl std::fmt::Display) -> AppError {
     AppError::Conflict(format!("Nomi runtime host: {value}"))
@@ -48,6 +50,39 @@ fn selected_application_tools(plan: &AgentToolPlan) -> Vec<String> {
     super::app_hosting_tools::ACTIONS.iter().filter_map(|action|
         plan.model_name_for_action(super::app_hosting_tools::MODULE_ID, action).map(str::to_owned)
     ).collect()
+}
+
+fn robot_interaction_context(plan: &AgentToolPlan) -> Result<String, AppError> {
+    let tools = plan.model_definitions().into_iter().filter_map(|definition| {
+        let binding = plan.binding(&definition.name)?;
+        (binding.capability_id.as_ref() == "robot").then(|| serde_json::json!({
+            "name": definition.name,
+            "action_id": binding.action_id.as_ref(),
+            "schema_visible": !definition.deferred,
+        }))
+    }).collect::<Vec<_>>();
+    let data = serde_json::to_string(&tools).map_err(error)?;
+    Ok(format!("Current frozen physical Robot tool mapping (data, not additional authority): {data}. Use an already-visible matching tool directly for an explicit device request; do not rediscover it or query unrelated device state first unless its declared contract requires that observation. If the needed schema is deferred, use ToolSearch with its exact advertised name or Action ID. An empty mapping means this turn has no callable Robot tools; do not simulate an action or claim dispatch. Keep simple interactions concise. Tool receipts establish only their declared result: an accepted asynchronous action is not proof of completed movement. Frozen resource, permission, connection, cancellation and Effect checks still apply."))
+}
+
+fn session_reasoning(effort: Option<SessionReasoningEffortDto>) -> Option<ChatReasoningRequest> {
+    // The route advertises reasoning as a capability, not a supported effort
+    // set. Preserve explicit choices; model-editor suggestions cannot justify
+    // sending a new default tier to every attempted provider or failover.
+    effort.map(|effort| ChatReasoningRequest {
+        effort: Some(match effort {
+            SessionReasoningEffortDto::None => ReasoningEffort::None,
+            SessionReasoningEffortDto::Minimal => ReasoningEffort::Minimal,
+            SessionReasoningEffortDto::Low => ReasoningEffort::Low,
+            SessionReasoningEffortDto::Medium => ReasoningEffort::Medium,
+            SessionReasoningEffortDto::High => ReasoningEffort::High,
+            SessionReasoningEffortDto::XHigh => ReasoningEffort::XHigh,
+            SessionReasoningEffortDto::Max => ReasoningEffort::Max,
+            SessionReasoningEffortDto::Ultra => ReasoningEffort::Ultra,
+        }),
+        summary: ReasoningSummary::None,
+        max_reasoning_tokens: None,
+    })
 }
 
 pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
@@ -219,6 +254,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("hosted_effect_receipts.rs"),
                     include_str!("engine_tool_discovery.rs"),
                     include_str!("engine_robot_tools.rs"),
+                    include_str!("robot_interaction.rs"),
                     include_str!("engine_browser_tools.rs"),
                     include_str!("automatic_collaboration_route.rs"),
                     include_str!("../browser_workspace_provider.rs"),
@@ -352,6 +388,8 @@ pub(crate) fn factory(
                     .any(|candidate| candidate.features.contains(&ChatRouteFeature::ImageInput)));
             let resources = session_host.open_kernel_session(&admitted)?;
             let compiled = resources.compiled().clone();
+            let lean_robot = robot_interaction::is_lean_robot_agent(compiled.content().enabled_capabilities.iter()
+                .map(|selection| selection.capability.id.as_ref()));
             let active = resources.active_state().clone();
             // Compile the exact selected surface once. This preview does not
             // mutate the Kernel active set or expose inactive tools to a model.
@@ -373,9 +411,12 @@ pub(crate) fn factory(
                 }
             }))?;
             let full_plan = full_plan.merged(&resources.robot_tool_plan().await?).map_err(error)?;
-            let full_plan = super::agent_tool_presentation::project(
-                full_plan, resources.tool_discovery_port()?.is_some(),
-            )?;
+            let discovery = resources.tool_discovery_port()?.is_some();
+            let full_plan = if lean_robot {
+                super::agent_tool_presentation::project_robot_interaction(full_plan, discovery)?
+            } else {
+                super::agent_tool_presentation::project(full_plan, discovery)?
+            };
             let skills = session_host.read_selected_skills(&admitted).await?;
             let tools = Arc::new(JoinedTools(resources.install_tools(full_plan.clone(), Arc::new(RuntimeToolObservation))?));
             let build = AgentEngineBuild {
@@ -383,7 +424,7 @@ pub(crate) fn factory(
                 build_digest: binding.build_digest.clone().into(),
             };
             let engine = Arc::new(AgentEngine::new(build).map_err(error)?
-                .with_context_budget(AgentContextBudget { max_context_bytes: 12 * 1024 * 1024, ..Default::default() }).map_err(error)?);
+                .with_context_budget(robot_interaction::context_budget(lean_robot)).map_err(error)?);
             let engine_binding = EngineBinding::new(
                 session_id,
                 RuntimeBindingId::from(format!("conversation-runtime:{}", options.conversation_id)),
@@ -907,6 +948,8 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             return Err(error("activation persistence is uncertain; reopen the runtime to restore its durable state"));
         }
         let capabilities = self.capability_state.snapshot().map_err(error)?;
+        let lean_robot = robot_interaction::is_lean_robot_agent(self.compiled.content().enabled_capabilities.iter()
+            .map(|selection| selection.capability.id.as_ref()));
         self.skills.validate_active(&message.inject_skills, &capabilities.active)?;
         // Owner-projected authority, not a model assertion. Activation returns
         // an updated projection only after its generation is durably committed.
@@ -971,17 +1014,22 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 ))
             })
             .transpose()
-            .map_err(error)?;
+            .map_err(error)?
+            .map(|context| robot_interaction::bounded_handoff(context, lean_robot));
         let handoff_bytes = handoff_context.as_ref().map_or(0, String::len);
-        let history_budget = (8 * 1024 * 1024usize)
-            .checked_sub(bytes.saturating_add(handoff_bytes))
-            .ok_or_else(|| error("current message and Agent handoff exceed the host context budget"))?;
+        let history_budget = if lean_robot {
+            robot_interaction::history_byte_limit(true).saturating_sub(bytes.saturating_add(handoff_bytes))
+        } else {
+            robot_interaction::history_byte_limit(false)
+                .checked_sub(bytes.saturating_add(handoff_bytes))
+                .ok_or_else(|| error("current message and Agent handoff exceed the host context budget"))?
+        };
         let history = super::unified_runtime_history::load(
-            self.session_host.read_history(&admitted, 32).await?,
+            self.session_host.read_history(&admitted, robot_interaction::history_turn_limit(lean_robot)).await?,
             self.session_host.as_ref(), &admitted,
             history_budget,
         ).await?;
-        let mut messages = history.messages;
+        let mut messages = robot_interaction::bounded_history(history.messages, lean_robot)?;
         let prior_task = history.prior_task;
         if let Some(text) = handoff_context {
             messages.push(ChatMessage {
@@ -1005,7 +1053,9 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             .filter(|text| !text.is_empty())
             .map(|text| vec![text.to_owned()])
             .unwrap_or_default();
-        instructions.push(admitted_workspace_context(admitted.session().workspace())?);
+        if !lean_robot {
+            instructions.push(admitted_workspace_context(admitted.session().workspace())?);
+        }
         instructions.extend(self.skills.instructions.iter().cloned());
         instructions.extend(self.skills.turn_instructions(&message.inject_skills)?);
         if self.resources.mcp_resources_selected() {
@@ -1032,6 +1082,9 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         let turn_plan = self
             .resources
             .retain_active_tools(&self.full_plan, &capabilities.active)?;
+        if lean_robot {
+            instructions.push(robot_interaction_context(&turn_plan)?);
+        }
         let collaboration = super::automatic_collaboration_route::route(
             &message.content,
             self.options.delegation_policy,
@@ -1080,20 +1133,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 tool_choice,
                 parallel_tool_calls: None,
                 max_output_tokens: None,
-                reasoning: response.reasoning_effort.map(|effort| ChatReasoningRequest {
-                    effort: Some(match effort {
-                        SessionReasoningEffortDto::None => ReasoningEffort::None,
-                        SessionReasoningEffortDto::Minimal => ReasoningEffort::Minimal,
-                        SessionReasoningEffortDto::Low => ReasoningEffort::Low,
-                        SessionReasoningEffortDto::Medium => ReasoningEffort::Medium,
-                        SessionReasoningEffortDto::High => ReasoningEffort::High,
-                        SessionReasoningEffortDto::XHigh => ReasoningEffort::XHigh,
-                        SessionReasoningEffortDto::Max => ReasoningEffort::Max,
-                        SessionReasoningEffortDto::Ultra => ReasoningEffort::Ultra,
-                    }),
-                    summary: ReasoningSummary::None,
-                    max_reasoning_tokens: None,
-                }),
+                reasoning: session_reasoning(response.reasoning_effort),
                 prompt_cache: PromptCachePolicy::Disabled,
                 response_format: ChatResponseFormat::Text,
                 requested_output_modalities: BTreeSet::new(),
@@ -1108,7 +1148,6 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             self.principal.clone(),
             capabilities.generation,
         ).with_model_budget(model_budget).with_context_resources(self.skills.resources.clone())
-            .with_execution_segments(nomifun_agent_runtime::AgentSegmentPolicy::default())
             .with_preactivated_tools(preactivated_tools)
             .with_context_image_input(context_image_input)
             .with_prior_task(prior_task)
@@ -1117,6 +1156,11 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             .with_user_input_request_port(Arc::new(UserInputRequestPort {
                 host:self.self_reference.clone(), enabled:!matches!(receipt.get("origin").and_then(Value::as_str), Some("cron" | "robot")),
             }));
+        request = if lean_robot {
+            request.with_max_model_steps(robot_interaction::LEAN_MAX_MODEL_STEPS)
+        } else {
+            request.with_execution_segments(nomifun_agent_runtime::AgentSegmentPolicy::default())
+        };
         if let Some(port)=self.active.lock().await.as_ref().and_then(|turn|turn.voice_control.clone()) {
             request=request.with_voice_immediate_correction(port);
         }

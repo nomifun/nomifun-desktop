@@ -18,6 +18,7 @@ export const isOrdinaryWorkConversation = (conversation: ConversationListItem): 
     !!extra?.companion_id ||
     !!extra?.channel_platform ||
     conversation.agent_snapshot?.preset_name === 'companion.default' ||
+    conversation.agent_snapshot?.preset_name === 'companion.robot' ||
     conversation.agent_snapshot?.enabled_capabilities.includes('companion') === true;
   const isSshHostConversation = conversationSshHostId(conversation) != null;
   const isExecutionAttemptTranscript = Boolean(conversation.execution_step_id);

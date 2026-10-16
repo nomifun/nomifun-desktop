@@ -56,4 +56,11 @@ describe('ordinary conversation list ownership', () => {
     };
     expect(isOrdinaryWorkConversation(companionSession as never)).toBe(false);
   });
+
+  test('robot companion sessions remain on the companion surface when list summaries are sparse', () => {
+    expect(isOrdinaryWorkConversation({
+      extra: {},
+      agent_snapshot: { preset_name: 'companion.robot', enabled_capabilities: [] },
+    } as never)).toBe(false);
+  });
 });

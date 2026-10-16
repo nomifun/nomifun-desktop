@@ -12,7 +12,7 @@ to your desktop over the LAN instead of using the default `xiaozhi.me` service.
 
 ## What You Need
 
-Once paired, a robot continues its companion's existing desktop conversation, using the same persona, Agent settings, memory and knowledge bindings. Pairing and reconnecting do not create a separate robot conversation or Agent.
+Once paired, a robot continues its companion's existing desktop conversation with the same persona, voice and long-term memory. Reconnecting does not create another conversation. The optional official **Robot companion** (`companion.robot`) preset can be explicitly selected for that same companion and session; it does not create another character.
 
 Ordinary Agent conversations can explicitly select a robot in the resource picker before launch. In a companion's Cohabit view, use **Connections → Conversation robot** in the right sidebar, select a device paired with that companion, then click **Apply robot**. Select **No robot control** and apply to remove the conversation's device control resource. Wait until the current reply finishes; active and paused turns block changes. Pairing a single device does not automatically select it or grant control authority.
 
@@ -40,6 +40,20 @@ isolation can prevent two devices on the same Wi-Fi network from communicating.
 3. In the same **Model configuration** section, select an ASR model and a TTS
    model (including a voice when the provider requires one).
 4. Test a normal text conversation with that companion first.
+
+For device-focused interaction, select **Robot companion** under the Cohabit
+sidebar's **Mind configuration → Agent**. Its default capabilities are limited
+to the companion, long-term memory and robot operations. Switch only after the
+current turn ends. The companion, session, model and complete stored history
+remain intact; the lean model context selects only necessary recent content.
+Then select and apply the device under **Connections → Conversation robot** and
+enable its required device permissions separately. Upgrades never silently
+replace existing companion or personal Agents or expand their permissions.
+
+The chat model remains your choice. Existing explicit reasoning settings or
+the model default still apply; this preset does not replace the global model.
+Natural-language commands still include recognition, model decisions and device
+communication, so changing the preset alone does not guarantee millisecond response.
 
 The robot uses the models assigned to the companion it is bound to. A provider
 existing in the model catalog is not enough by itself: the companion must have
@@ -147,8 +161,11 @@ board names, tool names, or a fixed number of servos.
 - Create named actions such as “Greeting” from an existing tool and fixed
   arguments. Multiple named actions may reuse one device tool and retain its
   permission and effect-receipt path. Saving or refreshing does not execute them.
-- Edit conversational timing, frequency and personality in the existing Agent
-  instructions. Tool descriptions explain capabilities and grant no authority.
+- Personality remains owned by the original companion. Select the lean **Robot
+  companion** preset or edit timing and gesture frequency in the existing Agent
+  instructions. Adding general workspace or Office capabilities makes it an
+  extended Agent and opts it out of automatic lean-context treatment. Tool
+  descriptions explain capabilities and grant no authority.
 
 Saving creates a new device capability revision without changing Agent Actions
 or device permissions. In the Cohabit view, **Apply robot** while the conversation
@@ -160,6 +177,13 @@ capabilities**, then reapply the robot to the conversation.
 This editor configures and extends capabilities; it is not a manual hardware
 control panel. New hardware primitives require firmware support, while defaults,
 usage descriptions and named actions over existing primitives are editable.
+
+Speech recognition and device frame processing are scheduled separately. MCP
+replies, cancellation and disconnects remain responsive while ASR is pending;
+cancelled or replaced connections cannot submit late transcripts as new commands.
+Speech playback consumes the current turn's final valid public answer, excluding
+reasoning, pre-tool narration and withdrawn steps. The firmware defines what an
+`accepted` receipt means; a spoken reply does not prove physical completion.
 
 ## How Data Flows
 

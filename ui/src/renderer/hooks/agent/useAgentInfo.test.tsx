@@ -50,6 +50,7 @@ describe('official creation Agent presentation', () => {
 test('product-owned official Agents use the same locale-aware identity as ordinary chat', async () => {
   for (const [key, chinese, english] of [
     ['companion.default', '伙伴', 'Companion'],
+    ['companion.robot', '机器人伙伴', 'Robot companion'],
     ['customer-service.default', '客户服务', 'Customer Service'],
   ]) {
     const hook = await mount(conversation({ official_template_key: key, agent_name: key }, key));

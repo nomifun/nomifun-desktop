@@ -8,6 +8,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useNavigationHistory } from '@/renderer/hooks/context/NavigationHistoryContext';
+import { isCompanionAgentTemplateKey } from '@/renderer/components/agent/conversationAgentCatalog';
 import { agentEditorReturn, editingDocument, type AgentEditorReturn } from './model';
 import AgentPresetEditor from './AgentPresetEditor';
 import GuidDefaultAgentSetting from './GuidDefaultAgentSetting';
@@ -142,7 +143,7 @@ const AgentSettingsPage: React.FC = () => {
       ? Object.entries(controller.library?.official_presets ?? {})
         .find(([, official]) => official.preset_id === preset.preset_id)?.[0]
       : undefined;
-    const productPath = templateKey === 'companion.default' ? '/nomi'
+    const productPath = isCompanionAgentTemplateKey(templateKey) ? '/nomi'
       : templateKey === 'customer-service.default' ? '/customer-service' : undefined;
     if (productPath) {
       void navigate(productPath);
@@ -280,7 +281,7 @@ const AgentSettingsPage: React.FC = () => {
               onDiscard={controller.discardChanges}
               onOpenModels={() => { void openKeepingEdits('/models'); }}
               startConversationLabel={controller.editor.preset.source === 'official'
-                ? sourceTemplate?.template_key === 'companion.default' ? t('agentSettings.workbench.openCompanions')
+                ? isCompanionAgentTemplateKey(sourceTemplate?.template_key) ? t('agentSettings.workbench.openCompanions')
                   : sourceTemplate?.template_key === 'customer-service.default' ? t('agentSettings.workbench.openCustomerService') : undefined
                 : undefined}
               onStartConversation={startConversation}

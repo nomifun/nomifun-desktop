@@ -130,6 +130,33 @@ async fn companion_explicit_resource_selection_updates_the_existing_session_and_
     let (status, reopened) = call(router.clone(), "POST", &thread_path, json!({})).await;
     assert_eq!(status, StatusCode::OK, "{reopened}");
     assert_eq!(reopened["data"]["conversation_id"], session_id);
+
+    // Changing the Agent profile carries the explicitly selected device into
+    // the same Session. Omitting resource_selections preserves that choice;
+    // an explicit empty list above remains the separate removal operation.
+    let (status, rebound) = call(router.clone(), "PUT", &product_path, request).await;
+    assert_eq!(status, StatusCode::OK, "{rebound}");
+    for key in ["companion.robot", "companion.default"] {
+        let (status, switched) = call(router.clone(), "PUT", &product_path, json!({
+            "selection":{"kind":"template","template_key":key}, "model":model, "conversation_id":session_id,
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{key}: {switched}");
+        let (status, projected) = call(router.clone(), "GET", &projection_path, json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{projected}");
+        assert_eq!(projected["data"]["conversation_id"], session_id);
+        assert_eq!(projected["data"]["extra"]["official_template_key"], key);
+        let carried = projected["data"]["agent_snapshot"]["canonical_binding"]["typed_resource_bindings"].as_array().unwrap();
+        for kind in ["companion", "companion_memory"] {
+            assert!(carried.iter().any(|resource| resource["resource_kind"] == kind && resource["resource_id"] == companion_id));
+        }
+        let device = carried.iter().find(|resource| resource["resource_kind"] == "robot").expect("selected Robot is preserved");
+        assert_eq!(device["resource_id"], robot.robot_id);
+        assert_eq!(device["typed_parameters"]["capability_revision"], "1");
+        assert_eq!(projected["data"]["agent_snapshot"]["resolved_model"], before["data"]["agent_snapshot"]["resolved_model"]);
+    }
+    let session_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_sessions WHERE state = 'live'")
+        .fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(session_count, 1, "switching robot profiles preserves the one Companion Session");
     assert!(upstream.received_requests().await.unwrap().is_empty(), "configuration changes must not invoke the model");
     services.shutdown_browser_platform().await.expect("browser cleanup");
     services.database.close().await;

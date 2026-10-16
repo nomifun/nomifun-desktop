@@ -444,6 +444,7 @@ const ChatConversation: React.FC<{
       conversation.extra?.companion_session ||
       Boolean(conversation.extra?.companion_id) ||
       conversation.agent_snapshot?.preset_name === 'companion.default' ||
+      conversation.agent_snapshot?.preset_name === 'companion.robot' ||
       conversation.agent_snapshot?.enabled_capabilities.includes('companion') === true;
     if (isCompanionConversation) {
       return <CompanionConversationRedirect conversationId={conversation.id} />;

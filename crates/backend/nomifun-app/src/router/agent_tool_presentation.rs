@@ -12,6 +12,18 @@ const MAX_VISIBLE_TOOLS: usize = MAX_VISIBLE_TOOL_DEFINITIONS;
 // ToolSearch result. They bound presentation, never the authorized catalog.
 const INITIAL_VISIBLE_TOOLS: usize = INITIAL_VISIBLE_TOOL_DEFINITIONS;
 pub(super) fn project(plan: AgentToolPlan, discovery_available: bool) -> Result<AgentToolPlan, AppError> {
+    project_with_policy(plan, discovery_available, false)
+}
+
+/// A robot-only interaction has already selected its device and Action grants.
+/// Keep its bounded concrete surface in the initial window instead of spending
+/// a model round discovering that same device again. Non-deferred definitions
+/// also remain visible when later ToolSearch results replace deferred schemas.
+pub(super) fn project_robot_interaction(plan: AgentToolPlan, discovery_available: bool) -> Result<AgentToolPlan, AppError> {
+    project_with_policy(plan, discovery_available, true)
+}
+
+fn project_with_policy(plan: AgentToolPlan, discovery_available: bool, robot_interaction: bool) -> Result<AgentToolPlan, AppError> {
     let definitions = plan.model_definitions();
     let visible = definitions.iter().filter(|definition| !definition.deferred).collect::<Vec<_>>();
     if !discovery_available {
@@ -32,8 +44,13 @@ pub(super) fn project(plan: AgentToolPlan, discovery_available: bool) -> Result<
         // Keep ordinary workspace work and the general-purpose web/delegation
         // entry points ready. Heavy business/provider schemas remain in the
         // exact same plan and are revealed by the selected ToolSearch policy.
-        if !matches!(binding.capability_id.as_ref(),
-            "workspace.files" | "workspace.vcs" | "workspace.process" | "web.research" | "agent.collaboration") {
+        let initially_ready = if robot_interaction {
+            matches!(binding.capability_id.as_ref(), "robot" | "companion.memory")
+        } else {
+            matches!(binding.capability_id.as_ref(),
+                "workspace.files" | "workspace.vcs" | "workspace.process" | "web.research" | "agent.collaboration")
+        };
+        if !initially_ready {
             binding.definition.deferred = true;
         }
         binding
@@ -42,8 +59,26 @@ pub(super) fn project(plan: AgentToolPlan, discovery_available: bool) -> Result<
     // delegation and patch definitions. Alphabetical order let apply_patch
     // consume the budget before write_file, hiding a basic file capability.
     // Oversized definitions stay in the exact plan for discovery.
+    // Give each granted Robot Action its smallest fitting representative before
+    // spending the remainder on a large motion/extension catalog. The group
+    // identities come from the host-frozen mapping, never tool-name guesses.
+    let mut representatives = std::collections::BTreeMap::new();
+    if robot_interaction {
+        for binding in bindings.iter().filter(|binding| binding.capability_id.as_ref() == "robot" && !binding.definition.deferred) {
+            let bytes = serde_json::to_vec(&binding.definition)
+                .map_err(|error| AppError::Internal(error.to_string()))?.len();
+            if bytes + 2 <= INITIAL_TOOL_BYTES {
+                let candidate = (bytes, binding.model_name.clone());
+                let selected = representatives.entry(binding.action_id.clone()).or_insert_with(|| candidate.clone());
+                if candidate < *selected { *selected = candidate; }
+            }
+        }
+    }
+    let representatives = representatives.into_values().map(|(_, name)| name).collect::<std::collections::BTreeSet<_>>();
     bindings.sort_by_key(|binding| (
-        initial_visibility_priority(binding),
+        if robot_interaction {
+            robot_visibility_priority(binding) + if representatives.contains(&binding.model_name) { 0 } else { 4 }
+        } else { initial_visibility_priority(binding) },
         binding.model_name.clone(),
     ));
     let mut visible_count = 0;
@@ -63,6 +98,16 @@ pub(super) fn project(plan: AgentToolPlan, discovery_available: bool) -> Result<
         }
     }
     AgentToolPlan::new(bindings).map_err(|error| AppError::Internal(error.to_string()))
+}
+
+fn robot_visibility_priority(binding: &nomifun_agent_runtime::AgentToolBinding) -> u8 {
+    match (binding.capability_id.as_ref(), binding.action_id.as_ref()) {
+        ("robot", "robot/motion") => 0,
+        ("robot", "robot/device") => 1,
+        ("robot", "robot/display" | "robot/vision") => 2,
+        ("companion.memory", _) => 3,
+        _ => 4,
+    }
 }
 
 fn initial_visibility_priority(binding: &nomifun_agent_runtime::AgentToolBinding) -> u8 {
@@ -211,6 +256,87 @@ mod tests {
         assert_eq!(project(original.clone(), false).unwrap(), original);
         let projected = project(original, true).unwrap();
         assert!(projected.binding("large_read").unwrap().definition.deferred);
+    }
+
+    fn robot_binding(name: &str, action: &str, description: &str) -> EngineToolBinding {
+        let mut tool = binding(name, "robot", description);
+        tool.action_id = action.into();
+        tool.resource_binding_ids.insert("exact-selected-device".into());
+        tool.effect_class = EngineEffectClass::ExternalUncertainEffect;
+        tool.parallel_safe = false;
+        tool
+    }
+
+    #[test]
+    fn robot_interaction_keeps_motion_and_device_schema_visible_under_byte_pressure() {
+        let original = AgentToolPlan::new([
+            robot_binding("bound_arm_pose", "robot/motion", "Move the bound arm"),
+            robot_binding("bound_status", "robot/device", "Read the bound device status"),
+            robot_binding("bound_extension", "robot/device", &"x".repeat(INITIAL_TOOL_BYTES)),
+            binding("recall", "companion.memory", "Recall memory"),
+        ]).unwrap();
+        let projected = project_robot_interaction(original.clone(), true).unwrap();
+        for name in ["bound_arm_pose", "bound_status"] {
+            assert!(!projected.binding(name).unwrap().definition.deferred,
+                "a non-deferred base schema survives later ToolSearch window replacement");
+        }
+        assert!(projected.binding("bound_extension").unwrap().definition.deferred);
+        for definition in original.model_definitions() {
+            let before = original.binding(&definition.name).unwrap();
+            let mut after = projected.binding(&definition.name).unwrap().clone();
+            after.definition.deferred = before.definition.deferred;
+            assert_eq!(&after, before, "presentation must preserve schema, resource and Effect authority");
+        }
+        let ordinary = project(original, true).unwrap();
+        assert!(ordinary.binding("bound_arm_pose").unwrap().definition.deferred,
+            "the broad Companion presentation policy must remain unchanged");
+    }
+
+    #[test]
+    fn large_robot_catalog_reserves_discovery_slots_without_preactivating_every_tool() {
+        let mut tools = (0..128).map(|index| robot_binding(
+            &format!("motion_{index:03}"), "robot/motion", "move",
+        )).collect::<Vec<_>>();
+        tools.push(robot_binding("status", "robot/device", "status"));
+        let projected = project_robot_interaction(AgentToolPlan::new(tools).unwrap(), true).unwrap();
+        let visible = projected.model_definitions().into_iter().filter(|definition| !definition.deferred).collect::<Vec<_>>();
+        assert!(visible.len() <= INITIAL_VISIBLE_TOOLS);
+        assert!(serde_json::to_vec(&visible).unwrap().len() <= INITIAL_TOOL_BYTES);
+        assert!(!projected.binding("motion_000").unwrap().definition.deferred);
+        assert!(!projected.binding("status").unwrap().definition.deferred,
+            "a large motion group must leave room for another granted Action");
+        assert!(projected.model_definitions().iter().any(|definition| definition.deferred));
+        assert_eq!(projected.len(), 129, "the complete frozen catalog remains searchable");
+    }
+
+    #[test]
+    fn robot_action_representatives_prefer_small_schemas_to_keep_other_actions_ready() {
+        let original = AgentToolPlan::new([
+            robot_binding("a_rich_motion", "robot/motion", &"x".repeat(INITIAL_TOOL_BYTES - 1024)),
+            robot_binding("z_simple_motion", "robot/motion", "A small pose schema"),
+            robot_binding("status", "robot/device", &"s".repeat(1024)),
+            robot_binding("display", "robot/display", &"d".repeat(1024)),
+        ]).unwrap();
+        let projected = project_robot_interaction(original.clone(), true).unwrap();
+        for name in ["z_simple_motion", "status", "display"] {
+            assert!(!projected.binding(name).unwrap().definition.deferred, "small granted Action must fit: {name}");
+        }
+        assert!(projected.binding("a_rich_motion").unwrap().definition.deferred,
+            "alphabetically early rich schemas must not consume other Action representatives' budget");
+        assert_eq!(projected.len(), original.len());
+        assert_eq!(project_robot_interaction(original, true).unwrap(), projected, "size/name tie-breaking is deterministic");
+    }
+
+    #[test]
+    fn robot_presentation_does_not_manufacture_unbound_or_revoked_actions() {
+        let no_device = AgentToolPlan::new([binding("recall", "companion.memory", "memory")]).unwrap();
+        let no_device = project_robot_interaction(no_device, true).unwrap();
+        assert!(!no_device.contains_capability("robot"));
+        let display_only = AgentToolPlan::new([robot_binding("display", "robot/display", "show")]).unwrap();
+        let projected = project_robot_interaction(display_only.clone(), true).unwrap();
+        assert_eq!(projected, display_only);
+        assert!(projected.model_name_for_action("robot", "robot/motion").is_none());
+        assert!(projected.model_name_for_action("robot", "robot/device").is_none());
     }
 
     #[tokio::test]

@@ -38,6 +38,7 @@ import AgentInlineNameEditor from './AgentInlineNameEditor';
 import AgentRuntimePolicyPanel from './AgentRuntimePolicyPanel';
 import AgentRecommendedCapabilities from './AgentRecommendedCapabilities';
 import AgentDefaultModelPicker from './AgentDefaultModelPicker';
+import { isCompanionAgentTemplateKey } from '@/renderer/components/agent/conversationAgentCatalog';
 
 type AgentPresetEditorProps = {
   editor: AgentPresetEditorResponse;
@@ -102,7 +103,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
     (!idmmPolicy.bypass_model.provider_id || !idmmPolicy.bypass_model.model);
   const moduleIds = draft.document.enabled_capabilities.map((selection) => String(selection.capability.id));
   const companionCoreMissing = editor.preset.source === 'official' &&
-    draft.source_template_key === 'companion.default' &&
+    isCompanionAgentTemplateKey(draft.source_template_key) &&
     ['companion', 'companion.memory'].some(id => !moduleIds.includes(id));
   const patchDocument = (transform: Parameters<typeof updateDocument>[1]) => onDraftChange(updateDocument(draft, transform));
   const applyChatRouteRecord = (record: ChatRouteRecord | undefined) => patchDocument((document) => {

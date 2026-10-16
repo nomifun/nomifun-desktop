@@ -23,6 +23,7 @@ describe('Agent Platform TypeScript contracts', () => {
       'assistant.general',
       'coding.codex',
       'companion.default',
+      'companion.robot',
       'customer-service.default',
       'creative-studio.default',
       'app.developer',

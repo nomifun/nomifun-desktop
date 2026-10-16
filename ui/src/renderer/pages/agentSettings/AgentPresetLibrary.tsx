@@ -1,7 +1,7 @@
 import type { AgentPresetLibraryResponse, AgentPresetSummary, OfficialPresetKey, OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import type { AgentPresetId } from '@/common/types/ids';
 import { Button, Popconfirm } from '@arco-design/web-react';
-import { AddOne, ExpandLeft, Code, Customer, Delete, Loading, Magic, MessageOne, Search, User } from '@icon-park/react';
+import { AddOne, ExpandLeft, Code, Customer, Delete, Loading, Magic, MessageOne, Robot, Search, User } from '@icon-park/react';
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { TEMPLATE_I18N_PATH, templateModuleCount } from './model';
@@ -22,7 +22,7 @@ type Props = {
 
 const TemplateIcon: React.FC<{ templateKey: OfficialPresetKey }> = ({ templateKey }) => {
   const icons = { 'chat.minimal': MessageOne, 'assistant.general': User, 'coding.codex': Code,
-    'companion.default': User, 'customer-service.default': Customer, 'creative-studio.default': Magic, 'app.developer': Code };
+    'companion.default': User, 'companion.robot': Robot, 'customer-service.default': Customer, 'creative-studio.default': Magic, 'app.developer': Code };
   const Icon = icons[templateKey];
   return <Icon theme='outline' size={18} />;
 };

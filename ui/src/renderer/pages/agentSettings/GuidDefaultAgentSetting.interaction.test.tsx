@@ -49,6 +49,7 @@ const templates = [
   'assistant.general',
   'coding.codex',
   'companion.default',
+  'companion.robot',
   'customer-service.default',
 ].map((template_key) => ({ template_key })) as OfficialPresetTemplate[];
 
@@ -110,6 +111,9 @@ describe('Guid default Agent workbench setting', () => {
       );
       expect([...select.options].map((option) => option.text)).not.toContain(
         agentSettings.template.companion.default.name
+      );
+      expect([...select.options].map((option) => option.text)).not.toContain(
+        agentSettings.template.companion.robot.name
       );
 
       await act(async () => {

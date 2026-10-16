@@ -8,9 +8,9 @@
 //! Model access is reached through the [`crate::services`] seam, so the whole
 //! conversation loop is exercised in tests with mocks and no provider.
 
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, interval};
 
 use crate::audio::OpusStreamEncoder;
@@ -36,6 +36,106 @@ pub const PING_INTERVAL_SECS: u64 = 60;
 /// sentence is survivable (it is still on screen); a run of them means the
 /// provider is down and the device should be released.
 pub const MAX_CONSECUTIVE_TTS_FAILURES: usize = 2;
+
+/// One ASR request runs at a time; two complete utterances may wait behind it.
+/// Each WAV is already bounded by the uplink pipeline's 60-second ceiling.
+const MAX_PENDING_TRANSCRIPTIONS: usize = 2;
+
+struct PendingTranscription {
+    request_id: String,
+    session_id: String,
+    companion_id: String,
+    wav: Vec<u8>,
+}
+
+struct ActiveTranscription {
+    request_id: String,
+    session_id: String,
+    companion_id: String,
+    task: OwnedTask,
+    result: oneshot::Receiver<anyhow::Result<Option<String>>>,
+}
+
+/// ASR owns no socket or speech projection. The actor remains the sole owner
+/// of frame ordering, connection checks, transcript delivery and cancellation.
+#[derive(Default)]
+struct Transcriptions {
+    pending: VecDeque<PendingTranscription>,
+    active: Option<ActiveTranscription>,
+}
+
+impl Transcriptions {
+    fn enqueue(&mut self, session_id: String, companion_id: String, wav: Vec<u8>) -> bool {
+        if self.pending.len() >= MAX_PENDING_TRANSCRIPTIONS { return false; }
+        self.pending.push_back(PendingTranscription {
+            request_id: uuid::Uuid::now_v7().to_string(), session_id, companion_id, wav,
+        });
+        true
+    }
+
+    fn start_next(&mut self, deps: &SessionDeps, robot_id: &str, tasks: &TaskScope,
+        stopped: &tokio::sync::watch::Receiver<bool>) {
+        if self.active.is_some() { return; }
+        let Some(request) = self.pending.pop_front() else { return; };
+        let (tx, result) = oneshot::channel();
+        let context = SpeechContext {
+            robot_id: robot_id.to_owned(), companion_id: request.companion_id.clone(),
+        };
+        let speech = deps.speech.clone();
+        let registry = deps.registry.clone();
+        let session_id = request.session_id.clone();
+        let request_id = request.request_id.clone();
+        let mut stopped = stopped.clone();
+        tracing::info!(%robot_id, %session_id, %request_id, wav_bytes = request.wav.len(),
+            queued = self.pending.len(), "robot: ASR started");
+        let task = tasks.spawn(async move {
+            // Replacement of this connection or its Companion must also drop a
+            // held provider future, without waiting for another device frame.
+            let invalidated = async {
+                loop {
+                    if !registry.connection_matches(&context.robot_id, &session_id).await
+                        || !registry.get(&context.robot_id).await.is_some_and(|record|
+                            record.companion_id.as_deref() == Some(context.companion_id.as_str())) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            };
+            let started = tokio::time::Instant::now();
+            let outcome = tokio::select! {
+                biased;
+                _ = invalidated => Ok(None),
+                result = transcribe_until_stopped(speech.as_ref(), &context, request.wav, &mut stopped) => result,
+            };
+            tracing::info!(robot_id = %context.robot_id, %session_id, %request_id,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                success = outcome.is_ok(), cancelled = matches!(&outcome, Ok(None)),
+                "robot: ASR finished");
+            let _ = tx.send(outcome);
+        });
+        self.active = Some(ActiveTranscription {
+            request_id: request.request_id, session_id: request.session_id,
+            companion_id: request.companion_id, task, result,
+        });
+    }
+
+    async fn receive(&mut self) -> anyhow::Result<Option<String>> {
+        let active = self.active.as_mut().expect("ASR completion requires an active request");
+        // Receiving a oneshot is cancellation-safe. Taking the task or joining
+        // it belongs in the selected branch, so another ready device frame
+        // cannot discard a consumed result while that join is still pending.
+        (&mut active.result).await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("Robot ASR task ended without a result")))
+    }
+
+    async fn cancel(&mut self, cleanup_errors: &mut Vec<String>) {
+        self.pending.clear();
+        if let Some(active) = self.active.take() {
+            active.task.abort();
+            if let Err(error) = active.task.join().await { cleanup_errors.push(error); }
+        }
+    }
+}
 
 /// Everything a session actor needs from the host.
 #[derive(Clone)]
@@ -513,6 +613,7 @@ pub(crate) async fn run_session_owned(
     let mut active_playback: Option<String> = None;
     let mut playback: Option<mpsc::Receiver<crate::registry::RobotPlaybackCommand>> = None;
     let mut utterance_queue = std::collections::VecDeque::<String>::new();
+    let mut transcriptions = Transcriptions::default();
     let mut ping = interval(Duration::from_secs(PING_INTERVAL_SECS));
     ping.tick().await; // the first tick is immediate; skip it
 
@@ -520,6 +621,7 @@ pub(crate) async fn run_session_owned(
         if *stopped.borrow_and_update() { break; }
         if let Some(sid) = session_id.as_deref()
             && !deps.registry.connection_matches(&robot_id, sid).await { break; }
+        transcriptions.start_next(&deps, &robot_id, &tasks, &stopped);
         if active_request.is_none() && turn_task.is_none()
             && let (Some(conversation), Some(sid), Some(bound)) = (
                 conversation_id.as_deref(), session_id.as_deref(), companion_id.as_deref(),
@@ -532,6 +634,7 @@ pub(crate) async fn run_session_owned(
         // Set by whichever branch decided the user stopped talking; handled at
         // the end of the iteration so the read loop stays one flat match.
         let mut utterance: Option<Vec<u8>> = None;
+        let asr_active = transcriptions.active.is_some();
 
         tokio::select! {
             biased;
@@ -625,6 +728,51 @@ pub(crate) async fn run_session_owned(
                     deps.status.publish_for_connection(&deps.registry, &robot_id, session_id.as_deref(), Some(bound), RobotPhase::Idle, now_ms()).await;
                 }
             }
+            outcome = transcriptions.receive(), if asr_active => {
+                let request = transcriptions.active.take().expect("completed ASR remains owned");
+                if let Err(error) = request.task.join().await { cleanup_errors.push(error); }
+                if *stopped.borrow() { break; }
+                if session_id.as_deref() != Some(request.session_id.as_str())
+                    || companion_id.as_deref() != Some(request.companion_id.as_str())
+                    || !deps.registry.connection_matches(&robot_id, &request.session_id).await {
+                    continue;
+                }
+                let sid = request.session_id;
+                let bound = request.companion_id;
+                let transcript = match outcome {
+                    Ok(Some(text)) => text,
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::warn!(%robot_id, session_id = %sid, request_id = %request.request_id,
+                            %error, "robot: ASR failed");
+                        show_voice_notice(&writer, &sid, &asr_notice_for(&error)).await;
+                        deps.status.publish_for_connection(&deps.registry, &robot_id,
+                            Some(&sid), Some(&bound), RobotPhase::Idle, now_ms()).await;
+                        continue;
+                    }
+                };
+                if transcript.trim().is_empty() {
+                    // Preserve the existing quiet recovery: no Agent or TTS
+                    // synthesis for an empty transcript, only reset listening.
+                    tracing::debug!(%robot_id, session_id = %sid, request_id = %request.request_id,
+                        "robot: ASR returned an empty transcript");
+                    writer.send_json(&ServerMessage::TtsStart { session_id: sid.clone() }).await;
+                    writer.send_json(&ServerMessage::TtsStop { session_id: sid.clone() }).await;
+                    deps.status.publish_for_connection(&deps.registry, &robot_id,
+                        Some(&sid), Some(&bound), RobotPhase::Idle, now_ms()).await;
+                    continue;
+                }
+                writer.send_json(&ServerMessage::Stt {
+                    session_id: sid.clone(), text: transcript.clone(),
+                }).await;
+                deps.status.publish_for_connection(&deps.registry, &robot_id,
+                    Some(&sid), Some(&bound), RobotPhase::Speaking, now_ms()).await;
+                if utterance_queue.len() < 16 {
+                    utterance_queue.push_back(transcript);
+                } else {
+                    show_voice_notice(&writer, &sid, "等待处理的消息过多，请稍后再说").await;
+                }
+            }
             frame = stream.next() => {
                 let Some(frame) = frame else { break };
                 let Ok(frame) = frame else { break };
@@ -652,6 +800,10 @@ pub(crate) async fn run_session_owned(
                         };
                         match message {
                             DeviceMessage::Hello(hello) => {
+                                // A repeated hello creates a new connection
+                                // identity; old audio/results cannot cross it.
+                                transcriptions.cancel(&mut cleanup_errors).await;
+                                utterance_queue.clear();
                                 let record = deps.registry.list().await.into_iter().find(|r| r.robot_id == robot_id);
                                 let Some(bound) = record.as_ref().and_then(|r| r.companion_id.clone()) else {
                                     tracing::warn!(%robot_id, "robot: refusing session, not bound to a companion");
@@ -759,6 +911,9 @@ pub(crate) async fn run_session_owned(
                             }
                             DeviceMessage::Abort { reason } => {
                                 tracing::info!(%robot_id, ?reason, "robot: abort");
+                                // Fence and join ASR before clearing input and
+                                // acknowledging stop, including queued audio.
+                                transcriptions.cancel(&mut cleanup_errors).await;
                                 // Order matters: stop our own queue first, because
                                 // the device will play anything we hand over.
                                 pacer.flush();
@@ -821,65 +976,10 @@ pub(crate) async fn run_session_owned(
             ) else {
                 continue;
             };
-            let ctx = SpeechContext {
-                robot_id: robot_id.clone(),
-                companion_id: bound.clone(),
-            };
-            let transcript = match transcribe_until_stopped(deps.speech.as_ref(), &ctx, wav, &mut stopped).await {
-                Ok(Some(text)) => text,
-                Ok(None) => break,
-                Err(error) => {
-                    tracing::warn!(%robot_id, %error, "robot: ASR failed");
-                    if !deps.registry.connection_matches(&robot_id, &sid).await { continue; }
-                    // Do not vanish: put a short notice on the device screen so a
-                    // missing/broken ASR model reads as a problem, not as a mute
-                    // robot. A genuinely silent round returns Ok("") and still
-                    // idles quietly in the branch below.
-                    show_voice_notice(&writer, &sid, &asr_notice_for(&error)).await;
-                    deps.status
-                        .publish_for_connection(&deps.registry, &robot_id, session_id.as_deref(), Some(&bound), RobotPhase::Idle, now_ms())
-                        .await;
-                    continue;
-                }
-            };
-            if *stopped.borrow() { break; }
-            if !deps.registry.connection_matches(&robot_id, &sid).await { continue; }
-            if transcript.trim().is_empty() {
-                // An empty round: hand the device straight back to listening
-                // without spending a model turn on noise. This is the normal
-                // outcome for VAD-triggered noise, so it must stay quiet on the
-                // device — but log it, because a misconfigured ASR that always
-                // answers 200-with-no-text is indistinguishable from silence
-                // here and otherwise leaves no trace at all.
-                tracing::debug!(%robot_id, "robot: ASR returned an empty transcript");
-                writer
-                    .send_json(&ServerMessage::TtsStart {
-                        session_id: sid.clone(),
-                    })
-                    .await;
-                writer
-                    .send_json(&ServerMessage::TtsStop {
-                        session_id: sid.clone(),
-                    })
-                    .await;
-                deps.status
-                    .publish_for_connection(&deps.registry, &robot_id, session_id.as_deref(), Some(&bound), RobotPhase::Idle, now_ms())
-                    .await;
-                continue;
-            }
-            writer
-                .send_json(&ServerMessage::Stt {
-                    session_id: sid.clone(),
-                    text: transcript.clone(),
-                })
-                .await;
-            deps.status
-                .publish_for_connection(&deps.registry, &robot_id, session_id.as_deref(), Some(&bound), RobotPhase::Speaking, now_ms())
-                .await;
-            if utterance_queue.len() < 16 {
-                utterance_queue.push_back(transcript);
-            } else {
-                show_voice_notice(&writer, &sid, "等待处理的消息过多，请稍后再说").await;
+            if !transcriptions.enqueue(sid.clone(), bound, wav) {
+                tracing::warn!(%robot_id, session_id = %sid, limit = MAX_PENDING_TRANSCRIPTIONS,
+                    "robot: pending transcription queue is full");
+                show_voice_notice(&writer, &sid, "等待识别的语音过多，请稍后再说").await;
             }
         }
     }
@@ -888,6 +988,7 @@ pub(crate) async fn run_session_owned(
     // hold clones of the writer's sender, so every one of them has to be gone —
     // not merely asked to stop — before the writer task can see its channel
     // close and finish.
+    transcriptions.cancel(&mut cleanup_errors).await;
     if let Some(task) = turn_task.take() {
         task.abort();
         if let Err(error) = task.join().await { cleanup_errors.push(error); }
@@ -983,6 +1084,274 @@ mod tests {
         stop.send_replace(true);
         assert_eq!(task.await.unwrap().unwrap(), None);
         assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    struct ControlledAsrCall {
+        reply: oneshot::Sender<anyhow::Result<String>>,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct ControlledAsr {
+        calls: mpsc::UnboundedSender<ControlledAsrCall>,
+        tts: MockSpeech,
+    }
+
+    #[async_trait::async_trait]
+    impl SpeechServices for ControlledAsr {
+        async fn transcribe(&self, _: &SpeechContext, _: Vec<u8>) -> anyhow::Result<String> {
+            struct Guard(Arc<std::sync::atomic::AtomicBool>);
+            impl Drop for Guard {
+                fn drop(&mut self) { self.0.store(true, std::sync::atomic::Ordering::Release); }
+            }
+            let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let _guard = Guard(dropped.clone());
+            let (reply, result) = oneshot::channel();
+            self.calls.send(ControlledAsrCall { reply, dropped })
+                .map_err(|_| anyhow::anyhow!("test ASR controller closed"))?;
+            result.await.map_err(|_| anyhow::anyhow!("test ASR response dropped"))?
+        }
+        async fn synthesize(&self, ctx: &SpeechContext, text: &str) -> anyhow::Result<crate::audio::AudioBuffer> {
+            self.tts.synthesize(ctx, text).await
+        }
+        async fn explain_image(&self, _: &SpeechContext, _: Vec<u8>, _: &str) -> anyhow::Result<String> {
+            anyhow::bail!("unused fixture")
+        }
+    }
+
+    fn controlled_asr(deps: &mut Harness) -> mpsc::UnboundedReceiver<ControlledAsrCall> {
+        let (calls, rx) = mpsc::unbounded_channel();
+        deps.deps.speech = Arc::new(ControlledAsr { calls, tts: MockSpeech::new() });
+        deps.dispatcher.set_vad_engine("energy");
+        rx
+    }
+
+    async fn next_asr(calls: &mut mpsc::UnboundedReceiver<ControlledAsrCall>) -> ControlledAsrCall {
+        tokio::time::timeout(Duration::from_secs(3), calls.recv()).await
+            .expect("ASR must start without waiting for another device frame")
+            .expect("ASR controller must remain open")
+    }
+
+    async fn manual_utterance(tx: &mpsc::Sender<Frame>) {
+        tx.send(Frame::Text(r#"{"type":"listen","state":"start","mode":"manual"}"#.into())).await.unwrap();
+        send_audio(tx, 120, true).await;
+        tx.send(Frame::Text(r#"{"type":"listen","state":"stop"}"#.into())).await.unwrap();
+    }
+
+    async fn reply_mcp(tx: &mpsc::Sender<Frame>, request: &serde_json::Value, result: serde_json::Value) {
+        tx.send(Frame::Text(serde_json::json!({
+            "type":"mcp", "payload":{"jsonrpc":"2.0", "id":request["payload"]["id"], "result":result}
+        }).to_string())).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn held_asr_keeps_mcp_responses_and_keepalive_flowing() {
+        let (mut deps, link, tx, written, _dir) = harness(true).await;
+        let mut calls = controlled_asr(&mut deps);
+        let tools = deps.deps.tools.clone();
+        let task = tokio::spawn(run_session(link, deps.deps.clone()));
+        tx.send(Frame::Text(r#"{"type":"hello","version":1,"transport":"websocket","features":{"mcp":true}}"#.into())).await.unwrap();
+        let initialize = await_frame(&written, |f| f["payload"]["method"] == "initialize").await;
+        manual_utterance(&tx).await;
+        let held = next_asr(&mut calls).await;
+        reply_mcp(&tx, &initialize, serde_json::json!({})).await;
+        let list = await_frame(&written, |f| f["payload"]["method"] == "tools/list").await;
+        reply_mcp(&tx, &list, serde_json::json!({"tools":[{
+            "name":"self.get_device_status", "description":"status",
+            "inputSchema":{"type":"object","properties":{}}
+        }]})).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !tools.is_attached("aa:bb:cc:dd:ee:ff").await { tokio::task::yield_now().await; }
+        }).await.expect("discovery replies must be read while ASR is held");
+        let call = tokio::spawn(async move {
+            tools.call_for_action("aa:bb:cc:dd:ee:ff", crate::capability::RobotAction::Device,
+                "robot_get_device_status", serde_json::json!({})).await
+        });
+        let request = await_frame(&written, |f| f["payload"]["method"] == "tools/call").await;
+        reply_mcp(&tx, &request, serde_json::json!({"content":[{"type":"text","text":"ready"}]})).await;
+        assert_eq!(tokio::time::timeout(Duration::from_secs(3), call).await.unwrap().unwrap().unwrap(), "ready");
+        assert!(!held.dropped.load(std::sync::atomic::Ordering::Acquire), "ASR is still waiting independently");
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(PING_INTERVAL_SECS + 1)).await;
+        await_frame(&written, |f| f["type"] == "ping").await;
+        drop(tx);
+        task.await.unwrap();
+        assert!(held.dropped.load(std::sync::atomic::Ordering::Acquire));
+        assert!(held.reply.send(Ok("late".into())).is_err());
+    }
+
+    struct FloodingStream {
+        inner: Box<dyn RobotLinkStream>,
+        enabled: Arc<std::sync::atomic::AtomicBool>,
+        remaining: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl RobotLinkStream for FloodingStream {
+        async fn next(&mut self) -> Option<Result<Frame, LinkError>> {
+            if self.enabled.load(std::sync::atomic::Ordering::Acquire)
+                && self.remaining.fetch_update(std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire, |left| left.checked_sub(1)).is_ok() {
+                // The previous listen window is closed. These ready packets
+                // must not starve the result that can open the next window.
+                Some(Ok(Frame::Binary(bytes::Bytes::new())))
+            } else {
+                self.inner.next().await
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ready_asr_result_progresses_under_continuously_ready_device_audio() {
+        let (mut deps, mut link, tx, written, _dir) = harness(true).await;
+        let mut calls = controlled_asr(&mut deps);
+        let flooding = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let remaining = Arc::new(std::sync::atomic::AtomicUsize::new(100_000));
+        link.stream = Box::new(FloodingStream {
+            inner: link.stream, enabled: flooding.clone(), remaining: remaining.clone(),
+        });
+        let task = tokio::spawn(run_session(link, deps.deps.clone()));
+        tx.send(Frame::Text(r#"{"type":"hello","version":1,"transport":"websocket"}"#.into())).await.unwrap();
+        manual_utterance(&tx).await;
+        let held = next_asr(&mut calls).await;
+        flooding.store(true, std::sync::atomic::Ordering::Release);
+        held.reply.send(Ok("not starved".into())).unwrap();
+        await_frame(&written, |f| f["type"] == "stt" && f["text"] == "not starved").await;
+        assert!(remaining.load(std::sync::atomic::Ordering::Acquire) > 0,
+            "ASR must complete before a continuously ready device backlog drains");
+        flooding.store(false, std::sync::atomic::Ordering::Release);
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(3), task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn device_abort_joins_asr_and_discards_queued_and_late_transcripts() {
+        let (mut deps, link, tx, written, _dir) = harness(true).await;
+        let mut calls = controlled_asr(&mut deps);
+        let task = tokio::spawn(run_session(link, deps.deps.clone()));
+        tx.send(Frame::Text(r#"{"type":"hello","version":1,"transport":"websocket"}"#.into())).await.unwrap();
+        manual_utterance(&tx).await;
+        let held = next_asr(&mut calls).await;
+        manual_utterance(&tx).await;
+        tx.send(Frame::Text(r#"{"type":"abort","reason":"wake_word_detected"}"#.into())).await.unwrap();
+        await_frame(&written, |f| f["type"] == "tts" && f["state"] == "stop").await;
+        assert!(held.dropped.load(std::sync::atomic::Ordering::Acquire), "abort acknowledgement follows ASR join");
+        assert!(held.reply.send(Ok("obsolete".into())).is_err());
+        assert!(calls.try_recv().is_err(), "the queued utterance was cancelled too");
+        manual_utterance(&tx).await;
+        next_asr(&mut calls).await.reply.send(Ok("new input".into())).unwrap();
+        await_frame(&written, |f| f["type"] == "stt" && f["text"] == "new input").await;
+        drop(tx);
+        task.await.unwrap();
+        let transcripts: Vec<_> = texts(&written).into_iter().filter(|f| f["type"] == "stt")
+            .map(|f| f["text"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(transcripts, ["new input"]);
+    }
+
+    #[tokio::test]
+    async fn session_shutdown_joins_held_asr_before_returning() {
+        let (mut deps, link, tx, written, _dir) = harness(true).await;
+        let mut calls = controlled_asr(&mut deps);
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let owned = Arc::new(OwnedTasks::default());
+        let task = tokio::spawn(run_session_owned(link, deps.deps.clone(), stopped, owned.clone()));
+        tx.send(Frame::Text(r#"{"type":"hello","version":1,"transport":"websocket"}"#.into())).await.unwrap();
+        manual_utterance(&tx).await;
+        let held = next_asr(&mut calls).await;
+        stop.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(3), task).await.unwrap().unwrap().unwrap();
+        assert!(held.dropped.load(std::sync::atomic::Ordering::Acquire));
+        assert!(held.reply.send(Ok("late".into())).is_err());
+        assert!(texts(&written).iter().all(|f| f["type"] != "stt"));
+        owned.abort_and_join().await.unwrap();
+        assert_eq!(owned.task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn host_stop_wins_over_a_ready_asr_response_without_late_projection() {
+        let (mut deps, link, tx, written, _dir) = harness(true).await;
+        let mut calls = controlled_asr(&mut deps);
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let owned = Arc::new(OwnedTasks::default());
+        let task = tokio::spawn(run_session_owned(link, deps.deps.clone(), stopped, owned.clone()));
+        tx.send(Frame::Text(r#"{"type":"hello","version":1,"transport":"websocket"}"#.into())).await.unwrap();
+        manual_utterance(&tx).await;
+        let held = next_asr(&mut calls).await;
+        held.reply.send(Ok("cancelled response".into())).unwrap();
+        // Neither operation yields, so stop and the provider response become
+        // ready together before the actor can publish either result.
+        stop.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(3), task).await.unwrap().unwrap().unwrap();
+        assert!(held.dropped.load(std::sync::atomic::Ordering::Acquire));
+        assert!(texts(&written).iter().all(|f| f["type"] != "stt"));
+        owned.abort_and_join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn repeated_hello_discards_old_asr_and_pending_audio() {
+        let (mut deps, link, tx, written, _dir) = harness(true).await;
+        let mut calls = controlled_asr(&mut deps);
+        let task = tokio::spawn(run_session(link, deps.deps.clone()));
+        let hello = r#"{"type":"hello","version":1,"transport":"websocket"}"#;
+        tx.send(Frame::Text(hello.into())).await.unwrap();
+        let first = await_frame(&written, |f| f["type"] == "hello").await;
+        manual_utterance(&tx).await;
+        let held = next_asr(&mut calls).await;
+        manual_utterance(&tx).await;
+        tx.send(Frame::Text(hello.into())).await.unwrap();
+        let replacement = await_frame(&written, |f| f["type"] == "hello" && f["session_id"] != first["session_id"]).await;
+        assert!(held.dropped.load(std::sync::atomic::Ordering::Acquire));
+        assert!(held.reply.send(Ok("old hello".into())).is_err());
+        assert!(calls.try_recv().is_err());
+        manual_utterance(&tx).await;
+        next_asr(&mut calls).await.reply.send(Ok("new hello".into())).unwrap();
+        let stt = await_frame(&written, |f| f["type"] == "stt").await;
+        assert_eq!(stt["text"], "new hello");
+        assert_eq!(stt["session_id"], replacement["session_id"]);
+        drop(tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn replacing_connection_cancels_asr_without_publishing_old_input() {
+        let (mut deps, link, tx, written, _dir) = harness(true).await;
+        let mut calls = controlled_asr(&mut deps);
+        let registry = deps.deps.registry.clone();
+        let task = tokio::spawn(run_session(link, deps.deps.clone()));
+        tx.send(Frame::Text(r#"{"type":"hello","version":1,"transport":"websocket"}"#.into())).await.unwrap();
+        manual_utterance(&tx).await;
+        let held = next_asr(&mut calls).await;
+        registry.connect("aa:bb:cc:dd:ee:ff", "0190f5fe-7c00-7a00-8000-0000000000aa", "replacement").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), task).await.unwrap().unwrap();
+        assert!(held.dropped.load(std::sync::atomic::Ordering::Acquire));
+        assert!(held.reply.send(Ok("old connection".into())).is_err());
+        assert!(texts(&written).iter().all(|f| f["type"] != "stt"));
+        assert_eq!(registry.current_connection("aa:bb:cc:dd:ee:ff").await.as_deref(), Some("replacement"));
+    }
+
+    #[tokio::test]
+    async fn asr_is_serial_bounded_and_preserves_utterance_order() {
+        let (mut deps, link, tx, written, _dir) = harness(true).await;
+        let mut calls = controlled_asr(&mut deps);
+        let task = tokio::spawn(run_session(link, deps.deps.clone()));
+        tx.send(Frame::Text(r#"{"type":"hello","version":1,"transport":"websocket"}"#.into())).await.unwrap();
+        manual_utterance(&tx).await;
+        let first = next_asr(&mut calls).await;
+        for _ in 0..MAX_PENDING_TRANSCRIPTIONS + 1 { manual_utterance(&tx).await; }
+        await_frame(&written, |f| f["type"] == "tts" && f["text"] == "等待识别的语音过多，请稍后再说").await;
+        assert!(calls.try_recv().is_err(), "there is only one in-flight ASR");
+        first.reply.send(Ok("first".into())).unwrap();
+        next_asr(&mut calls).await.reply.send(Ok("second".into())).unwrap();
+        next_asr(&mut calls).await.reply.send(Ok("third".into())).unwrap();
+        await_frame(&written, |f| f["type"] == "stt" && f["text"] == "third").await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while deps.dispatcher.dispatched_text().len() < 3 { tokio::task::yield_now().await; }
+        }).await.expect("recognized utterances must reach the Agent in the same order");
+        assert_eq!(deps.dispatcher.dispatched_text(), ["first", "second", "third"]);
+        drop(tx);
+        task.await.unwrap();
+        let transcripts: Vec<_> = texts(&written).into_iter().filter(|f| f["type"] == "stt")
+            .map(|f| f["text"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(transcripts, ["first", "second", "third"]);
+        assert!(calls.try_recv().is_err(), "overflow never started another provider request");
     }
 
     struct HeldDispatch {

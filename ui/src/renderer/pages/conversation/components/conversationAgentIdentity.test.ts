@@ -17,7 +17,7 @@ describe('officialConversationTemplateKey', () => {
 });
 
 test('presentation recognizes product Agents without exposing them in ordinary chat selection', () => {
-  for (const key of ['companion.default', 'customer-service.default'] as const) {
+  for (const key of ['companion.default', 'companion.robot', 'customer-service.default'] as const) {
     expect(officialAgentTemplateKey({ official_template_key: key })).toBe(key);
     expect(officialConversationTemplateKey({ official_template_key: key })).toBeNull();
     expect(officialAgentTemplateKey({ agent_name: key })).toBeNull();

@@ -19,6 +19,7 @@ await i18n.init({ lng: 'en', keySeparator: false, resources: { en: { translation
   'nomi.cohabit.quickAgent': 'Agent', 'nomi.cohabit.quickModel': 'Model',
   'nomi.cohabit.modelDefaultSaveFailed': 'Session switched; retry saving the default.',
   'agentSettings.template.companion.default.name': 'Companion',
+  'agentSettings.template.companion.robot.name': 'Robot companion',
   'agentSettings.productBinding.label': 'Agent setup', 'agentSettings.productBinding.busy': 'Wait for the current reply to finish',
   'agentSettings.productBinding.saveFailed': 'Save failed', 'agentSettings.actions.retry': 'Retry',
   'agent.model.switchSuccess': 'Model switched',
@@ -35,6 +36,7 @@ const idle: TChatConversation = { id: conversationId, type: 'nomi', name: 'Compa
 };
 const agentOptions: ProductAgentOptions = { selection: { kind: 'template', template_key: 'companion.default' }, needs_model: false,
   options: [{ selection: { kind: 'template', template_key: 'companion.default' }, display_name: '', available: true, reason: null },
+    { selection: { kind: 'template', template_key: 'companion.robot' }, display_name: '', available: true, reason: null },
     { selection: { kind: 'preset', preset_id: 'my-companion' }, display_name: 'Personal companion', available: true, reason: null }],
 };
 const restores: Array<() => void> = [];
@@ -73,6 +75,31 @@ test('the docked model dropdown switches the existing Session and locks the Agen
   expect(switched.mock.calls[0][0].conversation_id).toBe(conversationId);
   await waitFor(() => expect(saving).toEqual([true, false]));
   expect(view.container.querySelectorAll('.arco-select')[1].textContent).toContain('Model B');
+});
+
+test('robot companion is explicitly selected in the existing companion Session without changing its model or permissions', async () => {
+  install();
+  const selected = spyOn(ipcBridge.agentPlatform.selectProductBinding, 'invoke').mockResolvedValue({
+    selection: { kind: 'template', template_key: 'companion.robot' }, needs_model: false,
+  });
+  const switchModel = spyOn(ipcBridge.conversation.switchModel, 'invoke').mockResolvedValue(true);
+  const permissions = spyOn(ipcBridge.robot.setPermissions, 'invoke').mockRejectedValue(new Error('Must not change permissions'));
+  for (const spy of [selected, switchModel, permissions]) restores.push(() => spy.mockRestore());
+  const patches: unknown[] = [];
+  const view = mount(async (patch) => { patches.push(patch); return profile; });
+  await waitFor(() => expect(view.container.querySelectorAll('.arco-select')).toHaveLength(2));
+  expect(selected).not.toHaveBeenCalled();
+  expect(view.container.querySelectorAll('.arco-select')[0].textContent).toContain('Companion');
+  fireEvent.click(view.container.querySelectorAll('.arco-select')[0]);
+  fireEvent.click(await view.findByText('Robot companion'));
+  await waitFor(() => expect(selected).toHaveBeenCalledTimes(1));
+  expect(selected.mock.calls[0][0]).toEqual({ target_kind: 'companion', target_id: companionId,
+    request: { selection: { kind: 'template', template_key: 'companion.robot' },
+      conversation_id: conversationId, model: { provider_id: providerId, model: 'model-a' } },
+  });
+  expect(switchModel).not.toHaveBeenCalled();
+  expect(permissions).not.toHaveBeenCalled();
+  expect(patches).toEqual([]);
 });
 
 test('a busy Session refusal preserves the current model and does not patch the default', async () => {

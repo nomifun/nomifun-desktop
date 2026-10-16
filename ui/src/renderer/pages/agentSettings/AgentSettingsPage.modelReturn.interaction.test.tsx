@@ -94,7 +94,7 @@ async function mount(error?: unknown, initialEditor?: AgentPresetEditorResponse,
   let editor: AgentPresetEditorResponse | undefined = initialEditor;
   const templates = OFFICIAL_PRESET_KEYS.map(templateKey => options.templates?.find(value => value.template_key === templateKey)
     ?? ({ ...template, template_key: templateKey, seed: { ...template.seed,
-      enabled_capabilities: templateKey === 'companion.default' ? companionCoreGrants : [],
+      enabled_capabilities: templateKey.startsWith('companion.') ? companionCoreGrants : [],
     } } as OfficialPresetTemplate));
   const officialEditors = new Map<string, AgentPresetEditorResponse>();
   templates.forEach((officialTemplate, index) => {
@@ -196,6 +196,7 @@ test('starting a conversation from a personal Agent preserves its preset ID', as
 
 test.each([
   ['companion.default', en.workbench.openCompanions, 'Desktop companions'],
+  ['companion.robot', en.workbench.openCompanions, 'Desktop companions'],
   ['customer-service.default', en.workbench.openCustomerService, 'Customer service'],
 ] as const)('official %s opens its fixed product workspace', async (templateKey, label, heading) => {
   const v = await mount(undefined, undefined, { entry: `/agent?template=${templateKey}` });
@@ -302,8 +303,8 @@ test('the bound official companion Agent saves added capabilities directly witho
   expect(v.getByRole('switch', { name: 'Disable Business check' })).toBeTruthy();
 });
 
-test('the official companion Agent explains and blocks removal of either required core capability', async () => {
-  const v = await mount(undefined, undefined, { entry: '/agent?template=companion.default' });
+test.each(['companion.default', 'companion.robot'] as const)('the official %s Agent explains and blocks removal of either required core capability', async (templateKey) => {
+  const v = await mount(undefined, undefined, { entry: `/agent?template=${templateKey}` });
   fireEvent.click(v.getByRole('switch', { name: 'Enable Business check' }));
   expect((v.getByRole('button', { name: common.save }) as HTMLButtonElement).disabled).toBe(false);
 

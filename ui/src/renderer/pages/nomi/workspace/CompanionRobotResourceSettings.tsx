@@ -134,6 +134,8 @@ const CompanionRobotResourceSettings: React.FC<Props> = ({ companionId, conversa
       {data?.robots.map((robot) => <NomiSelect.Option key={robot.robot_id} value={robot.robot_id}>{robot.name || robot.board || robot.robot_id}</NomiSelect.Option>)}
     </NomiSelect>}
     <p className={styles.hint}>{t('nomi.cohabit.robotResource.hint')}</p>
+    {committed && data?.options.selection?.kind === 'template' && data.options.selection.template_key !== 'companion.robot'
+      && <p className={styles.hint}>{t('nomi.cohabit.robotResource.robotAgentHint')}</p>}
     {capabilitiesChanged && <p role='status' className={styles.hint}>{t('nomi.cohabit.robotResource.capabilitiesChanged')}</p>}
     {blocked && <p role='status' className={styles.hint}>{t('agentSettings.productBinding.busy')}</p>}
     {data && !data.options.selection && <p role='status' className={styles.hint}>{t('agentSettings.productBinding.selectionNeededHint')}</p>}

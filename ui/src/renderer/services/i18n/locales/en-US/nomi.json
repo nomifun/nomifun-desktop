@@ -117,6 +117,7 @@
     "channelsHint": "Configure messaging channels and MCP in Manage",
     "manageConnections": "Manage channels and robots",
     "robotResource": {
+        "robotAgentHint": "For focused robot actions and concise replies, choose “Robot companion” in the Agent selector under Mind configuration. It keeps the same companion, memory, conversation, model, and movement permissions.",
       "capabilitiesChanged": "Device capabilities changed. Apply robot to update this conversation.",
       "label": "Conversation robot",
       "none": "No robot control",

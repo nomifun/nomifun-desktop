@@ -16,6 +16,12 @@ import {
 export const COMPANION_TEMPLATE_KEY =
   'companion.default' satisfies OfficialPresetKey;
 
+export const COMPANION_ROBOT_TEMPLATE_KEY =
+  'companion.robot' satisfies OfficialPresetKey;
+
+export const isCompanionAgentTemplateKey = (value: string | undefined): boolean =>
+  value === COMPANION_TEMPLATE_KEY || value === COMPANION_ROBOT_TEMPLATE_KEY;
+
 export const CUSTOMER_SERVICE_TEMPLATE_KEY =
   'customer-service.default' satisfies OfficialPresetKey;
 
@@ -23,7 +29,7 @@ export const isConversationAgentTemplateKey = (
   value: string,
 ): value is OfficialPresetKey =>
   OFFICIAL_PRESET_KEYS.includes(value as OfficialPresetKey)
-  && value !== COMPANION_TEMPLATE_KEY
+  && !isCompanionAgentTemplateKey(value)
   && value !== CUSTOMER_SERVICE_TEMPLATE_KEY;
 
 export const isConversationAgentTemplate = (

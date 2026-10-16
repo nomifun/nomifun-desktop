@@ -21,6 +21,7 @@ await i18n.init({ lng: 'en', keySeparator: false, resources: { en: { translation
   'nomi.cohabit.robotResource.saved': 'Robot updated',
   'nomi.cohabit.robotResource.changed': 'Settings changed; review and apply again',
   'nomi.cohabit.robotResource.capabilitiesChanged': 'Apply the updated device capabilities',
+  'nomi.cohabit.robotResource.robotAgentHint': 'Choose Robot companion in Mind configuration; this keeps the same conversation.',
   'agentSettings.productBinding.busy': 'Wait for the current reply',
   'agentSettings.productBinding.loadFailed': 'Load failed',
   'agentSettings.productBinding.saveFailed': 'Save failed',
@@ -121,6 +122,19 @@ test('explicitly removing a robot preserves other resources', async () => {
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
   expect(save.mock.calls[0][0].request.resource_selections).toHaveLength(resources.length);
   expect(save.mock.calls[0][0].request.resource_selections?.some((resource) => resource.resource_kind === 'robot')).toBe(false);
+});
+
+test('robot mode guidance appears only for an explicitly selected robot and never switches the Agent automatically', async () => {
+  const { save, setBinding, robots } = install();
+  const view = mount();
+  await waitFor(() => expect(view.container.querySelector('.arco-select')).not.toBeNull());
+  expect(view.queryByText('Choose Robot companion in Mind configuration; this keeps the same conversation.')).toBeNull();
+  view.unmount();
+  setBinding(binding('robot-a'));
+  const selectedView = mount();
+  await selectedView.findByText('Choose Robot companion in Mind configuration; this keeps the same conversation.');
+  expect(robots).toHaveBeenCalled();
+  expect(save).not.toHaveBeenCalled();
 });
 
 test('a capability revision can be explicitly reapplied without selecting a different robot', async () => {

@@ -237,6 +237,7 @@ Official seeds grant concrete business Actions rather than deriving authority fr
 | `coding.codex` | Files, version control, processes, artifacts, project memory, research, collaboration, SSH, knowledge and Session management; retains headless Runtime requirements without browser or desktop-control dependencies. |
 | `app.developer` | Complete Coding baseline plus ten application-hosting actions; its independent project uses ordinary Sessions and the same application owner. Other presets keep application hosting optional. |
 | `companion.default` | Keeps persona, long-term memory, channels and schedules; recommends robot vision, display, motion and other device controls subject to explicit resource selection and device permissions; adds everyday files, processes, artifacts, research, browser, computer, media, assets, Office, SSH, collaboration and management. |
+| `companion.robot` | Optional lean device interaction with Companion, long-term memory and the four Robot Actions only; reuses the same companion and Session without silently replacing existing choices or adding workspace, Office or collaboration duties. |
 | `customer-service.default` | Customer notes, handoff, knowledge retrieval, channel replies and sends, files, processes, artifacts, research and schedules; no default global knowledge-registry, cross-Session or terminal management. |
 | `creative-studio.default` | Media, Canvas, assets, templates, Office, files, processes, artifacts, project memory, research, browser, collaboration and schedules; retains its three creative Package Skills. |
 
@@ -252,9 +253,28 @@ Saved official customizations are not overwritten by release seeds. The owner-sc
 
 Companion persona and historical memory never advertise retired `nomi_*` tools or unverified full capabilities. Current Runtime tool descriptions and real receipts determine names, inputs, target scope and completion. Authorized catalog search finds deferred tools; their absence from the initial schema display does not prove a missing capability.
 
+Robot companion uses the existing explicit Companion product Agent transition, preserving the companion ID,
+Session, model, long-term memory and complete stored history. Its lean runtime policy requires exactly the
+`companion`, `companion.memory` and `robot` capability set, optionally with `agent.tool-discovery`.
+Adding other business capabilities restores ordinary budgets; display names cannot silently narrow an extended Agent.
+The derived model context is bounded to 128 KiB, with at most four complete historical user turns, 64 KiB and
+16 historical messages. Oversized historical turns are omitted whole, retaining tool call/result pairs in kept
+turns; the accepted current input is never truncated. Canonical history and history APIs remain complete.
+Cross-Agent handoffs are loaded verbatim up to 16 KiB; larger handoffs receive a short model-projection notice while their canonical facts remain intact. JSON is not truncated and old tasks are not inferred or inherited.
+Each turn permits eight model steps without execution-window renewal. Explicit reasoning settings and model defaults remain unchanged.
+Frozen, currently authorized Robot tools receive priority within the existing 24 KiB/initial-definition budget,
+with small representatives of granted Actions before richer definitions. Initially visible definitions remain
+non-deferred and cannot be evicted by later ToolSearch windows. Oversized definitions remain discoverable;
+schemas, resource authority, connection leases and dispatch-time permission checks are unchanged.
+
+Robot ASR runs as an owned task, with at most one recognition in flight and two queued recordings per connection.
+The device reader continues handling MCP replies, abort, disconnect and ping. Abort clears unsubmitted audio
+and joins recognition cleanup. Replaced connections and host shutdown cannot submit late transcripts as new
+Companion inputs. Independent recognition scheduling retains the existing final-public-answer speech contract.
+
 The App's compilation surface remains desktop regardless of optional Browser/Computer adapters. Deferring physical availability in the resource ceiling requires an exact pinned bundled public Provider with one member, one resource kind, complete Action operation contracts, and no private implementation, dependencies, Context or Events. Unsupported physical members enter only the current compiled object's non-executable set, never Snapshot or checkpoint data; binding and invocation still reject them. Other Providers, incomplete contracts and direct non-Agent operations retain strict admission.
 
-The authorized catalog is not truncated at 128 Modules or Actions. With ToolSearch, initial schema presentation projects within 24 KiB and 112 tools, reserving Runtime controls and five latest search matches while preserving every binding and schema in the original ToolPlan. Later searches protect the latest set of up to five matches, fill remaining space with older displayed tools, and leave omitted tools searchable. Explicit Host preactivation uses the final authorized frozen names and atomically presents the entire requested set; it does not split them into five-match searches that can evict earlier members. Both latest search results and explicit Host sets may exceed the soft 24 KiB target. The hard limits remain 117 authorized definitions, 128 visible tools including Runtime controls, and the whole-request context budget; an oversized set is rejected without partially changing activation. Canonical recovery rebuilds presentation from its original facts and applies the corresponding set rules. Without ToolSearch, only the actual assembled visible tool count is limited. This window is presentation state, not a second authority set or persistent ledger.
+The authorized catalog is not truncated at 128 Modules or Actions. With ToolSearch, initial schema presentation projects within 24 KiB and 111 tools, reserving Runtime controls and five latest search matches while preserving every binding and schema in the original ToolPlan. Later searches protect the latest set of up to five matches, fill remaining space with older displayed tools, and leave omitted tools searchable. Explicit Host preactivation uses the final authorized frozen names and atomically presents the entire requested set; it does not split them into five-match searches that can evict earlier members. Both latest search results and explicit Host sets may exceed the soft 24 KiB target. The hard limits remain 116 authorized definitions, 128 visible tools including Runtime controls, and the whole-request context budget; an oversized set is rejected without partially changing activation. Canonical recovery rebuilds presentation from its original facts and applies the corresponding set rules. Without ToolSearch, only the actual assembled visible tool count is limited. This window is presentation state, not a second authority set or persistent ledger.
 
 ### Relocating the same current dataset
 

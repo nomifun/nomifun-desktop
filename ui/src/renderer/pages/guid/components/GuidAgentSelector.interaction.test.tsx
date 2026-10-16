@@ -29,6 +29,7 @@ const templates = [
   'assistant.general',
   'coding.codex',
   'companion.default',
+  'companion.robot',
   'creative-studio.default',
   'customer-service.default',
 ].map((template_key) => ({ template_key }) as OfficialPresetTemplate);
@@ -162,6 +163,9 @@ describe('Guid Agent selector', () => {
     expect(within(page.getByRole('dialog')).getByRole('status').textContent).toBe(guid.agentEntries.empty);
     await act(async () => { fireEvent.input(search, { target: { value: agentSettings.template.companion.default.name } }); });
     expect(page.queryByRole('button', { name: agentSettings.template.companion.default.name })).toBeNull();
+    expect(within(page.getByRole('dialog')).getByRole('status').textContent).toBe(guid.agentEntries.empty);
+    await act(async () => { fireEvent.input(search, { target: { value: agentSettings.template.companion.robot.name } }); });
+    expect(page.queryByRole('button', { name: agentSettings.template.companion.robot.name })).toBeNull();
     expect(within(page.getByRole('dialog')).getByRole('status').textContent).toBe(guid.agentEntries.empty);
     expect(selections).toEqual([]);
   });

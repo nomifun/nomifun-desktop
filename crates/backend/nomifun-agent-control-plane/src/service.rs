@@ -38,7 +38,11 @@ const CHAT_MODEL_TASK: &str = nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHA
 const APP_DEVELOPMENT_INSTRUCTIONS: &str = "You are NomiFun's built-in application developer. Treat a request to create, import or change an application as completing the usable application in this workspace, including its application record and preview, not just writing source files. At the start of application work, discover app.hosting/current and app.hosting/guide with ToolSearch, then call current_app and read_app_guide. When current_app returns an application, keep its exact app_id and edit its existing managed workspace; do not import a second copy or create another application. Infer a useful application name, short description and appropriate tags from the user's request, and use update_app to keep the actual application metadata and ordinary runtime settings aligned with the files you create. Read existing project scripts and configuration; preserve user data and existing explicit settings unless the requested change requires modifying them. Use update_app with detect_settings:true to recognize ordinary supported project commands, then inspect the returned settings and fill any missing custom commands or real web_url yourself. Settings that do not apply may remain null; never invent install or build commands. Once the files and configuration are ready, call preview_app or rebuild_app on the same application through the hosting owner; do not start a separate unmanaged web server. Verify the returned state, actual HTTP response and relevant business behavior using already-authorized tools, and use the same owner to repair and restart after changes. Clearly distinguish verified behavior from checks unavailable with your granted tools. A generated file, a running process, or an empty web_url does not prove that an embedded preview works. Finish with the application's actual name, preview result and any real remaining failure; never claim preview success from prose alone. For ordinary questions or an explicit request to inspect only, do not modify or start an application.";
 
 fn official_template_instructions(key: OfficialPresetKey) -> &'static str {
-    if key == OfficialPresetKey::AppDeveloper { APP_DEVELOPMENT_INSTRUCTIONS } else { "" }
+    match key {
+        OfficialPresetKey::AppDeveloper => APP_DEVELOPMENT_INSTRUCTIONS,
+        OfficialPresetKey::CompanionRobot => "Prioritize responsive physical interaction while keeping the selected Companion's identity and memories. For a clear supported device request, call the already available authorized device tool immediately; do not search unrelated capabilities or perform preliminary narration. Discover a device tool only when the needed operation is not already visible. If the request is ambiguous or unsupported, ask one short clarification or explain the limitation. Keep spoken replies brief and natural. Report an action only from the device tool's actual result, distinguishing acceptance from completion; never claim physical success from your own text. Do not repeat a device action after an uncertain result without resolving its status.",
+        _ => "",
+    }
 }
 
 fn required_chat_features<'a>(
@@ -1601,7 +1605,7 @@ impl AgentControlPlane {
             // Internal variants retain their host-assigned official lineage.
             request.draft.display_name = stored.preset.display_name.clone();
         }
-        if owned_official_key(&stored) == Some(OfficialPresetKey::CompanionDefault) {
+        if matches!(owned_official_key(&stored), Some(OfficialPresetKey::CompanionDefault | OfficialPresetKey::CompanionRobot)) {
             let missing = ["companion", "companion.memory"].into_iter().filter(|required|
                 !request.draft.document.enabled_capabilities.iter().any(|selection| selection.capability.id == *required))
                 .collect::<Vec<_>>();
@@ -3624,6 +3628,37 @@ mod tests {
                 assert_eq!(control.resolve_app_development_workflow_binding(&owner, &binding).await.unwrap(), binding,
                     "a current workflow is an exact no-op, without a new hidden configuration or binding version");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn robot_companion_official_configuration_is_seeded_once_and_keeps_its_core_identity() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control = template_control_plane(store, OfficialPresetKey::CompanionRobot, false);
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let created = control.create_from_template(&owner, "companion.robot", official_launch_request(true)).await.unwrap();
+        assert_eq!(created.draft.source_template_key, Some(nomifun_api_types::OfficialPresetKeyDto::CompanionRobot));
+        assert_eq!(created.draft.document.instructions, official_template_instructions(OfficialPresetKey::CompanionRobot));
+        assert!(!created.draft.document.instructions.is_empty());
+        assert_eq!(created.draft.document.enabled_capabilities.iter().map(|selection| selection.capability.id.as_str())
+            .collect::<BTreeSet<_>>(), BTreeSet::from(["companion", "companion.memory", "robot"]));
+        let mut draft = created.draft.clone();
+        draft.document.instructions = "My authored physical interaction rules".into();
+        let saved = control.save_revision(&owner, &created.preset.preset_id, SaveAgentPresetRevisionRequest {
+            expected_current_revision: draft.current_revision.clone(), draft, reason: None,
+        }).await.unwrap();
+        let reopened = control.create_from_template(&owner, "companion.robot", official_launch_request(true)).await.unwrap();
+        assert_eq!(reopened.preset.preset_id, created.preset.preset_id);
+        assert_eq!(reopened.draft.document.instructions, "My authored physical interaction rules",
+            "launching an official robot Agent must preserve authored instructions");
+        assert_eq!(reopened.revision.unwrap().reference, saved.revision.reference);
+        for required in ["companion", "companion.memory"] {
+            let mut detached = reopened.draft.clone();
+            detached.document.enabled_capabilities.retain(|selection| selection.capability.id != required);
+            let error = control.save_revision(&owner, &created.preset.preset_id, SaveAgentPresetRevisionRequest {
+                expected_current_revision: detached.current_revision.clone(), draft: detached, reason: None,
+            }).await.unwrap_err();
+            assert_eq!(error.code().as_ref(), "PRESET_REVISION_SAVE_FAILED");
         }
     }
 

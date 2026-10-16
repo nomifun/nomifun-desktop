@@ -448,6 +448,59 @@ fn selected_application_tools_preserve_the_exact_frozen_active_action_subset() {
     assert!(selected_application_tools(&AgentToolPlan::default()).is_empty(), "inactive or unselected application modules supply no tools");
 }
 
+#[test]
+fn robot_interaction_context_uses_only_the_frozen_active_tool_mapping() {
+    let binding = |name: &str, action: &str, deferred: bool| {
+        let schema = StrictJsonValue(json!({"type":"object","additionalProperties":false,"properties":{}}));
+        AgentToolBinding {
+            model_name: name.into(), definition: ChatToolDefinition {
+                name: name.into(), description: "bound device tool".into(), input_schema: schema.clone(), deferred,
+            },
+            schema_digest: nomifun_engine_core::input_schema_digest(&schema).unwrap(),
+            canonical_input_schema_ref: "schema://nomifun/robot-interaction-fixture@1".into(),
+            capability_contract_digest: "a".repeat(64).into(), capability_id: "robot".into(), action_id: action.into(),
+            resource_binding_ids: BTreeSet::from(["exact-owned-robot".into()]),
+            effect_class: AgentEffectClass::ExternalUncertainEffect, parallel_safe: false,
+        }
+    };
+    let active = AgentToolPlan::new([
+        binding("current_motion", "robot/motion", false),
+        binding("deferred_extension", "robot/device", true),
+    ]).unwrap();
+    let context = robot_interaction_context(&active).unwrap();
+    let data = context.split_once(": ").unwrap().1.split_once(". Use ").unwrap().0;
+    assert_eq!(serde_json::from_str::<Value>(data).unwrap(), json!([
+        {"name":"current_motion","action_id":"robot/motion","schema_visible":true},
+        {"name":"deferred_extension","action_id":"robot/device","schema_visible":false},
+    ]));
+    assert!(context.contains("not proof of completed movement"));
+    let absent = robot_interaction_context(&AgentToolPlan::default()).unwrap();
+    assert!(absent.contains("[]"));
+    assert!(absent.contains("no callable Robot tools"));
+    assert!(!absent.contains("current_motion"), "missing binding or revoked active tools cannot be resurrected by context");
+    assert!(selected_application_tools(&active).is_empty(), "robot presentation needs no all-tool preactivation");
+}
+
+#[test]
+fn robot_profile_preserves_explicit_reasoning_and_does_not_guess_a_supported_low_tier() {
+    assert!(session_reasoning(None).is_none(), "reasoning-capable routes do not advertise which default tier is supported");
+    for (selected, expected) in [
+        (SessionReasoningEffortDto::None, ReasoningEffort::None),
+        (SessionReasoningEffortDto::Minimal, ReasoningEffort::Minimal),
+        (SessionReasoningEffortDto::Low, ReasoningEffort::Low),
+        (SessionReasoningEffortDto::Medium, ReasoningEffort::Medium),
+        (SessionReasoningEffortDto::High, ReasoningEffort::High),
+        (SessionReasoningEffortDto::XHigh, ReasoningEffort::XHigh),
+        (SessionReasoningEffortDto::Max, ReasoningEffort::Max),
+        (SessionReasoningEffortDto::Ultra, ReasoningEffort::Ultra),
+    ] {
+        let request = session_reasoning(Some(selected)).unwrap();
+        assert_eq!(request.effort, Some(expected));
+        assert_eq!(request.summary, ReasoningSummary::None);
+        assert!(request.max_reasoning_tokens.is_none());
+    }
+}
+
 #[tokio::test]
 async fn cancellation_receipt_identity_rejects_altered_empty_delivery() {
     cancellation_identity_scenario(false).await;

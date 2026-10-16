@@ -177,7 +177,7 @@ fn official_preset_action_safety_matrix_is_exact() {
             ("companion.memory", &["companion.memory/recall", "companion.memory/write"]),
             ("knowledge", KNOWLEDGE),
             ("channel.messaging", &["channel.messaging/reply", "channel.messaging/send"]),
-            ("robot", &["robot/vision"]),
+            ("robot", &["robot/device", "robot/display", "robot/motion", "robot/vision"]),
             ("automation.schedule", SCHEDULE),
             ("workspace.files", FILES),
             ("workspace.process", PROCESS),
@@ -193,6 +193,11 @@ fn official_preset_action_safety_matrix_is_exact() {
             ("agent.collaboration", COLLABORATION),
             ("knowledge.management", KNOWLEDGE_MANAGEMENT),
             ("session.management", SESSION_MANAGEMENT),
+        ])),
+        (OfficialPresetKey::CompanionRobot, actions(&[
+            ("companion", &["companion/evolve", "companion/learn"]),
+            ("companion.memory", &["companion.memory/recall", "companion.memory/write"]),
+            ("robot", &["robot/device", "robot/display", "robot/motion", "robot/vision"]),
         ])),
         (OfficialPresetKey::CustomerServiceDefault, actions(&[
             ("customer.service", &["customer.service/handoff", "customer.service/notes.read", "customer.service/notes.write"]),
@@ -797,6 +802,10 @@ fn official_session_resources(
             resource("project_memory", "default-project-memory"),
             resource("scheduler", "installation-scheduler"),
             resource("workspace", "default-workspace"),
+        ]),
+        "companion.robot" => serde_json::json!([
+            resource("companion", companion_id),
+            resource("companion_memory", companion_id),
         ]),
         "customer-service.default" => serde_json::json!([
             resource("customer", customer_id),

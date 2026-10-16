@@ -31,6 +31,7 @@ export const OFFICIAL_PRESET_KEYS = [
   'assistant.general',
   'coding.codex',
   'companion.default',
+  'companion.robot',
   'customer-service.default',
   'creative-studio.default',
   'app.developer',
