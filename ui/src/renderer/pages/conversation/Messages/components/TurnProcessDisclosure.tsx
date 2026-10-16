@@ -120,23 +120,23 @@ const TurnWorkDuration: React.FC<{
 
 type ProcessEntry<T> = { kind: 'item'; item: T } | { kind: 'group'; id: string; items: T[] };
 
-/** A group is a read-only canonical boundary. Manual choices are scoped to its
- * immutable identity and survive incoming text, tools, and history refreshes. */
+/** A group is a read-only canonical boundary and starts collapsed. Manual
+ * choices are scoped to its immutable identity and survive incoming text,
+ * tools, and history refreshes. */
 function ProcessGroup<T>({ id, items, label, active, running, highlighted, children }: {
   id: string; items: T[]; label: string; active: boolean; running: boolean; highlighted: boolean; children: React.ReactNode;
 }) {
-  const [choice, setChoice] = useState<boolean | undefined>();
-  const expanded = choice ?? active;
+  const [expanded, setExpanded] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
   const followRef = useRef(true);
   useLayoutEffect(() => {
     if (active && expanded && followRef.current && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
   }, [active, expanded, items]);
   const bodyId = `process-group-${sanitizeDomId(id)}`;
-  useEffect(() => { if (highlighted) setChoice(true); }, [highlighted]);
+  useEffect(() => { if (highlighted) setExpanded(true); }, [highlighted]);
   return <div className={classNames('turn-process-group', running && 'turn-process-group--running')} data-process-group-id={id}>
     <button type='button' className='turn-process-group__toggle' aria-expanded={expanded} aria-controls={bodyId}
-      onClick={() => setChoice(!expanded)}>
+      onClick={() => setExpanded(!expanded)}>
       <Right theme='outline' size='12' className={classNames('turn-process-disclosure__arrow', expanded && 'turn-process-disclosure__arrow--open')} />
       <span className='turn-process-group__label'>{label}</span>
     </button>

@@ -130,7 +130,7 @@ test('opens when the first live process items arrive', () => {
   expect(page.getByText('thinking')).toBeDefined();
 });
 
-test('canonical groups keep narration outside, current work open, and manual choices across increments', () => {
+test('canonical groups start collapsed, keep narration outside, and preserve manual choices across increments', () => {
   type Entry = { id: string; group?: string; kind: 'thinking' | 'tool' | 'text'; state: 'running' | 'completed' };
   const items: Entry[] = [
     { id: 'past-thinking', group: 'canonical-first', kind: 'thinking', state: 'completed' },
@@ -149,20 +149,33 @@ test('canonical groups keep narration outside, current work open, and manual cho
   const first = () => page.container.querySelector('[data-process-group-id="canonical-first"] > button')!;
   const second = () => page.container.querySelector('[data-process-group-id="canonical-second"] > button')!;
   expect(first().getAttribute('aria-expanded')).toBe('false');
-  expect(second().getAttribute('aria-expanded')).toBe('true');
+  expect(second().getAttribute('aria-expanded')).toBe('false');
+  expect(page.queryByText('past-tool')).toBeNull();
+  expect(page.queryByText('current-tool')).toBeNull();
   expect(first().parentElement?.classList.contains('turn-process-group--running')).toBe(false);
   expect(second().parentElement?.classList.contains('turn-process-group--running')).toBe(true);
   expect(page.getByText('public-narration').closest('.turn-process-group')).toBeNull();
+  page.rerender(stageView(true, [...items]));
+  expect(second().getAttribute('aria-expanded')).toBe('false');
   fireEvent.click(first());
   fireEvent.click(second());
+  expect(page.getByText('past-tool')).toBeDefined();
+  expect(page.getByText('current-tool')).toBeDefined();
   page.rerender(stageView(true, [...items, { id: 'later-output', group: 'canonical-second', kind: 'tool', state: 'running' }]));
   expect(first().getAttribute('aria-expanded')).toBe('true');
+  expect(second().getAttribute('aria-expanded')).toBe('true');
+  expect(page.getByText('later-output')).toBeDefined();
+  fireEvent.click(second());
+  page.rerender(stageView(true, [...items]));
   expect(second().getAttribute('aria-expanded')).toBe('false');
+  expect(page.queryByText('current-tool')).toBeNull();
   expect(second().parentElement?.classList.contains('turn-process-group--running')).toBe(true);
   page.rerender(stageView(false));
   expect(page.container.querySelector('.turn-process-disclosure__body')).toBeNull();
   fireEvent.click(page.container.querySelector('.turn-process-disclosure__toggle')!);
   expect(page.container.querySelector('.turn-process-group--running')).toBeNull();
+  expect(first().getAttribute('aria-expanded')).toBe('false');
+  expect(second().getAttribute('aria-expanded')).toBe('false');
 });
 
 type PhaseEntry = {
@@ -188,6 +201,8 @@ test('a process title stays active between calls without reopening a manually cl
   const tool: PhaseEntry = { id: 'tool', group: 'phase', kind: 'tool', state: 'running' };
   const page = render(phaseView([tool]));
   const toggle = page.getByRole('button', { name: 'phase' });
+  expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  fireEvent.click(toggle);
   expect(toggle.getAttribute('aria-expanded')).toBe('true');
   fireEvent.click(toggle);
   const settled: PhaseEntry = { ...tool, state: 'completed' };

@@ -4,6 +4,8 @@ import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import type { IMessageToolCall, TMessage } from '@/common/chat/chatLib';
+import type { MessageTimeline } from '@/common/protocolBindings/MessageTimeline';
+import type { MessageTimelineSegment } from '@/common/protocolBindings/MessageTimelineSegment';
 import { parseConversationId, parseKnowledgeBaseId, parseMessageId, parsePersistedArtifactId } from '@/common/types/ids';
 import { ConversationProvider } from '@/renderer/hooks/context/ConversationContext';
 import { PreviewProvider } from '../Preview';
@@ -821,8 +823,8 @@ test('canonical group headings span model waits without changing tool outcomes o
     return <>
       <button onClick={() => update(current => current.map(message => message.id === tool.id
         ? { ...tool, content: { ...tool.content, output: 'Source available. Stream receipt refreshed.' } } : message))}>Refresh completed tool</button>
-      <button onClick={() => update(current => [...current, narration])}>Deliver phase narration</button>
-      <button onClick={() => update(current => [...current, staleTool, { ...base, id: 'wait-terminal', msg_id: messageId(815),
+      <button onClick={() => update(current => [...current, narration, staleTool])}>Deliver phase narration</button>
+      <button onClick={() => update(current => [...current, { ...base, id: 'wait-terminal', msg_id: messageId(815),
         type: 'agent_status', created_at: 50, content: { backend: 'nomi', status: 'prepared', turn_summary: true,
           turn_state: 'completed', started_at_ms: 1, finished_at_ms: 50 } }])}>Commit terminal receipt</button>
     </>;
@@ -852,8 +854,13 @@ test('canonical group headings span model waits without changing tool outcomes o
   expect(group.querySelector('.turn-process-trace__row--running')).toBeNull();
   fireEvent.click(page.getByRole('button', { name: 'Deliver phase narration' }));
   expect(group.classList.contains('turn-process-group--running')).toBe(false);
+  expect(toggle.getAttribute('aria-expanded')).toBe('true');
   expect(page.container.querySelector('.turn-process-disclosure--live')).not.toBeNull();
   expect(page.container.querySelector('[data-process-segment-id="wait-public-boundary"]')?.closest('.turn-process-group')).toBeNull();
+  const nextGroup = page.container.querySelector('[data-process-group-id="canonical-stale-tail"]')!;
+  expect(nextGroup.querySelector('button')?.getAttribute('aria-expanded')).toBe('false');
+  expect(nextGroup.querySelector('.turn-process-group__body')).toBeNull();
+  expect(nextGroup.classList.contains('turn-process-group--running')).toBe(true);
   fireEvent.click(page.getByRole('button', { name: 'Commit terminal receipt' }));
   expect(page.container.querySelector('.turn-process-disclosure--live')).toBeNull();
   fireEvent.click(page.getByRole('button', { name: messagesLocale.turnProcess.expand }));
@@ -862,10 +869,11 @@ test('canonical group headings span model waits without changing tool outcomes o
   expect(staleTool.content.status).toBe('running');
 });
 
-test('canonical segment references restore narration between mixed reasoning and tool groups', () => {
+test('canonical segment references keep active groups collapsed and preserve manual choices around narration', () => {
   const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };
-  const timeline = (segments: unknown[]) => ({ through_seq: 30, segments });
-  const ref = (id: string, group: string, seq: number, kind: string, start = 0, end = 1, state = 'completed') => ({
+  const timeline = (segments: MessageTimelineSegment[]): MessageTimeline => ({ through_seq: 30, segments });
+  const ref = (id: string, group: string, seq: number, kind: MessageTimelineSegment['kind'], start = 0, end = 1,
+    state: MessageTimelineSegment['state'] = 'completed'): MessageTimelineSegment => ({
     segment_id: id, group_id: group, first_seq: seq, last_seq: seq, kind, state, start_utf16: start, end_utf16: end,
   });
   const messages: TMessage[] = [
@@ -882,26 +890,51 @@ test('canonical segment references restore narration between mixed reasoning and
     { ...base, id: 'segment-summary', msg_id: messageId(805), type: 'agent_status', created_at: 10, content: { backend: 'nomi', status: 'prepared', turn_summary: true,
       turn_state: 'completed', turn_outcome: { kind: 'answered', message_ids: [messageId(804)] } } },
   ];
+  const StreamControls = () => {
+    const update = useUpdateMessageList();
+    return <button onClick={() => update(current => current.map(message => message.id === 'segment-thinking' && message.type === 'thinking'
+      ? { ...message, content: { ...message.content, content: 'First.Second. Streamed.', timeline: timeline([
+        ref('reasoning-first', 'canonical-first', 2, 'reasoning', 0, 6),
+        ref('reasoning-second', 'canonical-second', 8, 'reasoning', 6, 23, 'running'),
+      ]) } } : message))}>Update current reasoning</button>;
+  };
   const view = (running: boolean) => <MemoryRouter><I18nextProvider i18n={i18n}>
     <PreviewProvider persistNamespace='canonical-segments-integration' subscribeGlobalOpen={false}>
       <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', readOnly: true, isProcessing: running }}>
-        <MessageListProvider initialValue={messages}><MessageList /></MessageListProvider>
+        <MessageListProvider initialValue={messages}><MessageList /><StreamControls /></MessageListProvider>
       </ConversationProvider>
     </PreviewProvider>
   </I18nextProvider></MemoryRouter>;
   const page = render(view(true));
   const first = page.container.querySelector('[data-process-group-id="canonical-first"]')!;
   const second = page.container.querySelector('[data-process-group-id="canonical-second"]')!;
-  expect(first.querySelector('button')?.getAttribute('aria-expanded')).toBe('false');
-  expect(second.querySelector('button')?.getAttribute('aria-expanded')).toBe('true');
+  const firstToggle = first.querySelector('button')!;
+  const secondToggle = second.querySelector('button')!;
+  expect(firstToggle.getAttribute('aria-expanded')).toBe('false');
+  expect(secondToggle.getAttribute('aria-expanded')).toBe('false');
+  expect(first.querySelector('.turn-process-group__body')).toBeNull();
+  expect(second.querySelector('.turn-process-group__body')).toBeNull();
+  expect(second.classList.contains('turn-process-group--running')).toBe(true);
   const narration = page.container.querySelector('[data-process-segment-id="public-between"] [data-testid="process-narration"]')!;
   expect(narration).not.toBeNull();
   expect(narration.closest('.turn-process-group')).toBeNull();
   expect(first.compareDocumentPosition(narration) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(narration.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  fireEvent.click(firstToggle);
+  fireEvent.click(page.getByRole('button', { name: 'Update current reasoning' }));
+  expect(firstToggle.getAttribute('aria-expanded')).toBe('true');
+  expect(secondToggle.getAttribute('aria-expanded')).toBe('false');
+  expect(second.querySelector('[data-process-segment-id="reasoning-second"]')).toBeNull();
+  fireEvent.click(secondToggle);
+  expect(second.querySelector('[data-process-segment-id="reasoning-second"]')).not.toBeNull();
+  expect(second.querySelector('.markdown-shadow')?.shadowRoot?.textContent).toContain('Second. Streamed.');
   page.rerender(view(false));
   expect(page.container.querySelector('.turn-process-disclosure__body')).toBeNull();
   const answer = page.container.querySelector('#message-segment-final')!;
   expect(answer).not.toBeNull();
   expect(answer.closest('.turn-process-disclosure')).toBeNull();
+  act(() => dispatchChatMessageJump({ conversation_id: conversationId, messageId: messageId(802) }));
+  expect(page.container.querySelector('[data-process-group-id="canonical-first"] > button')?.getAttribute('aria-expanded')).toBe('true');
+  expect(page.container.querySelector('[data-process-group-id="canonical-second"] > button')?.getAttribute('aria-expanded')).toBe('false');
+  expect(page.container.querySelector('[data-tool-call-id="segment-read"]')).not.toBeNull();
 });
