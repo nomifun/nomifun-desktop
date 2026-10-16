@@ -8,8 +8,10 @@
 //! was a raw failure from a real inference attempt.
 //!
 //! The probe answers three states rather than pass/fail, because the situation
-//! that matters most cannot be expressed as either: a 401/403 means the address
-//! is right and the credential is not. It also refuses to call a `200 OK` with a
+//! that matters most cannot be expressed as either: a 401 means the address is
+//! right and the credential is not. A 403 is not read as a rejected key: the
+//! probe request names no model, and gateways that authorize per model refuse
+//! it after authenticating the key. It also refuses to call a `200 OK` with a
 //! document body a success — that is a gateway serving its web UI at a near-miss
 //! path, and reporting it as reachable is how a wrong base URL survives review.
 
@@ -250,10 +252,16 @@ impl ModelFetchService {
         let reachability = if markup {
             // A document at any status means there is no API here, even at 200.
             ProviderReachability::Unreachable
-        } else if matches!(status.as_u16(), 401 | 403) {
+        } else if status.as_u16() == 401 {
             ProviderReachability::CredentialsRejected
-        } else if status.is_success() || matches!(status.as_u16(), 400 | 415 | 422 | 429) {
-            // 200/400/415/422/429 prove the endpoint exists and parsed the request.
+        } else if status.is_success() || matches!(status.as_u16(), 400 | 403 | 415 | 422 | 429) {
+            // 200/400/415/422/429 prove the endpoint exists and parsed the
+            // request. A 403 does too: the probe body names no model, so
+            // gateways that authorize per model — New API keys with a model
+            // allowlist, for example — authenticate the key (an invalid key
+            // answers 401) and then refuse the missing model with 403. A 403
+            // therefore cannot be blamed on the key; it confirms the endpoint
+            // and model access is left to model verification.
             ProviderReachability::Reachable
         } else {
             // A catch-all GET route can answer 405 to every POST. A removed
@@ -360,11 +368,11 @@ fn error_kind_for(
         return K::NonApiResponse;
     }
     match (reachability, http_status) {
-        (ProviderReachability::CredentialsRejected, Some(403)) => K::Forbidden,
         (ProviderReachability::CredentialsRejected, _) => K::Unauthorized,
         (ProviderReachability::Unreachable, Some(404)) => K::NotFound,
         (ProviderReachability::Unreachable, Some(_)) => K::ApiError,
         (ProviderReachability::Unreachable, None) => K::ConnectionError,
+        (ProviderReachability::Reachable, Some(403)) => K::Forbidden,
         (ProviderReachability::Reachable, Some(429)) => K::RateLimited,
         (ProviderReachability::Reachable, _) => K::Unknown,
     }
@@ -404,7 +412,7 @@ mod tests {
             ProviderHealthCheckErrorKind::Unauthorized
         );
         assert_eq!(
-            error_kind_for(ProviderReachability::CredentialsRejected, Some(403), false),
+            error_kind_for(ProviderReachability::Reachable, Some(403), false),
             ProviderHealthCheckErrorKind::Forbidden
         );
         assert_eq!(

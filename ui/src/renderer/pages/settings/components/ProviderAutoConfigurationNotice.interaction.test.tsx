@@ -16,10 +16,10 @@ await i18n.use(initReactI18next).init({
   lng: 'zh-CN', resources: { 'zh-CN': { translation: { settings: zhSettings } } }, interpolation: { escapeValue: false },
 });
 const available: ProviderAutoConfigurationDetection = {
-  task: 'chat', protocol: 'openai.chat_text', authScheme: 'bearer', confidence: 'verified',
+  task: 'chat', protocol: 'openai.chat_text', authScheme: 'bearer', confidence: 'reachable',
 };
 const rejected: ProviderAutoConfigurationDetection = {
-  task: 'chat', protocol: 'anthropic.messages', authScheme: 'header_key:x-api-key', confidence: 'endpoint_confirmed',
+  task: 'chat', protocol: 'anthropic.messages', authScheme: 'header_key:x-api-key', confidence: 'credentials_rejected',
 };
 const unconfirmed: ProviderAutoConfigurationDetection = {
   task: 'chat', protocol: 'openai.responses', authScheme: 'bearer', confidence: 'fallback',
@@ -43,9 +43,10 @@ describe('provider interface detection choices', () => {
     const page = mount({ onSelect: value => selections.push(value) });
     const results = within(page.getByRole('group', { name: '接口检测结果' }));
     expect(results.getAllByRole('button')).toHaveLength(3);
-    expect(results.getByText('接口可用')).toBeTruthy();
-    expect(results.getByText('鉴权失败')).toBeTruthy();
+    expect(results.getByText('已识别')).toBeTruthy();
+    expect(results.getByText('密钥被拒绝（401）')).toBeTruthy();
     expect(results.getByText('未确认')).toBeTruthy();
+    expect(page.container.querySelector('.arco-tag-green')).toBeNull();
     expect(results.getByText(unconfirmed.suggestedBaseUrl!)).toBeTruthy();
     expect(results.getByRole('button', { name: available.protocol }).getAttribute('aria-pressed')).toBe('true');
     const option = results.getByRole('button', { name: unconfirmed.protocol });
@@ -145,9 +146,9 @@ describe('provider interface detection choices', () => {
     const imageButton = page.getByRole('button', { name: `${zhSettings.modelTask.image_generation} · ${image.protocol}` }) as HTMLButtonElement;
     expect(page.getByRole('status').textContent).toContain('配置已修改，尚未重新检测');
     expect(chatButton.disabled).toBe(true);
-    expect(chatButton.parentElement?.querySelector('.arco-tag-green')).toBeNull();
+    expect(chatButton.parentElement?.querySelector('.arco-tag-gray')).toBeNull();
     expect(imageButton.disabled).toBe(false);
-    expect(imageButton.parentElement?.querySelector('.arco-tag-green')).not.toBeNull();
+    expect(imageButton.parentElement?.querySelector('.arco-tag-gray')).not.toBeNull();
     fireEvent.click(chatButton);
     fireEvent.click(imageButton);
     expect(selections).toEqual([image]);
@@ -164,7 +165,7 @@ describe('provider interface detection choices', () => {
     const page = mount({ definition: { ...definition, capabilities: [{ ...emptyCapabilityDraft('chat'), protocol: rejected.protocol }] } });
     expect(page.getByRole('status').textContent).toContain(rejected.protocol);
     expect(page.getByRole('status').textContent).not.toContain(available.protocol);
-    expect(page.container.querySelector('[data-provider-auto-configuration]')?.getAttribute('data-provider-auto-configuration')).toBe('endpoint_confirmed');
+    expect(page.container.querySelector('[data-provider-auto-configuration]')?.getAttribute('data-provider-auto-configuration')).toBe('credentials_rejected');
   });
 
   test('hides results for providers without automatic interface detection', () => {

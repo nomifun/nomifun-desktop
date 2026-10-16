@@ -44,7 +44,7 @@ describe('form-local provider interface discovery', () => {
     await waitFor(() => expect(hook.result.current.data?.candidates).toHaveLength(2));
     expect(probe).toHaveBeenCalledTimes(2);
     expect(probe.mock.calls.every(([request]) => !Object.hasOwn(request, 'model'))).toBe(true);
-    expect(hook.result.current.data?.candidates.every(candidate => candidate.confidence === 'verified')).toBe(true);
+    expect(hook.result.current.data?.candidates.every(candidate => candidate.confidence === 'reachable')).toBe(true);
     const applied = applyProviderAutoConfiguration(initial.definition, hook.result.current.data!.detections);
     hook.rerender({ ...initial, definition: { ...applied, model: 'one' } });
     hook.rerender({ ...initial, definition: { ...applied, model: 'another' } });
@@ -65,7 +65,7 @@ describe('form-local provider interface discovery', () => {
     const hook = renderHook(props => useProviderAutoConfiguration(props), { initialProps: initial });
     await waitFor(() => expect(hook.result.current.data?.candidates).toHaveLength(2));
     const chosen = hook.result.current.data!.candidates.find(candidate => candidate.protocol === 'anthropic.messages')!;
-    expect(chosen).toMatchObject({ confidence: 'verified', authScheme: 'header_key:x-api-key', suggestedBaseUrl: 'https://vendor.example/claude' });
+    expect(chosen).toMatchObject({ confidence: 'reachable', authScheme: 'header_key:x-api-key', suggestedBaseUrl: 'https://vendor.example/claude' });
     hook.rerender({ ...initial, baseUrl: chosen.suggestedBaseUrl!, authScheme: chosen.authScheme, definition: {
       model: 'selected-model', capabilities: [{ ...emptyCapabilityDraft('chat'), protocol: chosen.protocol, transportSource: 'user', protocolSelectionSource: 'manual' }],
     } });
@@ -82,7 +82,7 @@ describe('form-local provider interface discovery', () => {
     }));
     const hook = renderHook(() => useProviderAutoConfiguration(options()));
     await waitFor(() => expect(hook.result.current.data?.candidates).toHaveLength(2));
-    expect(hook.result.current.data?.candidates.map(candidate => candidate.confidence)).toEqual(['endpoint_confirmed', 'fallback']);
+    expect(hook.result.current.data?.candidates.map(candidate => candidate.confidence)).toEqual(['credentials_rejected', 'fallback']);
     expect(hook.result.current.data?.detections[0].protocol).toBe('openai.chat_text');
   });
 

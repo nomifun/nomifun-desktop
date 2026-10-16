@@ -238,15 +238,17 @@ pub struct FetchModelsAnonymousRequest {
 ///
 /// The three-state result exists because a binary pass/fail cannot express the
 /// most common real situation: the address is correct and the credential is not.
-/// A 401/403 proves an endpoint exists and is enforcing auth, so it confirms the
-/// URL even though the request failed.
+/// A 401 proves an endpoint exists and is enforcing auth, so it confirms the URL
+/// even though the request failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderReachability {
-    /// The endpoint answered as an API.
+    /// The endpoint answered as an API, including a 403 refusal of the
+    /// model-less probe: gateways that authorize per model accept the key and
+    /// then reject the missing model, so a 403 cannot be blamed on the key.
     Reachable,
-    /// The endpoint exists and rejected the credential (401/403).
+    /// The endpoint exists and rejected the credential (401).
     CredentialsRejected,
     /// No API at this address: 404, a document body, or a transport failure.
     Unreachable,

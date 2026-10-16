@@ -112,20 +112,22 @@ function mount({ duplicate = false, holdSave = false, platform = 'preview' } = {
 
 describe('add-model configuration save controls', () => {
   for (const platform of ['custom', 'new-api']) {
-    test(`${platform} reuses endpoint checks and saves the chosen protocol without automatic model verification`, async () => {
-      const { page, open, confirm, discover, save, probe } = mount({ platform });
+    test(`${platform} reuses endpoint checks and saves the chosen protocol after one automatic model verification`, async () => {
+      const { page, open, confirm, discover, save, probe, discovery } = mount({ platform });
       const input = await open();
       await waitFor(() => expect(probe).toHaveBeenCalledTimes(2));
       await page.findByRole('button', { name: 'openai.responses' });
       fireEvent.change(input, { target: { value: MODEL } });
       fireEvent.keyDown(input, { key: 'Enter' });
+      await waitFor(() => expect(discover).toHaveBeenCalledTimes(1));
+      expect(confirm().disabled).toBe(true);
+      await act(async () => discovery.resolve(completedDiscovery()));
       await waitFor(() => expect(confirm().disabled).toBe(false));
-      expect(discover).not.toHaveBeenCalled();
       fireEvent.click(page.getByRole('button', { name: 'openai.responses' }));
       await act(async () => { await new Promise(resolve => setTimeout(resolve, 650)); });
       expect(page.getByRole('button', { name: 'openai.responses' }).getAttribute('aria-pressed')).toBe('true');
       expect(probe).toHaveBeenCalledTimes(2);
-      expect(discover).not.toHaveBeenCalled();
+      expect(discover).toHaveBeenCalledTimes(1);
       expect(confirm().disabled).toBe(false);
       fireEvent.click(confirm());
       await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
@@ -133,14 +135,11 @@ describe('add-model configuration save controls', () => {
     });
   }
 
-  test('custom providers can explicitly verify the model and save its selected tested capability', async () => {
-    const { page, open, confirm, discover, save, discovery } = mount({ platform: 'custom' });
+  test('custom providers automatically verify the model and save its selected tested capability', async () => {
+    const { open, confirm, discover, save, discovery } = mount({ platform: 'custom' });
     const input = await open();
     fireEvent.change(input, { target: { value: MODEL } });
     fireEvent.keyDown(input, { key: 'Enter' });
-    await waitFor(() => expect(confirm().disabled).toBe(false));
-    expect(discover).not.toHaveBeenCalled();
-    fireEvent.click(page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.verifyModel }));
     await waitFor(() => expect(discover).toHaveBeenCalledTimes(1));
     expect(confirm().disabled).toBe(true);
     await act(async () => discovery.resolve(completedDiscovery()));

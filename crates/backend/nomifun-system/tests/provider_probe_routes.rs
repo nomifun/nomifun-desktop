@@ -190,6 +190,121 @@ async fn anthropic_empty_request_sends_native_headers_but_only_confirms_endpoint
     assert!(!requests[0].headers.contains_key("authorization"));
 }
 
+/// A gateway that authorizes per model — a New API key with a model allowlist —
+/// authenticates the key first and then refuses the model-less probe body with
+/// a 403 permission error. That refusal must not be reported as a rejected key:
+/// only a 401 carries that meaning.
+#[tokio::test]
+async fn a_per_model_403_confirms_the_endpoint_while_a_401_rejects_the_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("x-api-key", "valid-key"))
+        .and(header("anthropic-version", "2023-06-01"))
+        .and(body_json(json!({})))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "type": "error",
+            "error": {
+                "type": "permission_error",
+                "message": "该模型暂无权限访问 [trace_id=trace-fixture-403 code=40004]"
+            },
+            "request_id": "req-fixture-403"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("x-api-key", "invalid-key"))
+        .and(header("anthropic-version", "2023-06-01"))
+        .and(body_json(json!({})))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "type": "error",
+            "error": {
+                "type": "authentication_error",
+                "message": "Invalid API Key! [trace_id=trace-fixture-401 code=40001]"
+            },
+            "request_id": "req-fixture-401"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let (router, db) = setup().await;
+    let probe_anonymous = |key: &str| {
+        let router = router.clone();
+        let base_url = server.uri();
+        let key = key.to_owned();
+        async move {
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/providers/probe-connection")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({
+                                "platform": "custom",
+                                "base_url": base_url,
+                                "auth_scheme": "header_key:x-api-key",
+                                "credentials": {"api_keys": [key]},
+                                "protocol": "anthropic.messages",
+                                "task": "chat",
+                                "probe_candidates": true
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "probe route must answer 200");
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        }
+    };
+
+    let body = probe_anonymous("valid-key").await;
+    assert_eq!(body["data"]["reachability"], "reachable");
+    assert_eq!(body["data"]["error_kind"], "forbidden");
+    assert_eq!(body["data"]["http_status"], 403);
+    assert!(
+        body["data"].get("suggested_base_url").is_none()
+            || body["data"]["suggested_base_url"].is_null(),
+        "a 403 is not a wrong-root signal: {}",
+        body["data"]
+    );
+    assert!(
+        body["data"].get("candidates").is_none()
+            || body["data"]["candidates"].as_array().unwrap().is_empty(),
+        "an authenticated endpoint must not fan out to root candidates: {}",
+        body["data"]
+    );
+    assert!(!body.to_string().contains("valid-key"));
+
+    let body = probe_anonymous("invalid-key").await;
+    assert_eq!(body["data"]["reachability"], "credentials_rejected");
+    assert_eq!(body["data"]["error_kind"], "unauthorized");
+    assert_eq!(body["data"]["http_status"], 401);
+    assert!(!body.to_string().contains("invalid-key"));
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2, "no root-candidate fan-out may occur");
+    for (index, key) in ["valid-key", "invalid-key"].iter().enumerate() {
+        assert_eq!(
+            requests[index].headers["x-api-key"].to_str().unwrap(),
+            *key
+        );
+    }
+    assert!(
+        SqliteProviderRepository::new(db.pool().clone())
+            .list()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[tokio::test]
 async fn missing_post_handlers_and_removed_endpoints_do_not_confirm_a_protocol() {
     for status in [405, 410] {

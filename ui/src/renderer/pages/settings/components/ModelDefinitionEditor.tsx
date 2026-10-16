@@ -107,7 +107,6 @@ export interface ModelDefinitionEditorProps {
   providerAuthScheme: string;
   providerLabel?: string;
   protocolDiscovery?: ModelProtocolDiscoveryContext;
-  automaticProtocolDiscovery?: boolean;
   onProtocolDiscoveryPendingChange?: (pending: boolean) => void;
   manifests: ModelProtocolManifestMap;
   manifestLoadingTasks?: readonly ModelTask[];
@@ -400,7 +399,6 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
   providerAuthScheme,
   providerLabel,
   protocolDiscovery,
-  automaticProtocolDiscovery = true,
   onProtocolDiscoveryPendingChange,
   manifests,
   manifestLoadingTasks = EMPTY_TASKS,
@@ -1371,7 +1369,6 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                 key={protocolDiscoveryEpoch}
                 model={value.model}
                 committed={Boolean(committedModel) && committedModel === value.model.trim()}
-                automatic={automaticProtocolDiscovery}
                 attemptState={protocolDiscoveryAttemptForTask(capability.task)}
                 applyRecommendedDefaults={modelProtocolDiscoveryAppliesDefaults(capability)}
                 capability={preparing ? undefined : capabilityInputsFromDefinition({ model: value.model, capabilities: [capability] })?.[0]}

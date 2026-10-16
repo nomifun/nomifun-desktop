@@ -84,7 +84,7 @@ describe('provider auto configuration', () => {
       protocol: 'openai.chat_text', connectionRole: 'other-account', baseUrlOverride: 'https://untested.example',
       endpoint: '/untested', allowCrossOriginCredentials: true, outputLimit: 8192, providerParamsJson: '{"temperature":0.2}' }] };
     const selected = applyProviderAutoConfigurationSelection(definition, {
-      task: 'chat', protocol: 'openai.chat_text', confidence: 'verified', authScheme: 'bearer',
+      task: 'chat', protocol: 'openai.chat_text', confidence: 'reachable', authScheme: 'bearer',
     }, 'https://checked.example/v1');
     expect(selected.capabilities[0]).toMatchObject({
       protocol: 'openai.chat_text', connectionRole: 'default', baseUrlOverride: 'https://checked.example/v1',
@@ -92,7 +92,7 @@ describe('provider auto configuration', () => {
       transportSource: 'user', protocolSelectionSource: 'manual',
     });
     expect(applyProviderAutoConfiguration(selected, [{ task: 'chat', protocol: 'openai.responses',
-      confidence: 'verified', authScheme: 'bearer' }])).toEqual(selected);
+      confidence: 'reachable', authScheme: 'bearer' }])).toEqual(selected);
   });
 
   test('required-output protocol discovery never invents a model recommendation', () => {
@@ -386,7 +386,7 @@ describe('provider auto configuration', () => {
       task: 'chat',
       protocol: 'anthropic.messages',
       authScheme: 'header_key:x-api-key',
-      confidence: 'verified',
+      confidence: 'reachable',
       suggestedBaseUrl: 'https://gateway.example',
     });
   });
@@ -416,7 +416,7 @@ describe('provider auto configuration', () => {
       task: 'chat' as const,
       protocol: 'anthropic.messages',
       authScheme: 'header_key:x-api-key',
-      confidence: 'verified' as const,
+      confidence: 'reachable' as const,
       outputLimit: 8_192,
     };
     const applied = applyProviderAutoConfiguration(

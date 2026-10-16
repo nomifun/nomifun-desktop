@@ -776,7 +776,6 @@ const AddPlatformModal = ModalHOC<{
             connections: pendingConnections,
             ...(bedrockConfig ? { bedrockConfig } : {}),
           } : undefined}
-          automaticProtocolDiscovery={!autoConfigurationEnabled}
           onProtocolDiscoveryPendingChange={setProtocolDetecting}
           manifests={manifestState.manifests}
           manifestLoadingTasks={manifestState.loadingTasks}

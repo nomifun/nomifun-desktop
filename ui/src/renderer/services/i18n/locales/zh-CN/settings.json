@@ -569,14 +569,14 @@
   "providerAutoConfiguration": {
     "changed": "配置已修改，尚未重新检测",
     "results": "接口检测结果",
-    "available": "接口可用",
-    "credentialsRejected": "鉴权失败",
+    "identified": "已识别",
+    "credentialsRejected": "密钥被拒绝（401）",
     "unconfirmed": "未确认",
     "applied": "已自动配置",
     "detecting": "正在检查接口地址及鉴权格式，不会生成模型回答…",
-    "verified": "已自动配置接口 {{protocols}}；需要时可点击「验证模型」检查模型与工具调用。",
-    "endpointConfirmed": "已确认接口 {{protocols}}；当前密钥未通过验证，尚未验证当前模型。",
-    "fallback": "接口在线确认未完成，暂用通用协议 {{protocols}}；可点击「验证模型」检查。",
+    "reachable": "已识别接口 {{protocols}}；确认模型 ID 后会用真实请求自动验证，可用性以该结果为准。",
+    "keyRejected": "已识别接口 {{protocols}}，但密钥被拒绝（401）；请检查 API Key。",
+    "fallback": "接口在线确认未完成，暂用通用协议 {{protocols}}；确认模型 ID 后会用真实请求自动验证。",
     "urlAdjusted": "API 地址已自动修正。"
   },
   "modelProtocolDiscovery": {
@@ -588,8 +588,6 @@
     "title": "可用协议",
     "recheck": "重新检测",
     "changed": "配置已修改，尚未重新检测",
-    "verifyModel": "验证模型",
-    "notVerified": "尚未验证模型",
     "awaitCommit": "请确认模型 ID",
     "needsConfiguration": "请补全连接信息",
     "waiting": "等待自动配置",

@@ -569,14 +569,14 @@
   "providerAutoConfiguration": {
     "changed": "Configuration changed; check again when ready",
     "results": "Endpoint check results",
-    "available": "Endpoint available",
-    "credentialsRejected": "Authentication rejected",
+    "identified": "Endpoint identified",
+    "credentialsRejected": "Key rejected (401)",
     "unconfirmed": "Unconfirmed",
     "applied": "Auto-configured",
     "detecting": "Checking endpoint and authentication format without generating a model response…",
-    "verified": "Configured the {{protocols}} endpoint. Use Verify model when you want to check model and tool calls.",
-    "endpointConfirmed": "Confirmed the {{protocols}} endpoint. The key was rejected and the current model is not verified.",
-    "fallback": "Endpoint confirmation did not finish. Using {{protocols}} for now; use Verify model to check it.",
+    "reachable": "Identified the {{protocols}} endpoint. After you confirm the model ID, a real request verifies it automatically; that result decides availability.",
+    "keyRejected": "Identified the {{protocols}} endpoint, but the key was rejected (401). Check the API key.",
+    "fallback": "Endpoint confirmation did not finish. Using {{protocols}} for now; after you confirm the model ID, a real request verifies it automatically.",
     "urlAdjusted": "The API URL was corrected automatically."
   },
   "modelProtocolDiscovery": {
@@ -588,8 +588,6 @@
     "title": "Available protocols",
     "recheck": "Check again",
     "changed": "Configuration changed; check again when ready",
-    "verifyModel": "Verify model",
-    "notVerified": "Model not verified",
     "awaitCommit": "Confirm the model ID",
     "needsConfiguration": "Complete the connection details",
     "waiting": "Waiting to configure",

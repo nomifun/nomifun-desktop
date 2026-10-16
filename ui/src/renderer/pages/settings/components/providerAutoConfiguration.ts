@@ -41,8 +41,8 @@ const OPENAI_RESPONSES_PROTOCOL_BY_TASK: Readonly<Partial<Record<ModelTask, stri
 const EMPTY_PROTOCOL_BY_TASK: Readonly<Partial<Record<ModelTask, string>>> = {};
 
 type ProviderAutoConfigurationConfidence =
-  | 'verified'
-  | 'endpoint_confirmed'
+  | 'reachable'
+  | 'credentials_rejected'
   | 'fallback';
 
 interface ProviderAutoConfigurationCandidate {
@@ -297,9 +297,9 @@ export const selectProviderAutoConfiguration = (
     authScheme: selected.authScheme,
     confidence:
       best?.reachability === 'reachable'
-        ? 'verified'
+        ? 'reachable'
         : best?.reachability === 'credentials_rejected'
-          ? 'endpoint_confirmed'
+          ? 'credentials_rejected'
           : 'fallback',
     ...(best?.suggestedBaseUrl
       ? { suggestedBaseUrl: best.suggestedBaseUrl }

@@ -40,10 +40,10 @@ const ProviderAutoConfigurationNotice: React.FC<{
   )
     ? 'fallback'
     : detections.some(
-          (detection) => detection.confidence === 'endpoint_confirmed'
+          (detection) => detection.confidence === 'credentials_rejected'
         )
-      ? 'endpoint_confirmed'
-      : 'verified';
+      ? 'credentials_rejected'
+      : 'reachable';
   const adjustedUrl = detections.some((detection) =>
     Boolean(detection.suggestedBaseUrl)
   );
@@ -59,7 +59,7 @@ const ProviderAutoConfigurationNotice: React.FC<{
         ) : !hasStaleResults && hasResults ? (
           <Tag
             size='small'
-            color={confidence === 'fallback' ? 'orange' : 'green'}
+            color={confidence === 'fallback' ? 'orange' : 'arcoblue'}
             bordered={false}
           >
             {mode === 'openai-responses'
@@ -90,21 +90,21 @@ const ProviderAutoConfigurationNotice: React.FC<{
                 })
               : !hasResults
                 ? t(canRecheck ? 'settings.healthNotChecked' : 'settings.modelProtocolDiscovery.needsConfiguration')
-                : confidence === 'verified'
-                  ? t('settings.providerAutoConfiguration.verified', {
+                : confidence === 'reachable'
+                  ? t('settings.providerAutoConfiguration.reachable', {
                       protocols: protocols.join(', '),
-                      defaultValue: '已自动配置接口 {{protocols}}；需要时可点击「验证模型」检查模型与工具调用。',
+                      defaultValue: '已识别接口 {{protocols}}；确认模型 ID 后会用真实请求自动验证，可用性以该结果为准。',
                     })
-                  : confidence === 'endpoint_confirmed'
-                    ? t('settings.providerAutoConfiguration.endpointConfirmed', {
+                  : confidence === 'credentials_rejected'
+                    ? t('settings.providerAutoConfiguration.keyRejected', {
                         protocols: protocols.join(', '),
                         defaultValue:
-                          '已确认接口 {{protocols}}；当前密钥未通过验证，尚未验证当前模型。',
+                          '已识别接口 {{protocols}}，但密钥被拒绝（401）；请检查 API Key。',
                       })
                     : t('settings.providerAutoConfiguration.fallback', {
                         protocols: protocols.join(', '),
                         defaultValue:
-                          '接口在线确认未完成，暂用通用协议 {{protocols}}；可点击「验证模型」检查。',
+                          '接口在线确认未完成，暂用通用协议 {{protocols}}；确认模型 ID 后会用真实请求自动验证。',
                       })}
           {!loading && !hasStaleResults && adjustedUrl
             ? ` ${t('settings.providerAutoConfiguration.urlAdjusted', {
@@ -125,17 +125,17 @@ const ProviderAutoConfigurationNotice: React.FC<{
           ) ?? false;
           const status = candidateStale
             ? t('settings.providerAutoConfiguration.unconfirmed', { defaultValue: '未确认' })
-            : candidate.confidence === 'verified'
-              ? t('settings.providerAutoConfiguration.available', { defaultValue: '接口可用' })
-              : candidate.confidence === 'endpoint_confirmed'
-                ? t('settings.providerAutoConfiguration.credentialsRejected', { defaultValue: '鉴权失败' })
+            : candidate.confidence === 'reachable'
+              ? t('settings.providerAutoConfiguration.identified', { defaultValue: '已识别' })
+              : candidate.confidence === 'credentials_rejected'
+                ? t('settings.providerAutoConfiguration.credentialsRejected', { defaultValue: '密钥被拒绝（401）' })
                 : t('settings.providerAutoConfiguration.unconfirmed', { defaultValue: '未确认' });
           return <div key={`${candidate.task}:${candidate.protocol}`} className='flex flex-wrap items-center gap-6px' data-provider-protocol-result={candidate.protocol} data-provider-protocol-task={candidate.task}>
             <Button size='mini' type={selected ? 'primary' : 'secondary'} aria-pressed={selected}
               disabled={loading || candidateStale || !onSelect} onClick={() => onSelect?.(candidate)}>
               {hasMultipleTasks ? `${t(`settings.modelTask.${candidate.task}`, { defaultValue: candidate.task })} · ` : ''}{candidate.protocol}
             </Button>
-            <Tag size='small' bordered={false} color={!candidateStale && candidate.confidence === 'verified' ? 'green' : 'orange'}>{status}</Tag>
+            <Tag size='small' bordered={false} color={!candidateStale && candidate.confidence === 'reachable' ? 'gray' : 'orange'}>{status}</Tag>
             {candidate.suggestedBaseUrl && <span className='min-w-0 break-all text-t-tertiary'>{candidate.suggestedBaseUrl}</span>}
           </div>;
         })}

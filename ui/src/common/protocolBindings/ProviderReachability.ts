@@ -5,7 +5,7 @@
  *
  * The three-state result exists because a binary pass/fail cannot express the
  * most common real situation: the address is correct and the credential is not.
- * A 401/403 proves an endpoint exists and is enforcing auth, so it confirms the
- * URL even though the request failed.
+ * A 401 proves an endpoint exists and is enforcing auth, so it confirms the URL
+ * even though the request failed.
  */
 export type ProviderReachability = "reachable" | "credentials_rejected" | "unreachable";

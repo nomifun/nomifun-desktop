@@ -111,10 +111,14 @@ default or select a value accepted by that server. Avoid `temperature`, `top_p`,
 and other sampling controls on reasoning models that reject them. Saving protocol
 parameters does not establish that a particular model accepts every field.
 
-A connection probe checks the address, authentication and endpoint response only.
+A connection probe only identifies the endpoint, authentication format and URL
+root: it sends an empty request without a model and never reports a model as
+available. Only a 401 is shown as a rejected key; a 403 still confirms the
+endpoint, because gateways that authorize per model (for example New API keys
+with a model allowlist) refuse the missing model after accepting the key.
 Loading the model list or observing a reachable endpoint does not verify that a
-particular model can generate an answer or call tools. Run the model health check
-on the saved capability.
+particular model can generate an answer or call tools. The model check described
+below does, and so does the health check on the saved capability.
 
 Health observations are stored per task. Text chat requires the same harmless
 tool round trip as protocol verification: the model must call the probe tool,
@@ -130,9 +134,13 @@ verified**, rather than reporting success or failure. Probes do not poll jobs,
 download remote outputs or start an audio conversation.
 
 Selecting a catalog model, or committing a complete ID with Enter or blur,
-automatically checks the current task. Connection, protocol and parameter changes
-start a new check; each keystroke and alias edits do not. Identical configurations
-reuse results within the editor. The normal view shows only the connection result; Connection settings lists
+automatically checks the current task once on every platform, including Custom
+and New API. Later connection, protocol, parameter or model changes mark the
+result as changed; choose **Check again** to send a new check. Each keystroke and
+alias edits do not. Identical configurations reuse results within the editor.
+When no candidate is available, the status names the classified failure, such as
+a rejected key (401), missing permission (403), insufficient quota or a timeout.
+The normal view shows only the connection result; Connection settings lists
 all available candidates when needed. A documented
 recommendation wins among available candidates, otherwise the first available
 candidate wins. A working saved or manual selection is preserved.

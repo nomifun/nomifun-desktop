@@ -53,7 +53,7 @@ const manifest = {
 };
 
 describe('add-provider interface configuration', () => {
-  test('reuses setup and waits for explicit detection after credentials change while preserving the chosen connection', async () => {
+  test('verifies the committed model once and waits for explicit detection after credentials change while preserving the chosen connection', async () => {
     const discover = spyOn(ipcBridge.mode.discoverModelProtocols, 'invoke').mockResolvedValue({ candidates: [], elapsed_ms: 1 });
     const listProtocols = spyOn(ipcBridge.modelProtocol.list, 'invoke').mockResolvedValue(manifest);
     const listModels = spyOn(ipcBridge.mode.fetchModelList, 'invoke').mockResolvedValue({ models: [] });
@@ -102,6 +102,7 @@ describe('add-provider interface configuration', () => {
     fireEvent.change(modelInput, { target: { value: MODEL } });
     fireEvent.keyDown(modelInput, { key: 'Enter' });
     fireEvent.blur(modelInput);
+    await waitFor(() => expect(discover).toHaveBeenCalledTimes(1));
     await waitFor(() => expect((page.getByRole('button', { name: 'anthropic.messages' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(page.getByRole('button', { name: 'anthropic.messages' }));
     await waitFor(() => expect(page.getByRole('button', { name: 'anthropic.messages' }).getAttribute('aria-pressed')).toBe('true'));
@@ -109,7 +110,7 @@ describe('add-provider interface configuration', () => {
     expect((page.getByPlaceholderText('bearer / token / header_key:x-api-key') as HTMLInputElement).value).toBe('header_key:x-api-key');
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 650)); });
     expect(probe).toHaveBeenCalledTimes(3);
-    expect(discover).not.toHaveBeenCalled();
+    expect(discover).toHaveBeenCalledTimes(1);
     expect(within(page.getByRole('group', { name: zhSettings.providerAutoConfiguration.results })).getAllByRole('button')).toHaveLength(3);
     const confirm = page.getByRole('button', { name: zhCommon.confirm }) as HTMLButtonElement;
     expect(confirm.disabled).toBe(false);
@@ -117,8 +118,9 @@ describe('add-provider interface configuration', () => {
     fireEvent.change(page.getByPlaceholderText(zhSettings.apiKeyPlaceholder), { target: { value: 'replacement-secret' } });
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 650)); });
     expect(probe).toHaveBeenCalledTimes(3);
-    expect(discover).not.toHaveBeenCalled();
-    expect(page.getByText('配置已修改，尚未重新检测')).toBeTruthy();
+    expect(discover).toHaveBeenCalledTimes(1);
+    // Both the endpoint notice and the model verification report the stale state.
+    expect(page.getAllByText('配置已修改，尚未重新检测')).toHaveLength(2);
     for (const option of within(page.getByRole('group', { name: zhSettings.providerAutoConfiguration.results })).getAllByRole('button')) {
       expect((option as HTMLButtonElement).disabled).toBe(true);
     }
@@ -140,7 +142,7 @@ describe('add-provider interface configuration', () => {
     expect((page.getByPlaceholderText('bearer / token / header_key:x-api-key') as HTMLInputElement).value).toBe('header_key:x-api-key');
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 650)); });
     expect(probe).toHaveBeenCalledTimes(6);
-    expect(discover).not.toHaveBeenCalled();
+    expect(discover).toHaveBeenCalledTimes(1);
 
     fireEvent.click(confirm);
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
@@ -152,10 +154,10 @@ describe('add-provider interface configuration', () => {
       }] },
     });
     expect(probe).toHaveBeenCalledTimes(6);
-    expect(discover).not.toHaveBeenCalled();
+    expect(discover).toHaveBeenCalledTimes(1);
   });
 
-  test('uses a named connection for one task when another task shares the default connection', async () => {
+  test('verifies each committed task once and uses a named connection for one task when another task shares the default connection', async () => {
     const imageManifest = {
       ...manifest, tasks: ['image_generation' as const], requested_task: 'image_generation' as const,
       recommendation: { ...manifest.recommendation, protocol_id: 'openai.images' },
@@ -199,6 +201,7 @@ describe('add-provider interface configuration', () => {
     expect(probe).toHaveBeenCalledTimes(3);
     fireEvent.change(modelInput, { target: { value: MODEL } });
     fireEvent.keyDown(modelInput, { key: 'Enter' });
+    await waitFor(() => expect(discover).toHaveBeenCalledTimes(1));
     fireEvent.click(page.getByRole('button', { name: zhSettings.addModelCallRoute }));
     fireEvent.click(page.getByRole('combobox', { name: zhSettings.selectModelCallRoute }));
     fireEvent.click(await page.findByRole('option', { name: zhSettings.modelTask.image_generation }));
@@ -207,6 +210,8 @@ describe('add-provider interface configuration', () => {
     await waitFor(() => expect((page.getByRole('button', { name: imageChoiceName }) as HTMLButtonElement).disabled).toBe(false));
     expect(probe).toHaveBeenCalledTimes(4);
     expect(probe.mock.calls[3]![0].task).toBe('image_generation');
+    await waitFor(() => expect(discover).toHaveBeenCalledTimes(2));
+    expect(discover.mock.calls[1]![0].capability.task).toBe('image_generation');
     fireEvent.click(page.getByRole('button', { name: imageChoiceName }));
     fireEvent.click(page.getByRole('button', { name: chatChoiceName }));
     await waitFor(() => expect(page.getByRole('button', { name: chatChoiceName }).getAttribute('aria-pressed')).toBe('true'));
@@ -216,7 +221,7 @@ describe('add-provider interface configuration', () => {
     expect((page.getByPlaceholderText('bearer / token / header_key:x-api-key') as HTMLInputElement).value).toBe('bearer');
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 650)); });
     expect(probe).toHaveBeenCalledTimes(4);
-    expect(discover).not.toHaveBeenCalled();
+    expect(discover).toHaveBeenCalledTimes(2);
     const confirm = page.getByRole('button', { name: zhCommon.confirm }) as HTMLButtonElement;
     expect(confirm.disabled).toBe(false);
     fireEvent.click(confirm);
@@ -232,6 +237,6 @@ describe('add-provider interface configuration', () => {
     });
     expect(save.mock.calls[0]![0].connections).toHaveLength(1);
     expect(probe).toHaveBeenCalledTimes(4);
-    expect(discover).not.toHaveBeenCalled();
+    expect(discover).toHaveBeenCalledTimes(2);
   });
 });

@@ -157,7 +157,7 @@ describe('model definition capability selection', () => {
     }
     expect(buildProviderAutoConfigurationTargets(unknown, manifests, 'bearer', false)).toEqual([]);
     expect(applyProviderAutoConfiguration(unknown, [{
-      task: 'chat', protocol: 'openai.chat_text', authScheme: 'bearer', confidence: 'verified',
+      task: 'chat', protocol: 'openai.chat_text', authScheme: 'bearer', confidence: 'reachable',
     }]).capabilities).toEqual([]);
   });
 

@@ -289,7 +289,6 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
               protocolDiscovery={data && modalProps.visible && !discoverySkipped ? {
                 providerId: data.id, platform: data.platform, baseUrl: data.base_url, authScheme: data.auth_scheme,
               } : undefined}
-              automaticProtocolDiscovery={!autoConfigurationEnabled}
               onProtocolDiscoveryPendingChange={setProtocolDetecting}
               manifests={manifests.manifests}
               manifestLoadingTasks={manifests.loadingTasks}

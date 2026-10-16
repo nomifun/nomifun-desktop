@@ -6,6 +6,7 @@ import { Button, Spin, Tag } from '@arco-design/web-react';
 import { IconLoading } from '@arco-design/web-react/icon';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { healthFailureHeadline } from '@/renderer/components/settings/SettingsModal/contents/healthFailureHeadline';
 import { modelProtocolDiscoveryContextSnapshot, modelProtocolDiscoverySnapshot, type ModelProtocolDiscoveryContext } from './modelProtocolDiscovery';
 import { capabilityDraftFromResponse } from './providerModelAdvanced';
 import { isOpenAIChatProtocol } from './chatProtocolTransition';
@@ -13,7 +14,6 @@ import { isOpenAIChatProtocol } from './chatProtocolTransition';
 interface Props {
   model: string;
   committed: boolean;
-  automatic?: boolean;
   attemptState?: { started: boolean };
   applyRecommendedDefaults: boolean;
   capability?: ProviderModelCapabilityInput;
@@ -30,7 +30,7 @@ const protocolLabel = (protocol: string): string => protocol === 'openai.respons
 const keyFor = (snapshot: string, preferred: string | undefined, revision: number): string => JSON.stringify([snapshot, preferred ?? '', revision]);
 
 /** Verify committed model IDs. Results and deduplication stay in this editor. */
-export default function ModelProtocolDiscoveryControl({ model, committed, automatic = true, attemptState: sharedAttemptState, applyRecommendedDefaults, capability, snapshot, context, preferredProtocol, onSelect, onPendingChange, onConfigureProtocol }: Props) {
+export default function ModelProtocolDiscoveryControl({ model, committed, attemptState: sharedAttemptState, applyRecommendedDefaults, capability, snapshot, context, preferredProtocol, onSelect, onPendingChange, onConfigureProtocol }: Props) {
   const { t } = useTranslation();
   const [checkingKey, setCheckingKey] = useState<string>();
   const [completed, setCompleted] = useState<Completed>();
@@ -69,7 +69,7 @@ export default function ModelProtocolDiscoveryControl({ model, committed, automa
     if (cached) { setCompleted(cached); setCheckingKey(undefined); return; }
     // Each scene gets one automatic attempt. Later draft edits only invalidate
     // its result; another network request requires an explicit button click.
-    if (requestedKey.current !== key && (!automatic || attemptState.started)) { setCheckingKey(undefined); return; }
+    if (requestedKey.current !== key && attemptState.started) { setCheckingKey(undefined); return; }
     let active = true;
     const controller = new AbortController();
     setCheckingKey(key);
@@ -125,7 +125,7 @@ export default function ModelProtocolDiscoveryControl({ model, committed, automa
     return () => {
       active = false; clearTimeout(timer); controller.abort(); current.current.onPendingChange?.(false);
     };
-  }, [key, ready, retry, automatic, attemptState]);
+  }, [key, ready, retry, attemptState]);
 
   const displayed = completed?.key === key ? completed : undefined;
   const result = displayed?.result;
@@ -133,12 +133,15 @@ export default function ModelProtocolDiscoveryControl({ model, committed, automa
   const diagnostics = result?.candidates.filter(candidate => candidate.status !== 'available') ?? [];
   const selected = available.find(candidate => candidate.protocol === capability?.protocol);
   const needsReview = available.length === 0 && diagnostics.some(candidate => candidate.status === 'blocked' || candidate.status === 'incompatible');
+  const isRequestFailure = (candidate: ModelProtocolCandidate) => candidate.status === 'inconclusive' && Boolean(candidate.error_kind);
+  const failure = available.length > 0 ? undefined
+    : diagnostics.find(candidate => candidate.protocol === capability?.protocol && isRequestFailure(candidate)) ?? diagnostics.find(isRequestFailure);
   const status = !committed ? t('settings.modelProtocolDiscovery.awaitCommit')
     : !ready ? t('settings.modelProtocolDiscovery.needsConfiguration')
     : checking ? t('settings.modelProtocolDiscovery.checking')
-    : !displayed ? t(attemptState.started ? 'settings.modelProtocolDiscovery.changed'
-      : automatic ? 'settings.modelProtocolDiscovery.waiting' : 'settings.modelProtocolDiscovery.notVerified')
+    : !displayed ? t(attemptState.started ? 'settings.modelProtocolDiscovery.changed' : 'settings.modelProtocolDiscovery.waiting')
     : available.length > 0 ? t(selected?.evidence === 'verified_stream' ? 'settings.modelProtocolDiscovery.connected' : 'settings.modelProtocolDiscovery.configured')
+    : failure ? healthFailureHeadline(t, failure)
     : needsReview ? t('settings.modelProtocolDiscovery.reviewConfiguration')
     : t('settings.modelProtocolDiscovery.unavailable');
   const evidenceLabel = (candidate: ModelProtocolCandidate): string => {
@@ -173,7 +176,7 @@ export default function ModelProtocolDiscoveryControl({ model, committed, automa
       </span>
       <div className='flex shrink-0 items-center gap-4px'>
         <Button size='mini' type='text' disabled={!ready || checking} onClick={check} data-model-protocol-recheck>
-          {t(!automatic && !attemptState.started ? 'settings.modelProtocolDiscovery.verifyModel' : 'settings.modelProtocolDiscovery.recheck')}
+          {t('settings.modelProtocolDiscovery.recheck')}
         </Button>
         <Button size='mini' type='text' aria-expanded={settingsOpen} onClick={() => {
           setDisclosure({ identity: disclosureIdentity, settings: !settingsOpen, diagnostics: false });

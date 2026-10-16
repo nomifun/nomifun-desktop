@@ -5,6 +5,12 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- Verify Custom and New API models automatically with one real Agent round
+  trip once the model ID is confirmed, and name the classified failure (such as
+  a rejected key or missing model permission) when it fails. The model-less
+  endpoint probe now only configures the endpoint: it no longer reports a model
+  as available, and only a 401 marks the key as rejected.
+
 ## v0.8.11 - 2026-10-16
 
 - Unify Chat protocol discovery and saved-capability health checks on the exact
