@@ -229,6 +229,7 @@ pub(crate) fn parse_images_response_limited(
     value: &Value,
     max_images: usize,
 ) -> Result<Vec<ProducedAsset>, InvokeError> {
+    super::media_response::reject_provider_error(value, "images response")?;
     let data = value
         .get("data")
         .and_then(|v| v.as_array())
@@ -262,7 +263,7 @@ pub(crate) fn parse_images_response_limited(
             });
         } else if let Some(url) = url {
             budget.accept_url("images response")?;
-            out.push(ProducedAsset { data: ProducedData::Url(url.to_string()), mime: None });
+            out.push(ProducedAsset { data: ProducedData::Url(super::media_response::media_url(url, "images response")?), mime: None });
         } else {
             return Err(InvokeError::parse(
                 "images data item has neither a non-empty b64_json nor URL field",

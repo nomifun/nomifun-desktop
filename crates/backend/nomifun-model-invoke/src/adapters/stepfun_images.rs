@@ -110,7 +110,7 @@ async fn submit_generation(
         &Value::Object(body),
     )
     .await?;
-    parse_http_response(response).await
+    parse_http_response(response).await.map_err(|error| error.redacted(&call.connection.auth.secret_redactor()))
 }
 
 async fn submit_edit(
@@ -160,7 +160,7 @@ async fn submit_edit(
         build_form,
     )
     .await?;
-    parse_http_response(response).await
+    parse_http_response(response).await.map_err(|error| error.redacted(&call.connection.auth.secret_redactor()))
 }
 
 /// Merge provider-native fields in this order:
@@ -302,7 +302,7 @@ async fn parse_http_response(response: reqwest::Response) -> Result<TaskOutcome,
 }
 
 fn parse_images_response(value: &Value) -> Result<Vec<ProducedAsset>, InvokeError> {
-    if let Some(error) = value.get("error") {
+    if let Some(error) = value.get("error").filter(|error| super::media_response::meaningful_error(error)) {
         return Err(classify_body_error(error));
     }
     let data = value
@@ -335,7 +335,7 @@ fn parse_images_response(value: &Value) -> Result<Vec<ProducedAsset>, InvokeErro
             .map(str::trim)
             .filter(|url| !url.is_empty())
         {
-            assets.push(ProducedAsset { data: ProducedData::Url(url.to_owned()), mime: None });
+            assets.push(ProducedAsset { data: ProducedData::Url(super::media_response::media_url(url,"StepFun image result")?), mime: None });
         } else {
             return Err(InvokeError::parse(
                 "StepFun images data item contains neither b64_json nor url",

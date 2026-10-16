@@ -676,8 +676,16 @@ async fn drain_text_response(rx: tokio::sync::mpsc::Receiver<LlmEvent>) -> Resul
 
 /// Drain variant that surfaces every text delta to `on_delta` as it arrives.
 async fn drain_text_response_with(
+    rx: tokio::sync::mpsc::Receiver<LlmEvent>,
+    on_delta: impl FnMut(&str) + Send,
+) -> Result<String, AppError> {
+    drain_text_response_with_limit(rx,on_delta,None).await
+}
+
+async fn drain_text_response_with_limit(
     mut rx: tokio::sync::mpsc::Receiver<LlmEvent>,
     mut on_delta: impl FnMut(&str) + Send,
+    max_output_utf8_bytes: Option<usize>,
 ) -> Result<String, AppError> {
     let mut output = String::new();
     let mut terminal: Option<StopReason> = None;
@@ -690,6 +698,13 @@ async fn drain_text_response_with(
         }
         match event {
             LlmEvent::TextDelta(delta) => {
+                if let Some(limit) = max_output_utf8_bytes {
+                    if !output.len().checked_add(delta.len()).is_some_and(|next| next <= limit) {
+                        return Err(AppError::BadGateway(format!(
+                            "LLM response exceeded the {limit}-byte output limit"
+                        )));
+                    }
+                }
                 on_delta(&delta);
                 output.push_str(&delta);
             }
@@ -739,43 +754,11 @@ async fn drain_text_response_with(
 }
 
 async fn drain_text_response_bounded(
-    mut rx: tokio::sync::mpsc::Receiver<LlmEvent>,
+    rx: tokio::sync::mpsc::Receiver<LlmEvent>,
     max_output_utf8_bytes: usize,
 ) -> Result<String, AppError> {
-    let mut output = String::new();
-
-    while let Some(event) = rx.recv().await {
-        match event {
-            LlmEvent::TextDelta(delta) => {
-                let within_limit = output
-                    .len()
-                    .checked_add(delta.len())
-                    .is_some_and(|next| next <= max_output_utf8_bytes);
-                if !within_limit {
-                    drop(rx);
-                    return Err(AppError::BadGateway(format!(
-                        "LLM response exceeded the {max_output_utf8_bytes}-byte output limit"
-                    )));
-                }
-                output.push_str(&delta);
-            }
-            LlmEvent::Done { .. } => return Ok(output),
-            LlmEvent::Error(message) => {
-                return Err(AppError::BadGateway(format!(
-                    "LLM stream error: {message}"
-                )));
-            }
-            _ => {}
-        }
-    }
-
-    if output.is_empty() {
-        Err(AppError::BadGateway(
-            "LLM stream ended without producing a response".into(),
-        ))
-    } else {
-        Ok(output)
-    }
+    // A memory bound must not weaken the normal one-shot success contract.
+    drain_text_response_with_limit(rx,|_| {},Some(max_output_utf8_bytes)).await
 }
 
 /// Drain variant for the Agent Execution planner: assembles `TextDelta` into the
@@ -1522,9 +1505,32 @@ mod tests {
         })
         .await
         .unwrap();
+        drop(tx);
 
         let result = drain_text_response_bounded(rx, 5).await.unwrap();
         assert_eq!(result, "ab你");
+    }
+
+    #[tokio::test]
+    async fn bounded_drain_requires_a_complete_visible_tool_free_end_turn() {
+        let done = |stop_reason| LlmEvent::Done {stop_reason,usage:Default::default()};
+        for (name,events) in [
+            ("partial EOF",vec![LlmEvent::TextDelta("OK".into())]),
+            ("empty terminal",vec![done(StopReason::EndTurn)]),
+            ("whitespace terminal",vec![LlmEvent::TextDelta("  ".into()),done(StopReason::EndTurn)]),
+            ("truncated terminal",vec![LlmEvent::TextDelta("OK".into()),done(StopReason::MaxTokens)]),
+            ("refused terminal",vec![LlmEvent::TextDelta("OK".into()),done(StopReason::Refusal)]),
+            ("unexpected tool",vec![LlmEvent::ToolUse {id:"call_health".into(),name:"unexpected".into(),input:serde_json::json!({}),extra:None},done(StopReason::ToolUse)]),
+            ("truncated tool",vec![LlmEvent::ToolUseTruncated {id:"call_health".into(),name:"unexpected".into(),argument_bytes:100}]),
+            ("unexpected provider state",vec![LlmEvent::ProviderRoundId("retained_health".into())]),
+            ("late error",vec![LlmEvent::TextDelta("OK".into()),done(StopReason::EndTurn),LlmEvent::Error("late protocol failure".into())]),
+        ] {
+            let (tx,rx) = tokio::sync::mpsc::channel(8);
+            for event in events {tx.send(event).await.unwrap();}
+            drop(tx);
+            let result = drain_text_response_bounded(rx,32 * 1024).await;
+            assert!(matches!(result,Err(AppError::BadGateway(_))),"{name}: {result:?}");
+        }
     }
 
     #[tokio::test]

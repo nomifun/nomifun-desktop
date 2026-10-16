@@ -55,6 +55,7 @@ import ModelHubPageHeader from '@/renderer/pages/modelHub/ModelHubPageHeader';
 import { consumePendingDeepLink } from '@/renderer/hooks/system/useDeepLink';
 import { reorderById, reorderStrings } from './modelProviderOrdering';
 import { healthFailureHeadline } from './healthFailureHeadline';
+import { capabilityForHealthSummary, healthStatusLabel, unverifiedHealthMessage } from './healthCheckPresentation';
 import {
   capabilityInputFromResponse,
 } from '@/renderer/pages/settings/components/providerModelAdvanced';
@@ -166,18 +167,16 @@ const CapabilityHealthTag: React.FC<{ capability: ProviderModelCapabilityRespons
         <div data-capability-health-tooltip={capability.task}>
           <div>
             {t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task })}:{' '}
-            {status === 'healthy'
-              ? t('common.success')
-              : status === 'unhealthy'
-                ? t('common.failed')
-                : t('settings.healthNotChecked', { defaultValue: 'Not checked' })}
+            {healthStatusLabel(t, status, capability.health_checked_at !== undefined)}
           </div>
           {capabilityHealth?.latency !== undefined && (
             <div className='text-12px mt-4px'>
               {t('settings.latency')}: {capabilityHealth.latency}ms
             </div>
           )}
-          {capabilityHealth?.error && <div className='text-12px mt-4px'>{capabilityHealth.error}</div>}
+          {status === 'unknown' && capability.health_checked_at !== undefined
+            ? <div className='text-12px mt-4px'>{unverifiedHealthMessage(t, capability.task)}</div>
+            : capabilityHealth?.error && <div className='text-12px mt-4px'>{capabilityHealth.error}</div>}
           {capability.health_checked_at !== undefined && (
             <div className='text-12px mt-4px'>
               {t('mcp.lastCheck')}: {new Date(capability.health_checked_at).toLocaleString()}
@@ -810,6 +809,11 @@ const ModelModalContent: React.FC = () => {
           content: `${platform.name} - ${modelName}: ${t('common.success')} (${latency}ms)`,
           duration: 3000,
         });
+      } else if (result.status === 'unknown') {
+        Message.info({
+          content: `${platform.name} - ${modelName}: ${unverifiedHealthMessage(t, task)}`,
+          duration: 5000,
+        });
       } else {
         Message.error({
           content: (
@@ -1121,11 +1125,7 @@ const ModelModalContent: React.FC = () => {
                     >
                     {modelRows.map((row: ProviderModelResponse, index: number, arr: ProviderModelResponse[]) => {
                       const model = row.model;
-                      const unhealthyCapability = row.capabilities.find(
-                        (capability) => capability.health?.status === 'unhealthy'
-                      );
-                      const checkedCapability =
-                        unhealthyCapability ?? row.capabilities.find((capability) => capability.health);
+                      const checkedCapability = capabilityForHealthSummary(row.capabilities);
                       const aggregateCapabilityHealth = checkedCapability?.health;
                       const healthStatus = aggregateCapabilityHealth?.status || 'unknown';
                       const modelDisplayName = row.display_name ?? '';
@@ -1155,14 +1155,14 @@ const ModelModalContent: React.FC = () => {
                                 />
 
                                 {/* 健康状态指示器 / Health status indicator */}
-                                {healthStatus !== 'unknown' && (
+                                {(healthStatus !== 'unknown' || checkedCapability?.health_checked_at !== undefined) && (
                                   <Tooltip
                                     content={
                                       <div>
                                         <div className='flex items-center gap-4px'>
-                                          <span>{healthStatus === 'healthy' ? '✅' : '❌'}</span>
+                                          <span>{healthStatus === 'healthy' ? '✅' : healthStatus === 'unhealthy' ? '❌' : '○'}</span>
                                           <span>
-                                            {healthStatus === 'healthy' ? t('common.success') : t('common.failed')}
+                                            {healthStatusLabel(t, healthStatus, checkedCapability?.health_checked_at !== undefined)}
                                           </span>
                                         </div>
                                         {checkedCapability && (
@@ -1181,9 +1181,9 @@ const ModelModalContent: React.FC = () => {
                                             {t('settings.latency')}: {aggregateCapabilityHealth.latency}ms
                                           </div>
                                         )}
-                                        {aggregateCapabilityHealth?.error && (
-                                          <div className='text-12px mt-4px'>{aggregateCapabilityHealth.error}</div>
-                                        )}
+                                        {healthStatus === 'unknown' && checkedCapability
+                                          ? <div className='text-12px mt-4px'>{unverifiedHealthMessage(t, checkedCapability.task)}</div>
+                                          : aggregateCapabilityHealth?.error && <div className='text-12px mt-4px'>{aggregateCapabilityHealth.error}</div>}
                                         {checkedCapability?.health_checked_at && (
                                           <div className='text-12px mt-4px'>
                                             {t('mcp.lastCheck')}:{' '}
@@ -1194,7 +1194,8 @@ const ModelModalContent: React.FC = () => {
                                     }
                                   >
                                     <div
-                                      className={`w-8px h-8px rounded-full shrink-0 ${healthStatus === 'healthy' ? 'bg-green-500' : 'bg-red-500'}`}
+                                      data-model-health-status={healthStatus}
+                                      className={`w-8px h-8px rounded-full shrink-0 ${healthStatus === 'healthy' ? 'bg-green-500' : healthStatus === 'unhealthy' ? 'bg-red-500' : 'bg-gray-400'}`}
                                     />
                                   </Tooltip>
                                 )}

@@ -150,6 +150,44 @@ async fn responses_probe_uses_the_responses_wire_endpoint_without_generating_con
     assert_eq!(body["data"]["reachability"], "reachable");
     assert_eq!(body["data"]["attempted_url"], format!("{}/relay/v1/responses", server.uri()));
     assert_eq!(body["data"]["protocol"], "openai.responses");
+    assert!(!server.received_requests().await.unwrap()[0].headers.contains_key("anthropic-version"));
+}
+
+#[tokio::test]
+async fn anthropic_empty_request_sends_native_headers_but_only_confirms_endpoint_reachability() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("x-api-key", "anthropic-probe-key"))
+        .and(header("anthropic-version", "2023-06-01"))
+        .and(body_json(json!({})))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "type": "error", "error": {"type": "invalid_request_error", "message": "messages is required"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (router, db) = setup().await;
+    let response = router.oneshot(Request::builder().method("POST").uri("/api/providers/probe-connection")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({
+            "platform": "anthropic", "base_url": server.uri(), "auth_scheme": "header_key:x-api-key",
+            "credentials": {"api_keys": ["anthropic-probe-key"]}, "protocol": "anthropic.messages",
+            "task": "chat", "probe_candidates": false
+        }).to_string())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["data"]["reachability"], "reachable");
+    assert_eq!(body["data"]["http_status"], 400);
+    assert_eq!(body["data"]["protocol"], "anthropic.messages");
+    assert!(body["data"].get("status").is_none(), "a reachability probe must not claim model health");
+    assert!(body["data"].get("healthy").is_none());
+    assert!(!body.to_string().contains("anthropic-probe-key"));
+    assert!(SqliteProviderRepository::new(db.pool().clone()).list().await.unwrap().is_empty());
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(!requests[0].headers.contains_key("authorization"));
 }
 
 #[tokio::test]

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use nomifun_api_types::ModelTask;
+use nomifun_api_types::{HealthStatus, ModelTask};
 use serde_json::json;
 
 use crate::adapter::{AdapterRegistry, ProtocolAdapter};
@@ -22,6 +22,9 @@ use crate::types::{
     MusicGenRequest, RerankRequest, TaskOutcome, TaskRequest, TtsRequest, VideoGenRequest,
 };
 use crate::ResolvedCall;
+
+#[path = "probe_validation.rs"]
+mod probe_validation;
 
 /// Ceiling on one modality probe (resolution + submit).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -43,10 +46,9 @@ fn probe_png() -> Vec<u8> {
 ///
 /// The samples are a quiet tone rather than digital silence, so the payload is
 /// representative audio instead of a buffer some providers special-case. Note
-/// this does not make the probe verify transcription quality: `probe` classifies
-/// on the outcome variant and never inspects the transcript, by design — it
-/// answers "did this endpoint/model/credential combination answer", and an
-/// empty transcript is a valid answer.
+/// this does not make the probe verify transcription quality: the selected
+/// codec must return a valid transcript field, and an explicitly empty
+/// transcript remains a legitimate answer to an audio clip without speech.
 fn probe_wav() -> Vec<u8> {
     const SAMPLE_RATE: u32 = 16_000;
     const SAMPLE_COUNT: u32 = 1_600; // 100 ms
@@ -111,15 +113,17 @@ fn bind_pending_job(
 }
 
 /// Outcome of a health probe. Upstream failures never surface as `Err` — they
-/// fold into `healthy = false` + `message`; `Err` is reserved for calls the
+/// fold into `Unhealthy` + `message`; `Err` is reserved for calls the
 /// probe path does not serve at all (chat rides the agent engine).
 #[derive(Debug, Clone)]
 pub struct ProbeReport {
-    pub healthy: bool,
+    /// Healthy requires a validated completed result. Accepted jobs and
+    /// session-only handshakes remain Unknown until their output is verified.
+    pub status: HealthStatus,
     /// Wall time of the probe attempt (resolution is a few local DB reads;
     /// this effectively measures the submit round-trip).
     pub latency_ms: u64,
-    /// Failure detail when `healthy == false`.
+    /// Failure detail or the boundary of an incomplete verification.
     pub message: Option<String>,
 }
 
@@ -427,8 +431,9 @@ impl ModelInvokeService {
     ///
     /// - resolution requires the same explicit task capability as a real call
     ///   (disabled provider/model rows still refuse and fold into unhealthy);
-    /// - `Done` OR `Pending` → healthy (an async accept proves the endpoint;
-    ///   the probe never polls and never downloads content);
+    /// - completed typed results are validated before reporting Healthy;
+    /// - accepted jobs and URL-only assets remain Unknown: the probe never
+    ///   polls or downloads generated content;
     /// - every upstream error, including 400/422 `InvalidParams`, remains
     ///   unhealthy. A generic probe cannot prove that the error is limited to
     ///   its placeholder input rather than a wrong/retired model or protocol;
@@ -454,22 +459,23 @@ impl ModelInvokeService {
             call.request = probe_request_for_protocol(task, &call.model_params, &call.protocol)
                 .expect("a task with an initial one-shot probe remains one-shot");
             let redactor = call.connection.auth.secret_redactor();
-            adapter
+            let result = adapter
                 .submit(&self.http, &call)
                 .await
+                .map_err(|error| error.redacted(&redactor))?;
+            probe_validation::validate_outcome(&call, &result)
                 .map_err(|error| error.redacted(&redactor))
         };
         let outcome = tokio::time::timeout(PROBE_TIMEOUT, attempt).await;
         let latency_ms = started.elapsed().as_millis() as u64;
         let report = match outcome {
-            // Sync success, or async accepted — either proves the model
-            // answers. Pending is NOT followed up: no poll, no download.
-            Ok(Ok(TaskOutcome::Done(_) | TaskOutcome::Pending(_))) => {
-                ProbeReport { healthy: true, latency_ms, message: None }
+            Ok(Ok(status)) => {
+                ProbeReport { status, latency_ms, message: (status == HealthStatus::Unknown)
+                    .then(|| "Request accepted; generated output has not been verified".to_owned()) }
             }
-            Ok(Err(e)) => ProbeReport { healthy: false, latency_ms, message: Some(e.to_string()) },
+            Ok(Err(e)) => ProbeReport { status: HealthStatus::Unhealthy, latency_ms, message: Some(e.to_string()) },
             Err(_) => ProbeReport {
-                healthy: false,
+                status: HealthStatus::Unhealthy,
                 latency_ms,
                 message: Some(format!("modality probe timeout ({}s)", PROBE_TIMEOUT.as_secs())),
             },
@@ -478,8 +484,9 @@ impl ModelInvokeService {
     }
 
     /// Probe a realtime model by completing its WebSocket handshake, waiting
-    /// for the provider's `session.created` acknowledgement, and then closing
-    /// the process-local session cleanly.
+    /// for session creation and configuration acknowledgements, then closing
+    /// the process-local session cleanly. This never claims to verify an
+    /// audio conversation and therefore returns Unknown on accepted setup.
     ///
     /// As with [`Self::probe`], catalog, adapter and upstream failures are
     /// folded into an unhealthy report. The dedicated method keeps persistent
@@ -494,13 +501,27 @@ impl ModelInvokeService {
                 .await
                 .map_err(|error| error.redacted(&redactor))?;
 
+            let mut created_session_id: Option<String> = None;
             loop {
                 match session.recv().await {
-                    Some(RealtimeServerEvent::SessionCreated { .. }) => {
-                        // A close failure after the provider acknowledged the
-                        // session does not invalidate the connectivity probe;
-                        // `RealtimeSession::close` is itself bounded and will
-                        // abort a stuck worker before returning.
+                    Some(RealtimeServerEvent::SessionCreated { session_id, .. }) => {
+                        if session_id.as_deref().is_none_or(|id| id.trim().is_empty()) {
+                            return Err(InvokeError::parse("realtime session acknowledgement has no session id"));
+                        }
+                        if created_session_id.is_some() {
+                            return Err(InvokeError::parse("realtime session was created more than once"));
+                        }
+                        created_session_id = session_id;
+                    }
+                    Some(RealtimeServerEvent::SessionUpdated { session_id, .. }) => {
+                        let Some(created) = created_session_id.as_deref() else {
+                            return Err(InvokeError::parse("realtime configuration was acknowledged before session creation"));
+                        };
+                        if session_id.as_deref().is_some_and(|updated| updated != created) {
+                            return Err(InvokeError::parse("realtime configuration acknowledged a different session"));
+                        }
+                        // The configured voice/formats were accepted. An
+                        // audio response still needs a separate real turn.
                         let _ = session.close().await;
                         return Ok::<(), InvokeError>(());
                     }
@@ -523,7 +544,7 @@ impl ModelInvokeService {
                         return Err(InvokeError::new(
                             InvokeErrorKind::Network,
                             format!(
-                                "realtime session closed before creation (code {code:?}): {}",
+                                "realtime session closed before configuration completed (code {code:?}): {}",
                                 redactor.redact(&reason)
                             ),
                         ));
@@ -536,7 +557,7 @@ impl ModelInvokeService {
                     None => {
                         return Err(InvokeError::new(
                             InvokeErrorKind::Network,
-                            "realtime session ended before creation",
+                            "realtime session ended before configuration completed",
                         ));
                     }
                 }
@@ -546,12 +567,13 @@ impl ModelInvokeService {
         let outcome = tokio::time::timeout(PROBE_TIMEOUT, attempt).await;
         let latency_ms = started.elapsed().as_millis() as u64;
         let report = match outcome {
-            Ok(Ok(())) => ProbeReport { healthy: true, latency_ms, message: None },
+            Ok(Ok(())) => ProbeReport { status: HealthStatus::Unknown, latency_ms,
+                message: Some("Realtime session created; an audio conversation has not been verified".to_owned()) },
             Ok(Err(error)) => {
-                ProbeReport { healthy: false, latency_ms, message: Some(error.to_string()) }
+                ProbeReport { status: HealthStatus::Unhealthy, latency_ms, message: Some(error.to_string()) }
             }
             Err(_) => ProbeReport {
-                healthy: false,
+                status: HealthStatus::Unhealthy,
                 latency_ms,
                 message: Some(format!(
                     "realtime probe timeout ({}s)",
@@ -1402,7 +1424,7 @@ mod tests {
         seed_model(&pool, &pid, "whisper-1", r#"["speech_recognition"]"#, "{}", true).await;
 
         let report = svc.probe(&mref(&pid, "whisper-1"), ModelTask::SpeechRecognition).await.unwrap();
-        assert!(!report.healthy);
+        assert!(report.status == nomifun_api_types::HealthStatus::Unhealthy);
         assert!(report.message.as_deref().is_some_and(|message| message.contains("400")));
     }
 
@@ -1439,7 +1461,7 @@ mod tests {
         seed_model(&pool, &pid, "gpt-image-1", r#"["image_edit"]"#, "{}", true).await;
 
         let report = svc.probe(&mref(&pid, "gpt-image-1"), ModelTask::ImageEdit).await.unwrap();
-        assert!(!report.healthy);
+        assert!(report.status == nomifun_api_types::HealthStatus::Unhealthy);
         assert!(report.message.as_deref().is_some_and(|message| message.contains("400")));
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1, "the edit probe must actually reach the wire");
@@ -1467,7 +1489,7 @@ mod tests {
 
         let report =
             svc.probe(&mref(&pid, "step-tts-mini"), ModelTask::SpeechSynthesis).await.unwrap();
-        assert!(!report.healthy);
+        assert!(report.status == nomifun_api_types::HealthStatus::Unhealthy);
         assert!(report.message.as_deref().is_some_and(|message| message.contains("400")));
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1, "the tts probe must actually reach the wire");
@@ -1506,7 +1528,7 @@ mod tests {
         let report =
             svc.probe(&mref(&pid, "step-tts-mini"), ModelTask::SpeechSynthesis).await.unwrap();
 
-        assert!(report.healthy, "unexpected probe failure: {:?}", report.message);
+        assert!(report.status == nomifun_api_types::HealthStatus::Healthy, "unexpected probe failure: {:?}", report.message);
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1, "the stepfun tts probe must actually reach the wire");
     }
@@ -1544,7 +1566,7 @@ mod tests {
         let report =
             svc.probe(&mref(&pid, "step-tts-mini"), ModelTask::SpeechSynthesis).await.unwrap();
 
-        assert!(report.healthy, "unexpected probe failure: {:?}", report.message);
+        assert!(report.status == nomifun_api_types::HealthStatus::Healthy, "unexpected probe failure: {:?}", report.message);
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
@@ -1568,7 +1590,7 @@ mod tests {
         let report =
             svc.probe(&mref(&pid, "step-tts-mini"), ModelTask::SpeechSynthesis).await.unwrap();
 
-        assert!(!report.healthy);
+        assert!(report.status == nomifun_api_types::HealthStatus::Unhealthy);
         assert!(
             report.message.as_deref().is_some_and(|message| message.contains("voice")),
             "unexpected message: {:?}",
@@ -1585,7 +1607,7 @@ mod tests {
         seed_model(&pool, &pid, "gpt-image-1", r#"["image_edit"]"#, "{}", true).await;
 
         let report = svc.probe(&mref(&pid, "gpt-image-1"), ModelTask::ImageEdit).await.unwrap();
-        assert!(!report.healthy, "a connection-refused probe must be unhealthy");
+        assert!(report.status == nomifun_api_types::HealthStatus::Unhealthy, "a connection-refused probe must be unhealthy");
         assert!(report.message.is_some());
     }
 
@@ -1603,7 +1625,7 @@ mod tests {
         seed_model(&pool, &pid, "gpt-image-1", r#"["image_generation"]"#, "{}", true).await;
 
         let report = svc.probe(&mref(&pid, "gpt-image-1"), ModelTask::ImageGeneration).await.unwrap();
-        assert!(!report.healthy);
+        assert!(report.status == nomifun_api_types::HealthStatus::Unhealthy);
         let message = report.message.expect("unhealthy probe carries a message");
         assert!(message.contains("500"), "message: {message}");
     }
@@ -1627,14 +1649,14 @@ mod tests {
         seed_model(&pool, &pid, "gpt-image-1", r#"["image_generation"]"#, "{}", true).await;
 
         let report = svc.probe(&mref(&pid, "gpt-image-1"), ModelTask::ImageGeneration).await.unwrap();
-        assert!(!report.healthy);
+        assert!(report.status == nomifun_api_types::HealthStatus::Unhealthy);
         assert!(report.message.unwrap().contains("400"));
     }
 
     #[tokio::test]
-    async fn probe_video_pending_is_healthy_and_never_polls() {
-        // An async-accepted submit is healthy on its own; the probe must not
-        // follow up with poll or content requests.
+    async fn probe_video_pending_remains_unknown_and_never_polls() {
+        // Accepting a job proves submission, not a playable result. Never
+        // follow up with additional polls or content downloads.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/videos"))
@@ -1648,7 +1670,7 @@ mod tests {
         seed_model(&pool, &pid, "sora-2", r#"["video_generation"]"#, "{}", true).await;
 
         let report = svc.probe(&mref(&pid, "sora-2"), ModelTask::VideoGeneration).await.unwrap();
-        assert!(report.healthy, "message: {:?}", report.message);
+        assert_eq!(report.status, HealthStatus::Unknown, "message: {:?}", report.message);
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1, "probe must stop at submit: no poll, no content download");
     }
@@ -1668,7 +1690,7 @@ mod tests {
                 "quality": "high",
                 "steps": 20,
             })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"b64_json": "aGk="}]})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"b64_json": base64::engine::general_purpose::STANDARD.encode(probe_png())}]})))
             .expect(1)
             .mount(&server)
             .await;
@@ -1686,7 +1708,7 @@ mod tests {
         .await;
 
         let report = svc.probe(&mref(&pid, "gpt-image-1"), ModelTask::ImageGeneration).await.unwrap();
-        assert!(report.healthy, "message: {:?}", report.message);
+        assert!(report.status == nomifun_api_types::HealthStatus::Healthy, "message: {:?}", report.message);
     }
 
     #[tokio::test]
@@ -1699,7 +1721,7 @@ mod tests {
         seed_model(&pool, &pid, "gpt-image-1", r#"["image_generation"]"#, "{}", false).await;
 
         let report = svc.probe(&mref(&pid, "gpt-image-1"), ModelTask::ImageGeneration).await.unwrap();
-        assert!(!report.healthy);
+        assert!(report.status == nomifun_api_types::HealthStatus::Unhealthy);
         let message = report.message.expect("unhealthy probe carries a message");
         assert!(message.contains("model disabled"), "message: {message}");
     }
@@ -1708,7 +1730,7 @@ mod tests {
     async fn probe_chat_reports_unsupported_one_shot_request() {
         let (svc, _pool) = setup().await;
         let report = svc.probe(&mref("any", "gpt-4o"), ModelTask::Chat).await.unwrap();
-        assert!(!report.healthy);
+        assert!(report.status == nomifun_api_types::HealthStatus::Unhealthy);
         assert!(report.message.as_deref().is_some_and(|message| message.contains("one-shot")));
     }
 

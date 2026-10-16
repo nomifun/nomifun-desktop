@@ -476,7 +476,7 @@ async fn saved_v20_health_probe_resolves_its_native_capability_and_preserves_fra
         provider_id: provider["data"]["provider_id"].as_str().unwrap().to_owned(),
         model: "agnes-video-v2.0".into(),
     }, ModelTask::VideoGeneration).await.unwrap();
-    assert!(report.healthy, "{:?}", report.message);
+    assert_eq!(report.status, nomifun_api_types::HealthStatus::Unknown, "{:?}", report.message);
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 1);
     let body: Value = serde_json::from_slice(&requests[0].body).unwrap();

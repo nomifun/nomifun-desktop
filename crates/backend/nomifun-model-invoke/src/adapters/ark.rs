@@ -272,10 +272,13 @@ impl ProtocolAdapter for ArkVideoJobsAdapter {
             .json()
             .await
             .map_err(|e| InvokeError::response_json("invalid ark task JSON", &e))?;
+        super::media_response::reject_provider_error(&value, "ark submit")?;
+        super::media_response::validate_submit_status(value.get("status"), &["queued","running"], &["succeeded"],
+            &["failed","cancelled","canceled"], "ark submit")?;
         let id = value
             .get("id")
             .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
+            .map(str::trim).filter(|s| !s.is_empty())
             .ok_or_else(|| InvokeError::parse("ark task submit response missing 'id'"))?;
         Ok(TaskOutcome::Pending(JobHandle {
             adapter_id: VIDEO_ADAPTER_ID.into(),
@@ -327,7 +330,7 @@ impl ProtocolAdapter for ArkVideoJobsAdapter {
                 remote_id: job.remote_id.clone(),
                 poll_state: json!({}),
             })),
-            ArkTaskState::Failed(msg) => Err(InvokeError::new(InvokeErrorKind::JobFailed, msg)),
+            ArkTaskState::Failed(msg) => Err(InvokeError::new(InvokeErrorKind::JobFailed, msg).redacted(&call.connection.auth.secret_redactor())),
             // The provider URL is short-lived (~24 h); the caller fetches it.
             ArkTaskState::Done(video_url) => Ok(TaskOutcome::Done(TaskResult::Assets(vec![
                 ProducedAsset { data: ProducedData::Url(video_url), mime: None },
@@ -502,9 +505,10 @@ pub(crate) enum ArkTaskState {
 /// Map an Ark task-status body (`queued/running/succeeded/failed/cancelled`)
 /// to [`ArkTaskState`]. A succeeded task must carry `content.video_url`; a
 /// failed/cancelled one reports `error.message` | `error` string | the status
-/// itself. Unknown/absent statuses keep waiting. Pure — unit tested.
+/// itself. Unknown/absent poll statuses fail closed. Pure — unit tested.
 pub(crate) fn parse_video_task_status(value: &Value) -> Result<ArkTaskState, InvokeError> {
-    let status = value.get("status").and_then(|v| v.as_str()).unwrap_or("").to_ascii_lowercase();
+    let status = value.get("status").and_then(|v| v.as_str()).unwrap_or("").trim().to_ascii_lowercase();
+    if !matches!(status.as_str(),"failed"|"cancelled"|"canceled") {super::media_response::reject_provider_error(value,"ark status")?;}
     match status.as_str() {
         "succeeded" => {
             let url = value
@@ -513,7 +517,7 @@ pub(crate) fn parse_video_task_status(value: &Value) -> Result<ArkTaskState, Inv
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| InvokeError::parse("ark task succeeded but missing content.video_url"))?;
-            Ok(ArkTaskState::Done(url.to_string()))
+            Ok(ArkTaskState::Done(super::media_response::media_url(url,"ark video result")?))
         }
         "failed" | "cancelled" | "canceled" => {
             let msg = value
@@ -523,8 +527,8 @@ pub(crate) fn parse_video_task_status(value: &Value) -> Result<ArkTaskState, Inv
                 .to_string();
             Ok(ArkTaskState::Failed(msg))
         }
-        // "queued" | "running" | "" | anything unknown → keep waiting.
-        _ => Ok(ArkTaskState::Pending),
+        "queued" | "running" => Ok(ArkTaskState::Pending),
+        _ => Err(InvokeError::parse("ark task response has no recognized status")),
     }
 }
 
@@ -729,10 +733,12 @@ mod tests {
 
     #[test]
     fn task_status_vocabulary_maps_to_states() {
-        for s in ["queued", "running", "", "mystery"] {
+        for s in ["queued", "running"] {
             assert_eq!(parse_video_task_status(&json!({"status": s})).unwrap(), ArkTaskState::Pending, "{s}");
         }
-        assert_eq!(parse_video_task_status(&json!({})).unwrap(), ArkTaskState::Pending);
+        for value in [json!({}),json!({"status":""}),json!({"status":"mystery"})] {
+            assert_eq!(parse_video_task_status(&value).unwrap_err().kind,InvokeErrorKind::ParseError);
+        }
 
         let done = json!({"status": "succeeded", "content": {"video_url": "https://cdn/v.mp4"}});
         assert_eq!(parse_video_task_status(&done).unwrap(), ArkTaskState::Done("https://cdn/v.mp4".into()));

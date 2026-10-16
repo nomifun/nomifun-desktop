@@ -29,6 +29,8 @@ base64.workspace = true
 crc32fast.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+image = { workspace = true, features = ["jpeg", "webp", "gif"] }
 
 [dev-dependencies]
+nomifun-chat-model-broker.workspace = true
 wiremock.workspace = true

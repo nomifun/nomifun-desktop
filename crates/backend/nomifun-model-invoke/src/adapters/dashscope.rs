@@ -12,7 +12,7 @@
 //!   → `output.task_id` → poll `GET {root}/api/v1/tasks/{id}` — DashScope's
 //!   PLATFORM-UNIFIED task poller. Submit and poll endpoints are independently
 //!   injected from the typed capability. Status vocab
-//!   `PENDING/RUNNING` (and unknown) → Pending, `SUCCEEDED` →
+//!   `PENDING/RUNNING` → Pending, `SUCCEEDED` →
 //!   `output.results[].url` (24 h URLs, the caller fetches them),
 //!   `FAILED/CANCELED` → [`InvokeErrorKind::JobFailed`] with
 //!   `output.message`|`output.code`.
@@ -44,6 +44,7 @@ use crate::types::{
 };
 
 use super::json_request_body;
+use super::retrieval_results::{embedding_batch, requested_dimension};
 
 /// Submit is a cheap enqueue; generation happens behind the task id.
 const SUBMIT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -116,11 +117,17 @@ impl ProtocolAdapter for DashScopeImagesAdapter {
             "dashscope submit",
         )
         .await?;
+        super::media_response::reject_provider_error(&value, "dashscope submit")?;
+        if value.get("code").and_then(Value::as_str).is_some_and(|code| !code.trim().is_empty() && code != "0") {
+            return Err(InvokeError::new(InvokeErrorKind::ProviderError,"dashscope submit returned a business error"));
+        }
+        super::media_response::validate_submit_status(value.pointer("/output/task_status"), &["pending","running"], &["succeeded"],
+            &["failed","canceled","cancelled"], "dashscope submit")?;
         let id = value
             .get("output")
             .and_then(|o| o.get("task_id"))
             .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
+            .map(str::trim).filter(|s| !s.is_empty())
             .ok_or_else(|| InvokeError::parse("dashscope submit response missing output.task_id"))?;
         Ok(TaskOutcome::Pending(JobHandle {
             adapter_id: IMAGES_ADAPTER_ID.into(),
@@ -183,7 +190,7 @@ impl ProtocolAdapter for DashScopeImagesAdapter {
                 remote_id: job.remote_id.clone(),
                 poll_state: json!({}),
             })),
-            DashScopeTaskState::Failed(msg) => Err(InvokeError::new(InvokeErrorKind::JobFailed, msg)),
+            DashScopeTaskState::Failed(msg) => Err(InvokeError::new(InvokeErrorKind::JobFailed, msg).redacted(&call.connection.auth.secret_redactor())),
             // 24 h provider URLs; the caller fetches them.
             DashScopeTaskState::Done(urls) => Ok(TaskOutcome::Done(TaskResult::Assets(
                 urls.into_iter().map(|u| ProducedAsset { data: ProducedData::Url(u), mime: None }).collect(),
@@ -224,7 +231,7 @@ pub(crate) enum DashScopeTaskState {
 /// `PENDING/RUNNING/SUCCEEDED/FAILED/CANCELED/UNKNOWN`) to
 /// [`DashScopeTaskState`]. A SUCCEEDED task must carry at least one
 /// `output.results[].url`; FAILED/CANCELED reports `output.message` |
-/// `output.code` | the status itself. Unknown/absent statuses keep waiting.
+/// `output.code` | the status itself. Unknown/absent poll statuses fail closed.
 /// Pure — unit tested.
 #[cfg(test)]
 pub(crate) fn parse_task_status(value: &Value) -> Result<DashScopeTaskState, InvokeError> {
@@ -236,29 +243,28 @@ fn parse_task_status_limited(
     max_images: usize,
 ) -> Result<DashScopeTaskState, InvokeError> {
     let output = value.get("output").unwrap_or(&Value::Null);
-    let status = output.get("task_status").and_then(|v| v.as_str()).unwrap_or("").to_ascii_uppercase();
+    super::media_response::reject_provider_error(value,"dashscope task")?;
+    if value.get("code").and_then(Value::as_str).is_some_and(|code| !code.trim().is_empty() && code != "0") {
+        return Err(InvokeError::new(InvokeErrorKind::ProviderError,"dashscope task returned a business error"));
+    }
+    let status = output.get("task_status").and_then(|v| v.as_str()).unwrap_or("").trim().to_ascii_uppercase();
     match status.as_str() {
         "SUCCEEDED" => {
-            let urls: Vec<&str> = output
+            let results = output
                 .get("results")
                 .and_then(|r| r.as_array())
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|item| item.get("url").and_then(|u| u.as_str()))
-                        .filter(|s| !s.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default();
-            if urls.is_empty() {
+                .ok_or_else(|| InvokeError::parse("dashscope task SUCCEEDED but missing output.results"))?;
+            if results.is_empty() {
                 return Err(InvokeError::parse("dashscope task SUCCEEDED but missing output.results[].url"));
             }
             let mut budget = ImageResponseBudget::new(max_images)?;
-            budget.ensure_additional_count(urls.len(), "dashscope task")?;
-            let mut accepted = Vec::with_capacity(urls.len());
-            for url in urls {
+            budget.ensure_additional_count(results.len(), "dashscope task")?;
+            let mut accepted = Vec::with_capacity(results.len());
+            for item in results {
+                let url = item.get("url").and_then(Value::as_str)
+                    .ok_or_else(|| InvokeError::parse("dashscope image result is missing its URL"))?;
                 budget.accept_url("dashscope task")?;
-                accepted.push(url.to_string());
+                accepted.push(super::media_response::media_url(url,"dashscope image result")?);
             }
             Ok(DashScopeTaskState::Done(accepted))
         }
@@ -271,8 +277,8 @@ fn parse_task_status_limited(
                 .to_string();
             Ok(DashScopeTaskState::Failed(msg))
         }
-        // "PENDING" | "RUNNING" | "UNKNOWN" | "" | anything else → keep waiting.
-        _ => Ok(DashScopeTaskState::Pending),
+        "PENDING" | "RUNNING" => Ok(DashScopeTaskState::Pending),
+        _ => Err(InvokeError::parse("dashscope task response has no recognized status")),
     }
 }
 
@@ -330,6 +336,7 @@ impl ProtocolAdapter for DashScopeEmbeddingsAdapter {
             raw_extra.remove("dimension");
         }
         let body = json_request_body(&call.model_params, &raw_extra, body)?;
+        let dimension = requested_dimension(body.pointer("/parameters/dimension"), "DashScope embedding dimension")?;
 
         let resp = send_with_rotation(&call.connection.auth, || {
             Ok(http.post(&url).timeout(EMBEDDINGS_TIMEOUT).json(&body))
@@ -342,41 +349,20 @@ impl ProtocolAdapter for DashScopeEmbeddingsAdapter {
             .json()
             .await
             .map_err(|e| InvokeError::response_json("invalid dashscope embeddings JSON", &e))?;
-        Ok(TaskOutcome::Done(TaskResult::Embeddings(parse_embeddings_output(&value)?)))
+        Ok(TaskOutcome::Done(TaskResult::Embeddings(parse_embeddings_output(&value, req.inputs.len(), dimension)?)))
     }
 }
 
 /// Parse `output.embeddings[].embedding` into one vector per input, re-ordered
 /// by `text_index` when every item declares one (array order otherwise). Pure
 /// — unit tested.
-pub(crate) fn parse_embeddings_output(value: &Value) -> Result<Vec<Vec<f32>>, InvokeError> {
+pub(crate) fn parse_embeddings_output(value: &Value, expected_count: usize, dimension: Option<usize>) -> Result<Vec<Vec<f32>>, InvokeError> {
     let data = value
         .get("output")
         .and_then(|o| o.get("embeddings"))
         .and_then(|v| v.as_array())
         .ok_or_else(|| InvokeError::parse("dashscope embeddings response missing output.embeddings"))?;
-    if data.is_empty() {
-        return Err(InvokeError::parse("dashscope embeddings response output.embeddings is empty"));
-    }
-    let mut items: Vec<(Option<u64>, Vec<f32>)> = Vec::with_capacity(data.len());
-    for item in data {
-        let raw = item
-            .get("embedding")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| InvokeError::parse("dashscope embeddings item missing 'embedding' array"))?;
-        let mut vector = Vec::with_capacity(raw.len());
-        for n in raw {
-            let f = n
-                .as_f64()
-                .ok_or_else(|| InvokeError::parse("dashscope embedding vector contains a non-numeric element"))?;
-            vector.push(f as f32);
-        }
-        items.push((item.get("text_index").and_then(|v| v.as_u64()), vector));
-    }
-    if items.iter().all(|(idx, _)| idx.is_some()) {
-        items.sort_by_key(|(idx, _)| idx.unwrap_or(u64::MAX));
-    }
-    Ok(items.into_iter().map(|(_, v)| v).collect())
+    embedding_batch(data, expected_count, "text_index", dimension, "DashScope embeddings response")
 }
 
 #[cfg(test)]
@@ -444,14 +430,16 @@ mod tests {
 
     #[test]
     fn task_status_vocabulary_maps_to_states() {
-        for s in ["PENDING", "RUNNING", "UNKNOWN", "", "mystery"] {
+        for s in ["PENDING", "RUNNING"] {
             assert_eq!(
                 parse_task_status(&json!({"output": {"task_status": s}})).unwrap(),
                 DashScopeTaskState::Pending,
                 "{s}"
             );
         }
-        assert_eq!(parse_task_status(&json!({})).unwrap(), DashScopeTaskState::Pending);
+        for value in [json!({}),json!({"output":{"task_status":"UNKNOWN"}}),json!({"output":{"task_status":"mystery"}})] {
+            assert_eq!(parse_task_status(&value).unwrap_err().kind,InvokeErrorKind::ParseError);
+        }
 
         let done = json!({"output": {
             "task_status": "SUCCEEDED",
@@ -491,11 +479,11 @@ mod tests {
             {"text_index": 1, "embedding": [3.0, 4.0]},
             {"text_index": 0, "embedding": [1.0, 2.0]},
         ]}});
-        assert_eq!(parse_embeddings_output(&v).unwrap(), vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
+        assert_eq!(parse_embeddings_output(&v, 2, None).unwrap(), vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
 
         // Without indices: array order.
         let plain = json!({"output": {"embeddings": [{"embedding": [1.0]}, {"embedding": [2.0]}]}});
-        assert_eq!(parse_embeddings_output(&plain).unwrap(), vec![vec![1.0], vec![2.0]]);
+        assert_eq!(parse_embeddings_output(&plain, 2, None).unwrap(), vec![vec![1.0], vec![2.0]]);
 
         for bad in [
             json!({}),
@@ -504,7 +492,8 @@ mod tests {
             json!({"output": {"embeddings": [{}]}}),
             json!({"output": {"embeddings": [{"embedding": [1.0, "x"]}]}}),
         ] {
-            assert_eq!(parse_embeddings_output(&bad).unwrap_err().kind, InvokeErrorKind::ParseError, "input {bad}");
+            let expected = bad.pointer("/output/embeddings").and_then(Value::as_array).map_or(1, Vec::len);
+            assert_eq!(parse_embeddings_output(&bad, expected, None).unwrap_err().kind, InvokeErrorKind::ParseError, "input {bad}");
         }
     }
 
@@ -762,6 +751,48 @@ mod tests {
         let requests = server.received_requests().await.unwrap();
         let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert!(body.get("parameters").is_none(), "empty parameters must be omitted");
+    }
+
+    #[tokio::test]
+    async fn embeddings_reject_missing_misindexed_and_unusable_vectors_on_the_wire() {
+        let server = MockServer::start().await;
+        for data in [
+            json!([]), json!([{"embedding":[1]}]),
+            json!([{"embedding":[1]},{"embedding":[2]},{"embedding":[3]}]),
+            json!([{"text_index":0,"embedding":[1]},{"embedding":[2]}]),
+            json!([{"text_index":0,"embedding":[1]},{"text_index":0,"embedding":[2]}]),
+            json!([{"text_index":0,"embedding":[1]},{"text_index":2,"embedding":[2]}]),
+            json!([{"text_index":-1,"embedding":[1]},{"text_index":1,"embedding":[2]}]),
+            json!([{"text_index":"0","embedding":[1]},{"text_index":1,"embedding":[2]}]),
+            json!([{"text_index":null,"embedding":[1]},{"text_index":1,"embedding":[2]}]),
+            json!([{"embedding":[]},{"embedding":[2]}]),
+            json!([{"embedding":[1]},{"embedding":[2,3]}]),
+            json!([{"embedding":[1e100]},{"embedding":[2]}]),
+        ] {
+            server.reset().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"output":{"embeddings":data}})))
+                .expect(1).mount(&server).await;
+            let call = embedding_call(&server.uri(), "text-embedding-v4", embed_request(&["alpha", "beta"], json!({})));
+            let error = DashScopeEmbeddingsAdapter.submit(&reqwest::Client::new(), &call).await.unwrap_err();
+            assert_eq!(error.kind, InvokeErrorKind::ParseError);
+        }
+    }
+
+    #[tokio::test]
+    async fn embeddings_respect_the_effective_native_dimension_parameter() {
+        for (dimensions, succeeds) in [(2, true), (3, false)] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST")).and(body_partial_json(json!({"parameters":{"dimension":2}})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"output":{"embeddings":[{"embedding":vec![0.5; dimensions]}]}})))
+                .expect(1).mount(&server).await;
+            let mut call = embedding_call(&server.uri(), "text-embedding-v4", embed_request(&["alpha"], json!({"dimension":2})));
+            call.model_params["parameters"] = json!({"dimension":7,"text_type":"query"});
+            let outcome = DashScopeEmbeddingsAdapter.submit(&reqwest::Client::new(), &call).await;
+            if succeeds { assert!(matches!(outcome, Ok(TaskOutcome::Done(TaskResult::Embeddings(_))))); }
+            else { assert_eq!(outcome.unwrap_err().kind, InvokeErrorKind::ParseError); }
+            assert_eq!(call.model_params["parameters"]["dimension"], 7);
+        }
     }
 
     #[tokio::test]

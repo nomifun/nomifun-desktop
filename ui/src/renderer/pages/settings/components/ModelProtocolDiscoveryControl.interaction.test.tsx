@@ -69,6 +69,88 @@ function Harness({ stored = false, initialModel = 'step-5-preview', initialCapab
 const pause = async (ms = 450) => act(async () => { await new Promise(resolve => setTimeout(resolve, ms)); });
 
 describe('automatic model protocol discovery', () => {
+  test('only a committed pending configuration shows a loading indicator and busy status until it finishes', async () => {
+    let complete!: (value: DiscoverModelProtocolsResponse) => void;
+    const discover = spyOn(ipcBridge.mode.discoverModelProtocols, 'invoke').mockImplementation(() => new Promise(resolve => { complete = resolve; }));
+    restorers.push(() => discover.mockRestore());
+    const page = render(<Harness initialModel='' />);
+    const region = page.container.querySelector('[data-model-protocol-discovery]')!;
+    const input = page.getByLabelText(zhSettings.modelId);
+    expect(region.getAttribute('aria-busy')).toBe('false');
+    expect(region.querySelector('.arco-spin')).toBeNull();
+    fireEvent.change(input, { target: { value: 'step-' } });
+    expect(region.getAttribute('aria-busy')).toBe('false');
+    expect(region.querySelector('.arco-spin')).toBeNull();
+    expect(page.queryByText(zhSettings.modelProtocolDiscovery.connected)).toBeNull();
+    fireEvent.change(input, { target: { value: 'step-5-preview' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(discover).not.toHaveBeenCalled();
+    expect(region.getAttribute('aria-busy')).toBe('true');
+    expect(region.querySelector('[role="status"]')?.textContent).toBe(zhSettings.modelProtocolDiscovery.checking);
+    expect(region.querySelector('[role="status"]')?.getAttribute('aria-atomic')).toBe('true');
+    expect(region.querySelector('.arco-spin')?.getAttribute('aria-hidden')).toBe('true');
+    expect(region.querySelector('.arco-icon-loading')?.classList.contains('motion-reduce:!animate-none')).toBe(true);
+    await waitFor(() => expect(discover).toHaveBeenCalledTimes(1));
+    expect(region.getAttribute('aria-busy')).toBe('true');
+    expect((page.getByTestId('save') as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => complete(response()));
+    await page.findByText(zhSettings.modelProtocolDiscovery.connected);
+    expect(region.getAttribute('aria-busy')).toBe('false');
+    expect(region.querySelector('.arco-spin')).toBeNull();
+    expect((page.getByTestId('save') as HTMLButtonElement).disabled).toBe(false);
+    expect(page.queryByRole('button', { name: zhSettings.modelProtocolDiscovery.diagnostics })).toBeNull();
+  });
+
+  test('editing a checked model ID cancels its loading indicator and cannot show its late success', async () => {
+    let complete!: (value: DiscoverModelProtocolsResponse) => void;
+    const discover = spyOn(ipcBridge.mode.discoverModelProtocols, 'invoke').mockImplementation(() => new Promise(resolve => { complete = resolve; }));
+    restorers.push(() => discover.mockRestore());
+    const page = render(<Harness />);
+    await waitFor(() => expect(discover).toHaveBeenCalledTimes(1));
+    const region = page.container.querySelector('[data-model-protocol-discovery]')!;
+    const signal = discover.mock.calls[0][1]!;
+    expect(region.getAttribute('aria-busy')).toBe('true');
+    fireEvent.change(page.getByLabelText(zhSettings.modelId), { target: { value: 'another-' } });
+    const edited = page.getByTestId('draft').textContent;
+    expect(signal.aborted).toBe(true);
+    expect(region.getAttribute('aria-busy')).toBe('false');
+    expect(region.querySelector('.arco-spin')).toBeNull();
+    expect(region.querySelector('[role="status"]')?.textContent).toBe(zhSettings.modelProtocolDiscovery.awaitCommit);
+    await act(async () => complete(response(chat)));
+    expect(page.queryByText(zhSettings.modelProtocolDiscovery.connected)).toBeNull();
+    expect(page.getByTestId('draft').textContent).toBe(edited);
+    await pause();
+    expect(discover).toHaveBeenCalledTimes(1);
+    expect(region.getAttribute('aria-busy')).toBe('false');
+  });
+
+  test('rechecking replaces previous success with loading and removes the indicator after a failed check', async () => {
+    let fail!: () => void;
+    const rawError = 'A transient transport error';
+    const discover = spyOn(ipcBridge.mode.discoverModelProtocols, 'invoke').mockResolvedValueOnce(response())
+      .mockImplementation(() => new Promise((_resolve, reject) => { fail = () => reject(new Error(rawError)); }));
+    restorers.push(() => discover.mockRestore());
+    const page = render(<Harness />);
+    await page.findByText(zhSettings.modelProtocolDiscovery.connected);
+    const configured = page.getByTestId('draft').textContent;
+    const region = page.container.querySelector('[data-model-protocol-discovery]')!;
+    fireEvent.click(page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.connectionSettings }));
+    const recheck = page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.recheck }) as HTMLButtonElement;
+    fireEvent.click(recheck);
+    expect(region.getAttribute('aria-busy')).toBe('true');
+    expect(region.querySelector('.arco-spin')).toBeTruthy();
+    expect(page.queryByText(zhSettings.modelProtocolDiscovery.connected)).toBeNull();
+    expect(recheck.disabled).toBe(true);
+    await waitFor(() => expect(discover).toHaveBeenCalledTimes(2));
+    await act(async () => fail());
+    await page.findByText(zhSettings.modelProtocolDiscovery.unavailable);
+    expect(region.getAttribute('aria-busy')).toBe('false');
+    expect(region.querySelector('.arco-spin')).toBeNull();
+    expect(page.queryByText(rawError)).toBeNull();
+    expect(page.getByTestId('draft').textContent).toBe(configured);
+    expect(recheck.disabled).toBe(false);
+  });
+
   test('typing prepares an ID, Enter checks once, and automatic selection cannot trigger itself again', async () => {
     const discover = spyOn(ipcBridge.mode.discoverModelProtocols, 'invoke').mockResolvedValue(response(chat, [
       candidate(capability, { status: 'incompatible', capability: undefined, message: 'Model does not support Responses' }), candidate(chat),
@@ -145,6 +227,9 @@ describe('automatic model protocol discovery', () => {
     restorers.push(() => discover.mockRestore());
     const page = render(<Harness />);
     await page.findByText(zhSettings.modelProtocolDiscovery.connected);
+    const region = page.container.querySelector('[data-model-protocol-discovery]')!;
+    expect(region.getAttribute('aria-busy')).toBe('false');
+    expect(region.querySelector('.arco-spin')).toBeNull();
     expect(page.queryByRole('button', { name: 'Chat Completions' })).toBeNull();
     fireEvent.click(page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.connectionSettings }));
     const chooseChat = page.getByRole('button', { name: 'Chat Completions' });
@@ -152,6 +237,8 @@ describe('automatic model protocol discovery', () => {
     expect(page.getByText(zhSettings.modelProtocolDiscovery.recommended)).toBeTruthy();
     fireEvent.click(chooseChat);
     expect(JSON.parse(page.getByTestId('draft').textContent!)[0]).toEqual(chat);
+    expect(region.getAttribute('aria-busy')).toBe('false');
+    expect(region.querySelector('.arco-spin')).toBeNull();
     fireEvent.click(page.getByRole('button', { name: 'Change alias' })); await pause();
     expect(discover).toHaveBeenCalledTimes(1);
     expect(JSON.parse(page.getByTestId('draft').textContent!)[0].protocol).toBe('openai.chat_text');

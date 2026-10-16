@@ -31,14 +31,17 @@ use crate::call::ResolvedCall;
 use crate::error::{InvokeError, InvokeErrorKind};
 use crate::transport::{
     MAX_ARTIFACT_BYTES, error_from_response, post_json, post_raw, read_body_capped,
+    read_json_capped, response_secret_redactor,
 };
 use crate::types::{
     ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult, TtsRequest,
 };
 
 use super::scalar_request_fields;
+use super::audio_payload::validate_audio_payload;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_TRANSCRIPTION_BYTES: u64 = 8 * 1024 * 1024;
 const DEEPGRAM_SPEAK_MAX_CHARS: usize = 2_000;
 
 /// Deepgram pre-recorded `/v1/listen` protocol.
@@ -97,16 +100,19 @@ impl ProtocolAdapter for DeepgramListenAdapter {
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        let body: Value = resp
-            .json()
-            .await
-            .map_err(|e| InvokeError::response_json("invalid deepgram JSON", &e))?;
+        let redactor = response_secret_redactor(&resp);
+        let body: Value = read_json_capped(resp,MAX_TRANSCRIPTION_BYTES,"Deepgram transcription").await
+            .map_err(|error| error.redacted(&redactor))?;
+        if body.get("error").is_some_and(|error| !error.is_null())
+            || body.get("err_code").is_some_and(|error| !error.is_null()) {
+            return Err(InvokeError::new(InvokeErrorKind::ProviderError,"Deepgram transcription returned a provider error"));
+        }
 
         let transcript = body["results"]["channels"]
             .get(0)
             .and_then(|ch| ch["alternatives"].get(0))
             .and_then(|alt| alt["transcript"].as_str())
-            .unwrap_or("")
+            .ok_or_else(|| InvokeError::parse("Deepgram response requires results.channels[0].alternatives[0].transcript as a string"))?
             .to_owned();
         let detected_language = body["results"]["channels"]
             .get(0)
@@ -176,14 +182,17 @@ impl ProtocolAdapter for DeepgramSpeakRestAdapter {
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        let mime = resp
+        let content_type = resp
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let mime = content_type.as_deref()
             .map(|value| value.split(';').next().unwrap_or(value).trim().to_ascii_lowercase())
             .filter(|value| value.starts_with("audio/"))
             .unwrap_or_else(|| mime_for_speak_url(&url).to_owned());
         let bytes = read_body_capped(resp, MAX_ARTIFACT_BYTES).await?;
+        validate_audio_payload(&bytes,content_type.as_deref(),"deepgram.speak_rest")?;
 
         Ok(TaskOutcome::Done(TaskResult::Assets(vec![ProducedAsset {
             data: ProducedData::Bytes(bytes),
@@ -483,6 +492,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn listen_requires_a_typed_transcript_but_preserves_valid_silence() {
+        for body in [json!({}),json!({"results":{"channels":[]}}),
+            json!({"results":{"channels":[{"alternatives":[{"transcript":null}]}]}}),
+            json!({"results":{"channels":[{"alternatives":[{"transcript":9}]}]}}),
+            json!({"err_code":"INVALID_REQUEST","err_msg":"dg-key"}),
+            json!({"results":{"channels":[{"alternatives":[{"transcript":""}]}]}})] {
+            let silent = body.pointer("/results/channels/0/alternatives/0/transcript")==Some(&json!(""));
+            let server = MockServer::start().await;
+            Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .expect(1).mount(&server).await;
+            let result = DeepgramListenAdapter.submit(&no_proxy_client(),&listen_call(&server.uri(),"nova-3",asr(None,json!({})))).await;
+            if silent {
+                assert!(matches!(result,Ok(TaskOutcome::Done(TaskResult::Transcript {text,..})) if text.is_empty()));
+            } else {
+                let error = result.unwrap_err();
+                assert!(matches!(error.kind,InvokeErrorKind::ParseError|InvokeErrorKind::ProviderError));
+                assert!(!error.message.contains("dg-key"));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn listen_extra_booleans_disable_defaults() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -583,6 +614,32 @@ mod tests {
             panic!("expected Done(Assets)")
         };
         assert_eq!(assets[0].mime.as_deref(), Some("audio/mpeg"));
+    }
+
+    #[tokio::test]
+    async fn speak_rejects_empty_or_disguised_error_bodies_and_accepts_raw_pcm() {
+        for (bytes,mime,valid) in [
+            (vec![],"audio/mpeg",false),
+            (b"{\"err_msg\":\"dg-key\"}".to_vec(),"application/json",false),
+            (b"{\"err_msg\":\"dg-key\"}".to_vec(),"audio/mpeg",false),
+            (b"<!doctype html><html>dg-key</html>".to_vec(),"audio/wav",false),
+            (vec![0,1,0,2],"application/octet-stream",true),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_raw(bytes.clone(),mime))
+                .expect(1).mount(&server).await;
+            let result = DeepgramSpeakRestAdapter.submit(&no_proxy_client(),
+                &speak_call(&server.uri(),"aura-2-thalia-en",tts("hi",None,Some("pcm"),json!({})))).await;
+            if valid {
+                let TaskOutcome::Done(TaskResult::Assets(assets)) = result.unwrap() else {panic!("expected PCM")};
+                assert_eq!(assets[0].mime.as_deref(),Some("audio/l16"));
+                assert!(matches!(&assets[0].data,ProducedData::Bytes(audio) if audio==&bytes));
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind,InvokeErrorKind::ParseError);
+                assert!(!error.message.contains("dg-key"));
+            }
+        }
     }
 
     #[tokio::test]

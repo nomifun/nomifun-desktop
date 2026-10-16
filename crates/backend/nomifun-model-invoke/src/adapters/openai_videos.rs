@@ -69,10 +69,14 @@ impl ProtocolAdapter for OpenAiVideosAdapter {
             .json()
             .await
             .map_err(|e| InvokeError::response_json("invalid videos JSON", &e))?;
+        super::media_response::reject_provider_error(&value, "videos submit")?;
+        super::media_response::validate_submit_status(value.get("status"),
+            &["queued","pending","in_progress","running","processing"], &["completed","succeeded","success","done"],
+            &["failed","error","cancelled","canceled","expired"], "videos submit")?;
         let id = value
             .get("id")
             .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
+            .map(str::trim).filter(|s| !s.is_empty())
             .ok_or_else(|| InvokeError::parse("videos submit response missing 'id'"))?;
         Ok(TaskOutcome::Pending(JobHandle {
             adapter_id: ADAPTER_ID.into(),
@@ -98,14 +102,14 @@ impl ProtocolAdapter for OpenAiVideosAdapter {
             .await
             .map_err(|e| InvokeError::response_json("invalid videos status JSON", &e))?;
 
-        match parse_video_status(&value) {
+        match parse_video_status(&value).map_err(|error| error.redacted(&call.connection.auth.secret_redactor()))? {
             VideoStatus::Pending => Ok(TaskOutcome::Pending(JobHandle {
                 adapter_id: ADAPTER_ID.into(),
                 config_revision: call.config_revision,
                 remote_id: job.remote_id.clone(),
                 poll_state: json!({}),
             })),
-            VideoStatus::Failed(msg) => Err(InvokeError::new(InvokeErrorKind::JobFailed, msg)),
+            VideoStatus::Failed(msg) => Err(InvokeError::new(InvokeErrorKind::JobFailed, msg).redacted(&call.connection.auth.secret_redactor())),
             VideoStatus::Completed => {
                 let content_url = job_endpoint(call, "content_endpoint", &job.remote_id)?;
                 let resp = get_request(http, &content_url, CONTENT_TIMEOUT, &call.connection.auth).await?;
@@ -120,6 +124,7 @@ impl ProtocolAdapter for OpenAiVideosAdapter {
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| "video/mp4".to_string());
                 let bytes = read_body_capped(resp, MAX_ARTIFACT_BYTES).await?;
+                if bytes.is_empty() { return Err(InvokeError::parse("videos content response is empty")); }
                 Ok(TaskOutcome::Done(TaskResult::Assets(vec![ProducedAsset {
                     data: ProducedData::Bytes(bytes),
                     mime: Some(mime),
@@ -196,11 +201,14 @@ pub(crate) enum VideoStatus {
 
 /// Map a videos status body to a [`VideoStatus`]. Tolerant of the common status
 /// vocabulary across OpenAI-compatible video APIs. Pure — unit tested.
-pub(crate) fn parse_video_status(value: &Value) -> VideoStatus {
-    let status = value.get("status").and_then(|v| v.as_str()).unwrap_or("").to_ascii_lowercase();
-    match status.as_str() {
+pub(crate) fn parse_video_status(value: &Value) -> Result<VideoStatus, InvokeError> {
+    let status = value.get("status").and_then(|v| v.as_str()).unwrap_or("").trim().to_ascii_lowercase();
+    if !matches!(status.as_str(),"failed"|"error"|"cancelled"|"canceled"|"expired") {
+        super::media_response::reject_provider_error(value, "videos status")?;
+    }
+    Ok(match status.as_str() {
         "completed" | "succeeded" | "success" | "done" => VideoStatus::Completed,
-        "failed" | "error" | "cancelled" | "canceled" => {
+        "failed" | "error" | "cancelled" | "canceled" | "expired" => {
             let msg = value
                 .get("error")
                 .and_then(|e| e.get("message").and_then(|m| m.as_str()).or_else(|| e.as_str()))
@@ -208,9 +216,9 @@ pub(crate) fn parse_video_status(value: &Value) -> VideoStatus {
                 .to_string();
             VideoStatus::Failed(msg)
         }
-        // "queued" | "in_progress" | "running" | "processing" | "" → keep waiting.
-        _ => VideoStatus::Pending,
-    }
+        "queued" | "pending" | "in_progress" | "running" | "processing" => VideoStatus::Pending,
+        _ => return Err(InvokeError::parse("videos response has no recognized task status")),
+    })
 }
 
 #[cfg(test)]
@@ -235,28 +243,30 @@ mod tests {
     #[test]
     fn status_completed_variants() {
         for s in ["completed", "succeeded", "success", "done"] {
-            assert_eq!(parse_video_status(&json!({"status": s})), VideoStatus::Completed);
+            assert_eq!(parse_video_status(&json!({"status": s})).unwrap(), VideoStatus::Completed);
         }
     }
 
     #[test]
     fn status_pending_variants() {
-        for s in ["queued", "in_progress", "running", "processing", ""] {
-            assert_eq!(parse_video_status(&json!({"status": s})), VideoStatus::Pending);
+        for s in ["queued", "pending", "in_progress", "running", "processing"] {
+            assert_eq!(parse_video_status(&json!({"status": s})).unwrap(), VideoStatus::Pending);
         }
-        assert_eq!(parse_video_status(&json!({})), VideoStatus::Pending);
+        for value in [json!({}), json!({"status":""}), json!({"status":"unexpected"})] {
+            assert_eq!(parse_video_status(&value).unwrap_err().kind, InvokeErrorKind::ParseError);
+        }
     }
 
     #[test]
     fn status_failed_carries_message() {
         let v = json!({"status": "failed", "error": {"message": "moderation blocked"}});
-        assert_eq!(parse_video_status(&v), VideoStatus::Failed("moderation blocked".into()));
+        assert_eq!(parse_video_status(&v).unwrap(), VideoStatus::Failed("moderation blocked".into()));
         // string error form
         let v2 = json!({"status": "error", "error": "boom"});
-        assert_eq!(parse_video_status(&v2), VideoStatus::Failed("boom".into()));
+        assert_eq!(parse_video_status(&v2).unwrap(), VideoStatus::Failed("boom".into()));
         // no detail → default message
         let v3 = json!({"status": "failed"});
-        assert_eq!(parse_video_status(&v3), VideoStatus::Failed("video generation failed".into()));
+        assert_eq!(parse_video_status(&v3).unwrap(), VideoStatus::Failed("video generation failed".into()));
     }
 
     // -- wiremock submit → poll → content chain ------------------------------

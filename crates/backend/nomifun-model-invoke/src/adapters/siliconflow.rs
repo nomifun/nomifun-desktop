@@ -420,6 +420,7 @@ fn build_image_edit_body(call: &ResolvedCall, req: &ImageEditRequest) -> Result<
 }
 
 fn parse_images(value: &Value) -> Result<Vec<ProducedAsset>, InvokeError> {
+    super::media_response::reject_provider_error(value,"SiliconFlow images")?;
     let images = value
         .get("images")
         .and_then(Value::as_array)
@@ -435,7 +436,7 @@ fn parse_images(value: &Value) -> Result<Vec<ProducedAsset>, InvokeError> {
                 .and_then(Value::as_str)
                 .filter(|url| !url.is_empty())
                 .ok_or_else(|| InvokeError::parse("SiliconFlow image result missing 'url'"))?;
-            Ok(ProducedAsset { data: ProducedData::Url(url.to_string()), mime: None })
+            Ok(ProducedAsset { data: ProducedData::Url(super::media_response::media_url(url,"SiliconFlow image result")?), mime: None })
         })
         .collect()
 }
@@ -472,10 +473,13 @@ impl ProtocolAdapter for SiliconFlowVideoJobsAdapter {
             .json()
             .await
             .map_err(|e| InvokeError::response_json("invalid SiliconFlow video submit JSON", &e))?;
+        super::media_response::reject_provider_error(&value,"SiliconFlow video submit")?;
+        super::media_response::validate_submit_status(value.get("status"), &["inqueue","inprogress"], &["succeed","succeeded","success"],
+            &["failed","failure"], "SiliconFlow video submit")?;
         let request_id = value
             .get("requestId")
             .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
+            .map(str::trim).filter(|id| !id.is_empty())
             .ok_or_else(|| InvokeError::parse("SiliconFlow video submit response missing 'requestId'"))?;
         Ok(TaskOutcome::Pending(JobHandle {
             adapter_id: VIDEO_ADAPTER_ID.into(),
@@ -510,7 +514,7 @@ impl ProtocolAdapter for SiliconFlowVideoJobsAdapter {
                 poll_state: json!({}),
             })),
             SiliconFlowVideoState::Failed(reason) => {
-                Err(InvokeError::new(InvokeErrorKind::JobFailed, reason))
+                Err(InvokeError::new(InvokeErrorKind::JobFailed, reason).redacted(&call.connection.auth.secret_redactor()))
             }
             SiliconFlowVideoState::Done(urls) => Ok(TaskOutcome::Done(TaskResult::Assets(
                 urls.into_iter()
@@ -549,7 +553,8 @@ enum SiliconFlowVideoState {
 }
 
 fn parse_video_status(value: &Value) -> Result<SiliconFlowVideoState, InvokeError> {
-    let status = value.get("status").and_then(Value::as_str).unwrap_or("").to_ascii_lowercase();
+    let status = value.get("status").and_then(Value::as_str).unwrap_or("").trim().to_ascii_lowercase();
+    if !matches!(status.as_str(),"failed"|"failure") {super::media_response::reject_provider_error(value,"SiliconFlow video status")?;}
     match status.as_str() {
         "succeed" | "succeeded" | "success" => parse_completed_video_urls(value),
         "failed" | "failure" => {
@@ -566,8 +571,8 @@ fn parse_video_status(value: &Value) -> Result<SiliconFlowVideoState, InvokeErro
         "" if value.pointer("/results/videos").and_then(Value::as_array).is_some() => {
             parse_completed_video_urls(value)
         }
-        // InQueue / InProgress (and unknown transient states) remain pending.
-        _ => Ok(SiliconFlowVideoState::Pending),
+        "inqueue" | "inprogress" => Ok(SiliconFlowVideoState::Pending),
+        _ => Err(InvokeError::parse("SiliconFlow video response has no recognized status")),
     }
 }
 
@@ -579,10 +584,11 @@ fn parse_completed_video_urls(value: &Value) -> Result<SiliconFlowVideoState, In
         .ok_or_else(|| InvokeError::parse("SiliconFlow video succeeded but missing results.videos"))?;
     let urls: Vec<String> = videos
         .iter()
-        .filter_map(|video| video.get("url").and_then(Value::as_str))
-        .filter(|url| !url.is_empty())
-        .map(str::to_string)
-        .collect();
+        .map(|video| {
+            let url = video.get("url").and_then(Value::as_str)
+                .ok_or_else(|| InvokeError::parse("SiliconFlow video result is missing its URL"))?;
+            super::media_response::media_url(url,"SiliconFlow video result")
+        }).collect::<Result<_,_>>()?;
     if urls.is_empty() {
         return Err(InvokeError::parse(
             "SiliconFlow video succeeded but results.videos contains no URL",

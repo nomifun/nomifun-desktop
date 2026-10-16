@@ -17,6 +17,7 @@ use crate::transport::{decode_hex, error_from_response, read_body_capped, send_w
 use crate::types::{ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult};
 
 use super::json_request_body;
+use super::audio_payload::validate_audio_payload;
 
 pub struct MiniMaxMusicAdapter;
 
@@ -72,7 +73,8 @@ impl ProtocolAdapter for MiniMaxMusicAdapter {
         let bytes = read_body_capped(response, MAX_ARTIFACT_BYTES).await?;
         let value: Value = serde_json::from_slice(&bytes)
             .map_err(|error| InvokeError::parse(format!("invalid minimax music JSON: {error}")))?;
-        let audio = parse_music_audio(&value)?;
+        let audio = parse_music_audio(&value).map_err(|error| error.redacted(&call.connection.auth.secret_redactor()))?;
+        validate_audio_payload(&audio,None,"minimax.music")?;
         Ok(TaskOutcome::Done(TaskResult::Assets(vec![ProducedAsset {
             data: ProducedData::Bytes(audio), mime: Some("audio/mpeg".to_owned()),
         }])))
@@ -143,6 +145,25 @@ mod tests {
         let error = MiniMaxMusicAdapter.submit(&reqwest::Client::new(), &call(&server.uri(), req)).await.unwrap_err();
         assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
         assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn http_200_business_failures_partial_tracks_and_non_audio_payloads_never_succeed() {
+        for body in [
+            json!({"base_resp":{"status_code":1004,"status_msg":"denied sk-test"},"data":{"status":2,"audio":"494433"}}),
+            json!({"base_resp":{"status_code":0},"data":{"status":1,"audio":"494433"}}),
+            json!({"base_resp":{"status_code":0},"data":{"status":2,"audio":""}}),
+            json!({"base_resp":{"status_code":0},"data":{"status":2,"audio":"https://example.invalid/track.mp3"}}),
+            json!({"base_resp":{"status_code":0},"data":{"status":2,"audio":"7b226572726f72223a2278227d"}}),
+            json!({"base_resp":{"status_code":"0"},"data":{"status":2,"audio":"494433"}}),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .expect(1).mount(&server).await;
+            let error = MiniMaxMusicAdapter.submit(&reqwest::Client::new(),&call(&server.uri(),request())).await.unwrap_err();
+            assert!(matches!(error.kind,InvokeErrorKind::ProviderError|InvokeErrorKind::ParseError));
+            assert!(!error.message.contains("sk-test"));
+        }
     }
 
     #[test]

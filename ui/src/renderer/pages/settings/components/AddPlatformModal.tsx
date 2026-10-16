@@ -45,6 +45,7 @@ import {
 import { buildAuthSchemeOptions } from './providerConnectionForm';
 import useModelProtocolManifests from './useModelProtocolManifests';
 import ModelCallConfigModalFooter from './ModelCallConfigModalFooter';
+import ModelConfigurationSaveFooter from './ModelConfigurationSaveFooter';
 import ProviderAutoConfigurationNotice from './ProviderAutoConfigurationNotice';
 import {
   applyProviderAutoConfiguration,
@@ -96,6 +97,7 @@ const AddPlatformModal = ModalHOC<{
   const [authSchemeDirty, setAuthSchemeDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [protocolDetecting, setProtocolDetecting] = useState(false);
+  const [discoverySkipped, setDiscoverySkipped] = useState(false);
   const [focusedCallConfigTask, setFocusedCallConfigTask] = useState<ModelTask>();
   const [compatibilityMode, setCompatibilityMode] =
     useState<ProviderCompatibilityMode>('auto');
@@ -188,7 +190,7 @@ const AddPlatformModal = ModalHOC<{
   });
   const autoConfigurationEnabled = isAutoConfigurationPlatform(runtimePlatform);
   const autoConfiguration = useProviderAutoConfiguration({
-    enabled: modalProps.visible && autoConfigurationEnabled,
+    enabled: modalProps.visible && autoConfigurationEnabled && !discoverySkipped,
     platform: runtimePlatform,
     baseUrl,
     authScheme,
@@ -262,6 +264,7 @@ const AddPlatformModal = ModalHOC<{
     setBaseUrlDirty(Boolean(deepLinkData?.base_url));
     setAuthSchemeDirty(false);
     setSaving(false);
+    setDiscoverySkipped(false);
     setFocusedCallConfigTask(undefined);
     setCompatibilityMode('auto');
     appliedAutoConfigurationRef.current = '';
@@ -343,7 +346,7 @@ const AddPlatformModal = ModalHOC<{
 
   useEffect(() => {
     const batch = autoConfiguration.data;
-    if (!batch || batch.detections.length === 0) return;
+    if (discoverySkipped || !batch || batch.detections.length === 0) return;
     const signature = JSON.stringify(batch);
     if (appliedAutoConfigurationRef.current === signature) return;
     appliedAutoConfigurationRef.current = signature;
@@ -374,10 +377,12 @@ const AddPlatformModal = ModalHOC<{
     authScheme,
     authSchemeDirty,
     autoConfiguration.data,
+    discoverySkipped,
     form,
   ]);
 
   const selectPreset = (nextPreset: string) => {
+    setDiscoverySkipped(false);
     const platform = getPlatformByValue(nextPreset);
     setDefinition(createModelDefinitionDraft(deepLinkData?.task ?? initialTask));
     setPendingConnections([]);
@@ -406,16 +411,8 @@ const AddPlatformModal = ModalHOC<{
     ]);
   };
 
-  const submit = async () => {
-    if (protocolDetecting) return;
-    if (autoConfiguration.isLoading) {
-      message.warning(
-        t('settings.providerAutoConfiguration.detecting', {
-          defaultValue: '正在探测协议、鉴权方式和可用 API 地址…',
-        })
-      );
-      return;
-    }
+  const submit = async (force = false) => {
+    if (saving || (!force && (protocolDetecting || autoConfiguration.isLoading))) return;
     if (!validation.valid) {
       // Name the blockers rather than restating that something is unfinished.
       const detail = describeValidationErrors(validation.errors, (key, fallback, parameter) =>
@@ -431,6 +428,7 @@ const AddPlatformModal = ModalHOC<{
     }
     const capabilities = capabilityInputsFromDefinition(definition);
     if (!capabilities) return;
+    setSaving(true);
     try {
       const values = await form.validate();
       const credentialBuild = buildProviderCredentials({
@@ -452,7 +450,7 @@ const AddPlatformModal = ModalHOC<{
         return;
       }
       const providerId = parseProviderId(uuidv7());
-      setSaving(true);
+      if (force) setDiscoverySkipped(true);
       const created = await ipcBridge.mode.createProvider.invoke({
         id: providerId,
         platform: runtimePlatform,
@@ -513,7 +511,16 @@ const AddPlatformModal = ModalHOC<{
             onCancel={() => modelEditorRef.current?.cancelCallConfig()}
             onApply={() => modelEditorRef.current?.applyCallConfig()}
           />
-        ) : undefined
+        ) : (
+          <ModelConfigurationSaveFooter
+            configuring={protocolDetecting || autoConfiguration.isLoading}
+            saving={saving}
+            disabled={!validation.valid}
+            onCancel={modalCtrl.close}
+            onSave={() => void submit()}
+            onForceSave={() => void submit(true)}
+          />
+        )
       }
       style={{
         width: focusedCallConfigTask ? 840 : 820,
@@ -724,7 +731,7 @@ const AddPlatformModal = ModalHOC<{
           providerBaseUrl={baseUrl}
           providerAuthScheme={authScheme}
           providerLabel={providerName || selectedPlatform?.name || preset || ''}
-          protocolDiscovery={modalProps.visible ? {
+          protocolDiscovery={modalProps.visible && !discoverySkipped ? {
             platform: runtimePlatform, baseUrl, authScheme,
             ...(credentialsResult.ok && credentialsResult.credentials !== undefined ? { credentials: credentialsResult.credentials } : {}),
             connections: pendingConnections,

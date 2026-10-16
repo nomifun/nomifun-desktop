@@ -4,6 +4,7 @@ use axum::http::StatusCode;
 use nomifun_api_types::{ModelCatalogSource, ModelContextLimitKind, ModelInfo, ModelTask, ModelTaskSource, ModelTokenLimitSources, ModelTrait};
 use nomifun_common::AppError;
 use nomifun_model_invoke::{AuthMaterial, AuthScheme};
+use nomifun_model_invoke::transport::apply_protocol_request_headers;
 use serde::Deserialize;
 use tracing::warn;
 
@@ -522,11 +523,11 @@ async fn fetch_anthropic(
                 "Anthropic model catalog request timed out while loading all pages".into(),
             ));
         }
-        let mut request = client
+        let request = client
             .get(&url)
             .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
             .query(&[("limit", "1000")]);
+        let mut request = apply_protocol_request_headers(request, "anthropic.messages");
         if let Some(cursor) = after_id.as_deref() {
             // Cursors stay opaque query values on the same catalog endpoint.
             request = request.query(&[("after_id", cursor)]);

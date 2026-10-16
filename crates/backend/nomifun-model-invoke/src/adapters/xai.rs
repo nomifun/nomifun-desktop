@@ -261,6 +261,7 @@ async fn parse_image_http_response(resp: reqwest::Response) -> Result<TaskOutcom
 }
 
 fn parse_images_response(value: &Value) -> Result<Vec<ProducedAsset>, InvokeError> {
+    super::media_response::reject_provider_error(value,"xAI images")?;
     let data = value
         .get("data")
         .and_then(Value::as_array)
@@ -273,13 +274,14 @@ fn parse_images_response(value: &Value) -> Result<Vec<ProducedAsset>, InvokeErro
             let mime = item.get("mime_type").and_then(Value::as_str).map(str::to_owned);
             if let Some(b64) = item.get("b64_json").and_then(Value::as_str) {
                 let bytes = decode_b64(b64)
+                    .filter(|bytes| !bytes.is_empty())
                     .ok_or_else(|| InvokeError::parse("xAI images b64_json is not valid base64"))?;
                 Ok(ProducedAsset {
                     data: ProducedData::Bytes(bytes),
                     mime: Some(mime.unwrap_or_else(|| "image/jpeg".into())),
                 })
             } else if let Some(url) = item.get("url").and_then(Value::as_str).filter(|s| !s.is_empty()) {
-                Ok(ProducedAsset { data: ProducedData::Url(url.into()), mime })
+                Ok(ProducedAsset { data: ProducedData::Url(super::media_response::media_url(url,"xAI image result")?), mime })
             } else {
                 Err(InvokeError::parse("xAI images data item has neither b64_json nor url"))
             }
@@ -322,10 +324,12 @@ impl ProtocolAdapter for XaiVideoJobsAdapter {
             .json()
             .await
             .map_err(|e| InvokeError::response_json("invalid xAI video submit JSON", &e))?;
+        super::media_response::reject_provider_error(&value,"xAI video submit")?;
+        super::media_response::validate_submit_status(value.get("status"), &["pending"], &["done"], &["failed","expired"], "xAI video submit")?;
         let request_id = value
             .get("request_id")
             .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
+            .map(str::trim).filter(|s| !s.is_empty())
             .ok_or_else(|| InvokeError::parse("xAI video submit response missing 'request_id'"))?;
         Ok(TaskOutcome::Pending(JobHandle {
             adapter_id: VIDEO_ADAPTER_ID.into(),
@@ -364,7 +368,7 @@ impl ProtocolAdapter for XaiVideoJobsAdapter {
                 data: ProducedData::Url(url),
                 mime: Some("video/mp4".into()),
             }]))),
-            XaiVideoState::Failed(message) => Err(InvokeError::new(InvokeErrorKind::JobFailed, message)),
+            XaiVideoState::Failed(message) => Err(InvokeError::new(InvokeErrorKind::JobFailed, message).redacted(&call.connection.auth.secret_redactor())),
         }
     }
 }
@@ -453,7 +457,8 @@ enum XaiVideoState {
 }
 
 fn parse_video_status(value: &Value) -> Result<XaiVideoState, InvokeError> {
-    let status = value.get("status").and_then(Value::as_str).unwrap_or("").to_ascii_lowercase();
+    let status = value.get("status").and_then(Value::as_str).unwrap_or("").trim().to_ascii_lowercase();
+    if !matches!(status.as_str(),"failed"|"expired") {super::media_response::reject_provider_error(value,"xAI video status")?;}
     match status.as_str() {
         "done" => {
             let url = value
@@ -462,7 +467,7 @@ fn parse_video_status(value: &Value) -> Result<XaiVideoState, InvokeError> {
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| InvokeError::parse("xAI video status is done but missing video.url"))?;
-            Ok(XaiVideoState::Done(url.into()))
+            Ok(XaiVideoState::Done(super::media_response::media_url(url,"xAI video result")?))
         }
         "failed" | "expired" => {
             let message = value
@@ -473,8 +478,8 @@ fn parse_video_status(value: &Value) -> Result<XaiVideoState, InvokeError> {
                 .to_owned();
             Ok(XaiVideoState::Failed(message))
         }
-        // pending and unknown/empty statuses are non-terminal.
-        _ => Ok(XaiVideoState::Pending),
+        "pending" => Ok(XaiVideoState::Pending),
+        _ => Err(InvokeError::parse("xAI video response has no recognized status")),
     }
 }
 

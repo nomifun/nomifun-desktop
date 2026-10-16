@@ -10,6 +10,7 @@ use nomifun_api_types::ModelTask;
 use serde_json::{Value, json};
 
 use super::json_request_body;
+use super::audio_payload::validate_audio_payload;
 use crate::adapter::ProtocolAdapter;
 use crate::call::ResolvedCall;
 use crate::error::{InvokeError, InvokeErrorKind};
@@ -53,6 +54,7 @@ impl ProtocolAdapter for ZhipuAudioSpeechAdapter {
         if bytes.is_empty() {
             return Err(InvokeError::parse("zhipu.audio_speech returned empty audio"));
         }
+        validate_audio_payload(&bytes,content_type.as_deref(),PROTOCOL_ID)?;
         let mime = match body["response_format"].as_str() {
             Some("pcm") => "audio/pcm",
             _ => "audio/wav",
@@ -218,6 +220,8 @@ mod tests {
         for response in [
             ResponseTemplate::new(200).set_body_raw(Vec::<u8>::new(), "audio/wav"),
             ResponseTemplate::new(200).set_body_json(json!({"error":{"message":"reflected sk-test"}})),
+            ResponseTemplate::new(200).set_body_raw("{\"error\":\"sk-test\"}", "audio/wav"),
+            ResponseTemplate::new(200).set_body_raw("<!doctype html><html>sk-test</html>", "audio/wav"),
             ResponseTemplate::new(200).set_body_raw("data: reflected sk-test\n\n", "text/event-stream"),
         ] {
             let server = MockServer::start().await;

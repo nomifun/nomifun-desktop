@@ -21,6 +21,7 @@ use crate::transport::{error_from_response, post_json};
 use crate::types::{TaskOutcome, TaskRequest, TaskResult};
 
 use super::json_request_body;
+use super::retrieval_results::{embedding_batch, requested_dimension};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -57,6 +58,7 @@ impl ProtocolAdapter for OpenAiEmbeddingsAdapter {
             json!({ "model": call.model, "input": req.inputs }),
         )?;
 
+        let dimension = requested_dimension(body.get("dimensions"), "embedding dimensions")?;
         let resp = post_json(http, &url, REQUEST_TIMEOUT, &call.connection.auth, &body).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
@@ -65,13 +67,7 @@ impl ProtocolAdapter for OpenAiEmbeddingsAdapter {
             .json()
             .await
             .map_err(|e| InvokeError::response_json("invalid embeddings JSON", &e))?;
-        let vectors = parse_embeddings_response(&value)?;
-        if vectors.len() != req.inputs.len() {
-            return Err(InvokeError::parse(format!(
-                "embeddings response returned {} vectors for {} inputs",
-                vectors.len(), req.inputs.len()
-            )));
-        }
+        let vectors = parse_embeddings_response(&value, req.inputs.len(), dimension)?;
         Ok(TaskOutcome::Done(TaskResult::Embeddings(vectors)))
     }
 }
@@ -80,46 +76,12 @@ impl ProtocolAdapter for OpenAiEmbeddingsAdapter {
 /// (`{ data: [ { embedding: [..], index? } ] }`) into one vector per input.
 /// Indices must either be absent from every item or cover each input once.
 /// Array order is used only for entirely unindexed compatible responses.
-pub(crate) fn parse_embeddings_response(value: &Value) -> Result<Vec<Vec<f32>>, InvokeError> {
+pub(crate) fn parse_embeddings_response(value: &Value, expected_count: usize, dimension: Option<usize>) -> Result<Vec<Vec<f32>>, InvokeError> {
     let data = value
         .get("data")
         .and_then(|v| v.as_array())
         .ok_or_else(|| InvokeError::parse("embeddings response missing 'data' array"))?;
-    if data.is_empty() {
-        return Err(InvokeError::parse("embeddings response 'data' array is empty"));
-    }
-    let mut items: Vec<(Option<u64>, Vec<f32>)> = Vec::with_capacity(data.len());
-    for item in data {
-        let raw = item
-            .get("embedding")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| InvokeError::parse("embeddings data item missing 'embedding' array"))?;
-        let mut vector = Vec::with_capacity(raw.len());
-        for n in raw {
-            let f = n
-                .as_f64()
-                .ok_or_else(|| InvokeError::parse("embedding vector contains a non-numeric element"))?;
-            vector.push(f as f32);
-        }
-        let index = item.get("index").map(|index| {
-            index.as_u64().ok_or_else(|| InvokeError::parse(
-                "embedding data item has an invalid 'index'"
-            ))
-        }).transpose()?;
-        items.push((index, vector));
-    }
-    if items.iter().any(|(idx, _)| idx.is_some()) {
-        if items.iter().any(|(idx, _)| idx.is_none()) {
-            return Err(InvokeError::parse("embeddings response contains partial indices"));
-        }
-        items.sort_by_key(|(idx, _)| idx.unwrap_or(u64::MAX));
-        if items.iter().enumerate().any(|(expected, (index, _))| *index != Some(expected as u64)) {
-            return Err(InvokeError::parse(
-                "embeddings response indices must cover every input once without gaps or duplicates"
-            ));
-        }
-    }
-    Ok(items.into_iter().map(|(_, v)| v).collect())
+    embedding_batch(data, expected_count, "index", dimension, "embeddings response")
 }
 
 #[cfg(test)]
@@ -151,7 +113,7 @@ mod tests {
             {"embedding": [1.0, 2.0]},
             {"embedding": [3.0, 4.0]},
         ]});
-        assert_eq!(parse_embeddings_response(&v).unwrap(), vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
+        assert_eq!(parse_embeddings_response(&v, 2, None).unwrap(), vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
     }
 
     #[test]
@@ -160,7 +122,7 @@ mod tests {
             {"index": 1, "embedding": [3.0, 4.0]},
             {"index": 0, "embedding": [1.0, 2.0]},
         ]});
-        assert_eq!(parse_embeddings_response(&v).unwrap(), vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
+        assert_eq!(parse_embeddings_response(&v, 2, None).unwrap(), vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
     }
 
     #[test]
@@ -173,7 +135,8 @@ mod tests {
             json!([{"index": "0", "embedding": [3.0]}]),
             json!([{"index": null, "embedding": [3.0]}]),
         ] {
-            let error = parse_embeddings_response(&json!({"data": data})).unwrap_err();
+            let expected = data.as_array().unwrap().len();
+            let error = parse_embeddings_response(&json!({"data": data}), expected, None).unwrap_err();
             assert_eq!(error.kind, InvokeErrorKind::ParseError);
         }
     }
@@ -187,7 +150,8 @@ mod tests {
             json!({"data": [{"embedding": "not an array"}]}),
             json!({"data": [{"embedding": [1.0, "x"]}]}),
         ] {
-            let err = parse_embeddings_response(&bad).unwrap_err();
+            let expected = bad.get("data").and_then(Value::as_array).map_or(1, Vec::len);
+            let err = parse_embeddings_response(&bad, expected, None).unwrap_err();
             assert_eq!(err.kind, InvokeErrorKind::ParseError, "input {bad}");
         }
     }
@@ -252,6 +216,46 @@ mod tests {
             let error = OpenAiEmbeddingsAdapter.submit(&reqwest::Client::new(), &call).await.unwrap_err();
             assert_eq!(error.kind, InvokeErrorKind::ParseError);
             assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn embeddings_reject_unusable_vector_values_and_dimensions_on_the_wire() {
+        let server = MockServer::start().await;
+        let mut replies: Vec<String> = [
+            json!({"data":[{"embedding":[]},{"embedding":[1]}]}),
+            json!({"data":[{"embedding":[1]},{"embedding":[2,3]}]}),
+            json!({"data":[{"embedding":[1e100]},{"embedding":[2]}]}),
+            json!({"data":[{"embedding":[null]},{"embedding":[2]}]}),
+        ].into_iter().map(|value| value.to_string()).collect();
+        replies.extend([r#"{"data":[{"embedding":[NaN]},{"embedding":[2]}]}"#.to_owned(),
+            r#"{"data":[{"embedding":[1e400]},{"embedding":[2]}]}"#.to_owned()]);
+        for reply in replies {
+            server.reset().await;
+            Mock::given(method("POST")).and(path("/v1/embeddings"))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(reply, "application/json"))
+                .expect(1).mount(&server).await;
+            let call = call(&server.uri(), "gateway-embedding", embed_request(&["alpha", "beta"]));
+            let error = OpenAiEmbeddingsAdapter.submit(&reqwest::Client::new(), &call).await.unwrap_err();
+            assert_eq!(error.kind, InvokeErrorKind::ParseError);
+        }
+    }
+
+    #[tokio::test]
+    async fn embeddings_match_the_effective_requested_dimension_without_replacing_configuration() {
+        for (dimensions, succeeds) in [(2, true), (3, false)] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST")).and(body_partial_json(json!({"dimensions":2})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{"embedding":vec![0.5; dimensions]}]})))
+                .expect(1).mount(&server).await;
+            let mut call = call(&server.uri(), "gateway-embedding", TaskRequest::Embedding(EmbedRequest {
+                inputs: vec!["alpha".into()], extra: json!({"dimensions":2}),
+            }));
+            call.model_params["dimensions"] = json!(7);
+            let outcome = OpenAiEmbeddingsAdapter.submit(&reqwest::Client::new(), &call).await;
+            if succeeds { assert!(matches!(outcome, Ok(TaskOutcome::Done(TaskResult::Embeddings(_))))); }
+            else { assert_eq!(outcome.unwrap_err().kind, InvokeErrorKind::ParseError); }
+            assert_eq!(call.model_params["dimensions"], 7);
         }
     }
 

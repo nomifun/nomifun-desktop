@@ -24,7 +24,8 @@ use serde_json::{Value, json};
 use crate::adapter::ProtocolAdapter;
 use crate::call::ResolvedCall;
 use crate::error::{InvokeError, InvokeErrorKind};
-use crate::transport::{decode_hex, error_from_response, send_with_rotation};
+use crate::transport::{MAX_ARTIFACT_BYTES, decode_hex, error_from_response, read_json_capped, response_secret_redactor, send_with_rotation};
+use super::audio_payload::validate_audio_payload;
 use crate::types::{ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult};
 
 use super::json_request_body;
@@ -88,15 +89,15 @@ impl ProtocolAdapter for MiniMaxT2aAdapter {
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        let value: Value = resp
-            .json()
-            .await
-            .map_err(|e| InvokeError::response_json("invalid minimax t2a JSON", &e))?;
+        let redactor = response_secret_redactor(&resp);
+        let value = read_json_capped(resp,MAX_ARTIFACT_BYTES,"minimax t2a").await
+            .map_err(|error| error.redacted(&redactor))?;
 
-        let bytes = parse_t2a_audio(&value)?;
+        let bytes = parse_t2a_audio(&value).map_err(|error| error.redacted(&redactor))?;
+        validate_audio_payload(&bytes,None,"minimax.t2a")?;
         Ok(TaskOutcome::Done(TaskResult::Assets(vec![ProducedAsset {
             data: ProducedData::Bytes(bytes),
-            mime: Some(mime_for_format(req.format.as_deref()).to_owned()),
+            mime: Some(mime_for_format(body.pointer("/audio_setting/format").and_then(Value::as_str)).to_owned()),
         }])))
     }
 }
@@ -107,26 +108,30 @@ impl ProtocolAdapter for MiniMaxT2aAdapter {
 /// HTTP 200); invalid hex is a parse error; `extra_info` is ignored. Pure —
 /// unit tested.
 pub(crate) fn parse_t2a_audio(value: &Value) -> Result<Vec<u8>, InvokeError> {
+    // Explicit business failure/partial state wins even if the response also
+    // contains audio bytes. Older compatible responses may omit these fields.
+    if let Some(code) = value.pointer("/base_resp/status_code") {
+        let code = code.as_i64().ok_or_else(|| InvokeError::parse("minimax t2a base_resp.status_code is not an integer"))?;
+        if code != 0 {
+            let message = value.pointer("/base_resp/status_msg").and_then(Value::as_str).unwrap_or("speech generation refused");
+            return Err(InvokeError::new(InvokeErrorKind::ProviderError,format!("minimax t2a failed (base_resp.status_code {code}): {message}")));
+        }
+    }
+    if value.pointer("/data/status").is_some_and(|status| status.as_i64()!=Some(2)) {
+        return Err(InvokeError::parse("minimax t2a did not return complete audio"));
+    }
     let audio = value.get("data").and_then(|d| d.get("audio")).and_then(|a| a.as_str());
     if let Some(hex) = audio.filter(|s| !s.trim().is_empty()) {
         return decode_hex(hex)
             .filter(|b| !b.is_empty())
             .ok_or_else(|| InvokeError::parse("minimax t2a data.audio is not valid hex"));
     }
-    // No audio: fold the in-body failure vocabulary into a provider error.
-    let code = value.get("base_resp").and_then(|b| b.get("status_code")).and_then(|c| c.as_i64());
     let msg = value
         .get("base_resp")
         .and_then(|b| b.get("status_msg"))
         .and_then(|m| m.as_str())
         .unwrap_or("response carries no data.audio");
-    match code {
-        Some(code) if code != 0 => Err(InvokeError::new(
-            InvokeErrorKind::ProviderError,
-            format!("minimax t2a failed (base_resp.status_code {code}): {msg}"),
-        )),
-        _ => Err(InvokeError::parse(format!("minimax t2a produced no audio: {msg}"))),
-    }
+    Err(InvokeError::parse(format!("minimax t2a produced no audio: {msg}")))
 }
 
 #[cfg(test)]
@@ -294,6 +299,37 @@ mod tests {
         let err = MiniMaxT2aAdapter.submit(&test_http(), &call).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::ProviderError);
         assert!(err.message.contains("2013"), "message: {}", err.message);
+    }
+
+    #[tokio::test]
+    async fn t2a_failure_and_partial_status_win_over_audio_and_diagnostics_are_redacted() {
+        for body in [
+            json!({"base_resp":{"status_code":2013,"status_msg":"rejected sk-test"},"data":{"status":2,"audio":"494433"}}),
+            json!({"base_resp":{"status_code":0},"data":{"status":1,"audio":"494433"}}),
+            json!({"base_resp":{"status_code":"0"},"data":{"status":2,"audio":"494433"}}),
+            json!({"base_resp":{"status_code":0},"data":{"status":2,"audio":""}}),
+            json!({"base_resp":{"status_code":0},"data":{"status":2,"audio":"7b226572726f72223a2278227d"}}),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .expect(1).mount(&server).await;
+            let error = MiniMaxT2aAdapter.submit(&test_http(),&minimax_call(&server.uri(),"speech-01",tts("hi",None,None))).await.unwrap_err();
+            assert!(matches!(error.kind,InvokeErrorKind::ProviderError|InvokeErrorKind::ParseError));
+            assert!(!error.message.contains("sk-test"));
+        }
+    }
+
+    #[tokio::test]
+    async fn t2a_configured_pcm_controls_the_returned_mime_without_requiring_a_container() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).respond_with(ResponseTemplate::new(200)
+            .set_body_json(json!({"base_resp":{"status_code":0},"data":{"status":2,"audio":"00010002"}})))
+            .expect(1).mount(&server).await;
+        let mut call = minimax_call(&server.uri(),"speech-01",tts("hi",None,None));
+        call.model_params["audio_setting"] = json!({"format":"pcm"});
+        let TaskOutcome::Done(TaskResult::Assets(assets)) = MiniMaxT2aAdapter.submit(&test_http(),&call).await.unwrap() else {panic!("expected PCM")};
+        assert_eq!(assets[0].mime.as_deref(),Some("audio/pcm"));
+        assert!(matches!(&assets[0].data,ProducedData::Bytes(bytes) if bytes==&[0,1,0,2]));
     }
 
     #[tokio::test]

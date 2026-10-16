@@ -156,7 +156,7 @@ async fn startup_repairs_saved_agnes_v20_before_catalog_health_and_real_invocati
         &token, &csrf)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let health = body_json(response).await;
-    assert_eq!(health["data"]["status"], "healthy", "{health}");
+    assert_eq!(health["data"]["status"], "unknown", "{health}");
     assert_eq!(health["data"]["task"], "video_generation");
     assert_eq!(health["data"]["attempted_url"], format!("{}/v1/videos", server.uri()));
     let outcome = services.model_invoke_service.invoke(&ModelRef {
@@ -179,7 +179,7 @@ async fn startup_repairs_saved_agnes_v20_before_catalog_health_and_real_invocati
     let capabilities = SqliteProviderModelCapabilityRepository::new(services.database.pool().clone());
     assert!(capabilities.get(&provider.provider_id, "agnes-video-v2.0", "image_generation").await.unwrap().is_none());
     let stored = capabilities.get(&provider.provider_id, "agnes-video-v2.0", "video_generation").await.unwrap().unwrap();
-    assert_eq!(serde_json::from_str::<serde_json::Value>(stored.health.as_deref().unwrap()).unwrap()["status"], "healthy");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(stored.health.as_deref().unwrap()).unwrap()["status"], "unknown");
     services.shutdown_browser_platform().await.unwrap();
     services.companion_service.close_storage().await;
     services.database.close().await;
