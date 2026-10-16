@@ -32,7 +32,8 @@ linker = "rust-lld.exe"
 # this rebuilds intermediates into the new location — run `cargo clean` once
 # to reclaim the orphaned old target/ contents.
 [build]
-build-dir = "{workspace-root}/build.noindex"
+target-dir = "D:/cargo/target/nomifun"
+jobs = 3
 
 # Enlarge rustc's compilation-thread stack. The release `tauri build` embeds the
 # entire frontend `ui/dist` (~34 MB, hundreds of files) into the `nomifun-desktop`
