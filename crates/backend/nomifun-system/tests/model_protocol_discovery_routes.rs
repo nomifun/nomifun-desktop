@@ -45,12 +45,37 @@ fn chat_round(tool: bool) -> String {
         json!({"choices":[{"index":0,"delta":{},"finish_reason":if tool {"tool_calls"} else {"stop"}}],"usage":{"prompt_tokens":3,"completion_tokens":1}}))
 }
 fn responses_round(tool: bool) -> String {
-    let output = if tool {vec![
-        json!({"id":"reasoning_1","type":"reasoning","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"original reasoning"}]}),
-        json!({"id":"function_1","call_id":"call_1","type":"function_call","name":TOOL,"arguments":"{\"value\":\"ok\"}","status":"completed"})]}
-        else {vec![json!({"id":"message_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"OK","annotations":[]}]})]};
-    frames(vec![json!({"type":"response.created","response":{"id":if tool {"response_1"} else {"response_2"},"status":"in_progress","output":[]}}),
-        json!({"type":"response.completed","response":{"id":if tool {"response_1"} else {"response_2"},"status":"completed","output":output,"usage":{"input_tokens":3,"output_tokens":1}}})])
+    // The production decoder corroborates the terminal output against each
+    // item's output_item.done snapshot; real streams always send the item
+    // lifecycle, so the fixture must too.
+    let id = if tool {"response_1"} else {"response_2"};
+    let mut events=vec![json!({"type":"response.created","response":{"id":id,"status":"in_progress","output":[]}})];
+    let output = if tool {
+        let reasoning=json!({"id":"reasoning_1","type":"reasoning","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"original reasoning"}]});
+        let function=json!({"id":"function_1","call_id":"call_1","type":"function_call","name":TOOL,"arguments":"{\"value\":\"ok\"}","status":"completed"});
+        events.extend([
+            json!({"type":"response.output_item.added","output_index":0,"item":{"id":"reasoning_1","type":"reasoning","summary":[],"content":[]}}),
+            json!({"type":"response.output_item.done","output_index":0,"item":reasoning}),
+            json!({"type":"response.output_item.added","output_index":1,"item":{"id":"function_1","call_id":"call_1","type":"function_call","name":TOOL,"arguments":"","status":"in_progress"}}),
+            json!({"type":"response.function_call_arguments.delta","output_index":1,"item_id":"function_1","delta":"{\"value\":\"ok\"}"}),
+            json!({"type":"response.function_call_arguments.done","output_index":1,"item_id":"function_1","arguments":"{\"value\":\"ok\"}"}),
+            json!({"type":"response.output_item.done","output_index":1,"item":function}),
+        ]);
+        vec![reasoning,function]
+    } else {
+        let message=json!({"id":"message_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"OK","annotations":[]}]});
+        events.extend([
+            json!({"type":"response.output_item.added","output_index":0,"item":{"id":"message_1","type":"message","role":"assistant","status":"in_progress","content":[]}}),
+            json!({"type":"response.content_part.added","output_index":0,"item_id":"message_1","content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}),
+            json!({"type":"response.output_text.delta","output_index":0,"item_id":"message_1","content_index":0,"delta":"OK"}),
+            json!({"type":"response.output_text.done","output_index":0,"item_id":"message_1","content_index":0,"text":"OK"}),
+            json!({"type":"response.content_part.done","output_index":0,"item_id":"message_1","content_index":0,"part":{"type":"output_text","text":"OK","annotations":[]}}),
+            json!({"type":"response.output_item.done","output_index":0,"item":message}),
+        ]);
+        vec![message]
+    };
+    events.push(json!({"type":"response.completed","response":{"id":id,"status":"completed","output":output,"usage":{"input_tokens":3,"output_tokens":1}}}));
+    frames(events)
 }
 fn anthropic_round(tool: bool) -> String {
     let block = if tool {json!({"type":"tool_use","id":"call_1","name":TOOL,"input":{}})} else {json!({"type":"text","text":""})};
@@ -81,7 +106,7 @@ impl Respond for ToolRounds {
             return ResponseTemplate::new(400).set_body_json(json!({"type":"error","error":{
                 "type":"invalid_request_error","message":"anthropic-version must be 2023-06-01"}}));
         }
-        let tool = self.count.fetch_add(1,Ordering::SeqCst) % 2 == 0;
+        let tool = self.count.fetch_add(1,Ordering::SeqCst).is_multiple_of(2);
         let stream = match self.protocol {"responses" => responses_round(tool),"anthropic" => anthropic_round(tool),"gemini" => gemini_round(tool),_ => chat_round(tool)};
         ResponseTemplate::new(200).set_delay(self.delay).set_body_raw(stream,"text/event-stream")
     }
@@ -226,7 +251,8 @@ async fn authentication_billing_and_rate_limit_html_keep_their_actual_stop_autho
 async fn protocol_scoped_html_and_server_failures_do_not_block_a_working_chat_candidate() {
     for (status,content_type,body) in [(200,"text/html","<!doctype html><html>gateway app</html>"),(503,"application/json","{\"error\":{\"code\":\"unavailable\"}}")] {
         let server=MockServer::start().await;
-        Mock::given(method("POST")).and(path("/v1/responses")).respond_with(ResponseTemplate::new(status).set_body_raw(body,content_type)).expect(if status == 503 {3} else {1}).mount(&server).await;
+        // Verification executes one attempt per request; no transport retries.
+        Mock::given(method("POST")).and(path("/v1/responses")).respond_with(ResponseTemplate::new(status).set_body_raw(body,content_type)).expect(1).mount(&server).await;
         mount_tools(&server,"/v1/chat/completions","chat","authorization",SECRET,Duration::ZERO).await;
         let (router,_)=setup().await;let mut draft=anonymous(&server,"openai.responses");draft["preferred_protocol"]=json!("openai.responses");
         let (_,body)=post(&router,ROUTE,draft).await;
@@ -254,10 +280,25 @@ async fn a_responses_timeout_does_not_prevent_verifying_the_available_chat_proto
 async fn structured_sse_rejection_is_distinct_from_transport_failure_and_can_find_an_alternative() {
     let server=MockServer::start().await;
     Mock::given(method("POST")).and(path("/v1/responses")).respond_with(ResponseTemplate::new(200).set_body_raw(
-        frames(vec![json!({"type":"error","code":"unsupported_protocol","message":"Use Chat Completions"})]),"text/event-stream")).expect(1).mount(&server).await;
+        frames(vec![json!({"type":"error","code":"unsupported_tool_calls","message":"Use Chat Completions"})]),"text/event-stream")).expect(1).mount(&server).await;
     mount_tools(&server,"/v1/chat/completions","chat","authorization",SECRET,Duration::ZERO).await;
     let (router,_)=setup().await;let (_,body)=post(&router,ROUTE,anonymous(&server,"openai.responses")).await;
     assert_eq!(candidate(&body,"openai.responses")["status"],"incompatible");assert_eq!(body["data"]["selected_protocol"],"openai.chat_text","{body}");
+}
+
+#[tokio::test]
+async fn a_typed_unsupported_parameter_rejection_marks_only_that_protocol_incompatible() {
+    let server=MockServer::start().await;
+    mount_tools(&server,"/v1/responses","responses","authorization",SECRET,Duration::ZERO).await;
+    Mock::given(method("POST")).and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({"error":{"code":"unsupported_parameter",
+            "type":"invalid_request_error","message":"Function tools with reasoning_effort are not supported for gpt-6-sol in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'."}})))
+        .expect(1).mount(&server).await;
+    let (router,_)=setup().await;let mut draft=anonymous(&server,"openai.responses");draft["preferred_protocol"]=json!("openai.chat_text");
+    let (_,body)=post(&router,ROUTE,draft).await;
+    let chat=candidate(&body,"openai.chat_text");
+    assert_eq!(chat["status"],"incompatible","{body}");assert_eq!(chat["error_kind"],"invalid_request");assert_eq!(chat["http_status"],400);
+    assert_eq!(body["data"]["selected_protocol"],"openai.responses","{body}");
 }
 
 #[tokio::test]

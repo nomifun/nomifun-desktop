@@ -256,7 +256,6 @@ pub(crate) async fn try_build_module_states(
 
     let agent_service = AgentService::new(
         services.agent_registry.clone(),
-        services.data_dir.clone(),
         services.model_invoke_service.clone(),
     );
     tracing::info!(elapsed_ms = boot.elapsed().as_millis(), "startup: agent service built");

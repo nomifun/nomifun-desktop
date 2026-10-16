@@ -694,7 +694,7 @@ impl AttemptOutcome {
 }
 
 #[derive(Default)]
-struct EventSequence {
+pub(crate) struct EventSequence {
     response_started: bool,
     usage_seen: bool,
     terminal_seen: bool,
@@ -703,7 +703,7 @@ struct EventSequence {
 }
 
 impl EventSequence {
-    fn observe(&mut self, event: &ChatModelEvent) -> Result<(), ChatModelError> {
+    pub(crate) fn observe(&mut self, event: &ChatModelEvent) -> Result<(), ChatModelError> {
         if self.terminal_seen {
             return Err(ChatModelError::protocol_violation(
                 "provider emitted an event after the canonical terminal",

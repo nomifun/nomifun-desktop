@@ -5,6 +5,14 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- Unify Chat protocol discovery and saved-capability health checks on the exact
+  Agent wire stack (broker serializers, provider-parameter merge, single-attempt
+  streaming executor, per-attempt decoders and event-sequence rules), and make
+  the production stream path tolerate union-envelope Anthropic streams,
+  re-encrypted Responses reasoning items, content-less vendor event kinds,
+  id-less OpenAI Chat prelude chunks and a final `[DONE]` sentinel missing its
+  SSE delimiter.
+
 ## v0.8.10 - 2026-10-16
 
 - Modernize model configuration with current OpenAI protocols, automatic

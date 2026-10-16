@@ -40,7 +40,19 @@ Chat Completions accepts `stream_options: null` to omit optional usage options,
 or an object whose `include_usage` overrides the default. Responses `include`
 arrays merge with encrypted reasoning continuation fields; `include: null`
 omits that option for compatible endpoints rejecting it. Missing encrypted
-continuation is never fabricated.
+continuation is never fabricated. At the decoder boundary, null members of an
+Anthropic event union are treated as absent, and a Responses item's
+`encrypted_content` is never compared between its `output_item.done` snapshot
+and the terminal response because upstreams re-encrypt it. Unknown stream
+event kinds are ignored as the vendors require: Responses content authority
+remains the item snapshots plus the terminal, and unknown Anthropic events
+must not carry content members. SSE records commit only at a blank line; the
+one exception is a complete `[DONE]` sentinel left without its final delimiter
+at end of stream, which still ends the stream, while any other unterminated
+record remains a framing error. Within one attempt, OpenAI Chat frames without
+an `id` (such as an Azure-style `prompt_filter_results` prelude) belong to the
+attempt's single response, which the first identified frame adopts;
+contradicting identified ids remain a stream violation.
 Parameter JSON cannot inject protocol-owned model, input, tool, streaming or
 retained cloud-state fields.
 Reasoning effort uses the normalized `reasoning_effort` control. Saving native
@@ -93,10 +105,15 @@ rather than automatically acquiring Chat.
 After model selection is committed, the editor calls
 `/api/providers/discover-model-protocols` or
 `/api/providers/{provider_id}/discover-model-protocols` with the exact model and
-capability draft. Chat checks reuse production OpenAI, Responses, Anthropic,
-Gemini and Bedrock providers, validating a streamed tool call, its real constant
-result, and a final visible answer. They create no Session and run no user tools.
-Each candidate has output/time bounds; production HTTP may perform finite retries.
+capability draft. Chat discovery and the saved-capability Chat health check run
+the same harmless tool round trip through the exact Agent wire stack: broker
+serializers plus the shared provider-parameter merge, one single-attempt HTTP
+request per round with SSE or AWS event-stream framing, a fresh per-attempt
+decoder, and the broker's canonical event-sequence rules. They validate a
+streamed tool call, its real constant result, and a final visible answer,
+creating no Session and running no user tools.
+Each candidate has output/time bounds and issues exactly one request per round
+without retry.
 All candidates retain their outcome. An available saved/manual choice wins,
 followed by the verified documented recommendation, then the first available
 candidate. Global authentication, quota and rate-limit failures stop further calls.

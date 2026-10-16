@@ -399,7 +399,15 @@ impl ResponsesDecoder {
                 Ok(Vec::new())
             }
             "response.completed" | "response.incomplete" => self.finish_response(kind, data),
-            _ => Err(invalid("Unsupported native Responses event")),
+            // OpenAI-compatible backends add response-level event kinds
+            // (e.g. `response.metadata`); vendors require clients to tolerate
+            // them. Content authority stays with the strictly validated
+            // output_item.done snapshots and terminal corroboration, so
+            // ignoring an unknown kind cannot drop admitted content — an
+            // unrepresentable part inside a snapshot still fails loudly.
+            // All generic checks above (budget, terminal, provider errors,
+            // sequence numbers, creation and response identity) still apply.
+            _ => Ok(Vec::new()),
         }
     }
 
@@ -756,15 +764,34 @@ impl ResponsesDecoder {
             return Err(invalid("Responses terminal status mismatch"));
         }
         let output = array(response, "output")?;
-        if output.len() != self.items.len()
-            || output
-                .iter()
-                .zip(&self.items)
-                .any(|(value, item)| item.snapshot.as_ref() != Some(value))
-        {
+        if output.len() != self.items.len() {
             return Err(invalid(
                 "Responses terminal omitted or changed an output item",
             ));
+        }
+        for (value, item) in output.iter().zip(&self.items) {
+            // Reasoning encrypted_content is re-encrypted on every upstream
+            // serialization, so the same item legitimately arrives with new
+            // ciphertext. It is excluded from corroboration for every item
+            // type; continuation authority stays the output_item.done
+            // snapshot and the terminal ciphertext is never read.
+            if value
+                .get("encrypted_content")
+                .is_some_and(|ciphertext| !ciphertext.is_null() && !ciphertext.is_string())
+            {
+                return Err(invalid(
+                    "Responses terminal omitted or changed an output item",
+                ));
+            }
+            let corroborated = item
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| item_eq_without_ciphertext(snapshot, value));
+            if !corroborated {
+                return Err(invalid(
+                    "Responses terminal omitted or changed an output item",
+                ));
+            }
         }
         let finish_reason = if !complete {
             match response
@@ -823,6 +850,24 @@ impl Item {
 
 fn invalid(message: &str) -> ChatModelError {
     ChatModelError::protocol_violation(message)
+}
+/// Terminal output items corroborate the output_item.done snapshots exactly
+/// except for the opaque top-level `encrypted_content` member, which upstream
+/// re-encryption may legitimately change between serializations.
+fn item_eq_without_ciphertext(snapshot: &Value, terminal: &Value) -> bool {
+    fn strip(value: &Value) -> Value {
+        match value.as_object() {
+            Some(object) => Value::Object(
+                object
+                    .iter()
+                    .filter(|(key, _)| key.as_str() != "encrypted_content")
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            ),
+            None => value.clone(),
+        }
+    }
+    strip(snapshot) == strip(terminal)
 }
 fn field<'a>(value: &'a Value, key: &str) -> Result<&'a Value, ChatModelError> {
     value
@@ -1111,5 +1156,193 @@ mod tests {
             events.last(),
             Some(ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed })
         ));
+    }
+
+    /// Gateways re-encrypt reasoning encrypted_content at every serialization,
+    /// so added, done and terminal legitimately carry different ciphertext.
+    fn gateway_reasoning_tool_stream() -> Vec<Value> {
+        vec![
+            serde_json::json!({"type":"response.created",
+                "response":{"id":"resp_gw","status":"in_progress"}}),
+            serde_json::json!({"type":"response.output_item.added","output_index":0,
+                "item":{"id":"rs_1","type":"reasoning","content":[],"encrypted_content":"cipher-a"}}),
+            serde_json::json!({"type":"response.output_item.done","output_index":0,
+                "item":{"id":"rs_1","type":"reasoning","content":[],"encrypted_content":"cipher-b"}}),
+            serde_json::json!({"type":"response.output_item.added","output_index":1,
+                "item":{"id":"fc_1","type":"function_call","status":"in_progress",
+                    "arguments":"","call_id":"call_1","name":"get_time"}}),
+            serde_json::json!({"type":"response.function_call_arguments.delta","output_index":1,
+                "item_id":"fc_1","delta":"{}"}),
+            serde_json::json!({"type":"response.function_call_arguments.done","output_index":1,
+                "item_id":"fc_1","arguments":"{}"}),
+            serde_json::json!({"type":"response.output_item.done","output_index":1,
+                "item":{"id":"fc_1","type":"function_call","status":"completed",
+                    "arguments":"{}","call_id":"call_1","name":"get_time"}}),
+            serde_json::json!({"type":"response.completed",
+                "response":{"id":"resp_gw","status":"completed","output":[
+                    {"id":"rs_1","type":"reasoning","content":[],"encrypted_content":"cipher-c"},
+                    {"id":"fc_1","type":"function_call","status":"completed",
+                        "arguments":"{}","call_id":"call_1","name":"get_time"}
+                ],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}),
+        ]
+    }
+
+    #[test]
+    fn reencrypted_terminal_reasoning_ciphertext_still_corroborates_the_done_snapshot() {
+        let mut decoder = ResponsesDecoder::with_argument_parser(false, Arc::new(crate::JsonToolArgumentParser));
+        let mut events = Vec::new();
+        for frame in gateway_reasoning_tool_stream() {
+            let kind = frame["type"].as_str().unwrap().to_owned();
+            events.extend(native(&mut decoder, &kind, frame).unwrap());
+        }
+        assert!(events.iter().any(|event| matches!(event,
+            ChatModelEvent::ReasoningBlock { encrypted_content, .. }
+                if encrypted_content.as_deref() == Some("cipher-b"))),
+            "continuation ciphertext comes from output_item.done, never the terminal");
+        assert!(events.iter().any(|event| matches!(event,
+            ChatModelEvent::ToolCallCompleted { call } if call.name == "get_time")));
+        assert!(matches!(events.last(), Some(ChatModelEvent::Completed {
+            finish_reason: ChatFinishReason::ToolCalls })));
+    }
+
+    #[test]
+    fn terminal_output_changes_beyond_ciphertext_are_still_rejected() {
+        for case in 0..6 {
+            let mut frames = gateway_reasoning_tool_stream();
+            {
+                let output = frames[7]["response"]["output"].as_array_mut().unwrap();
+                match case {
+                    0 => { output.truncate(1); }
+                    1 => output.reverse(),
+                    2 => output[1]["arguments"] = serde_json::json!("{\"tz\":\"UTC\"}"),
+                    3 => output[0]["id"] = serde_json::json!("rs_other"),
+                    4 => output[0]["summary"] =
+                        serde_json::json!([{"type":"summary_text","text":"changed"}]),
+                    5 => output[0]["encrypted_content"] = serde_json::json!(123),
+                    _ => unreachable!(),
+                }
+            }
+            let mut decoder = ResponsesDecoder::with_argument_parser(false, Arc::new(crate::JsonToolArgumentParser));
+            let mut failed = false;
+            for frame in frames {
+                let kind = frame["type"].as_str().unwrap().to_owned();
+                if native(&mut decoder, &kind, frame).is_err() {
+                    failed = true;
+                    break;
+                }
+            }
+            assert!(failed, "terminal mutation {case} must be rejected");
+        }
+    }
+
+    /// The codex gateway shape: a normal function_call lifecycle plus a
+    /// response.metadata event the upstream adds before the terminal.
+    fn codex_metadata_stream() -> Vec<Value> {
+        vec![
+            serde_json::json!({"type":"response.created",
+                "response":{"id":"resp_codex","status":"in_progress"}}),
+            serde_json::json!({"type":"response.output_item.added","output_index":0,
+                "item":{"id":"fc_1","type":"function_call","status":"in_progress",
+                    "arguments":"","call_id":"call_1","name":"get_time"}}),
+            serde_json::json!({"type":"response.function_call_arguments.done","output_index":0,
+                "item_id":"fc_1","arguments":"{}"}),
+            serde_json::json!({"type":"response.output_item.done","output_index":0,
+                "item":{"id":"fc_1","type":"function_call","status":"completed",
+                    "arguments":"{}","call_id":"call_1","name":"get_time"}}),
+            serde_json::json!({"type":"response.metadata","sequence_number":10,
+                "response_id":"resp_codex",
+                "metadata":{"openai_chatgpt_moderation_metadata":{"severity":"low"}}}),
+            serde_json::json!({"type":"response.completed",
+                "response":{"id":"resp_codex","status":"completed","output":[
+                    {"id":"fc_1","type":"function_call","status":"completed",
+                        "arguments":"{}","call_id":"call_1","name":"get_time"}
+                ]}}),
+        ]
+    }
+
+    #[test]
+    fn unknown_response_level_event_kinds_are_ignored_before_the_terminal() {
+        let mut decoder = ResponsesDecoder::with_argument_parser(false, Arc::new(crate::JsonToolArgumentParser));
+        let mut events = Vec::new();
+        for frame in codex_metadata_stream() {
+            let kind = frame["type"].as_str().unwrap().to_owned();
+            events.extend(native(&mut decoder, &kind, frame).unwrap());
+        }
+        assert!(events.iter().any(|event| matches!(event,
+            ChatModelEvent::ToolCallCompleted { call } if call.name == "get_time")));
+        assert!(matches!(events.last(), Some(ChatModelEvent::Completed {
+            finish_reason: ChatFinishReason::ToolCalls })));
+    }
+
+    #[test]
+    fn unknown_item_scoped_events_are_ignored_without_dropping_streamed_text() {
+        let message = serde_json::json!({"id":"message","type":"message","role":"assistant",
+            "status":"completed","content":[{"type":"output_text","text":"hello"}]});
+        let frames = vec![
+            serde_json::json!({"type":"response.created","response":{"id":"resp_ann","status":"in_progress"}}),
+            serde_json::json!({"type":"response.output_item.added","output_index":0,
+                "item":{"id":"message","type":"message","role":"assistant","status":"in_progress","content":[]}}),
+            serde_json::json!({"type":"response.content_part.added","output_index":0,"item_id":"message",
+                "content_index":0,"part":{"type":"output_text","text":""}}),
+            serde_json::json!({"type":"response.output_text.delta","output_index":0,"item_id":"message",
+                "content_index":0,"delta":"hel"}),
+            // An item-scoped event kind this decoder does not model yet.
+            serde_json::json!({"type":"response.output_text.annotation.added","output_index":0,"item_id":"message",
+                "content_index":0,"annotation":{"type":"url_citation","url":"https://example.invalid"}}),
+            serde_json::json!({"type":"response.output_text.delta","output_index":0,"item_id":"message",
+                "content_index":0,"delta":"lo"}),
+            serde_json::json!({"type":"response.output_text.done","output_index":0,"item_id":"message",
+                "content_index":0,"text":"hello"}),
+            serde_json::json!({"type":"response.content_part.done","output_index":0,"item_id":"message",
+                "content_index":0,"part":{"type":"output_text","text":"hello"}}),
+            serde_json::json!({"type":"response.output_item.done","output_index":0,"item":message}),
+            serde_json::json!({"type":"response.completed","response":{"id":"resp_ann","status":"completed",
+                "output":[message]}}),
+        ];
+        let mut decoder = ResponsesDecoder::with_argument_parser(false, Arc::new(crate::JsonToolArgumentParser));
+        let mut events = Vec::new();
+        for frame in &frames {
+            let kind = frame["type"].as_str().unwrap().to_owned();
+            events.extend(native(&mut decoder, &kind, frame.clone()).unwrap());
+        }
+        let text: String = events.iter().filter_map(|event| match event {
+            ChatModelEvent::OutputTextDelta { text } => Some(text.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(text, "hello", "streamed text must survive ignored events");
+        assert!(matches!(events.last(), Some(ChatModelEvent::Completed {
+            finish_reason: ChatFinishReason::Completed })));
+    }
+
+    #[test]
+    fn unknown_event_kinds_keep_identity_sequence_and_lifecycle_guards() {
+        // A different response_id is still a stream violation.
+        let mut decoder = ResponsesDecoder::with_argument_parser(false, Arc::new(crate::JsonToolArgumentParser));
+        for frame in &codex_metadata_stream()[..4] {
+            let kind = frame["type"].as_str().unwrap().to_owned();
+            native(&mut decoder, &kind, frame.clone()).unwrap();
+        }
+        assert!(native(&mut decoder,"response.metadata",serde_json::json!({"type":"response.metadata",
+            "sequence_number":11,"response_id":"other","metadata":{}})).is_err());
+        // A non-advancing sequence number is still a stream violation.
+        let mut decoder = ResponsesDecoder::with_argument_parser(false, Arc::new(crate::JsonToolArgumentParser));
+        for frame in &codex_metadata_stream()[..5] {
+            let kind = frame["type"].as_str().unwrap().to_owned();
+            native(&mut decoder, &kind, frame.clone()).unwrap();
+        }
+        assert!(native(&mut decoder,"response.metadata",serde_json::json!({"type":"response.metadata",
+            "sequence_number":10,"response_id":"resp_codex","metadata":{}})).is_err());
+        // Nothing unknown survives the terminal.
+        let mut decoder = ResponsesDecoder::with_argument_parser(false, Arc::new(crate::JsonToolArgumentParser));
+        for frame in &codex_metadata_stream() {
+            let kind = frame["type"].as_str().unwrap().to_owned();
+            native(&mut decoder, &kind, frame.clone()).unwrap();
+        }
+        assert!(native(&mut decoder,"response.metadata",serde_json::json!({"type":"response.metadata",
+            "response_id":"resp_codex","metadata":{}})).is_err());
+        // Nothing runs before response.created.
+        let mut decoder = ResponsesDecoder::with_argument_parser(false, Arc::new(crate::JsonToolArgumentParser));
+        assert!(native(&mut decoder,"response.metadata",serde_json::json!({"type":"response.metadata",
+            "response_id":"resp_codex","metadata":{}})).is_err());
     }
 }

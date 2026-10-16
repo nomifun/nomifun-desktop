@@ -1,38 +1,36 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use nomi_config::config::Config;
 use nomifun_api_types::{
     CapabilityHealth, HealthStatus, ModelTask, ProviderHealthCheckErrorKind,
     ProviderHealthCheckRequest, ProviderHealthCheckResponse,
 };
 use nomifun_common::AppError;
-use nomifun_model_invoke::{ModelInvokeService, ModelRef};
+use nomifun_model_invoke::{
+    ChatVerificationFailure, ChatVerificationTarget, ModelInvokeService, ModelRef,
+    verify_chat_agent_round_trip,
+};
 use regex::Regex;
 use tracing::{info, warn};
 
-use crate::factory::provider_config::{
-    one_shot_completion_bounded, resolve_provider_config, user_message,
-};
-
-const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
-const HEALTH_CHECK_PROMPT: &str = "Reply with exactly OK.";
+/// Whole-exchange deadline for the Chat health round trip.
+const CHAT_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Default probe output ceiling; the capability's own `output_limit` wins when
+/// it is lower, matching the saved configuration exactly.
+const CHAT_PROBE_OUTPUT_TOKENS: u32 = 4096;
 
 pub struct ProviderHealthCheckService {
-    data_dir: PathBuf,
     /// Unified invoke layer: non-chat modality probes ride
-    /// [`ModelInvokeService::probe`] (chat stays on the agent engine).
+    /// [`ModelInvokeService::probe`]; Chat health runs the shared Agent wire
+    /// stack through [`verify_chat_agent_round_trip`].
     invoke: Arc<ModelInvokeService>,
 }
 
 impl ProviderHealthCheckService {
     pub fn new(
-        data_dir: PathBuf,
         invoke: Arc<ModelInvokeService>,
     ) -> Self {
         Self {
-            data_dir,
             invoke,
         }
     }
@@ -57,8 +55,40 @@ impl ProviderHealthCheckService {
         let model = resolved.model.clone();
 
         let response = if task == ModelTask::Chat {
-            let config = self.resolve_probe_config(&provider_id, &model).await?;
-            run_probe(provider_id, platform, model, task, config).await?
+            info!(
+                provider_id = %provider_id,
+                platform = %platform,
+                model = %model,
+                "Provider health check started"
+            );
+            let started = Instant::now();
+            let probe_tokens = resolved
+                .output_limit
+                .and_then(|limit| u32::try_from(limit).ok())
+                .filter(|limit| *limit > 0)
+                .unwrap_or(CHAT_PROBE_OUTPUT_TOKENS)
+                .min(CHAT_PROBE_OUTPUT_TOKENS);
+            match ChatVerificationTarget::from_resolved(&resolved)
+                .map_err(ChatVerificationFailure::Transport)
+            {
+                Err(failure) => chat_probe_outcome(
+                    provider_id, platform, model, task, started.elapsed(), &failure,
+                ),
+                Ok(target) => match verify_chat_agent_round_trip(
+                    &target,
+                    probe_tokens,
+                    CHAT_PROBE_TIMEOUT,
+                )
+                .await
+                {
+                    Ok(()) => healthy_response(
+                        provider_id, platform, model, task, started.elapsed(),
+                    ),
+                    Err(failure) => chat_probe_outcome(
+                        provider_id, platform, model, task, started.elapsed(), &failure,
+                    ),
+                },
+            }
         } else {
             info!(
                 provider_id = %provider_id,
@@ -142,20 +172,6 @@ impl ProviderHealthCheckService {
         .await;
         Ok(response)
     }
-
-    async fn resolve_probe_config(
-        &self,
-        provider_id: &str,
-        model_id: &str,
-    ) -> Result<Config, AppError> {
-        resolve_provider_config(
-            self.invoke.as_ref(),
-            provider_id,
-            model_id,
-            &self.data_dir,
-        )
-        .await
-    }
 }
 /// Persist one probe outcome onto the model's authoritative catalog row.
 ///
@@ -221,77 +237,50 @@ pub(crate) async fn persist_probe_outcome(
     }
 }
 
-async fn run_probe(
+/// Map one typed verification result onto the health response: success is
+/// `Healthy`, a well-formed exchange that never used the probe tool stays
+/// `Unknown`, and every failure carries the runner's typed diagnosis rather
+/// than a parsed string.
+fn chat_probe_outcome(
     provider_id: String,
     platform: String,
     model: String,
     task: ModelTask,
-    config: Config,
-) -> Result<ProviderHealthCheckResponse, AppError> {
-    let started = Instant::now();
-
-    info!(
-        provider_id = %provider_id,
-        platform = %platform,
-        model = %model,
-        "Provider health check started"
-    );
-
-    match tokio::time::timeout(
-        HEALTH_CHECK_TIMEOUT,
-        one_shot_completion_bounded(
-            &config,
-            "You are a provider health probe. Reply with exactly OK and do not use tools.",
-            vec![user_message(HEALTH_CHECK_PROMPT)],
-            None,
-            32 * 1024,
-        ),
-    )
-    .await
-    {
-        Ok(Ok(_)) => {
-            let response = ProviderHealthCheckResponse {
-                provider_id,
-                platform,
-                model,
-                task,
-                status: HealthStatus::Healthy,
-                elapsed_ms: elapsed_ms(started.elapsed()),
-                message: None,
-                error_kind: None,
-                http_status: None,
-                timeout_stage: None,
-                attempted_url: None,
-            };
-            log_health_check_result(&response);
-            Ok(response)
+    elapsed: Duration,
+    failure: &ChatVerificationFailure,
+) -> ProviderHealthCheckResponse {
+    match failure {
+        ChatVerificationFailure::Inconclusive(message) => {
+            let mut response = healthy_response(provider_id, platform, model, task, elapsed);
+            response.status = HealthStatus::Unknown;
+            response.message = Some((*message).to_owned());
+            response
         }
-        Ok(Err(error)) => {
-            let message = error.to_string();
-            let response = unhealthy_response(
+        ChatVerificationFailure::Timeout => unhealthy_response(
+            provider_id,
+            platform,
+            model,
+            task,
+            elapsed,
+            format!("Health check timeout ({}s)", CHAT_PROBE_TIMEOUT.as_secs()),
+            Some("chat_probe".into()),
+        ),
+        _ => {
+            let diagnosis = failure.diagnosis();
+            let mut response = unhealthy_response(
                 provider_id,
                 platform,
                 model,
                 task,
-                started.elapsed(),
-                message,
+                elapsed,
+                failure.message(),
                 None,
             );
-            log_health_check_result(&response);
-            Ok(response)
-        }
-        Err(_) => {
-            let response = unhealthy_response(
-                provider_id,
-                platform,
-                model,
-                task,
-                started.elapsed(),
-                format!("Health check timeout ({}s)", HEALTH_CHECK_TIMEOUT.as_secs()),
-                Some("chat_probe".into()),
-            );
-            log_health_check_result(&response);
-            Ok(response)
+            if let Some(diagnosis) = diagnosis {
+                response.error_kind = Some(diagnosis.error_kind);
+                response.http_status = diagnosis.http_status;
+            }
+            response
         }
     }
 }
@@ -567,20 +556,23 @@ mod tests {
         events.into_iter().map(|event| format!("event: {}\ndata: {event}\n\n",event["type"].as_str().unwrap())).collect()
     }
 
-    fn anthropic_unexpected_tool_stream() -> String {
+    fn anthropic_tool_stream(name: &str) -> String {
         anthropic_frames(vec![
             serde_json::json!({"type":"message_start","message":{"id":"msg_health","type":"message","role":"assistant",
                 "content":[],"model":CHAT_MODEL,"usage":{"input_tokens":2,"output_tokens":0}}}),
-            serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_health","name":"unexpected_tool","input":{}}}),
-            serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}),
+            serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_health","name":name,"input":{}}}),
+            serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"value\":\"ok\"}"}}),
             serde_json::json!({"type":"content_block_stop","index":0}),
             serde_json::json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}),
             serde_json::json!({"type":"message_stop"}),
         ])
     }
 
+    /// Two-round endpoint: the request containing the local tool result gets
+    /// `second`; every other request gets `first`. Anthropic requests still
+    /// require the pinned Messages version header.
     #[derive(Clone)]
-    struct StrictAnthropicEndpoint { stream: String }
+    struct StrictAnthropicEndpoint { first: String, second: String }
     impl Respond for StrictAnthropicEndpoint {
         fn respond(&self, request: &Request) -> ResponseTemplate {
             if request.headers.get("anthropic-version").and_then(|value| value.to_str().ok()) != Some("2023-06-01") {
@@ -588,25 +580,27 @@ mod tests {
                     "error":{"type":"invalid_request_error","message":"anthropic-version header is required"}
                 }));
             }
-            ResponseTemplate::new(200).set_body_raw(self.stream.clone(),"text/event-stream")
+            let body = String::from_utf8_lossy(&request.body);
+            let stream = if body.contains("tool_result") { &self.second } else { &self.first };
+            ResponseTemplate::new(200).set_body_raw(stream.clone(),"text/event-stream")
         }
     }
 
     async fn anthropic_health_fixture(server: &MockServer) -> (
-        ProviderHealthCheckService, Arc<SqliteProviderModelCapabilityRepository>, tempfile::TempDir,
+        ProviderHealthCheckService, Arc<SqliteProviderModelCapabilityRepository>,
     ) {
         managed_chat_health_fixture(server,"anthropic","anthropic.messages","header_key:x-api-key","/v1/messages").await
     }
 
     async fn managed_chat_health_fixture(
         server: &MockServer, platform: &str, protocol: &str, auth_scheme: &str, endpoint_path: &str,
-    ) -> (ProviderHealthCheckService, Arc<SqliteProviderModelCapabilityRepository>, tempfile::TempDir) {
+    ) -> (ProviderHealthCheckService, Arc<SqliteProviderModelCapabilityRepository>) {
         managed_task_health_fixture(server, platform, protocol, auth_scheme, endpoint_path, ModelTask::Chat).await
     }
 
     async fn managed_task_health_fixture(
         server: &MockServer, platform: &str, protocol: &str, auth_scheme: &str, endpoint_path: &str, task: ModelTask,
-    ) -> (ProviderHealthCheckService, Arc<SqliteProviderModelCapabilityRepository>, tempfile::TempDir) {
+    ) -> (ProviderHealthCheckService, Arc<SqliteProviderModelCapabilityRepository>) {
         const KEY: [u8;32] = [0xA8;32];
         let db = init_database_memory().await.unwrap();
         let pool = db.pool().clone();
@@ -629,60 +623,69 @@ mod tests {
             Arc::new(SqliteProviderModelRepository::new(pool.clone())),capability_repo.clone(),
             Arc::new(SqliteProviderConnectionRepository::new(pool)),KEY,reqwest::Client::new(),
             AdapterRegistry::new(default_adapters())));
-        let dir = tempfile::tempdir().unwrap();
-        (ProviderHealthCheckService::new(dir.path().to_owned(),invoke),capability_repo,dir)
+        (ProviderHealthCheckService::new(invoke),capability_repo)
     }
 
     #[tokio::test]
     async fn anthropic_health_uses_required_version_header_and_complete_visible_response() {
         let server = MockServer::start().await;
         Mock::given(method("POST")).and(path("/v1/messages")).and(header("x-api-key",CHAT_KEY))
-            .respond_with(StrictAnthropicEndpoint {stream:anthropic_text_stream("OK","end_turn",true)})
-            .expect(2).mount(&server).await;
+            .respond_with(StrictAnthropicEndpoint {
+                first:anthropic_tool_stream("nomifun_protocol_echo"),
+                second:anthropic_text_stream("OK","end_turn",true)})
+            .expect(3).mount(&server).await;
         let missing_version = reqwest::Client::new().post(format!("{}/v1/messages",server.uri()))
             .header("x-api-key",CHAT_KEY).json(&serde_json::json!({"model":CHAT_MODEL,"stream":true,
                 "max_tokens":4096,"messages":[{"role":"user","content":"Reply OK"}]}))
             .send().await.unwrap();
         assert_eq!(missing_version.status(),reqwest::StatusCode::BAD_REQUEST);
-        let (service,capabilities,_dir) = anthropic_health_fixture(&server).await;
+        let (service,capabilities) = anthropic_health_fixture(&server).await;
         let response = service.health_check(ProviderHealthCheckRequest {
             provider_id:CHAT_PROVIDER_ID.into(),model:CHAT_MODEL.into(),task:ModelTask::Chat,
         }).await.unwrap();
         assert_eq!(response.status,HealthStatus::Healthy,"{response:?}");
         assert_eq!(response.attempted_url.as_deref(),Some(format!("{}/v1/messages",server.uri()).as_str()));
         let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(),3,"one manual sanity request plus the two verification rounds");
         assert!(!requests[0].headers.contains_key("anthropic-version"));
+        let first: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
         assert_eq!(requests[1].headers["anthropic-version"],"2023-06-01");
-        let body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
-        assert_eq!(body["model"],CHAT_MODEL);
-        assert_eq!(body["stream"],true);
-        assert!(body.get("tools").is_none());
+        assert_eq!(first["model"],CHAT_MODEL);
+        assert_eq!(first["stream"],true);
+        assert_eq!(first["tools"][0]["name"],"nomifun_protocol_echo");
+        let second: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+        let tool_result = second["messages"].as_array().unwrap().iter()
+            .flat_map(|message| message["content"].as_array().into_iter().flatten())
+            .find(|part| part["type"] == "tool_result")
+            .expect("round two replays the local tool result");
+        assert_eq!(tool_result["tool_use_id"],"call_health");
         let stored = capabilities.get(CHAT_PROVIDER_ID,CHAT_MODEL,"chat").await.unwrap().unwrap().health.unwrap();
         let stored: CapabilityHealth = serde_json::from_str(&stored).unwrap();
         assert_eq!(stored.status,HealthStatus::Healthy);
     }
 
     #[tokio::test]
-    async fn anthropic_health_rejects_incomplete_empty_and_truncated_http_200_streams() {
-        for (name,stream) in [
-            ("partial",anthropic_text_stream("OK","end_turn",false)),
-            ("usage_only",anthropic_text_stream("","end_turn",true)),
-            ("max_tokens",anthropic_text_stream("OK","max_tokens",true)),
-            ("unexpected_tool",anthropic_unexpected_tool_stream()),
+    async fn anthropic_health_distinguishes_decoder_failures_from_inconclusive_rounds() {
+        for (name,stream,expected) in [
+            ("partial",anthropic_text_stream("OK","end_turn",false),HealthStatus::Unhealthy),
+            ("usage_only",anthropic_text_stream("","end_turn",true),HealthStatus::Unknown),
+            ("max_tokens",anthropic_text_stream("OK","max_tokens",true),HealthStatus::Unknown),
+            ("unexpected_tool",anthropic_tool_stream("unexpected_tool"),HealthStatus::Unknown),
         ] {
             let server = MockServer::start().await;
             Mock::given(method("POST")).and(path("/v1/messages")).and(header("x-api-key",CHAT_KEY))
-                .respond_with(StrictAnthropicEndpoint {stream}).expect(1).mount(&server).await;
-            let (service,capabilities,_dir) = anthropic_health_fixture(&server).await;
+                .respond_with(StrictAnthropicEndpoint {first:stream,second:anthropic_text_stream("OK","end_turn",true)})
+                .expect(1).mount(&server).await;
+            let (service,capabilities) = anthropic_health_fixture(&server).await;
             let response = service.health_check(ProviderHealthCheckRequest {
                 provider_id:CHAT_PROVIDER_ID.into(),model:CHAT_MODEL.into(),task:ModelTask::Chat,
             }).await.unwrap();
-            assert_eq!(response.status,HealthStatus::Unhealthy,"{name}: {response:?}");
+            assert_eq!(response.status,expected,"{name}: {response:?}");
             assert!(response.message.as_deref().is_some_and(|message| !message.is_empty()));
             assert!(!serde_json::to_string(&response).unwrap().contains(CHAT_KEY));
             let stored = capabilities.get(CHAT_PROVIDER_ID,CHAT_MODEL,"chat").await.unwrap().unwrap().health.unwrap();
             let stored: CapabilityHealth = serde_json::from_str(&stored).unwrap();
-            assert_eq!(stored.status,HealthStatus::Unhealthy,"{name}");
+            assert_eq!(stored.status,expected,"{name}");
         }
     }
 
@@ -694,7 +697,7 @@ mod tests {
                 "type":"error","error":{"type":"invalid_request_error",
                     "message":format!("anthropic-version rejected for key {CHAT_KEY}")}
             }))).expect(1).mount(&server).await;
-        let (service,capabilities,_dir) = anthropic_health_fixture(&server).await;
+        let (service,capabilities) = anthropic_health_fixture(&server).await;
         let response = service.health_check(ProviderHealthCheckRequest {
             provider_id:CHAT_PROVIDER_ID.into(),model:CHAT_MODEL.into(),task:ModelTask::Chat,
         }).await.unwrap();
@@ -708,8 +711,64 @@ mod tests {
         assert_eq!(serde_json::from_str::<CapabilityHealth>(&stored).unwrap().status,HealthStatus::Unhealthy);
     }
 
+    /// Two-round endpoint for the non-Anthropic protocols: the request carrying
+    /// the local tool result (round two) is routed by a wire marker.
+    #[derive(Clone)]
+    struct TwoRoundSse { first: String, second: String, marker: &'static str }
+    impl Respond for TwoRoundSse {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let body = String::from_utf8_lossy(&request.body);
+            let stream = if body.contains(self.marker) { &self.second } else { &self.first };
+            ResponseTemplate::new(200).set_body_raw(stream.clone(), "text/event-stream")
+        }
+    }
+
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum ChatHealthScenario { Complete, Empty, Partial, Truncated, Error }
+
+    fn openai_chat_tool_stream() -> String {
+        let events = [
+            serde_json::json!({"id":"chatcmpl_health","choices":[{"index":0,
+                "delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_health","type":"function",
+                    "function":{"name":"nomifun_protocol_echo","arguments":""}}]},"finish_reason":null}]}),
+            serde_json::json!({"id":"chatcmpl_health","choices":[{"index":0,
+                "delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"value\":\"ok\"}"}}]},
+                "finish_reason":null}]}),
+            serde_json::json!({"id":"chatcmpl_health","choices":[{"index":0,"delta":{},
+                "finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1}}),
+        ];
+        format!("{}data: [DONE]\n\n", data_sse_frames(events.into()))
+    }
+
+    fn responses_tool_stream() -> String {
+        anthropic_frames(vec![
+            serde_json::json!({"type":"response.created","response":{"id":"resp_health","status":"in_progress"}}),
+            serde_json::json!({"type":"response.output_item.added","output_index":0,
+                "item":{"id":"fc_health","type":"function_call","status":"in_progress",
+                    "arguments":"","call_id":"call_health","name":"nomifun_protocol_echo"}}),
+            serde_json::json!({"type":"response.function_call_arguments.delta","output_index":0,
+                "item_id":"fc_health","delta":"{\"value\":\"ok\"}"}),
+            serde_json::json!({"type":"response.function_call_arguments.done","output_index":0,
+                "item_id":"fc_health","arguments":"{\"value\":\"ok\"}"}),
+            serde_json::json!({"type":"response.output_item.done","output_index":0,
+                "item":{"id":"fc_health","type":"function_call","status":"completed",
+                    "arguments":"{\"value\":\"ok\"}","call_id":"call_health","name":"nomifun_protocol_echo"}}),
+            serde_json::json!({"type":"response.completed","response":{"id":"resp_health","status":"completed",
+                "output":[{"id":"fc_health","type":"function_call","status":"completed",
+                    "arguments":"{\"value\":\"ok\"}","call_id":"call_health","name":"nomifun_protocol_echo"}],
+                "usage":{"input_tokens":2,"output_tokens":1}}}),
+        ])
+    }
+
+    fn gemini_tool_stream() -> String {
+        data_sse_frames(vec![
+            serde_json::json!({"candidates":[{"index":0,"content":{"role":"model",
+                "parts":[{"functionCall":{"name":"nomifun_protocol_echo","args":{"value":"ok"}}}]}}],
+                "usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":1}}),
+            serde_json::json!({"candidates":[{"index":0,"finishReason":"STOP"}],
+                "usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":1}}),
+        ])
+    }
 
     fn data_sse_frames(events: Vec<serde_json::Value>) -> String {
         events.into_iter().map(|event| format!("data: {event}\n\n")).collect()
@@ -747,9 +806,15 @@ mod tests {
             events.push(serde_json::json!({"type":"error","code":"invalid_request_error","message":format!("fixture stream failure {CHAT_KEY}")}));
         } else {
             let status = if scenario==ChatHealthScenario::Truncated {"incomplete"} else {"completed"};
-            let output = if scenario==ChatHealthScenario::Empty {vec![]} else {vec![serde_json::json!({
-                "id":"msg_health","type":"message","role":"assistant","status":status,
-                "content":[{"type":"output_text","text":"OK","annotations":[]}]})]};
+            // The production decoder corroborates the terminal output against
+            // each item's output_item.done snapshot, so emit the done event.
+            let item = serde_json::json!({"id":"msg_health","type":"message","role":"assistant",
+                "status":status,"content":[{"type":"output_text","text":"OK","annotations":[]}]});
+            if scenario != ChatHealthScenario::Empty {
+                events.push(serde_json::json!({"type":"response.output_item.done","output_index":0,
+                    "item":item}));
+            }
+            let output = if scenario==ChatHealthScenario::Empty {vec![]} else {vec![item]};
             let mut response = serde_json::json!({"id":"resp_health","status":status,"store":false,
                 "output":output,"usage":{"input_tokens":2,"output_tokens":1}});
             if scenario==ChatHealthScenario::Truncated {
@@ -775,25 +840,36 @@ mod tests {
         data_sse_frames(events)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn assert_chat_health_scenarios(
         platform: &str, protocol: &str, auth_scheme: &str, endpoint_path: &str, auth_header: &str,
-        stream: fn(ChatHealthScenario) -> String,
+        result_marker: &'static str, tool_stream: fn() -> String, stream: fn(ChatHealthScenario) -> String,
     ) {
         for scenario in [ChatHealthScenario::Complete,ChatHealthScenario::Empty,ChatHealthScenario::Partial,
             ChatHealthScenario::Truncated,ChatHealthScenario::Error] {
             let server = MockServer::start().await;
             let auth_value = if auth_header=="authorization" {format!("Bearer {CHAT_KEY}")} else {CHAT_KEY.to_owned()};
             let request_path = endpoint_path.split('?').next().unwrap();
+            let expected_requests = if scenario==ChatHealthScenario::Complete {2u64} else {1u64};
             Mock::given(method("POST")).and(path(request_path)).and(header(auth_header,auth_value.as_str()))
-                .respond_with(ResponseTemplate::new(200).set_body_raw(stream(scenario),"text/event-stream"))
-                .expect(1).mount(&server).await;
-            let (service,capabilities,_dir) = managed_chat_health_fixture(&server,platform,protocol,auth_scheme,endpoint_path).await;
+                .respond_with(TwoRoundSse {
+                    first:if scenario==ChatHealthScenario::Complete {tool_stream()} else {stream(scenario)},
+                    second:stream(ChatHealthScenario::Complete),marker:result_marker})
+                .expect(expected_requests).mount(&server).await;
+            let (service,capabilities) = managed_chat_health_fixture(&server,platform,protocol,auth_scheme,endpoint_path).await;
             let response = service.health_check(ProviderHealthCheckRequest {
                 provider_id:CHAT_PROVIDER_ID.into(),model:CHAT_MODEL.into(),task:ModelTask::Chat,
             }).await.unwrap();
-            let expected = if scenario==ChatHealthScenario::Complete {HealthStatus::Healthy} else {HealthStatus::Unhealthy};
+            // Only the complete two-round tool exchange proves Agent support.
+            // A well-formed answer that never uses the probe tool stays Unknown;
+            // decoder/sequence violations are Unhealthy.
+            let expected = match scenario {
+                ChatHealthScenario::Complete => HealthStatus::Healthy,
+                ChatHealthScenario::Partial | ChatHealthScenario::Error => HealthStatus::Unhealthy,
+                ChatHealthScenario::Empty | ChatHealthScenario::Truncated => HealthStatus::Unknown,
+            };
             assert_eq!(response.status,expected,"{protocol} {scenario:?}: {response:?}");
-            if expected==HealthStatus::Unhealthy {
+            if expected!=HealthStatus::Healthy {
                 assert!(response.message.as_deref().is_some_and(|message| !message.is_empty()));
             }
             assert!(!serde_json::to_string(&response).unwrap().contains(CHAT_KEY));
@@ -801,37 +877,47 @@ mod tests {
             assert!(!stored.contains(CHAT_KEY));
             assert_eq!(serde_json::from_str::<CapabilityHealth>(&stored).unwrap().status,expected,"{protocol} {scenario:?}");
             let requests = server.received_requests().await.unwrap();
-            assert_eq!(requests.len(),1,"{protocol} {scenario:?}");
+            assert_eq!(requests.len() as u64,expected_requests,"{protocol} {scenario:?}");
             assert!(!requests[0].headers.contains_key("anthropic-version"));
             let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
             match protocol {
-                "openai.chat_text" => {assert!(body["messages"].is_array());assert_eq!(body["model"],CHAT_MODEL);assert_eq!(body["stream"],true);}
-                "openai.responses" => {assert!(body["input"].is_array());assert_eq!(body["model"],CHAT_MODEL);assert_eq!(body["stream"],true);assert_eq!(body["store"],false);}
+                "openai.chat_text" => {
+                    assert!(body["messages"].is_array());assert_eq!(body["model"],CHAT_MODEL);assert_eq!(body["stream"],true);
+                    assert_eq!(body["tools"][0]["function"]["name"],"nomifun_protocol_echo");
+                    assert_eq!(body["tool_choice"],"auto");
+                }
+                "openai.responses" => {
+                    assert!(body["input"].is_array());assert_eq!(body["model"],CHAT_MODEL);assert_eq!(body["stream"],true);assert_eq!(body["store"],false);
+                    assert_eq!(body["tools"][0]["name"],"nomifun_protocol_echo");
+                }
                 "gemini.generate_text" => {
                     assert!(body["contents"].is_array());
+                    assert_eq!(body["tools"][0]["functionDeclarations"][0]["name"],"nomifun_protocol_echo");
                     assert_eq!(requests[0].url.query_pairs().find(|(key,_)| key=="alt").map(|(_,value)| value.into_owned()).as_deref(),Some("sse"));
                     assert!(!requests[0].headers.contains_key("authorization"));
                 }
                 _ => unreachable!(),
             }
-            assert!(body.get("tools").is_none(),"health only verifies a tool-free text response");
         }
     }
 
     #[tokio::test]
     async fn openai_chat_health_requires_a_complete_visible_non_truncated_response() {
-        assert_chat_health_scenarios("openai","openai.chat_text","bearer","/v1/chat/completions","authorization",openai_chat_health_stream).await;
+        assert_chat_health_scenarios("openai","openai.chat_text","bearer","/v1/chat/completions","authorization",
+            "\"tool_call_id\"",openai_chat_tool_stream,openai_chat_health_stream).await;
     }
 
     #[tokio::test]
     async fn responses_health_requires_a_complete_visible_non_truncated_response() {
-        assert_chat_health_scenarios("openai","openai.responses","bearer","/v1/responses","authorization",responses_health_stream).await;
+        assert_chat_health_scenarios("openai","openai.responses","bearer","/v1/responses","authorization",
+            "function_call_output",responses_tool_stream,responses_health_stream).await;
     }
 
     #[tokio::test]
     async fn gemini_health_requires_a_complete_visible_non_truncated_response() {
         assert_chat_health_scenarios("gemini","gemini.generate_text","header_key:x-goog-api-key",
-            &format!("/v1beta/models/{CHAT_MODEL}:streamGenerateContent?alt=sse"),"x-goog-api-key",gemini_health_stream).await;
+            &format!("/v1beta/models/{CHAT_MODEL}:streamGenerateContent?alt=sse"),"x-goog-api-key",
+            "functionResponse",gemini_tool_stream,gemini_health_stream).await;
     }
 
     #[tokio::test]
@@ -840,7 +926,7 @@ mod tests {
         Mock::given(method("POST")).and(path("/v1/videos"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"accepted-job","status":"queued"})))
             .expect(1).mount(&server).await;
-        let (service,capabilities,_dir) = managed_task_health_fixture(&server,"openai","openai.videos","bearer","/v1/videos",ModelTask::VideoGeneration).await;
+        let (service,capabilities) = managed_task_health_fixture(&server,"openai","openai.videos","bearer","/v1/videos",ModelTask::VideoGeneration).await;
         let response = service.health_check(ProviderHealthCheckRequest {
             provider_id:CHAT_PROVIDER_ID.into(),model:CHAT_MODEL.into(),task:ModelTask::VideoGeneration,
         }).await.unwrap();
@@ -861,7 +947,7 @@ mod tests {
         Mock::given(method("POST")).and(path("/v1/audio/speech"))
             .respond_with(ResponseTemplate::new(200).set_body_raw(Vec::<u8>::new(),"audio/mpeg"))
             .expect(1).mount(&server).await;
-        let (service,capabilities,_dir) = managed_task_health_fixture(&server,"openai","openai.audio_speech","bearer","/v1/audio/speech",ModelTask::SpeechSynthesis).await;
+        let (service,capabilities) = managed_task_health_fixture(&server,"openai","openai.audio_speech","bearer","/v1/audio/speech",ModelTask::SpeechSynthesis).await;
         let response = service.health_check(ProviderHealthCheckRequest {
             provider_id:CHAT_PROVIDER_ID.into(),model:CHAT_MODEL.into(),task:ModelTask::SpeechSynthesis,
         }).await.unwrap();
@@ -1077,8 +1163,7 @@ mod tests {
             reqwest::Client::new(),
             AdapterRegistry::new(default_adapters()),
         ));
-        let data_dir = tempfile::tempdir().unwrap();
-        let service = ProviderHealthCheckService::new(data_dir.path().to_owned(), invoke);
+        let service = ProviderHealthCheckService::new(invoke);
         let response = service
             .health_check(ProviderHealthCheckRequest {
                 provider_id: PROVIDER_ID.to_owned(),

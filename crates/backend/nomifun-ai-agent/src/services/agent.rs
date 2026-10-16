@@ -11,7 +11,6 @@
 //! `AgentRuntimeHandle`. This service retains agent-catalog listing and
 //! model-provider health checks.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use nomifun_api_types::{
@@ -31,11 +30,9 @@ pub struct AgentService {
 impl AgentService {
     pub fn new(
         registry: Arc<AgentRegistry>,
-        data_dir: PathBuf,
         model_invoke_service: Arc<ModelInvokeService>,
     ) -> Arc<Self> {
         let provider_health = ProviderHealthCheckService::new(
-            data_dir.clone(),
             model_invoke_service,
         );
         Arc::new(Self {

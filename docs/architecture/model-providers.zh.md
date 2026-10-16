@@ -35,7 +35,14 @@ OpenAI 官方、MiniMax 和 xAI 保留文档明确的 Responses 默认。仅支�
 capability `output_limit` 的较小值决定；别名不能覆盖消息、工具或协议状态。
 Chat Completions 的 `stream_options: null` 省略可选用量字段，对象中的 `include_usage`
 可显式覆盖缺省值；Responses 的 `include` 数组合并加密推理续传字段，`include: null`
-则省略不支持该字段的兼容服务选项。没有加密续传信息时不补造加密内容。
+则省略不支持该字段的兼容服务选项。没有加密续传信息时不补造加密内容。解码边界上，
+Anthropic 事件 union 中为 null 的成员按缺失处理；Responses item 的 `encrypted_content`
+不在 `output_item.done` 快照与终态响应之间比较，因为上游每次序列化都会重新加密。未知流
+事件类型按供应商要求忽略：Responses 的内容权威仍是 item 快照加终态，未知 Anthropic 事件
+不得携带内容成员。SSE 记录只在空行处提交；唯一例外是流结束时缺少最后分隔空行、但内容
+完整的 `[DONE]` 结束标记仍按正常结束处理，其他未终止记录仍是分帧错误。同一次尝试中，
+没有 `id` 的 OpenAI Chat 帧（如 Azure 风格的 `prompt_filter_results` 前导帧）属于该次
+尝试唯一的响应，并由第一个带 id 的帧接管；相互矛盾的 id 仍是流违规。
 协议拥有的模型、输入、工具、流模式和云端状态字段不能由参数 JSON 注入。
 推理强度只使用标准化的 `reasoning_effort` 配置；Responses 的原生 `reasoning.effort`
 在保存时提示改用该字段，`summary`、`mode` 和 `context` 等其他原生设置保留。
@@ -74,9 +81,11 @@ OpenAI serializer 作为可用默认值。原生目录缺少用途时，未知�
 
 模型选择完成后，界面通过 `/api/providers/discover-model-protocols` 或
 `/api/providers/{provider_id}/discover-model-protocols` 提交精确模型与 capability 草稿。
-对话候选复用生产 OpenAI、Responses、Anthropic、Gemini 和 Bedrock provider，验证流式
+对话发现和已保存 capability 的 Chat 健康检查使用与 Agent 完全相同的 wire stack 运行同一
+次无副作用工具往返：broker serializer 加共享 provider 参数合并、每轮一次单尝试 HTTP 请求
+（SSE 或 AWS 事件流分帧）、每次尝试独立解码器并执行 broker 的事件序列规则。检查验证流式
 工具调用、真实工具结果回传及最终可见回答；不创建 Session、不执行用户工具。每个候选有
-输出和时长预算；生产 HTTP 层可能执行有限重试。所有候选均记录结果，已有可用选择优先，
+输出和时长预算，每轮只发一次请求，不重试。所有候选均记录结果，已有可用选择优先，
 否则选择已验证的文档推荐项，再回退到第一个可用项。全局鉴权、额度和限流失败停止后续请求。
 
 多模态候选使用 [供应商协议审计](../../crates/backend/nomifun-model-invoke/src/provider_protocol_audit.rs)

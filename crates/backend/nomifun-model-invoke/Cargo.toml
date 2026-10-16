@@ -8,6 +8,8 @@ repository.workspace = true
 [dependencies]
 nomifun-common.workspace = true
 nomifun-api-types.workspace = true
+nomifun-agent-contracts.workspace = true
+nomifun-chat-model-broker.workspace = true
 nomifun-db.workspace = true
 nomifun-net.workspace = true
 nomifun-voice-contracts.workspace = true
@@ -32,5 +34,4 @@ tracing.workspace = true
 image = { workspace = true, features = ["jpeg", "webp", "gif"] }
 
 [dev-dependencies]
-nomifun-chat-model-broker.workspace = true
 wiremock.workspace = true

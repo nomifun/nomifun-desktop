@@ -1,19 +1,15 @@
 //! Configuration-only protocol discovery; never writes models or Agent data.
 use std::time::{Duration, Instant};
-use nomi_config::compat::ProviderCompat;
-use nomi_providers::{LlmProvider, ProviderError};
-use nomi_types::llm::{LlmEvent, LlmRequest};
-use nomi_types::message::{ContentBlock, Message, Role, StopReason};
-use nomi_types::tool::ToolDef;
-use nomifun_api_types::{BedrockAuthMethod, BedrockConfig, DiscoverModelProtocolsAnonymousRequest,
+use nomifun_api_types::{BedrockConfig, DiscoverModelProtocolsAnonymousRequest,
     DiscoverModelProtocolsRequest, DiscoverModelProtocolsResponse, ModelProtocolCandidate as Candidate,
     ModelProtocolCandidateEvidence as Evidence, ModelProtocolCandidateStatus as Status,
     ModelTask, ModelTaskSource, ProtocolScope, ProviderHealthCheckErrorKind as ErrorKind, ProviderModelCapabilityInput};
 use nomifun_common::{AppError, ProviderId};
-use nomifun_model_invoke::{AuthMaterial, AuthScheme, ResolvedConnection, protocol_task_descriptor,
+use nomifun_model_invoke::chat_verification::{ChatVerificationFailure, ChatVerificationTarget, verify_chat_agent_round_trip};
+use nomifun_model_invoke::{AuthMaterial, AuthScheme, InvokeError, ResolvedConnection, protocol_task_descriptor,
     protocol_descriptor, protocol_manifest_for_model_connection, resolve_submit_url};
 use nomifun_model_invoke::provider_protocol_audit::{DocumentedProtocolCandidate, DocumentationStatus, documented_protocol_candidates};
-use serde_json::{Value,json};
+use serde_json::Value;
 use super::{FetchConfig, ModelFetchService};
 
 const RESPONSES: &str = "openai.responses";
@@ -22,7 +18,6 @@ const CHAT_PROTOCOLS: [&str;5] = [RESPONSES,CHAT,"anthropic.messages","gemini.ge
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
 const CHAT_DISCOVERY_BUDGET: Duration = Duration::from_secs(60);
 const PROBE_OUTPUT_LIMIT: u32 = 4096;
-const ECHO_TOOL: &str = "nomifun_protocol_echo";
 
 impl ModelFetchService {
     pub async fn discover_model_protocols(&self, provider_id: &str, req: &DiscoverModelProtocolsRequest,
@@ -161,10 +156,13 @@ impl ModelFetchService {
             } else {
                 candidate.probe_output_limit = Some(output_limit);
                 let remaining = CHAT_DISCOVERY_BUDGET.saturating_sub(started.elapsed()).min(ATTEMPT_TIMEOUT);
-                match tokio::time::timeout(remaining,check_candidate(model,&capability,connection,config.bedrock_config.as_ref(),output_limit)).await {
-                    Ok(Ok(())) => { candidate.status = Status::Available; candidate.evidence = Evidence::VerifiedStream; }
-                    Ok(Err(error)) => classify_error(&mut candidate,error,&connection.auth),
-                    Err(_) => { candidate.error_kind = Some(ErrorKind::Timeout); candidate.message = Some("verification timed out; protocol support remains inconclusive".into()); }
+                match verification_target(model,&capability,connection,config.bedrock_config.as_ref())
+                    .map_err(ChatVerificationFailure::Transport) {
+                    Err(failure) => classify_failure(&mut candidate,&failure,&connection.auth),
+                    Ok(target) => match verify_chat_agent_round_trip(&target,output_limit,remaining).await {
+                        Ok(()) => { candidate.status = Status::Available; candidate.evidence = Evidence::VerifiedStream; }
+                        Err(failure) => classify_failure(&mut candidate,&failure,&connection.auth),
+                    },
                 }
                 stopped = stops_billable_checks(&candidate);
             }
@@ -303,177 +301,69 @@ fn candidate_capability(original: &ProviderModelCapabilityInput, protocol: &str)
     Ok(candidate)
 }
 
-fn make_provider(model: &str, capability: &ProviderModelCapabilityInput, connection: &ResolvedConnection,
-    bedrock: Option<&BedrockConfig>) -> Result<Box<dyn LlmProvider>,ProviderError> {
-    let mut compat = match capability.protocol.as_str() {RESPONSES => ProviderCompat::openai_responses_defaults(),CHAT => ProviderCompat::openai_defaults(),
-        "anthropic.messages" => ProviderCompat::anthropic_defaults(),"gemini.generate_text" => ProviderCompat::gemini_defaults(),
-        "bedrock.anthropic_messages" => ProviderCompat::bedrock_defaults(),_ => return Err(ProviderError::Config("Chat protocol has no production verifier".into()))};
-    let mut params = capability.provider_params.as_object().expect("validated object").clone();
-    compat.max_tokens_field = params.remove("max_tokens_field").and_then(|value| value.as_str().map(str::trim).map(str::to_owned)).or(compat.max_tokens_field);
-    compat.require_reasoning_content = params.remove("require_reasoning_content").and_then(|value| value.as_bool());
-    compat.chain_rounds = params.remove("chain_rounds").and_then(|value| value.as_bool());
-    compat.reasoning_effort = params.remove("reasoning_effort").and_then(|value| value.as_str().map(str::to_owned));
-    params.remove("_nomifun_context_limit_kind"); params.remove(nomifun_api_types::MODEL_GATEWAY_CATALOG_BASELINE_PARAM);
-    compat.api_path = Some(String::new()); compat.extra_body = Some(params);
+/// Resolve one Chat candidate into the shared verification target. The URL is
+/// computed exactly like the generation path (`resolve_submit_url` against the
+/// capability endpoint and connection root); provider parameters pass through
+/// unchanged because the broker's `merge_chat_provider_params` owns
+/// `max_tokens_field`/`reasoning_effort` and strips internal sentinel keys.
+fn verification_target(model: &str, capability: &ProviderModelCapabilityInput, connection: &ResolvedConnection,
+    bedrock: Option<&BedrockConfig>) -> Result<ChatVerificationTarget,InvokeError> {
     if capability.protocol == "bedrock.anthropic_messages" {
-        let metadata = bedrock.ok_or_else(|| ProviderError::Config("Bedrock verification requires the production region and authentication configuration".into()))?;
-        crate::provider::validate_provider_auth("bedrock","bedrock",&connection.auth.credentials,Some(metadata)).map_err(|error| ProviderError::Config(error.to_string()))?;
-        let credentials = match metadata.auth_method {
-            BedrockAuthMethod::AccessKey => nomi_providers::bedrock::AwsCredentials::Explicit {
-                access_key_id:connection.auth.credentials["access_key_id"].as_str().expect("validated AWS key").trim().into(),
-                secret_access_key:connection.auth.credentials["secret_access_key"].as_str().expect("validated AWS key").trim().into(),
-                session_token:connection.auth.credentials.get("session_token").and_then(Value::as_str).map(str::trim).map(str::to_owned)},
-            BedrockAuthMethod::Profile => nomi_providers::bedrock::AwsCredentials::Profile(metadata.profile.as_deref().unwrap_or_default().trim().into()),
-            BedrockAuthMethod::DefaultChain => nomi_providers::bedrock::AwsCredentials::Environment,
-        };
-        return Ok(Box::new(nomi_providers::bedrock::BedrockProvider::new(metadata.region.trim(),credentials,false,compat)));
+        let metadata = bedrock.ok_or_else(|| InvokeError::config("Bedrock verification requires the production region and authentication configuration"))?;
+        crate::provider::validate_provider_auth("bedrock","bedrock",&connection.auth.credentials,Some(metadata))
+            .map_err(|error| InvokeError::config(error.to_string()))?;
+        let region = metadata.region.trim();
+        if region.is_empty() { return Err(InvokeError::config("Bedrock signing region is missing")); }
+        return Ok(ChatVerificationTarget {
+            protocol_id:capability.protocol.clone(),
+            url:format!("https://bedrock-runtime.{region}.amazonaws.com/model/{model}/invoke-with-response-stream"),
+            model:model.into(),auth:connection.auth.clone(),provider_params:capability.provider_params.clone(),
+            configured_output_limit:capability.output_limit,region:Some(region.into())});
     }
     let mut connection = connection.clone();
     if let Some(root) = &capability.base_url_override {connection.base_url = root.clone();}
-    let descriptor = protocol_task_descriptor(&capability.protocol,ModelTask::Chat).expect("validated Chat protocol");
+    let descriptor = protocol_task_descriptor(&capability.protocol,ModelTask::Chat)
+        .ok_or_else(|| InvokeError::config("Chat protocol has no production verifier"))?;
     let endpoint = capability.endpoint.as_deref().unwrap_or_else(|| descriptor.endpoints.iter().find(|endpoint| endpoint.field == "endpoint").expect("HTTP endpoint").default_value.as_str());
-    let url = resolve_submit_url(&connection,&capability.protocol,ModelTask::Chat,endpoint,model,capability.allow_cross_origin_credentials)
-        .map_err(|error| ProviderError::Config(error.message))?;
-    let keys = connection.auth.secrets().join("\n");
-    Ok(match capability.protocol.as_str() {
-        RESPONSES => Box::new(nomi_providers::openai_responses::OpenAIResponsesProvider::new(&keys,&url,compat)),
-        CHAT => Box::new(nomi_providers::openai::OpenAIProvider::new(&keys,&url,compat)),
-        "anthropic.messages" => Box::new(nomi_providers::anthropic::AnthropicProvider::new(&keys,&url,compat).with_cache(false)),
-        "gemini.generate_text" => Box::new(nomi_providers::gemini::GeminiProvider::new(&keys,&url,compat)),
-        _ => unreachable!(),
-    })
+    let url = resolve_submit_url(&connection,&capability.protocol,ModelTask::Chat,endpoint,model,capability.allow_cross_origin_credentials)?;
+    Ok(ChatVerificationTarget {
+        protocol_id:capability.protocol.clone(),url,model:model.into(),auth:connection.auth.clone(),
+        provider_params:capability.provider_params.clone(),configured_output_limit:capability.output_limit,region:None})
 }
 
-async fn check_candidate(model: &str, capability: &ProviderModelCapabilityInput, connection: &ResolvedConnection,
-    bedrock: Option<&BedrockConfig>, output_limit: u32) -> Result<(),ProviderError> {
-    let provider = make_provider(model,capability,connection,bedrock)?;
-    let mut request = LlmRequest {model:model.into(),system:"This is an isolated protocol verification. First call nomifun_protocol_echo once with value ok. After the tool result, return a short visible answer. Do not call any other tools.".into(),
-        messages:vec![Message::new(Role::User,vec![ContentBlock::Text{text:"Verify the echo tool, then reply OK.".into()}])],
-        tools:vec![ToolDef {name:ECHO_TOOL.into(),description:"A harmless local protocol test that returns the constant ok; no external side effects.".into(),
-            input_schema:json!({"type":"object","properties":{"value":{"type":"string","enum":["ok"]}},"required":["value"],"additionalProperties":false}),deferred:false}],
-        max_tokens:Some(output_limit),thinking:None,reasoning_effort:None,retain_provider_round:false};
-    let first = collect_round(provider.as_ref(),&request,&capability.protocol).await?;
-    let mut results = Vec::new();
-    for block in &first {
-        if let ContentBlock::ToolUse {id,name,input,..} = block {
-            if name != ECHO_TOOL || input != &json!({"value":"ok"}) || !results.is_empty() {
-                return Err(ProviderError::Config("model did not produce the bounded verification tool call; Agent support remains inconclusive".into()));
+/// Map the typed verification result onto a candidate. Wire-contract failures
+/// are `Incompatible`; everything else stays `Inconclusive` unless the local
+/// request itself was unsendable.
+fn classify_failure(candidate: &mut Candidate, failure: &ChatVerificationFailure, auth: &AuthMaterial) {
+    let diagnosis = failure.diagnosis();
+    match failure {
+        ChatVerificationFailure::Request(_) => {
+            candidate.status = Status::Blocked;
+            candidate.error_kind = diagnosis.map(|diagnosis| diagnosis.error_kind);
+        }
+        ChatVerificationFailure::Inconclusive(_) => {}
+        ChatVerificationFailure::Timeout => candidate.error_kind = Some(ErrorKind::Timeout),
+        ChatVerificationFailure::Transport(_) | ChatVerificationFailure::Stream(_) => {
+            if let Some(diagnosis) = diagnosis {
+                candidate.error_kind = Some(diagnosis.error_kind);
+                candidate.http_status = diagnosis.http_status;
+                if diagnosis.incompatible { candidate.status = Status::Incompatible; }
             }
-            results.push(ContentBlock::ToolResult {tool_use_id:id.clone(),content:"{\"value\":\"ok\"}".into(),is_error:false,images:Vec::new()});
         }
     }
-    if results.is_empty() {return Err(ProviderError::Config("text generation succeeded without the verification tool; Agent support remains inconclusive".into()));}
-    request.messages.push(Message::new(Role::Assistant,first));
-    request.messages.push(Message::new(Role::User,results));
-    let final_blocks = collect_round(provider.as_ref(),&request,&capability.protocol).await?;
-    if final_blocks.iter().any(|block| matches!(block,ContentBlock::ToolUse {..}))
-        || !final_blocks.iter().any(|block| matches!(block,ContentBlock::Text {text} if !text.trim().is_empty())) {
-        return Err(ProviderError::Config("tool verification completed without a final visible answer; Agent support remains inconclusive".into()));
-    }
-    Ok(())
-}
-
-async fn collect_round(provider: &dyn LlmProvider, request: &LlmRequest, protocol: &str) -> Result<Vec<ContentBlock>,ProviderError> {
-    let mut stream = provider.stream(request).await?;
-    let (mut text,mut thinking,mut signature,mut tools) = (String::new(),String::new(),None::<String>,Vec::new());
-    let mut signed_blocks = Vec::new();
-    let mut buffered_bytes = 0usize;
-    let mut terminal = false;
-    while let Some(event) = stream.recv().await {
-        if terminal {return Err(ProviderError::Parse("verification stream emitted an event after its terminal result".into()));}
-        match event {
-            LlmEvent::TextDelta(delta) => {buffered_bytes += delta.len();text.push_str(&delta);}
-            LlmEvent::ThinkingDelta(delta) => {
-                if signature.is_some() {signed_blocks.push(ContentBlock::Thinking {thinking:std::mem::take(&mut thinking),signature:signature.take()});}
-                buffered_bytes += delta.len();thinking.push_str(&delta);
-            }
-            LlmEvent::ThinkingSignature(value) => {
-                buffered_bytes += value.len();
-                if matches!(protocol,"anthropic.messages"|"bedrock.anthropic_messages") {signature.get_or_insert_default().push_str(&value);}
-                else {signature = Some(value);}
-            }
-            LlmEvent::ToolUse {id,name,input,extra} => {
-                buffered_bytes += input.to_string().len() + extra.as_ref().map_or(0,|value| value.to_string().len());
-                tools.push(ContentBlock::ToolUse {id,name,input,extra});
-            }
-            LlmEvent::ToolUseTruncated {..} => return Err(ProviderError::Config("verification tool arguments were truncated; Agent support remains inconclusive".into())),
-            LlmEvent::ProviderRoundId(_) => return Err(ProviderError::Config("verification received unexpected retained provider state".into())),
-            LlmEvent::Done {stop_reason:StopReason::MaxTokens,..} => return Err(ProviderError::Config("verification output budget exhausted; protocol support remains inconclusive".into())),
-            LlmEvent::Done {stop_reason:StopReason::EndTurn|StopReason::ToolUse,..} => {
-                terminal = true;
-            }
-            LlmEvent::Done {..} => return Err(ProviderError::Config("verification ended without a normal terminal result".into())),
-            LlmEvent::Error(message) => return Err(stream_error(message)),
-            _ => {}
-        }
-        if buffered_bytes > 256 * 1024 || tools.len() > 1 {
-            return Err(ProviderError::Config("verification exceeded its bounded response budget; Agent support remains inconclusive".into()));
-        }
-    }
-    if terminal {
-        let mut blocks = signed_blocks;
-        if !thinking.is_empty() || signature.is_some() {blocks.push(ContentBlock::Thinking {thinking,signature});}
-        if !text.is_empty() {blocks.push(ContentBlock::Text {text});}
-        blocks.extend(tools); return Ok(blocks);
-    }
-    Err(ProviderError::Connection("verification stream closed without a terminal result".into()))
-}
-
-fn stream_error(message: String) -> ProviderError {
-    if let Some(message) = message.strip_prefix("SSE parse error: ") {return ProviderError::Parse(message.into());}
-    if let Some(rest) = message.strip_prefix("API error ") {if let Some((status,message)) = rest.split_once(": ") {
-        if let Ok(status) = status.parse() {return ProviderError::Api {status,message:message.into()};}
-    }}
-    ProviderError::Connection(message)
-}
-
-fn classify_error(candidate: &mut Candidate, error: ProviderError, auth: &AuthMaterial) {
-    candidate.error_kind = Some(ErrorKind::ApiError);
-    match &error {
-        ProviderError::Parse(_) => {candidate.status = Status::Incompatible;candidate.error_kind = Some(ErrorKind::InvalidRequest);}
-        ProviderError::Api {status,message} => {
-            candidate.http_status = Some(*status);
-            candidate.error_kind = Some(match status {401 => ErrorKind::Unauthorized,402 => ErrorKind::InsufficientQuota,403 => ErrorKind::Forbidden,404 => ErrorKind::NotFound,
-                429 => ErrorKind::RateLimited,status if *status >= 500 => ErrorKind::ApiError,_ => ErrorKind::InvalidRequest});
-            let body = serde_json::Deserializer::from_str(message).into_iter::<Value>().next().and_then(Result::ok);
-            let code = body.as_ref().and_then(|body| body.pointer("/error/code").or_else(|| body.get("code")).or_else(|| body.pointer("/error/type")))
-                .and_then(Value::as_str).unwrap_or_default();
-            if matches!(code,"invalid_api_key"|"invalid_access_token"|"authentication_error"|"unauthorized") {candidate.error_kind = Some(ErrorKind::Unauthorized);}
-            else if matches!(code,"access_denied"|"forbidden"|"account_suspended") {candidate.error_kind = Some(ErrorKind::Forbidden);}
-            else if matches!(code,"insufficient_quota"|"quota_exceeded"|"insufficient_balance") {candidate.error_kind = Some(ErrorKind::InsufficientQuota);}
-            else if matches!(code,"model_not_found"|"model_not_available"|"model_not_supported")
-                || body.as_ref().and_then(|body| body.pointer("/error/param")).and_then(Value::as_str) == Some("model") {candidate.error_kind = Some(ErrorKind::ModelUnavailable);}
-            else if matches!(*status,405|410|501) || (*status == 404 && (matches!(code,"endpoint_not_found"|"route_not_found")
-                || body.as_ref().and_then(|body| body.get("detail")).and_then(Value::as_str) == Some("Not Found")))
-                || (matches!(*status,400|422) && matches!(code,"unsupported_protocol"|"unsupported_endpoint"|"unsupported_parameter"|"unknown_parameter"|"not_implemented")) {
-                candidate.status = Status::Incompatible;
-            }
-        }
-        ProviderError::RateLimited {..} => candidate.error_kind = Some(ErrorKind::RateLimited),
-        ProviderError::Http(error) if error.is_timeout() => candidate.error_kind = Some(ErrorKind::Timeout),
-        ProviderError::Connection(_) | ProviderError::Http(_) | ProviderError::StreamTruncated(_) => candidate.error_kind = Some(ErrorKind::ConnectionError),
-        ProviderError::NonApiResponse {message,..} => {
-            candidate.error_kind = Some(ErrorKind::NonApiResponse);
-            // reject_non_api_response in the production provider library
-            // formats this prefix from the actual HTTP status, never from the
-            // response body. Preserve auth/rate stop authority even for HTML.
-            candidate.http_status = message.strip_prefix("HTTP ").and_then(|message| message.split_once(" — "))
-                .and_then(|(status,_)| status.parse::<u16>().ok()).filter(|status| (100..=599).contains(status));
-            candidate.error_kind = Some(match candidate.http_status {
-                Some(401) => ErrorKind::Unauthorized,Some(402) => ErrorKind::InsufficientQuota,
-                Some(403) => ErrorKind::Forbidden,Some(429) => ErrorKind::RateLimited,_ => ErrorKind::NonApiResponse,
-            });
-        }
-        ProviderError::Config(_) | ProviderError::PromptTooLong(_) => candidate.error_kind = Some(ErrorKind::InvalidRequest),
-    }
-    candidate.message = Some(if matches!(error,ProviderError::Http(_)) {"model verification transport failed".into()}
-        else {nomifun_net::secret_redaction::SecretRedactor::new(auth.secrets()).redact(&error.to_string()).chars().take(350).collect()});
+    candidate.message = Some(if matches!(failure,ChatVerificationFailure::Transport(error) if error.kind == nomifun_model_invoke::InvokeErrorKind::Network) {
+        "model verification transport failed".into()
+    } else {
+        nomifun_net::secret_redaction::SecretRedactor::new(auth.secrets()).redact(&failure.message()).chars().take(350).collect()
+    });
 }
 fn millis(started: Instant) -> u64 {started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nomifun_api_types::BedrockAuthMethod;
+    use serde_json::json;
     fn capability(task: ModelTask, protocol: &str) -> ProviderModelCapabilityInput {
         serde_json::from_value(json!({"task":task,"protocol":protocol,"connection_role":"default","provider_params":{}})).unwrap()
     }
@@ -505,22 +395,27 @@ mod tests {
         capability.output_limit = Some(4096);
         let connection = ResolvedConnection {role:"default".into(),base_url:String::new(),extra:Value::Null,
             auth:AuthMaterial {scheme:AuthScheme::Bedrock,credentials:json!({"access_key_id":"fixture-access","secret_access_key":"fixture-secret"})}};
-        assert!(make_provider("anthropic.fixture",&capability,&connection,None).is_err());
+        assert!(verification_target("anthropic.fixture",&capability,&connection,None).is_err());
         let metadata = BedrockConfig {auth_method:BedrockAuthMethod::AccessKey,region:"us-east-1".into(),profile:None};
-        assert!(make_provider("anthropic.fixture",&capability,&connection,Some(&metadata)).is_ok());
+        let target = verification_target("anthropic.fixture",&capability,&connection,Some(&metadata)).unwrap();
+        assert_eq!(target.url,"https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.fixture/invoke-with-response-stream");
+        assert_eq!(target.region.as_deref(),Some("us-east-1"));
         capability.output_limit = None;
         assert!(prepare_candidate("bedrock","anthropic.fixture",&capability,"bedrock.anthropic_messages",&connection,None,true).is_err());
     }
 
     #[test]
-    fn screenshot_decoder_failure_is_incompatible_while_transport_failure_is_inconclusive() {
+    fn decoder_failure_is_incompatible_while_transport_failure_is_inconclusive() {
         let auth = AuthMaterial {scheme:AuthScheme::Bearer,credentials:json!({"api_keys":["fixture"]})};
         let mut parse = empty_candidate(RESPONSES,true);
-        classify_error(&mut parse,stream_error("SSE parse error: Responses content part does not match its message item".into()),&auth);
+        classify_failure(&mut parse,&ChatVerificationFailure::Stream(
+            nomifun_chat_model_broker::ChatModelError::protocol_violation("Responses content part does not match its message item")),&auth);
         assert_eq!(parse.status,Status::Incompatible);
         let mut transport = empty_candidate(RESPONSES,true);
-        classify_error(&mut transport,ProviderError::Connection("connection reset".into()),&auth);
+        classify_failure(&mut transport,&ChatVerificationFailure::Transport(
+            InvokeError::new(nomifun_model_invoke::InvokeErrorKind::Network,"connection reset")),&auth);
         assert_eq!(transport.status,Status::Inconclusive);
+        assert_eq!(transport.error_kind,Some(ErrorKind::ConnectionError));
         assert!(!stops_billable_checks(&transport));
     }
 

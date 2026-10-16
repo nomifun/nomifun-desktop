@@ -116,8 +116,11 @@ Loading the model list or observing a reachable endpoint does not verify that a
 particular model can generate an answer or call tools. Run the model health check
 on the saved capability.
 
-Health observations are stored per task. Text chat requires a complete, visible
-response; media, embedding and rerank probes validate their typed results. Empty
+Health observations are stored per task. Text chat requires the same harmless
+tool round trip as protocol verification: the model must call the probe tool,
+receive its constant result and finish with a complete, visible response; a
+model that answers without calling the probe tool is **not fully verified**.
+Media, embedding and rerank probes validate their typed results. Empty
 audio, damaged images, invalid vectors and failed jobs are unhealthy. A present
 empty transcription remains valid for silence. Accepted async jobs, remote output
 URLs and realtime session/configuration acknowledgements remain **not fully
@@ -132,8 +135,9 @@ all available candidates when needed. A documented
 recommendation wins among available candidates, otherwise the first available
 candidate wins. A working saved or manual selection is preserved.
 
-Chat checks use the production stream decoder and one harmless tool round trip;
-they may incur small model usage. All candidates matching the configured
+Chat checks use the exact Agent wire stack — broker serializers, provider-parameter
+merge, single-attempt streaming executor and per-attempt decoders — for one
+harmless tool round trip; they may incur small model usage. All candidates matching the configured
 authentication are checked rather than stopping after the first success.
 Authentication, quota and rate-limit failures are not incompatibility evidence.
 Image, video, music, speech, embedding and rerank candidates instead require native

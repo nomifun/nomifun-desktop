@@ -69,13 +69,32 @@ impl AnthropicDecoder {
         frame: &ProviderWireFrame,
     ) -> Option<Result<Vec<ChatModelEvent>, ChatModelError>> {
         self.last_frame_semantic_progress = false;
+        // Gateways serializing the Anthropic event union carry every member on
+        // every frame; an unused member arrives as JSON null, which is
+        // indistinguishable from an absent member (provider_errors uses the
+        // same convention). Normalization is shallow: nested nulls keep their
+        // payload meaning.
+        let normalized;
+        let data = match frame.data.as_object() {
+            Some(object) if object.values().any(Value::is_null) => {
+                normalized = Value::Object(
+                    object
+                        .iter()
+                        .filter(|(_, value)| !value.is_null())
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect(),
+                );
+                &normalized
+            }
+            _ => &frame.data,
+        };
         let named = frame.event.trim().to_ascii_lowercase();
-        let declared = frame.data.get("type").and_then(Value::as_str);
+        let declared = data.get("type").and_then(Value::as_str);
         if named == "json"
             && declared == Some("message")
-            && frame.data.get("role").and_then(Value::as_str) == Some("assistant")
+            && data.get("role").and_then(Value::as_str) == Some("assistant")
         {
-            let result = self.decode_complete_message(&frame.data);
+            let result = self.decode_complete_message(data);
             if result.is_err() { self.last_frame_semantic_progress = false; }
             return Some(result);
         }
@@ -86,8 +105,33 @@ impl AnthropicDecoder {
         };
         // Heartbeats can precede message_start, but may not select a legacy
         // decoding mode or keep an attempt alive with unbounded no-op frames.
+        // A union-envelope ping may keep bookkeeping members such as a zeroed
+        // `index`; after null normalization it must carry no content-bearing
+        // member.
         if kind == "ping" {
-            return Some(self.ping(frame, &named, declared));
+            return Some(self.ping(frame, data, &named, declared));
+        }
+        let carries_content = ["message", "content_block", "delta", "usage"]
+            .iter()
+            .any(|key| data.get(*key).is_some());
+        let known_kind = matches!(
+            kind,
+            "message_start"
+                | "content_block_start"
+                | "content_block_delta"
+                | "content_block_stop"
+                | "message_delta"
+                | "message_stop"
+        );
+        // Anthropic's streaming contract requires clients to tolerate new
+        // event kinds. An unknown typed kind carrying no content-bearing
+        // member (after null normalization) is ignored like a heartbeat and
+        // must not select a decoding mode. A content-carrying unknown keeps
+        // the strict native path below, and once the stream is already native
+        // it still reaches decode_native so it remains an error after
+        // message_stop. Untyped frames keep the normalized event path.
+        if !known_kind && !carries_content && declared.is_some() && self.native != Some(true) {
+            return Some(Ok(Vec::new()));
         }
         let native_frame = matches!(
             declared,
@@ -99,9 +143,10 @@ impl AnthropicDecoder {
                     | "message_delta"
                     | "message_stop"
             )
-        ) || frame.data.get("content_block").is_some()
-            || frame.data.get("index").is_some()
-            || frame.data.pointer("/message/role").is_some();
+        ) || data.get("content_block").is_some()
+            || data.get("index").is_some()
+            || data.pointer("/message/role").is_some()
+            || (!known_kind && carries_content);
         if self.native == Some(false) && native_frame {
             return Some(Err(invalid(
                 "Anthropic stream mixed native and normalized events",
@@ -110,8 +155,7 @@ impl AnthropicDecoder {
         if !*self.native.get_or_insert(native_frame) {
             return None;
         }
-        if frame
-            .data
+        if data
             .get("type")
             .is_some_and(|value| !value.is_string())
             || (!matches!(named.as_str(), "message" | "json")
@@ -121,7 +165,7 @@ impl AnthropicDecoder {
                 "Anthropic event name contradicts its payload type",
             )));
         }
-        let result = self.decode_native(kind, &frame.data);
+        let result = self.decode_native(kind, data);
         if result.is_err() { self.last_frame_semantic_progress = false; }
         Some(result)
     }
@@ -190,20 +234,24 @@ impl AnthropicDecoder {
     fn ping(
         &mut self,
         frame: &ProviderWireFrame,
+        data: &Value,
         named: &str,
         declared: Option<&str>,
     ) -> Result<Vec<ChatModelEvent>, ChatModelError> {
         self.budget.admit(&frame.data)?;
         if self.terminal
-            || frame
-                .data
+            || data
                 .get("type")
                 .is_some_and(|value| value.as_str() != Some("ping"))
             || (!matches!(named, "message" | "json") && declared.is_some_and(|kind| kind != named))
-            || !frame
-                .data
-                .as_object()
-                .is_some_and(|object| object.keys().all(|key| key == "type"))
+            || !data.as_object().is_some_and(|object| {
+                ["message", "content_block", "delta", "usage", "error"]
+                    .iter()
+                    .all(|key| !object.contains_key(*key))
+                    && object
+                        .get("index")
+                        .is_none_or(|value| value.as_u64().is_some())
+            })
         {
             return Err(invalid("Invalid Anthropic heartbeat"));
         }
@@ -239,9 +287,13 @@ impl AnthropicDecoder {
                 return Err(invalid("Invalid initial Anthropic message"));
             }
             let id = identity(message, "id")?.to_owned();
+            // Token counters are observability, not semantics: a provider may
+            // omit input_tokens/output_tokens at start (e.g. a refused Bedrock
+            // request). Present counters must still be real integers, and
+            // merge_usage validates the remaining counter members.
             let usage = field(message, "usage")?;
             for key in ["input_tokens", "output_tokens"] {
-                if field(usage, key)?.as_u64().is_none() {
+                if usage.get(key).is_some_and(|value| value.as_u64().is_none()) {
                     return Err(invalid("Missing initial Anthropic token count"));
                 }
             }
@@ -250,6 +302,24 @@ impl AnthropicDecoder {
             return Ok(vec![ChatModelEvent::ResponseStarted {
                 provider_response_id: Some(ProviderResponseId(id)),
             }]);
+        }
+        // The same forward-compatibility rule at lifecycle level: unknown
+        // kinds carrying no content member are ignored. Anthropic has no item
+        // snapshots to re-validate skipped content, so an unknown carrying
+        // message/content_block/delta/usage keeps the strict path below.
+        if !matches!(
+            kind,
+            "content_block_start"
+                | "content_block_delta"
+                | "content_block_stop"
+                | "message_delta"
+                | "message_stop"
+        ) && !data.as_object().is_some_and(|object| {
+            ["message", "content_block", "delta", "usage"]
+                .iter()
+                .any(|key| object.contains_key(*key))
+        }) {
+            return Ok(Vec::new());
         }
         if !self.started {
             return Err(invalid("Anthropic content before message_start"));
@@ -298,7 +368,9 @@ impl AnthropicDecoder {
                         ));
                     }
                 }
-                self.merge_usage(field(data, "usage")?)?;
+                if let Some(usage) = data.get("usage") {
+                    self.merge_usage(usage)?;
+                }
                 Ok(Vec::new())
             }
             "message_stop" => {
@@ -720,5 +792,249 @@ mod tests {
         assert!(matches!(events.last(), Some(ChatModelEvent::Completed {
             finish_reason: ChatFinishReason::Completed
         })));
+    }
+
+    /// NewAPI-style gateways serialize the full Anthropic event union on every
+    /// frame: unused members are JSON null and `index` is 0 even on events
+    /// with no content block. Members passed here override the nulls.
+    fn gateway_envelope(kind: &str, members: Value) -> Value {
+        let mut data = serde_json::json!({
+            "type": kind,
+            "content_block": null,
+            "delta": null,
+            "error": null,
+            "index": 0,
+            "message": null,
+            "usage": null,
+        });
+        for (key, value) in members.as_object().expect("envelope members") {
+            data[key] = value.clone();
+        }
+        data
+    }
+
+    fn gateway_message_start(usage: Value) -> Value {
+        gateway_envelope("message_start", serde_json::json!({
+            "message": {
+                "id": "msg_gw", "type": "message", "role": "assistant",
+                "content": [], "stop_reason": null, "usage": usage,
+            },
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+        }))
+    }
+
+    #[test]
+    fn union_envelope_text_stream_tolerates_null_members_and_mid_stream_ping() {
+        let mut decoder = AnthropicDecoder::default();
+        let mut events = Vec::new();
+        for (kind, data) in [
+            ("message_start", gateway_message_start(
+                serde_json::json!({"input_tokens": 9, "output_tokens": 1}))),
+            ("content_block_start", gateway_envelope("content_block_start",
+                serde_json::json!({"index": 0,
+                    "content_block": {"type": "text", "text": ""}}))),
+            ("ping", gateway_envelope("ping", serde_json::json!({}))),
+            ("content_block_delta", gateway_envelope("content_block_delta",
+                serde_json::json!({"index": 0,
+                    "delta": {"type": "text_delta", "text": "hello"}}))),
+            ("content_block_stop", gateway_envelope("content_block_stop",
+                serde_json::json!({"index": 0}))),
+            ("message_delta", gateway_envelope("message_delta",
+                serde_json::json!({"delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                    "usage": {"input_tokens": 9, "output_tokens": 4}}))),
+            ("message_stop", gateway_envelope("message_stop", serde_json::json!({}))),
+        ] {
+            events.extend(native(&mut decoder, kind, data).unwrap());
+        }
+        assert!(events.iter().any(|event| matches!(event,
+            ChatModelEvent::OutputTextDelta { text } if text == "hello")));
+        assert!(matches!(events.last(), Some(ChatModelEvent::Completed {
+            finish_reason: ChatFinishReason::Completed })));
+    }
+
+    #[test]
+    fn union_envelope_thinking_ping_and_text_blocks_decode_atomically() {
+        let mut decoder = AnthropicDecoder::default();
+        let mut events = Vec::new();
+        for (kind, data) in [
+            ("message_start", gateway_message_start(
+                serde_json::json!({"input_tokens": 11, "output_tokens": 3}))),
+            ("content_block_start", gateway_envelope("content_block_start",
+                serde_json::json!({"index": 0,
+                    "content_block": {"type": "thinking", "thinking": "", "signature": ""}}))),
+            ("ping", gateway_envelope("ping", serde_json::json!({}))),
+            ("content_block_delta", gateway_envelope("content_block_delta",
+                serde_json::json!({"index": 0,
+                    "delta": {"type": "thinking_delta", "thinking": "native thought"}}))),
+            ("content_block_delta", gateway_envelope("content_block_delta",
+                serde_json::json!({"index": 0,
+                    "delta": {"type": "signature_delta", "signature": "sig"}}))),
+            ("content_block_stop", gateway_envelope("content_block_stop",
+                serde_json::json!({"index": 0}))),
+            ("content_block_start", gateway_envelope("content_block_start",
+                serde_json::json!({"index": 1,
+                    "content_block": {"type": "text", "text": ""}}))),
+            ("content_block_delta", gateway_envelope("content_block_delta",
+                serde_json::json!({"index": 1,
+                    "delta": {"type": "text_delta", "text": "hi"}}))),
+            ("content_block_stop", gateway_envelope("content_block_stop",
+                serde_json::json!({"index": 1}))),
+            ("message_delta", gateway_envelope("message_delta",
+                serde_json::json!({"delta": {"stop_reason": "end_turn"},
+                    "usage": {"output_tokens": 12}}))),
+            ("message_stop", gateway_envelope("message_stop", serde_json::json!({}))),
+        ] {
+            events.extend(native(&mut decoder, kind, data).unwrap());
+        }
+        assert!(events.iter().any(|event| matches!(event,
+            ChatModelEvent::ProviderReasoningBlock {
+                block: ChatProviderReasoning::AnthropicThinking { text, signature, route_digest: None }
+            } if text == "native thought" && signature == "sig")));
+        assert!(events.iter().any(|event| matches!(event,
+            ChatModelEvent::OutputTextDelta { text } if text == "hi")));
+        assert!(matches!(events.last(), Some(ChatModelEvent::Completed {
+            finish_reason: ChatFinishReason::Completed })));
+    }
+
+    #[test]
+    fn union_envelope_bedrock_thinking_text_and_tool_use_decode() {
+        let mut decoder = AnthropicDecoder::default();
+        let mut events = Vec::new();
+        for (kind, data) in [
+            ("message_start", gateway_message_start(serde_json::json!({
+                "cache_creation": {"ephemeral_5m_input_tokens": 39279},
+                "cache_creation_input_tokens": 39279, "input_tokens": 91,
+                "output_tokens": 4}))),
+            ("content_block_start", gateway_envelope("content_block_start",
+                serde_json::json!({"index": 0,
+                    "content_block": {"type": "thinking", "thinking": "", "signature": ""}}))),
+            ("content_block_delta", gateway_envelope("content_block_delta",
+                serde_json::json!({"index": 0,
+                    "delta": {"type": "signature_delta", "signature": "sig"}}))),
+            ("content_block_stop", gateway_envelope("content_block_stop",
+                serde_json::json!({"index": 0}))),
+            ("content_block_start", gateway_envelope("content_block_start",
+                serde_json::json!({"index": 1,
+                    "content_block": {"type": "text", "text": ""}}))),
+            ("content_block_delta", gateway_envelope("content_block_delta",
+                serde_json::json!({"index": 1,
+                    "delta": {"type": "text_delta", "text": "checking"}}))),
+            ("content_block_stop", gateway_envelope("content_block_stop",
+                serde_json::json!({"index": 1}))),
+            ("content_block_start", gateway_envelope("content_block_start",
+                serde_json::json!({"index": 2, "content_block": {
+                    "type": "tool_use", "id": "toolu_1", "name": "get_time", "input": {}}}))),
+            ("content_block_delta", gateway_envelope("content_block_delta",
+                serde_json::json!({"index": 2,
+                    "delta": {"type": "input_json_delta", "partial_json": "{\"tz\":\"Asia/Shanghai\"}"}}))),
+            ("content_block_stop", gateway_envelope("content_block_stop",
+                serde_json::json!({"index": 2}))),
+            ("message_delta", gateway_envelope("message_delta",
+                serde_json::json!({"delta": {"stop_reason": "tool_use"},
+                    "usage": {"output_tokens": 20}}))),
+            ("message_stop", gateway_envelope("message_stop", serde_json::json!({}))),
+        ] {
+            events.extend(native(&mut decoder, kind, data).unwrap());
+        }
+        assert!(events.iter().any(|event| matches!(event,
+            ChatModelEvent::ToolCallCompleted { call } if call.name == "get_time")));
+        assert!(matches!(events.last(), Some(ChatModelEvent::Completed {
+            finish_reason: ChatFinishReason::ToolCalls })));
+    }
+
+    #[test]
+    fn union_envelope_refusal_without_initial_output_tokens_completes() {
+        let mut decoder = AnthropicDecoder::default();
+        let mut events = Vec::new();
+        for (kind, data) in [
+            // A Bedrock-backed refusal reports usage without output_tokens.
+            ("message_start", gateway_message_start(serde_json::json!({
+                "cache_creation_input_tokens": 39279, "input_tokens": 243}))),
+            ("message_delta", gateway_envelope("message_delta",
+                serde_json::json!({"delta": {"stop_reason": "refusal"},
+                    "usage": {"input_tokens": 243, "output_tokens": 0}}))),
+            ("message_stop", gateway_envelope("message_stop", serde_json::json!({}))),
+        ] {
+            events.extend(native(&mut decoder, kind, data).unwrap());
+        }
+        assert!(matches!(events.last(), Some(ChatModelEvent::Completed {
+            finish_reason: ChatFinishReason::Refusal })));
+    }
+
+    #[test]
+    fn union_envelope_ping_and_initial_usage_keep_their_strictness() {
+        for extra in [
+            serde_json::json!({"delta": {"type": "text_delta", "text": "x"}}),
+            serde_json::json!({"content_block": {"type": "text", "text": "x"}}),
+            serde_json::json!({"message": {"id": "m", "type": "message",
+                "role": "assistant", "content": []}}),
+            serde_json::json!({"usage": {"input_tokens": 1}}),
+            serde_json::json!({"error": {"type": "overloaded_error"}}),
+            serde_json::json!({"index": "0"}),
+            serde_json::json!({"index": -1}),
+        ] {
+            let mut decoder = AnthropicDecoder::default();
+            assert!(
+                native(&mut decoder, "ping", gateway_envelope("ping", extra.clone())).is_err(),
+                "heartbeat must not carry {extra}"
+            );
+        }
+        let mut decoder = AnthropicDecoder::default();
+        assert!(native(&mut decoder, "ping", serde_json::json!({"type": "ping"})).is_ok(),
+            "a bare provider heartbeat still passes");
+        for (kind, data) in [
+            ("message_start", gateway_message_start(
+                serde_json::json!({"input_tokens": 1, "output_tokens": 1}))),
+            ("message_delta", gateway_envelope("message_delta",
+                serde_json::json!({"delta": {"stop_reason": "end_turn"}}))),
+            ("message_stop", gateway_envelope("message_stop", serde_json::json!({}))),
+        ] {
+            native(&mut decoder, kind, data).unwrap();
+        }
+        assert!(native(&mut decoder, "ping", gateway_envelope("ping", serde_json::json!({}))).is_err(),
+            "no heartbeat is valid after the terminal event");
+        let mut decoder = AnthropicDecoder::default();
+        assert!(native(&mut decoder, "message_start", gateway_message_start(
+            serde_json::json!({"input_tokens": 1, "output_tokens": "1"}))).is_err(),
+            "a non-integer initial token count is still rejected");
+    }
+
+    #[test]
+    fn unknown_content_less_events_are_ignored_and_never_select_a_mode_or_survive_the_terminal() {
+        let mut decoder = AnthropicDecoder::default();
+        // Before message_start the event is ignored without selecting a
+        // decoding mode (the following native frames must not look "mixed").
+        assert!(native(&mut decoder,"message_metadata",serde_json::json!({"type":"message_metadata","metadata":{"x":1}}))
+            .unwrap().is_empty());
+        start(&mut decoder);
+        assert!(native(&mut decoder,"message_metadata",serde_json::json!({"type":"message_metadata","metadata":{"x":2}}))
+            .unwrap().is_empty());
+        // The same tolerance applies to union envelopes with null members.
+        assert!(native(&mut decoder,"message",gateway_envelope("message_metadata",
+            serde_json::json!({"metadata":{"x":3}}))).unwrap().is_empty());
+        native(&mut decoder,"content_block_start",serde_json::json!({"type":"content_block_start","index":0,
+            "content_block":{"type":"text","text":""}})).unwrap();
+        native(&mut decoder,"content_block_delta",serde_json::json!({"type":"content_block_delta","index":0,
+            "delta":{"type":"text_delta","text":"OK"}})).unwrap();
+        native(&mut decoder,"content_block_stop",serde_json::json!({"type":"content_block_stop","index":0})).unwrap();
+        native(&mut decoder,"message_delta",serde_json::json!({"type":"message_delta",
+            "delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}})).unwrap();
+        let events = native(&mut decoder,"message_stop",serde_json::json!({"type":"message_stop"})).unwrap();
+        assert!(matches!(events.last(),Some(ChatModelEvent::Completed {
+            finish_reason: ChatFinishReason::Completed })));
+        assert!(native(&mut decoder,"message_metadata",serde_json::json!({"type":"message_metadata"})).is_err(),
+            "an unknown event is still an error after message_stop");
+    }
+
+    #[test]
+    fn unknown_events_carrying_content_members_keep_the_strict_rejection() {
+        for member in ["delta", "content_block", "message", "usage"] {
+            let mut decoder = AnthropicDecoder::default();
+            assert!(native(&mut decoder,"mystery",serde_json::json!({"type":"mystery",member:{"x":1}})).is_err(),
+                "unknown {member} event before message_start");
+            let mut decoder = AnthropicDecoder::default(); start(&mut decoder);
+            assert!(native(&mut decoder,"mystery",serde_json::json!({"type":"mystery",member:{"x":1}})).is_err(),
+                "unknown {member} event mid-stream");
+        }
     }
 }

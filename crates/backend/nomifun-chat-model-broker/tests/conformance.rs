@@ -697,6 +697,196 @@ fn openai_chat_raw_sse_shape_decodes_text_tools_usage_and_finish() {
 }
 
 #[test]
+fn openai_chat_id_less_prelude_and_trailing_chunks_join_the_identified_stream() {
+    let mut decoder =
+        nomifun_chat_model_broker::new_verification_frame_decoder(ChatProtocol::OpenaiChat);
+    let frames = [
+        serde_json::json!({
+            "id": "", "choices": [], "created": 0, "model": "gpt-6-sol", "object": ""
+        }),
+        serde_json::json!({
+            "id": "chatcmpl-1",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "gpt-6-sol",
+            "obfuscation": "x",
+            "service_tier": "default",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "nomifun_protocol_echo", "arguments": ""}
+                    }]
+                },
+                "finish_reason": null
+            }]
+        }),
+        serde_json::json!({
+            "id": "chatcmpl-1",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {"arguments": "{\"value\":\"ok\"}"}
+                    }]
+                },
+                "finish_reason": null
+            }]
+        }),
+        serde_json::json!({
+            "id": "chatcmpl-1",
+            "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": "tool_calls"}]
+        }),
+        serde_json::json!({
+            "id": "",
+            "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": null}]
+        }),
+        serde_json::json!({
+            "id": "chatcmpl-1",
+            "choices": [],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }),
+    ];
+    let events = frames
+        .into_iter()
+        .flat_map(|data| {
+            decoder
+                .decode_frame(ProviderWireFrame {
+                    diagnostic: None,
+                    event: "message".to_owned(),
+                    data,
+                })
+                .expect("Azure-style Chat frame")
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ChatModelEvent::ResponseStarted { .. }))
+            .count(),
+        1,
+        "events: {events:?}"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ChatModelEvent::ToolCallCompleted { call }
+            if call.name == "nomifun_protocol_echo"
+                && call.arguments.0 == serde_json::json!({"value": "ok"})
+    )));
+    assert!(matches!(
+        events.last(),
+        Some(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls })
+    ));
+}
+
+#[test]
+fn openai_chat_id_less_prelude_text_stream_completes_once() {
+    let mut decoder =
+        nomifun_chat_model_broker::new_verification_frame_decoder(ChatProtocol::OpenaiChat);
+    let frames = [
+        serde_json::json!({
+            "id": "", "choices": [], "created": 0, "model": "gpt-6-sol", "object": ""
+        }),
+        serde_json::json!({
+            "id": "chatcmpl-2",
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant", "content": ""},
+                "finish_reason": null
+            }]
+        }),
+        serde_json::json!({
+            "id": "chatcmpl-2",
+            "choices": [{"index": 0, "delta": {"content": "OK"}, "finish_reason": null}]
+        }),
+        serde_json::json!({
+            "id": "chatcmpl-2",
+            "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": "stop"}]
+        }),
+        serde_json::json!({
+            "id": "",
+            "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": null}]
+        }),
+        serde_json::json!({
+            "id": "chatcmpl-2",
+            "choices": [],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }),
+    ];
+    let events = frames
+        .into_iter()
+        .flat_map(|data| {
+            decoder
+                .decode_frame(ProviderWireFrame {
+                    diagnostic: None,
+                    event: "message".to_owned(),
+                    data,
+                })
+                .expect("Azure-style Chat frame")
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ChatModelEvent::ResponseStarted { .. }))
+            .count(),
+        1,
+        "events: {events:?}"
+    );
+    let text = events
+        .iter()
+        .filter_map(|event| match event {
+            ChatModelEvent::OutputTextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    assert_eq!(text, "OK");
+    assert!(matches!(
+        events.last(),
+        Some(ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed })
+    ));
+}
+
+#[test]
+fn openai_chat_contradicting_identified_ids_remain_a_stream_violation() {
+    let mut decoder =
+        nomifun_chat_model_broker::new_verification_frame_decoder(ChatProtocol::OpenaiChat);
+    let first = decoder
+        .decode_frame(ProviderWireFrame {
+            diagnostic: None,
+            event: "message".to_owned(),
+            data: serde_json::json!({
+                "id": "chatcmpl-a",
+                "choices": [{"index": 0, "delta": {"content": "x"}, "finish_reason": null}]
+            }),
+        })
+        .expect("first identified frame decodes");
+    assert!(first
+        .iter()
+        .any(|event| matches!(event, ChatModelEvent::ResponseStarted { .. })));
+    let error = decoder
+        .decode_frame(ProviderWireFrame {
+            diagnostic: None,
+            event: "message".to_owned(),
+            data: serde_json::json!({
+                "id": "chatcmpl-b",
+                "choices": [{"index": 0, "delta": {"content": "y"}, "finish_reason": null}]
+            }),
+        })
+        .expect_err("a second identified response violates the event sequence");
+    assert_eq!(error.code, ChatModelErrorCode::ProtocolViolation);
+}
+
+#[test]
 fn openai_chat_done_marker_completes_a_stream_without_finish_reason() {
     let transports =
         transport_map(std::iter::empty::<(ChatProtocol, Arc<dyn ProviderTransport>)>());

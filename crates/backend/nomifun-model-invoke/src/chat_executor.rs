@@ -1124,4 +1124,75 @@ mod tests {
         assert_eq!(frames.len(), 3, "frames: {frames:?}");
     }
 
+    #[tokio::test]
+    async fn sse_parser_accepts_a_final_done_marker_without_its_delimiter() {
+        let sources = vec![
+            stream::iter(vec![Ok::<_, InvokeError>(
+                b"data: {\"id\":\"c1\",\"choices\":[]}\r\n\r\ndata: [DONE]".to_vec(),
+            )]),
+            stream::iter(vec![Ok::<_, InvokeError>(
+                b"data: {\"id\":\"c1\",\"choices\":[]}\n\ndata: [DONE]\n".to_vec(),
+            )]),
+            stream::iter(vec![
+                Ok::<_, InvokeError>(
+                    b"data: {\"id\":\"c1\",\"choices\":[]}\r\n\r\ndata: [DO".to_vec(),
+                ),
+                Ok::<_, InvokeError>(b"NE]".to_vec()),
+            ]),
+            stream::iter(vec![Ok::<_, InvokeError>(
+                b"data: {\"id\":\"c1\",\"choices\":[]}\n\nevent: done\ndata: [DONE]".to_vec(),
+            )]),
+        ];
+        for source in sources {
+            let frames = stream_response(source, SingleAttemptFraming::Sse, 1024)
+                .collect::<Vec<_>>()
+                .await;
+            assert_eq!(frames.len(), 2, "frames: {frames:?}");
+            let first = frames[0].as_ref().expect("data frame must decode");
+            assert_eq!(first.event, "message");
+            let last = frames[1].as_ref().expect("done frame must decode");
+            assert_eq!(last.event, "done");
+        }
+    }
+
+    #[tokio::test]
+    async fn sse_parser_still_rejects_other_unterminated_records_at_eof() {
+        let cases: Vec<(&[u8], &str)> = vec![
+            (b"data: {\"id\":\"c1\"}", "ended before the event delimiter"),
+            (b"data: {\"id\":\"c1\"}\n", "ended before the event delimiter"),
+            (b"data: [DONE", "ended before the event delimiter"),
+            (
+                b"data: [DONE]\ndata: {}",
+                "ended before the event delimiter",
+            ),
+            (b"event: error\ndata: [DONE]", "contradicts its event name"),
+            (b"event: done", "ended before the event delimiter"),
+            (b": keepalive", "ended before the event delimiter"),
+        ];
+        for (record, expected) in cases {
+            let source = stream::iter([Ok::<_, InvokeError>(record.to_vec())]);
+            let frames = stream_response(source, SingleAttemptFraming::Sse, 1024)
+                .collect::<Vec<_>>()
+                .await;
+            for frame in &frames[..frames.len() - 1] {
+                assert!(frame.is_ok(), "frames: {frames:?}");
+            }
+            let error = frames
+                .last()
+                .expect("a stream must report its framing result")
+                .as_ref()
+                .expect_err("unterminated records must not decode as done")
+                .message
+                .clone();
+            assert!(error.contains(expected), "error: {error}");
+            assert!(
+                frames.iter().all(|frame| match frame {
+                    Ok(frame) => frame.event != "done",
+                    Err(_) => true,
+                }),
+                "frames: {frames:?}"
+            );
+        }
+    }
+
 }

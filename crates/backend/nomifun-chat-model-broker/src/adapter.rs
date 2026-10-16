@@ -18,8 +18,8 @@ use crate::contracts::{
 };
 use crate::ports::CredentialLease;
 use crate::tool_arguments::{JsonToolArgumentParser, ToolArgumentInput, ToolArgumentParser, proposal_event};
-use crate::provider_reasoning::{ProviderReasoningRoute, gemini_tool_matches_route,
-    gemini_tool_signature, validate_reasoning_signature_origins};
+use crate::provider_reasoning::{ChatProviderReasoning, ProviderReasoningRoute,
+    gemini_tool_matches_route, gemini_tool_signature, validate_reasoning_signature_origins};
 
 pub type ProviderWireStream =
     Pin<Box<dyn Stream<Item = Result<ProviderWireFrame, ChatModelError>> + Send>>;
@@ -800,6 +800,92 @@ pub fn encode_standalone_chat_input(
     Ok(body)
 }
 
+/// Encode one bounded verification exchange with the same Agent serializers
+/// and provider-parameter merge. Unlike standalone completion it carries
+/// function tools plus the exchange's own tool call/result and reasoning
+/// replay; it never carries provider-retained round state.
+pub fn encode_verification_chat_input(
+    protocol: ChatProtocol,
+    model: &str,
+    input: &ChatModelInput,
+    provider_params: &Value,
+    configured_output_limit: Option<i64>,
+) -> Result<Value, ChatModelError> {
+    if model.trim().is_empty()
+        || input.provider_round_parent.is_some()
+        || input.preserve_native_responses_items
+        || !matches!(input.tool_choice, ChatToolChoice::Auto | ChatToolChoice::None)
+        || input
+            .messages
+            .iter()
+            .any(|message| message.provider_round_id.is_some())
+        || input.messages.iter().flat_map(|message| &message.content).any(|part| {
+            matches!(part, ChatContentPart::Image { .. } | ChatContentPart::Audio { .. })
+        })
+    {
+        return Err(ChatModelError::invalid_request(
+            "verification input must be exchange-local text/tool content without provider-retained round state",
+        ));
+    }
+    validate_reasoning_signature_origins(input)?;
+    for part in input.messages.iter().flat_map(|message| &message.content) {
+        match part {
+            ChatContentPart::Reasoning {
+                encrypted_content: Some(_),
+                ..
+            } if protocol != ChatProtocol::OpenaiResponses => {
+                return Err(ChatModelError::new(
+                    ChatModelErrorCode::UnsupportedFeature,
+                    "opaque Responses reasoning cannot be sent to a different protocol",
+                    crate::contracts::ChatRetryDirective::Never,
+                ));
+            }
+            // One verification target produces and consumes the exchange, so
+            // route-digest binding does not apply; only the producing
+            // protocol family can carry each provider reasoning kind.
+            ChatContentPart::ProviderReasoning { block } => {
+                let compatible = match block {
+                    ChatProviderReasoning::OpenaiResponsesReasoning { .. } => {
+                        protocol == ChatProtocol::OpenaiResponses
+                    }
+                    _ => protocol.uses_anthropic_messages(),
+                };
+                if !compatible || block.validate().is_err() {
+                    return Err(ChatModelError::new(
+                        ChatModelErrorCode::UnsupportedFeature,
+                        "provider reasoning is incompatible with the verification protocol",
+                        crate::contracts::ChatRetryDirective::Never,
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    let body = match protocol {
+        ChatProtocol::Anthropic => encode_anthropic_request(input, model),
+        ChatProtocol::OpenaiChat => encode_openai_chat_request(input, model),
+        ChatProtocol::OpenaiResponses => encode_openai_responses_request(input, model),
+        ChatProtocol::Gemini => encode_gemini_request(input, model),
+        ChatProtocol::Bedrock => encode_bedrock_request(input, model),
+        ChatProtocol::Vertex => encode_vertex_request(input, model),
+    }?;
+    let mut body = crate::provider_params::merge_chat_provider_params(
+        body,
+        provider_params,
+        protocol,
+        configured_output_limit,
+    )?;
+    // Encoder-owned tools/tool_choice/parallel_tool_calls stay authoritative:
+    // they merge as missing-only, and retained-round keys are stripped again
+    // after the merge even though provider params can no longer insert them.
+    if let Some(object) = body.as_object_mut() {
+        for key in ["previous_response_id", "conversation"] {
+            object.remove(key);
+        }
+    }
+    Ok(body)
+}
+
 /// Every standalone call receives fresh protocol state. This supplies only
 /// decoding, never Runtime recovery or retained provider round authority.
 pub fn new_standalone_frame_decoder(protocol: ChatProtocol) -> Box<dyn ChatFrameDecoder> {
@@ -812,6 +898,43 @@ pub fn new_standalone_frame_decoder(protocol: ChatProtocol) -> Box<dyn ChatFrame
         anthropic: crate::anthropic_decoder::AnthropicDecoder::with_argument_parser(argument_parser.clone()),
         argument_parser,
     })
+}
+
+/// The verification decoder is the standalone protocol decoder plus the
+/// broker's canonical event-sequence rules: a verification round replays
+/// decoder-produced reasoning and tool state back to the same endpoint, so
+/// malformed event sequences must fail exactly like broker consumption.
+pub fn new_verification_frame_decoder(protocol: ChatProtocol) -> Box<dyn ChatFrameDecoder> {
+    Box::new(VerificationFrameDecoder {
+        inner: new_standalone_frame_decoder(protocol),
+        sequence: crate::broker::EventSequence::default(),
+    })
+}
+
+struct VerificationFrameDecoder {
+    inner: Box<dyn ChatFrameDecoder>,
+    sequence: crate::broker::EventSequence,
+}
+
+impl ChatFrameDecoder for VerificationFrameDecoder {
+    fn decode_frame(
+        &mut self,
+        frame: ProviderWireFrame,
+    ) -> Result<Vec<ChatModelEvent>, ChatModelError> {
+        let events = self.inner.decode_frame(frame)?;
+        for event in &events {
+            self.sequence.observe(event)?;
+        }
+        Ok(events)
+    }
+
+    fn has_deferred_semantic_progress(&self) -> bool {
+        self.inner.has_deferred_semantic_progress()
+    }
+
+    fn reported_output_tokens(&self) -> Option<u64> {
+        self.inner.reported_output_tokens()
+    }
 }
 
 #[cfg(test)]
@@ -876,6 +999,250 @@ mod standalone_input_tests {
         }
         assert_eq!(output_tokens_from_usage(&json!({"input_tokens":100})),None);
         assert_eq!(parse_usage(&json!({"input_tokens":100})).output_tokens,0);
+    }
+}
+
+#[cfg(test)]
+mod verification_tests {
+    use super::*;
+    use crate::contracts::{ChatToolCall, ChatUsage};
+
+    fn verification_input() -> ChatModelInput {
+        serde_json::from_value(json!({
+            "instructions":["verify the echo tool"],
+            "messages":[
+                {"role":"user","content":[{"type":"text","text":"call the tool"}]},
+                {"role":"assistant","content":[
+                    {"type":"provider_reasoning","block":{"kind":"anthropic_thinking","text":"thinking","signature":"sig"}},
+                    {"type":"tool_call","call_id":"call_1","name":"nomifun_protocol_echo","arguments":{"value":"ok"}}
+                ]},
+                {"role":"tool","content":[{"type":"tool_result","call_id":"call_1",
+                    "output":[{"type":"text","text":"{\"value\":\"ok\"}"}],"is_error":false}]}
+            ],
+            "tools":[{"name":"nomifun_protocol_echo","description":"echo",
+                "input_schema":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}}],
+            "tool_choice":{"mode":"auto"},"max_output_tokens":512,
+            "prompt_cache":"disabled","response_format":{"type":"text"}
+        })).unwrap()
+    }
+
+    fn without_provider_reasoning(input: &mut ChatModelInput) {
+        input.messages[1]
+            .content
+            .retain(|part| !matches!(part, ChatContentPart::ProviderReasoning { .. }));
+    }
+
+    #[test]
+    fn verification_encoding_keeps_tools_and_tool_history_for_every_protocol() {
+        for (protocol, anthropic_family) in [
+            (ChatProtocol::Anthropic, true), (ChatProtocol::Bedrock, true), (ChatProtocol::Vertex, true),
+            (ChatProtocol::OpenaiChat, false), (ChatProtocol::OpenaiResponses, false), (ChatProtocol::Gemini, false),
+        ] {
+            let mut input = verification_input();
+            if !anthropic_family {
+                // Anthropic signed thinking can replay only on Messages-family routes.
+                without_provider_reasoning(&mut input);
+            }
+            let body = encode_verification_chat_input(protocol, "verified-model", &input, &json!({}), Some(2048)).unwrap();
+            let wire = body.to_string();
+            assert!(wire.contains("nomifun_protocol_echo"), "{protocol:?} lost the tool surface: {wire}");
+            assert!(wire.contains("call_1"), "{protocol:?} lost the tool call/result history: {wire}");
+            match protocol {
+                ChatProtocol::Anthropic | ChatProtocol::Bedrock | ChatProtocol::Vertex => {
+                    let content = body["messages"][1]["content"].as_array().unwrap();
+                    assert_eq!(content[0]["type"], "thinking", "{protocol:?}: {wire}");
+                    assert_eq!(content[0]["signature"], "sig", "{protocol:?}: {wire}");
+                    assert_eq!(content[1]["type"], "tool_use", "{protocol:?}: {wire}");
+                    assert_eq!(body["messages"][2]["content"][0]["type"], "tool_result", "{protocol:?}: {wire}");
+                    assert!(body.get("tools").is_some(), "{protocol:?}");
+                }
+                ChatProtocol::OpenaiChat => {
+                    // Instructions serialize as a leading system message.
+                    assert_eq!(body["messages"][2]["tool_calls"][0]["id"], "call_1", "{protocol:?}: {wire}");
+                    assert_eq!(body["messages"][3]["role"], "tool", "{protocol:?}: {wire}");
+                    assert_eq!(body["tools"][0]["function"]["name"], "nomifun_protocol_echo");
+                    assert_eq!(body["tool_choice"], "auto");
+                }
+                ChatProtocol::OpenaiResponses => {
+                    let input_items = body["input"].as_array().unwrap();
+                    assert!(input_items.iter().any(|item| item["type"] == "function_call" && item["call_id"] == "call_1"), "{wire}");
+                    assert!(input_items.iter().any(|item| item["type"] == "function_call_output" && item["call_id"] == "call_1"), "{wire}");
+                    assert_eq!(body["tools"][0]["name"], "nomifun_protocol_echo");
+                }
+                ChatProtocol::Gemini => {
+                    let contents = body["contents"].as_array().unwrap();
+                    assert!(
+                        contents[1]["parts"].as_array().unwrap().iter()
+                            .any(|part| part["functionCall"]["name"] == "nomifun_protocol_echo"),
+                        "{wire}"
+                    );
+                    assert!(contents[2]["parts"].as_array().unwrap().iter()
+                        .any(|part| part.get("functionResponse").is_some()), "{wire}");
+                    assert_eq!(body["tools"][0]["functionDeclarations"][0]["name"], "nomifun_protocol_echo");
+                }
+            }
+            assert!(body.get("previous_response_id").is_none(), "{protocol:?}");
+            assert!(body.get("conversation").is_none(), "{protocol:?}");
+        }
+    }
+
+    #[test]
+    fn verification_encoding_rejects_retained_round_state_and_non_text_parts() {
+        for mutate in [
+            |input: &mut ChatModelInput| input.provider_round_parent = Some("round-1".into()),
+            |input: &mut ChatModelInput| input.messages[0].provider_round_id = Some("round-0".into()),
+            |input: &mut ChatModelInput| input.preserve_native_responses_items = true,
+            |input: &mut ChatModelInput| input.tool_choice = ChatToolChoice::Required,
+            |input: &mut ChatModelInput| input.messages[0].content =
+                vec![ChatContentPart::Image { media_type: "image/png".into(), data_base64: "AA==".into() }],
+            |input: &mut ChatModelInput| input.messages[0].content =
+                vec![ChatContentPart::Audio { media_type: "audio/wav".into(), data_base64: "AA==".into() }],
+        ] {
+            let mut input = verification_input();
+            without_provider_reasoning(&mut input);
+            mutate(&mut input);
+            assert!(encode_verification_chat_input(ChatProtocol::OpenaiChat, "model", &input, &json!({}), None).is_err());
+        }
+        assert!(encode_verification_chat_input(ChatProtocol::OpenaiChat, "  ", &verification_input(), &json!({}), None).is_err());
+    }
+
+    #[test]
+    fn verification_encoding_enforces_reasoning_protocol_compatibility() {
+        let mut input = verification_input();
+        without_provider_reasoning(&mut input);
+        // Generic signed reasoning has no producing-route evidence anywhere.
+        input.messages[1].content = vec![ChatContentPart::Reasoning {
+            text: "thinking".into(), signature: Some("sig".into()), encrypted_content: None }];
+        for protocol in [ChatProtocol::Anthropic, ChatProtocol::OpenaiResponses] {
+            assert_eq!(
+                encode_verification_chat_input(protocol, "model", &input, &json!({}), None).unwrap_err().code,
+                ChatModelErrorCode::UnsupportedFeature
+            );
+        }
+        // Opaque Responses ciphertext is OpenaiResponses-only.
+        input.messages[1].content = vec![ChatContentPart::Reasoning {
+            text: "thinking".into(), signature: None, encrypted_content: Some("cipher".into()) }];
+        assert!(encode_verification_chat_input(ChatProtocol::OpenaiResponses, "model", &input, &json!({}), None).is_ok());
+        assert_eq!(
+            encode_verification_chat_input(ChatProtocol::Anthropic, "model", &input, &json!({}), None).unwrap_err().code,
+            ChatModelErrorCode::UnsupportedFeature
+        );
+        // Provider reasoning blocks must match the protocol family.
+        let responses_block = ChatContentPart::ProviderReasoning {
+            block: ChatProviderReasoning::OpenaiResponsesReasoning {
+                item: json!({"id":"rs_1","type":"reasoning","content":[],"summary":[],"encrypted_content":"c"}),
+                route_digest: None,
+            },
+        };
+        input.messages[1].content = vec![responses_block.clone()];
+        assert!(encode_verification_chat_input(ChatProtocol::OpenaiResponses, "model", &input, &json!({}), None).is_ok());
+        assert_eq!(
+            encode_verification_chat_input(ChatProtocol::Anthropic, "model", &input, &json!({}), None).unwrap_err().code,
+            ChatModelErrorCode::UnsupportedFeature
+        );
+    }
+
+    #[test]
+    fn verification_encoding_merges_provider_params_like_standalone() {
+        let mut input = verification_input();
+        without_provider_reasoning(&mut input);
+        let body = encode_verification_chat_input(ChatProtocol::OpenaiChat, "model", &input,
+            &json!({"max_tokens_field":"max_completion_tokens","temperature":0.2,"stream_options":{"include_usage":false}}),
+            Some(4096)).unwrap();
+        assert_eq!(body["max_completion_tokens"], 512);
+        assert_eq!(body["temperature"], 0.2);
+        assert_eq!(body["stream_options"]["include_usage"], false);
+        let body = encode_verification_chat_input(ChatProtocol::OpenaiChat, "model", &input,
+            &json!({"max_tokens_field":"max_completion_tokens"}), Some(256)).unwrap();
+        assert_eq!(body["max_completion_tokens"], 256, "configured ceiling caps the requested output");
+    }
+
+    #[test]
+    fn verification_provider_params_cannot_reinsert_round_state_or_replace_tools() {
+        let mut input = verification_input();
+        without_provider_reasoning(&mut input);
+        for protocol in [ChatProtocol::OpenaiChat, ChatProtocol::OpenaiResponses, ChatProtocol::Anthropic] {
+            let body = encode_verification_chat_input(protocol, "model", &input,
+                &json!({"previous_response_id":"round-x","conversation":"conv-1",
+                    "tools":[{"name":"injected"}],"tool_choice":"required","parallel_tool_calls":false}),
+                None).unwrap();
+            assert!(body.get("previous_response_id").is_none(), "{protocol:?}");
+            assert!(body.get("conversation").is_none(), "{protocol:?}");
+            let wire = body.to_string();
+            assert!(wire.contains("nomifun_protocol_echo"), "{protocol:?} lost encoder tools: {wire}");
+            assert!(!wire.contains("injected"), "{protocol:?} took provider-param tools: {wire}");
+        }
+    }
+
+    struct StubDecoder {
+        batches: std::collections::VecDeque<Result<Vec<ChatModelEvent>, ChatModelError>>,
+    }
+
+    impl ChatFrameDecoder for StubDecoder {
+        fn decode_frame(&mut self, _frame: ProviderWireFrame) -> Result<Vec<ChatModelEvent>, ChatModelError> {
+            self.batches.pop_front().unwrap_or_else(|| Ok(Vec::new()))
+        }
+    }
+
+    fn verification_decoder(batches: Vec<Result<Vec<ChatModelEvent>, ChatModelError>>) -> VerificationFrameDecoder {
+        VerificationFrameDecoder {
+            inner: Box::new(StubDecoder { batches: batches.into() }),
+            sequence: crate::broker::EventSequence::default(),
+        }
+    }
+
+    fn frame() -> ProviderWireFrame {
+        ProviderWireFrame { event: "message".into(), data: json!({}), diagnostic: None }
+    }
+
+    fn usage() -> ChatModelEvent {
+        ChatModelEvent::Usage { usage: ChatUsage::default() }
+    }
+
+    #[test]
+    fn verification_decoder_applies_broker_sequence_rules() {
+        // Duplicate canonical usage is rejected exactly like broker consumption.
+        let mut decoder = verification_decoder(vec![Ok(vec![usage()]), Ok(vec![usage()])]);
+        decoder.decode_frame(frame()).unwrap();
+        let error = decoder.decode_frame(frame()).unwrap_err();
+        assert_eq!(error.code, ChatModelErrorCode::ProtocolViolation);
+        // Any event after the canonical terminal is rejected.
+        let mut decoder = verification_decoder(vec![
+            Ok(vec![ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed }]),
+            Ok(vec![ChatModelEvent::OutputTextDelta { text: "late".into() }]),
+        ]);
+        decoder.decode_frame(frame()).unwrap();
+        let error = decoder.decode_frame(frame()).unwrap_err();
+        assert_eq!(error.code, ChatModelErrorCode::ProtocolViolation);
+        // Provider reasoning blocks pass through block.validate().
+        let mut decoder = verification_decoder(vec![Ok(vec![ChatModelEvent::ProviderReasoningBlock {
+            block: ChatProviderReasoning::AnthropicThinking { text: "t".into(), signature: String::new(), route_digest: None },
+        }])]);
+        let error = decoder.decode_frame(frame()).unwrap_err();
+        assert_eq!(error.code, ChatModelErrorCode::ProtocolViolation);
+    }
+
+    #[test]
+    fn verification_decoder_passes_valid_streams_and_delegates() {
+        let call = ChatToolCall {
+            call_id: ToolCallId("call_1".into()),
+            name: "nomifun_protocol_echo".into(),
+            arguments: StrictJsonValue(json!({"value":"ok"})),
+            provider_metadata: None,
+        };
+        let mut decoder = new_verification_frame_decoder(ChatProtocol::OpenaiChat);
+        let events = decoder
+            .decode_frame(ProviderWireFrame {
+                event: "message".into(),
+                data: json!({"id":"r1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1",
+                    "type":"function","function":{"name":"nomifun_protocol_echo","arguments":"{\"value\":\"ok\"}"}}]},
+                    "finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1}}),
+                diagnostic: None,
+            })
+            .unwrap();
+        assert!(events.iter().any(|event| matches!(event,
+            ChatModelEvent::ToolCallCompleted { call: completed } if completed == &call)));
+        assert!(matches!(events.last(), Some(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls })));
     }
 }
 
@@ -1794,6 +2161,8 @@ struct RawToolCallState {
     emitted_arguments: usize,
 }
 
+const OPENAI_ANONYMOUS_STREAM: &str = "__openai_anonymous__";
+
 fn decode_openai_chat_raw_frame(
     frame: ProviderWireFrame,
     raw_decode_state: &Arc<Mutex<RawDecodeState>>,
@@ -1808,6 +2177,20 @@ fn decode_openai_chat_raw_frame(
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
+    // One attempt carries one Chat Completions response. Azure-style gateways
+    // open it with an id-less prelude (`id: ""`, `choices: []`, e.g.
+    // prompt_filter_results) and may interleave id-less chunks; id-less frames
+    // already join the single open stream, and symmetrically the first
+    // identified frame adopts a single anonymous stream instead of opening a
+    // second response. A frame whose id contradicts an already identified
+    // stream still opens a separate stream, which the event-sequence rules
+    // reject.
+    if let Some(response_key) = explicit_response_key.as_deref()
+        && state.openai.len() == 1
+        && let Some(anonymous) = state.openai.remove(OPENAI_ANONYMOUS_STREAM)
+    {
+        state.openai.insert(response_key.to_owned(), anonymous);
+    }
     let response_key = match explicit_response_key.clone() {
         Some(response_key) => response_key,
         None if state.openai.len() <= 1 => state
@@ -1815,7 +2198,7 @@ fn decode_openai_chat_raw_frame(
             .keys()
             .next()
             .cloned()
-            .unwrap_or_else(|| "__openai_anonymous__".to_owned()),
+            .unwrap_or_else(|| OPENAI_ANONYMOUS_STREAM.to_owned()),
         None => {
             return Err(ChatModelError::protocol_violation(
                 "OpenAI Chat frame without response id cannot be correlated with multiple active streams",

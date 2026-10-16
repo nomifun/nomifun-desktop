@@ -194,10 +194,30 @@ where
                     }
                     Poll::Ready(Some(Err(error))) => return this.fail(error),
                     Poll::Ready(None) => {
-                        // A blank line commits an SSE event. EOF must not turn
-                        // an unfinished JSON record into a successful terminal.
+                        // A blank line commits an SSE event, and EOF must not
+                        // turn an unfinished JSON record into a successful
+                        // terminal. The content-free `[DONE]` sentinel is the
+                        // one exception: some gateways close the stream right
+                        // after it without the final delimiter, and it carries
+                        // nothing that could have been truncated.
                         let incomplete =
                             !this.line.is_empty() || this.data_seen || !this.event.is_empty();
+                        if incomplete && !this.line.is_empty()
+                            && let Err(error) = this.consume_line()
+                        {
+                            return this.fail(error);
+                        }
+                        if incomplete && this.data_seen && this.data.trim() == "[DONE]" {
+                            // finish_event validates the event name and stops
+                            // the stream for [DONE].
+                            return match this.finish_event() {
+                                Ok(frame) => {
+                                    this.stop();
+                                    Poll::Ready(frame.map(Ok))
+                                }
+                                Err(error) => this.fail(error),
+                            };
+                        }
                         this.stop();
                         return if incomplete {
                             Poll::Ready(Some(Err(InvokeError::parse(

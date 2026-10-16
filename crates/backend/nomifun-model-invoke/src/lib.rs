@@ -18,6 +18,7 @@ pub mod auth;
 pub mod call;
 pub mod chat_executor;
 pub mod chat_protocol_transition;
+pub mod chat_verification;
 pub mod error;
 mod provider_diagnostic;
 pub mod default_model;
@@ -52,6 +53,10 @@ pub use chat_executor::{
 pub use chat_protocol_transition::{
     ChatProtocolTransition, ChatProtocolTransitionIssue, ChatProtocolTransitionIssueKind,
     transition_chat_provider_params,
+};
+pub use chat_verification::{
+    CHAT_VERIFICATION_TOOL, ChatVerificationDiagnosis, ChatVerificationFailure,
+    ChatVerificationTarget, verify_chat_agent_round_trip,
 };
 pub use error::{GatewayBusinessError, InvokeError, InvokeErrorKind};
 pub use default_model::default_model_preference_key;

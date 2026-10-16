@@ -12,9 +12,6 @@ nomifun-db.workspace = true
 nomifun-net.workspace = true
 nomifun-api-types.workspace = true
 nomifun-model-invoke.workspace = true
-nomi-config.workspace = true
-nomi-providers.workspace = true
-nomi-types.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 serde.workspace = true
@@ -30,6 +27,7 @@ dirs.workspace = true
 chrono.workspace = true
 
 [dev-dependencies]
+nomifun-chat-model-broker.workspace = true
 tower = { workspace = true }
 http-body-util.workspace = true
 reqwest.workspace = true
