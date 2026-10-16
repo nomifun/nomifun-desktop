@@ -49,6 +49,7 @@ import ModelConfigurationSaveFooter from './ModelConfigurationSaveFooter';
 import ProviderAutoConfigurationNotice from './ProviderAutoConfigurationNotice';
 import {
   applyProviderAutoConfiguration,
+  applyProviderAutoConfigurationSelection,
   applyProviderCompatibilityMode,
   isAutoConfigurationPlatform,
   normalizeProviderBaseUrlForCompatibilityMode,
@@ -355,6 +356,11 @@ const AddPlatformModal = ModalHOC<{
       applyProviderAutoConfiguration(current, batch.detections)
     );
     const primary = batch.detections[0];
+    const hasManualDefaultConnection = definition.capabilities.some(capability =>
+      capability.connectionRole === 'default' &&
+      (capability.transportSource === 'user' || capability.transportSource === 'persisted')
+    );
+    if (hasManualDefaultConnection) return;
     const currentBaseUrl = String(form.getFieldValue('base_url') ?? '').trim();
     if (
       primary?.suggestedBaseUrl &&
@@ -377,6 +383,7 @@ const AddPlatformModal = ModalHOC<{
     authScheme,
     authSchemeDirty,
     autoConfiguration.data,
+    definition.capabilities,
     discoverySkipped,
     form,
   ]);
@@ -720,7 +727,39 @@ const AddPlatformModal = ModalHOC<{
             enabled={autoConfigurationEnabled}
             loading={autoConfiguration.isLoading}
             batch={autoConfiguration.data}
+            stale={autoConfiguration.stale}
+            canRecheck={autoConfiguration.canRecheck}
+            onRecheck={autoConfiguration.recheck}
             mode={compatibilityMode}
+            definition={definition}
+            onSelect={(detection) => {
+              if (autoConfiguration.isLoading || autoConfiguration.data?.staleTasks?.includes(detection.task)) return;
+              const detectedBaseUrl = detection.suggestedBaseUrl ?? detection.requestBaseUrl ?? autoConfiguration.data?.requestBaseUrl;
+              const separateConnection = definition.capabilities.length > 1 &&
+                (detectedBaseUrl !== baseUrl.trim() || detection.authScheme !== authScheme.trim());
+              if (separateConnection) {
+                if (!credentialsResult.ok || credentialsResult.credentials === undefined || !detectedBaseUrl) return;
+                const credentials = credentialsResult.credentials;
+                const existing = pendingConnections.find(connection => connection.base_url === detectedBaseUrl &&
+                  connection.auth_scheme === detection.authScheme && JSON.stringify(connection.credentials) === JSON.stringify(credentials));
+                let role = existing?.role ?? `detected_${detection.task}`;
+                let suffix = 1;
+                while (!existing && pendingConnections.some(connection => connection.role === role)) role = `detected_${detection.task}_${suffix++}`;
+                if (!existing) setPendingConnections(current => [...current, {
+                  role, label: t(`settings.modelTask.${detection.task}`), base_url: detectedBaseUrl,
+                  auth_scheme: detection.authScheme, credentials,
+                }]);
+                setDefinition(current => applyProviderAutoConfigurationSelection(current, detection, '', role));
+              } else {
+                setDefinition(current => applyProviderAutoConfigurationSelection(current, detection));
+                if (detectedBaseUrl) {
+                  setBaseUrlDirty(true);
+                  form.setFieldValue('base_url', detectedBaseUrl);
+                }
+                setAuthSchemeDirty(true);
+                form.setFieldValue('auth_scheme', detection.authScheme);
+              }
+            }}
           />
         )}
 
@@ -737,6 +776,7 @@ const AddPlatformModal = ModalHOC<{
             connections: pendingConnections,
             ...(bedrockConfig ? { bedrockConfig } : {}),
           } : undefined}
+          automaticProtocolDiscovery={!autoConfigurationEnabled}
           onProtocolDiscoveryPendingChange={setProtocolDetecting}
           manifests={manifestState.manifests}
           manifestLoadingTasks={manifestState.loadingTasks}

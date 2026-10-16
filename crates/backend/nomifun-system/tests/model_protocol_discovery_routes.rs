@@ -27,7 +27,8 @@ async fn setup() -> (axum::Router,nomifun_db::Database) {
     (system_routes(state),db)
 }
 fn capability(protocol: &str) -> Value {json!({"task":"chat","protocol":protocol,"connection_role":"default","provider_params":{},"context_limit":100000,"output_limit":16000})}
-fn anonymous(server: &MockServer, protocol: &str) -> Value {json!({"platform":"openai","base_url":format!("{}/v1",server.uri()),
+fn anonymous(server: &MockServer, protocol: &str) -> Value {anonymous_at(&format!("{}/v1",server.uri()),protocol)}
+fn anonymous_at(base_url: &str, protocol: &str) -> Value {json!({"platform":"openai","base_url":base_url,
     "auth_scheme":"bearer","credentials":{"api_keys":[SECRET]},"model":"exact-user-model","capability":capability(protocol)})}
 async fn post(router: &axum::Router, uri: &str, body: Value) -> (StatusCode,Value) {
     let response = router.clone().oneshot(Request::builder().method("POST").uri(uri).header("content-type","application/json")
@@ -140,11 +141,87 @@ async fn all_available_chat_protocols_are_verified_and_selection_respects_only_a
         let received=server.received_requests().await.unwrap(); assert_eq!(received.len(),4);
         assert!(received.iter().all(|request| !request.headers.contains_key("anthropic-version")),
             "OpenAI requests must not inherit Anthropic protocol headers");
-        let responses_replay: Value=serde_json::from_slice(&received[1].body).unwrap();
+        let responses_replay: Value=serde_json::from_slice(&received.iter().filter(|request|request.url.path().ends_with("/responses")).nth(1).unwrap().body).unwrap();
         assert_eq!(responses_replay["input"][1]["type"],"reasoning");
         assert_eq!(responses_replay["input"][1]["content"],json!([{"type":"reasoning_text","text":"original reasoning"}]));
         assert!(responses_replay["input"].as_array().unwrap().iter().any(|item| item["type"] == "function_call_output" && item["call_id"] == "call_1"));
         assert!(SqliteProviderRepository::new(db.pool().clone()).list().await.unwrap().is_empty());
+    }
+}
+
+struct ConcurrentRounds {
+    barrier: tokio::sync::Barrier,
+    active: AtomicUsize,
+    peak: AtomicUsize,
+    rounds: [AtomicUsize;4],
+    limit_responses: bool,
+}
+async fn concurrent_round(
+    axum::extract::State(state): axum::extract::State<Arc<ConcurrentRounds>>,
+    uri: axum::http::Uri,
+) -> (StatusCode,[(axum::http::header::HeaderName,&'static str);1],String) {
+    let index=match uri.path() {
+        "/v1/responses" => 0,
+        "/v1/chat/completions" => 1,
+        "/v1/messages" => 2,
+        "/v1beta/models/exact-user-model:streamGenerateContent" => 3,
+        other => panic!("unexpected verification endpoint: {other}"),
+    };
+    let round=state.rounds[index].fetch_add(1,Ordering::SeqCst);
+    if index<3 && round==0 {
+        let active=state.active.fetch_add(1,Ordering::SeqCst)+1;
+        state.peak.fetch_max(active,Ordering::SeqCst);
+        // No first response is released until three distinct protocol calls
+        // have arrived. A serial implementation cannot cross this barrier.
+        state.barrier.wait().await;
+        state.active.fetch_sub(1,Ordering::SeqCst);
+    }
+    if state.limit_responses && index==0 {
+        return (StatusCode::TOO_MANY_REQUESTS,[(axum::http::header::CONTENT_TYPE,"application/json")],
+            json!({"error":{"code":"rate_limit_exceeded","message":"fixture limit"}}).to_string());
+    }
+    let stream=match index {0=>responses_round(round==0),1=>chat_round(round==0),2=>anthropic_round(round==0),_=>gemini_round(round==0)};
+    (StatusCode::OK,[(axum::http::header::CONTENT_TYPE,"text/event-stream")],stream)
+}
+
+#[tokio::test]
+async fn chat_protocol_waves_dispatch_concurrently_preserve_every_result_and_bound_rate_limit_fanout() {
+    for limited in [false,true] {
+        let state=Arc::new(ConcurrentRounds {barrier:tokio::sync::Barrier::new(3),active:AtomicUsize::new(0),
+            peak:AtomicUsize::new(0),rounds:std::array::from_fn(|_|AtomicUsize::new(0)),limit_responses:limited});
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let root=format!("http://{}",listener.local_addr().unwrap());
+        let fixture=axum::Router::new().fallback(concurrent_round).with_state(state.clone());
+        let fixture_task=tokio::spawn(async move {axum::serve(listener,fixture).await.unwrap()});
+        let (router,_)=setup().await;
+        let mut draft=anonymous_at(&format!("{root}/v1"),"openai.responses");
+        draft["platform"]=json!("custom");
+        draft["preferred_protocol"]=json!("anthropic.messages");
+        draft["connections"]=json!([
+            {"role":"claude","base_url":root,"auth_scheme":"header_key:x-api-key","credentials":{"api_keys":[SECRET]}},
+            {"role":"gemini","base_url":root,"auth_scheme":"header_key:x-goog-api-key","credentials":{"api_keys":[SECRET]}}
+        ]);
+        let (status,body)=tokio::time::timeout(Duration::from_secs(5),post(&router,ROUTE,draft)).await
+            .expect("the concurrent protocol wave must cross the three-request barrier");
+        assert_eq!(status,StatusCode::OK,"{body}");
+        assert_eq!(state.peak.load(Ordering::SeqCst),3,"all three first-wave protocols must be in flight together");
+        let candidates=body["data"]["candidates"].as_array().unwrap();
+        assert_eq!(candidates.iter().map(|candidate|candidate["protocol"].as_str().unwrap()).collect::<Vec<_>>(),
+            ["openai.chat_text","openai.responses","anthropic.messages","gemini.generate_text"],"completion order must not reorder priorities");
+        assert_eq!(body["data"]["selected_protocol"],"anthropic.messages","an available explicit preference remains authoritative");
+        assert_eq!(state.rounds[1].load(Ordering::SeqCst),2);
+        assert_eq!(state.rounds[2].load(Ordering::SeqCst),2);
+        for protocol in ["openai.chat_text","anthropic.messages"] {assert_eq!(candidate(&body,protocol)["status"],"available","{body}");}
+        if limited {
+            assert_eq!(state.rounds[0].load(Ordering::SeqCst),1,"rate limits do not cause retries");
+            assert_eq!(state.rounds[3].load(Ordering::SeqCst),0,"later waves cannot amplify a known account failure");
+            assert_eq!(candidate(&body,"openai.responses")["error_kind"],"rate_limited");
+            assert_eq!(candidate(&body,"gemini.generate_text")["status"],"blocked");
+        } else {
+            assert!(candidates.iter().all(|candidate|candidate["status"]=="available"),"{body}");
+            assert!(state.rounds.iter().all(|rounds|rounds.load(Ordering::SeqCst)==2));
+        }
+        fixture_task.abort();
     }
 }
 
@@ -221,15 +298,18 @@ async fn retired_vendor_audit_does_not_disable_a_user_managed_working_relay() {
 }
 
 #[tokio::test]
-async fn authentication_quota_and_rate_limits_stop_additional_billable_checks_but_list_candidates() {
+async fn authentication_quota_and_rate_limits_preserve_inflight_results_without_retrying() {
     for (status,code,kind) in [(401,"invalid_api_key","unauthorized"),(403,"forbidden","forbidden"),(400,"insufficient_quota","insufficient_quota"),(429,"rate_limit_exceeded","rate_limited")] {
         let server=MockServer::start().await;
         Mock::given(method("POST")).and(path("/v1/responses"))
             .respond_with(ResponseTemplate::new(status).insert_header("retry-after","0").set_body_json(json!({"error":{"code":code,"message":SECRET}}))).expect(1).mount(&server).await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(status).insert_header("retry-after","0").set_body_json(json!({"error":{"code":code,"message":SECRET}}))).expect(1).mount(&server).await;
         let (router,_)=setup().await;let (_,body)=post(&router,ROUTE,anonymous(&server,"openai.responses")).await;
         assert_eq!(candidate(&body,"openai.responses")["status"],"inconclusive");assert_eq!(candidate(&body,"openai.responses")["error_kind"],kind);
-        assert_eq!(candidate(&body,"openai.chat_text")["status"],"blocked");assert!(body["data"].get("selected_capability").is_none());
-        assert_eq!(server.received_requests().await.unwrap().len(),1);
+        assert_eq!(candidate(&body,"openai.chat_text")["status"],"inconclusive");
+        assert_eq!(candidate(&body,"openai.chat_text")["error_kind"],kind);assert!(body["data"].get("selected_capability").is_none());
+        assert_eq!(server.received_requests().await.unwrap().len(),2);
     }
 }
 
@@ -239,11 +319,14 @@ async fn authentication_billing_and_rate_limit_html_keep_their_actual_stop_autho
         let server=MockServer::start().await;
         Mock::given(method("POST")).and(path("/v1/responses"))
             .respond_with(ResponseTemplate::new(status).set_body_raw("<!doctype html><html>account gateway</html>","text/html")).expect(1).mount(&server).await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(status).set_body_raw("<!doctype html><html>account gateway</html>","text/html")).expect(1).mount(&server).await;
         let (router,_)=setup().await;let (_,body)=post(&router,ROUTE,anonymous(&server,"openai.responses")).await;
         let first=candidate(&body,"openai.responses");assert_eq!(first["status"],"inconclusive");
         assert_eq!(first["http_status"],status);assert_eq!(first["error_kind"],kind);
-        assert_eq!(candidate(&body,"openai.chat_text")["status"],"blocked");
-        assert_eq!(server.received_requests().await.unwrap().len(),1);
+        let second=candidate(&body,"openai.chat_text");assert_eq!(second["status"],"inconclusive");
+        assert_eq!(second["http_status"],status);assert_eq!(second["error_kind"],kind);
+        assert_eq!(server.received_requests().await.unwrap().len(),2);
     }
 }
 
@@ -312,7 +395,8 @@ async fn equivalent_output_policies_are_tested_and_unmapped_policies_never_silen
     assert_eq!(selected_params["thinking"],json!({"type":"disabled"}));
     assert_eq!(selected_params["text"],json!({"format":{"type":"json_object"},"verbosity":"low"}));
     assert!(selected_params.get("response_format").is_none());assert!(selected_params.get("stream_options").is_none());
-    let received=server.received_requests().await.unwrap();let tested: Value=serde_json::from_slice(&received[0].body).unwrap();
+    let received=server.received_requests().await.unwrap();
+    let tested: Value=serde_json::from_slice(&received.iter().find(|request|request.url.path().ends_with("/responses")).unwrap().body).unwrap();
     assert_eq!(tested["thinking"],json!({"type":"disabled"}));assert_eq!(tested["text"],json!({"format":{"type":"json_object"},"verbosity":"low"}));
     assert!(tested.get("response_format").is_none());
     let other=MockServer::start().await;

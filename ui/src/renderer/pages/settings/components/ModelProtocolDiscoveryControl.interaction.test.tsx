@@ -38,8 +38,8 @@ const manifests: ModelProtocolManifestMap = { chat: { ...aliasProtocolManifest, 
     endpoints: [{ ...aliasProtocolManifest.protocols[0].endpoints[0], task: 'image_generation', default_value: '/images/generations' }] })),
 } };
 const noErrors: never[] = [];
-function Harness({ stored = false, initialModel = 'step-5-preview', initialCapability = capability, initialCapabilities, catalog = false }: {
-  stored?: boolean; initialModel?: string; initialCapability?: ProviderModelCapabilityInput; initialCapabilities?: ProviderModelCapabilityInput[]; catalog?: boolean;
+function Harness({ stored = false, initialModel = 'step-5-preview', initialCapability = capability, initialCapabilities, catalog = false, automatic = true }: {
+  stored?: boolean; initialModel?: string; initialCapability?: ProviderModelCapabilityInput; initialCapabilities?: ProviderModelCapabilityInput[]; catalog?: boolean; automatic?: boolean;
 }) {
   const [value, setValue] = useState<ModelDefinitionDraft>({ model: initialModel, capabilities: (initialCapabilities ?? [initialCapability]).map(input => ({ ...capabilityDraftFromResponse(input),
     protocolSelectionSource: stored ? 'manual' : 'automatic', transportSource: stored ? 'persisted' : 'user',
@@ -52,12 +52,15 @@ function Harness({ stored = false, initialModel = 'step-5-preview', initialCapab
     })) }))}>Choose manual Chat</button>
     <button onClick={() => setCredentialVersion(version => version + 1)}>Change credentials</button>
     <button onClick={() => setValue(current => ({ ...current, displayName: 'Renamed' }))}>Change alias</button>
+    <button onClick={() => setValue(current => ({ ...current, capabilities: [...current.capabilities, emptyCapabilityDraft('image_generation')] }))}>Add image scenario</button>
+    <button onClick={() => setValue(current => ({ ...current, capabilities: current.capabilities.filter(row => row.task !== 'image_generation') }))}>Remove image scenario</button>
     <button onClick={() => setValue(current => ({ ...current, capabilities: current.capabilities.map(row => patchCapabilityDraft(row, {
       providerParamsJson: JSON.stringify({ ...JSON.parse(row.providerParamsJson), temperature: Number((Number(JSON.parse(row.providerParamsJson).temperature) + 0.1).toFixed(1)) }),
       providerParamsEditedKeys: ['temperature'],
     })) }))}>Change parameters</button>
     <ModelDefinitionEditor value={value} onChange={setValue} providerBaseUrl={aliasProviderBaseUrl} providerAuthScheme='bearer'
       manifests={manifests} validationErrors={noErrors} modelReadOnly={stored}
+      automaticProtocolDiscovery={automatic}
       catalogSuggestions={catalog ? [{ value: 'catalog-model', label: 'Catalog Model', tasks: ['chat'], traits: [], tasksSource: 'provider_declared' }] : []}
       protocolDiscovery={{ platform: 'stepfun', baseUrl: aliasProviderBaseUrl, authScheme: 'bearer',
         ...(stored ? { providerId: aliasProviderId } : { credentials: { api_keys: [`test-key-${credentialVersion}`] } }),
@@ -69,6 +72,159 @@ function Harness({ stored = false, initialModel = 'step-5-preview', initialCapab
 const pause = async (ms = 450) => act(async () => { await new Promise(resolve => setTimeout(resolve, ms)); });
 
 describe('automatic model protocol discovery', () => {
+  test('output and context edits stay editable without checking until the visible recheck button is clicked', async () => {
+    const discover = spyOn(ipcBridge.mode.discoverModelProtocols, 'invoke').mockImplementation(async request => response(request.capability, [candidate(request.capability)]));
+    restorers.push(() => discover.mockRestore());
+    const page = render(<Harness />);
+    await page.findByText(zhSettings.modelProtocolDiscovery.connected);
+    fireEvent.click(page.getByRole('combobox', { name: zhSettings.outputLimit }));
+    fireEvent.click(await page.findByRole('option', { name: '8,192 tokens' }));
+    fireEvent.click(page.getByRole('combobox', { name: zhSettings.contextLimit }));
+    fireEvent.click(await page.findByRole('option', { name: '128k' }));
+    await pause();
+    expect(discover).toHaveBeenCalledTimes(1);
+    expect(page.getByText(zhSettings.modelProtocolDiscovery.changed)).toBeTruthy();
+    expect(page.queryByText(zhSettings.modelProtocolDiscovery.connected)).toBeNull();
+    expect((page.getByTestId('save') as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.recheck }));
+    await waitFor(() => expect(discover).toHaveBeenCalledTimes(2));
+    expect(discover.mock.calls[1][0].capability).toMatchObject({ output_limit: 8192, context_limit: 128000 });
+    await page.findByText(zhSettings.modelProtocolDiscovery.connected);
+    await pause();
+    expect(discover).toHaveBeenCalledTimes(2);
+  });
+
+  test('edits during the first debounce use the final draft for the single automatic attempt', async () => {
+    const discover = spyOn(ipcBridge.mode.discoverModelProtocols, 'invoke').mockImplementation(async request => response(request.capability, [candidate(request.capability)]));
+    restorers.push(() => discover.mockRestore());
+    const page = render(<Harness />);
+    fireEvent.click(page.getByRole('button', { name: 'Change parameters' }));
+    fireEvent.click(page.getByRole('button', { name: 'Change parameters' }));
+    await page.findByText(zhSettings.modelProtocolDiscovery.connected);
+    expect(discover).toHaveBeenCalledTimes(1);
+    expect(discover.mock.calls[0][0].capability.provider_params).toMatchObject({ temperature: 0.6 });
+  });
+
+  for (const dispatched of [false, true]) test(`editing away and back does not revive a ${dispatched ? 'dispatched' : 'debounced'} manual check`, async () => {
+    let complete!: (value: DiscoverModelProtocolsResponse) => void;
+    const discover = spyOn(ipcBridge.mode.discoverModelProtocols, 'invoke').mockResolvedValueOnce(response())
+      .mockImplementation(() => new Promise(resolve => { complete = resolve; }));
+    restorers.push(() => discover.mockRestore());
+    const page = render(<Harness />);
+    await page.findByText(zhSettings.modelProtocolDiscovery.connected);
+    const input = page.getByLabelText(zhSettings.modelId);
+    const commit = (model: string) => { fireEvent.change(input, { target: { value: model } }); fireEvent.keyDown(input, { key: 'Enter' }); };
+    commit('model-b');
+    fireEvent.click(page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.recheck }));
+    if (dispatched) await waitFor(() => expect(discover).toHaveBeenCalledTimes(2));
+    commit('model-c'); commit('model-b');
+    if (dispatched) {
+      expect(discover.mock.calls[1][1]!.aborted).toBe(true);
+      await act(async () => complete(response()));
+    }
+    await pause();
+    expect(discover).toHaveBeenCalledTimes(dispatched ? 2 : 1);
+    expect((page.getByTestId('save') as HTMLButtonElement).disabled).toBe(false);
+    expect(page.queryByText(zhSettings.modelProtocolDiscovery.connected)).toBeNull();
+  });
+
+  test('canceling advanced configuration cancels its manual check without granting another automatic attempt', async () => {
+    let complete!: (value: DiscoverModelProtocolsResponse) => void;
+    const discover = spyOn(ipcBridge.mode.discoverModelProtocols, 'invoke').mockResolvedValueOnce(response())
+      .mockImplementation(() => new Promise(resolve => { complete = resolve; }));
+    restorers.push(() => discover.mockRestore());
+    const page = render(<Harness />);
+    await page.findByText(zhSettings.modelProtocolDiscovery.connected);
+    const original = page.getByTestId('draft').textContent;
+    fireEvent.click(page.container.querySelector<HTMLButtonElement>('[data-capability-disclosure="chat"]')!);
+    fireEvent.click(page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.recheck }));
+    await waitFor(() => expect(discover).toHaveBeenCalledTimes(2));
+    const signal = discover.mock.calls[1][1]!;
+    fireEvent.click(page.getByRole('button', { name: zhSettings.modelAdvanced.cancelAdjustment }));
+    expect(signal.aborted).toBe(true);
+    await act(async () => complete(response(chat)));
+    await pause();
+    expect(discover).toHaveBeenCalledTimes(2);
+    expect(page.getByTestId('draft').textContent).toBe(original);
+    expect((page.getByTestId('save') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  test('a new scenario gets one automatic attempt and removing and readding it does not repeat the check', async () => {
+    const discover = spyOn(ipcBridge.mode.discoverModelProtocols, 'invoke').mockImplementation(async request => response(request.capability, [candidate(request.capability)]));
+    restorers.push(() => discover.mockRestore());
+    const page = render(<Harness />);
+    await page.findByText(zhSettings.modelProtocolDiscovery.connected);
+    fireEvent.click(page.getByRole('button', { name: 'Add image scenario' }));
+    await waitFor(() => expect(discover).toHaveBeenCalledTimes(2));
+    expect(discover.mock.calls[1][0].capability.task).toBe('image_generation');
+    await pause();
+    fireEvent.click(page.getByRole('button', { name: 'Remove image scenario' }));
+    fireEvent.click(page.getByRole('button', { name: 'Add image scenario' }));
+    await pause();
+    expect(discover).toHaveBeenCalledTimes(2);
+  });
+
+  test('optional model verification leaves save ready and only runs when requested', async () => {
+    let complete!: (value: DiscoverModelProtocolsResponse) => void;
+    const discover = spyOn(ipcBridge.mode.discoverModelProtocols, 'invoke').mockImplementation(() => new Promise(resolve => { complete = resolve; }));
+    restorers.push(() => discover.mockRestore());
+    const page = render(<Harness initialModel='' automatic={false} />);
+    const input = page.getByLabelText(zhSettings.modelId);
+    const verify = () => page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.verifyModel }) as HTMLButtonElement;
+    expect(verify().disabled).toBe(true);
+    fireEvent.change(input, { target: { value: 'step-5-preview' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await pause();
+    expect(discover).not.toHaveBeenCalled();
+    expect(page.getByText(zhSettings.modelProtocolDiscovery.notVerified)).toBeTruthy();
+    expect(page.queryByText(zhSettings.modelProtocolDiscovery.connected)).toBeNull();
+    expect((page.getByTestId('save') as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(verify());
+    expect((page.getByTestId('save') as HTMLButtonElement).disabled).toBe(true);
+    await waitFor(() => expect(discover).toHaveBeenCalledTimes(1));
+    await act(async () => complete(response()));
+    await page.findByText(zhSettings.modelProtocolDiscovery.connected);
+    await pause();
+    expect(discover).toHaveBeenCalledTimes(1);
+    expect((page.getByTestId('save') as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.connectionSettings }));
+    fireEvent.click(page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.recheck }));
+    await waitFor(() => expect(discover).toHaveBeenCalledTimes(2));
+    await act(async () => complete(response()));
+  });
+
+  test('an optional verification request is scoped to its model, parameters and credentials', async () => {
+    let complete!: (value: DiscoverModelProtocolsResponse) => void;
+    const discover = spyOn(ipcBridge.mode.discoverModelProtocols, 'invoke').mockImplementation(() => new Promise(resolve => { complete = resolve; }));
+    restorers.push(() => discover.mockRestore());
+    const page = render(<Harness automatic={false} />);
+    const verify = () => page.container.querySelector<HTMLButtonElement>('[data-model-protocol-recheck]')!;
+    fireEvent.click(verify());
+    await waitFor(() => expect(discover).toHaveBeenCalledTimes(1));
+    const signal = discover.mock.calls[0][1]!;
+    fireEvent.click(page.getByRole('button', { name: 'Change credentials' }));
+    expect(signal.aborted).toBe(true);
+    await act(async () => complete(response()));
+    await pause();
+    expect(discover).toHaveBeenCalledTimes(1);
+    expect(page.queryByText(zhSettings.modelProtocolDiscovery.connected)).toBeNull();
+    expect((page.getByTestId('save') as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(verify());
+    await waitFor(() => expect(discover).toHaveBeenCalledTimes(2));
+    await act(async () => complete(response()));
+    await page.findByText(zhSettings.modelProtocolDiscovery.connected);
+    fireEvent.click(page.getByRole('button', { name: 'Change parameters' }));
+    await pause();
+    expect(discover).toHaveBeenCalledTimes(2);
+    expect(page.getByText(zhSettings.modelProtocolDiscovery.changed)).toBeTruthy();
+    const input = page.getByLabelText(zhSettings.modelId);
+    fireEvent.change(input, { target: { value: 'another-model' } });
+    fireEvent.blur(input);
+    await pause();
+    expect(discover).toHaveBeenCalledTimes(2);
+    expect(page.getByText(zhSettings.modelProtocolDiscovery.changed)).toBeTruthy();
+  });
+
   test('only a committed pending configuration shows a loading indicator and busy status until it finishes', async () => {
     let complete!: (value: DiscoverModelProtocolsResponse) => void;
     const discover = spyOn(ipcBridge.mode.discoverModelProtocols, 'invoke').mockImplementation(() => new Promise(resolve => { complete = resolve; }));
@@ -167,10 +323,10 @@ describe('automatic model protocol discovery', () => {
       platform: 'stepfun', base_url: aliasProviderBaseUrl, credentials: { api_keys: ['test-key-0'] } });
     expect(discover.mock.calls[0][0]).not.toHaveProperty('preferred_protocol');
     expect(page.container.querySelector('[data-model-protocol-discovery] [role="status"]')?.textContent).toBe(zhSettings.modelProtocolDiscovery.connected);
-    expect(page.queryByText(zhSettings.modelProtocolDiscovery.incompatible)).toBeNull();
+    expect(page.getByText(zhSettings.modelProtocolDiscovery.incompatible)).toBeTruthy();
     expect(page.queryByText('Model does not support Responses')).toBeNull();
     expect(page.queryByText(/可能产生少量用量/)).toBeNull();
-    expect(page.queryByRole('button', { name: 'Responses' })).toBeNull();
+    expect((page.getByRole('button', { name: 'Responses' }) as HTMLButtonElement).disabled).toBe(true);
     expect(page.queryByText(zhSettings.modelProtocolDiscovery.diagnostics)).toBeNull();
     fireEvent.blur(input); fireEvent.click(page.getByRole('button', { name: 'Change alias' })); await pause();
     expect(discover).toHaveBeenCalledTimes(1);
@@ -222,7 +378,7 @@ describe('automatic model protocol discovery', () => {
     await pause(); expect(discover).toHaveBeenCalledTimes(1);
   });
 
-  test('connection settings reveal available candidates and a user choice is retained without another paid request', async () => {
+  test('all candidates are shown directly and a user choice is retained without another paid request', async () => {
     const discover = spyOn(ipcBridge.mode.discoverModelProtocols, 'invoke').mockResolvedValue(response());
     restorers.push(() => discover.mockRestore());
     const page = render(<Harness />);
@@ -230,12 +386,12 @@ describe('automatic model protocol discovery', () => {
     const region = page.container.querySelector('[data-model-protocol-discovery]')!;
     expect(region.getAttribute('aria-busy')).toBe('false');
     expect(region.querySelector('.arco-spin')).toBeNull();
-    expect(page.queryByRole('button', { name: 'Chat Completions' })).toBeNull();
-    fireEvent.click(page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.connectionSettings }));
     const chooseChat = page.getByRole('button', { name: 'Chat Completions' });
     expect(page.getByRole('button', { name: 'Responses' })).toBeTruthy();
     expect(page.getByText(zhSettings.modelProtocolDiscovery.recommended)).toBeTruthy();
     fireEvent.click(chooseChat);
+    expect(chooseChat.getAttribute('aria-pressed')).toBe('true');
+    expect(page.getByRole('button', { name: 'Responses' }).getAttribute('aria-pressed')).toBe('false');
     expect(JSON.parse(page.getByTestId('draft').textContent!)[0]).toEqual(chat);
     expect(region.getAttribute('aria-busy')).toBe('false');
     expect(region.querySelector('.arco-spin')).toBeNull();
@@ -253,7 +409,7 @@ describe('automatic model protocol discovery', () => {
     await page.findByText(zhSettings.modelProtocolDiscovery.unavailable);
     expect(page.getByTestId('draft').textContent).toBe(original);
     expect(page.queryByText('Credentials rejected')).toBeNull();
-    expect(page.queryByText(zhSettings.modelProtocolDiscovery.inconclusive)).toBeNull();
+    expect(page.getByText(zhSettings.modelProtocolDiscovery.inconclusive)).toBeTruthy();
     fireEvent.click(page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.connectionSettings }));
     expect(page.queryByText('Credentials rejected')).toBeNull();
     fireEvent.click(page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.diagnostics }));
@@ -287,7 +443,7 @@ describe('automatic model protocol discovery', () => {
     const page = render(<Harness />);
     await page.findByText(zhSettings.modelProtocolDiscovery.reviewConfiguration);
     expect(page.queryByText(rawError)).toBeNull();
-    expect(page.queryByText(zhSettings.modelProtocolDiscovery.blocked)).toBeNull();
+    expect(page.getByText(zhSettings.modelProtocolDiscovery.blocked)).toBeTruthy();
     expect(page.queryByRole('alert')).toBeNull();
   });
 
@@ -311,6 +467,9 @@ describe('automatic model protocol discovery', () => {
     expect(page.queryByText(failure)).toBeNull();
     expect(page.queryByRole('button', { name: zhSettings.modelProtocolDiscovery.diagnostics })).toBeNull();
     fireEvent.keyDown(input, { key: 'Enter' });
+    await pause();
+    expect(discover).toHaveBeenCalledTimes(1);
+    fireEvent.click(page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.recheck }));
     await waitFor(() => expect(discover).toHaveBeenCalledTimes(2));
     await page.findByText(zhSettings.modelProtocolDiscovery.connected);
     expect(connectionSettings.getAttribute('aria-expanded')).toBe('false');
@@ -359,13 +518,13 @@ describe('automatic model protocol discovery', () => {
     await page.findByText(zhSettings.modelProtocolDiscovery.configured);
     expect(discover.mock.calls[0][0].capability.task).toBe('image_generation');
     expect(page.queryByText(zhSettings.modelProtocolDiscovery.connected)).toBeNull();
-    expect(page.queryByText(zhSettings.modelProtocolDiscovery.documented)).toBeNull();
+    expect(page.getByText(zhSettings.modelProtocolDiscovery.documented)).toBeTruthy();
     fireEvent.click(page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.connectionSettings }));
     expect(page.getByText(zhSettings.modelProtocolDiscovery.documented)).toBeTruthy();
     expect(page.queryByText(zhSettings.modelProtocolDiscovery.verified)).toBeNull();
   });
 
-  test('parameter edits are debounced to one exact new check and the applied result is deduplicated', async () => {
+  test('parameter edits wait for an explicit check and send only the final draft', async () => {
     const discover = spyOn(ipcBridge.mode.discoverModelProtocols, 'invoke').mockImplementation(async request => response(request.capability, [candidate(request.capability)]));
     restorers.push(() => discover.mockRestore());
     const page = render(<Harness />);
@@ -373,7 +532,11 @@ describe('automatic model protocol discovery', () => {
     await page.findByText(zhSettings.modelProtocolDiscovery.connected);
     const change = page.getByRole('button', { name: 'Change parameters' });
     fireEvent.click(change); fireEvent.click(change); fireEvent.click(change);
+    await pause();
     expect(discover).toHaveBeenCalledTimes(1);
+    expect(page.getByText(zhSettings.modelProtocolDiscovery.changed)).toBeTruthy();
+    expect((page.getByTestId('save') as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.recheck }));
     await waitFor(() => expect(discover).toHaveBeenCalledTimes(2));
     expect(discover.mock.calls[1][0].capability.provider_params).toMatchObject({ temperature: 0.7 });
     await pause(); expect(discover).toHaveBeenCalledTimes(2);
@@ -412,6 +575,9 @@ describe('automatic model protocol discovery', () => {
     expect(page.getByText(zhSettings.modelProtocolDiscovery.nativeSwitchImpact)).toBeTruthy();
     fireEvent.click(page.getByRole('button', { name: '暂存旧设置并配置 ark.images' }));
     const nativeWire = capabilityInputsFromDefinition({ model: 'step-5-preview', capabilities: [capabilityDraftFromResponse(native)] })![0];
+    await pause();
+    expect(discover).toHaveBeenCalledTimes(1);
+    fireEvent.click(page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.recheck }));
     await waitFor(() => expect(discover).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(JSON.parse(page.getByTestId('draft').textContent!)[0]).toEqual(nativeWire));
     expect(discover.mock.calls[1][0]).toMatchObject({ preferred_protocol: 'ark.images', capability: { protocol: 'ark.images' },
@@ -477,6 +643,10 @@ describe('automatic model protocol discovery', () => {
     expect(discover.mock.calls[0][0].apply_recommended_defaults).toBe(true);
     await pause(); expect(discover).toHaveBeenCalledTimes(1);
     fireEvent.click(page.getByRole('button', { name: 'Clear voice' }));
+    await pause();
+    expect(discover).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(page.getByTestId('policy-draft').textContent!)[0]).toEqual(native);
+    fireEvent.click(page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.recheck }));
     await waitFor(() => expect(discover).toHaveBeenCalledTimes(2));
     expect(discover.mock.calls[1][0].apply_recommended_defaults).toBe(false);
     expect(discover.mock.calls[1][0].capability).not.toHaveProperty('provider_params');
@@ -512,6 +682,9 @@ describe('automatic model protocol discovery', () => {
     expect(page.getByTestId('owned-draft').textContent).toBe(originalWire);
     expect(signal.aborted).toBe(true);
     await act(async () => complete(response({ ...native, provider_params: { voice: 'Kore' } }, [candidate({ ...native, provider_params: { voice: 'Kore' } })])));
+    await pause();
+    expect(discover).toHaveBeenCalledTimes(1);
+    fireEvent.click(page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.recheck }));
     await waitFor(() => expect(discover).toHaveBeenCalledTimes(2));
     expect(discover.mock.calls[1][0].apply_recommended_defaults).toBe(false);
     await pause(); expect(page.getByTestId('owned-draft').textContent).toBe(originalWire);

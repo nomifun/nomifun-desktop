@@ -65,6 +65,8 @@ export interface ProviderAutoConfigurationDetection {
   protocol: string;
   authScheme: string;
   confidence: ProviderAutoConfigurationConfidence;
+  /** The exact connection root used for this candidate's interface probe. */
+  requestBaseUrl?: string;
   suggestedBaseUrl?: string;
   outputLimit?: number;
 }
@@ -468,3 +470,23 @@ export const applyProviderAutoConfiguration = (
   };
   return sameDefinition(definition, next) ? definition : next;
 };
+
+/** Select the checked provider connection, including when reselecting a protocol. */
+export const applyProviderAutoConfigurationSelection = (
+  definition: ModelDefinitionDraft,
+  detection: ProviderAutoConfigurationDetection,
+  baseUrlOverride = '',
+  connectionRole = 'default',
+): ModelDefinitionDraft => ({
+  ...definition,
+  capabilities: definition.capabilities.map(capability => capability.task === detection.task ? {
+    ...changeCapabilityProtocol(capability, detection.protocol),
+    connectionRole,
+    baseUrlOverride,
+    endpoint: '',
+    pollEndpoint: '',
+    contentEndpoint: '',
+    realtimeEndpoint: '',
+    allowCrossOriginCredentials: false,
+  } : capability),
+});

@@ -53,4 +53,51 @@ describe('provider connection probe wire contract', () => {
       probe_candidates: true,
     });
   });
+
+  for (const savedProvider of [false, true]) {
+    test(`cancels an in-flight ${savedProvider ? 'saved provider' : 'draft connection'} probe`, async () => {
+      let receivedSignal: AbortSignal | null | undefined;
+      let requestBody: Record<string, unknown> | undefined;
+      let requestUrl: string | undefined;
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        receivedSignal = init?.signal;
+        requestBody = JSON.parse(String(init?.body));
+        requestUrl = String(input);
+        return new Promise<Response>((_resolve, reject) => {
+          receivedSignal?.addEventListener('abort', () => {
+            reject(new DOMException('aborted', 'AbortError'));
+          }, { once: true });
+        });
+      }) as typeof fetch;
+
+      const controller = new AbortController();
+      const probe = {
+        protocol: 'openai.chat_text',
+        task: 'chat' as const,
+        model: 'test-model',
+        probe_candidates: true,
+      };
+      const draft = {
+        platform: 'custom',
+        base_url: 'https://gateway.example/v1',
+        auth_scheme: 'bearer',
+        credentials: { api_keys: ['test-secret'] },
+        ...probe,
+      };
+      const pending = savedProvider
+        ? mode.probeProviderConnection.invoke({ provider_id: PROVIDER_ID, ...probe }, controller.signal)
+        : mode.probeConnection.invoke(draft, controller.signal);
+
+      expect(receivedSignal?.aborted).toBe(false);
+      expect(requestBody).toEqual(savedProvider ? probe : draft);
+      expect(new URL(requestUrl!, 'http://127.0.0.1').pathname).toBe(
+        savedProvider ? `/api/providers/${PROVIDER_ID}/probe-connection` : '/api/providers/probe-connection'
+      );
+      expect(requestUrl).not.toContain('test-secret');
+      controller.abort();
+
+      await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+      expect(receivedSignal?.aborted).toBe(true);
+    });
+  }
 });

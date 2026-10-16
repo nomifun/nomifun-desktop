@@ -1667,7 +1667,7 @@ export const mode = {
    * Reachability test for a saved provider's connection root. Needs no model or
    * capability row, so it can answer before anything is configured on top.
    */
-  probeProviderConnection: httpPost<
+  probeProviderConnection: httpPostAbortable<
     ProbeProviderConnectionResponse,
     { provider_id: ProviderId } & ProbeProviderConnectionRequest
   >(
@@ -1680,7 +1680,7 @@ export const mode = {
     })
   ),
   /** The same test for a proposed connection, before the provider is saved. */
-  probeConnection: httpPost<ProbeProviderConnectionResponse, ProbeProviderConnectionAnonymousRequest>(
+  probeConnection: httpPostAbortable<ProbeProviderConnectionResponse, ProbeProviderConnectionAnonymousRequest>(
     '/api/providers/probe-connection'
   ),
   /** Model setup discovery; non-generative task checks never create jobs. */

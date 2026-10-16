@@ -4,97 +4,142 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Spin, Tag } from '@arco-design/web-react';
-import React, { useMemo } from 'react';
+import { Button, Spin, Tag } from '@arco-design/web-react';
+import React from 'react';
 import { useTranslation } from 'react-i18next';
-import type { ProviderCompatibilityMode } from './providerAutoConfiguration';
+import type { ProviderAutoConfigurationDetection, ProviderCompatibilityMode } from './providerAutoConfiguration';
+import type { ModelDefinitionDraft } from './providerModelAdvanced';
 import type { ProviderAutoConfigurationBatch } from './useProviderAutoConfiguration';
 
 const ProviderAutoConfigurationNotice: React.FC<{
   enabled: boolean;
   loading: boolean;
+  stale?: boolean;
   batch?: ProviderAutoConfigurationBatch;
   mode?: ProviderCompatibilityMode;
-}> = ({ enabled, loading, batch, mode = 'auto' }) => {
+  definition?: ModelDefinitionDraft;
+  onSelect?: (detection: ProviderAutoConfigurationDetection) => void;
+  onRecheck?: () => void;
+  canRecheck?: boolean;
+}> = ({ enabled, loading, stale = false, batch, mode = 'auto', definition, onSelect, onRecheck, canRecheck = true }) => {
   const { t } = useTranslation();
-  const protocols = useMemo(
-    () => [...new Set(batch?.detections.map((detection) => detection.protocol) ?? [])],
-    [batch?.detections]
-  );
-  if (!enabled || (!loading && protocols.length === 0)) return null;
+  const candidates = batch?.candidates ?? batch?.detections ?? [];
+  const selectedDetections = candidates.filter(candidate => definition?.capabilities.some(capability =>
+    capability.task === candidate.task && capability.protocol === candidate.protocol
+  ));
+  const detections = selectedDetections.length > 0 ? selectedDetections : batch?.detections ?? [];
+  const protocols = [...new Set(detections.map(detection => detection.protocol))];
+  const hasMultipleTasks = new Set(candidates.map(candidate => candidate.task)).size > 1;
+  const hasResults = protocols.length > 0 || candidates.length > 0;
+  const staleTasks = batch?.staleTasks;
+  const hasStaleResults = stale || Boolean(staleTasks?.length);
+  if (!enabled || (!loading && !hasResults && !onRecheck)) return null;
 
-  const confidence = batch?.detections.some(
+  const confidence = detections.some(
     (detection) => detection.confidence === 'fallback'
   )
     ? 'fallback'
-    : batch?.detections.some(
+    : detections.some(
           (detection) => detection.confidence === 'endpoint_confirmed'
         )
       ? 'endpoint_confirmed'
       : 'verified';
-  const adjustedUrl = batch?.detections.some((detection) =>
+  const adjustedUrl = detections.some((detection) =>
     Boolean(detection.suggestedBaseUrl)
   );
 
   return (
     <div
-      className='flex min-h-34px items-center gap-8px border-0 border-l-2px border-l-solid border-primary-5 bg-fill-1 px-10px py-7px text-11px text-t-secondary'
-      data-provider-auto-configuration={loading ? 'probing' : confidence}
-      role='status'
-      aria-live='polite'
+      className='space-y-8px border-0 border-l-2px border-l-solid border-primary-5 bg-fill-1 px-10px py-7px text-11px text-t-secondary'
+      data-provider-auto-configuration={loading ? 'probing' : hasStaleResults ? 'stale' : hasResults ? confidence : 'unconfirmed'}
     >
-      {loading ? (
-        <Spin size={14} />
-      ) : (
-        <Tag
-          size='small'
-          color={confidence === 'fallback' ? 'orange' : 'green'}
-          bordered={false}
-        >
-          {mode === 'openai-responses'
-            ? t('settings.providerCompatibilityMode.responses', {
-                defaultValue: 'OpenAI Responses',
-              })
-            : mode === 'openai'
-            ? t('settings.providerCompatibilityMode.openai', {
-                defaultValue: 'Chat Completions',
-              })
-            : mode === 'anthropic'
-              ? t('settings.providerCompatibilityMode.anthropic', {
-                  defaultValue: 'Claude 兼容',
+      <div className='flex min-h-20px items-center gap-8px' role='status' aria-live='polite'>
+        {loading ? (
+          <Spin size={14} />
+        ) : !hasStaleResults && hasResults ? (
+          <Tag
+            size='small'
+            color={confidence === 'fallback' ? 'orange' : 'green'}
+            bordered={false}
+          >
+            {mode === 'openai-responses'
+              ? t('settings.providerCompatibilityMode.responses', {
+                  defaultValue: 'OpenAI Responses',
                 })
-              : t('settings.providerAutoConfiguration.applied', {
-                  defaultValue: '已自动配置',
-                })}
-        </Tag>
-      )}
-      <span className='min-w-0 flex-1 leading-16px'>
-        {loading
-          ? t('settings.providerAutoConfiguration.detecting', {
-              defaultValue: '正在检查接口地址及鉴权格式，不会生成模型回答…',
-            })
-          : confidence === 'verified'
-            ? t('settings.providerAutoConfiguration.verified', {
-                protocols: protocols.join(', '),
-                defaultValue: '已探测到接口 {{protocols}}；尚未验证当前模型，请点击「检测并选择可用协议」确认。',
-              })
-            : confidence === 'endpoint_confirmed'
-              ? t('settings.providerAutoConfiguration.endpointConfirmed', {
-                  protocols: protocols.join(', '),
-                  defaultValue:
-                    '已确认接口 {{protocols}}；当前密钥未通过验证，尚未验证当前模型。',
+              : mode === 'openai'
+              ? t('settings.providerCompatibilityMode.openai', {
+                  defaultValue: 'Chat Completions',
                 })
-              : t('settings.providerAutoConfiguration.fallback', {
-                  protocols: protocols.join(', '),
-                  defaultValue:
-                    '接口在线确认未完成，暂用通用协议 {{protocols}}；可检测当前模型后再确认。',
-                })}
-        {!loading && adjustedUrl
-          ? ` ${t('settings.providerAutoConfiguration.urlAdjusted', {
-              defaultValue: 'API 地址已自动修正。',
-            })}`
-          : ''}
-      </span>
+              : mode === 'anthropic'
+                ? t('settings.providerCompatibilityMode.anthropic', {
+                    defaultValue: 'Claude 兼容',
+                  })
+                : t('settings.providerAutoConfiguration.applied', {
+                    defaultValue: '已自动配置',
+                  })}
+          </Tag>
+        ) : null}
+        <span className='min-w-0 flex-1 leading-16px'>
+          {loading
+            ? t('settings.providerAutoConfiguration.detecting', {
+                defaultValue: '正在检查接口地址及鉴权格式，不会生成模型回答…',
+              })
+            : hasStaleResults
+              ? t('settings.providerAutoConfiguration.changed', {
+                  defaultValue: '配置已修改，尚未重新检测',
+                })
+              : !hasResults
+                ? t(canRecheck ? 'settings.healthNotChecked' : 'settings.modelProtocolDiscovery.needsConfiguration')
+                : confidence === 'verified'
+                  ? t('settings.providerAutoConfiguration.verified', {
+                      protocols: protocols.join(', '),
+                      defaultValue: '已自动配置接口 {{protocols}}；需要时可点击「验证模型」检查模型与工具调用。',
+                    })
+                  : confidence === 'endpoint_confirmed'
+                    ? t('settings.providerAutoConfiguration.endpointConfirmed', {
+                        protocols: protocols.join(', '),
+                        defaultValue:
+                          '已确认接口 {{protocols}}；当前密钥未通过验证，尚未验证当前模型。',
+                      })
+                    : t('settings.providerAutoConfiguration.fallback', {
+                        protocols: protocols.join(', '),
+                        defaultValue:
+                          '接口在线确认未完成，暂用通用协议 {{protocols}}；可点击「验证模型」检查。',
+                      })}
+          {!loading && !hasStaleResults && adjustedUrl
+            ? ` ${t('settings.providerAutoConfiguration.urlAdjusted', {
+                defaultValue: 'API 地址已自动修正。',
+              })}`
+            : ''}
+        </span>
+        {onRecheck && <Button size='mini' type='secondary' disabled={loading || !canRecheck}
+          onClick={onRecheck} data-provider-protocol-recheck>
+          {t('settings.modelProtocolDiscovery.recheck', { defaultValue: '重新检测' })}
+        </Button>}
+      </div>
+      {candidates.length > 0 && <div className='space-y-6px' role='group' aria-label={t('settings.providerAutoConfiguration.results', { defaultValue: '接口检测结果' })}>
+        {candidates.map(candidate => {
+          const candidateStale = staleTasks ? staleTasks.includes(candidate.task) : stale;
+          const selected = definition?.capabilities.some(capability =>
+            capability.task === candidate.task && capability.protocol === candidate.protocol
+          ) ?? false;
+          const status = candidateStale
+            ? t('settings.providerAutoConfiguration.unconfirmed', { defaultValue: '未确认' })
+            : candidate.confidence === 'verified'
+              ? t('settings.providerAutoConfiguration.available', { defaultValue: '接口可用' })
+              : candidate.confidence === 'endpoint_confirmed'
+                ? t('settings.providerAutoConfiguration.credentialsRejected', { defaultValue: '鉴权失败' })
+                : t('settings.providerAutoConfiguration.unconfirmed', { defaultValue: '未确认' });
+          return <div key={`${candidate.task}:${candidate.protocol}`} className='flex flex-wrap items-center gap-6px' data-provider-protocol-result={candidate.protocol} data-provider-protocol-task={candidate.task}>
+            <Button size='mini' type={selected ? 'primary' : 'secondary'} aria-pressed={selected}
+              disabled={loading || candidateStale || !onSelect} onClick={() => onSelect?.(candidate)}>
+              {hasMultipleTasks ? `${t(`settings.modelTask.${candidate.task}`, { defaultValue: candidate.task })} · ` : ''}{candidate.protocol}
+            </Button>
+            <Tag size='small' bordered={false} color={!candidateStale && candidate.confidence === 'verified' ? 'green' : 'orange'}>{status}</Tag>
+            {candidate.suggestedBaseUrl && <span className='min-w-0 break-all text-t-tertiary'>{candidate.suggestedBaseUrl}</span>}
+          </div>;
+        })}
+      </div>}
     </div>
   );
 };

@@ -59,7 +59,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function mount({ duplicate = false, holdSave = false } = {}) {
+function mount({ duplicate = false, holdSave = false, platform = 'preview' } = {}) {
   const discovery = deferred<DiscoverModelProtocolsResponse>();
   const persistence = deferred<ProviderModelResponse>();
   const discover = spyOn(ipcBridge.mode.discoverProviderModelProtocols, 'invoke').mockImplementation(() => discovery.promise);
@@ -68,9 +68,13 @@ function mount({ duplicate = false, holdSave = false } = {}) {
   const listProtocols = spyOn(ipcBridge.modelProtocol.list, 'invoke').mockResolvedValue(manifest);
   const listConnections = spyOn(ipcBridge.providerConnection.list, 'invoke').mockResolvedValue([]);
   const listModels = spyOn(ipcBridge.mode.fetchProviderModels, 'invoke').mockResolvedValue({ models: [] });
+  const probe = spyOn(ipcBridge.mode.probeProviderConnection, 'invoke').mockImplementation(async request => ({
+    reachability: 'reachable', protocol: request.protocol!, task: request.task!, root_shape: 'versioned_root',
+    attempted_url: `${aliasProviderBaseUrl}/probe`, elapsed_ms: 5, candidates: [],
+  }));
   restorers.push(() => discover.mockRestore(), () => save.mockRestore(), () => listProtocols.mockRestore(),
-    () => listConnections.mockRestore(), () => listModels.mockRestore());
-  const provider: IProvider = { id: aliasProviderId, platform: 'preview', name: '配置测试',
+    () => listConnections.mockRestore(), () => listModels.mockRestore(), () => probe.mockRestore());
+  const provider: IProvider = { id: aliasProviderId, platform, name: '配置测试',
     base_url: aliasProviderBaseUrl, auth_scheme: 'bearer', has_credentials: true,
     models: duplicate ? [modelResponse] : [] };
   const fallback: Record<string, unknown> = {
@@ -78,7 +82,7 @@ function mount({ duplicate = false, holdSave = false } = {}) {
     [unstable_serialize(['provider-models', aliasProviderId, undefined])]: { models: [] },
   };
   for (const model of ['', MODEL]) {
-    const requestKey = JSON.stringify(['preview', aliasProviderBaseUrl, ['chat'], ...(model ? [model] : [])]);
+    const requestKey = JSON.stringify([platform, aliasProviderBaseUrl, ['chat'], ...(model ? [model] : [])]);
     fallback[unstable_serialize(['model-protocol-manifests', requestKey])] = {
       requestKey, manifests: { chat: manifest }, errorTasks: [],
     };
@@ -103,10 +107,49 @@ function mount({ duplicate = false, holdSave = false } = {}) {
   };
   const confirm = () => page.getByRole('button', { name: zhCommon.confirm }) as HTMLButtonElement;
   const force = () => page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.forceSave }) as HTMLButtonElement;
-  return { page, start, open, confirm, force, discover, save, discovery, persistence };
+  return { page, start, open, confirm, force, discover, save, discovery, persistence, probe };
 }
 
 describe('add-model configuration save controls', () => {
+  for (const platform of ['custom', 'new-api']) {
+    test(`${platform} reuses endpoint checks and saves the chosen protocol without automatic model verification`, async () => {
+      const { page, open, confirm, discover, save, probe } = mount({ platform });
+      const input = await open();
+      await waitFor(() => expect(probe).toHaveBeenCalledTimes(2));
+      await page.findByRole('button', { name: 'openai.responses' });
+      fireEvent.change(input, { target: { value: MODEL } });
+      fireEvent.keyDown(input, { key: 'Enter' });
+      await waitFor(() => expect(confirm().disabled).toBe(false));
+      expect(discover).not.toHaveBeenCalled();
+      fireEvent.click(page.getByRole('button', { name: 'openai.responses' }));
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 650)); });
+      expect(page.getByRole('button', { name: 'openai.responses' }).getAttribute('aria-pressed')).toBe('true');
+      expect(probe).toHaveBeenCalledTimes(2);
+      expect(discover).not.toHaveBeenCalled();
+      expect(confirm().disabled).toBe(false);
+      fireEvent.click(confirm());
+      await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+      expect(save.mock.calls[0]![0].model.capabilities[0]!.protocol).toBe('openai.responses');
+    });
+  }
+
+  test('custom providers can explicitly verify the model and save its selected tested capability', async () => {
+    const { page, open, confirm, discover, save, discovery } = mount({ platform: 'custom' });
+    const input = await open();
+    fireEvent.change(input, { target: { value: MODEL } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(confirm().disabled).toBe(false));
+    expect(discover).not.toHaveBeenCalled();
+    fireEvent.click(page.getByRole('button', { name: zhSettings.modelProtocolDiscovery.verifyModel }));
+    await waitFor(() => expect(discover).toHaveBeenCalledTimes(1));
+    expect(confirm().disabled).toBe(true);
+    await act(async () => discovery.resolve(completedDiscovery()));
+    await waitFor(() => expect(confirm().disabled).toBe(false));
+    fireEvent.click(confirm());
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(save.mock.calls[0]![0].model.capabilities).toEqual([selectedCapability]);
+  });
+
   test('pending discovery disables ordinary confirmation without saving or warning', async () => {
     const { page, start, confirm, force, save } = mount();
     await start();

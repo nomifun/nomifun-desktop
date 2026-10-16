@@ -33,6 +33,7 @@ import ModelConfigurationSaveFooter from './ModelConfigurationSaveFooter';
 import ProviderAutoConfigurationNotice from './ProviderAutoConfigurationNotice';
 import {
   applyProviderAutoConfiguration,
+  applyProviderAutoConfigurationSelection,
   isAutoConfigurationPlatform,
 } from './providerAutoConfiguration';
 import useProviderAutoConfiguration from './useProviderAutoConfiguration';
@@ -265,6 +266,16 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
                   enabled={autoConfigurationEnabled}
                   loading={autoConfiguration.isLoading}
                   batch={autoConfiguration.data}
+                  stale={autoConfiguration.stale}
+                  canRecheck={autoConfiguration.canRecheck}
+                  onRecheck={autoConfiguration.recheck}
+                  definition={definition}
+                  onSelect={(detection) => {
+                    if (autoConfiguration.isLoading || autoConfiguration.data?.staleTasks?.includes(detection.task)) return;
+                    const root = detection.suggestedBaseUrl ?? detection.requestBaseUrl ?? autoConfiguration.data?.requestBaseUrl ?? '';
+                    setDefinition(current => applyProviderAutoConfigurationSelection(current, detection,
+                      root === data?.base_url.trim() ? '' : root));
+                  }}
                 />
               </div>
             )}
@@ -278,6 +289,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
               protocolDiscovery={data && modalProps.visible && !discoverySkipped ? {
                 providerId: data.id, platform: data.platform, baseUrl: data.base_url, authScheme: data.auth_scheme,
               } : undefined}
+              automaticProtocolDiscovery={!autoConfigurationEnabled}
               onProtocolDiscoveryPendingChange={setProtocolDetecting}
               manifests={manifests.manifests}
               manifestLoadingTasks={manifests.loadingTasks}

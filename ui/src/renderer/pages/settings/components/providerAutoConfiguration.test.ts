@@ -8,6 +8,7 @@ import { describe, expect, test } from 'bun:test';
 import type { ProtocolDescriptor } from '@/common/types/provider/modelProtocolManifest';
 import {
   applyProviderAutoConfiguration,
+  applyProviderAutoConfigurationSelection,
   applyProviderCompatibilityMode,
   buildProviderAutoConfigurationTargets,
   isAutoConfigurationPlatform,
@@ -78,6 +79,22 @@ const manifest = (
 });
 
 describe('provider auto configuration', () => {
+  test('selecting a checked protocol replaces stale transport overrides while preserving model settings', () => {
+    const definition = { model: 'm', capabilities: [{ ...emptyCapabilityDraft('chat'),
+      protocol: 'openai.chat_text', connectionRole: 'other-account', baseUrlOverride: 'https://untested.example',
+      endpoint: '/untested', allowCrossOriginCredentials: true, outputLimit: 8192, providerParamsJson: '{"temperature":0.2}' }] };
+    const selected = applyProviderAutoConfigurationSelection(definition, {
+      task: 'chat', protocol: 'openai.chat_text', confidence: 'verified', authScheme: 'bearer',
+    }, 'https://checked.example/v1');
+    expect(selected.capabilities[0]).toMatchObject({
+      protocol: 'openai.chat_text', connectionRole: 'default', baseUrlOverride: 'https://checked.example/v1',
+      endpoint: '', allowCrossOriginCredentials: false, outputLimit: 8192, providerParamsJson: '{"temperature":0.2}',
+      transportSource: 'user', protocolSelectionSource: 'manual',
+    });
+    expect(applyProviderAutoConfiguration(selected, [{ task: 'chat', protocol: 'openai.responses',
+      confidence: 'verified', authScheme: 'bearer' }])).toEqual(selected);
+  });
+
   test('required-output protocol discovery never invents a model recommendation', () => {
     const anthropic=descriptor('anthropic.messages',['header_key:x-api-key'],true);
     const definition={model:'unknown-model',capabilities:[emptyCapabilityDraft('chat')]};

@@ -17,6 +17,7 @@ const CHAT: &str = "openai.chat_text";
 const CHAT_PROTOCOLS: [&str;5] = [RESPONSES,CHAT,"anthropic.messages","gemini.generate_text","bedrock.anthropic_messages"];
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
 const CHAT_DISCOVERY_BUDGET: Duration = Duration::from_secs(60);
+const CHAT_DISCOVERY_CONCURRENCY: usize = 3;
 const PROBE_OUTPUT_LIMIT: u32 = 4096;
 
 impl ModelFetchService {
@@ -110,21 +111,29 @@ impl ModelFetchService {
         protocols.dedup();
         let mut result = DiscoverModelProtocolsResponse {selected_protocol:None,selected_capability:None,candidates:Vec::new(),elapsed_ms:0,config_revision:None};
         let mut stopped = false;
-        for protocol in protocols {
+        let document_candidates = &documents;
+        let resolved_connections = &connections;
+        // Independent protocols share a bounded wave instead of accumulating
+        // their network latency. join_all retains the deterministic priority
+        // order even when responses finish in a different order. Account-wide
+        // failures stop later waves; already dispatched exchanges may finish.
+        for batch in protocols.chunks(CHAT_DISCOVERY_CONCURRENCY) {
+          let candidates = futures::future::join_all(batch.iter().map(|protocol| async move {
+            let protocol = protocol.as_str();
             let attempt_started = Instant::now();
-            let document = documents.iter().find(|document| document.protocol == protocol);
-            let connection = connections.iter().find(|connection| document.and_then(|document| document.connection_role.as_deref())
+            let document = document_candidates.iter().find(|document| document.protocol == protocol);
+            let connection = resolved_connections.iter().find(|connection| document.and_then(|document| document.connection_role.as_deref())
                 .is_none_or(|role| role == connection.role) && auth_matches(&protocol,connection));
-            let mut candidate = empty_candidate(&protocol,Some(protocol.as_str()) == recommended);
+            let mut candidate = empty_candidate(protocol,Some(protocol) == recommended);
             let Some(connection) = connection else {
                 candidate.status = Status::Blocked;
                 candidate.message = Some("the protocol requires a configured connection with its native authentication".into());
-                result.candidates.push(candidate); continue;
+                return candidate;
             };
             if let Some(note) = retired_note.filter(|_| official_origin(platform,connection)) {
                 candidate.status = Status::Blocked;
                 candidate.message = Some(format!("the provider's official endpoint has retired this task; no verification request was sent: {note}"));
-                result.candidates.push(candidate); continue;
+                return candidate;
             }
             let prepared = prepare_candidate(platform,model,original,&protocol,connection,document,apply_recommended_defaults);
             let (capability,output_limit) = match prepared {
@@ -133,7 +142,7 @@ impl ModelFetchService {
                     candidate.status = Status::Blocked;
                     candidate.error_kind = Some(ErrorKind::InvalidRequest);
                     candidate.message = Some(nomifun_net::secret_redaction::SecretRedactor::new(connection.auth.secrets()).redact(&error.to_string()));
-                    result.candidates.push(candidate); continue;
+                    return candidate;
                 }
             };
             candidate.capability = Some(capability.clone());
@@ -149,7 +158,7 @@ impl ModelFetchService {
                 } else { candidate.message = Some("registered serializer only; model support is unverified and no generation request was performed".into()); }
             } else if stopped {
                 candidate.status = Status::Blocked;
-                candidate.message = Some("additional billable checks stopped after an authentication, quota or rate limit failure".into());
+                candidate.message = Some("additional billable check waves stopped after an authentication, quota or rate limit failure".into());
             } else if started.elapsed() >= CHAT_DISCOVERY_BUDGET {
                 candidate.status = Status::Blocked;
                 candidate.message = Some("the bounded verification budget was exhausted; this candidate was not checked".into());
@@ -164,10 +173,12 @@ impl ModelFetchService {
                         Err(failure) => classify_failure(&mut candidate,&failure,&connection.auth),
                     },
                 }
-                stopped = stops_billable_checks(&candidate);
             }
             candidate.elapsed_ms = millis(attempt_started);
-            result.candidates.push(candidate);
+            candidate
+          })).await;
+          stopped |= candidates.iter().any(stops_billable_checks);
+          result.candidates.extend(candidates);
         }
         let available = |candidate: &&Candidate| candidate.status == Status::Available && candidate.capability.is_some();
         let chosen = preferred.and_then(|preferred| result.candidates.iter().filter(available).find(|candidate| candidate.protocol == preferred.trim()))

@@ -107,6 +107,7 @@ export interface ModelDefinitionEditorProps {
   providerAuthScheme: string;
   providerLabel?: string;
   protocolDiscovery?: ModelProtocolDiscoveryContext;
+  automaticProtocolDiscovery?: boolean;
   onProtocolDiscoveryPendingChange?: (pending: boolean) => void;
   manifests: ModelProtocolManifestMap;
   manifestLoadingTasks?: readonly ModelTask[];
@@ -399,6 +400,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
   providerAuthScheme,
   providerLabel,
   protocolDiscovery,
+  automaticProtocolDiscovery = true,
   onProtocolDiscoveryPendingChange,
   manifests,
   manifestLoadingTasks = EMPTY_TASKS,
@@ -515,6 +517,18 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
     Partial<Record<ModelTask, boolean>>
   >({});
   const [protocolDiscoveryEpoch, setProtocolDiscoveryEpoch] = useState(0);
+  const protocolDiscoveryAttempts = React.useRef(new Map<ModelTask, { started: boolean }>());
+  useEffect(() => {
+    if (!protocolDiscovery) protocolDiscoveryAttempts.current.clear();
+  }, [Boolean(protocolDiscovery)]);
+  const protocolDiscoveryAttemptForTask = (task: ModelTask) => {
+    let attempt = protocolDiscoveryAttempts.current.get(task);
+    if (!attempt) {
+      attempt = { started: false };
+      protocolDiscoveryAttempts.current.set(task, attempt);
+    }
+    return attempt;
+  };
   const [committedModel, setCommittedModel] = useState(() => value.model.trim());
   const latestModel = React.useRef(value.model);
   latestModel.current = value.model;
@@ -1357,6 +1371,8 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                 key={protocolDiscoveryEpoch}
                 model={value.model}
                 committed={Boolean(committedModel) && committedModel === value.model.trim()}
+                automatic={automaticProtocolDiscovery}
+                attemptState={protocolDiscoveryAttemptForTask(capability.task)}
                 applyRecommendedDefaults={modelProtocolDiscoveryAppliesDefaults(capability)}
                 capability={preparing ? undefined : capabilityInputsFromDefinition({ model: value.model, capabilities: [capability] })?.[0]}
                 snapshot={modelProtocolDiscoverySnapshot(value.model, capability)}

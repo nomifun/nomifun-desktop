@@ -13,6 +13,8 @@ import { isOpenAIChatProtocol } from './chatProtocolTransition';
 interface Props {
   model: string;
   committed: boolean;
+  automatic?: boolean;
+  attemptState?: { started: boolean };
   applyRecommendedDefaults: boolean;
   capability?: ProviderModelCapabilityInput;
   snapshot: string;
@@ -27,12 +29,15 @@ const protocolLabel = (protocol: string): string => protocol === 'openai.respons
   ? 'Responses' : protocol === 'openai.chat_text' ? 'Chat Completions' : protocol;
 const keyFor = (snapshot: string, preferred: string | undefined, revision: number): string => JSON.stringify([snapshot, preferred ?? '', revision]);
 
-/** Only committed model IDs start discovery. Results and deduplication stay in this editor. */
-export default function ModelProtocolDiscoveryControl({ model, committed, applyRecommendedDefaults, capability, snapshot, context, preferredProtocol, onSelect, onPendingChange, onConfigureProtocol }: Props) {
+/** Verify committed model IDs. Results and deduplication stay in this editor. */
+export default function ModelProtocolDiscoveryControl({ model, committed, automatic = true, attemptState: sharedAttemptState, applyRecommendedDefaults, capability, snapshot, context, preferredProtocol, onSelect, onPendingChange, onConfigureProtocol }: Props) {
   const { t } = useTranslation();
   const [checkingKey, setCheckingKey] = useState<string>();
   const [completed, setCompleted] = useState<Completed>();
   const [retry, setRetry] = useState(0);
+  const localAttemptState = useRef({ started: false });
+  const attemptState = sharedAttemptState ?? localAttemptState.current;
+  const requestedKey = useRef<string | undefined>(undefined);
   const cache = useRef(new Map<string, Completed>());
   const contextSnapshot = modelProtocolDiscoveryContextSnapshot(context);
   const contextVersion = useRef({ snapshot: contextSnapshot, revision: 0 });
@@ -46,6 +51,8 @@ export default function ModelProtocolDiscoveryControl({ model, committed, applyR
   const settingsOpen = disclosure.identity === disclosureIdentity && disclosure.settings;
   const diagnosticsOpen = settingsOpen && disclosure.diagnostics;
   const key = keyFor(snapshot, preferredProtocol, revision);
+  // A click authorizes this uninterrupted draft only, including during debounce.
+  if (requestedKey.current !== key) requestedKey.current = undefined;
   const current = useRef({ key, onSelect, onPendingChange });
   current.current = { key, onSelect, onPendingChange };
   const ready = Boolean(committed && model.trim() && capability &&
@@ -60,11 +67,16 @@ export default function ModelProtocolDiscoveryControl({ model, committed, applyR
     if (!ready || !capability) { setCheckingKey(undefined); return; }
     const cached = cache.current.get(key);
     if (cached) { setCompleted(cached); setCheckingKey(undefined); return; }
+    // Each scene gets one automatic attempt. Later draft edits only invalidate
+    // its result; another network request requires an explicit button click.
+    if (requestedKey.current !== key && (!automatic || attemptState.started)) { setCheckingKey(undefined); return; }
     let active = true;
     const controller = new AbortController();
     setCheckingKey(key);
     current.current.onPendingChange?.(true);
     const timer = setTimeout(() => {
+      requestedKey.current = undefined;
+      attemptState.started = true;
       void (async () => {
         try {
           const body = { model: model.trim(), capability, apply_recommended_defaults: applyRecommendedDefaults,
@@ -113,7 +125,7 @@ export default function ModelProtocolDiscoveryControl({ model, committed, applyR
     return () => {
       active = false; clearTimeout(timer); controller.abort(); current.current.onPendingChange?.(false);
     };
-  }, [key, ready, retry]);
+  }, [key, ready, retry, automatic, attemptState]);
 
   const displayed = completed?.key === key ? completed : undefined;
   const result = displayed?.result;
@@ -124,7 +136,8 @@ export default function ModelProtocolDiscoveryControl({ model, committed, applyR
   const status = !committed ? t('settings.modelProtocolDiscovery.awaitCommit')
     : !ready ? t('settings.modelProtocolDiscovery.needsConfiguration')
     : checking ? t('settings.modelProtocolDiscovery.checking')
-    : !displayed ? t('settings.modelProtocolDiscovery.waiting')
+    : !displayed ? t(attemptState.started ? 'settings.modelProtocolDiscovery.changed'
+      : automatic ? 'settings.modelProtocolDiscovery.waiting' : 'settings.modelProtocolDiscovery.notVerified')
     : available.length > 0 ? t(selected?.evidence === 'verified_stream' ? 'settings.modelProtocolDiscovery.connected' : 'settings.modelProtocolDiscovery.configured')
     : needsReview ? t('settings.modelProtocolDiscovery.reviewConfiguration')
     : t('settings.modelProtocolDiscovery.unavailable');
@@ -147,31 +160,42 @@ export default function ModelProtocolDiscoveryControl({ model, committed, applyR
     cache.current.set(nextKey, entry); setCompleted(entry);
     current.current.onSelect(snapshot, candidate.capability, 'manual');
   };
+  const check = () => {
+    cache.current.delete(key);
+    requestedKey.current = key;
+    setRetry(value => value + 1);
+  };
   return <div className='space-y-6px border-0 border-t border-solid border-[var(--color-border-2)] px-14px py-8px' data-model-protocol-discovery={capability?.task} aria-busy={checking}>
     <div className='flex items-center justify-between gap-8px text-11px leading-4 text-t-secondary'>
       <span className='inline-flex min-w-0 items-center gap-6px' role='status' aria-live='polite' aria-atomic='true'>
         {checking && <Spin size={14} aria-hidden='true' element={<IconLoading className='motion-reduce:!animate-none' style={{ fontSize: 14 }} />} />}
         <span>{status}</span>
       </span>
-      <Button size='mini' type='text' aria-expanded={settingsOpen} onClick={() => {
-        setDisclosure({ identity: disclosureIdentity, settings: !settingsOpen, diagnostics: false });
-      }}>{t('settings.modelProtocolDiscovery.connectionSettings')}</Button>
-    </div>
-    {settingsOpen && <div className='space-y-6px pb-2px text-11px leading-4 text-t-secondary' data-model-protocol-settings>
-      <div className='flex items-center justify-between gap-8px'>
-        <span>{t('settings.modelProtocolDiscovery.title')}</span>
-        <Button size='mini' type='text' disabled={!ready || checking} onClick={() => {
-          cache.current.delete(key); setRetry(value => value + 1);
-        }}>{t('settings.modelProtocolDiscovery.recheck')}</Button>
+      <div className='flex shrink-0 items-center gap-4px'>
+        <Button size='mini' type='text' disabled={!ready || checking} onClick={check} data-model-protocol-recheck>
+          {t(!automatic && !attemptState.started ? 'settings.modelProtocolDiscovery.verifyModel' : 'settings.modelProtocolDiscovery.recheck')}
+        </Button>
+        <Button size='mini' type='text' aria-expanded={settingsOpen} onClick={() => {
+          setDisclosure({ identity: disclosureIdentity, settings: !settingsOpen, diagnostics: false });
+        }}>{t('settings.modelProtocolDiscovery.connectionSettings')}</Button>
       </div>
-      {available.map(candidate => <div key={candidate.protocol} className='flex flex-wrap items-center gap-6px break-words' data-model-protocol-candidate={candidate.protocol}>
-        <Button size='mini' disabled={checking || !candidate.capability}
+    </div>
+    {result && <div className='space-y-6px pb-2px text-11px leading-4 text-t-secondary' data-model-protocol-results>
+      <span>{t('settings.modelProtocolDiscovery.title')}</span>
+      {result.candidates.map(candidate => <div key={candidate.protocol} className='flex flex-wrap items-center gap-6px break-words' data-model-protocol-candidate={candidate.protocol}>
+        <Button size='mini' disabled={checking || candidate.status !== 'available' || !candidate.capability}
+          aria-pressed={capability?.protocol === candidate.protocol}
           type={capability?.protocol === candidate.protocol ? 'primary' : 'secondary'} onClick={() => choose(candidate)}>
           {protocolLabel(candidate.protocol)}
         </Button>
         <span>{evidenceLabel(candidate)}</span>
         {candidate.recommended && <Tag size='small'>{t('settings.modelProtocolDiscovery.recommended')}</Tag>}
       </div>)}
+    </div>}
+    {settingsOpen && <div className='space-y-6px pb-2px text-11px leading-4 text-t-secondary' data-model-protocol-settings>
+      <div className='flex items-center justify-between gap-8px'>
+        <span>{t('settings.modelProtocolDiscovery.title')}</span>
+      </div>
       {(displayed?.error || diagnostics.length > 0) && <div className='text-t-tertiary'>
         <Button size='mini' type='text' aria-expanded={diagnosticsOpen} onClick={() => {
           setDisclosure({ identity: disclosureIdentity, settings: true, diagnostics: !diagnosticsOpen });
@@ -179,7 +203,7 @@ export default function ModelProtocolDiscoveryControl({ model, committed, applyR
         {diagnosticsOpen && <div className='max-h-240px overflow-auto' data-model-protocol-diagnostics>
           {displayed?.error && <pre className='m-0 whitespace-pre-wrap break-words pt-4px font-inherit'>{displayed.error}</pre>}
           {diagnostics.map(candidate => <div key={candidate.protocol} className='break-words pt-4px'>
-            <span>{protocolLabel(candidate.protocol)} · </span><span>{evidenceLabel(candidate)}</span>
+            <span>{protocolLabel(candidate.protocol)}</span>
             {candidate.message || candidate.error_kind ? <pre className='m-0 whitespace-pre-wrap break-words font-inherit'>{candidate.message || candidate.error_kind}</pre> : null}
             {candidate.status === 'blocked' && candidate.protocol !== capability?.protocol && onConfigureProtocol && (() => {
               const nativeSwitch = !(isOpenAIChatProtocol(capability?.protocol ?? '') && isOpenAIChatProtocol(candidate.protocol));
