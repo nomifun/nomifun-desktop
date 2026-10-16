@@ -378,11 +378,16 @@ requires no Agent Browser Module or resource binding. Opening and retrying never
 Authorized managed Agent wrappers borrow the user's real page while enforcing the frozen Snapshot, exact Provider,
 typed resource and BrowserRunGuard. Attached Chrome remains a separate connected resource.
 
-Every Agent Turn locks its Session's managed browser during retained Runtime preparation, including chat without
-Browser tools. Settlement drains native operations while retaining the hardware input gate. Only the exact durable
-Turn terminal permits final release; later cleanup or terminal-write failures leave input locked. User commands and first native
-creation fail closed while canonical running precedes a proven gate. User profiles use owner/Session identity independent
-of grant definitions: Windows uses `browser-v4/agent-sessions/<hash>/`; macOS 14+ uses a separate persistent
+Turn preparation freezes Browser authority without locking the managed browser. The first actual managed browser
+invocation acquires the current Workspace's native input gate and guard for the remainder of that Turn. Tool completion,
+ordinary tool failure, model thinking and unrelated subsequent tools do not release ownership. Settlement drains native
+operations while retaining the hardware input gate; only the exact durable Turn terminal followed by successful finish
+permits final release. Failed settlement, uncertain native cleanup and terminal-write or finish failures retain the gate
+for the original Turn's recovery. User APIs use the actual coordinator gate, without deriving ownership from Session
+running or paused, model prose or configured Browser permissions. Turns that never invoke the managed browser,
+including chat, file work, attached Chrome and background rendering, leave it available to the user.
+User profiles use owner/Session identity independent of grant definitions: Windows uses
+`browser-v4/agent-sessions/<hash>/`; macOS 14+ uses a separate persistent
 WKWebsiteDataStore with a stable derived identifier and does not read former directory profiles. Session deletion includes this browser and its
 profile even when no Agent Browser binding exists; there is no second active Agent authority ledger.
 See the [browser architecture](browser-platform.md).

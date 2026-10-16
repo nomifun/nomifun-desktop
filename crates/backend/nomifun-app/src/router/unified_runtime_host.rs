@@ -784,8 +784,8 @@ impl ConversationRuntimeHost {
         *self.last_terminal_root.lock().map_err(|_| error("terminal root state poisoned"))? = None;
         *self.unstarted_cancelled_root.lock().map_err(|_| error("unstarted cancellation state poisoned"))? = None;
         drop(active);
-        // Retain and lock the managed user browser before any later awaited
-        // preflight can fail. Early failure/cancellation uses the same cleanup.
+        // Register frozen resource authority before later preflight can fail.
+        // Browser input is claimed only by its first interactive invocation.
         self.resources.open_turn(&admitted, journal.clone()).await
             .map_err(|error| self.preparation_error(root, "resource_open", error))?;
         // Publish the exact journal before the next awaited budget/read so

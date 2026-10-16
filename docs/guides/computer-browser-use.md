@@ -8,21 +8,21 @@ Open the browser from the Browser button inside a conversation. The global Brows
 
 The embedded browser is the primary browsing experience, with navigation and recovery in its panel. System-browser opening and Attached Chrome remain explicitly selected features for particular workflows; an embedded-page failure does not switch browsers automatically.
 
-The user and Agent see the same native web page. During an Agent run, user page input is locked. Stop the Agent and wait for pending operations to settle before interacting manually. Hiding the panel keeps the page and tabs alive; it is not a takeover or a reset.
+The user and Agent see the same native web page. Once an Agent Turn first uses this browser, manual controls stay locked for the rest of that Turn, including thinking time and other tools between browser actions. Wait for the Turn to end, or stop the Agent and wait for cleanup, before interacting manually. A chat or file task that never uses this browser leaves browsing and tab closure available. Attached Chrome and background rendering do not lock this embedded browser. Hiding the panel keeps its pages, tabs and current input lock alive.
 
-At the minimum 880×600 desktop window, the main navigation and Session list may temporarily collapse to keep chat and the embedded browser visible side by side. Widening the window or closing the browser panel restores your preferred sidebar state and widths; resizing does not replace your saved split preference. Explicitly expanding a sidebar that yielded space hides the browser panel. Open Browser again to show the same Session's pages; hiding it keeps any active Agent input lock in place.
+At the minimum 880×600 desktop window, the main navigation and Session list may temporarily collapse to keep chat and the embedded browser visible side by side. Widening the window or closing the browser panel restores your preferred sidebar state and widths; resizing does not replace your saved split preference. Explicitly expanding a sidebar that yielded space hides the browser panel. Open Browser again to show the same Session's pages; hiding it preserves any current browser input lock.
 
-Repeated page navigation can show a warning and offer Pause page navigation. Pause retains usable content and blocks subsequent page navigations and new popups from the current tab; other open tabs keep running. Resume page navigation releases the hold without reloading; an explicit address, reload or history command can also continue browsing. Stop loading cancels the current load, so the website's next timer may still run. Pause does not stop all network activity; close the tab when all activity from that page must end. These user controls remain locked during Agent work.
+Repeated page navigation can show a warning and offer Pause page navigation. Pause retains usable content and blocks subsequent page navigations and new popups from the current tab; other open tabs keep running. Resume page navigation releases the hold without reloading; an explicit address, reload or history command can also continue browsing. Stop loading cancels the current load, so the website's next timer may still run. Pause does not stop all network activity; close the tab when all activity from that page must end. These user controls stay locked throughout any Turn that has acquired this browser.
 
 Pause is shown only when the native browser establishes support. Without it, Stop loading and closing the tab remain available.
 
-Windows has native validation for settling popups already being created when Pause is requested. macOS still needs a native fix and validation for this case; a popup whose creation began before Pause may still open. If Windows navigation control reports unavailable, close the affected tab and open it again.
+Windows has native validation for settling popups already being created when Pause is requested. The macOS fix has source coverage but still needs native acceptance; do not assume a popup whose creation began before Pause is blocked until that evidence is recorded. If Windows navigation control reports unavailable, close the affected tab and open it again.
 
 Copy navigation diagnostics distinguishes host commands, new website navigations and HTTP redirects. It is not a full Fetch/XHR log and excludes cookies, authentication headers and form content. For verification or unsupported embedded environments, explicitly open the page in the system browser. Login state stays separate. Record normal access, verification pages and repeat navigation separately; observing a CAPTCHA is not proof that normal access passed.
 
 For a frontend project, start its development server, then ask the Agent to navigate to the localhost URL in the conversation browser, observe the page, interact, and verify the result. Navigation, clicks, keyboard input and standard HTML selections use the real browser. A screenshot stream is not the interactive surface.
 
-Windows native input has real smoke coverage. The full product acceptance matrix, including macOS, frames, dialogs, files, and packaging, is still in progress. See the [architecture](../architecture/browser-platform.md) for the current limits.
+Historical Windows native input has real smoke coverage. Native and production-GUI acceptance of acquisition on first browser use, retention through the Turn and availability for tasks that never use the browser remains outstanding on both platforms. The full product acceptance matrix, including macOS, frames, dialogs, files, and packaging, is still in progress. See the [architecture](../architecture/browser-platform.md) for the current limits.
 
 ## Optional Attached Chrome (macOS and Windows)
 
@@ -39,8 +39,8 @@ NomiFun browser selection. **Refresh** reads the current connection;
 
 No Chrome restart, replacement profile, or import of cookies, passwords or
 history is required. Disconnect releases automation and its connection, not
-your browser or tabs. Mutable browser operations fail closed while the Agent
-owns the run.
+your browser or tabs. Connection changes fail closed while the Agent owns that
+Chrome run. Attached Chrome does not lock the embedded Browser Workspace.
 
 If an explicitly selected Chrome connection is lost, the picker preserves that
 choice and requires reconnecting or explicitly choosing the NomiFun browser
@@ -61,7 +61,7 @@ neither embedded-browser control nor local or provider-native web search.
 The `web.research` capability module covers public-web research independently
 of the model provider's native search. Queries run through an isolated
 background browser runtime and do not use session login state; enabling it does
-not grant Browser automation.
+not grant Browser automation or lock the embedded Browser Workspace.
 
 Windows and macOS desktop detect installed Chrome 120+. On macOS, discovery
 checks `/Applications/Google Chrome.app` and `~/Applications/Google Chrome.app`.

@@ -471,8 +471,12 @@ Computer 的系统权限是执行环境前提，不能因为未授权而阻断�
 Agent Browser 工具仍只从当前冻结 Snapshot、exact Provider 与 typed Resource binding 获得权限；授权后的
 managed Agent wrapper 借用用户的同一真实页面，attached Chrome 工具继续独立指向已连接的 Chrome。
 
-所有 Agent Turn 在预备阶段取得同 Session 用户浏览器的原生输入锁，包括没有 Browser 工具的聊天。
-预备失败、取消和正常终态经过同一 retained owner 清理；settle 仅排空操作，exact Turn 终态持久化后才 finish 与解锁。下游清理或终态写入失败继续保持原生硬件锁。canonical running 与原生输入锁之间的窗口不放行用户创建或命令。
+Turn 预备只冻结 Browser 授权，不锁 managed 浏览器；首次真实调用才取得当前 Workspace 的原生输入锁与 guard，
+并持续占用至本 Turn 结束。单次工具完成、普通工具失败、模型思考及后续无关工具均不释放所有权。
+settle 在保留硬件输入锁的情况下排空原生操作；只有 exact Turn 终态已持久化且 finish 成功后才 final release。
+结算失败、原生清理不确定、终态写入或 finish 失败继续保留门禁，由原 Turn 恢复路径处理。
+用户 API 按实际 coordinator 门禁准入，不从 Session 的 running/paused、模型正文或已配置的 Browser 权限推导占用。
+未真实调用 managed 浏览器的 Turn，包括普通聊天、文件任务、attached Chrome 及后台渲染，保持用户浏览器可用。
 用户 Profile 使用独立于授权定义的 owner/Session 身份：Windows 使用 `browser-v4/agent-sessions/<hash>/`，
 macOS 14+ 使用稳定派生标识的独立持久 WKWebsiteDataStore，不读取旧目录 Profile。
 Session 删除也关闭与清除此用户实体，即使当前 Agent binding 中没有 Browser 资源；不另建 Agent 活动授权账本。

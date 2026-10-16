@@ -198,7 +198,6 @@ impl BrowserWorkspace {
     }
 
     pub fn runtime_generation(&self)->u64 {self.slot.request.runtime_generation}
-    pub async fn has_active_run(&self)->bool {self.coordinator.has_active_run().await}
     pub fn run_changes(&self) -> tokio::sync::watch::Receiver<u64> {
         self.coordinator.subscribe()
     }

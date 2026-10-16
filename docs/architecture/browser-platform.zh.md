@@ -12,7 +12,7 @@
 打开、重试与用户地址栏命令不写入 Agent binding，不赋予 Agent 工具权限，也不新建第二个 Session。
 旧全局浏览器管理页、设置 Tab、侧栏库存和浏览器设置重定向仍保持退役。
 
-页面由原生嵌入 WebView 承载，不使用 iframe、截图流、canvas viewer 或 JPEG 传输充当浏览器。用户和 Agent 操作同一个真实页面。Agent 工作期间，原生用户输入及会改变页面的浏览器栏操作被锁定；必须先停止运行、等待在途操作完成清理，再恢复用户输入。没有用户接管或交还状态。
+页面由原生嵌入 WebView 承载，不使用 iframe、截图流、canvas viewer 或 JPEG 传输充当浏览器。用户和 Agent 操作同一个真实页面。Agent 首次使用此浏览器后，原生用户输入及会改变页面的浏览器栏操作持续锁定，直到本回合结束并完成清理；从未使用此浏览器的回合保持用户操作可用。没有用户接管或交还模式。
 
 隐藏面板不销毁标签页。同一用户与 Session 只持有一个 managed 原生 runtime、Profile 和输入协调器；
 Agent 的资源定义 ID 改变不会选择新页面或 Profile。`BrowserResource` 只封装 frozen Agent authority，
@@ -25,10 +25,20 @@ Agent 选择 attached Chrome 不改变用户的内置浏览器，也不会把用
 
 空间预留与展开侧栏后的自动关闭只注册给 Browser：关闭只隐藏并 detach 面板，保留网页、runtime 和输入所有权，不销毁标签或释放 Agent 输入锁。Preview 沿用原有侧栏折叠策略，不把会清空标签和未保存编辑的 `closePreview` 交给布局让位回调；Browser 与 Preview 互相切换时同步交接侧栏管理。布局、原生输入与运行中 Stop 的证据范围分别见[持续验收](../validation/browser-platform.zh.md)。
 
-所有 Agent Turn（包括没有 Browser 工具的普通聊天及 attached Chrome Agent）均在 Runtime 预备阶段取得
-同 Session 内置浏览器的输入锁。实体创建本身不创建原生网页；运行中首次创建原生 child 时输入已禁用。
-canonical Turn 已进入 running、但输入锁尚未得到证明时，用户命令及首次打开明确拒绝，不能短暂显示 UserReady。
-预备失败或取消必须等待 retained owner 排空输入操作；settle 阶段保持硬件输入锁，只有 exact Turn 终态成功持久化后才 finish 并恢复用户输入。begin 未发出 guard 时也分为排空与终态后 failed-start recovery 两阶段，终态写入或下游清理失败不能提前解锁。
+Turn 预备阶段只冻结 Browser 授权，不取得 managed 浏览器输入锁。实际已授权的 managed Browser
+调用在原生工作前取得当前 Workspace 与 guard。首次调用后持续占用至本 Turn 结束；在此占用下首次创建的
+原生 child 从一开始就禁用用户输入。单次浏览器工具完成、普通工具失败、模型思考、后续无关工具及暂停
+均不释放门禁。未真实调用此浏览器的普通聊天、文件任务、attached Chrome 及后台渲染不锁内置浏览器；
+已配置的 Browser 权限和模型正文也不构成占用依据。
+
+retained owner 在保持输入锁的情况下结算原生操作；只有 exact Turn 终态持久化且 finish 成功后才释放所有权。
+等待中的导航或对话框、未结算或未知效果、回执持久化失败及原生清理不确定继续受原 Turn 恢复边界保护。
+取得输入锁失败而未发出 guard 时，仍分为排空与终态后的 failed-start recovery。
+单次工具或原生操作完成均不授权回合内解锁。
+
+用户 API 校验认证 owner 与 canonical Session 后，只按 Workspace coordinator 准入；Session 的 running 或
+paused 本身不构成浏览器输入锁。Browser snapshot 只报告实际输入所有权与 gate failure，不从全局 Agent 状态
+覆盖。导航、关闭标签及下载共用这一准入边界。
 
 终态提交与原生 final release 是不同的完成证据。终态已经写入而 release 失败时，SDK 重试必须核对
 同一 root 的 canonical receipt、原 Runtime terminal、delivery、Snapshot 与 route，再只重试 finish；
@@ -66,18 +76,17 @@ HTTP(S)，并且 Browser child 无 Tauri capability、local trust、backend cred
 后台 `web.research` / render 仍是不同消费者，保留严格公网 DNS/IP pinning，不与可见浏览器混用。
 
 浏览器菜单的“重新打开浏览器”需要明确确认：关闭所有网页并丢弃未保存网页内容，但不清空会话消息或项目文件。
-后端持有同一 Session 的 operation fence，在 canonical 空闲边界校验浏览器代际。
-没有原生 guard 时按普通空闲关闭处理；已经发出 guard 且 final unlock 失败时，必须确认同一 Operation 的
-canonical 终态、已完成的 native settlement 与对应旧 Workspace 身份，才允许确认关闭 exact generation。
-canonical running 或未完成的 settlement 仍明确拒绝，重建入口不取消活跃 Agent、不生成终态。
-`turn/paused` 保留同一 active Operation 与 native checkpoint 恢复权，不属于这里的最终终态。
-暂停时仍拒绝重建；用户须先经正式 Stop/cancel 终结该 Operation，并取得相应 Runtime 清理证明后再重开。
-旧 Workspace 的真实关闭证明供 SDK 随后确认既有终态并重试 final release；新的用户 Workspace 是另一代实体，
-不会被旧 owner cleanup 释放，模型不会重放、原终态不会改写。
+后端持有同一 Session 的 operation fence，校验 exact runtime generation，并通过 coordinator 的实际空闲门禁关闭。
+从未使用此浏览器的回合不阻止关闭；回合一旦取得浏览器所有权，即使后续进行无关工作也不能关闭，用户关闭不能取消或夺取其 guard。
+若 final unlock 失败，恢复关闭仍必须确认同一 Operation 的 canonical 终态、已完成的 native settlement
+与对应旧 Workspace 身份。`turn/paused` 保留同一 active Operation 与 native checkpoint 恢复权，不能替代这里的
+最终终态证明。仍保留所有权时，用户须先经正式 Stop/cancel 终结该 Operation，并取得 Runtime 清理证明后，
+才能走这条恢复关闭路径。旧 Workspace 的真实关闭证明供 SDK 随后确认既有终态并重试 final release；新的用户
+Workspace 是另一代实体，不会被旧 owner cleanup 释放，模型不会重放、原终态不会改写。
 
 菜单已有“打开系统下载目录”，默认保存对话框也使用宿主解析的 OS Downloads 目录，不再默认 Home。
 用户另选保存位置仍由原生保存对话框决定，菜单不会声称该系统目录包含所有自选位置的文件。
-此命令只携带当前 Runtime 代际，不接受路径/URL，不启动或更换浏览器；Agent 运行中拒绝、Agent 工具不可调用。
+此命令只携带当前 Runtime 代际，不接受路径/URL，不启动或更换浏览器；浏览器被 Agent 占用时拒绝，Agent 工具不可调用。
 打开失败只显示轻量提示，不销毁当前网页、不自动重试。Windows 使用原生 OS handoff，macOS 使用公开 NSWorkspace；OS 接受请求不等于完整文件管理器视觉验收。
 
 macOS 复用 Tauri 已建立的 AppKit 主线程与事件循环，创建真实可见的 WKWebView child view。
@@ -135,7 +144,8 @@ macOS conformance 可以在初始化 Engine 时选择不可变的 `NativeWebKit`
 | 独立持久登录态、会话删除与站点清理 | macOS 14+ 独立 WKWebsiteDataStore | 保留目录 Profile |
 
 `semantic_dom` 不伪造 `isTrusted`，也不是 user activation；DOM API 或事件分发完成不代表网站已完成业务操作，
-Agent 必须重新观察结果。网站要求真实用户激活时由用户按既有 Stop → 等待清理 → 恢复输入流程处理。
+Agent 必须重新观察结果。网站要求真实用户激活时，应等待本回合结束或停止 Agent，并在清理及 final release
+完成后手动操作；单次浏览器工具完成不会恢复用户输入。
 工具观察与用户工作区携带 `interaction_capabilities`，工具 schema 的动作全集不代表每个平台均支持。
 不支持错误明确禁止同动作重试；单项不支持不会关闭普通浏览能力。浏览器菜单同时说明常见限制。
 
@@ -154,13 +164,13 @@ Windows 的可选 `browser.upload` 只授权已观察的可见标准 file input�
 
 WebView2 通过 `DOM.setFileInputFiles` 交付，不伪造 input/change；空列表拒绝。Frame/document/Session/当前请求身份先于交付校验，新 iframe 首段脚本前安装 chooser 策略。未知路由、策略失败或失效观察不授予文件权。目录上传、File System Access、Agent 下载/沙箱发布及完整异常退出回收仍须独立交付与验收。
 
-用户 Open/Save 对话框由隔离 helper 通过有界私有协议拥有。只允许可见、活动、闲置标签申请；隐藏、导航和 Agent 入场撤销未确认选择，取消等待真实进程树退出。HTML `accept` 在 Windows 只提供安全解析的原生筛选提示并保留所有文件选项；macOS 公开 WK API 不提供相同筛选信息。筛选不成为文件授权或内容校验。
+用户 Open/Save 对话框由隔离 helper 通过有界私有协议拥有。只允许可见、活动、闲置标签申请；隐藏、导航和 Agent 取得此浏览器所有权时撤销未确认选择，取消等待真实进程树退出。HTML `accept` 在 Windows 只提供安全解析的原生筛选提示并保留所有文件选项；macOS 公开 WK API 不提供相同筛选信息。筛选不成为文件授权或内容校验。
 
-用户下载沿原生 DownloadStarting/下载 owner 执行；每标签有界，最多四个在途请求、一个待选 Save。Agent 入场后已获授权的传输可继续，新下载仍拒绝；关闭标签取消并等待原生终态，清理失败保留重试所有权。默认下载 UI 不得绕过输入锁。实际网络失败、重定向、权限和平台矩阵见 [持续验收](../validation/browser-platform.zh.md)，不从已有局部结果推导完成。
+用户下载沿原生 DownloadStarting/下载 owner 执行；每标签有界，最多四个在途请求、一个待选 Save。Agent 取得此浏览器所有权后，已获授权的传输可继续，占用期间拒绝新的用户下载；关闭标签取消并等待原生终态，清理失败保留重试所有权。默认下载 UI 不得绕过输入锁。实际网络失败、重定向、权限和平台矩阵见 [持续验收](../validation/browser-platform.zh.md)，不从已有局部结果推导完成。
 
 ## 独立网页搜索与渲染
 
-`web.research` 是独立可选能力，不授予 Browser 自动化，也不要求模型原生搜索。匿名 `headless_page` owner 使用临时 context、受限来源转发与精确进程/Profile 清理，不读取可见标签或登录态。搜索只把固定引擎域交给固定公网 DNS；任意内容渲染沿系统 DNS 的严格公网校验、连接 pinning 与 GET-only 转发，保留浏览器 CORS/Referer，不放行 Fake-IP 或私网。
+`web.research` 是独立可选能力，不授予 Browser 自动化，也不要求模型原生搜索。匿名 `headless_page` owner 使用临时 context、受限来源转发与精确进程/Profile 清理，不读取可见标签或登录态，也不取得 managed 浏览器输入锁。搜索只把固定引擎域交给固定公网 DNS；任意内容渲染沿系统 DNS 的严格公网校验、连接 pinning 与 GET-only 转发，保留浏览器 CORS/Referer，不放行 Fake-IP 或私网。
 
 Windows/macOS 从已知位置发现 Chrome 120+ 并冻结完整版本/文件指纹，实际创建页面前复核。发现不扫描任意 PATH、不执行或安装浏览器；无合格依赖明确 unavailable，不阻断桌面启动。macOS 指纹包含真实 framework、helper、Libraries 与 Resources，不只固定 launcher。
 
@@ -170,7 +180,7 @@ Knowledge 冻结 exact Provider/source，通过 Kernel 非 Agent operation 和�
 
 ## 系统浏览器与退役边界
 
-Attached Chrome 使用显式授权连接。非观察动作期间的临时 debugger 绘制 override 持续到 run settle 后撤销；不能在单次 wheel ACK 后立即释放。启停不确定时关闭自己的连接，不关闭用户浏览器或页面，不修改 Profile、启动参数或 OS 窗口。
+Attached Chrome 使用显式授权连接，不取得 managed 浏览器输入锁。非观察动作期间的临时 debugger 绘制 override 持续到 run settle 后撤销；不能在单次 wheel ACK 后立即释放。启停不确定时关闭自己的连接，不关闭用户浏览器或页面，不修改 Profile、启动参数或 OS 窗口。
 
 宿主通过明确 `BrowserRuntimeTarget` 及持久 owner/source/cron/execution 归属分类，不从缺少 Workspace 猜 Headless。普通聊天可不选 Browser；选择后缺少原生宿主明确失败。渠道、定时和执行步骤的后台自动化仍无现役 v2 owner，不能恢复旧 Hub/Lane、租约、私有引擎、共享 vault 或旧 Profile 导入。独立搜索与 Knowledge render 具有自己的 owner，不受此限制替代。
 

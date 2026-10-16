@@ -124,7 +124,6 @@ pub struct BrowserRunCoordinator {
 }
 
 impl BrowserRunCoordinator {
-    pub async fn has_active_run(&self)->bool {self.state.lock().await.active.is_some()}
     /// An explicit human close must never cancel or take ownership from a run.
     /// Keep the transition lock through the close, including native failure.
     pub async fn close_idle_runtime<T,F,Fut>(self: &Arc<Self>,close:F)->Result<T,RunAdmissionError>

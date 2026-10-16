@@ -327,9 +327,10 @@ fn browser_profile_uses_canonical_owner_and_session_identity() {
 }
 
 #[tokio::test]
-async fn user_api_opens_without_agent_browser_grants_and_rejects_foreign_owners_and_preparation_races() {
+async fn user_api_authorizes_sessions_and_locks_only_for_active_browser_runs() {
     use axum::{body::Body, http::{Request, StatusCode}};
-    use nomifun_agent_contracts::{AgentBindingValue, AgentPresetId, DigestHex, PresetRevisionRef, PrincipalRef, ResolvedSnapshotId, ResolvedSnapshotRef};
+    use nomifun_agent_contracts::{AgentBindingValue, AgentPresetId, DigestHex, PresetRevisionRef, PrincipalRef, ResolvedSnapshotId, ResolvedSnapshotRef,
+        SemanticSessionEventDraft, SessionEventAppend, SessionEventKind, SessionEventPayloadRef, StrictJsonValue};
     use tower::ServiceExt;
     let db = nomifun_db::init_database_memory().await.unwrap();
     let sessions = nomifun_conversation::CanonicalAgentSessionOwner::from_pool(db.pool().clone()).await.unwrap();
@@ -415,38 +416,110 @@ async fn user_api_opens_without_agent_browser_grants_and_rejects_foreign_owners_
     assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
     assert_eq!(factory.created.lock().unwrap().len(), 1);
 
-    sessions.start_turn(&owner, &session, "preparing-no-browser", serde_json::json!({"content":"ordinary chat"})).await.unwrap();
-    // The canonical Turn is active but its global native gate is not yet proven.
-    let preparing = router.clone().oneshot(request(owner_id, "POST", base.clone(), "{}")).await.unwrap();
-    assert_eq!(preparing.status(), StatusCode::CONFLICT);
-    let blocked = router.clone().oneshot(request(owner_id, "POST", format!("{base}/commands"), r#"{"command":"create","url":"https://example.test/"}"#)).await.unwrap();
-    assert_eq!(blocked.status(), StatusCode::CONFLICT);
-    let accepted_commands = factory.executed.lock().unwrap().len();
+    let active_turn = sessions.start_turn(&owner, &session, "active-turn", serde_json::json!({"content":"ordinary work followed by browser use"})).await.unwrap();
+    let snapshot = router.clone().oneshot(request(owner_id, "GET", base.clone(), "")).await.unwrap();
+    let snapshot: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(snapshot.into_body(), 64 * 1024).await.unwrap()).unwrap();
+    assert_eq!(snapshot["data"]["run"]["input_state"], "user_ready", "ordinary Agent work does not claim browser input");
+    let ensure = router.clone().oneshot(request(owner_id, "POST", base.clone(), "{}")).await.unwrap();
+    assert_eq!(ensure.status(), StatusCode::OK);
+    let create = router.clone().oneshot(request(owner_id, "POST", format!("{base}/commands"), r#"{"command":"create","url":"https://example.test/"}"#)).await.unwrap();
+    assert_eq!(create.status(), StatusCode::OK, "ordinary Agent work permits user browsing");
     for command in ["reload", "stop_loading", "pause_navigation", "resume_navigation"] {
         let guarded = serde_json::json!({ "command": command, "target": control_target, "expected_navigation_sequence": 11 }).to_string();
+        let accepted = router.clone().oneshot(request(owner_id, "POST", format!("{base}/commands"), &guarded)).await.unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK, "ordinary Agent work permits user {command}");
+    }
+    let close_tab = serde_json::json!({ "command": "close", "target": control_target }).to_string();
+    let closed_tab = router.clone().oneshot(request(owner_id, "POST", format!("{base}/commands"), &close_tab)).await.unwrap();
+    assert_eq!(closed_tab.status(), StatusCode::OK, "ordinary Agent work permits closing a browser tab");
+    assert!(matches!(factory.executed.lock().unwrap().last(), Some(BrowserTabCommand::Close { .. })));
+
+    let close_body = serde_json::json!({ "runtime_generation": generation }).to_string();
+    let foreign_close = router.clone().oneshot(request("0190f5fe-7c00-7a00-8000-000000000002", "DELETE", base.clone(), &close_body)).await.unwrap();
+    assert_eq!(foreign_close.status(), StatusCode::FORBIDDEN);
+    let closed = router.clone().oneshot(request(owner_id, "DELETE", base.clone(), &close_body)).await.unwrap();
+    assert_eq!(closed.status(), StatusCode::OK, "ordinary Agent work permits closing its idle browser workspace");
+    assert!(resources.get_for_agent_session(owner_id, session.as_ref()).await.unwrap().is_none());
+    let absent = router.clone().oneshot(request(owner_id, "GET", base.clone(), "")).await.unwrap();
+    let absent: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(absent.into_body(), 64 * 1024).await.unwrap()).unwrap();
+    assert_eq!(absent["data"]["run"]["input_state"], "user_ready");
+    assert!(absent["data"]["runtime"].is_null());
+    let reopened = router.clone().oneshot(request(owner_id, "POST", base.clone(), "{}")).await.unwrap();
+    assert_eq!(reopened.status(), StatusCode::OK, "a running ordinary Turn permits creating a fresh user workspace");
+    let user = resources.get_for_agent_session(owner_id, session.as_ref()).await.unwrap().unwrap();
+    let next_generation = user.runtime_generation();
+    assert!(next_generation > generation);
+    let stale_close = router.clone().oneshot(request(owner_id, "DELETE", base.clone(), &close_body)).await.unwrap();
+    assert_eq!(stale_close.status(), StatusCode::CONFLICT, "a delayed close cannot destroy a replacement browser");
+    let stale_close: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(stale_close.into_body(), 64 * 1024).await.unwrap()).unwrap();
+    assert_eq!(stale_close["code"], "BROWSER_STALE_TARGET");
+    assert_eq!(resources.get_for_agent_session(owner_id, session.as_ref()).await.unwrap().unwrap().runtime_generation(), next_generation);
+    let stale_close_all = serde_json::json!({ "command": "close_all", "runtime_generation": generation }).to_string();
+    let stale_close_all = router.clone().oneshot(request(owner_id, "POST", format!("{base}/commands"), &stale_close_all)).await.unwrap();
+    assert_eq!(stale_close_all.status(), StatusCode::CONFLICT, "a delayed close-all cannot target a replacement browser");
+    let stale_close_all: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(stale_close_all.into_body(), 64 * 1024).await.unwrap()).unwrap();
+    assert_eq!(stale_close_all["code"], "BROWSER_STALE_TARGET");
+    assert_eq!(factory.created.lock().unwrap().len(), 1, "stale commands must not initialize a replacement runtime");
+
+    // The same Turn now starts browser work. Its gate must survive all tool
+    // gaps and cleanup until the trusted owner has published the Turn terminal.
+    let guard = user.begin_run().await.unwrap();
+    let current_target = serde_json::json!({ "tab_id": "owned-control-tab", "runtime_generation": next_generation, "document_generation": 2 });
+    let accepted_commands = factory.executed.lock().unwrap().len();
+    for command in ["reload", "stop_loading", "pause_navigation", "resume_navigation"] {
+        let guarded = serde_json::json!({ "command": command, "target": current_target, "expected_navigation_sequence": 11 }).to_string();
         let blocked = router.clone().oneshot(request(owner_id, "POST", format!("{base}/commands"), &guarded)).await.unwrap();
-        assert_eq!(blocked.status(), StatusCode::CONFLICT, "canonical Turn preparation must reject user {command}");
+        assert_eq!(blocked.status(), StatusCode::CONFLICT, "a held browser input gate must reject user {command}");
         let body: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(blocked.into_body(), 64 * 1024).await.unwrap()).unwrap();
         assert_eq!(body["code"], "BROWSER_USER_INPUT_LOCKED");
     }
-    assert_eq!(factory.executed.lock().unwrap().len(), accepted_commands, "the canonical preparation gate rejects controls before native dispatch");
-    assert_eq!(factory.created.lock().unwrap().len(), 1, "preparation cannot create a user-ready native child");
-    let snapshot = router.clone().oneshot(request(owner_id, "GET", base.clone(), "")).await.unwrap();
-    let snapshot: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(snapshot.into_body(), 64 * 1024).await.unwrap()).unwrap();
-    assert_eq!(snapshot["data"]["run"]["input_state"], "agent_running");
-    let user = resources.get_for_agent_session(owner_id, session.as_ref()).await.unwrap().unwrap();
-    let guard = user.begin_run().await.unwrap();
-    for command in ["pause_navigation", "resume_navigation"] {
-        let guarded = serde_json::json!({ "command": command, "target": control_target, "expected_navigation_sequence": 11 }).to_string();
-        let blocked = router.clone().oneshot(request(owner_id, "POST", format!("{base}/commands"), &guarded)).await.unwrap();
-        assert_eq!(blocked.status(), StatusCode::CONFLICT, "a held native Agent input gate must reject user {command}");
-    }
-    assert_eq!(factory.executed.lock().unwrap().len(), accepted_commands);
-    let already_locked = router.oneshot(request(owner_id, "POST", base, "{}")).await.unwrap();
-    assert_eq!(already_locked.status(), StatusCode::OK, "a first pane may attach to a genuinely locked runtime during chat");
+    let close_tab = serde_json::json!({ "command": "close", "target": current_target }).to_string();
+    let blocked_tab = router.clone().oneshot(request(owner_id, "POST", format!("{base}/commands"), &close_tab)).await.unwrap();
+    assert_eq!(blocked_tab.status(), StatusCode::CONFLICT, "an active browser run protects its tab");
+    assert_eq!(factory.executed.lock().unwrap().len(), accepted_commands, "a real browser run rejects user input before native dispatch");
+    let close_body = serde_json::json!({ "runtime_generation": next_generation }).to_string();
+    let blocked_close = router.clone().oneshot(request(owner_id, "DELETE", base.clone(), &close_body)).await.unwrap();
+    assert_eq!(blocked_close.status(), StatusCode::CONFLICT, "an active browser run protects the workspace");
+    let blocked_close: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(blocked_close.into_body(), 64 * 1024).await.unwrap()).unwrap();
+    assert_eq!(blocked_close["code"], "BROWSER_USER_INPUT_LOCKED");
+    let locked = router.clone().oneshot(request(owner_id, "GET", base.clone(), "")).await.unwrap();
+    let locked: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(locked.into_body(), 64 * 1024).await.unwrap()).unwrap();
+    assert_eq!(locked["data"]["run"]["input_state"], "agent_running", "a browser Turn remains locked between tool invocations");
+    let already_locked = router.clone().oneshot(request(owner_id, "POST", base.clone(), "{}")).await.unwrap();
+    assert_eq!(already_locked.status(), StatusCode::OK, "a first pane may attach to a genuinely locked browser during chat");
     let locked: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(already_locked.into_body(), 64 * 1024).await.unwrap()).unwrap();
     assert_eq!(locked["data"]["run"]["input_state"], "agent_running");
+    let observation = sessions.get(&owner, &session).await.unwrap();
+    assert_eq!(observation.head.status, "running");
+    assert_eq!(observation.head.active_turn_id.as_deref(), Some(active_turn.operation_id.as_ref()));
+    user.settle_run(&guard).await.unwrap();
+    let settled = router.clone().oneshot(request(owner_id, "GET", base.clone(), "")).await.unwrap();
+    let settled: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(settled.into_body(), 64 * 1024).await.unwrap()).unwrap();
+    assert_eq!(settled["data"]["run"]["input_state"], "agent_running", "settled browser tools remain locked until the Turn terminal is published");
+    let blocked_close = router.clone().oneshot(request(owner_id, "DELETE", base.clone(), &close_body)).await.unwrap();
+    assert_eq!(blocked_close.status(), StatusCode::CONFLICT, "native cleanup alone cannot release the active Turn's browser");
+
+    let started = sessions.turn_receipt(&owner, &session, &active_turn.operation_id).await.unwrap().started_event.unwrap();
+    let store = nomifun_agent_session::AgentSessionStore::from_pool(db.pool().clone()).await.unwrap();
+    store.append_turn_terminal(&SessionEventAppend {
+        agent_session_id: session.clone(), event_id: "browser-route-turn-completed".into(), producer_id: "runtime_supervisor".into(),
+        idempotency_key: "browser-route-turn-completed".into(), semantic_event: SemanticSessionEventDraft {
+            kind: SessionEventKind("turn/completed".into()), kind_version: 1, correlation_id: active_turn.operation_id.as_ref().into(),
+            causation_event_id: Some(started.event_id), payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(serde_json::json!({"output":"done"}))),
+        },
+    }, &active_turn.operation_id).await.unwrap();
+    let observation = sessions.get(&owner, &session).await.unwrap();
+    assert_eq!(observation.head.status, "ready");
+    assert!(observation.head.active_turn_id.is_none());
+    let terminal = router.clone().oneshot(request(owner_id, "GET", base.clone(), "")).await.unwrap();
+    let terminal: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(terminal.into_body(), 64 * 1024).await.unwrap()).unwrap();
+    assert_eq!(terminal["data"]["run"]["input_state"], "agent_running", "the browser gate stays owned until the trusted Turn owner acknowledges finish");
     user.finish_run(&guard).await.unwrap();
+    let released = router.clone().oneshot(request(owner_id, "GET", base.clone(), "")).await.unwrap();
+    let released: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(released.into_body(), 64 * 1024).await.unwrap()).unwrap();
+    assert_eq!(released["data"]["run"]["input_state"], "user_ready", "the trusted owner releases input after the canonical Turn terminal and browser cleanup");
+    let closed = router.oneshot(request(owner_id, "DELETE", base, &close_body)).await.unwrap();
+    assert_eq!(closed.status(), StatusCode::OK, "a released browser may close after the Agent Turn finishes");
     resources.shutdown().await.unwrap();
     db.close().await;
 }
