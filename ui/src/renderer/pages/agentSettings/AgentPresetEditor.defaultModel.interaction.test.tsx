@@ -104,14 +104,14 @@ const catalog: AgentCatalogResponse = {
 
 afterEach(() => { cleanup(); mock.restore(); });
 
-function mount(defaultRoute: ChatRouteRecord | null = initialRoute, hasRevision = true) {
-  spyOn(taskModels, 'useModelsForTask').mockReturnValue({
-    groups: providers.map(provider => ({ provider, models: provider.models.map(model => model.model) })),
+function mount(defaultRoute: ChatRouteRecord | null = initialRoute, hasRevision = true, availableProviders = providers) {
+  const modelCatalog = spyOn(taskModels, 'useModelsForTask').mockReturnValue({
+    groups: availableProviders.map(provider => ({ provider, models: provider.models.map(model => model.model) })),
     isLoading: false,
     refresh: () => {},
   });
-  spyOn(modelProviders, 'useProvidersQuery').mockReturnValue({
-    data: providers, error: undefined, isLoading: false, isValidating: false, mutate: async () => providers,
+  const providerCatalog = spyOn(modelProviders, 'useProvidersQuery').mockReturnValue({
+    data: availableProviders, error: undefined, isLoading: false, isValidating: false, mutate: async () => availableProviders,
   });
   const presetDocument = createEmptyAgentPresetDocument();
   presetDocument.enabled_capabilities = [{ capability, action_allowlist: ['workspace.files/read'] }];
@@ -146,11 +146,18 @@ function mount(defaultRoute: ChatRouteRecord | null = initialRoute, hasRevision 
       busyAction={null} dirty={draft !== original} onDraftChange={next => { current = next; setDraft(next); }}
       onSave={() => { saved = structuredClone(draft); }} onStartConversation={() => {}} />;
   };
-  const view = render(<I18nextProvider i18n={i18n}>
+  const content = () => <I18nextProvider i18n={i18n}>
     <SWRConfig value={{ provider: () => new Map(), revalidateOnMount: false, fallback: { 'apps.mcp-sources': [] } }}>
       <MemoryRouter><Harness /></MemoryRouter>
     </SWRConfig>
-  </I18nextProvider>);
+  </I18nextProvider>;
+  const view = render(content());
+  const refreshCatalog = (next: IProvider[]) => {
+    modelCatalog.mockReturnValue({ groups: next.map(provider => ({ provider, models: provider.models.map(model => model.model) })),
+      isLoading: false, refresh: () => {} });
+    providerCatalog.mockReturnValue({ data: next, error: undefined, isLoading: false, isValidating: false, mutate: async () => next });
+    view.rerender(content());
+  };
   fireEvent.click(view.getByRole('tab', { name: en.workbench.settingsTab }));
   const picker = () => {
     const target = view.getByTestId('agent-default-model-picker');
@@ -178,7 +185,7 @@ function mount(defaultRoute: ChatRouteRecord | null = initialRoute, hasRevision 
     expect(saved).toBeDefined();
     return saved!;
   };
-  return { ...view, picker, choose, clear, save, state: () => current, original };
+  return { ...view, picker, choose, clear, save, refreshCatalog, state: () => current, original };
 }
 
 test('selects a configured model outside saved failovers and saves the host record on the same official Agent', async () => {
@@ -224,6 +231,34 @@ test('an Agent with no default model can choose any configured chat model and sa
   await waitFor(() => expect(view.state().document.chat_route_records[AGENT_CHAT_MODEL_TASK]).toEqual(resolved));
   expect(resolve).toHaveBeenCalledWith({ preset_id: presetId, model: { provider_id: providerAId, model: 'first-choice' } });
   expect(view.save().document.chat_route_records[AGENT_CHAT_MODEL_TASK]).toEqual(resolved);
+});
+
+test('an empty Agent default stays empty when the model catalog loads, reorders or disappears', () => {
+  const resolve = spyOn(agentPlatform.resolveChatModelRoute, 'invoke');
+  const view = mount(null, false, []);
+  for (const next of [providers, [...providers].reverse(), [], providers]) {
+    view.refreshCatalog(next);
+    expect(view.picker().textContent).toContain(en.fields.defaultModelPlaceholder);
+    expect(view.picker().textContent).not.toContain('First provider /');
+    expect(view.picker().textContent).not.toContain('Second provider /');
+    expect(view.state().document.chat_route_records[AGENT_CHAT_MODEL_TASK]).toBeUndefined();
+    expect(view.state().document.model_route_refs[AGENT_CHAT_MODEL_TASK]).toBeUndefined();
+  }
+  const saved = view.save();
+  expect(saved.document.chat_route_records[AGENT_CHAT_MODEL_TASK]).toBeUndefined();
+  expect(saved.document.model_route_refs).toEqual({ unrelated_task: 'unrelated-route' });
+  expect(resolve).not.toHaveBeenCalled();
+});
+
+test('catalog removal never replaces an explicit Agent default with another available model', () => {
+  const resolve = spyOn(agentPlatform.resolveChatModelRoute, 'invoke');
+  const view = mount();
+  view.refreshCatalog([providers[1]]);
+  expect(view.state().document.chat_route_records[AGENT_CHAT_MODEL_TASK]).toEqual(initialRoute);
+  expect(view.picker().textContent).not.toContain('Second provider / Next model');
+  fireEvent.change(view.getByRole('textbox', { name: en.fields.persona }), { target: { value: 'Keep this explicit model' } });
+  expect(view.save().document.chat_route_records[AGENT_CHAT_MODEL_TASK]).toEqual(initialRoute);
+  expect(resolve).not.toHaveBeenCalled();
 });
 
 test('failed resolution preserves the previous default and shows a product error', async () => {

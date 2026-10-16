@@ -551,8 +551,8 @@ impl CompanionProfileConfig {
     /// ONE list so [`Self::load`], [`Self::save`], the startup audit
     /// (`CompanionRegistry::validate_provider_references_under_guard`) and the
     /// Provider-deletion usage scan (`CompanionService::providers_in_use`) can
-    /// never disagree about which slots are hard references. Adding a slot means
-    /// editing exactly this function.
+    /// never disagree about which slots are hard references. New slots must also
+    /// participate in [`Self::detach_provider_model_references`].
     pub fn provider_model_slots(&self) -> Vec<(&'static str, ProviderWithModel)> {
         let mut slots = Vec::new();
         for (label, model) in [
@@ -571,6 +571,46 @@ impl CompanionProfileConfig {
             slots.push(("tts", tts.as_provider_model()));
         }
         slots
+    }
+
+    /// Clear mutable selections for a removed catalog entry without choosing a
+    /// replacement or changing any historical/session binding.
+    pub(crate) fn detach_provider_model_references(
+        &mut self,
+        provider_id: &str,
+        model: Option<&str>,
+    ) -> usize {
+        let matches = |candidate_provider: &str, candidate_model: &str| {
+            candidate_provider == provider_id
+                && model.is_none_or(|model| candidate_model == model)
+        };
+        let mut detached = 0;
+        for slot in [
+            &mut self.model,
+            &mut self.learn.model,
+            &mut self.evolve.model,
+            &mut self.fallback_model,
+            &mut self.vision_model,
+            &mut self.voice.asr,
+        ] {
+            if slot
+                .as_ref()
+                .is_some_and(|selection| matches(&selection.provider_id, &selection.model))
+            {
+                *slot = None;
+                detached += 1;
+            }
+        }
+        if self
+            .voice
+            .tts
+            .as_ref()
+            .is_some_and(|selection| matches(&selection.provider_id, &selection.model))
+        {
+            self.voice.tts = None;
+            detached += 1;
+        }
+        detached
     }
 
     pub fn config_path(dir: &Path) -> PathBuf {

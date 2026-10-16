@@ -48,6 +48,7 @@ pub trait IClientPreferenceRepository: Send + Sync {
 pub(crate) struct NormalizedProviderPreference {
     pub value: String,
     pub provider_ids: Vec<String>,
+    pub model_selections: Vec<(String, String)>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -190,6 +191,7 @@ fn parse_knowledge_retrieval_preference(
         })
         .to_string(),
         provider_ids,
+        model_selections: Vec::new(),
     })
 }
 
@@ -396,6 +398,7 @@ fn parse_json_provider_preference(
     Ok(NormalizedProviderPreference {
         value: canonical_value.unwrap_or_else(|| parsed.to_string()),
         provider_ids,
+        model_selections: Vec::new(),
     })
 }
 
@@ -407,16 +410,49 @@ pub(crate) fn normalize_provider_preference(
         return Ok(NormalizedProviderPreference {
             value: value.to_owned(),
             provider_ids: Vec::new(),
+            model_selections: Vec::new(),
         });
     };
 
-    parse_json_provider_preference(key, value, kind)
+    let mut normalized = parse_json_provider_preference(key, value, kind)?;
+    let parsed = parse_json(key, &normalized.value)?;
+    let selections: Vec<&serde_json::Value> = match kind {
+        ProviderPreferenceKind::ModelFailover => parsed.get("queue").and_then(|value| value.as_array())
+            .map(|items| items.iter().collect()).unwrap_or_default(),
+        ProviderPreferenceKind::CollaborationModels => parsed.as_array()
+            .map(|items| items.iter().collect()).unwrap_or_default(),
+        ProviderPreferenceKind::KnowledgeRetrieval => ["embedding", "rerank"].iter()
+            .filter_map(|field| parsed.get(*field))
+            .filter(|stage| stage.get("mode").and_then(|value| value.as_str()) == Some("remote"))
+            .collect(),
+        ProviderPreferenceKind::RequiredModelObject | ProviderPreferenceKind::CanonicalModelObject
+        | ProviderPreferenceKind::OptionalObjectProviderId => vec![&parsed],
+    };
+    // Only registered selection locations have model-parent semantics. Do not
+    // interpret similarly named fields in arbitrary preference/vendor JSON.
+    normalized.model_selections = selections.into_iter().filter_map(|selection| {
+        let provider_id = selection.get("provider_id")?.as_str()?;
+        let model = selection.get("model")?.as_str()?;
+        (!model.is_empty() && model.trim() == model).then(|| (provider_id.to_owned(), model.to_owned()))
+    }).collect();
+    normalized.model_selections.sort();
+    normalized.model_selections.dedup();
+    Ok(normalized)
 }
 
 pub(crate) fn provider_preference_delete_action(
     key: &str,
     value: &str,
     provider_id: &str,
+) -> Result<ProviderPreferenceDeleteAction, DbError> {
+    provider_model_preference_delete_action(key,value,provider_id,None)
+}
+
+pub(crate) fn provider_model_preference_delete_action(
+    key: &str,
+    value: &str,
+    provider_id: &str,
+    model: Option<&str>,
 ) -> Result<ProviderPreferenceDeleteAction, DbError> {
     let Some(kind) = provider_preference_kind(key) else {
         return Ok(ProviderPreferenceDeleteAction::Keep);
@@ -428,6 +464,10 @@ pub(crate) fn provider_preference_delete_action(
     }
 
     let mut parsed = parse_json(key, &normalized.value)?;
+    let matches = |item: &serde_json::Value| {
+        item.get("provider_id").and_then(serde_json::Value::as_str)==Some(provider_id)
+            && model.is_none_or(|model| item.get("model").and_then(serde_json::Value::as_str)==Some(model))
+    };
     match kind {
         ProviderPreferenceKind::ModelFailover => {
             let queue = parsed
@@ -435,27 +475,24 @@ pub(crate) fn provider_preference_delete_action(
                 .and_then(|object| object.get_mut("queue"))
                 .and_then(serde_json::Value::as_array_mut)
                 .expect("validated model failover queue");
-            queue.retain(|item| {
-                item.get("provider_id").and_then(serde_json::Value::as_str)
-                    != Some(provider_id)
-            });
+            if !queue.iter().any(&matches) {return Ok(ProviderPreferenceDeleteAction::Keep);}
+            queue.retain(|item| !matches(item));
             Ok(ProviderPreferenceDeleteAction::Update(parsed.to_string()))
         }
         ProviderPreferenceKind::CollaborationModels => {
             let models = parsed
                 .as_array_mut()
                 .expect("validated collaboration model array");
-            models.retain(|item| {
-                item.get("provider_id").and_then(serde_json::Value::as_str)
-                    != Some(provider_id)
-            });
+            if !models.iter().any(&matches) {return Ok(ProviderPreferenceDeleteAction::Keep);}
+            models.retain(|item| !matches(item));
             Ok(ProviderPreferenceDeleteAction::Update(parsed.to_string()))
         }
         ProviderPreferenceKind::RequiredModelObject
         | ProviderPreferenceKind::CanonicalModelObject => {
-            Ok(ProviderPreferenceDeleteAction::Delete)
+            Ok(if matches(&parsed) {ProviderPreferenceDeleteAction::Delete} else {ProviderPreferenceDeleteAction::Keep})
         }
         ProviderPreferenceKind::OptionalObjectProviderId => {
+            if !matches(&parsed) {return Ok(ProviderPreferenceDeleteAction::Keep);}
             parsed
                 .as_object_mut()
                 .expect("validated optional Provider preference")
@@ -463,6 +500,7 @@ pub(crate) fn provider_preference_delete_action(
             Ok(ProviderPreferenceDeleteAction::Update(parsed.to_string()))
         }
         ProviderPreferenceKind::KnowledgeRetrieval => {
+            let mut changed = false;
             let object = parsed
                 .as_object_mut()
                 .expect("validated knowledge retrieval preference");
@@ -470,15 +508,12 @@ pub(crate) fn provider_preference_delete_action(
                 let stage_value = object
                     .get_mut(stage)
                     .expect("normalized retrieval stage");
-                if stage_value
-                    .get("provider_id")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(provider_id)
-                {
+                if matches(stage_value) {
                     *stage_value = serde_json::json!({"mode": "local"});
+                    changed = true;
                 }
             }
-            Ok(ProviderPreferenceDeleteAction::Update(parsed.to_string()))
+            Ok(if changed {ProviderPreferenceDeleteAction::Update(parsed.to_string())} else {ProviderPreferenceDeleteAction::Keep})
         }
     }
 }

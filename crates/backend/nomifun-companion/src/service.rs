@@ -8,7 +8,7 @@ use std::sync::Arc;
 use nomifun_common::{
     AppError, CompanionId, ProviderId, ProviderUsage, ProviderUsageFeature, SharedProviderLifecycleBarrier,
 };
-use nomifun_db::IProviderRepository;
+use nomifun_db::{IProviderModelRepository, IProviderRepository};
 use serde::Serialize;
 use tokio::sync::{Mutex, RwLock};
 
@@ -253,6 +253,7 @@ impl CompanionService {
             skill_paths,
             None,
             None,
+            None,
         )
         .await
     }
@@ -264,6 +265,7 @@ impl CompanionService {
         completer: Arc<dyn CompanionCompleter>,
         skill_paths: Arc<SkillPaths>,
         provider_repo: Option<Arc<dyn IProviderRepository>>,
+        provider_model_repo: Option<Arc<dyn IProviderModelRepository>>,
         provider_lifecycle: Option<SharedProviderLifecycleBarrier>,
     ) -> Result<Arc<Self>, AppError> {
         let owner_id = owner_id.trim();
@@ -287,6 +289,7 @@ impl CompanionService {
             companions_dir,
             shared_dir.clone(),
             provider_repo.clone(),
+            provider_model_repo,
             provider_lifecycle.clone(),
         )?);
         // Boot migration, part 1 of 2: every existing companion inherits the
@@ -536,6 +539,41 @@ impl CompanionService {
             }
         }
         out
+    }
+
+    /// Detach mutable model selections while the deletion coordinator holds
+    /// the shared Provider lifecycle write guard. `None` removes the Provider's
+    /// references; `Some` removes only that exact model. Existing conversations
+    /// and their frozen model bindings are deliberately left untouched.
+    pub async fn detach_model_references_under_provider_guard(
+        &self,
+        provider_id: &str,
+        model: Option<&str>,
+    ) -> Result<usize, AppError> {
+        let provider_id = ProviderId::try_from(provider_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid provider id: {error}")))?;
+        if model.is_some_and(|model| model.trim().is_empty()) {
+            return Err(AppError::BadRequest("model must not be empty".into()));
+        }
+        let mut changed = 0;
+        for profile in self.registry.list().await {
+            if let Some(detached) = self
+                .registry
+                .detach_model_references_under_guard(
+                    &profile.companion_id,
+                    provider_id.as_str(),
+                    model,
+                )
+                .await?
+            {
+                // Emit each successful save immediately: if another profile's
+                // save fails, already persisted changes still reach subscribers.
+                self.emitter
+                    .emit_companion_updated(&detached.companion_id, &detached);
+                changed += 1;
+            }
+        }
+        Ok(changed)
     }
 
     /// Create a companion. The first companion ever created automatically becomes the
@@ -2359,6 +2397,189 @@ mod tests {
         for malformed in ["", MALFORMED_PROVIDER_ID] {
             assert!(svc.providers_in_use(malformed).await.is_empty());
         }
+    }
+
+    async fn model_detachment_service(
+        data_dir: &std::path::Path,
+    ) -> (
+        Arc<CompanionService>,
+        SharedProviderLifecycleBarrier,
+        Arc<BroadcastEventBus>,
+    ) {
+        let barrier = Arc::new(nomifun_common::ProviderLifecycleBarrier::new());
+        let bus = Arc::new(BroadcastEventBus::new(32));
+        let svc = CompanionService::start_with_provider_lifecycle(
+            data_dir,
+            Arc::clone(&bus),
+            "owner-a",
+            Arc::new(NoopCompleter),
+            Arc::new(nomifun_skill_library::skill_service::resolve_skill_paths(data_dir, data_dir)),
+            None,
+            None,
+            Some(Arc::clone(&barrier)),
+        )
+        .await
+        .unwrap();
+        (svc, barrier, bus)
+    }
+
+    #[tokio::test]
+    async fn model_detachment_clears_all_seven_slots_under_the_provider_write_guard() {
+        struct ModelChangeHook(std::sync::atomic::AtomicUsize);
+        #[async_trait::async_trait]
+        impl CompanionCleanupHook for ModelChangeHook {
+            async fn on_companion_deleted(&self, _: &str) {}
+            async fn on_companion_model_changed(
+                &self,
+                _: &str,
+                _: Option<&nomifun_common::ProviderWithModel>,
+            ) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, barrier, bus) = model_detachment_service(dir.path()).await;
+        let selected = svc.create_companion("Selected", "ink").await.unwrap();
+        let untouched = svc.create_companion("Untouched", "boo").await.unwrap();
+        let provider_id = provider_fixture(20);
+        let model = serde_json::json!({"provider_id": provider_id, "model": "removed"});
+        let before = svc.patch_companion(&selected.companion_id, serde_json::json!({
+            "model": model, "learn": {"model": model}, "evolve": {"model": model},
+            "fallback_model": model, "vision_model": model,
+            "voice": {"asr": model, "tts": {
+                "provider_id": provider_id, "model": "removed", "voice": "selected-voice"
+            }},
+            "persona": {"custom": "Preserve this preference"}, "order_index": 7
+        })).await.unwrap();
+        assert_eq!(before.provider_model_slots().len(), 7);
+        let hook = Arc::new(ModelChangeHook(std::sync::atomic::AtomicUsize::new(0)));
+        svc.set_cleanup_hooks(vec![hook.clone() as Arc<dyn CompanionCleanupHook>]);
+
+        let conversation = conversation_fixture(20);
+        svc.store.insert_companion_thread(&conversation, &selected.companion_id, "Existing").await.unwrap();
+        crate::companion::set_active_thread_ptr(&svc.store, &selected.companion_id, Some(&conversation)).await.unwrap();
+        let window = svc.store.ensure_open_window(&selected.companion_id, &conversation, 1).await.unwrap();
+        svc.store.close_window(&window.session_window_id, "archived", Some("Existing digest"), None, 5).await.unwrap();
+        let archived_before = serde_json::to_value(svc.store.list_digests(&selected.companion_id, 10).await.unwrap()).unwrap();
+        let shared_before = svc.get_config().await;
+        let mut events = bus.subscribe_user();
+
+        let _write_guard = barrier.write().await;
+        let changed = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            svc.detach_model_references_under_provider_guard(&provider_id, None),
+        ).await.expect("detachment must not reacquire the lifecycle read lock").unwrap();
+        assert_eq!(changed, 1);
+        let actual = svc.get_companion(&selected.companion_id).await.unwrap();
+        let mut expected = before;
+        expected.model = None;
+        expected.learn.model = None;
+        expected.evolve.model = None;
+        expected.fallback_model = None;
+        expected.vision_model = None;
+        expected.voice.asr = None;
+        expected.voice.tts = None;
+        assert_eq!(actual, expected);
+        assert_eq!(svc.get_companion(&untouched.companion_id).await.unwrap(), untouched);
+        let profile_dir = dir.path().join(crate::COMPANION_COMPANIONS_REL_DIR).join(&selected.companion_id);
+        assert_eq!(CompanionProfileConfig::load(&profile_dir).unwrap().unwrap(), expected);
+        let event = events.try_recv().unwrap();
+        assert_eq!(event.user_id, "owner-a");
+        assert_eq!(event.event.name, "companion.config-updated");
+        assert_eq!(event.event.data["scope"], selected.companion_id);
+        assert!(event.event.data["model"].is_null());
+        assert!(matches!(events.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
+        assert_eq!(svc.detach_model_references_under_provider_guard(&provider_id, None).await.unwrap(), 0);
+        assert!(matches!(events.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
+
+        assert_eq!(hook.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(svc.get_config().await, shared_before);
+        assert_eq!(svc.store.thread_companion_id(&conversation).await.unwrap().as_deref(), Some(selected.companion_id.as_str()));
+        assert_eq!(crate::companion::active_thread_ptr(&svc.store, &selected.companion_id).await.unwrap().as_deref(), Some(conversation.as_str()));
+        assert_eq!(serde_json::to_value(svc.store.list_digests(&selected.companion_id, 10).await.unwrap()).unwrap(), archived_before);
+    }
+
+    #[tokio::test]
+    async fn model_detachment_matches_the_exact_provider_and_model_without_replacing_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, barrier, _) = model_detachment_service(dir.path()).await;
+        let profile = svc.create_companion("Exact", "ink").await.unwrap();
+        let provider_id = provider_fixture(21);
+        let other_provider = provider_fixture(22);
+        let before = svc.patch_companion(&profile.companion_id, serde_json::json!({
+            "model": {"provider_id": provider_id, "model": "removed"},
+            "learn": {"model": {"provider_id": provider_id, "model": "sibling"}},
+            "evolve": {"model": {"provider_id": other_provider, "model": "removed"}},
+            "fallback_model": {"provider_id": provider_id, "model": "removed-preview"},
+            "vision_model": {"provider_id": provider_id, "model": "Removed"},
+            "voice": {
+                "asr": {"provider_id": provider_id, "model": "removed"},
+                "tts": {"provider_id": provider_id, "model": "removed", "voice": "custom"}
+            }
+        })).await.unwrap();
+        let _write_guard = barrier.write().await;
+        assert_eq!(svc.detach_model_references_under_provider_guard(&provider_id, Some("removed")).await.unwrap(), 1);
+        let mut expected = before;
+        expected.model = None;
+        expected.voice.asr = None;
+        expected.voice.tts = None;
+        assert_eq!(svc.get_companion(&profile.companion_id).await.unwrap(), expected);
+        assert_eq!(svc.detach_model_references_under_provider_guard(&provider_id, Some("removed")).await.unwrap(), 0);
+        assert_eq!(svc.detach_model_references_under_provider_guard(&provider_id, None).await.unwrap(), 1);
+        expected.learn.model = None;
+        expected.fallback_model = None;
+        expected.vision_model = None;
+        assert_eq!(svc.get_companion(&profile.companion_id).await.unwrap(), expected);
+        assert_eq!(expected.evolve.model.unwrap().provider_id, other_provider);
+    }
+
+    #[tokio::test]
+    async fn model_detachment_failed_save_preserves_all_selections_and_emits_no_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, barrier, bus) = model_detachment_service(dir.path()).await;
+        let profile = svc.create_companion("Fail closed", "ink").await.unwrap();
+        let provider_id = provider_fixture(23);
+        let before = svc.patch_companion(&profile.companion_id, serde_json::json!({
+            "model": {"provider_id": provider_id, "model": "removed"},
+            "fallback_model": {"provider_id": provider_id, "model": "sibling"},
+            "voice": {"tts": {"provider_id": provider_id, "model": "voice", "voice": "keep"}}
+        })).await.unwrap();
+        let profile_dir = dir.path().join(crate::COMPANION_COMPANIONS_REL_DIR).join(&profile.companion_id);
+        let config_path = CompanionProfileConfig::config_path(&profile_dir);
+        let saved = std::fs::read(&config_path).unwrap();
+        std::fs::remove_file(&config_path).unwrap();
+        std::fs::create_dir(&config_path).unwrap();
+        let mut events = bus.subscribe_user();
+        let _write_guard = barrier.write().await;
+        let error = svc.detach_model_references_under_provider_guard(&provider_id, Some("removed")).await.unwrap_err();
+        assert!(error.to_string().contains("save companion profile"), "{error}");
+        assert_eq!(svc.get_companion(&profile.companion_id).await.unwrap(), before);
+        assert!(config_path.is_dir());
+        assert!(matches!(events.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
+
+        std::fs::remove_dir(&config_path).unwrap();
+        std::fs::write(&config_path, saved).unwrap();
+        assert_eq!(CompanionProfileConfig::load(&profile_dir).unwrap().unwrap(), before);
+        assert_eq!(svc.detach_model_references_under_provider_guard(&provider_id, Some("removed")).await.unwrap(), 1);
+        let mut expected = before;
+        expected.model = None;
+        assert_eq!(CompanionProfileConfig::load(&profile_dir).unwrap().unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn model_detachment_rejects_invalid_identifiers_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, barrier, bus) = model_detachment_service(dir.path()).await;
+        let profile = svc.create_companion("Keep", "ink").await.unwrap();
+        let mut events = bus.subscribe_user();
+        let provider_id = provider_fixture(24);
+        let _write_guard = barrier.write().await;
+        for (provider, model) in [(MALFORMED_PROVIDER_ID, None), (&provider_id, Some("  "))] {
+            assert!(matches!(svc.detach_model_references_under_provider_guard(provider, model).await, Err(AppError::BadRequest(_))));
+        }
+        assert_eq!(svc.get_companion(&profile.companion_id).await.unwrap(), profile);
+        assert!(matches!(events.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
     }
 
     #[tokio::test]

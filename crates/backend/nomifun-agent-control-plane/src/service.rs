@@ -33,6 +33,10 @@ use crate::wire::{document_payload, payload_document, wire_cast};
 
 const CHAT_MODEL_TASK: &str = nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT;
 
+#[path = "model_detachment.rs"]
+mod model_detachment;
+pub use model_detachment::PreparedAgentModelDetachment;
+
 // This small product workflow is authored into new immutable AppDeveloper
 // Revisions. The detailed platform guide remains an on-demand tool resource.
 const APP_DEVELOPMENT_INSTRUCTIONS: &str = "You are NomiFun's built-in application developer. Treat a request to create, import or change an application as completing the usable application in this workspace, including its application record and preview, not just writing source files. At the start of application work, discover app.hosting/current and app.hosting/guide with ToolSearch, then call current_app and read_app_guide. When current_app returns an application, keep its exact app_id and edit its existing managed workspace; do not import a second copy or create another application. Infer a useful application name, short description and appropriate tags from the user's request, and use update_app to keep the actual application metadata and ordinary runtime settings aligned with the files you create. Read existing project scripts and configuration; preserve user data and existing explicit settings unless the requested change requires modifying them. Use update_app with detect_settings:true to recognize ordinary supported project commands, then inspect the returned settings and fill any missing custom commands or real web_url yourself. Settings that do not apply may remain null; never invent install or build commands. Once the files and configuration are ready, call preview_app or rebuild_app on the same application through the hosting owner; do not start a separate unmanaged web server. Verify the returned state, actual HTTP response and relevant business behavior using already-authorized tools, and use the same owner to repair and restart after changes. Clearly distinguish verified behavior from checks unavailable with your granted tools. A generated file, a running process, or an empty web_url does not prove that an embedded preview works. Finish with the application's actual name, preview result and any real remaining failure; never claim preview success from prose alone. For ordinary questions or an explicit request to inspect only, do not modify or start an application.";
@@ -491,24 +495,11 @@ impl AgentControlPlane {
             return Err(ControlPlaneError::canonical("MODEL_ROUTE_RECORD_INVALID", axum::http::StatusCode::BAD_REQUEST,
                 "select a model or provide an explicit route, not both"));
         }
-        if uses_default_route
-            && (request.model.is_some()
-                || !nomifun_agent_contracts::is_direct_creation_agent(seed.enabled_capabilities.iter().map(|selection| selection.capability.id.as_ref())))
-            && let Some(record) =
-                match request.model.as_ref() {
-                    Some(model) => Some(
-                        self.resolve_selected_chat_route(owner, model, &required_chat_features)
-                            .await?,
-                    ),
-                    None => {
-                        self.resolve_default_chat_route_for_features(
-                            owner,
-                            &required_chat_features,
-                        )
-                        .await?
-                    }
-                }
+        // Creating an authored Agent does not authorize adopting the current
+        // installation model. Only an explicit model/route enters its defaults.
+        if uses_default_route && let Some(model) = request.model.as_ref()
         {
+            let record = self.resolve_selected_chat_route(owner, model, &required_chat_features).await?;
             model_route_refs.insert(
                 CHAT_MODEL_TASK.to_owned(),
                 record.primary.model_route_id.as_ref().to_owned(),
@@ -626,9 +617,21 @@ impl AgentControlPlane {
                 } else {
                     draft.document = self.materialize_default_chat_route(owner, draft.document).await?;
                 }
-                self.save_revision(owner, preset.preset.preset_id.as_ref(), SaveAgentPresetRevisionRequest {
-                    expected_current_revision: None, draft, reason: Some("Initial official Agent Revision".into()),
-                }).await?;
+                // A first launch is not an authoring save. Its selected or
+                // inherited execution model belongs only to the existing
+                // hidden Session configuration, never the official default.
+                let payload = document_payload(&draft.document)?;
+                for existing in self.store.list_presets(owner).await? {
+                    if !existing.session_only || owned_official_key(&existing) != Some(key)
+                        || existing.preset.description != preset.preset.description { continue; }
+                    let Some((revision, _)) = self.reusable_session_configuration(
+                        &existing, &payload, !has_explicit_route,
+                    ).await else { continue; };
+                    self.refresh_session_configuration(owner, &existing, &revision, Some(key)).await?;
+                    return self.editor(owner, existing.preset.preset_id.as_ref(), None).await;
+                }
+                return self.create_configuration_with_payload(owner, AgentPresetId::from(Uuid::now_v7().to_string()),
+                    key.as_str().to_owned(), preset.preset.description, payload, Some(key), true, None).await;
             }
             // Explicit route objects are launch-local overrides, like model
             // selections. They never overwrite a saved official configuration.
@@ -3001,6 +3004,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catalog_detachment_plans_a_new_empty_default_without_mutating_frozen_artifacts() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control = test_control_plane(store.clone());
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let route = media_chat_route("delete-model");
+        let mut document = empty_document();
+        document.instructions = "Keep these authorial instructions".into();
+        document.model_route_refs.insert(CHAT_MODEL_TASK.into(),route.primary.model_route_id.as_ref().into());
+        document.chat_route_records.insert(CHAT_MODEL_TASK.into(),serde_json::to_value(&route).unwrap());
+        let created = control.create_preset(&owner, CreateAgentPresetRequest {
+            display_name:"My explicit Agent".into(), description:Some("Keep this description".into()),
+            document:Some(document), fork_from_revision:None,
+        }).await.unwrap();
+        let reference: PresetRevisionRef = wire_cast(created.preset.current_stable_revision.as_ref().unwrap()).unwrap();
+        let original = store.get_revision(&reference).await.unwrap().unwrap();
+        let snapshot = store.get_snapshot(&reference).await.unwrap().unwrap();
+        assert!(control.plan_catalog_model_detachment(&owner,&route.primary.provider_id,Some("other-model")).await.unwrap().is_empty());
+        assert!(control.plan_catalog_model_detachment(&UserId::from("other-owner"),&route.primary.provider_id,None).await.unwrap().is_empty());
+        let planned = control.plan_catalog_model_detachment(&owner,&route.primary.provider_id,Some("delete-model")).await.unwrap();
+        assert_eq!(planned.len(),1);
+        let next = &planned[0];
+        assert_eq!(next.expected_current, reference);
+        assert!(next.revision.payload.chat_route_records.is_empty());
+        assert!(next.revision.payload.model_route_refs.is_empty());
+        assert_eq!(next.revision.payload.instructions, original.payload.instructions);
+        assert!(next.snapshot.content.chat_route_identity.is_none());
+        assert_eq!(store.get_revision(&reference).await.unwrap().unwrap(), original);
+        assert_eq!(store.get_snapshot(&reference).await.unwrap().unwrap(), snapshot);
+        assert_eq!(control.editor(&owner,&created.preset.preset_id,None).await.unwrap().draft.document.chat_route_records.len(),1,"planning is read-only");
+        let mut tampered = next.revision.clone();
+        tampered.payload.instructions = "Unrelated overwrite".into();
+        tampered.reference.revision_digest = tampered.revision_digest().unwrap();
+        assert!(nomifun_agent_contracts::validate_catalog_model_detachment(&original,&snapshot,&tampered,&route.primary.provider_id,None).is_err());
+        store.append_revision(Some(&reference),next.revision.clone(),next.snapshot.clone(),created.preset.display_name.clone(),created.preset.description.clone()).await.unwrap();
+        assert!(control.editor(&owner,&created.preset.preset_id,None).await.unwrap().draft.document.chat_route_records.is_empty());
+        assert_eq!(store.get_revision(&reference).await.unwrap().unwrap(),original);
+        assert_eq!(store.get_snapshot(&reference).await.unwrap().unwrap(),snapshot);
+        assert!(control.plan_catalog_model_detachment(&owner,&route.primary.provider_id,None).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn catalog_detachment_prunes_only_matching_failovers_and_never_promotes_a_replacement() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control = test_control_plane(store);
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let mut route = media_chat_route("keep-primary");
+        let mut fallback = route.primary.clone();
+        fallback.model = "delete-fallback".into();
+        fallback.model_route_id = "fallback-route".into();
+        route.failovers.push(fallback);
+        let mut document = empty_document();
+        document.model_route_refs.insert(CHAT_MODEL_TASK.into(),route.primary.model_route_id.as_ref().into());
+        document.chat_route_records.insert(CHAT_MODEL_TASK.into(),serde_json::to_value(&route).unwrap());
+        control.create_preset(&owner, CreateAgentPresetRequest {display_name:"Keep primary".into(),description:None,document:Some(document),fork_from_revision:None}).await.unwrap();
+        let planned = control.plan_catalog_model_detachment(&owner,&route.primary.provider_id,Some("delete-fallback")).await.unwrap();
+        assert_eq!(planned.len(),1);
+        let retained = &planned[0].revision.payload.chat_route_records[CHAT_MODEL_TASK];
+        assert_eq!(retained.primary,route.primary);
+        assert!(retained.failovers.is_empty());
+        let removed = control.plan_catalog_model_detachment(&owner,&route.primary.provider_id,Some("keep-primary")).await.unwrap();
+        assert!(removed[0].revision.payload.chat_route_records.is_empty(),"a remaining failover never becomes an implicit default");
+    }
+
+    #[tokio::test]
     async fn configured_creation_without_a_model_saves_an_immutable_preset() {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let control_plane = test_control_plane(store.clone());
@@ -3340,6 +3407,101 @@ mod tests {
         route.primary.provider_id = "0190f5fe-7c00-7a00-8000-000000000011".into();
         route.primary.model = model.into();
         route
+    }
+
+    /// Authoring scenarios explicitly publish the editable official identity;
+    /// preparing an execution configuration is no longer an authoring save.
+    async fn publish_official_fixture(
+        control: &AgentControlPlane, owner: &UserId, key: OfficialPresetKey,
+        model: Option<&nomifun_api_types::AgentChatModelSelectionDto>,
+    ) -> AgentPresetEditorResponse {
+        let preset = control.ensure_official_preset(owner, key).await.unwrap();
+        let id = preset.preset.preset_id.as_ref();
+        let mut draft = control.editor(owner, id, None).await.unwrap().draft;
+        if let Some(model) = model {
+            let route = control.preset_chat_model_route(owner, id, model).await.unwrap();
+            draft.document.model_route_refs.insert(CHAT_MODEL_TASK.into(), route.primary.model_route_id.as_ref().into());
+            draft.document.chat_route_records.insert(CHAT_MODEL_TASK.into(), serde_json::to_value(route).unwrap());
+        }
+        control.save_revision(owner, id, SaveAgentPresetRevisionRequest {
+            expected_current_revision: draft.current_revision.clone(), draft,
+            reason: Some("Explicit authoring fixture".into()),
+        }).await.unwrap();
+        control.editor(owner, id, None).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn template_authoring_keeps_an_empty_model_default_until_explicit_selection() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let route = media_chat_route("installation-model");
+        let control = test_control_plane(store.clone())
+            .with_default_chat_route_resolver(Arc::new(MediaChatRoutes(vec![route.clone()])));
+        let created = control.create_from_template(&owner, "chat.minimal", official_launch_request(false)).await.unwrap();
+        assert!(created.draft.document.model_route_refs.is_empty());
+        assert!(created.draft.document.chat_route_records.is_empty(), "authoring cannot adopt the global or first available model");
+        let refreshed = test_control_plane(store)
+            .with_default_chat_route_resolver(Arc::new(MediaChatRoutes(vec![media_chat_route("replacement-model")])));
+        let reopened = refreshed.editor(&owner, &created.preset.preset_id, None).await.unwrap();
+        assert!(reopened.draft.document.chat_route_records.is_empty());
+        assert!(reopened.draft.document.model_route_refs.is_empty());
+        let explicit = control.create_from_template(&owner, "chat.minimal", CreateAgentPresetFromTemplateRequest {
+            model: Some(nomifun_api_types::AgentChatModelSelectionDto {
+                provider_id: route.primary.provider_id.clone(), model: route.primary.model.clone(),
+            }), ..official_launch_request(false)
+        }).await.unwrap();
+        assert_eq!(explicit.draft.document.chat_route_records[CHAT_MODEL_TASK], serde_json::to_value(route).unwrap());
+    }
+
+    #[tokio::test]
+    async fn initial_official_launch_uses_the_global_model_without_authoring_an_agent_default() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let route = media_chat_route("installation-model");
+        let control = test_control_plane(store.clone())
+            .with_default_chat_route_resolver(Arc::new(MediaChatRoutes(vec![route.clone()])));
+        let library = control.library(&owner).await.unwrap();
+        let id = &library.official_presets[&nomifun_api_types::OfficialPresetKeyDto::ChatMinimal].preset_id;
+        let before = control.editor(&owner, id, None).await.unwrap();
+        let launch = control.create_from_template(&owner, "chat.minimal", official_launch_request(true)).await.unwrap();
+        assert_ne!(launch.preset.preset_id, *id, "execution model belongs to the existing hidden configuration path");
+        assert!(store.get_preset(&AgentPresetId::from(launch.preset.preset_id.clone())).await.unwrap().unwrap().session_only);
+        let binding = control.resolve_agent_session_binding(&owner, &launch.preset.preset_id).await.unwrap();
+        let (_, revision, _) = control.saved_binding_artifacts(&owner, &binding).await.unwrap();
+        assert_eq!(revision.payload.chat_route_records[CHAT_MODEL_TASK], route);
+        assert_eq!(control.editor(&owner, id, None).await.unwrap(), before, "launching cannot mutate the editable official Agent");
+        let repeated = control.create_from_template(&owner, "chat.minimal", official_launch_request(true)).await.unwrap();
+        assert_eq!(repeated.preset.preset_id, launch.preset.preset_id, "matching execution configurations remain reusable");
+        assert_eq!(control.library(&owner).await.unwrap().official_presets[&nomifun_api_types::OfficialPresetKeyDto::ChatMinimal].current_stable_revision, None);
+        let without_models = test_control_plane(store).with_default_chat_route_resolver(Arc::new(MediaChatRoutes(Vec::new())));
+        assert!(without_models.editor(&owner, id, None).await.unwrap().draft.document.chat_route_records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn first_explicit_session_model_does_not_become_the_official_agent_default() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let route = media_chat_route("selected-for-session");
+        let control = test_control_plane(store.clone())
+            .with_default_chat_route_resolver(Arc::new(MediaChatRoutes(vec![route.clone()])));
+        let library = control.library(&owner).await.unwrap();
+        let id = &library.official_presets[&nomifun_api_types::OfficialPresetKeyDto::ChatMinimal].preset_id;
+        let launch = control.create_from_template(&owner, "chat.minimal", CreateAgentPresetFromTemplateRequest {
+            model: Some(nomifun_api_types::AgentChatModelSelectionDto {
+                provider_id: route.primary.provider_id.clone(), model: route.primary.model.clone(),
+            }), ..official_launch_request(true)
+        }).await.unwrap();
+        assert_eq!(launch.draft.document.chat_route_records[CHAT_MODEL_TASK], serde_json::to_value(&route).unwrap());
+        let editor = control.editor(&owner, id, None).await.unwrap();
+        assert!(editor.draft.document.chat_route_records.is_empty());
+        assert!(editor.draft.document.model_route_refs.is_empty());
+        let mut draft = editor.draft;
+        draft.document.chat_route_records.insert(CHAT_MODEL_TASK.into(), serde_json::to_value(route.clone()).unwrap());
+        draft.document.model_route_refs.insert(CHAT_MODEL_TASK.into(), route.primary.model_route_id.as_ref().into());
+        control.save_revision(&owner, id, SaveAgentPresetRevisionRequest {
+            expected_current_revision: None, draft, reason: None,
+        }).await.unwrap();
+        assert_eq!(control.editor(&owner, id, None).await.unwrap().draft.document.chat_route_records[CHAT_MODEL_TASK], serde_json::to_value(route).unwrap());
     }
 
     #[tokio::test]
@@ -3732,11 +3894,12 @@ mod tests {
             let snapshot = store.get_snapshot(&reference).await.unwrap().unwrap();
             let binding = session_binding_from_stable_artifacts(reference.clone(), Some(revision.clone()), Some(snapshot.clone())).unwrap();
             let binding: AgentBindingValueDto = wire_cast(&binding).unwrap();
+            let configurations_before = store.list_presets(&owner).await.unwrap().len();
             assert_eq!(control.resolve_app_development_workflow_binding(&owner, &binding).await.unwrap_err().code().as_ref(), "APP_DEVELOPMENT_SESSION_MISMATCH");
             assert!(control.resolve_app_development_workflow_binding(&other, &binding).await.is_err());
             assert_eq!(store.get_revision(&reference).await.unwrap().unwrap(), revision);
             assert_eq!(store.get_snapshot(&reference).await.unwrap().unwrap(), snapshot);
-            assert_eq!(store.list_presets(&owner).await.unwrap().len(), 1, "rejection does not create a replacement configuration");
+            assert_eq!(store.list_presets(&owner).await.unwrap().len(), configurations_before, "rejection does not create a replacement configuration");
         }
     }
 
@@ -3813,7 +3976,9 @@ mod tests {
             json!({"preset_id": first.preset.preset_id}),
         ).expect("the official Agent must be accepted by the canonical Session request contract");
         assert_eq!(session_request.preset_id, first.preset.preset_id);
-        assert_eq!(store.list_presets(&owner).await.unwrap().len(), 1);
+        let configurations = store.list_presets(&owner).await.unwrap();
+        assert_eq!(configurations.iter().filter(|preset| preset.session_only).count(), 1);
+        assert_eq!(configurations.iter().filter(|preset| !preset.session_only).count(), 1);
         assert!(control_plane.library(&owner).await.unwrap().user_presets.is_empty());
         let other_copy = control_plane.create_from_template(&other, "chat.minimal", official_launch_request(true)).await.unwrap();
         assert_ne!(first.preset.preset_id, other_copy.preset.preset_id);
@@ -3850,7 +4015,7 @@ mod tests {
         let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
         let mut request = official_launch_request(true);
         request.display_name = "Caller supplied name".into();
-        let created = control.create_from_template(&owner, "creative-studio.default", request.clone()).await.unwrap();
+        let created = publish_official_fixture(&control, &owner, OfficialPresetKey::CreativeStudioDefault, None).await;
         assert_eq!(created.preset.display_name, "creative-studio.default");
         let id = AgentPresetId::from(created.preset.preset_id.clone());
         let reference: PresetRevisionRef = wire_cast(created.preset.current_stable_revision.as_ref().unwrap()).unwrap();
@@ -3932,9 +4097,7 @@ mod tests {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let control = template_control_plane_with_order_contributions(store.clone(), OfficialPresetKey::CompanionDefault, false, true);
         let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
-        let mut request = official_launch_request(true);
-        request.display_name = "companion.default".into();
-        let created = control.create_from_template(&owner, "companion.default", request).await.unwrap();
+        let created = publish_official_fixture(&control, &owner, OfficialPresetKey::CompanionDefault, None).await;
         let id = &created.preset.preset_id;
         assert_eq!(control.internal_official_template(&owner, id).await.unwrap(), Some(OfficialPresetKey::CompanionDefault));
         let reference: PresetRevisionRef = wire_cast(created.preset.current_stable_revision.as_ref().unwrap()).unwrap();
@@ -4026,7 +4189,7 @@ mod tests {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
         let control = template_control_plane(store.clone(), OfficialPresetKey::CompanionDefault, false);
-        let created = control.create_from_template(&owner, "companion.default", official_launch_request(true)).await.unwrap();
+        let created = publish_official_fixture(&control, &owner, OfficialPresetKey::CompanionDefault, None).await;
         let id = &created.preset.preset_id;
         // An existing authored configuration can intentionally retain only
         // vision. Publishing broader recommendations must not overwrite it.
@@ -4085,7 +4248,7 @@ mod tests {
         let control = template_control_plane(store.clone(), OfficialPresetKey::AssistantGeneral, false);
         let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
         let other = UserId::from("0190f5fe-7c00-7a00-8000-000000000002");
-        let created = control.create_from_template(&owner, "assistant.general", official_launch_request(true)).await.unwrap();
+        let created = publish_official_fixture(&control, &owner, OfficialPresetKey::AssistantGeneral, None).await;
         let id = &created.preset.preset_id;
         let initial_ref: PresetRevisionRef = wire_cast(created.preset.current_stable_revision.as_ref().unwrap()).unwrap();
         let initial = store.get_revision(&initial_ref).await.unwrap().unwrap();
@@ -4157,8 +4320,11 @@ mod tests {
         let mut route_b = media_chat_route("model-b");
         route_b.primary.model_route_id = "0190f5fe-7c00-7a00-8000-000000000012".into();
         let control = template_control_plane(store.clone(), OfficialPresetKey::CompanionDefault, false)
-            .with_default_chat_route_resolver(Arc::new(MediaChatRoutes(vec![route_a, route_b.clone()])));
-        let created = control.create_from_template(&owner, "companion.default", official_launch_request(true)).await.unwrap();
+            .with_default_chat_route_resolver(Arc::new(MediaChatRoutes(vec![route_a.clone(), route_b.clone()])));
+        let selection_a = nomifun_api_types::AgentChatModelSelectionDto {
+            provider_id: route_a.primary.provider_id.clone(), model: route_a.primary.model.clone(),
+        };
+        let created = publish_official_fixture(&control, &owner, OfficialPresetKey::CompanionDefault, Some(&selection_a)).await;
         let current = control.resolve_agent_session_binding(&owner, &created.preset.preset_id).await.unwrap();
         let selection = nomifun_api_types::AgentChatModelSelectionDto {
             provider_id: route_b.primary.provider_id.clone(), model: route_b.primary.model.clone(),
@@ -4248,7 +4414,11 @@ mod tests {
         route_b.primary.model_route_id = "0190f5fe-7c00-7a00-8000-000000000012".into();
         let old_control = general_template_control_plane(store.clone(), false)
             .with_default_chat_route_resolver(Arc::new(MediaChatRoutes(vec![route_a.clone(), route_b.clone()])));
-        let created = old_control.create_from_template(&owner, "assistant.general", official_launch_request(false)).await.unwrap();
+        let created = old_control.create_from_template(&owner, "assistant.general", CreateAgentPresetFromTemplateRequest {
+            model: Some(nomifun_api_types::AgentChatModelSelectionDto {
+                provider_id: route_a.primary.provider_id.clone(), model: route_a.primary.model.clone(),
+            }), ..official_launch_request(false)
+        }).await.unwrap();
         let mut payload = document_payload(&created.draft.document).unwrap();
         payload.instructions = "Preserve the Session's authored instruction".into();
         payload.skill_bindings.push(nomifun_agent_contracts::AgentSkillBinding::library_selected(
@@ -4661,7 +4831,9 @@ mod tests {
         assert_eq!(stable.preset.current_stable_revision, refreshed.preset.current_stable_revision, "current contracts must not create redundant revisions");
         let personal = control.editor(&owner, &explicit.preset.preset_id, None).await.unwrap();
         assert_eq!(personal.preset.current_stable_revision, explicit.preset.current_stable_revision, "explicit personal copies retain their chosen immutable revision");
-        assert_eq!(store.list_presets(&owner).await.unwrap().len(), 2);
+        let configurations = store.list_presets(&owner).await.unwrap();
+        assert_eq!(configurations.iter().filter(|preset| preset.session_only).count(), 1);
+        assert_eq!(configurations.iter().filter(|preset| !preset.session_only).count(), 2);
     }
 
     #[tokio::test]

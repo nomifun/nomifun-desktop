@@ -84,6 +84,30 @@ pub struct PresetRevisionCompiler {
 type ConsumerValidator = dyn Fn(&MaterializedRegistry, &ResolvedSnapshotEnvelope) -> Result<(), ControlPlaneError> + Send + Sync;
 
 impl PresetRevisionCompiler {
+    pub(crate) fn prepare_catalog_model_detachment(
+        &self,
+        source_revision: &AgentPresetRevision,
+        source_snapshot: &ResolvedSnapshotEnvelope,
+        provider_id: &str,
+        model: Option<&str>,
+    ) -> Result<Option<(AgentPresetRevision, ResolvedSnapshotEnvelope)>, ControlPlaneError> {
+        let Some(payload) = nomifun_agent_contracts::catalog_model_detached_payload(
+            &source_revision.payload, provider_id, model,
+        ) else { return Ok(None); };
+        let mut revision = source_revision.clone();
+        revision.payload = payload;
+        revision.reference.revision = revision.reference.revision.checked_add(1)
+            .ok_or_else(|| ControlPlaneError::Wire("Agent revision limit reached".into()))?;
+        revision.reference.revision_digest = revision.revision_digest()
+            .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
+        revision.created_at_ms = now_ms();
+        revision.reason = Some("Clear deleted model selection".into());
+        let snapshot = KernelAgentPresetCompiler::derive_catalog_model_detachment_snapshot(
+            source_revision, source_snapshot, saved_snapshot_request(revision.clone(), source_snapshot), provider_id, model,
+        ).map_err(kernel_compile_error)?;
+        Ok(Some((revision, snapshot)))
+    }
+
     /// Give an explicitly selected authored Agent its own immutable identity
     /// when its executable contract equals another Session-local cache. The
     /// saved contract is copied without resolving current defaults or modules.

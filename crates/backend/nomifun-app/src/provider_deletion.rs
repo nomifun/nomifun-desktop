@@ -1,13 +1,7 @@
-//! App-layer aggregation of every subsystem's provider-in-use scan.
-//!
-//! `nomifun-app` is the only layer that sees the companion, customer-service,
-//! workshop and Agent Execution subsystems at once, so the cross-subsystem
-//! [`ProviderDeletionCoordinator`](nomifun_system::provider_deletion::ProviderDeletionCoordinator)
-//! is implemented here and injected into `ProviderService` (see
-//! `router::state::build_system_state`). Deletion then refuses an in-use provider
-//! (409 `PROVIDER_IN_USE`). The provider repository owns the deletion-time
-//! logical-reference guards and soft-reference cleanup in one transaction; this
-//! coordinator exists only for friendly, labeled product errors.
+//! Plan mutable model-reference cleanup across product owners. The repository
+//! commits SQLite configuration changes and catalog deletion together; profile
+//! side stores use their existing guarded atomic writer. Historical references
+//! remain audit facts and are never a reason to reject catalog deletion.
 
 use std::sync::Arc;
 
@@ -19,8 +13,7 @@ use nomifun_db::{
 };
 use nomifun_system::provider_deletion::ProviderDeletionCoordinator;
 
-/// Aggregates every subsystem's provider-in-use scan behind the single
-/// `ProviderDeletionCoordinator` hook `ProviderService::delete` calls.
+/// The lifecycle coordinator shared by provider and exact-model deletion.
 pub struct AppProviderDeletionCoordinator {
     pub provider_lifecycle: Arc<ProviderLifecycleBarrier>,
     pub companion: Arc<nomifun_companion::CompanionService>,
@@ -29,12 +22,61 @@ pub struct AppProviderDeletionCoordinator {
     pub execution_repo: Arc<dyn IAgentExecutionRepository>,
     pub execution_template_repo: Arc<dyn IAgentExecutionTemplateRepository>,
     pub pool: SqlitePool,
+    pub control_plane: Option<Arc<nomifun_agent_control_plane::AgentControlPlane>>,
+    pub events: Option<Arc<dyn nomifun_realtime::UserEventSink>>,
+    pub owner_user_id: Option<String>,
+}
+
+impl AppProviderDeletionCoordinator {
+    async fn append_agent_cleanup(
+        &self, cleanup: &mut nomifun_db::ProviderModelCleanupPlan,
+        provider_id: &str, model: Option<&str>,
+    ) -> Result<(), AppError> {
+        if let Some(control_plane) = &self.control_plane {
+            let owners: Vec<String> = nomifun_db::sqlx::query_scalar(
+                "SELECT DISTINCT json_extract(preset.owner_ref_json,'$.user_id') FROM agent_presets preset \
+                 JOIN agent_preset_revisions revision ON revision.preset_id=preset.preset_id AND revision.revision_no=preset.current_stable_revision, \
+                 json_tree(revision.payload_json,'$.chat_route_records') route \
+                 WHERE preset.retired_at_ms IS NULL AND COALESCE(json_extract(preset.display_json,'$.session_only'),0)=0 \
+                   AND route.type='object' AND json_extract(route.value,'$.provider_id')=?1 \
+                   AND (?2 IS NULL OR json_extract(route.value,'$.model')=?2)")
+                .bind(provider_id).bind(model).fetch_all(&self.pool).await
+                .map_err(|error| AppError::Internal(format!("plan Agent model cleanup: {error}")))?;
+            for owner in owners {
+                let owner = nomifun_agent_contracts::UserId::from(owner);
+                for change in control_plane.plan_catalog_model_detachment(&owner, provider_id, model).await
+                    .map_err(|error| AppError::Conflict(error.to_string()))? {
+                    cleanup.agent_revisions.push(nomifun_db::ProviderAgentRevisionCleanup {
+                        expected_current: change.expected_current, revision: change.revision, snapshot: change.snapshot,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
 impl ProviderDeletionCoordinator for AppProviderDeletionCoordinator {
+    fn catalog_deleted(&self, provider_id: &str, model: Option<&str>) {
+        if let (Some(events), Some(owner)) = (&self.events, &self.owner_user_id) {
+            events.send_to_user(owner, nomifun_api_types::WebSocketMessage::new("providers.changed",
+                serde_json::json!({"provider_id":provider_id,"model":model})));
+        }
+    }
     fn provider_lifecycle_barrier(&self) -> Option<Arc<ProviderLifecycleBarrier>> {
         Some(self.provider_lifecycle.clone())
+    }
+
+    async fn prepare_provider_cleanup(&self, provider_id: &str) -> Result<nomifun_db::ProviderModelCleanupPlan, AppError> {
+        let mut cleanup = self.workshop.plan_provider_cleanup_under_lifecycle_write_guard(provider_id).await?;
+        self.append_agent_cleanup(&mut cleanup, provider_id, None).await?;
+        Ok(cleanup)
+    }
+
+    async fn cleanup_external_references(&self, provider_id: &str, model: Option<&str>) -> Result<(), AppError> {
+        self.companion.detach_model_references_under_provider_guard(provider_id, model).await?;
+        Ok(())
     }
 
     async fn cleanup_soft_references(&self, provider_id: &str) -> Result<(), AppError> {
@@ -48,9 +90,11 @@ impl ProviderDeletionCoordinator for AppProviderDeletionCoordinator {
         provider_id: &str,
         model: &str,
     ) -> Result<nomifun_db::ProviderModelCleanupPlan, AppError> {
-        self.workshop
+        let mut cleanup = self.workshop
             .plan_provider_model_cleanup_under_lifecycle_write_guard(provider_id, model)
-            .await
+            .await?;
+        self.append_agent_cleanup(&mut cleanup, provider_id, Some(model)).await?;
+        Ok(cleanup)
     }
 
     async fn usages(&self, provider_id: &str) -> Result<Vec<ProviderUsage>, AppError> {
@@ -61,12 +105,11 @@ impl ProviderDeletionCoordinator for AppProviderDeletionCoordinator {
         out.extend(self.companion.providers_in_use(provider_id).await);
         out.extend(self.customer_service.providers_in_use(provider_id).await);
 
-        // Current Agent revisions are hard provider bindings. Session model
-        // authority is frozen through these exact revision payloads; the
-        // retired Conversation table is never consulted.
+        // Current Agent choices are reported for diagnostics. Deletion authors
+        // a new detached revision while frozen Session authority stays intact.
         let agents: Vec<(String, String)> = nomifun_db::sqlx::query_as(
             "SELECT DISTINCT preset.preset_id, \
-                    COALESCE(json_extract(preset.display_json, '$.name'), preset.preset_id) \
+                    COALESCE(json_extract(preset.display_json, '$.display_name'), 'Agent') \
              FROM agent_presets preset \
              JOIN agent_preset_revisions revision \
                ON revision.preset_id = preset.preset_id \
@@ -87,10 +130,8 @@ impl ProviderDeletionCoordinator for AppProviderDeletionCoordinator {
             });
         }
 
-        // Current Agent Execution participants remain live provider bindings
-        // even after completed/failed settlement: retry and adopt can reopen
-        // those aggregates. Only cancelled or tombstoned executions are
-        // permanently inert and therefore stop blocking provider deletion.
+        // Reopenable execution references remain diagnostic history. They do
+        // not block deletion or gain permission to replay with another model.
         let executions = self
             .execution_repo
             .list_reopenable_provider_usages(provider_id)
@@ -138,7 +179,7 @@ mod tests {
     const NOMI_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000114";
 
     /// Minimal completer so `CompanionService::start` needs no live provider — the
-    /// deletion-guard tests never trigger a distillation call.
+    /// deletion-coordination tests never trigger a distillation call.
     struct NoopCompleter;
 
     #[async_trait::async_trait]
@@ -191,6 +232,16 @@ mod tests {
             .await
             .unwrap();
         }
+        for (provider_id, model) in [
+            ("0190f5fe-7c00-7a00-8000-000000000025", "model_template"),
+            ("0190f5fe-7c00-7a00-8000-000000000026", "m"),
+            ("0190f5fe-7c00-7a00-8000-000000000023", "m2"),
+        ] {
+            nomifun_db::sqlx::query(
+                "INSERT INTO provider_models (provider_id,model,created_at,updated_at) VALUES (?,?,1,1)",
+            )
+            .bind(provider_id).bind(model).execute(db.pool()).await.unwrap();
+        }
         let companion = nomifun_companion::CompanionService::start(
             dir,
             Arc::new(nomifun_realtime::BroadcastEventBus::new(16)),
@@ -221,6 +272,9 @@ mod tests {
                 execution_repo,
                 execution_template_repo,
                 pool: db.pool().clone(),
+                control_plane: None,
+                events: None,
+                owner_user_id: None,
             },
             db,
         )
@@ -383,7 +437,7 @@ mod tests {
             get_global_failover_config, set_global_failover_config,
         };
         let dir = tempfile::tempdir().unwrap();
-        // 协调器只为把删除守卫接上来;这条用例断言的是删除本身的事务效果。
+        // 本用例断言删除当前配置引用的事务效果，不执行真实模型调用。
         let (_coord, db) = coordinator(dir.path()).await;
         let client_prefs: Arc<dyn IClientPreferenceRepository> =
             Arc::new(SqliteClientPreferenceRepository::new(db.pool().clone()));
@@ -439,14 +493,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_agent_revision_is_a_hard_provider_binding() {
+    async fn active_agent_revision_is_reported_for_diagnostics() {
         let dir = tempfile::tempdir().unwrap();
         let (coord, db) = coordinator(dir.path()).await;
         let preset_id = nomifun_common::generate_id();
         nomifun_db::sqlx::query(
             "INSERT INTO agent_presets \
              (preset_id, owner_ref_json, source_json, display_json, current_stable_revision, created_at) \
-             VALUES (?, '{}', '{}', '{\"name\":\"受保护 Agent\"}', 1, 1)",
+             VALUES (?, '{}', '{}', '{\"display_name\":\"受保护 Agent\"}', 1, 1)",
         )
         .bind(&preset_id)
         .execute(db.pool())

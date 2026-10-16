@@ -199,6 +199,7 @@ describe('editing models from task-specific model management pages', () => {
     expect(endpoint).not.toBeNull();
     fireEvent.change(endpoint!, { target: { value: '/chat/scenario-completions' } });
     fireEvent.click(page.getByRole('button', { name: '应用到对话' }));
+    await waitFor(() => expect((page.getByRole('button', { name: zhCommon.save }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(page.getByRole('button', { name: zhCommon.save }));
 
     await waitFor(() => expect(saved).toHaveLength(1));
@@ -264,6 +265,7 @@ describe('editing models from task-specific model management pages', () => {
     await open();
     fireEvent.change(page.getByLabelText(zhSettings.modelDisplayNameTitle), { target: { value: '等待重试的别名' } });
     await chooseOutput('32,768 tokens');
+    await waitFor(() => expect((page.getByRole('button', { name: zhCommon.save }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(page.getByRole('button', { name: zhCommon.save }));
     await waitFor(() => expect(saved).toHaveLength(1));
     await waitFor(() => expect((page.getByRole('button', { name: zhCommon.save }) as HTMLButtonElement).disabled).toBe(false));
@@ -296,6 +298,7 @@ describe('editing models from task-specific model management pages', () => {
       }],
     }));
     await waitFor(() => expect(page.getByText('同时更新的描述')).toBeTruthy());
+    await waitFor(() => expect((page.getByRole('button', { name: zhCommon.save }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(page.getByRole('button', { name: zhCommon.save }));
     await waitFor(() => expect(saved).toHaveLength(1));
     expect(saved[0].model.enabled).toBe(true);
@@ -317,6 +320,7 @@ describe('editing models from task-specific model management pages', () => {
         ? { ...capability, output_limit: 16_384 }
         : capability) }],
     }));
+    await waitFor(() => expect((page.getByRole('button', { name: zhCommon.save }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(page.getByRole('button', { name: zhCommon.save }));
     await page.findByText(i18n.t('settings.modelAdvanced.scopedTaskChanged'));
     expect((page.getByRole('button', { name: zhCommon.save }) as HTMLButtonElement).disabled).toBe(true);

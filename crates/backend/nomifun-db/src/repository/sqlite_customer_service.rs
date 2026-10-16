@@ -49,6 +49,14 @@ impl ICustomerServiceRepository for SqliteCustomerServiceRepository {
 
     async fn create_agent(&self, row: &NewCsAgentRow) -> Result<CsAgentRow, DbError> {
         canonical_id("cs_agent_id", &row.cs_agent_id)?;
+        let mut tx = self.pool.begin().await?;
+        if let Some(provider_id) = &row.provider_id {
+            canonical_id("provider_id", provider_id)?;
+            crate::provider_cleanup::lock_provider_model_choice_tx(
+                &mut tx, provider_id, row.model.as_deref(),
+            )
+            .await?;
+        }
         let sql = format!(
             "INSERT INTO cs_agents ({AGENT_COLUMNS}) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
@@ -68,8 +76,9 @@ impl ICustomerServiceRepository for SqliteCustomerServiceRepository {
             .bind(row.audit_retention_days)
             .bind(row.created_at)
             .bind(row.updated_at)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(inserted)
     }
 
@@ -96,6 +105,24 @@ impl ICustomerServiceRepository for SqliteCustomerServiceRepository {
     ) -> Result<CsAgentRow, DbError> {
         if let Some(Some(provider_id)) = &params.provider_id {
             canonical_id("provider_id", provider_id)?;
+        }
+        let mut tx = self.pool.begin().await?;
+        let current: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+            "UPDATE cs_agents SET updated_at = updated_at WHERE cs_agent_id = ? \
+             RETURNING provider_id, model",
+        )
+        .bind(cs_agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let (provider_id, model) = current
+            .ok_or_else(|| DbError::NotFound(format!("cs agent {cs_agent_id}")))?;
+        let selected_provider = params.provider_id.as_ref().unwrap_or(&provider_id);
+        let selected_model = params.model.as_ref().unwrap_or(&model);
+        if let Some(provider_id) = selected_provider {
+            crate::provider_cleanup::lock_provider_model_choice_tx(
+                &mut tx, provider_id, selected_model.as_deref(),
+            )
+            .await?;
         }
         let sql = format!(
             "UPDATE cs_agents SET \
@@ -128,9 +155,11 @@ impl ICustomerServiceRepository for SqliteCustomerServiceRepository {
             .bind(params.audit_retention_days)
             .bind(now)
             .bind(cs_agent_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await?;
-        updated.ok_or_else(|| DbError::NotFound(format!("cs agent {cs_agent_id}")))
+        let updated = updated.ok_or_else(|| DbError::NotFound(format!("cs agent {cs_agent_id}")))?;
+        tx.commit().await?;
+        Ok(updated)
     }
 
     async fn delete_agent(&self, cs_agent_id: &str) -> Result<(), DbError> {

@@ -236,14 +236,14 @@ async fn advance_terminal_turn_phase(
     Ok(TerminalTurnEffectsStart::AlreadySettled)
 }
 
-fn idmm_bypass_provider_ids(encoded: &str) -> Result<Vec<String>, DbError> {
+fn idmm_bypass_selections(encoded: &str) -> Result<Vec<(String, Option<String>)>, DbError> {
     let value: serde_json::Value = serde_json::from_str(encoded)
         .map_err(|error| DbError::Conflict(format!("IDMM config is invalid JSON: {error}")))?;
     let object = value
         .as_object()
         .ok_or_else(|| DbError::Conflict("IDMM config must be a JSON object".to_owned()))?;
 
-    let mut provider_ids = Vec::new();
+    let mut selections = Vec::new();
     for watch in ["fault_watch", "decision_watch"] {
         let Some(bypass_model) = object.get(watch).and_then(|watch| watch.get("bypass_model"))
         else {
@@ -268,11 +268,17 @@ fn idmm_bypass_provider_ids(encoded: &str) -> Result<Vec<String>, DbError> {
                 "IDMM {watch}.bypass_model.provider_id is not canonical: {error}"
             ))
         })?;
-        provider_ids.push(provider_id.to_owned());
+        let model = bypass_model.get("model").filter(|value| !value.is_null()).map(|value| {
+            value.as_str().filter(|model| !model.is_empty() && model.trim() == *model)
+                .map(str::to_owned).ok_or_else(|| DbError::Conflict(format!(
+                    "IDMM {watch}.bypass_model.model must be a non-empty trimmed model key"
+                )))
+        }).transpose()?;
+        selections.push((provider_id.to_owned(), model));
     }
-    provider_ids.sort_unstable();
-    provider_ids.dedup();
-    Ok(provider_ids)
+    selections.sort_unstable();
+    selections.dedup();
+    Ok(selections)
 }
 
 async fn lock_idmm_bypass_providers(
@@ -282,7 +288,7 @@ async fn lock_idmm_bypass_providers(
     let Some(idmm) = idmm else {
         return Ok(());
     };
-    for provider_id in idmm_bypass_provider_ids(idmm)? {
+    for (provider_id, model) in idmm_bypass_selections(idmm)? {
         let locked = sqlx::query(
             "UPDATE providers SET updated_at = updated_at WHERE provider_id = ?",
         )
@@ -293,6 +299,9 @@ async fn lock_idmm_bypass_providers(
             return Err(DbError::Conflict(format!(
                 "IDMM references missing provider '{provider_id}'"
             )));
+        }
+        if let Some(model) = model {
+            crate::provider_cleanup::lock_provider_model_choice_tx(tx, &provider_id, Some(&model)).await?;
         }
     }
     Ok(())
@@ -1966,6 +1975,8 @@ mod tests {
             }
         })
         .to_string();
+        sqlx::query("INSERT INTO provider_models (provider_id,model,description,created_at,updated_at) VALUES (?,'decision-model','',0,0)")
+            .bind(provider_id).execute(db.pool()).await.unwrap();
         repo.update_idmm(id.as_str(), Some(&valid)).await.unwrap();
         let stored: serde_json::Value =
             serde_json::from_str(&repo.get_idmm(id.as_str()).await.unwrap().unwrap()).unwrap();
@@ -1973,6 +1984,23 @@ mod tests {
             stored["decision_watch"]["bypass_model"]["provider_id"],
             provider_id
         );
+
+        // Exact deletion keeps the provider but clears this mutable choice.
+        // An older monitor/editor must not restore the removed model.
+        use crate::IProviderModelRepository;
+        let models = crate::SqliteProviderModelRepository::new(db.pool().clone());
+        let config_revision = sqlx::query_scalar("SELECT config_revision FROM providers WHERE provider_id=?")
+            .bind(provider_id).fetch_one(db.pool()).await.unwrap();
+        assert!(models.delete_coordinated(&crate::CoordinatedProviderModelDelete {
+            provider_id: provider_id.into(), model: "decision-model".into(),
+            expected_config_revision: config_revision, cleanup: Default::default(),
+        }).await.unwrap());
+        let detached = repo.get_idmm(id.as_str()).await.unwrap().unwrap();
+        let detached_value: serde_json::Value = serde_json::from_str(&detached).unwrap();
+        assert!(detached_value["decision_watch"].get("bypass_model").is_none());
+        assert_eq!(detached_value["decision_watch"]["enabled"], true);
+        assert!(matches!(repo.update_idmm(id.as_str(), Some(&valid)).await, Err(DbError::Conflict(_))));
+        assert_eq!(repo.get_idmm(id.as_str()).await.unwrap().as_deref(), Some(detached.as_str()));
     }
 
     #[tokio::test]

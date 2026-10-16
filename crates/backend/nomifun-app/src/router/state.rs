@@ -327,7 +327,7 @@ pub(crate) async fn try_build_module_states(
     },Err(error)=>{tracing::warn!(error=%error,"optional Mobile voice registration unavailable");None}};
     let states = ModuleStates {
         mobile_voice,
-        system: build_system_state(services),
+        system: build_system_state_with_agent_cleanup(services, Some(nomi_core_agent_api.control_plane.clone())),
         ssh_host: build_ssh_host_state(services),
         agent: AgentRouterState {
             agent_registry: services.agent_registry.clone(),
@@ -556,7 +556,7 @@ async fn build_nomi_core_agent_api_state(
         .with_consumer_validator(super::nomi_core_tool_discovery::validate_snapshot);
     let store = Arc::new(NomiCoreControlPlaneStore::new(
         services.database.pool().clone(),
-    ));
+    ).with_provider_lifecycle(services.provider_lifecycle.clone()));
     let session_capabilities = Arc::new(super::session_capabilities::GlobalSessionCapabilities {
         owner: nomifun_agent_contracts::UserId::from(services.authoritative_user_id.as_ref().to_owned()),
         skills: Arc::clone(&services.skill_paths),
@@ -1045,6 +1045,13 @@ fn nomi_core_runtime_target() -> RuntimeTarget {
 
 /// Build the default `SystemRouterState` from application services.
 pub fn build_system_state(services: &AppServices) -> SystemRouterState {
+    build_system_state_with_agent_cleanup(services, None)
+}
+
+fn build_system_state_with_agent_cleanup(
+    services: &AppServices,
+    control_plane: Option<Arc<AgentControlPlane>>,
+) -> SystemRouterState {
     let encryption_key = services.encryption_key;
     let pool = services.database.pool().clone();
     let provider_repo = Arc::new(SqliteProviderRepository::new(pool.clone()));
@@ -1056,9 +1063,8 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
         nomifun_db::SqliteProviderConnectionRepository::new(pool.clone()),
     );
 
-    // Cross-subsystem provider-deletion guard: aggregate every hard binding
-    // (companion, public Agent, active Agent Execution) and strip soft
-    // failover/model-pool references only after deletion is allowed.
+    // Plan current configuration cleanup under the catalog lifecycle barrier.
+    // Immutable Agent/Session/Execution history never blocks deletion.
     let execution_repo: Arc<dyn IAgentExecutionRepository> =
         Arc::new(SqliteAgentExecutionRepository::new(pool.clone()));
     let execution_template_repo: Arc<dyn IAgentExecutionTemplateRepository> =
@@ -1071,6 +1077,9 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
         execution_repo,
         execution_template_repo,
         pool: pool.clone(),
+        control_plane,
+        events: Some(services.event_bus.clone()),
+        owner_user_id: Some(services.authoritative_user_id.to_string()),
     });
 
     SystemRouterState {

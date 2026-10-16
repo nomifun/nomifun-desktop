@@ -5,6 +5,7 @@
  */
 
 import { ipcBridge } from '@/common';
+import { configService } from '@/common/config/configService';
 import type { IProvider, ModelTask } from '@/common/config/storage';
 import type {
   ProviderModelCapabilityResponse,
@@ -12,7 +13,7 @@ import type {
 } from '@/common/types/provider/providerModel';
 import type { ProviderId } from '@/common/types/ids';
 import { modelDisplayLabel, modelPresentationRawId } from '@/common/utils/modelPresentation';
-import { Button, Collapse, Divider, Input, Message, Modal, Popconfirm, Popover, Switch, Tag, Tooltip } from '@arco-design/web-react';
+import { Button, Collapse, Divider, Input, Message, Popover, Switch, Tag, Tooltip } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { Copy, DeleteFour, Info, Minus, Plus, Write, Heartbeat, Drag } from '@icon-park/react';
 import {
@@ -31,16 +32,10 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
-import {
-  featureRoute,
-  groupUsagesByFeature,
-  parseProviderInUseDetails,
-  type ProviderUsageFeature,
-} from './providerInUse';
 import AddModelModal from '@/renderer/pages/settings/components/AddModelModal';
 import AddPlatformModal from '@/renderer/pages/settings/components/AddPlatformModal';
 import ModelAdvancedEditor, { type ModelAdvancedPatch } from '@/renderer/pages/settings/components/ModelAdvancedEditor';
@@ -49,7 +44,10 @@ import ModelGatewayDetails from '@/renderer/pages/settings/components/ModelGatew
 import EditModelGatewayModal from '@/renderer/pages/settings/components/EditModelGatewayModal';
 import EditModeModal from '@/renderer/pages/settings/components/EditModeModal';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
+import NomiModal from '@/renderer/components/base/NomiModal';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
+import { AGENT_PRESET_LIBRARY_SWR_KEY } from '@/renderer/hooks/agent/useAgentPresets';
+import { useSWRConfig } from 'swr';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
 import ModelHubPageHeader from '@/renderer/pages/modelHub/ModelHubPageHeader';
 import { consumePendingDeepLink } from '@/renderer/hooks/system/useDeepLink';
@@ -465,7 +463,6 @@ const PriorityDragHandle: React.FC<SortableRenderProps & { label: string }> = ({
 
 const ModelModalContent: React.FC = () => {
   const { t } = useTranslation();
-  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   // 以「内容面板实际宽度」而非视口宽度做分档：模型管理面板被一次 rail + 二级
   // ContentSider 占去宽度，视口断点(md:/lg:)会误判为宽屏。窄面板下用紧凑布局，
@@ -475,6 +472,11 @@ const ModelModalContent: React.FC = () => {
   const [collapseKey, setCollapseKey] = useState<Record<string, boolean>>({});
   const [healthCheckLoading, setHealthCheckLoading] = useState<Record<string, boolean>>({});
   const { data, mutate } = useProvidersQuery();
+  const { mutate: mutateQueries } = useSWRConfig();
+  const [deletion, setDeletion] = useState<{ provider: IProvider; model?: ProviderModelResponse }>();
+  const [deleting, setDeleting] = useState(false);
+  const deletionPending = useRef(false);
+  const [deletionError, setDeletionError] = useState('');
   const editableProviders = useMemo(() => data ?? [], [data]);
   const [message, messageContext] = useArcoMessage();
   const configurationTarget = useMemo(
@@ -570,73 +572,39 @@ const ModelModalContent: React.FC = () => {
     }
   };
 
-  /** Delete one canonical model aggregate. */
-  const removeModel = (platform: IProvider, model: string) => {
-    if (data) {
-      const nextArray = data.map((item) =>
-        item.id === platform.id
-          ? {
-              ...item,
-              models: item.models.filter((row) => row.model !== model),
-            }
-          : item
-      );
-      void mutate(nextArray, false);
-    }
-    ipcBridge.providerModel.remove
-      .invoke({ provider_id: platform.id, model })
-      .then(() => {
-        void mutate();
-      })
-      .catch((error) => {
-        void mutate();
-        console.error('Failed to delete model:', error);
-        message.error(t('settings.saveModelConfigFailed'));
-      });
+  const requestDeletion = (provider: IProvider, model?: ProviderModelResponse) => {
+    if (deletionPending.current) return;
+    setDeletionError('');
+    setDeletion({ provider, ...(model ? { model } : {}) });
   };
 
-  const removePlatform = (id: ProviderId) => {
-    const nextArray = (data ?? []).filter((item: IProvider) => item.id !== id);
-    void mutate(nextArray, false);
-    ipcBridge.mode.deleteProvider
-      .invoke({ provider_id: id })
-      .then(() => {
-        void mutate();
-      })
-      .catch((error) => {
-        void mutate();
-        console.error('Failed to delete provider:', error);
-        if (isBackendHttpError(error) && error.code === 'PROVIDER_IN_USE') {
-          const groups = groupUsagesByFeature(parseProviderInUseDetails(error.details));
-          const featureName: Record<ProviderUsageFeature, string> = {
-            desktopCompanion: t('settings.providerInUse.desktopCompanion'),
-            customerService: t('settings.providerInUse.customerService'),
-            agent: t('settings.providerInUse.agent'),
-            agentExecution: t('settings.providerInUse.agentExecution'),
-          };
-          Modal.confirm({
-            title: t('settings.providerInUse.title'),
-            content: (
-              <div className='flex flex-col gap-8px'>
-                <div>{t('settings.providerInUse.desc')}</div>
-                {groups.map((g) => (
-                  <div key={g.feature}>
-                    <b>{featureName[g.feature]}</b>：{g.labels.join('、')}
-                  </div>
-                ))}
-              </div>
-            ),
-            okText: t('settings.providerInUse.goto'),
-            cancelText: t('common.cancel', { defaultValue: '取消' }),
-            onOk: () => {
-              const first = groups[0];
-              if (first) navigate(featureRoute(first.feature, first.targetId));
-            },
-          });
-          return;
-        }
-        message.error(t('settings.saveModelConfigFailed'));
-      });
+  const confirmDeletion = async () => {
+    if (!deletion || deletionPending.current) return;
+    const target = deletion;
+    deletionPending.current = true;
+    setDeleting(true);
+    setDeletionError('');
+    try {
+      if (target.model) await ipcBridge.providerModel.remove.invoke({ provider_id: target.provider.id, model: target.model.model });
+      else await ipcBridge.mode.deleteProvider.invoke({ provider_id: target.provider.id });
+    } catch (error) {
+      const detail = isBackendHttpError(error) ? error.backendMessage : error instanceof Error ? error.message : '';
+      // Older servers may still return an in-use response. Keep the action
+      // retryable here; never send the user through an unbind/navigation loop.
+      setDeletionError(isBackendHttpError(error) && error.code === 'PROVIDER_IN_USE'
+        ? t('settings.modelDeletion.referencesFailed')
+        : detail.trim().replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi,
+            t('settings.modelDeletion.relatedSetting')).slice(0, 600) || t('settings.modelDeletion.failed'));
+      return;
+    } finally {
+      deletionPending.current = false;
+      setDeleting(false);
+    }
+    setDeletion(undefined);
+    // The backend owns reference cleanup. Refresh its authoritative results;
+    // never choose another default model or write replacements in the renderer.
+    const refreshed = await Promise.allSettled([mutate(), configService.reload(), mutateQueries(AGENT_PRESET_LIBRARY_SWR_KEY)]);
+    if (refreshed.some(result => result.status === 'rejected')) message.error(t('settings.modelDeletion.refreshFailed'));
   };
 
   const persistProviderOrder = async (nextArray: IProvider[], previousArray: IProvider[]) => {
@@ -928,6 +896,25 @@ const ModelModalContent: React.FC = () => {
       {editModalContext}
       {editGatewayContext}
       {addModelModalContext}
+      {deletion && <NomiModal visible size='small'
+        header={{ title: deletion?.model
+          ? t('settings.modelDeletion.modelTitle', { name: modelDisplayLabel(deletion.model.model, deletion.model.display_name) })
+          : t('settings.modelDeletion.providerTitle', { name: deletion?.provider.name ?? '' }), showClose: !deleting }}
+        onCancel={() => { if (!deletionPending.current) setDeletion(undefined); }}
+        onOk={() => void confirmDeletion()} confirmLoading={deleting}
+        okButtonProps={{ disabled: deleting, status: 'danger' }} cancelButtonProps={{ disabled: deleting }}
+        maskClosable={false} escToExit={!deleting}
+        okText={t(deletionError ? 'settings.modelDeletion.retry' : 'settings.modelDeletion.confirm')}>
+        {deletion && <div className='space-y-10px text-13px leading-6 text-t-secondary' data-model-deletion-confirmation>
+          {deletion.model ? <>
+            <div className='break-words'>{deletion.provider.name} · {deletion.model.model}</div>
+            <div>{t('settings.modelDeletion.modelSummary')}</div>
+          </> : <div>{t('settings.modelDeletion.providerSummary', { count: deletion.provider.models.length })}</div>}
+          <div>{t('settings.modelDeletion.effects')}</div>
+          <div>{t('settings.modelDeletion.preserve')}</div>
+          {deletionError && <div role='alert' className='break-words text-danger-6'>{deletionError}</div>}
+        </div>}
+      </NomiModal>}
 
       {/* Header with Add Button */}
       <div className='flex-shrink-0 border-b border-b-solid border-[var(--color-border-2)] pb-12px mb-14px flex flex-col gap-10px'>
@@ -1084,12 +1071,6 @@ const ModelModalContent: React.FC = () => {
                                   : addModelModalCtrl.open({ data: platform, initialTask })}
                               />
                             </Tooltip>
-                            <Popconfirm
-                              title={t('settings.deleteProviderConfirm', {
-                                defaultValue: '删除该供应商及其全部模型？',
-                              })}
-                              onOk={() => removePlatform(platform.id)}
-                            >
                               <Button
                                 size='mini'
                                 className='model-provider-action-btn !w-28px !h-28px !min-w-28px text-t-secondary hover:text-t-primary'
@@ -1097,8 +1078,8 @@ const ModelModalContent: React.FC = () => {
                                 aria-label={t('settings.deleteProvider', {
                                   defaultValue: '删除供应商',
                                 })}
+                                onClick={() => requestDeletion(platform)}
                               />
-                            </Popconfirm>
                             <Button
                               size='mini'
                               className='model-provider-action-btn !w-28px !h-28px !min-w-28px text-t-secondary hover:text-t-primary'
@@ -1288,16 +1269,13 @@ const ModelModalContent: React.FC = () => {
                                 onCheck={(task) => performHealthCheck(platform, model, task)}
                               />
 
-                              <Popconfirm
-                                title={t('settings.deleteModelConfirm')}
-                                onOk={() => removeModel(platform, model)}
-                              >
                                 <Button
                                   size='mini'
                                   className='!w-28px !h-28px !min-w-28px !bg-[var(--color-bg-1)] text-t-secondary hover:text-t-primary hover:!bg-[var(--fill-0)]'
                                   icon={<DeleteFour theme='outline' size='18' strokeWidth={2} />}
+                                  aria-label={t('settings.modelDeletion.deleteModel')}
+                                  onClick={() => requestDeletion(platform, row)}
                                 />
-                              </Popconfirm>
                             </div>
                           </div>
                           {index < arr.length - 1 && <Divider className='!my-0 !border-[var(--color-border-2)]/70' />}

@@ -10,7 +10,7 @@ use nomifun_db::{
     NewAgentExecutionTemplateParticipant, SqliteAgentExecutionRepository,
     SqliteAgentExecutionTemplateRepository,
     SqliteClientPreferenceRepository, SqliteProviderRepository,
-    UpdateAgentExecutionParams, init_database_memory,
+    init_database_memory,
 };
 
 const NOMI_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000114";
@@ -35,6 +35,13 @@ async fn insert_provider(database: &nomifun_db::Database, id: &str) {
     .bind(id)
     .bind(id)
     .bind(credentials_encrypted)
+    .execute(database.pool())
+    .await
+    .unwrap();
+    nomifun_db::sqlx::query(
+        "INSERT INTO provider_models (provider_id,model,created_at,updated_at) VALUES (?,'model',1,1)",
+    )
+    .bind(id)
     .execute(database.pool())
     .await
     .unwrap();
@@ -202,23 +209,12 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
         )
         .await
         .unwrap();
-    assert!(
-        providers
-            .delete("0190f5fe-7c00-7a00-8000-000000000002")
-            .await
-            .is_err(),
-        "the DB closes a Template usage-scan/delete race"
-    );
-    assert!(
-        templates
-            .delete_template(
-                &owner,
-                &template.template.execution_template_id,
-                template.template.version,
-            )
-            .await
-            .unwrap()
-    );
+    providers.delete("0190f5fe-7c00-7a00-8000-000000000002").await.unwrap();
+    let cleared: (Option<String>,Option<String>) = nomifun_db::sqlx::query_as(
+        "SELECT provider_id,model FROM agent_execution_template_participants WHERE template_id=?")
+        .bind(&template.template.execution_template_id).fetch_one(database.pool()).await.unwrap();
+    assert_eq!(cleared,(None,None),"current template choice is detached without deleting the template");
+    insert_provider(&database,"0190f5fe-7c00-7a00-8000-000000000002").await;
 
     let execution = executions
         .create_execution_with_participants(
@@ -239,31 +235,7 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
         )
         .await
         .unwrap();
-    assert!(
-        providers
-            .delete("0190f5fe-7c00-7a00-8000-000000000002")
-            .await
-            .is_err(),
-        "the DB closes an Agent Execution usage-scan/delete race"
-    );
-    executions
-        .update_execution(
-            &owner,
-            &execution.execution_id,
-            execution.version,
-            None,
-            &UpdateAgentExecutionParams {
-                status: Some(AgentExecutionStatus::Cancelled),
-                ..Default::default()
-            },
-            &event(AgentExecutionEventKind::StatusChanged),
-        )
-        .await
-        .unwrap();
-    providers
-        .delete("0190f5fe-7c00-7a00-8000-000000000002")
-        .await
-        .unwrap();
+    providers.delete("0190f5fe-7c00-7a00-8000-000000000002").await.unwrap();
     let historical_provider_id: Option<String> = nomifun_db::sqlx::query_scalar(
         "SELECT provider_id FROM agent_execution_participants WHERE execution_id = ?",
     )
@@ -274,7 +246,7 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
     assert_eq!(
         historical_provider_id.as_deref(),
         Some("0190f5fe-7c00-7a00-8000-000000000002"),
-        "cancelled execution participants keep their historical provider snapshot"
+        "admitted execution participants keep their historical provider snapshot"
     );
     assert!(
         providers
@@ -284,6 +256,7 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
             .is_none(),
         "KEEP_HISTORY does not require retaining the live provider catalog row"
     );
+    nomifun_db::validate_id_data_contract(database.pool()).await.unwrap();
 
     let missing_execution = executions
         .create_execution_with_participants(
@@ -382,6 +355,10 @@ async fn provider_delete_downgrades_only_the_affected_knowledge_retrieval_stage(
     let database = init_database_memory().await.unwrap();
     insert_provider(&database, PROVIDER_A).await;
     insert_provider(&database, PROVIDER_B).await;
+    for (provider_id, model) in [(PROVIDER_A, "embedding-model"), (PROVIDER_B, "rerank-model")] {
+        nomifun_db::sqlx::query("INSERT INTO provider_models (provider_id,model,created_at,updated_at) VALUES (?,?,1,1)")
+            .bind(provider_id).bind(model).execute(database.pool()).await.unwrap();
+    }
     let providers = SqliteProviderRepository::new(database.pool().clone());
     let preferences = SqliteClientPreferenceRepository::new(database.pool().clone());
     let retrieval_preference = serde_json::json!({

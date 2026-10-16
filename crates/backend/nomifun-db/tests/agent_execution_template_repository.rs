@@ -34,6 +34,18 @@ async fn test_database() -> nomifun_db::Database {
         .execute(database.pool())
         .await
         .unwrap();
+        for model in (0..16).map(|index| format!("model_{index}"))
+            .chain(["model_live_override".to_owned()])
+        {
+            nomifun_db::sqlx::query(
+                "INSERT INTO provider_models (provider_id,model,created_at,updated_at) VALUES (?,?,1,1)",
+            )
+            .bind(provider_id)
+            .bind(model)
+            .execute(database.pool())
+            .await
+            .unwrap();
+        }
     }
     database
 }
@@ -209,7 +221,7 @@ async fn template_crud_is_owner_scoped_and_keeps_only_executable_configuration()
 }
 
 #[tokio::test]
-async fn template_repository_rejects_runtime_ceiling_and_unresolved_model_debt() {
+async fn template_repository_rejects_runtime_ceiling_and_keeps_unconfigured_models_empty() {
     let database = test_database().await;
     let repository = SqliteAgentExecutionTemplateRepository::new(database.pool().clone());
     let params = |max_parallel, participants| CreateAgentExecutionTemplateParams {
@@ -262,12 +274,12 @@ async fn template_repository_rejects_runtime_ceiling_and_unresolved_model_debt()
     let mut unresolved = participant(0);
     unresolved.provider_id = None;
     unresolved.model = None;
-    assert!(
-        repository
-            .create_template(USER_ID, &params(Some(1), vec![unresolved]))
-            .await
-            .is_err()
-    );
+    let unconfigured = repository
+        .create_template(USER_ID, &params(Some(1), vec![unresolved]))
+        .await
+        .unwrap();
+    assert_eq!(unconfigured.participants[0].provider_id, None);
+    assert_eq!(unconfigured.participants[0].model, None);
 
     let mut preset_resolved = participant(0);
     preset_resolved.provider_id = None;
@@ -280,18 +292,15 @@ async fn template_repository_rejects_runtime_ceiling_and_unresolved_model_debt()
             r#"{{"preset_id":"0190f5fe-7c00-7a00-8000-000000000121","preset_revision":1,"preset_name":"Test Agent","resolved_model":{{"provider_id":"0190f5fe-7c00-7a00-8000-000000000004","model":"model_from_preset"}}}}"#
         ),
     );
+    let frozen_snapshot = preset_resolved.agent_snapshot.clone();
     let created = repository
         .create_template(USER_ID, &params(Some(1), vec![preset_resolved]))
         .await
         .unwrap();
-    assert_eq!(
-        created.participants[0].provider_id.as_deref(),
-        Some("0190f5fe-7c00-7a00-8000-000000000004")
-    );
-    assert_eq!(
-        created.participants[0].model.as_deref(),
-        Some("model_from_preset")
-    );
+    assert_eq!(created.participants[0].provider_id, None);
+    assert_eq!(created.participants[0].model, None);
+    assert_eq!(created.participants[0].agent_snapshot, frozen_snapshot,
+        "a frozen snapshot is preserved without restoring its historical model");
 
     let mut explicit_override = participant(1);
     explicit_override.provider_id = Some(LIVE_OVERRIDE_PROVIDER_ID.to_owned());

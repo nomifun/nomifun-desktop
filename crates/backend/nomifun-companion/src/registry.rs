@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use nomifun_common::{
     AppError, CompanionId, ProviderWithModel, SharedProviderLifecycleBarrier,
 };
-use nomifun_db::IProviderRepository;
+use nomifun_db::{IProviderModelRepository, IProviderRepository};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, MutexGuard, RwLock};
 
@@ -156,6 +156,7 @@ pub struct CompanionRegistry {
     /// existing automatic-mood row. Never held while invoking a model.
     mood_updates: Mutex<()>,
     provider_repo: Option<std::sync::Arc<dyn IProviderRepository>>,
+    provider_model_repo: Option<std::sync::Arc<dyn IProviderModelRepository>>,
     provider_lifecycle: Option<SharedProviderLifecycleBarrier>,
 }
 
@@ -171,13 +172,14 @@ impl CompanionRegistry {
         companions_dir: PathBuf,
         shared_dir: PathBuf,
     ) -> Result<Self, AppError> {
-        Self::scan_with_provider_lifecycle(companions_dir, shared_dir, None, None)
+        Self::scan_with_provider_lifecycle(companions_dir, shared_dir, None, None, None)
     }
 
     pub fn scan_with_provider_lifecycle(
         companions_dir: PathBuf,
         shared_dir: PathBuf,
         provider_repo: Option<std::sync::Arc<dyn IProviderRepository>>,
+        provider_model_repo: Option<std::sync::Arc<dyn IProviderModelRepository>>,
         provider_lifecycle: Option<SharedProviderLifecycleBarrier>,
     ) -> Result<Self, AppError> {
         let mut companions = HashMap::new();
@@ -329,6 +331,7 @@ impl CompanionRegistry {
             inner: RwLock::new(companions),
             mood_updates: Mutex::new(()),
             provider_repo,
+            provider_model_repo,
             provider_lifecycle,
         })
     }
@@ -543,6 +546,11 @@ impl CompanionRegistry {
         let mut value = serde_json::to_value(current)
             .map_err(|e| AppError::Internal(format!("serialize companion profile: {e}")))?;
         json_merge_patch(&mut value, &patch);
+        // The persisted primary slot is required but nullable. RFC 7396 removes
+        // a null key; preserve an explicit clear without relaxing load schema.
+        if patch.get("model").is_some_and(serde_json::Value::is_null) {
+            value["model"] = serde_json::Value::Null;
+        }
         value["companion_id"] =
             serde_json::Value::String(current.companion_id.clone());
         value["seq"] = serde_json::Value::from(current.seq);
@@ -554,13 +562,40 @@ impl CompanionRegistry {
         merged.created_at = current.created_at;
         merged.name = validate_name(&merged.name)?;
         for (_, model) in merged.provider_model_slots() {
-            validate_provider_model(self.provider_repo.as_ref(), Some(&model)).await?;
+            validate_provider_model(
+                self.provider_repo.as_ref(), self.provider_model_repo.as_ref(), Some(&model),
+                ProviderReferenceScope::ExactModel,
+            ).await?;
         }
         merged
             .save(&self.companions_dir.join(&merged.companion_id))
             .map_err(|e| AppError::Internal(format!("save companion profile: {e}")))?;
         companions.insert(merged.companion_id.clone(), merged.clone());
         Ok(merged)
+    }
+
+    /// The caller holds the Provider lifecycle write guard. Do not acquire its
+    /// read side here: deletion must exclude new model selections until the
+    /// catalog mutation finishes. Publish a profile only after its atomic save.
+    pub(crate) async fn detach_model_references_under_guard(
+        &self,
+        id: &str,
+        provider_id: &str,
+        model: Option<&str>,
+    ) -> Result<Option<CompanionProfileConfig>, AppError> {
+        let mut companions = self.inner.write().await;
+        let current = companions
+            .get(id)
+            .ok_or_else(|| AppError::NotFound(format!("companion '{id}' not found")))?;
+        let mut detached = current.clone();
+        if detached.detach_provider_model_references(provider_id, model) == 0 {
+            return Ok(None);
+        }
+        detached
+            .save(&self.companions_dir.join(&detached.companion_id))
+            .map_err(|error| AppError::Internal(format!("save companion profile: {error}")))?;
+        companions.insert(detached.companion_id.clone(), detached.clone());
+        Ok(Some(detached))
     }
 
     /// Remove a companion from the map and delete its directory (an already-missing
@@ -585,8 +620,9 @@ impl CompanionRegistry {
     }
 
     /// Verify every loaded profile's Provider parent while the caller holds a
-    /// shared lifecycle read guard. A missing Provider is an orphaned hard
-    /// reference and fails startup.
+    /// shared lifecycle read guard. Keep the existing Provider-level startup
+    /// contract: an older missing model must not prevent the App from starting.
+    /// New writes validate the exact catalog pair separately.
     pub(crate) async fn validate_provider_references_under_guard(
         &self,
     ) -> Result<(), AppError> {
@@ -594,11 +630,13 @@ impl CompanionRegistry {
         for profile in profiles {
             // Every slot in `provider_model_slots()` is a hard binding: a missing
             // Provider is an orphaned reference and fails startup. Provider
-            // deletion is refused while any of them points at it
-            // (`CompanionService::providers_in_use`), so an orphan means the
-            // durable state was edited behind the app's back.
+            // deletion detaches these mutable selections before removing the
+            // catalog parent, so an orphan is not an expected deletion result.
             for (what, model) in profile.provider_model_slots() {
-                validate_provider_model(self.provider_repo.as_ref(), Some(&model))
+                validate_provider_model(
+                    self.provider_repo.as_ref(), self.provider_model_repo.as_ref(), Some(&model),
+                    ProviderReferenceScope::ParentOnly,
+                )
                     .await
                     .map_err(|error| {
                         AppError::Internal(format!(
@@ -639,13 +677,29 @@ impl CompanionRegistry {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProviderReferenceScope {
+    ParentOnly,
+    ExactModel,
+}
+
 async fn validate_provider_model(
     provider_repo: Option<&std::sync::Arc<dyn IProviderRepository>>,
+    provider_model_repo: Option<&std::sync::Arc<dyn IProviderModelRepository>>,
     model: Option<&ProviderWithModel>,
+    scope: ProviderReferenceScope,
 ) -> Result<(), AppError> {
-    let (Some(provider_repo), Some(model)) = (provider_repo, model) else {
+    let Some(model) = model else {
         return Ok(());
     };
+    // Standalone Companion fixtures may have no catalog. Once either catalog
+    // repository is configured, both parents must be checked under the guard.
+    if provider_repo.is_none() && provider_model_repo.is_none() {
+        return Ok(());
+    }
+    let provider_repo = provider_repo.ok_or_else(|| {
+        AppError::Internal("companion provider catalog is not configured".into())
+    })?;
     if provider_repo
         .find_by_id(&model.provider_id)
         .await
@@ -655,6 +709,22 @@ async fn validate_provider_model(
         return Err(AppError::NotFound(format!(
             "provider '{}' not found",
             model.provider_id
+        )));
+    }
+    if scope == ProviderReferenceScope::ParentOnly {
+        return Ok(());
+    }
+    let provider_model_repo = provider_model_repo.ok_or_else(|| {
+        AppError::Internal("companion model catalog is not configured".into())
+    })?;
+    if provider_model_repo
+        .get(&model.provider_id, &model.model)
+        .await
+        .map_err(|error| AppError::Internal(format!("check companion catalog model: {error}")))?
+        .is_none()
+    {
+        return Err(AppError::NotFound(format!(
+            "model '{}' not found for provider '{}'", model.model, model.provider_id
         )));
     }
     Ok(())
@@ -682,6 +752,159 @@ mod tests {
 
     fn registry(dir: &std::path::Path) -> CompanionRegistry {
         scan_at(dir).unwrap()
+    }
+
+    struct CatalogRegistryFixture {
+        _db: nomifun_db::Database,
+        registry: std::sync::Arc<CompanionRegistry>,
+        provider_repo: std::sync::Arc<dyn IProviderRepository>,
+        model_repo: std::sync::Arc<dyn IProviderModelRepository>,
+        barrier: SharedProviderLifecycleBarrier,
+        provider_id: String,
+    }
+
+    async fn catalog_registry(dir: &std::path::Path) -> CatalogRegistryFixture {
+        use nomifun_db::{CreateProviderParams, NewProviderModel, NewProviderModelCapability};
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let provider_repo: std::sync::Arc<dyn IProviderRepository> = std::sync::Arc::new(
+            nomifun_db::SqliteProviderRepository::new(db.pool().clone()),
+        );
+        let model_repo: std::sync::Arc<dyn IProviderModelRepository> = std::sync::Arc::new(
+            nomifun_db::SqliteProviderModelRepository::new(db.pool().clone()),
+        );
+        let capabilities = [NewProviderModelCapability {
+            task: "chat", traits: "[]", protocol: "openai.chat_text",
+            connection_role: "default", provider_params: "{}", ..Default::default()
+        }];
+        let (provider, _) = provider_repo.create(CreateProviderParams {
+            provider_id: None, platform: "custom", name: "Companion catalog",
+            base_url: "https://example.invalid/v1", auth_scheme: "bearer",
+            credentials_encrypted: "fixture-only", enabled: true,
+            bedrock_config: None, sort_order: None,
+        }, &NewProviderModel {
+            model: "removed", enabled: true, capabilities: &capabilities, ..Default::default()
+        }, &[]).await.unwrap();
+        // Disabled entries remain legitimate saved selections. This guard
+        // checks exact identity, not current invocation availability.
+        model_repo.save(&provider.provider_id, provider.config_revision, &NewProviderModel {
+            model: "sibling", enabled: false, capabilities: &capabilities, ..Default::default()
+        }).await.unwrap();
+        let barrier = std::sync::Arc::new(nomifun_common::ProviderLifecycleBarrier::new());
+        let registry = std::sync::Arc::new(CompanionRegistry::scan_with_provider_lifecycle(
+            dir.join("companions"), dir.join("shared"),
+            Some(std::sync::Arc::clone(&provider_repo)), Some(std::sync::Arc::clone(&model_repo)),
+            Some(std::sync::Arc::clone(&barrier)),
+        ).unwrap());
+        CatalogRegistryFixture { _db: db, registry, provider_repo, model_repo, barrier, provider_id: provider.provider_id }
+    }
+
+    async fn delete_catalog_model(fixture: &CatalogRegistryFixture) {
+        let provider = fixture.provider_repo.find_by_id(&fixture.provider_id).await.unwrap().unwrap();
+        assert!(fixture.model_repo.delete_coordinated(&nomifun_db::CoordinatedProviderModelDelete {
+            provider_id: fixture.provider_id.clone(), model: "removed".into(),
+            expected_config_revision: provider.config_revision,
+            cleanup: nomifun_db::ProviderModelCleanupPlan::default(),
+        }).await.unwrap());
+        assert!(fixture.provider_repo.find_by_id(&fixture.provider_id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn catalog_model_guard_rejects_stale_patches_for_every_slot_after_exact_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = catalog_registry(dir.path()).await;
+        let reg = &fixture.registry;
+        let profile = reg.create("Original", "ink").await.unwrap();
+        let selected = serde_json::json!({"provider_id": fixture.provider_id, "model": "removed"});
+        let old_profile = reg.patch(&profile.companion_id, serde_json::json!({
+            "model": selected, "learn": {"model": selected}, "evolve": {"model": selected},
+            "fallback_model": selected, "vision_model": selected,
+            "voice": {"asr": selected, "tts": selected}
+        })).await.unwrap();
+        assert_eq!(old_profile.provider_model_slots().len(), 7);
+
+        let write_guard = fixture.barrier.write().await;
+        let pending_registry = std::sync::Arc::clone(reg);
+        let pending_id = profile.companion_id.clone();
+        let old_patch = serde_json::to_value(old_profile).unwrap();
+        let mut pending = tokio::spawn(async move { pending_registry.patch(&pending_id, old_patch).await });
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(25), &mut pending).await.is_err(),
+            "a stale PATCH must wait while deletion holds the lifecycle write guard");
+        let cleared = reg.detach_model_references_under_guard(&profile.companion_id, &fixture.provider_id, Some("removed"))
+            .await.unwrap().unwrap();
+        delete_catalog_model(&fixture).await;
+        drop(write_guard);
+        let error = tokio::time::timeout(std::time::Duration::from_secs(2), pending).await.unwrap().unwrap().unwrap_err();
+        assert!(matches!(error, AppError::NotFound(ref message) if message.contains("model 'removed'")), "{error}");
+
+        let profile_dir = dir.path().join("companions").join(&profile.companion_id);
+        let saved = std::fs::read(CompanionProfileConfig::config_path(&profile_dir)).unwrap();
+        for path in ["/model", "/learn/model", "/evolve/model", "/fallback_model", "/vision_model", "/voice/asr", "/voice/tts"] {
+            let mut patch = serde_json::json!({
+                "name": "Must not be saved", "learn": {}, "evolve": {}, "voice": {}
+            });
+            // JSON pointers target an existing slot so the test cannot silently
+            // omit any of the seven persisted model selections.
+            let (parent, key) = path.rsplit_once('/').unwrap();
+            let object = if parent.is_empty() { patch.as_object_mut().unwrap() }
+                else { patch.pointer_mut(parent).unwrap().as_object_mut().unwrap() };
+            object.insert(key.to_owned(), selected.clone());
+            let error = reg.patch(&profile.companion_id, patch).await.unwrap_err();
+            assert!(matches!(error, AppError::NotFound(ref message) if message.contains("model 'removed'")), "{path}: {error}");
+            assert_eq!(reg.get(&profile.companion_id).await.unwrap(), cleared, "{path}");
+            assert_eq!(std::fs::read(CompanionProfileConfig::config_path(&profile_dir)).unwrap(), saved, "{path}");
+        }
+        let sibling = reg.patch(&profile.companion_id, serde_json::json!({
+            "model": {"provider_id": fixture.provider_id, "model": "sibling"}
+        })).await.unwrap();
+        assert_eq!(sibling.model.unwrap().model, "sibling");
+        let cleared_again = reg.patch(&profile.companion_id, serde_json::json!({"model": null})).await.unwrap();
+        assert!(cleared_again.provider_model_slots().is_empty());
+    }
+
+    #[tokio::test]
+    async fn catalog_model_guard_keeps_old_missing_models_loadable_but_rejects_new_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = catalog_registry(dir.path()).await;
+        let profile = fixture.registry.create("Audited", "ink").await.unwrap();
+        {
+            let _guard = fixture.barrier.read().await;
+            fixture.registry.validate_provider_references_under_guard().await.unwrap();
+        }
+        fixture.registry.patch(&profile.companion_id, serde_json::json!({
+            "learn": {"model": {"provider_id": fixture.provider_id, "model": "removed"}}
+        })).await.unwrap();
+        let guard = fixture.barrier.write().await;
+        delete_catalog_model(&fixture).await;
+        fixture.registry.validate_provider_references_under_guard().await.unwrap();
+        drop(guard);
+        let existing = fixture.registry.get(&profile.companion_id).await.unwrap();
+        let profile_dir = dir.path().join("companions").join(&profile.companion_id);
+        let saved = std::fs::read(CompanionProfileConfig::config_path(&profile_dir)).unwrap();
+        let error = fixture.registry.patch(&profile.companion_id, serde_json::json!({"name": "Must not repersist the stale model"}))
+            .await.unwrap_err();
+        assert!(matches!(error, AppError::NotFound(ref message) if message.contains("model 'removed'")), "{error}");
+        assert_eq!(fixture.registry.get(&profile.companion_id).await.unwrap(), existing);
+        assert_eq!(std::fs::read(CompanionProfileConfig::config_path(&profile_dir)).unwrap(), saved);
+        let _guard = fixture.barrier.write().await;
+        fixture.registry.detach_model_references_under_guard(&profile.companion_id, &fixture.provider_id, Some("removed"))
+            .await.unwrap().unwrap();
+        fixture.registry.validate_provider_references_under_guard().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn catalog_model_guard_fails_closed_when_only_the_provider_repository_is_wired() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = catalog_registry(dir.path()).await;
+        let reg = CompanionRegistry::scan_with_provider_lifecycle(
+            dir.path().join("isolated-companions"), dir.path().join("isolated-shared"),
+            Some(std::sync::Arc::clone(&fixture.provider_repo)), None, Some(std::sync::Arc::clone(&fixture.barrier)),
+        ).unwrap();
+        let profile = reg.create("Empty remains valid", "ink").await.unwrap();
+        let error = reg.patch(&profile.companion_id, serde_json::json!({
+            "model": {"provider_id": fixture.provider_id, "model": "sibling"}
+        })).await.unwrap_err();
+        assert!(matches!(error, AppError::Internal(ref message) if message.contains("model catalog is not configured")), "{error}");
+        assert_eq!(reg.get(&profile.companion_id).await.unwrap(), profile);
     }
 
     #[test]
@@ -986,6 +1209,7 @@ mod tests {
             inner: RwLock::new(HashMap::new()),
             mood_updates: Mutex::new(()),
             provider_repo: None,
+            provider_model_repo: None,
             provider_lifecycle: None,
         };
 

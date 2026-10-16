@@ -5,7 +5,7 @@ use nomifun_api_types::{
     BedrockConfig, CreateProviderRequest, ProviderModelCapabilityInput, ProviderModelResponse,
     ProviderResponse, UpdateProviderRequest,
 };
-use nomifun_common::{AppError, ProviderId, ProviderInUseDetails};
+use nomifun_common::{AppError, ProviderId};
 use nomifun_db::{
     CreateProviderParams, IProviderConnectionRepository,
     IProviderModelCapabilityRepository, IProviderModelRepository, IProviderRepository,
@@ -385,14 +385,18 @@ impl ProviderService {
         } else {
             None
         };
+        let provider = self.repo.find_by_id(provider_id).await?
+            .ok_or_else(|| AppError::NotFound("供应商已不存在，请刷新模型列表。".into()))?;
         if let Some(coordinator) = &self.coordinator {
-            let usages = coordinator.usages(provider_id).await?;
-            if !usages.is_empty() {
-                return Err(AppError::ProviderInUse(ProviderInUseDetails { usages }));
-            }
-            coordinator.cleanup_soft_references(provider_id).await?;
+            let cleanup = coordinator.prepare_provider_cleanup(provider_id).await?;
+            coordinator.cleanup_external_references(provider_id, None).await?;
+            self.repo.delete_coordinated(&nomifun_db::CoordinatedProviderDelete {
+                provider_id: provider_id.to_owned(), expected_config_revision: provider.config_revision, cleanup,
+            }).await?;
+        } else {
+            self.repo.delete(provider_id).await?;
         }
-        self.repo.delete(provider_id).await?;
+        if let Some(coordinator) = &self.coordinator { coordinator.catalog_deleted(provider_id, None); }
         Ok(())
     }
 

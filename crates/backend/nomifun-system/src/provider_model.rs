@@ -215,22 +215,14 @@ impl ProviderModelService {
                 "provider model must not be empty".into(),
             ));
         }
-        let provider = self
-            .provider_repo
-            .find_by_id(provider_id)
-            .await?
-            .ok_or_else(|| AppError::NotFound(format!("Provider {provider_id} not found")))?;
-        if is_retired_provider_platform(&provider.platform) {
-            return Err(AppError::Forbidden(
-                "Models owned by a retired built-in provider cannot be modified".into(),
-            ));
-        }
         let lifecycle_barrier = self.deletion_coordinator.provider_lifecycle_barrier();
         let _lifecycle_guard = if let Some(barrier) = lifecycle_barrier.as_ref() {
             Some(barrier.write().await)
         } else {
             None
         };
+        let provider = self.provider_repo.find_by_id(provider_id).await?
+            .ok_or_else(|| AppError::NotFound(format!("Provider {provider_id} not found")))?;
         if self.model_repo.get(provider_id, model).await?.is_none() {
             return Ok(false);
         }
@@ -238,7 +230,8 @@ impl ProviderModelService {
             .deletion_coordinator
             .prepare_soft_model_cleanup(provider_id, model)
             .await?;
-        Ok(self
+        self.deletion_coordinator.cleanup_external_references(provider_id, Some(model)).await?;
+        let deleted = self
             .model_repo
             .delete_coordinated(&CoordinatedProviderModelDelete {
                 provider_id: provider_id.to_owned(),
@@ -246,7 +239,9 @@ impl ProviderModelService {
                 expected_config_revision: provider.config_revision,
                 cleanup,
             })
-            .await?)
+            .await?;
+        if deleted { self.deletion_coordinator.catalog_deleted(provider_id, Some(model)); }
+        Ok(deleted)
     }
 
     async fn validate_capabilities(

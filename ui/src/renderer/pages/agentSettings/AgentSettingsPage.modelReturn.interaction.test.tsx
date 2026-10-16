@@ -9,7 +9,7 @@ import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-rou
 import { SWRConfig } from 'swr';
 import { NavigationHistoryProvider, useNavigationHistory } from '@/renderer/hooks/context/NavigationHistoryContext';
 import { AGENT_SIDER_TOGGLE_EVENT } from '@/renderer/utils/workspace/agentSiderEvents';
-import { agentPlatform } from '@/common/adapter/ipcBridge';
+import { agentPlatform, mode, conversation } from '@/common/adapter/ipcBridge';
 import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
 
 import { AGENT_CHAT_MODEL_TASK, CHAT_ROUTE_RECORD_SCHEMA, OFFICIAL_PRESET_KEYS, asAgentPresetId, asCapabilityId, asPackageId, asDigestHex, asResolvedSnapshotId, createEmptyAgentPresetDocument, type AgentCatalogResponse, type AgentPresetEditorResponse,
@@ -81,6 +81,8 @@ afterEach(() => {
 async function mount(error?: unknown, initialEditor?: AgentPresetEditorResponse,
   options: { entry?: string; expectedHeading?: string; templates?: OfficialPresetTemplate[]; roles?: AgentCatalogResponse['roles'];
     missingModel?: boolean; noRevision?: boolean; rawOfficialName?: boolean } = {}) {
+  spyOn(mode.onProvidersChanged, 'on').mockReturnValue(() => {});
+  spyOn(conversation.reconnected, 'on').mockReturnValue(() => {});
   spyOn(authContext, 'useAuth').mockReturnValue({ user: { id: '01900000-0000-7000-8000-000000000071', username: 'owner' } } as ReturnType<typeof authContext.useAuth>);
   spyOn(modelProviders, 'useProvidersQuery').mockReturnValue({ data: [], error: undefined, isLoading: false,
     isValidating: false, mutate: async () => [] });

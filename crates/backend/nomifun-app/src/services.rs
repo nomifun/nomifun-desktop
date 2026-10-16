@@ -2018,6 +2018,7 @@ impl AppServices {
             companion_completer,
             skill_paths.clone(),
             Some(provider_repo.clone() as Arc<dyn nomifun_db::IProviderRepository>),
+            Some(provider_model_repo.clone() as Arc<dyn nomifun_db::IProviderModelRepository>),
             Some(provider_lifecycle.clone()),
         )
         .await

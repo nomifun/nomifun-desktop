@@ -61,6 +61,10 @@ name = "agent_provider_health_e2e"
 path = "tests/agent_provider_health_e2e.rs"
 
 [[test]]
+name = "provider_deletion_e2e"
+path = "tests/provider_deletion_e2e.rs"
+
+[[test]]
 name = "official_preset_catalog_integrity"
 path = "tests/official_preset_catalog_integrity.rs"
 required-features = ["browser-use", "computer-use"]

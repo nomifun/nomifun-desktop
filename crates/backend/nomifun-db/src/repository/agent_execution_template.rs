@@ -27,8 +27,8 @@ pub struct NewAgentExecutionTemplateParticipant {
 pub struct CreateAgentExecutionTemplateParams {
     pub name: String,
     pub description: Option<String>,
-    /// Authoring and runtime share one ceiling; saved Templates are always
-    /// directly executable rather than deferring validation to launch time.
+    /// Authoring and runtime share one concurrency ceiling. A cleared model
+    /// choice stays unconfigured and must be selected before execution.
     pub max_parallel: Option<i64>,
     pub work_dir: Option<String>,
     pub context: Option<String>,
@@ -82,7 +82,7 @@ pub trait IAgentExecutionTemplateRepository: Send + Sync {
         expected_version: i64,
     ) -> Result<bool, DbError>;
 
-    /// Narrow owner-independent occupancy read for provider deletion guards.
+    /// Narrow owner-independent read of current provider selections.
     /// It exposes only the referencing template identity and display name.
     async fn list_templates_using_provider(
         &self,

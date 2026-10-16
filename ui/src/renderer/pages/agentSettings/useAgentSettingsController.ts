@@ -1,4 +1,4 @@
-import { agentPlatform } from '@/common/adapter/ipcBridge';
+import { agentPlatform, mode, conversation } from '@/common/adapter/ipcBridge';
 import type {
   AgentCatalogResponse,
   AgentPresetDraft,
@@ -33,6 +33,14 @@ type Selection =
   | null;
 
 type BusyAction = 'save' | 'create' | 'open' | 'delete' | 'recommend' | null;
+
+const withoutModelFields = (draft: AgentPresetDraft): AgentPresetDraft => ({
+  ...cloneDraft(draft), current_revision: undefined,
+  document: { ...cloneAgentPresetDocument(draft.document), model_route_refs: {}, chat_route_records: {} },
+});
+const modelFieldsEqual = (left: AgentPresetDraft, right: AgentPresetDraft): boolean => !isDraftDirty(left, {
+  ...left, document: { ...left.document, model_route_refs: right.document.model_route_refs, chat_route_records: right.document.chat_route_records },
+});
 
 const emptyCatalog: AgentCatalogResponse = {
   modules: [],
@@ -90,7 +98,13 @@ export function useAgentSettingsController() {
   const editorGenerationRef = useRef(0);
   const recommendingRef = useRef(false);
   const [loading, setLoading] = useState(true);
-  const [busyAction, setBusyAction] = useState<BusyAction>(null);
+  const [busyAction, setBusyActionState] = useState<BusyAction>(null);
+  const busyActionRef = useRef<BusyAction>(null);
+  const setBusyAction = useCallback((action: BusyAction) => { busyActionRef.current = action; setBusyActionState(action); }, []);
+  const editorState = useRef({ editor, draft, savedDraft });
+  editorState.current = { editor, draft, savedDraft };
+  const [providerRefreshVersion, setProviderRefreshVersion] = useState(0);
+  const refreshedProviderVersion = useRef(0);
   const [openingPresetId, setOpeningPresetId] = useState<string | null>(null);
   const [deletingPresetId, setDeletingPresetId] = useState<string | null>(null);
   const [error, setErrorState] = useState<string | null>(null);
@@ -175,10 +189,7 @@ export function useAgentSettingsController() {
     );
   }, [mutate]);
 
-  const applyEditor = useCallback((response: AgentPresetEditorResponse) => {
-    editorGenerationRef.current += 1;
-    setRecommendation(null);
-    editingDrafts?.rememberSelection({ kind: 'preset', preset_id: response.preset.preset_id });
+  const editorDraft = useCallback((response: AgentPresetEditorResponse) => {
     const nextDraft = cloneDraft(response.draft);
     if (response.preset.source === 'official' && nextDraft.source_template_key &&
         (!response.revision || nextDraft.display_name === nextDraft.source_template_key)) {
@@ -186,6 +197,14 @@ export function useAgentSettingsController() {
       nextDraft.display_name = t(`agentSettings.template.${path}.name`);
       nextDraft.description ??= t(`agentSettings.template.${path}.description`);
     }
+    return nextDraft;
+  }, [t]);
+
+  const applyEditor = useCallback((response: AgentPresetEditorResponse) => {
+    editorGenerationRef.current += 1;
+    setRecommendation(null);
+    editingDrafts?.rememberSelection({ kind: 'preset', preset_id: response.preset.preset_id });
+    const nextDraft = editorDraft(response);
     setEditor({
       ...response,
       draft: nextDraft,
@@ -197,7 +216,77 @@ export function useAgentSettingsController() {
     setSavedDraft(response.revision || response.preset.source === 'official' ? cloneDraft(nextDraft) : null);
     setSelection({ kind: 'preset', preset: response.preset });
     return nextDraft;
-  }, [editingDrafts, t]);
+  }, [editingDrafts, editorDraft]);
+
+  useEffect(() => {
+    const refresh = () => setProviderRefreshVersion(version => version + 1);
+    const stopChanges = mode.onProvidersChanged.on(refresh);
+    const stopReconnect = conversation.reconnected.on(refresh);
+    return () => { stopChanges(); stopReconnect(); };
+  }, []);
+
+  useEffect(() => {
+    if (!providerRefreshVersion || providerRefreshVersion === refreshedProviderVersion.current || busyAction) return;
+    let active = true;
+    const generation = editorGenerationRef.current;
+    const presetId = editorState.current.editor?.preset.preset_id;
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const [nextLibrary, response] = await Promise.all([
+            agentPlatform.library.invoke(),
+            presetId ? agentPlatform.getEditor.invoke({ preset_id: presetId }) : Promise.resolve(undefined),
+          ]);
+          if (!active || busyActionRef.current || generation !== editorGenerationRef.current) return;
+          refreshedProviderVersion.current = providerRefreshVersion;
+          setLibrary(nextLibrary);
+          void mutate(AGENT_PRESET_LIBRARY_SWR_KEY, nextLibrary, { revalidate: false });
+          const current = editorState.current;
+          if (!response || !current.editor || !current.draft || current.editor.preset.preset_id !== presetId) return;
+          const baseline = current.savedDraft ?? current.editor.draft;
+          const nextDraft = editorDraft(response);
+          if (!isDraftDirty(baseline, nextDraft)) return;
+          const previousRevision = baseline.current_revision;
+          const nextRevision = nextDraft.current_revision;
+          const modelsChanged = !modelFieldsEqual(baseline, nextDraft);
+          const revisionMatches = !previousRevision || Boolean(nextRevision && nextRevision.preset_id === previousRevision.preset_id &&
+            (nextRevision.revision > previousRevision.revision || (nextRevision.revision === previousRevision.revision &&
+              nextRevision.revision_digest === previousRevision.revision_digest)));
+          if (!revisionMatches || (modelsChanged && (!nextRevision || (previousRevision && nextRevision.revision <= previousRevision.revision)))) {
+            setRecommendation(null);
+            setErrorSubjects([]);
+            setError(t('agentSettings.errors.conflict'));
+            return;
+          }
+          if (!isDraftDirty(current.savedDraft, current.draft)) {
+            applyEditor(response);
+            setError(null);
+          } else if (!isDraftDirty(withoutModelFields(baseline), withoutModelFields(nextDraft)) && modelFieldsEqual(baseline, current.draft)) {
+            const rebased: AgentPresetDraft = { ...cloneDraft(current.draft), current_revision: nextDraft.current_revision,
+              document: { ...cloneAgentPresetDocument(current.draft.document),
+                model_route_refs: structuredClone(nextDraft.document.model_route_refs),
+                chat_route_records: structuredClone(nextDraft.document.chat_route_records) } };
+            applyEditor(response);
+            setDraftState(rebased);
+            editingDrafts?.writePreset(rebased);
+            setError(null);
+          } else {
+            // A provider event is never authority to discard authoring input
+            // or replace a model the user has already selected in this draft.
+            setRecommendation(null);
+            setErrorSubjects([]);
+            setError(t('agentSettings.errors.conflict'));
+          }
+        } catch (refreshError) {
+          if (active && !busyActionRef.current && generation === editorGenerationRef.current) {
+            refreshedProviderVersion.current = providerRefreshVersion;
+            reportError(refreshError, 'load');
+          }
+        }
+      })();
+    }, 100);
+    return () => { active = false; clearTimeout(timer); };
+  }, [providerRefreshVersion, busyAction, applyEditor, editorDraft, editingDrafts, mutate, reportError, setError, t]);
 
   const openPreset = useCallback(
     async (preset: AgentPresetSummary, returned?: Extract<AgentEditorReturn, { kind: 'preset' }>['draft']) => {
@@ -320,6 +409,7 @@ export function useAgentSettingsController() {
   );
 
   const setDraft = useCallback((next: AgentPresetDraft) => {
+    editorState.current = { ...editorState.current, draft: next };
     setRecommendation(null);
     editingDrafts?.writePreset(next);
     setDraftState(next);

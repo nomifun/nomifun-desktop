@@ -48,6 +48,21 @@ For each model:
 Provider credentials remain local configuration. Any hosted provider still
 processes the content sent to it according to its own billing and data policy.
 
+Deleting a model or provider requires one impact confirmation. The system then
+clears matching current selections in Agent defaults, global/task defaults,
+failover queues, companions, customer service, collaboration templates, creation
+configuration and scheduled jobs. Deleting one model matches its exact provider
+and model key. Jobs losing their model are disabled until the user configures one,
+including jobs that use the model of an existing conversation.
+Remaining models are never selected automatically. Agents, conversations, task
+records and frozen historical configurations remain intact; unfinished calls may
+fail when their model configuration is removed. Historical references do not
+prevent catalog deletion.
+
+An Agent workbench default stays empty until explicitly selected and saved.
+Models resolved for launching an official Agent belong to that execution's
+configuration and do not become authored Agent defaults or change on refresh.
+
 Chat, speech recognition, speech synthesis, and the other specialized model
 pages provide **Edit model** on each model row. Edit and save without leaving
 the current page. The editor shows the current task's invocation route and

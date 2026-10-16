@@ -718,16 +718,7 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
         .with_orphan_audit_policy(OrphanAuditPolicy::RequireParent)
         .with_frozen_projection_authority("child.agent_snapshot IS NOT NULL"),
     text_ref!("agent_execution_participants", "provider_id" => "providers", "provider_id", true, KeepHistory)
-        .with_orphan_audit_policy(OrphanAuditPolicy::RequireParent)
-        .with_child_predicate(
-            "child.retired_in_revision IS NULL \
-             AND EXISTS (\
-                 SELECT 1 FROM agent_executions execution \
-                 WHERE execution.execution_id = child.execution_id \
-                   AND execution.status <> 'cancelled' \
-                   AND execution.deleted_at IS NULL\
-             )",
-        ),
+        .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
     text_ref!("agent_execution_steps", "execution_id" => "agent_executions", "execution_id", false, Cascade),
     text_ref!("agent_execution_steps", "assigned_participant_id" => "agent_execution_participants", "participant_id", true, Restrict)
         .with_aggregate_scope("parent.execution_id = child.execution_id"),
@@ -771,7 +762,7 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("agent_execution_template_participants", "source_agent_id" => "agent_metadata", "agent_id", false, Restrict),
     text_ref!("agent_execution_template_participants", "preset_id" => "agent_presets", "preset_id", true, SetNull)
         .with_frozen_projection_authority("child.agent_snapshot IS NOT NULL"),
-    text_ref!("agent_execution_template_participants", "provider_id" => "providers", "provider_id", true, Restrict),
+    text_ref!("agent_execution_template_participants", "provider_id" => "providers", "provider_id", true, SetNull),
     text_ref!("conversation_execution_links", "conversation_id" => "agent_sessions", "agent_session_id", false, KeepHistory),
     text_ref!("conversation_execution_links", "execution_id" => "agent_executions", "execution_id", false, Cascade),
     text_ref!("conversation_execution_links", "step_id" => "agent_execution_steps", "step_id", true, KeepHistory)
@@ -790,9 +781,11 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     external_ref!("channel_plugins", "companion_id", Text, true, CanonicalUuidV7, SetNull),
     text_ref!("channel_users", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", true, Cascade),
     // ── customer-service domain (015) ────────────────────────────────
-    // Provider/KB references keep history on parent deletion: the runtime
-    // resolves them per turn and degrades gracefully to "model/KB missing".
-    text_ref!("cs_agents", "provider_id" => "providers", "provider_id", true, KeepHistory),
+    // Mutable model choices are cleared on catalog deletion. Previously
+    // retained missing-provider values remain readable; dialogue history and
+    // knowledge references keep their existing independent contracts.
+    text_ref!("cs_agents", "provider_id" => "providers", "provider_id", true, SetNull)
+        .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
     text_ref!("cs_agent_capability_receipts", "owner_user_id" => "users", "user_id", false, KeepHistory),
     text_ref!("cs_agent_capability_receipts", "cs_agent_id" => "cs_agents", "cs_agent_id", false, Cascade),
     text_ref!("cs_channel_bindings", "cs_agent_id" => "cs_agents", "cs_agent_id", false, Cascade),
@@ -820,7 +813,8 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("creation_tasks", "template_id" => "creative_studio_templates", "template_id", true, KeepHistory),
     text_ref!("creation_tasks", "template_run_id" => "creative_studio_template_runs", "template_run_id", true, KeepHistory)
         .with_aggregate_scope("parent.template_id = child.template_id"),
-    text_ref!("creation_tasks", "provider_id" => "providers", "provider_id", false, Restrict),
+    text_ref!("creation_tasks", "provider_id" => "providers", "provider_id", false, KeepHistory)
+        .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
     text_ref!("creative_studio_template_runs", "template_id" => "creative_studio_templates", "template_id", false, KeepHistory),
     text_ref!("creative_studio_agent_proposal_receipts", "project_id" => "creative_studio_projects", "project_id", false, Cascade),
     text_ref!("creative_studio_agent_proposal_receipts", "assistant_message_id" => "agent_events", "event_id", false, Restrict),
@@ -909,7 +903,7 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
     json_text_ref!(
         "cron_jobs", "agent_config", "$.provider_id (agent_type=nomi)",
         "SELECT json_extract(agent_config, '$.provider_id') AS value FROM cron_jobs WHERE agent_type = 'nomi' AND agent_config IS NOT NULL" =>
-        "providers", "provider_id", Restrict, RequireParent
+        "providers", "provider_id", SetNull, RequireParent
     ),
     json_text_ref!(
         "workshop_assets", "origin", "$.provider_id",

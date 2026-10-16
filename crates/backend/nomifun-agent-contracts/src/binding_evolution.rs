@@ -67,6 +67,51 @@ pub fn validate_model_only_revision_derivation(
     Ok(())
 }
 
+/// Remove a deleted catalog selection without selecting a replacement. A
+/// primary match clears the default; failover matches only prune that queue.
+pub fn catalog_model_detached_payload(
+    source: &crate::AgentPresetRevisionPayload,
+    provider_id: &str,
+    model: Option<&str>,
+) -> Option<crate::AgentPresetRevisionPayload> {
+    let mut payload = source.clone();
+    let route = payload.chat_route_records.get_mut(CHAT_MODEL_TASK_AGENT_CHAT)?;
+    let matches = |candidate: &crate::ChatRouteCandidate| candidate.provider_id == provider_id
+        && model.is_none_or(|model| candidate.model == model);
+    if matches(&route.primary) {
+        payload.chat_route_records.remove(CHAT_MODEL_TASK_AGENT_CHAT);
+        payload.model_route_refs.remove(CHAT_MODEL_TASK_AGENT_CHAT);
+    } else {
+        let before = route.failovers.len();
+        route.failovers.retain(|candidate| !matches(candidate));
+        if route.failovers.len() == before { return None; }
+    }
+    Some(payload)
+}
+
+/// Author a new current configuration after catalog deletion. This grants no
+/// Session transition and never changes the source Revision or Snapshot.
+pub fn validate_catalog_model_detachment(
+    source: &AgentPresetRevision,
+    snapshot: &ResolvedSnapshotEnvelope,
+    target: &AgentPresetRevision,
+    provider_id: &str,
+    model: Option<&str>,
+) -> Result<(), PresetContractViolation> {
+    validate_artifacts(source, snapshot)?;
+    target.validate()?;
+    let expected = catalog_model_detached_payload(&source.payload, provider_id, model)
+        .ok_or_else(|| rejected("catalog detachment has no matching model selection"))?;
+    let mut locks = source.contribution_locks.clone(); locks.sort();
+    let mut next_locks = target.contribution_locks.clone(); next_locks.sort();
+    if target.payload != expected || locks != next_locks || target.created_by != source.created_by
+        || target.reference.preset_id != source.reference.preset_id
+        || source.reference.revision.checked_add(1) != Some(target.reference.revision) {
+        return Err(rejected("catalog detachment must only clear the deleted model in the next configuration revision"));
+    }
+    Ok(())
+}
+
 /// Admit a fresh forward execution contract from the same bundled publishers.
 /// Exact schemas and artifacts may change, but grants, effects, resources,
 /// dependency graph, provider mounts and runtime requirements may not. MCP,

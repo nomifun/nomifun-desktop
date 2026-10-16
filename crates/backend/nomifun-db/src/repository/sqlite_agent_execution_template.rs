@@ -123,40 +123,17 @@ fn validate_participant(
         &participant.disabled_builtin_skills,
         "template participant disabled_builtin_skills",
     )?;
-    resolved_provider_model(participant)?;
     Ok(())
 }
 
-fn resolved_provider_model(
+fn selected_provider_model(
     participant: &NewAgentExecutionTemplateParticipant,
-) -> Result<(String, String), DbError> {
+) -> Option<(&str, &str)> {
     if let (Some(provider_id), Some(model)) = (&participant.provider_id, &participant.model) {
-        return Ok((provider_id.trim().to_owned(), model.trim().to_owned()));
+        return Some((provider_id.as_str(), model.as_str()));
     }
-    let resolved = participant
-        .agent_snapshot
-        .as_deref()
-        .map(|snapshot| validate_json_object(snapshot, "template participant agent_snapshot"))
-        .transpose()?
-        .and_then(|snapshot| snapshot.get("resolved_model").cloned());
-    let provider_id = resolved
-        .as_ref()
-        .and_then(|model| model.get("provider_id"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let model = resolved
-        .as_ref()
-        .and_then(|model| model.get("model"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    match (provider_id, model) {
-        (Some(provider_id), Some(model)) => Ok((provider_id.to_owned(), model.to_owned())),
-        _ => Err(invalid(
-            "template participant must resolve a concrete provider and model",
-        )),
-    }
+    // A frozen Agent snapshot is audit data, not a source of mutable defaults.
+    None
 }
 
 fn validate_participants(
@@ -170,7 +147,9 @@ fn validate_participants(
     let mut models = HashSet::new();
     for participant in participants {
         validate_participant(participant)?;
-        models.insert(resolved_provider_model(participant)?);
+        if let Some(selection) = selected_provider_model(participant) {
+            models.insert(selection);
+        }
     }
     if models.len() > MAX_AGENT_EXECUTION_MODELS {
         return Err(invalid(format!(
@@ -234,7 +213,7 @@ async fn insert_participants_tx(
 ) -> Result<Vec<String>, DbError> {
     let mut participant_ids = Vec::with_capacity(participants.len());
     for participant in participants {
-        let (provider_id, model) = resolved_provider_model(participant)?;
+        let selection = selected_provider_model(participant);
         let source_agent = sqlx::query(
             "UPDATE agent_metadata SET updated_at = updated_at WHERE agent_id = ?",
         )
@@ -255,19 +234,11 @@ async fn insert_participants_tx(
             "Template participant",
         )
         .await?;
-        // Provider is a hard logical parent. Take SQLite's writer lock and
-        // validate it in this transaction so provider deletion cannot race a
-        // newly persisted Template participant. No FK/trigger is involved.
-        let provider = sqlx::query(
-            "UPDATE providers SET updated_at = updated_at WHERE provider_id = ?",
-        )
-        .bind(&provider_id)
-        .execute(&mut **tx)
-        .await?;
-        if provider.rows_affected() == 0 {
-            return Err(invalid(format!(
-                "template participant provider '{provider_id}' does not exist"
-            )));
+        if let Some((provider_id, model)) = selection {
+            crate::provider_cleanup::lock_provider_model_choice_tx(
+                tx, provider_id, Some(model),
+            )
+            .await?;
         }
         sqlx::query(
             "INSERT INTO agent_execution_template_participants (\
@@ -282,8 +253,8 @@ async fn insert_participants_tx(
         .bind(&participant.preset_id)
         .bind(participant.preset_revision)
         .bind(&participant.agent_snapshot)
-        .bind(&provider_id)
-        .bind(&model)
+        .bind(&participant.provider_id)
+        .bind(&participant.model)
         .bind(&participant.role)
         .bind(&participant.capability)
         .bind(&participant.constraints)

@@ -37,11 +37,34 @@ fn now_ms() -> i64 {
 #[derive(Clone)]
 pub(crate) struct NomiCoreControlPlaneStore {
     pool: SqlitePool,
+    provider_lifecycle: Option<std::sync::Arc<nomifun_common::ProviderLifecycleBarrier>>,
 }
 
 impl NomiCoreControlPlaneStore {
     pub(crate) fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self { pool, provider_lifecycle: None }
+    }
+
+    pub(crate) fn with_provider_lifecycle(mut self, barrier: std::sync::Arc<nomifun_common::ProviderLifecycleBarrier>) -> Self {
+        self.provider_lifecycle = Some(barrier);
+        self
+    }
+
+    async fn guard_revision_models<'a>(&'a self, revision: &AgentPresetRevision)
+        -> Result<Option<tokio::sync::RwLockReadGuard<'a, ()>>, ControlPlaneError> {
+        let Some(barrier) = self.provider_lifecycle.as_ref() else { return Ok(None); };
+        let guard = barrier.read().await;
+        for route in revision.payload.chat_route_records.values() {
+            for candidate in std::iter::once(&route.primary).chain(&route.failovers) {
+                let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM provider_models model JOIN providers provider ON provider.provider_id = model.provider_id WHERE model.provider_id = ? AND model.model = ?)")
+                    .bind(&candidate.provider_id).bind(&candidate.model).fetch_one(&self.pool).await.map_err(sql)?;
+                if !exists {
+                    return Err(ControlPlaneError::canonical("MODEL_ROUTE_UNAVAILABLE", StatusCode::CONFLICT,
+                        "The selected model was removed; select a model before saving this Agent"));
+                }
+            }
+        }
+        Ok(Some(guard))
     }
 
     async fn begin_write_transaction(&self) -> Result<Transaction<'static, Sqlite>, ControlPlaneError> {
@@ -427,51 +450,9 @@ async fn insert_revision_tx(
     revision: &AgentPresetRevision,
     snapshot: &ResolvedSnapshotEnvelope,
 ) -> Result<(), ControlPlaneError> {
-    let revision_id = revision.reference.revision_id();
-    sqlx::query(
-        "INSERT INTO agent_preset_revisions \
-         (revision_id, preset_id, revision_no, schema_version, payload_json, \
-          revision_digest, created_by, created_at, reason) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&revision_id)
-    .bind(revision.reference.preset_id.as_ref())
-    .bind(i64_from_u64(revision.reference.revision, "revision")?)
-    .bind(revision.payload.schema_version.as_ref())
-    .bind(wire(&revision.payload)?)
-    .bind(revision.reference.revision_digest.as_ref())
-    .bind(revision.created_by.as_ref())
-    .bind(revision.created_at_ms)
-    .bind(revision.reason.as_deref())
-    .execute(&mut **tx)
-    .await
-    .map_err(sql)?;
-    for lock in &revision.contribution_locks {
-        sqlx::query(
-            "INSERT INTO agent_preset_contribution_locks \
-             (revision_id, contribution_id, lock_json) VALUES (?, ?, ?)",
-        )
-        .bind(&revision_id)
-        .bind(lock.contribution_id.as_ref())
-        .bind(wire(lock)?)
-        .execute(&mut **tx)
-        .await
-        .map_err(sql)?;
-    }
-    sqlx::query(
-        "INSERT INTO agent_runtime_snapshots \
-         (snapshot_id, snapshot_digest, content_json, envelope_json) VALUES (?, ?, ?, ?)",
-    )
-    .bind(snapshot.snapshot_ref.snapshot_id.as_ref())
-    .bind(snapshot.snapshot_ref.snapshot_digest.as_ref())
-    .bind(wire(&snapshot.content)?)
-    .bind(wire(snapshot)?)
-    .execute(&mut **tx)
-    .await
-    .map_err(sql)?;
-    Ok(())
+    nomifun_db::insert_agent_preset_revision_tx(tx, revision, snapshot)
+        .await.map_err(|error| ControlPlaneError::Wire(error.to_string()))
 }
-
 fn remote_snapshot_placeholder(
     snapshot: &ResolvedSnapshotEnvelope,
 ) -> Result<String, ControlPlaneError> {
@@ -556,6 +537,7 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         revision: AgentPresetRevision,
         snapshot: ResolvedSnapshotEnvelope,
     ) -> Result<StoredPreset, ControlPlaneError> {
+        let _catalog_guard = self.guard_revision_models(&revision).await?;
         validate_revision_snapshot(&preset, &revision, &snapshot)?;
         let mut tx = self.begin_write_transaction().await?;
         insert_preset_tx(&mut tx, &preset, revision.created_at_ms).await?;
@@ -691,6 +673,7 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         display_name: String,
         description: Option<String>,
     ) -> Result<StoredPreset, ControlPlaneError> {
+        let _catalog_guard = self.guard_revision_models(&revision).await?;
         validate_nomi_projection(&revision)?;
         revision.validate().map_err(|violation| {
             ControlPlaneError::canonical(

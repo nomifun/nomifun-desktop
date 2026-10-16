@@ -284,7 +284,7 @@ pub fn cron_job_from_row(row: CronJobRow) -> Result<CronJob, CronError> {
                 row.cron_job_id
             )));
         }
-        validate_agent_config_ids(&row.cron_job_id, &row.agent_type, config)?;
+        validate_agent_config_ids(&row.cron_job_id, &row.agent_type, config, !row.enabled)?;
     } else if row.preset_id.is_some()
         || row.preset_revision.is_some()
         || row.agent_snapshot.is_some()
@@ -385,7 +385,7 @@ pub fn cron_job_to_row(job: &CronJob) -> Result<CronJobRow, CronError> {
         })?;
     }
     if let Some(config) = job.agent_config.as_ref() {
-        validate_agent_config_ids(&job.cron_job_id, &job.agent_type, config)?;
+        validate_agent_config_ids(&job.cron_job_id, &job.agent_type, config, !job.enabled)?;
     }
     let (schedule_kind, schedule_value, schedule_tz, schedule_description) =
         schedule_to_row_fields(&job.schedule);
@@ -457,6 +457,7 @@ fn validate_agent_config_ids(
     job_id: &str,
     agent_type: &str,
     config: &CronAgentConfig,
+    allow_empty_model: bool,
 ) -> Result<(), CronError> {
     if let Some(snapshot) = config.agent_snapshot.as_ref() {
         if snapshot.preset_revision <= 0 {
@@ -474,6 +475,9 @@ fn validate_agent_config_ids(
             return Err(CronError::Scheduler(format!(
                 "cron job {job_id} uses legacy agent_config.backend for a Nomi provider; use provider_id"
             )));
+        }
+        if allow_empty_model && config.provider_id.is_none() && config.model.is_none() {
+            return Ok(());
         }
         let provider_id = config.provider_id.as_deref().ok_or_else(|| {
             CronError::Scheduler(format!(
@@ -1068,6 +1072,19 @@ mod tests {
                 .into_iter()
                 .collect()
         );
+    }
+
+    #[test]
+    fn disabled_jobs_can_retain_an_empty_model_selection_after_catalog_deletion() {
+        let row = CronJobRow { enabled:false, agent_type:"nomi".into(),
+            agent_config:Some(serde_json::json!({"name":"Nomi","provider_id":null,"model":null}).to_string()),
+            ..sample_row() };
+        let job = cron_job_from_row(row).unwrap();
+        assert!(!job.enabled);
+        assert!(job.agent_config.as_ref().unwrap().provider_id.is_none());
+        let mut restored = cron_job_to_row(&job).unwrap();
+        restored.enabled = true;
+        assert!(cron_job_from_row(restored).is_err(),"reenabling still requires the user to choose a model");
     }
 
     #[test]

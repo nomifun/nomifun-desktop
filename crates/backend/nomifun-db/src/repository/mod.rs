@@ -74,8 +74,9 @@ pub use channel::{
 };
 pub use client_preference::{IClientPreferenceRepository, KNOWLEDGE_RETRIEVAL_KEY};
 pub(crate) use client_preference::{
-    provider_preference_delete_action, ProviderPreferenceDeleteAction,
+    provider_model_preference_delete_action, provider_preference_delete_action, ProviderPreferenceDeleteAction,
 };
+pub(crate) use sqlite_provider::prune_missing_provider_preference;
 pub use creation_task::{
     CreateCreativeTaskParams, CreativeTaskOwnerRef,
     ICreationTaskRepository, IdempotentCreationTask, UpdateCreationTaskParams,
@@ -104,7 +105,7 @@ pub use oauth_token::IOAuthTokenRepository;
 pub use provider::IProviderRepository;
 pub use provider_connection::IProviderConnectionRepository;
 pub use provider_model::{
-    CoordinatedProviderModelDelete, IProviderModelRepository, ProviderModelCleanupPlan,
+    CoordinatedProviderDelete, CoordinatedProviderModelDelete, IProviderModelRepository, ProviderAgentRevisionCleanup, ProviderModelCleanupPlan,
     ProviderModelProjectCleanup, ProviderModelTemplateCleanup,
 };
 pub use provider_model_capability::IProviderModelCapabilityRepository;

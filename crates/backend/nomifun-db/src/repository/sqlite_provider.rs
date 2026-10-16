@@ -13,13 +13,10 @@ use crate::repository::sqlite_provider_model_capability::{
     bump_provider_config_revision_tx, clear_health_for_connection_role_tx,
 };
 use crate::repository::{
-    IProviderRepository, ProviderPreferenceDeleteAction, provider_preference_delete_action,
+    IProviderRepository,
 };
 
-const PROVIDER_HARD_BINDING_DELETE_CONFLICT: &str =
-    "provider is still referenced by an executable Agent binding";
-
-async fn prune_missing_provider_preference(
+pub(crate) async fn prune_missing_provider_preference(
     key: &str,
     value: String,
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -65,6 +62,25 @@ pub struct SqliteProviderRepository {
 impl SqliteProviderRepository {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    async fn delete_graph(&self, id: &str, expected_revision: Option<i64>, cleanup: &crate::ProviderModelCleanupPlan) -> Result<(),DbError> {
+        let mut transaction = self.pool.begin().await?;
+        // The writer lock fences cleanup, reference writers and catalog removal.
+        let locked = sqlx::query("UPDATE providers SET config_revision=config_revision WHERE provider_id=? AND (? IS NULL OR config_revision=?)")
+            .bind(id).bind(expected_revision).bind(expected_revision).execute(&mut *transaction).await?;
+        if locked.rows_affected()==0 {
+            let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers WHERE provider_id=?)")
+                .bind(id).fetch_one(&mut *transaction).await?;
+            return Err(if exists {DbError::Conflict("provider invocation graph changed during deletion".into())}
+                else {DbError::NotFound(format!("Provider '{id}' not found"))});
+        }
+        crate::provider_cleanup::apply_cleanup_plan_tx(&mut transaction,id,None,cleanup).await?;
+        for table in ["provider_model_capabilities","provider_models","provider_connections","providers"] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE provider_id=?")).bind(id).execute(&mut *transaction).await?;
+        }
+        transaction.commit().await?;
+        Ok(())
     }
 }
 
@@ -562,223 +578,10 @@ impl IProviderRepository for SqliteProviderRepository {
     }
 
     async fn delete(&self, id: &str) -> Result<(), DbError> {
-        let mut transaction = self.pool.begin().await?;
+        self.delete_graph(id,None,&crate::ProviderModelCleanupPlan::default()).await
+    }
 
-        // Acquire SQLite's writer lock before inspecting logical references.
-        // This keeps the guard, provider deletion, and soft-reference cleanup
-        // in one application-owned transaction without a physical FK/trigger.
-        let locked =
-            sqlx::query("UPDATE providers SET updated_at = updated_at WHERE provider_id = ?")
-                .bind(id)
-                .execute(&mut *transaction)
-                .await?;
-
-        if locked.rows_affected() == 0 {
-            return Err(DbError::NotFound(format!("Provider '{id}' not found")));
-        }
-
-        let hard_binding_exists: bool = sqlx::query_scalar(
-            "SELECT \
-                EXISTS(\
-                    SELECT 1 FROM agent_preset_revisions revision, \
-                         json_tree(revision.payload_json) route \
-                    WHERE route.type = 'object' \
-                      AND json_extract(route.value, '$.provider_id') = ?1\
-                ) \
-                OR EXISTS(\
-                    SELECT 1 FROM agent_execution_template_participants \
-                    WHERE provider_id = ?1\
-                ) \
-                OR EXISTS(\
-                    SELECT 1 \
-                    FROM agent_execution_participants participant \
-                    JOIN agent_executions execution \
-                      ON execution.execution_id = participant.execution_id \
-                    WHERE participant.provider_id = ?1 \
-                      AND participant.retired_in_revision IS NULL \
-                      AND execution.status <> 'cancelled' \
-                      AND execution.deleted_at IS NULL\
-                ) \
-                OR EXISTS(\
-                    SELECT 1 FROM creation_tasks WHERE provider_id = ?1\
-                ) \
-                OR EXISTS(\
-                    SELECT 1 FROM cron_jobs \
-                    WHERE agent_type = 'nomi' \
-                      AND agent_config IS NOT NULL \
-                      AND CASE \
-                            WHEN NOT json_valid(agent_config) THEN 1 \
-                            ELSE json_extract(agent_config, '$.provider_id') = ?1 \
-                          END\
-                )",
-        )
-        .bind(id)
-        .fetch_one(&mut *transaction)
-        .await?;
-        if hard_binding_exists {
-            return Err(DbError::Conflict(
-                PROVIDER_HARD_BINDING_DELETE_CONFLICT.to_owned(),
-            ));
-        }
-
-        // Client preferences are a generic key/value store, so their Provider
-        // references are enforced by the centralized registry in the
-        // client-preference repository rather than by SQL FK/trigger logic.
-        // Resolve every registered preference before deleting the parent:
-        // arrays are filtered in order; defaults are deleted and optional
-        // references are set to null. No registered preference RESTRICTs the
-        // delete any more.
-        let preference_rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT key, value FROM client_preferences \
-             WHERE key = 'agent.model_failover' \
-                OR key = 'nomi.collaborationModels' \
-                OR key = 'nomi.defaultModel' \
-                OR key = 'knowledge.autogenModel' \
-                OR key = 'knowledge.retrieval' \
-                OR key = 'models.default.imageGeneration' \
-                OR key = 'models.default.imageEdit' \
-                OR key = 'models.default.vision' \
-                OR key = 'models.default.videoGeneration' \
-                OR key = 'models.default.musicGeneration' \
-                OR key = 'models.default.speechSynthesis' \
-                OR key = 'tools.speechToText' \
-                OR key = 'tools.textToSpeech' \
-                OR key LIKE 'channels.%.defaultModel'",
-        )
-        .fetch_all(&mut *transaction)
-        .await?;
-        let mut preference_actions = Vec::new();
-        for (key, value) in preference_rows {
-            match provider_preference_delete_action(&key, &value, id)? {
-                ProviderPreferenceDeleteAction::Keep => {}
-                action => preference_actions.push((key, action)),
-            }
-        }
-
-        // IDMM is per canonical AgentSession and stores its bounded domain
-        // record under a namespaced client-preference key.  A deleted bypass
-        // provider must not leave the supervisor in a model tier that can no
-        // longer run.  Downgrade only that tier to deterministic rules while
-        // preserving its intervention history and every unrelated setting.
-        let idmm_rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT key, value FROM client_preferences \
-             WHERE key GLOB 'agent_session.idmm.*'",
-        )
-        .fetch_all(&mut *transaction)
-        .await?;
-        let mut idmm_updates = Vec::new();
-        for (key, value) in idmm_rows {
-            let mut parsed: serde_json::Value = serde_json::from_str(&value).map_err(|error| {
-                DbError::Conflict(format!("invalid IDMM preference '{key}': {error}"))
-            })?;
-            let selected = parsed
-                .pointer("/config/bypass_model/provider_id")
-                .and_then(serde_json::Value::as_str);
-            if selected != Some(id) {
-                continue;
-            }
-            let config = parsed
-                .get_mut("config")
-                .and_then(serde_json::Value::as_object_mut)
-                .ok_or_else(|| DbError::Conflict(format!("invalid IDMM preference '{key}'")))?;
-            config.insert("bypass_model".to_owned(), serde_json::json!({}));
-            if config.get("mode").and_then(serde_json::Value::as_str)
-                == Some("rule_plus_model")
-            {
-                config.insert("mode".to_owned(), serde_json::json!("rule_only"));
-            }
-            if let Some(revision) = parsed.get("revision").and_then(serde_json::Value::as_u64) {
-                parsed["revision"] = serde_json::json!(revision.saturating_add(1));
-            }
-            idmm_updates.push((key, parsed.to_string()));
-        }
-
-        sqlx::query("DELETE FROM providers WHERE provider_id = ?")
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
-
-        let now = nomifun_common::now_ms();
-        sqlx::query(
-            "UPDATE terminal_sessions \
-             SET idmm = json_remove(\
-                    idmm, \
-                    CASE \
-                        WHEN json_extract(idmm, '$.fault_watch.bypass_model.provider_id') = ?1 \
-                        THEN '$.fault_watch.bypass_model' \
-                        ELSE '$.__nomifun_noop_idmm_fault_bypass' \
-                    END, \
-                    CASE \
-                        WHEN json_extract(idmm, '$.decision_watch.bypass_model.provider_id') = ?1 \
-                        THEN '$.decision_watch.bypass_model' \
-                        ELSE '$.__nomifun_noop_idmm_decision_bypass' \
-                    END\
-                 ), \
-                 updated_at = MAX(updated_at, ?2) \
-             WHERE idmm IS NOT NULL \
-               AND json_valid(idmm) \
-               AND (\
-                    json_extract(idmm, '$.fault_watch.bypass_model.provider_id') = ?1 \
-                    OR json_extract(idmm, '$.decision_watch.bypass_model.provider_id') = ?1\
-               )",
-        )
-        .bind(id)
-        .bind(now)
-        .execute(&mut *transaction)
-        .await?;
-
-        for (key, action) in preference_actions {
-            match action {
-                ProviderPreferenceDeleteAction::Delete => {
-                    sqlx::query("DELETE FROM client_preferences WHERE key = ?")
-                        .bind(&key)
-                        .execute(&mut *transaction)
-                        .await?;
-                }
-                ProviderPreferenceDeleteAction::Update(value) => {
-                    let value =
-                        prune_missing_provider_preference(&key, value, &mut transaction).await?;
-                    sqlx::query(
-                        "UPDATE client_preferences \
-                         SET value = ?, updated_at = MAX(updated_at, ?) \
-                         WHERE key = ?",
-                    )
-                    .bind(value)
-                    .bind(now)
-                    .bind(&key)
-                    .execute(&mut *transaction)
-                    .await?;
-                }
-                ProviderPreferenceDeleteAction::Keep => unreachable!(),
-            }
-        }
-        for (key, value) in idmm_updates {
-            sqlx::query(
-                "UPDATE client_preferences \
-                 SET value = ?, updated_at = MAX(updated_at, ?) WHERE key = ?",
-            )
-            .bind(value)
-            .bind(now)
-            .bind(key)
-            .execute(&mut *transaction)
-            .await?;
-        }
-
-        // Cascade the provider delete to its current catalog tables in the
-        // same transaction.
-        sqlx::query("DELETE FROM provider_model_capabilities WHERE provider_id = ?")
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
-        sqlx::query("DELETE FROM provider_models WHERE provider_id = ?")
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
-        sqlx::query("DELETE FROM provider_connections WHERE provider_id = ?")
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
-        transaction.commit().await?;
-        Ok(())
+    async fn delete_coordinated(&self, plan: &crate::CoordinatedProviderDelete) -> Result<(), DbError> {
+        self.delete_graph(&plan.provider_id,Some(plan.expected_config_revision),&plan.cleanup).await
     }
 }

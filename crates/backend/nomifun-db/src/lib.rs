@@ -10,6 +10,8 @@ mod error;
 mod id_schema_contract;
 pub mod models;
 mod repository;
+mod provider_cleanup;
+pub use provider_cleanup::insert_agent_preset_revision_tx;
 mod session_projection;
 mod installation_role_bindings;
 pub use installation_role_bindings::{load_installation_role_bindings, put_installation_role_binding};
@@ -110,7 +112,7 @@ pub use repository::{
     KnowledgeProjectionReplacement,
     RelocateKnowledgeEntryProjectionParams, UpsertKnowledgeEntryParams,
     IMcpServerRepository, IOAuthTokenRepository,
-    CoordinatedProviderModelDelete, IProviderConnectionRepository,
+    CoordinatedProviderDelete, CoordinatedProviderModelDelete, IProviderConnectionRepository,
     IProviderModelCapabilityRepository, IProviderModelRepository, IProviderRepository,
     IRequirementRepository, ISettingsRepository, ISkillTagRepository,
     ITagSettingRepository, ITerminalRepository, IUserRepository, IWebhookRepository,
@@ -124,7 +126,7 @@ pub use repository::{
     SqliteKnowledgeTreeOperationRepository, SqliteMcpServerRepository,
     SqliteOAuthTokenRepository,
     SqliteProviderConnectionRepository, SqliteProviderModelCapabilityRepository,
-    ProviderModelCleanupPlan, ProviderModelProjectCleanup, ProviderModelTemplateCleanup,
+    ProviderAgentRevisionCleanup, ProviderModelCleanupPlan, ProviderModelProjectCleanup, ProviderModelTemplateCleanup,
     SqliteProviderModelRepository, SqliteProviderRepository,
     SqliteRequirementRepository, SqliteSettingsRepository,
     SqliteSkillTagRepository, SqliteTagSettingRepository, SqliteTerminalRepository,

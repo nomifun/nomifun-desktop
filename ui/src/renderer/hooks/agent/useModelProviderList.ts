@@ -1,9 +1,11 @@
 import { ipcBridge } from '@/common';
 import type { IProvider } from '@/common/config/storage';
+import { configService } from '@/common/config/configService';
 import { modelDisplayLabel } from '@/common/utils/modelPresentation';
 import { useCallback, useMemo } from 'react';
 import useSWR, { useSWRConfig, type SWRConfiguration } from 'swr';
 import useSWRSubscription from 'swr/subscription';
+import { AGENT_PRESET_LIBRARY_SWR_KEY } from './useAgentPresets';
 
 export interface ModelProviderListResult {
   /** Enabled providers in selector order. Task membership is filtered from
@@ -35,7 +37,11 @@ export const useProvidersQuery = () => {
   const { mutate } = useSWRConfig();
   // SWR shares one subscription per cache/key across all model selectors.
   useSWRSubscription('providers.changed', () => {
-    const refresh = () => { void mutate(PROVIDERS_SWR_KEY).catch(() => undefined); };
+    const refresh = () => {
+      void mutate(PROVIDERS_SWR_KEY).catch(() => undefined);
+      void mutate(AGENT_PRESET_LIBRARY_SWR_KEY).catch(() => undefined);
+      void configService.reload().catch(() => undefined);
+    };
     const stopChanges = ipcBridge.mode.onProvidersChanged.on(refresh);
     const stopReconnect = ipcBridge.conversation.reconnected.on(refresh);
     return () => { stopChanges(); stopReconnect(); };

@@ -39,9 +39,11 @@ impl SqliteClientPreferenceRepository {
 
         let mut normalized_upserts = Vec::with_capacity(final_upserts.len());
         let mut provider_ids = BTreeSet::new();
+        let mut model_selections = BTreeSet::new();
         for (key, value) in final_upserts {
             let normalized = normalize_provider_preference(key, value)?;
             provider_ids.extend(normalized.provider_ids);
+            model_selections.extend(normalized.model_selections);
             normalized_upserts.push((key, normalized.value));
         }
 
@@ -62,6 +64,12 @@ impl SqliteClientPreferenceRepository {
                     "Provider '{provider_id}' referenced by client preferences does not exist"
                 )));
             }
+        }
+        for (provider_id, model) in model_selections {
+            crate::provider_cleanup::lock_provider_model_choice_tx(
+                &mut tx, &provider_id, Some(&model),
+            )
+            .await?;
         }
 
         for key in delete_keys {

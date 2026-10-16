@@ -319,6 +319,28 @@ impl AgentPresetCompiler {
         nomifun_agent_contracts::validate_model_only_revision_derivation(
             source_revision, source, &request.revision,
         ).map_err(|error| KernelError::InvalidPresetRevision { reason: error.message })?;
+        Self::derive_frozen_model_snapshot(source, request)
+    }
+
+    /// Catalog deletion only narrows the current authored model selection.
+    /// Frozen Sessions continue to reference their original exact artifacts.
+    pub fn derive_catalog_model_detachment_snapshot(
+        source_revision: &AgentPresetRevision,
+        source: &ResolvedSnapshotEnvelope,
+        request: CompileRequest,
+        provider_id: &str,
+        model: Option<&str>,
+    ) -> Result<ResolvedSnapshotEnvelope, KernelError> {
+        nomifun_agent_contracts::validate_catalog_model_detachment(
+            source_revision, source, &request.revision, provider_id, model,
+        ).map_err(|error| KernelError::InvalidPresetRevision { reason: error.message })?;
+        Self::derive_frozen_model_snapshot(source, request)
+    }
+
+    fn derive_frozen_model_snapshot(
+        source: &ResolvedSnapshotEnvelope,
+        request: CompileRequest,
+    ) -> Result<ResolvedSnapshotEnvelope, KernelError> {
         if request.principal != source.actor || request.scene != source.scene
             || request.surface != source.surface || request.audience != source.audience
         {

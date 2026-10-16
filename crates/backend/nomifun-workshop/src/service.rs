@@ -30,12 +30,12 @@ use crate::canvas_agent_artifact::{
     CREATIVE_CANVAS_AGENT_ARTIFACT_KIND, parse_creative_canvas_agent_artifact,
 };
 use crate::creative_studio::{
-    CreativeChatModel, CreativeChatPendingTurn, CreativeChatSession, CreativeGenerationStatus,
+    CreativeChatModel, CreativeChatPendingTurn, CreativeChatSession,
     CreativeCanvasDetail, CreativeCanvasDocument, CreativeCanvasSummary, CreativeNodeData,
     CreativeProjectDocument, CreativeProjectSummary, MAX_CREATIVE_PROJECT_DOCUMENT_BYTES,
 };
 #[cfg(test)]
-use crate::creative_studio::CREATIVE_STUDIO_SCHEMA;
+use crate::creative_studio::{CREATIVE_STUDIO_SCHEMA, CreativeGenerationStatus};
 use crate::creative_agent_ops::{CreativeAgentOp, CreativeAgentOpResult};
 use crate::dto::WorkshopAsset;
 use crate::prompt_catalog::{CreativePromptCatalogPage, PromptCatalogService};
@@ -1959,6 +1959,12 @@ impl WorkshopService {
             .await
     }
 
+    pub async fn plan_provider_cleanup_under_lifecycle_write_guard(
+        &self, provider_id: &str,
+    ) -> Result<ProviderModelCleanupPlan, AppError> {
+        self.build_provider_model_cleanup_plan(provider_id, None).await
+    }
+
     async fn build_provider_model_cleanup_plan(
         &self,
         provider_id: &str,
@@ -1974,11 +1980,6 @@ impl WorkshopService {
         let mut project_cleanups = Vec::new();
         for project in self.repo.list_creative_projects().await? {
             let mut document = parse_stored_creative_project_row(&project)?;
-            let pending_task_ids = document
-                .pending_task_ids
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>();
             let mut changed = false;
             for node in &mut document.nodes {
                 match &mut node.data {
@@ -1987,24 +1988,6 @@ impl WorkshopService {
                             matches(candidate, config.model.as_deref())
                         }) =>
                     {
-                        if target_model.is_some()
-                            && (matches!(
-                                config.status,
-                                CreativeGenerationStatus::Queued
-                                    | CreativeGenerationStatus::Running
-                            ) || config
-                                .task_id
-                                .as_ref()
-                                .is_some_and(|task_id| pending_task_ids.contains(task_id)))
-                        {
-                            return Err(AppError::Conflict(format!(
-                                "creative studio project {} config node {} is still using provider-model '{}/{}'",
-                                project.project_id,
-                                node.id,
-                                provider_id,
-                                target_model.expect("exact cleanup has a model")
-                            )));
-                        }
                         config.provider_id = None;
                         config.model = None;
                         changed = true;
@@ -2057,7 +2040,7 @@ impl WorkshopService {
                     _ => {}
                 }
             }
-            if target_model.is_some() {
+            {
                 for chat in &mut document.chat_sessions {
                     let clears_target = chat.model.as_ref().is_some_and(|model| {
                         matches(&model.provider_id, Some(&model.model))
@@ -2065,16 +2048,9 @@ impl WorkshopService {
                     if !clears_target {
                         continue;
                     }
-                    if chat.pending_turn.is_some() {
-                        return Err(AppError::Conflict(format!(
-                            "creative studio project {} Agent session {} has a pending turn using provider-model '{}/{}'",
-                            project.project_id,
-                            chat.id,
-                            provider_id,
-                            target_model.expect("exact cleanup has a model")
-                        )));
-                    }
-                    if chat.message_ids.is_empty() {
+                    // A live or historical Session retains its frozen model
+                    // facts. Only an unused mutable selection is cleared.
+                    if chat.message_ids.is_empty() && chat.pending_turn.is_none() {
                         chat.model = None;
                         changed = true;
                     }
@@ -2181,6 +2157,7 @@ impl WorkshopService {
         Ok(ProviderModelCleanupPlan {
             projects: project_cleanups,
             templates: template_cleanups,
+            agent_revisions: Vec::new(),
         })
     }
 
@@ -5655,7 +5632,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_model_cleanup_rejects_pending_canvas_or_agent_usage_without_writes() {
+    async fn exact_model_cleanup_clears_mutable_selection_without_changing_pending_work_or_sessions() {
         let barrier = Arc::new(ProviderLifecycleBarrier::new());
         let (svc, _dir, db) =
             service_with_database_and_lifecycle(Some(barrier.clone())).await;
@@ -5687,14 +5664,16 @@ mod tests {
             .unwrap();
 
         let write_guard = barrier.write().await;
-        let canvas_error = svc
+        let canvas_cleanup = svc
             .plan_provider_model_cleanup_under_lifecycle_write_guard(provider_id, "delete-me")
             .await
-            .unwrap_err();
-        assert!(matches!(
-            canvas_error,
-            AppError::Conflict(ref message) if message.contains("config node live-config")
-        ));
+            .unwrap();
+        assert_eq!(canvas_cleanup.projects.len(),1);
+        let planned: CreativeProjectDocument = serde_json::from_str(&canvas_cleanup.projects[0].document_json).unwrap();
+        let CreativeNodeData::Config(planned_config) = &planned.nodes[0].data else { unreachable!() };
+        assert!(planned_config.provider_id.is_none() && planned_config.model.is_none());
+        assert_eq!(planned_config.status,CreativeGenerationStatus::Queued);
+        assert_eq!(planned.pending_task_ids,canvas_document.pending_task_ids);
         drop(write_guard);
         assert_eq!(
             svc.get_creative_project(&canvas_project.project_id)
@@ -5739,15 +5718,11 @@ mod tests {
             .unwrap();
 
         let _write_guard = barrier.write().await;
-        let agent_error = svc
+        let agent_cleanup = svc
             .plan_provider_model_cleanup_under_lifecycle_write_guard(provider_id, "delete-me")
             .await
-            .unwrap_err();
-        assert!(matches!(
-            agent_error,
-            AppError::Conflict(ref message)
-                if message.contains("Agent session") && message.contains(&chat_id)
-        ));
+            .unwrap();
+        assert!(agent_cleanup.projects.is_empty(),"a pending Session is preserved and never blocks catalog deletion");
         assert_eq!(
             svc.get_creative_project(&agent_project.project_id)
                 .await

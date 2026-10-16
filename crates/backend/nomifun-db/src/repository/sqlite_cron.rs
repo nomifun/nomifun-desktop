@@ -39,7 +39,7 @@ impl SqliteCronRepository {
                 "atomic Cron/Session relation insertion requires a conversation_id".into(),
             ));
         }
-        validate_cron_agent_config_shape(&row.agent_type, row.agent_config.as_deref())?;
+        validate_cron_agent_config_shape(&row.agent_type, row.agent_config.as_deref(), row.enabled)?;
         let mut tx = self.pool.begin().await?;
         lock_nomi_provider(&mut tx, &row.agent_type, row.agent_config.as_deref()).await?;
         validate_and_lock_agent_preset_lineage(
@@ -128,6 +128,7 @@ impl SqliteCronRepository {
 fn validate_cron_agent_config_shape(
     agent_type: &str,
     agent_config: Option<&str>,
+    enabled: bool,
 ) -> Result<(), DbError> {
     let Some(agent_config) = agent_config else {
         return Ok(());
@@ -189,21 +190,21 @@ fn validate_cron_agent_config_shape(
                 "cron Nomi agent_config.backend is forbidden; use provider_id".into(),
             ));
         }
-        let provider_id = object
-            .get("provider_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                DbError::Conflict("cron Nomi agent_config.provider_id is required".into())
-            })?;
-        nomifun_common::ProviderId::parse(provider_id).map_err(|error| {
-            DbError::Conflict(format!(
-                "cron Nomi agent_config.provider_id is not a canonical UUIDv7: {error}"
-            ))
-        })?;
-        if object.get("model").and_then(Value::as_str).is_none() {
-            return Err(DbError::Conflict(
-                "cron Nomi agent_config.model is required".into(),
-            ));
+        match (
+            object.get("provider_id").and_then(Value::as_str),
+            object.get("model").and_then(Value::as_str),
+        ) {
+            (None, None) if !enabled => {}
+            (Some(provider_id), Some(_)) => {
+                nomifun_common::ProviderId::parse(provider_id).map_err(|error| {
+                    DbError::Conflict(format!(
+                        "cron Nomi agent_config.provider_id is not a canonical UUIDv7: {error}"
+                    ))
+                })?;
+            }
+            _ => return Err(DbError::Conflict(
+                "cron Nomi agent_config.provider_id and model are required together for enabled jobs".into(),
+            )),
         }
     } else if object.contains_key("provider_id") {
         return Err(DbError::Conflict(
@@ -274,16 +275,19 @@ async fn validate_cron_authority(
         "model",
         "clear_context_each_run",
     ];
+    let unconfigured = !enabled
+        && object.get("provider_id").is_none_or(Value::is_null)
+        && object.get("model").is_none_or(Value::is_null);
     if object.keys().any(|key| !allowed.contains(&key.as_str()))
-        || object
+        || (!unconfigured && (object
             .get("provider_id")
             .and_then(Value::as_str)
             .is_none_or(|value| value.trim().is_empty())
-        || object.get("name").and_then(Value::as_str).is_none()
         || object
             .get("model")
             .and_then(Value::as_str)
-            .is_none_or(|value| value.is_empty() || value.trim() != value)
+            .is_none_or(|value| value.is_empty() || value.trim() != value)))
+        || object.get("name").and_then(Value::as_str).is_none()
         || object
             .get("clear_context_each_run")
             .is_some_and(|value| !value.is_boolean())
@@ -384,18 +388,11 @@ async fn lock_nomi_provider(
     let Some(provider_id) = nomi_provider_id(agent_type, agent_config)? else {
         return Ok(());
     };
-    let locked = sqlx::query(
-        "UPDATE providers SET updated_at = updated_at WHERE provider_id = ?",
-    )
-    .bind(&provider_id)
-    .execute(&mut **tx)
-    .await?;
-    if locked.rows_affected() == 0 {
-        return Err(DbError::Conflict(format!(
-            "cron Nomi agent_config references missing provider '{provider_id}'"
-        )));
-    }
-    Ok(())
+    let config: Value = serde_json::from_str(agent_config.expect("selected Nomi provider has a config"))
+        .map_err(|error| DbError::Conflict(format!("invalid cron agent_config JSON: {error}")))?;
+    crate::provider_cleanup::lock_provider_model_choice_tx(
+        tx, &provider_id, config.get("model").and_then(Value::as_str),
+    ).await
 }
 
 #[async_trait::async_trait]
@@ -542,7 +539,7 @@ impl ICronRepository for SqliteCronRepository {
             .unwrap_or(&existing.execution_mode);
         let final_agent_type = params.agent_type.as_deref().unwrap_or(&existing.agent_type);
         let final_enabled = params.enabled.unwrap_or(existing.enabled);
-        validate_cron_agent_config_shape(final_agent_type, final_agent_config)?;
+        validate_cron_agent_config_shape(final_agent_type, final_agent_config, final_enabled)?;
         validate_cron_authority(
             &mut tx,
             user_id,
@@ -1611,6 +1608,8 @@ mod tests {
         .execute(db.pool())
         .await
         .unwrap();
+        sqlx::query("INSERT INTO provider_models (provider_id,model,created_at,updated_at) VALUES (?,'model',1,1)")
+            .bind(provider_id).execute(db.pool()).await.unwrap();
     }
 
     #[tokio::test]
@@ -1629,7 +1628,7 @@ mod tests {
         );
         let error = repo.insert(&missing).await.unwrap_err();
         assert!(
-            matches!(error, DbError::Conflict(ref message) if message.contains("missing provider")),
+            matches!(error, DbError::Conflict(ref message) if message.contains("selected provider no longer exists")),
             "unexpected missing-provider error: {error:?}"
         );
 
@@ -1680,7 +1679,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(error, DbError::Conflict(ref message) if message.contains("missing provider")),
+            matches!(error, DbError::Conflict(ref message) if message.contains("selected provider no longer exists")),
             "unexpected update error: {error:?}"
         );
 
@@ -1695,7 +1694,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_delete_is_restricted_by_nomi_cron_binding() {
+    async fn provider_delete_clears_the_model_and_disables_nomi_cron_without_deleting_the_job() {
         use crate::{IProviderRepository, SqliteProviderRepository};
 
         let (repo, db, owner) = setup().await;
@@ -1714,15 +1713,68 @@ mod tests {
         repo.insert(&row).await.unwrap();
 
         let providers = SqliteProviderRepository::new(db.pool().clone());
-        let error = providers.delete(PROVIDER_ID).await.unwrap_err();
-        assert!(
-            matches!(error, DbError::Conflict(ref message) if message.contains("executable Agent binding")),
-            "unexpected provider delete error: {error:?}"
-        );
-        assert!(providers.find_by_id(PROVIDER_ID).await.unwrap().is_some());
-
-        repo.delete(&owner, &cron_job_id).await.unwrap();
         providers.delete(PROVIDER_ID).await.unwrap();
+        assert!(providers.find_by_id(PROVIDER_ID).await.unwrap().is_none());
+        let remaining = repo.get_by_cron_job_id(&owner, &cron_job_id).await.unwrap().unwrap();
+        assert!(!remaining.enabled);
+        let config: serde_json::Value = serde_json::from_str(remaining.agent_config.as_deref().unwrap()).unwrap();
+        assert!(config.get("provider_id").is_none_or(serde_json::Value::is_null));
+        assert!(config.get("model").is_none_or(serde_json::Value::is_null));
+    }
+
+    #[tokio::test]
+    async fn catalog_detached_nomi_jobs_remain_editable_without_restoring_removed_models() {
+        use crate::{CoordinatedProviderModelDelete, IProviderModelRepository, IProviderRepository,
+            SqliteProviderModelRepository, SqliteProviderRepository};
+        for whole_provider in [false, true] {
+            for secondary_user in [false, true] {
+                let (repo, db, owner) = setup().await;
+                insert_provider(&db, PROVIDER_ID).await;
+                let mut user = owner.clone();
+                if secondary_user {
+                    user = "0190f5fe-7c00-7a00-8000-000000000002".into();
+                    sqlx::query("INSERT INTO users (user_id,username,password_hash,created_at,updated_at) VALUES (?,'detached_cron','hash',1,1)")
+                        .bind(&user).execute(db.pool()).await.unwrap();
+                }
+                let selected = serde_json::json!({"name":"Nomi","provider_id":PROVIDER_ID,"model":"model"}).to_string();
+                let mut row = make_row(&user);
+                row.agent_type = "nomi".into();
+                row.execution_mode = "new_conversation".into();
+                row.conversation_id = None;
+                row.agent_config = Some(selected.clone());
+                repo.insert(&row).await.unwrap();
+                if whole_provider {
+                    SqliteProviderRepository::new(db.pool().clone()).delete(PROVIDER_ID).await.unwrap();
+                } else {
+                    SqliteProviderModelRepository::new(db.pool().clone()).delete_coordinated(&CoordinatedProviderModelDelete {
+                        provider_id: PROVIDER_ID.into(), model: "model".into(),
+                        expected_config_revision: 0, cleanup: Default::default(),
+                    }).await.unwrap();
+                }
+                repo.update(&user, &row.cron_job_id, &UpdateCronJobParams {
+                    name: Some("Still editable".into()), ..Default::default()
+                }).await.unwrap();
+                let empty_config = serde_json::json!({"name":"Edited Nomi","provider_id":null,"model":null}).to_string();
+                repo.update(&user, &row.cron_job_id, &UpdateCronJobParams {
+                    agent_config: Some(Some(empty_config.clone())), ..Default::default()
+                }).await.unwrap();
+                for params in [
+                    UpdateCronJobParams {enabled:Some(true), ..Default::default()},
+                    UpdateCronJobParams {name:Some("Must roll back".into()),agent_config:Some(Some(selected.clone())),..Default::default()},
+                    UpdateCronJobParams {agent_config:Some(Some(serde_json::json!({"name":"Nomi","provider_id":PROVIDER_ID,"model":null}).to_string())),..Default::default()},
+                ] {
+                    assert!(repo.update(&user, &row.cron_job_id, &params).await.is_err());
+                }
+                let saved = repo.get_by_cron_job_id(&user, &row.cron_job_id).await.unwrap().unwrap();
+                assert!(!saved.enabled);
+                assert_eq!(saved.name, "Still editable");
+                assert_eq!(saved.agent_config.as_deref(), Some(empty_config.as_str()));
+                assert_eq!(saved.schedule_revision, 2);
+                assert_eq!(saved.next_run_at, None);
+                assert_eq!(saved.preset_id, row.preset_id);
+                assert_eq!(saved.agent_snapshot, row.agent_snapshot);
+            }
+        }
     }
 
     #[tokio::test]

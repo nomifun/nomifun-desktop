@@ -579,7 +579,7 @@ impl CronService {
                 req.conversation_id.as_deref(),
             )?;
         }
-        validate_agent_config_shape(&req.agent_type, req.agent_config.as_ref())?;
+        validate_agent_config_shape(&req.agent_type, req.agent_config.as_ref(), false)?;
         let schedule = schedule_from_dto(&req.schedule);
         validate_schedule(&schedule)?;
 
@@ -768,7 +768,7 @@ impl CronService {
             )?;
         }
         if let Some(config) = req.agent_config.as_ref() {
-            validate_agent_config_shape(&job.agent_type, Some(config))?;
+            validate_agent_config_shape(&job.agent_type, Some(config), !req.enabled.unwrap_or(job.enabled))?;
         }
 
         if let Some(name) = &req.name {
@@ -815,7 +815,7 @@ impl CronService {
             }
             job.max_retries = max_retries;
         }
-        if req.agent_config.is_some() || req.enabled == Some(true) {
+        if job.enabled && (req.agent_config.is_some() || req.enabled == Some(true)) {
             // Validate the resulting aggregate, not just a supplied config. A
             // disabled row cannot be re-enabled without first selecting a
             // usable Nomi model.
@@ -3406,11 +3406,15 @@ fn validate_nomi_agent_config(
 fn validate_agent_config_shape(
     agent_type: &str,
     agent_config: Option<&nomifun_api_types::CronAgentConfigDto>,
+    allow_empty_model: bool,
 ) -> Result<(), CronError> {
     let Some(config) = agent_config else {
         return Ok(());
     };
     if agent_type == "nomi" {
+        if allow_empty_model && config.backend.is_none() && config.provider_id.is_none() && config.model.is_none() {
+            return Ok(());
+        }
         validate_nomi_agent_selection(
             agent_type,
             config.backend.as_deref(),

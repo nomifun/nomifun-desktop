@@ -67,6 +67,13 @@ pub trait IProviderRepository: Send + Sync {
     ) -> Result<Provider, DbError>;
 
     async fn delete(&self, id: &str) -> Result<(), DbError>;
+
+    async fn delete_coordinated(
+        &self,
+        _plan: &crate::repository::provider_model::CoordinatedProviderDelete,
+    ) -> Result<(), DbError> {
+        Err(DbError::Init("coordinated provider deletion is unavailable in this repository".into()))
+    }
 }
 
 #[derive(Debug)]

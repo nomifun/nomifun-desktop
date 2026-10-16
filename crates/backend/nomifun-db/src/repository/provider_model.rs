@@ -1,5 +1,15 @@
 use crate::error::DbError;
 use crate::models::{CreativeStudioTemplateRow, NewProviderModel, ProviderModelRow};
+use nomifun_agent_contracts::{AgentPresetRevision, PresetRevisionRef, ResolvedSnapshotEnvelope};
+
+/// A newly compiled current default with only deleted catalog model choices
+/// removed. The source revision and its frozen Snapshot are never rewritten.
+#[derive(Debug, Clone)]
+pub struct ProviderAgentRevisionCleanup {
+    pub expected_current: PresetRevisionRef,
+    pub revision: AgentPresetRevision,
+    pub snapshot: ResolvedSnapshotEnvelope,
+}
 
 /// One compare-and-swap replacement for a canonical Creative Studio project
 /// whose mutable document referenced the model being deleted.
@@ -22,12 +32,20 @@ pub struct ProviderModelTemplateCleanup {
     pub replacement: CreativeStudioTemplateRow,
 }
 
-/// All mutable Creative Studio references that must be removed together with
-/// one exact provider/model row.
+/// Prepared current-Agent revisions and Creative Studio CAS replacements.
+/// Registered database selections are cleared in the same delete transaction.
 #[derive(Debug, Clone, Default)]
 pub struct ProviderModelCleanupPlan {
     pub projects: Vec<ProviderModelProjectCleanup>,
     pub templates: Vec<ProviderModelTemplateCleanup>,
+    pub agent_revisions: Vec<ProviderAgentRevisionCleanup>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CoordinatedProviderDelete {
+    pub provider_id: String,
+    pub expected_config_revision: i64,
+    pub cleanup: ProviderModelCleanupPlan,
 }
 
 /// Strongly typed authority for deleting one model and its precomputed

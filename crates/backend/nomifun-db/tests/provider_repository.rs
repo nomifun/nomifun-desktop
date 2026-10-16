@@ -1215,6 +1215,7 @@ async fn coordinated_model_delete_applies_all_cleanup_and_preserves_sibling_mode
             model: "delete-me".to_owned(),
             expected_config_revision,
             cleanup: ProviderModelCleanupPlan {
+                agent_revisions: Vec::new(),
                 projects: vec![model_cleanup_project_patch(&project_id, 1, "cleared")],
                 templates: vec![model_cleanup_template_patch(&template, 1, "cleared")],
             },
@@ -1269,72 +1270,51 @@ async fn coordinated_model_delete_applies_all_cleanup_and_preserves_sibling_mode
 }
 
 #[tokio::test]
-async fn coordinated_model_delete_rejects_live_creation_task_without_writes() {
+async fn coordinated_model_delete_keeps_live_creation_facts_and_clears_the_mutable_project() {
     let db = init_database_memory().await.unwrap();
     seed_model_delete_provider(&db, false).await;
-    let (project_id, original_document) = seed_model_cleanup_project(&db, "original").await;
+    let (project_id, _) = seed_model_cleanup_project(&db, "original").await;
     seed_live_model_creation_task(&db, &project_id).await;
+    let before: Vec<(String,String,String,String,String)> = sqlx::query_as("SELECT provider_id,model,status,params,input_bindings FROM creation_tasks")
+        .fetch_all(db.pool()).await.unwrap();
     let models = SqliteProviderModelRepository::new(db.pool().clone());
-    let error = models
-        .delete_coordinated(&CoordinatedProviderModelDelete {
-            provider_id: PROVIDER_ID.to_owned(),
-            model: "delete-me".to_owned(),
-            expected_config_revision: 0,
-            cleanup: ProviderModelCleanupPlan {
-                projects: vec![model_cleanup_project_patch(&project_id, 1, "must-not-write")],
-                templates: vec![],
-            },
-        })
-        .await
-        .unwrap_err();
-    assert!(matches!(error, DbError::Conflict(message) if message.contains("live creation task")));
-    assert!(models.get(PROVIDER_ID, "delete-me").await.unwrap().is_some());
-    let project: (i64, String) = sqlx::query_as(
-        "SELECT revision, document_json FROM creative_studio_projects WHERE project_id = ?",
-    )
-    .bind(project_id)
-    .fetch_one(db.pool())
-    .await
-    .unwrap();
-    assert_eq!(project, (1, original_document));
-    assert_eq!(model_delete_provider_revision(&db).await, 0);
+    assert!(models.delete_coordinated(&CoordinatedProviderModelDelete {
+        provider_id:PROVIDER_ID.into(),model:"delete-me".into(),expected_config_revision:0,
+        cleanup:ProviderModelCleanupPlan {projects:vec![model_cleanup_project_patch(&project_id,1,"cleared")],..Default::default()},
+    }).await.unwrap());
+    assert!(models.get(PROVIDER_ID,"delete-me").await.unwrap().is_none());
+    let after: Vec<(String,String,String,String,String)> = sqlx::query_as("SELECT provider_id,model,status,params,input_bindings FROM creation_tasks")
+        .fetch_all(db.pool()).await.unwrap();
+    assert_eq!(after,before,"catalog deletion must not rewrite admitted creation facts");
+    let project: (i64,String) = sqlx::query_as("SELECT revision,document_json FROM creative_studio_projects WHERE project_id=?")
+        .bind(&project_id).fetch_one(db.pool()).await.unwrap();
+    assert_eq!(project.0,2);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&project.1).unwrap()["nodes"][0]["marker"],"cleared");
+    assert_eq!(model_delete_provider_revision(&db).await,1);
 }
 
 #[tokio::test]
-async fn coordinated_model_delete_rejects_each_live_template_snapshot_binding() {
-    for step_kind in ["generate-images", "draft-prompts"] {
+async fn coordinated_model_delete_preserves_each_live_template_run_snapshot() {
+    for step_kind in ["generate-images","draft-prompts"] {
         let db = init_database_memory().await.unwrap();
-        seed_model_delete_provider(&db, false).await;
-        let template = seed_model_cleanup_template(&db, "original").await;
-        seed_model_template_run(&db, &template, step_kind, "queued").await;
+        seed_model_delete_provider(&db,false).await;
+        let template = seed_model_cleanup_template(&db,"original").await;
+        seed_model_template_run(&db,&template,step_kind,"queued").await;
+        let before: Vec<(String,String)> = sqlx::query_as("SELECT aggregate_json,status FROM creative_studio_template_runs")
+            .fetch_all(db.pool()).await.unwrap();
         let models = SqliteProviderModelRepository::new(db.pool().clone());
-        let error = models
-            .delete_coordinated(&CoordinatedProviderModelDelete {
-                provider_id: PROVIDER_ID.to_owned(),
-                model: "delete-me".to_owned(),
-                expected_config_revision: 0,
-                cleanup: ProviderModelCleanupPlan {
-                    projects: vec![],
-                    templates: vec![model_cleanup_template_patch(
-                        &template,
-                        1,
-                        "must-not-write",
-                    )],
-                },
-            })
-            .await
-            .unwrap_err();
-        assert!(matches!(error, DbError::Conflict(message) if message.contains("nonterminal template run")));
-        assert!(models.get(PROVIDER_ID, "delete-me").await.unwrap().is_some());
-        let revision: i64 = sqlx::query_scalar(
-            "SELECT revision FROM creative_studio_templates WHERE template_id = ?",
-        )
-        .bind(&template.template_id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-        assert_eq!(revision, 1, "{step_kind}");
-        assert_eq!(model_delete_provider_revision(&db).await, 0, "{step_kind}");
+        assert!(models.delete_coordinated(&CoordinatedProviderModelDelete {
+            provider_id:PROVIDER_ID.into(),model:"delete-me".into(),expected_config_revision:0,
+            cleanup:ProviderModelCleanupPlan {templates:vec![model_cleanup_template_patch(&template,1,"cleared")],..Default::default()},
+        }).await.unwrap());
+        let after: Vec<(String,String)> = sqlx::query_as("SELECT aggregate_json,status FROM creative_studio_template_runs")
+            .fetch_all(db.pool()).await.unwrap();
+        assert_eq!(after,before,"{step_kind}: frozen runs must keep their exact original snapshot");
+        assert!(models.get(PROVIDER_ID,"delete-me").await.unwrap().is_none());
+        let revision: i64 = sqlx::query_scalar("SELECT revision FROM creative_studio_templates WHERE template_id=?")
+            .bind(&template.template_id).fetch_one(db.pool()).await.unwrap();
+        assert_eq!(revision,2);
+        assert_eq!(model_delete_provider_revision(&db).await,1);
     }
 }
 
@@ -1360,6 +1340,7 @@ async fn stale_project_cleanup_rolls_back_earlier_project_patch_and_model_delete
             model: "delete-me".to_owned(),
             expected_config_revision: 0,
             cleanup: ProviderModelCleanupPlan {
+                agent_revisions: Vec::new(),
                 projects: vec![
                     model_cleanup_project_patch(&first_id, 1, "first-cleaned"),
                     model_cleanup_project_patch(&stale_id, 1, "stale-cleaned"),
@@ -1410,6 +1391,7 @@ async fn stale_template_cleanup_rolls_back_project_patch_and_model_delete() {
             model: "delete-me".to_owned(),
             expected_config_revision: 0,
             cleanup: ProviderModelCleanupPlan {
+                agent_revisions: Vec::new(),
                 projects: vec![model_cleanup_project_patch(&project_id, 1, "cleaned")],
                 templates: vec![model_cleanup_template_patch(&template, 1, "cleaned")],
             },
@@ -1442,6 +1424,7 @@ async fn missing_model_returns_false_without_applying_cleanup() {
                 model: "missing".to_owned(),
                 expected_config_revision: 0,
                 cleanup: ProviderModelCleanupPlan {
+                agent_revisions: Vec::new(),
                     projects: vec![model_cleanup_project_patch(
                         &project_id,
                         1,
