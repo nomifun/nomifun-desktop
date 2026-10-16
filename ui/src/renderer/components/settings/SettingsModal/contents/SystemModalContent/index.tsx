@@ -47,7 +47,6 @@ const SystemModalContent: React.FC = () => {
   });
   const [notificationEnabled, setNotificationEnabled] = useState(true);
   const [cronNotificationEnabled, setCronNotificationEnabled] = useState(false);
-  const [saveUploadToWorkspace, setSaveUploadToWorkspace] = useState(false);
   const [autoPreviewOfficeFiles, setAutoPreviewOfficeFiles] = useState(true);
   const [sendKey, setSendKey] = useState<'enter' | 'mod-enter'>('enter');
   const [factoryResetVisible, setFactoryResetVisible] = useState(false);
@@ -74,7 +73,6 @@ const SystemModalContent: React.FC = () => {
   useEffect(() => {
     setNotificationEnabled(configService.get('system.notificationEnabled') ?? true);
     setCronNotificationEnabled(configService.get('system.cronNotificationEnabled') ?? false);
-    setSaveUploadToWorkspace(configService.get('upload.saveToWorkspace') ?? false);
     setAutoPreviewOfficeFiles(configService.get('system.autoPreviewOfficeFiles') ?? true);
     setSendKey(configService.get('chat.sendKey') ?? 'enter');
   }, []);
@@ -143,14 +141,6 @@ const SystemModalContent: React.FC = () => {
       configService.setLocal('system.cronNotificationEnabled', !checked);
     });
   }, [ensureNotificationPermission]);
-
-  const handleSaveUploadToWorkspaceChange = useCallback((checked: boolean) => {
-    setSaveUploadToWorkspace(checked);
-    return configService.set('upload.saveToWorkspace', checked).catch(() => {
-      setSaveUploadToWorkspace(!checked);
-      configService.setLocal('upload.saveToWorkspace', !checked);
-    });
-  }, []);
 
   const handleAutoPreviewOfficeFilesChange = useCallback((checked: boolean) => {
     setAutoPreviewOfficeFiles(checked);
@@ -266,7 +256,6 @@ const SystemModalContent: React.FC = () => {
     {
       key: 'files', title: t('settings.workspace.files'), description: t('settings.workspace.filesDesc'),
       rows: [
-        { key: 'saveUploadToWorkspace', label: t('settings.saveUploadToWorkspace'), control: switchControl(t('settings.saveUploadToWorkspace'), saveUploadToWorkspace, handleSaveUploadToWorkspaceChange) },
         { key: 'autoPreviewOfficeFiles', label: t('settings.autoPreviewOfficeFiles'), description: t('settings.autoPreviewOfficeFilesDesc'), control: switchControl(t('settings.autoPreviewOfficeFiles'), autoPreviewOfficeFiles, handleAutoPreviewOfficeFilesChange) },
       ],
       directories: [

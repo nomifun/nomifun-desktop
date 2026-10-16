@@ -51,7 +51,9 @@ async fn forward_005_retires_only_side_question_policy_and_preserves_schema_and_
     let empty_id = insert_policy(&old, Some("{}")).await;
     let absent_policy = "{ \"self_identity_sticky\": true }";
     let absent_id = insert_policy(&old, Some(absent_policy)).await;
-    let before_schema: Vec<(String, String)> = sqlx::query_as("SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY name")
+    // Later product migrations may retire settings columns independently of
+    // this Agent metadata migration. All other schema remains identical.
+    let before_schema: Vec<(String, String)> = sqlx::query_as("SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND name<>'system_settings' ORDER BY name")
         .fetch_all(&old).await.unwrap();
     let before_receipts: Vec<(i64, Vec<u8>)> = sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version")
         .fetch_all(&old).await.unwrap();
@@ -79,7 +81,7 @@ async fn forward_005_retires_only_side_question_policy_and_preserves_schema_and_
         let saved: (String, bool) = sqlx::query_as("SELECT name,enabled FROM agent_metadata WHERE agent_id=?")
             .bind(NOMI).fetch_one(current.pool()).await.unwrap();
         assert_eq!(saved, ("Saved owner name".into(), false));
-        let schema: Vec<(String, String)> = sqlx::query_as("SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        let schema: Vec<(String, String)> = sqlx::query_as("SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND name<>'system_settings' ORDER BY name")
             .fetch_all(current.pool()).await.unwrap();
         assert_eq!(schema, before_schema, "metadata data retirement must not change the schema");
         let manifest: (i64, String) = sqlx::query_as("SELECT migration_head,canonical_schema_manifest_digest FROM schema_metadata")

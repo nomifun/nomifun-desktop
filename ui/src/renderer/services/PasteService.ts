@@ -11,9 +11,8 @@ import type { ConversationId } from '@/common/types/ids';
 
 /**
  * Upload pasted bytes to the backend via HTTP multipart and return the absolute
- * file path stored on disk. Works the same in Electron and WebUI — the backend
- * is always reached over HTTP (the Electron preload injects `window.__backendPort`
- * so requests land on `http://127.0.0.1:<port>`; WebUI hits same-origin).
+ * file path stored on disk. The Tauri desktop shell reaches the loopback backend;
+ * WebUI uses its same-origin backend. Clipboard bytes always use HTTP upload.
  *
  * Returns `null` when the upload is cancelled by the user (via the per-file
  * cancel button or a conversation switch); other errors propagate.
@@ -180,11 +179,7 @@ class PasteServiceClass {
       const usedFileNames = new Set<string>();
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        const file_path = (file as File & { path?: string }).path;
-
-        // 检查是否有文件路径 (Electron 环境下 File 对象会有额外的 path 属性)
-
-        if (!file_path && file.type.startsWith('image/')) {
+        if (file.type.startsWith('image/')) {
           // 剪贴板图片，需要检查是否支持该类型
           const fileExt = getFileExtension(file.name) || getExtensionFromMimeType(file.type);
 
@@ -222,7 +217,7 @@ class PasteServiceClass {
               }
               usedFileNames.add(file_name);
 
-              // 上传到后端并拿回绝对路径（Electron / WebUI 都走 HTTP multipart）
+              // Upload clipboard bytes and use the stored backend path.
               const tempPath = await createTempFile(file_name, uint8Array, file.type, conversation_id, source);
 
               if (tempPath) {
@@ -244,25 +239,8 @@ class PasteServiceClass {
             // 不支持的文件类型，跳过但不报错（让后续过滤处理）
             console.warn(`Unsupported image type: ${file.type}, extension: ${fileExt}`);
           }
-        } else if (file_path) {
-          // 有文件路径的文件（从文件管理器拖拽的文件）
-          // 检查文件类型是否支持
-          const fileExt = getFileExtension(file.name);
-
-          if (allowAll || supportedExts.includes(fileExt)) {
-            fileList.push({
-              name: file.name,
-              path: file_path,
-              size: file.size,
-              type: file.type,
-              lastModified: file.lastModified,
-            });
-          } else {
-            // 不支持的文件类型
-            console.warn(`Unsupported file type: ${file.name}, extension: ${fileExt}`);
-          }
-        } else if (!file.type.startsWith('image/')) {
-          // 没有文件路径的非图片文件（从文件管理器复制粘贴的文件）
+        } else {
+          // Non-image clipboard files also upload their bytes.
           const fileExt = getFileExtension(file.name);
 
           if (allowAll || supportedExts.includes(fileExt)) {

@@ -2,44 +2,67 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-License-Identifier: MIT
 
-use std::{ffi::CStr, path::PathBuf};
+use std::path::PathBuf;
 
 use objc2::{
   runtime::{Bool, ProtocolObject},
-  DeclaredClass,
+  ClassType, DeclaredClass,
 };
-use objc2_app_kit::{NSDragOperation, NSDraggingInfo, NSFilenamesPboardType};
-use objc2_foundation::{NSArray, NSPoint, NSRect, NSString};
+use objc2_app_kit::{NSDragOperation, NSDraggingInfo};
+use objc2_foundation::{NSArray, NSPoint, NSURL};
 
 use crate::DragDropEvent;
 
 use super::WryWebView;
 
-pub(crate) unsafe fn collect_paths(drag_info: &ProtocolObject<dyn NSDraggingInfo>) -> Vec<PathBuf> {
+pub(crate) fn collect_paths(drag_info: &ProtocolObject<dyn NSDraggingInfo>) -> Vec<PathBuf> {
   let pb = drag_info.draggingPasteboard();
-  let mut drag_drop_paths = Vec::new();
-  let types = NSArray::arrayWithObject(NSFilenamesPboardType);
+  let classes = NSArray::from_slice(&[NSURL::class()]);
+  // Read the current file-URL contract instead of the deprecated filenames
+  // property list. Non-file drags have no host paths and never require casts
+  // or unwraps on externally supplied pasteboard data.
+  let Some(urls) = (unsafe { pb.readObjectsForClasses_options(&classes, None) }) else {
+    return Vec::new();
+  };
+  urls
+    .into_iter()
+    .filter_map(|object| object.downcast::<NSURL>().ok())
+    .filter(|url| url.isFileURL())
+    .filter_map(|url| url.path())
+    .map(|path| PathBuf::from(path.to_string()))
+    .collect()
+}
 
-  if pb.availableTypeFromArray(&types).is_some() {
-    let paths = pb.propertyListForType(NSFilenamesPboardType).unwrap();
-    let paths = paths.downcast::<NSArray>().unwrap();
-    for path in paths {
-      let path = path.downcast::<NSString>().unwrap();
-      let path = CStr::from_ptr(path.UTF8String()).to_string_lossy();
-      drag_drop_paths.push(PathBuf::from(path.into_owned()));
-    }
-  }
-  drag_drop_paths
+/// AppKit supplies window-relative points; the cross-platform drag event uses
+/// physical pixels relative to the webview's top-left corner. Convert through
+/// the view so child offsets, flipped bounds and the current display's backing
+/// scale are all applied before rounding.
+fn drag_position(this: &WryWebView, drag_info: &ProtocolObject<dyn NSDraggingInfo>) -> (i32, i32) {
+  let point = this.convertPoint_fromView(drag_info.draggingLocation(), None);
+  let bounds = this.bounds();
+  let top_left = NSPoint::new(
+    bounds.origin.x,
+    if this.isFlipped() {
+      bounds.origin.y
+    } else {
+      bounds.origin.y + bounds.size.height
+    },
+  );
+  let point = this.convertPointToBacking(point);
+  let top_left = this.convertPointToBacking(top_left);
+  // Backing coordinates have an upward Y axis, including for flipped views.
+  (
+    (point.x - top_left.x).round() as i32,
+    (top_left.y - point.y).round() as i32,
+  )
 }
 
 pub(crate) fn dragging_entered(
   this: &WryWebView,
   drag_info: &ProtocolObject<dyn NSDraggingInfo>,
 ) -> NSDragOperation {
-  let paths = unsafe { collect_paths(drag_info) };
-  let dl: NSPoint = unsafe { drag_info.draggingLocation() };
-  let frame: NSRect = this.frame();
-  let position = (dl.x as i32, (frame.size.height - dl.y) as i32);
+  let paths = collect_paths(drag_info);
+  let position = drag_position(this, drag_info);
 
   let listener = &this.ivars().drag_drop_handler;
   if !listener(DragDropEvent::Enter { paths, position }) {
@@ -54,9 +77,7 @@ pub(crate) fn dragging_updated(
   this: &WryWebView,
   drag_info: &ProtocolObject<dyn NSDraggingInfo>,
 ) -> NSDragOperation {
-  let dl: NSPoint = unsafe { drag_info.draggingLocation() };
-  let frame: NSRect = this.frame();
-  let position = (dl.x as i32, (frame.size.height - dl.y) as i32);
+  let position = drag_position(this, drag_info);
 
   let listener = &this.ivars().drag_drop_handler;
   if !listener(DragDropEvent::Over { position }) {
@@ -81,10 +102,8 @@ pub(crate) fn perform_drag_operation(
   this: &WryWebView,
   drag_info: &ProtocolObject<dyn NSDraggingInfo>,
 ) -> Bool {
-  let paths = unsafe { collect_paths(drag_info) };
-  let dl: NSPoint = unsafe { drag_info.draggingLocation() };
-  let frame: NSRect = this.frame();
-  let position = (dl.x as i32, (frame.size.height - dl.y) as i32);
+  let paths = collect_paths(drag_info);
+  let position = drag_position(this, drag_info);
 
   let listener = &this.ivars().drag_drop_handler;
   if !listener(DragDropEvent::Drop { paths, position }) {

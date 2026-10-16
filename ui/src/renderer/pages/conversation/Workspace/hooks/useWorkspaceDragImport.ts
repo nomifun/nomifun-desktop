@@ -158,10 +158,7 @@ export function useWorkspaceDragImport({
   );
 
   /**
-   * 处理一组绝对路径（Tauri 原生 drop 或其他能拿到绝对路径的来源）
-   * Process a batch of absolute host paths (Tauri native drop or any other source
-   * that can resolve a real file_path) through the same downstream as the legacy
-   * "file with absolute path" branch.
+   * Inspect native host paths before importing files or directories into the workspace.
    */
   const handleAbsolutePaths = useCallback(
     async (paths: string[]) => {
@@ -184,7 +181,7 @@ export function useWorkspaceDragImport({
 
       // Browser files are uploaded; Tauri routes native absolute paths separately.
       const dataTransfer = event.dataTransfer || event.nativeEvent?.dataTransfer;
-      const filesWithoutPath: File[] = [];
+      const browserFiles: File[] = [];
 
       if (dataTransfer?.files && dataTransfer.files.length > 0) {
         for (let i = 0; i < dataTransfer.files.length; i++) {
@@ -192,18 +189,18 @@ export function useWorkspaceDragImport({
           const item = dataTransfer.items?.[i];
           const entry = item?.webkitGetAsEntry?.();
           if (entry?.isDirectory) {
-            // Directory without an absolute path cannot be processed via the WebUI fallback.
-            console.warn('[WorkspaceDragImport] Directory without path property, cannot process:', entry.name);
+            // Browser directory entries cannot use the file upload endpoint.
+            console.warn('[WorkspaceDragImport] Browser directory uploads are unsupported:', entry.name);
           } else {
-            filesWithoutPath.push(file);
+            browserFiles.push(file);
           }
         }
       }
 
       let tempItems: DroppedItem[] = [];
-      if (filesWithoutPath.length > 0) {
+      if (browserFiles.length > 0) {
         try {
-          tempItems = await createTempItemsFromFiles(filesWithoutPath);
+          tempItems = await createTempItemsFromFiles(browserFiles);
         } catch (error) {
           console.error('[WorkspaceDragImport] Failed to create temp files:', error);
         }

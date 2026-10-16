@@ -213,14 +213,16 @@ test('repeated send input while admission is awaiting its receipt creates one Ex
   expect(composer.send).not.toHaveBeenCalled();
 });
 
-test('a paused turn keeps a quiet cancellation action and blocks new admissions', async () => {
+test('a paused turn keeps its draft editable and a quiet cancellation action while blocking new admissions', async () => {
   const composer = mount({ paused: true });
   const cancel = composer.view.getByTestId('sendbox-paused-cancel-btn');
   expect(cancel.classList.contains('bg-animate')).toBe(false);
   expect(composer.view.queryByTestId('sendbox-stop-btn')).toBeNull();
-  expect(composer.input.disabled).toBe(true);
+  await waitFor(() => expect(composer.input.disabled).toBe(false));
   fireEvent.change(composer.input, { target: { value: 'Continue the unfinished work' } });
-  fireEvent.keyDown(composer.input, { key: 'Enter' });
+  await waitFor(() => expect(composer.input.value).toBe('Continue the unfinished work'));
+  await act(async () => { fireEvent.keyDown(composer.input, { key: 'Enter' }); });
+  expect(composer.input.value).toBe('Continue the unfinished work');
   expect(composer.send).not.toHaveBeenCalled();
   expect(composer.create).not.toHaveBeenCalled();
   const stop = spyOn(ipcBridge.conversation.stop, 'invoke').mockResolvedValue(undefined);

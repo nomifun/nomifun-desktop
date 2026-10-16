@@ -111,6 +111,19 @@ test('leave clears hover and empty or outside drops add no files', async () => {
   expect(onDrop).not.toHaveBeenCalled();
 });
 
+test('native drags without file paths never show attachment feedback', async () => {
+  const onHoverChange = mock(() => {});
+  const onDrop = mock(() => {});
+  renderHook(() => useNativeFileDrop({ targetRef, onHoverChange, onDrop }));
+  await flushSubscription();
+  emit({ type: 'enter', paths: [], position: position() });
+  emit({ type: 'over', position: position() });
+  emit({ type: 'drop', paths: [], position: position() });
+  emit({ type: 'over', position: position() });
+  expect(onHoverChange).not.toHaveBeenCalled();
+  expect(onDrop).not.toHaveBeenCalled();
+});
+
 test('covered, hidden and disconnected targets reject native drops', async () => {
   const onDrop = mock(() => {});
   renderHook(() => useNativeFileDrop({ targetRef, onHoverChange: mock(() => {}), onDrop }));

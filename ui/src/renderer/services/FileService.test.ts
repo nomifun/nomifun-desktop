@@ -158,17 +158,19 @@ describe('FileService native dropped paths', () => {
 });
 
 describe('FileService browser dropped files', () => {
-  test('preserves files that already carry a native path without HTTP upload', async () => {
+  test('uploads browser bytes even when a File carries an unofficial path property', async () => {
     const file = Object.assign(new File(['image'], '截图.png', { type: 'image/png', lastModified: 123 }), {
       path: 'C:\\用户\\截图.png',
     });
-    const tracker = watch(spyOn(uploadState, 'trackUpload'));
+    const pending = FileService.processDroppedFiles(fileList(file), conversationId);
+    expect(FakeUploadXhr.instances).toHaveLength(1);
+    const xhr = FakeUploadXhr.instances[0];
+    expect((xhr.body?.get('file') as File).name).toBe(file.name);
+    xhr.complete('/workspace/uploads/截图.png');
 
-    expect(await FileService.processDroppedFiles(fileList(file), conversationId)).toEqual([{
-      name: file.name, path: file.path, size: file.size, type: file.type, lastModified: file.lastModified,
+    expect(await pending).toEqual([{
+      name: file.name, path: '/workspace/uploads/截图.png', size: file.size, type: file.type, lastModified: file.lastModified,
     }]);
-    expect(tracker).not.toHaveBeenCalled();
-    expect(FakeUploadXhr.instances).toHaveLength(0);
   });
 
   test('WebUI uploads retain conversation binding and progress, then release the tracker', async () => {
@@ -204,27 +206,30 @@ describe('FileService browser dropped files', () => {
 
   test('cancelling a WebUI upload aborts its XHR and continues to other dropped files', async () => {
     const hook = renderHook(() => uploadState.useActiveUploads('sendbox'));
-    const nativeFile = Object.assign(new File(['keep me'], 'keep.txt', { lastModified: 789 }), {
-      path: 'C:\\附件\\keep.txt',
-    });
+    const nextFile = new File(['keep me'], 'keep.txt', { lastModified: 789 });
     let pending!: ReturnType<typeof FileService.processDroppedFiles>;
     act(() => {
-      pending = FileService.processDroppedFiles(fileList(new File(['cancel me'], 'cancel.txt'), nativeFile), conversationId);
+      pending = FileService.processDroppedFiles(fileList(new File(['cancel me'], 'cancel.txt'), nextFile), conversationId);
     });
     const xhr = FakeUploadXhr.instances[0];
     let result: Awaited<typeof pending> = [];
 
     await act(async () => {
       uploadState.abortUpload(hook.result.current[0].id);
+    });
+    // The cancelled upload yields to the next browser file in the batch.
+    expect(FakeUploadXhr.instances).toHaveLength(2);
+    await act(async () => {
+      FakeUploadXhr.instances[1].complete('/workspace/uploads/keep.txt');
       result = await pending;
     });
 
     expect(xhr.aborted).toBe(true);
     expect(result).toEqual([{
-      name: nativeFile.name, path: nativeFile.path, size: nativeFile.size,
-      type: nativeFile.type, lastModified: nativeFile.lastModified,
+      name: nextFile.name, path: '/workspace/uploads/keep.txt', size: nextFile.size,
+      type: nextFile.type, lastModified: nextFile.lastModified,
     }]);
-    expect(FakeUploadXhr.instances).toHaveLength(1);
+    expect(FakeUploadXhr.instances).toHaveLength(2);
     expect(hook.result.current).toHaveLength(0);
   });
 });

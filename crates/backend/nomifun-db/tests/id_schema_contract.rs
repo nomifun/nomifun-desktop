@@ -64,6 +64,7 @@ fn migration_directory_contains_the_canonical_forward_migration_chain() {
         "003_remove_agent_handshake_cache.sql",
         "004_retire_plugin_hosting.sql",
         "005_retire_side_question_policy.sql",
+        "006_retire_upload_workspace_preference.sql",
     ]);
 }
 

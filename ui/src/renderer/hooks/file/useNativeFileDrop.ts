@@ -39,6 +39,7 @@ export function useNativeFileDrop({ targetRef, enabled = true, onHoverChange, on
     let disposed = false;
     let unlisten: (() => void) | undefined;
     let hovered = false;
+    let draggingFiles = false;
     const setHovered = (next: boolean) => {
       if (next === hovered) return;
       hovered = next;
@@ -47,15 +48,18 @@ export function useNativeFileDrop({ targetRef, enabled = true, onHoverChange, on
     const handleEvent = (payload: DragDropEvent) => {
       if (disposed) return;
       if (payload.type === 'leave') {
+        draggingFiles = false;
         setHovered(false);
         return;
       }
       const overTarget = isOverTarget(targetRef.current, payload.position);
       if (payload.type === 'drop') {
+        draggingFiles = false;
         setHovered(false);
         if (overTarget && payload.paths.length > 0) callbacks.current.onDrop(payload.paths);
       } else {
-        setHovered(overTarget);
+        if (payload.type === 'enter') draggingFiles = payload.paths.length > 0;
+        setHovered(draggingFiles && overTarget);
       }
     };
     void (async () => {

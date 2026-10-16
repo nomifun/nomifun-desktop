@@ -49,7 +49,6 @@ export type ConfigKeyMap = {
   // blank object — is how "no default" is expressed.
   'tools.textToSpeech': TextToSpeechConfig | undefined;
   'workspace.pasteConfirm': boolean | undefined;
-  'upload.saveToWorkspace': boolean | undefined;
   /** Explicit Agent Workbench default for newly-created Guid conversations. */
   'guid.defaultAgentSelection': GuidAgentSelectionPreference | undefined;
   'system.notificationEnabled': boolean | undefined;

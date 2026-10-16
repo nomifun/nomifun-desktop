@@ -198,18 +198,24 @@ test.each([false, true])('native inspection holds the send guard and respects ca
   expect(error).not.toHaveBeenCalled();
 });
 
-test('native drops use host paths once even if a DOM file drop also fires', async () => {
+test.each([1, 1.25, 2])('native drops hit the lower composer at scale %s and attach once even if a DOM drop also fires', async scale => {
   runtimeSpy.mockReturnValue(true);
+  const originalDpr = Object.getOwnPropertyDescriptor(window, 'devicePixelRatio');
+  Object.defineProperty(window, 'devicePixelRatio', { value: scale, configurable: true });
+  restore.push(() => {
+    if (originalDpr) Object.defineProperty(window, 'devicePixelRatio', originalDpr);
+    else Reflect.deleteProperty(window, 'devicePixelRatio');
+  });
   let emit!: EventCallback<webviewApi.DragDropEvent>;
   watch(spyOn(webviewApi, 'getCurrentWebview').mockReturnValue({ onDragDropEvent: (handler: typeof emit) => {
     emit = handler;
     return Promise.resolve(() => {});
   } } as unknown as webviewApi.Webview));
   const view = fixture();
-  watch(spyOn(view.surface, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 500, 100)));
+  watch(spyOn(view.surface, 'getBoundingClientRect').mockReturnValue(new DOMRect(300, 600, 500, 100)));
   watch(spyOn(document, 'elementFromPoint').mockReturnValue(view.input));
   await flush();
-  const position = new PhysicalPosition(20, 20);
+  const position = new PhysicalPosition(550 * scale, 650 * scale);
   act(() => emit({ event: 'tauri://drag-enter', id: 1, payload: { type: 'enter', paths: [attachment.path], position } }));
   expect(view.surface.dataset.dragging).toBe('true');
   act(() => emit({ event: 'tauri://drag-drop', id: 1, payload: { type: 'drop', paths: [attachment.path], position } }));

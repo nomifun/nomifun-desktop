@@ -13,7 +13,6 @@ pub struct SystemSettingsResponse {
     pub notification_enabled: bool,
     pub cron_notification_enabled: bool,
     pub command_queue_enabled: bool,
-    pub save_upload_to_workspace: bool,
 }
 
 impl Default for SystemSettingsResponse {
@@ -23,7 +22,6 @@ impl Default for SystemSettingsResponse {
             notification_enabled: true,
             cron_notification_enabled: false,
             command_queue_enabled: false,
-            save_upload_to_workspace: false,
         }
     }
 }
@@ -39,7 +37,6 @@ pub struct UpdateSettingsRequest {
     pub notification_enabled: Option<bool>,
     pub cron_notification_enabled: Option<bool>,
     pub command_queue_enabled: Option<bool>,
-    pub save_upload_to_workspace: Option<bool>,
 }
 
 impl UpdateSettingsRequest {
@@ -49,7 +46,6 @@ impl UpdateSettingsRequest {
             && self.notification_enabled.is_none()
             && self.cron_notification_enabled.is_none()
             && self.command_queue_enabled.is_none()
-            && self.save_upload_to_workspace.is_none()
     }
 }
 
@@ -80,7 +76,6 @@ mod tests {
         assert!(resp.notification_enabled);
         assert!(!resp.cron_notification_enabled);
         assert!(!resp.command_queue_enabled);
-        assert!(!resp.save_upload_to_workspace);
     }
 
     #[test]
@@ -91,7 +86,6 @@ mod tests {
         assert_eq!(json["notification_enabled"], true);
         assert_eq!(json["cron_notification_enabled"], false);
         assert_eq!(json["command_queue_enabled"], false);
-        assert_eq!(json["save_upload_to_workspace"], false);
         // Verify snake_case, not camelCase
         assert!(json.get("notificationEnabled").is_none());
         assert!(json.get("cronNotificationEnabled").is_none());
@@ -103,15 +97,13 @@ mod tests {
             "language": "zh-CN",
             "notification_enabled": false,
             "cron_notification_enabled": true,
-            "command_queue_enabled": true,
-            "save_upload_to_workspace": true
+            "command_queue_enabled": true
         });
         let resp: SystemSettingsResponse = serde_json::from_value(raw).unwrap();
         assert_eq!(resp.language, "zh-CN");
         assert!(!resp.notification_enabled);
         assert!(resp.cron_notification_enabled);
         assert!(resp.command_queue_enabled);
-        assert!(resp.save_upload_to_workspace);
     }
 
     #[test]
@@ -121,7 +113,6 @@ mod tests {
             notification_enabled: false,
             cron_notification_enabled: true,
             command_queue_enabled: true,
-            save_upload_to_workspace: true,
         };
         let json = serde_json::to_string(&original).unwrap();
         let parsed: SystemSettingsResponse = serde_json::from_str(&json).unwrap();
@@ -138,7 +129,6 @@ mod tests {
         assert!(req.notification_enabled.is_none());
         assert!(req.cron_notification_enabled.is_none());
         assert!(req.command_queue_enabled.is_none());
-        assert!(req.save_upload_to_workspace.is_none());
     }
 
     #[test]
@@ -171,6 +161,13 @@ mod tests {
     fn test_update_request_rejects_unknown_field() {
         let raw = r#"{"unknownField":123}"#;
         assert!(serde_json::from_str::<UpdateSettingsRequest>(raw).is_err());
+    }
+
+    #[test]
+    fn test_update_request_rejects_retired_upload_setting() {
+        assert!(serde_json::from_value::<UpdateSettingsRequest>(json!({
+            "save_upload_to_workspace": true
+        })).is_err());
     }
 
     // -- ClientPreferencesResponse / UpdateClientPreferencesRequest --

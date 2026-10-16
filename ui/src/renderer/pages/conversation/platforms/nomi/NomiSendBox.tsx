@@ -110,7 +110,7 @@ const useSendBoxDraft = (conversation_id: ConversationId) => {
     [data, mutate]
   );
 
-  const setUploadFile = createSetUploadFile(mutate, data);
+  const setUploadFile = createSetUploadFile(mutate);
 
   const setContent = useCallback(
     (nextContent: string) => {
@@ -398,8 +398,6 @@ const NomiSendBox: React.FC<{
 
   // Shared file handling logic
   const { handleFilesAdded, clearFiles } = useSendBoxFiles({
-    atPath,
-    uploadFile,
     setAtPath,
     setUploadFile,
   });

@@ -81,8 +81,20 @@ const pluginForwardMigration = 'crates/backend/nomifun-db/migrations/002_simplif
 const metadataForwardMigration = 'crates/backend/nomifun-db/migrations/003_remove_agent_handshake_cache.sql';
 const hostingForwardMigration = 'crates/backend/nomifun-db/migrations/004_retire_plugin_hosting.sql';
 const policyForwardMigration = 'crates/backend/nomifun-db/migrations/005_retire_side_question_policy.sql';
-if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration, policyForwardMigration].includes(path))) {
+const uploadForwardMigration = 'crates/backend/nomifun-db/migrations/006_retire_upload_workspace_preference.sql';
+if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration, policyForwardMigration, uploadForwardMigration].includes(path))) {
   failures.push('Agent clean cut requires its canonical baseline and only explicitly supported forward product migrations');
+}
+if (migrations.includes(uploadForwardMigration)) {
+  const source = readFileSync(resolve(ROOT, uploadForwardMigration), 'utf8');
+  const statements = source.replace(/--[^\r\n]*/g, '').split(';').map((statement) => statement.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const expected = [
+    'ALTER TABLE system_settings DROP COLUMN save_upload_to_workspace',
+    "DELETE FROM client_preferences WHERE key IN ('upload.saveToWorkspace', 'saveUploadToWorkspace')",
+  ];
+  if (JSON.stringify(statements) !== JSON.stringify(expected)) {
+    failures.push(`${uploadForwardMigration}: only the unused upload setting and its exact preference keys may be removed; canonical facts, other settings and lineage receipts cannot change`);
+  }
 }
 if (migrations.includes(policyForwardMigration)) {
   const source = readFileSync(resolve(ROOT, policyForwardMigration), 'utf8').replace(/--[^\r\n]*/g, '');

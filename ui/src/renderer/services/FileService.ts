@@ -20,9 +20,9 @@ export interface UploadFileOptions {
 /**
  * Upload a file to the backend via HTTP multipart.
  *
- * Works in both Electron (via `http://127.0.0.1:<backendPort>`) and WebUI
- * (same-origin reverse-proxied). Conversation-bound uploads go to the
- * workspace uploads directory; pre-conversation uploads go to temp storage.
+ * Works in both the Tauri desktop shell (via `http://127.0.0.1:<backendPort>`) and WebUI
+ * (same-origin reverse-proxied). The backend stages uploads in its temporary
+ * directory, isolated by conversation ID or in the general staging directory.
  *
  * Field names match the backend contract exactly (snake_case): `file`,
  * `file_name` (optional), `conversation_id` (optional). The response is
@@ -130,9 +130,7 @@ export async function uploadFileViaHttp(
     xhr.send(formData);
   });
 }
-// ===== 文件类型支持配置 =====
-// 注意：当前为预先设计的架构，支持所有文件类型
-// 以下常量为将来可能的文件类型过滤功能预留
+// Clipboard attachment filters shared by the conversation and guide composers.
 
 /** 支持的图片文件扩展名 */
 export const imageExts = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg'];
@@ -170,7 +168,7 @@ const textExts = [
   '.config',
 ];
 
-/** 所有支持的文件扩展名（预先设计，当前实际接受所有文件类型） */
+/** File extensions accepted by composers that enable clipboard filtering. */
 export const allSupportedExts = [...imageExts, ...documentExts, ...textExts];
 
 // 文件元数据接口
@@ -186,24 +184,6 @@ export interface FileMetadata {
 export function getFileExtension(file_name: string): string {
   const lastDotIndex = file_name.lastIndexOf('.');
   return lastDotIndex > -1 ? file_name.substring(lastDotIndex).toLowerCase() : '';
-}
-
-import { NOMIFUN_TIMESTAMP_REGEX } from '@/common/config/constants';
-
-// 清理Nomifun时间戳后缀，返回原始文件名
-function cleanNomifunTimestamp(file_name: string): string {
-  return file_name.replace(NOMIFUN_TIMESTAMP_REGEX, '$1');
-}
-
-// 从文件路径获取清理后的文件名（用于UI显示）
-function getCleanFileName(file_path: string): string {
-  const file_name = file_path.split(/[\\/]/).pop() || '';
-  return cleanNomifunTimestamp(file_name);
-}
-
-// 从文件路径数组获取清理后的文件名数组（用于消息格式化）
-export function getCleanFileNames(file_paths: string[]): string[] {
-  return file_paths.map(getCleanFileName);
 }
 
 class FileServiceClass {
@@ -230,13 +210,8 @@ class FileServiceClass {
   }
 
   /**
-   * Process files from drag and drop events, uploading any file that lacks a
-   * native disk path via HTTP multipart.
-   *
-   * In Electron, files dragged from the OS file manager already expose an
-   * absolute `path`, so we skip upload for those. Anything without a path
-   * (WebUI, synthetic File objects, browser-sourced drags) is uploaded to the
-   * backend, which returns the absolute stored path.
+   * Upload browser File objects from drops and file inputs via HTTP multipart.
+   * Native desktop selections use explicit host paths through processNativePaths.
    */
   async processDroppedFiles(
     files: FileList,
@@ -247,50 +222,37 @@ class FileServiceClass {
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      // In Electron environment, dragged files have additional path property
-      const electronFile = file as File & { path?: string };
-
-      let file_path = electronFile.path || '';
-
-      // If no valid path (WebUI or some dragged files may not have paths), upload via HTTP multipart
-      if (!file_path) {
-        // Each upload owns its own AbortController; the tracker exposes an `abort()`
-        // that triggers the signal so user-driven cancel and conversation-switch
-        // bulk-abort go through the same path.
-        const controller = new AbortController();
-        const tracker = trackUpload(file.size, {
-          source,
-          name: file.name,
-          conversationId: conversation_id,
-          onAbort: () => controller.abort(),
-        });
-        try {
-          file_path = await uploadFileViaHttp(file, conversation_id, tracker.onProgress, undefined, {
-            signal: controller.signal,
-          });
-        } catch (error) {
-          // Re-throw size errors so caller can show user-facing toast
-          if (error instanceof Error && error.message === 'FILE_TOO_LARGE') {
-            throw error;
-          }
-          if (error instanceof Error && error.message === UPLOAD_ABORTED_ERROR) {
-            // User-initiated abort: drop this file silently (the UI already reflects it).
-            continue;
-          }
-          console.error('Failed to upload dragged file:', error);
-          continue;
-        } finally {
-          tracker.finish();
-        }
-      }
-
-      processedFiles.push({
+      // Each upload owns its own AbortController; cancellation and conversation
+      // switches use the same tracked upload lifecycle.
+      const controller = new AbortController();
+      const tracker = trackUpload(file.size, {
+        source,
         name: file.name,
-        path: file_path,
-        size: file.size,
-        type: file.type,
-        lastModified: file.lastModified,
+        conversationId: conversation_id,
+        onAbort: () => controller.abort(),
       });
+      try {
+        const file_path = await uploadFileViaHttp(file, conversation_id, tracker.onProgress, undefined, {
+          signal: controller.signal,
+        });
+        processedFiles.push({
+          name: file.name,
+          path: file_path,
+          size: file.size,
+          type: file.type,
+          lastModified: file.lastModified,
+        });
+      } catch (error) {
+        // Re-throw size errors so caller can show user-facing toast.
+        if (error instanceof Error && error.message === 'FILE_TOO_LARGE') {
+          throw error;
+        }
+        if (!(error instanceof Error && error.message === UPLOAD_ABORTED_ERROR)) {
+          console.error('Failed to upload browser file:', error);
+        }
+      } finally {
+        tracker.finish();
+      }
     }
 
     return processedFiles;

@@ -59,12 +59,12 @@ const renderPage = (section = 'preferences') => render(<I18nextProvider i18n={i1
 test('search finds controls across groups, saves the canonical preference and Escape returns to the selected group', async () => {
   const screen = renderPage();
   const search = screen.getByRole('searchbox', { name: settings.workspace.search });
-  await act(async () => { fireEvent.input(search, { target: { value: settings.saveUploadToWorkspace } }); });
-  fireEvent.click(await screen.findByRole('switch', { name: settings.saveUploadToWorkspace }));
-  await waitFor(() => expect(configService.set).toHaveBeenCalledWith('upload.saveToWorkspace', true));
+  await act(async () => { fireEvent.input(search, { target: { value: settings.autoPreviewOfficeFiles } }); });
+  fireEvent.click(await screen.findByRole('switch', { name: settings.autoPreviewOfficeFiles }));
+  await waitFor(() => expect(configService.set).toHaveBeenCalledWith('system.autoPreviewOfficeFiles', false));
   fireEvent.keyDown(search, { key: 'Escape' });
   expect(screen.getByRole('tab', { name: settings.workspace.preferences }).getAttribute('aria-selected')).toBe('true');
-  expect(screen.queryByRole('switch', { name: settings.saveUploadToWorkspace })).toBeNull();
+  expect(screen.queryByRole('switch', { name: settings.autoPreviewOfficeFiles })).toBeNull();
   await act(async () => { fireEvent.input(search, { target: { value: 'does-not-exist' } }); });
   expect(screen.getByRole('heading', { name: settings.workspace.noResults })).toBeTruthy();
 });
@@ -100,16 +100,16 @@ test('a pending preference write prevents duplicate clicks and a failure restore
   const set = spyOn(configService, 'set').mockImplementation(() => new Promise((_resolve, reject) => { fail = reject; }));
   restores.push(() => set.mockRestore());
   const screen = renderPage('files');
-  const upload = screen.getByRole('switch', { name: settings.saveUploadToWorkspace }) as HTMLButtonElement;
-  fireEvent.click(upload);
-  expect(upload.disabled).toBe(true);
-  expect(upload.getAttribute('aria-checked')).toBe('true');
-  fireEvent.click(upload);
+  const preview = screen.getByRole('switch', { name: settings.autoPreviewOfficeFiles }) as HTMLButtonElement;
+  fireEvent.click(preview);
+  expect(preview.disabled).toBe(true);
+  expect(preview.getAttribute('aria-checked')).toBe('false');
+  fireEvent.click(preview);
   expect(set).toHaveBeenCalledTimes(1);
   await act(async () => { fail(new Error('offline')); });
-  expect(upload.disabled).toBe(false);
-  expect(upload.getAttribute('aria-checked')).toBe('false');
-  expect(configService.get('upload.saveToWorkspace')).toBe(false);
+  expect(preview.disabled).toBe(false);
+  expect(preview.getAttribute('aria-checked')).toBe('true');
+  expect(configService.get('system.autoPreviewOfficeFiles')).toBe(true);
 });
 
 test('denied notification access leaves notifications off and does not persist an enabled value', async () => {

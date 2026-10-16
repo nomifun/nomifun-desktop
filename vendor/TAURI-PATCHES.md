@@ -27,3 +27,19 @@ not spoof a User-Agent, alter JavaScript browser getters or delete page scripts.
 Upgrade these exact forks together, review the small local patch against the
 new upstream release, and run the external-page native conformance fixtures.
 Do not silently restore initialization to ordinary or popup browser children.
+
+The macOS Wry drag destination converts AppKit window-relative logical points
+to webview-local physical pixels for enter, over and drop events. It uses
+`convertPoint:fromView:` and `convertPointToBacking:` with the view's actual
+top-left bounds, including flipped views. This keeps the Tauri
+`PhysicalPosition` contract consistent with Windows and fixes Retina hit
+testing without platform-specific renderer offsets or scale exceptions.
+The same destination reads typed file URLs from the pasteboard instead of the
+deprecated filenames property list, preserving Unicode paths and rejecting
+non-file URLs without unchecked property-list casts.
+
+On macOS, run `cargo run -p nomifun-desktop --example macos_file_drop_smoke`
+to verify native callbacks through Tauri for the main and offset child views,
+scaled bounds, Unicode file identities, and non-file pasteboard contents. The
+report records the actual display backing scale; use a Retina display for 2x
+coverage.

@@ -7146,7 +7146,6 @@ export type I18nKey =
   | 'settings.rule_content'
   | 'settings.saveModelConfigFailed'
   | 'settings.savePreset'
-  | 'settings.saveUploadToWorkspace'
   | 'settings.searchPresets'
   | 'settings.selectCli'
   | 'settings.selectModel'

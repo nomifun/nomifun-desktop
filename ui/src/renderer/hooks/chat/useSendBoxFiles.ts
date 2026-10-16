@@ -1,6 +1,5 @@
 import { useCallback } from 'react';
 import type { FileMetadata } from '@/renderer/services/FileService';
-import { getCleanFileNames } from '@/renderer/services/FileService';
 import type { FileOrFolderItem } from '@/renderer/utils/file/fileTypes';
 
 /**
@@ -8,8 +7,7 @@ import type { FileOrFolderItem } from '@/renderer/utils/file/fileTypes';
  * 支持函数式更新，避免闭包陷阱
  */
 export const createSetUploadFile = <T extends Record<string, unknown>>(
-  mutate: (fn: (prev: T | undefined) => T) => void,
-  data: unknown
+  mutate: (fn: (prev: T | undefined) => T) => void
 ) => {
   return useCallback(
     (uploadFile: string[] | ((prev: string[]) => string[])) => {
@@ -20,33 +18,19 @@ export const createSetUploadFile = <T extends Record<string, unknown>>(
         return { ...prev, uploadFile: newUploadFile } as unknown as T;
       });
     },
-    [data, mutate]
+    [mutate]
   );
 };
 
-const formatFileRef = (file_name: string): string => {
-  const trimmed = file_name.trim();
-  // Remove @ prefix if present (normalize)
-  // @ prefix is an internal implementation detail for the agent runtime
-  // It will be added by the backend when needed
-  // 移除 @ 前缀（如果存在）
-  // @ 前缀是 agent 的内部实现细节，由后端按需添加
-  const normalized = trimmed.startsWith('@') ? trimmed.slice(1) : trimmed;
-  return normalized;
-};
-
 interface UseSendBoxFilesProps {
-  atPath: Array<string | FileOrFolderItem>;
-  uploadFile: string[];
   setAtPath: (atPath: Array<string | FileOrFolderItem>) => void;
   setUploadFile: (uploadFile: string[] | ((prev: string[]) => string[])) => void;
 }
 
 /**
- * 共享的SendBox文件处理逻辑
- * 消除会话与 GUID 组件间的代码重复
+ * Manage attachment state in the conversation composer.
  */
-export const useSendBoxFiles = ({ atPath, uploadFile, setAtPath, setUploadFile }: UseSendBoxFilesProps) => {
+export const useSendBoxFiles = ({ setAtPath, setUploadFile }: UseSendBoxFilesProps) => {
   // 处理拖拽或粘贴的文件
   const handleFilesAdded = useCallback(
     (files: FileMetadata[]) => {
@@ -57,29 +41,6 @@ export const useSendBoxFiles = ({ atPath, uploadFile, setAtPath, setUploadFile }
     [setUploadFile]
   );
 
-  // 处理消息中的文件引用（@文件名 格式）
-  // Process file references in messages (format: @filename)
-  const processMessageWithFiles = useCallback(
-    (message: string): string => {
-      if (atPath.length || uploadFile.length) {
-        const cleanUploadFiles = getCleanFileNames(uploadFile).map((file_name) => formatFileRef(file_name));
-        // atPath 现在可能包含字符串路径或对象，需要分别处理
-        // atPath may now contain string paths or objects, need to handle separately
-        const atPathStrings = atPath.map((item) => {
-          if (typeof item === 'string') {
-            return item;
-          } else {
-            return item.path;
-          }
-        });
-        const cleanAtPaths = getCleanFileNames(atPathStrings).map((file_name) => formatFileRef(file_name));
-        return cleanUploadFiles.join(' ') + ' ' + cleanAtPaths.join(' ') + ' ' + message;
-      }
-      return message;
-    },
-    [atPath, uploadFile]
-  );
-
   // 清理文件状态
   const clearFiles = useCallback(() => {
     setAtPath([]);
@@ -88,7 +49,6 @@ export const useSendBoxFiles = ({ atPath, uploadFile, setAtPath, setUploadFile }
 
   return {
     handleFilesAdded,
-    processMessageWithFiles,
     clearFiles,
   };
 };

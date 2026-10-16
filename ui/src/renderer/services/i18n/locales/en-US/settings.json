@@ -334,7 +334,6 @@
   "languageFollowSystemDesc": "Automatically use your operating system language (currently {{language}}).",
   "languageFollowSystemTooltip": "Following system language: {{language}}",
   "languageFollowSystemActive": "Currently using {{language}} from your system settings.",
-  "saveUploadToWorkspace": "Save Uploads to Project Folder",
   "autoPreviewOfficeFiles": "Auto Preview New Office Files",
   "autoPreviewOfficeFilesDesc": "Automatically open newly created Word, Excel, and PowerPoint files in the current project. Office temporary lock files are ignored.",
   "capabilityPermissions": {

@@ -32,7 +32,6 @@ impl SettingsService {
                 notification_enabled: s.notification_enabled,
                 cron_notification_enabled: s.cron_notification_enabled,
                 command_queue_enabled: s.command_queue_enabled,
-                save_upload_to_workspace: s.save_upload_to_workspace,
             }),
         )
     }
@@ -50,7 +49,6 @@ impl SettingsService {
                 req.notification_enabled,
                 req.cron_notification_enabled,
                 req.command_queue_enabled,
-                req.save_upload_to_workspace,
             )
             .await
             .map_err(|e| AppError::Internal(format!("Failed to update settings: {e}")))?;
@@ -60,7 +58,6 @@ impl SettingsService {
             notification_enabled: row.notification_enabled,
             cron_notification_enabled: row.cron_notification_enabled,
             command_queue_enabled: row.command_queue_enabled,
-            save_upload_to_workspace: row.save_upload_to_workspace,
         })
     }
 }
@@ -172,7 +169,7 @@ mod tests {
         let svc = setup().await;
         svc.update_settings(UpdateSettingsRequest {
             language: Some("zh-CN".into()),
-            save_upload_to_workspace: Some(true),
+            command_queue_enabled: Some(true),
             ..Default::default()
         })
         .await
@@ -180,6 +177,6 @@ mod tests {
 
         let settings = svc.get_settings().await.unwrap();
         assert_eq!(settings.language, "zh-CN");
-        assert!(settings.save_upload_to_workspace);
+        assert!(settings.command_queue_enabled);
     }
 }
