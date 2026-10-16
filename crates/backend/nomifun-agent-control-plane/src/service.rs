@@ -3798,7 +3798,7 @@ mod tests {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let control = template_control_plane(store, OfficialPresetKey::CompanionRobot, false);
         let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
-        let created = control.create_from_template(&owner, "companion.robot", official_launch_request(true)).await.unwrap();
+        let created = publish_official_fixture(&control, &owner, OfficialPresetKey::CompanionRobot, None).await;
         assert_eq!(created.draft.source_template_key, Some(nomifun_api_types::OfficialPresetKeyDto::CompanionRobot));
         assert_eq!(created.draft.document.instructions, official_template_instructions(OfficialPresetKey::CompanionRobot));
         assert!(!created.draft.document.instructions.is_empty());
