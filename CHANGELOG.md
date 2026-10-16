@@ -5,6 +5,18 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+No unreleased changes yet.
+
+## v0.8.12 - 2026-10-17
+
+- Add independent companion and robot roles, multi-session navigation and
+  naming, bounded shared memory and recent context, and asynchronous desktop
+  delegation with replies routed to the originating device session.
+- Preserve explicit capability selections across preset editing, resource
+  configuration and execution.
+- Hide private tool bodies in conversation projections and deduplicate
+  canonical tool content while preserving history and recovery semantics.
+- Retain browser input ownership for the full browser-using turn.
 - Verify Custom and New API models automatically with one real Agent round
   trip once the model ID is confirmed, and name the classified failure (such as
   a rejected key or missing model permission) when it fails. The model-less
