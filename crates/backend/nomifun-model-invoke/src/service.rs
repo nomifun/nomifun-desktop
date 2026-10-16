@@ -808,21 +808,21 @@ mod tests {
         realtime_endpoint: Option<String>,
     }
 
-    /// Protocol for a fixture whose `(platform, task)` intentionally has no
-    /// preset route.
-    ///
-    /// `openai.videos` is still registered — already-saved capabilities must
-    /// keep resolving until OpenAI's 2026-09-24 Sora shutdown — but it is no
-    /// longer a preset, so the route table cannot supply it. These fixtures
-    /// exercise the async-job adapter itself, not the recommendation.
-    fn fixture_only_protocol(platform: &str, task: ModelTask) -> Option<&'static str> {
-        matches!((platform, task), ("openai", ModelTask::VideoGeneration))
-            .then_some("openai.videos")
+    /// Explicit saved capabilities remain testable independently of current
+    /// recommendations. These fixtures exercise codecs, not provider availability.
+    fn fixture_only_route(platform: &str, task: ModelTask) -> Option<TaskRoute> {
+        let (protocol, connection_role) = match (platform, task) {
+            ("openai", ModelTask::VideoGeneration) => ("openai.videos",None),
+            ("stepfun" | "stepfun-plan", ModelTask::ImageGeneration | ModelTask::ImageEdit) => ("stepfun.images",None),
+            ("ark", ModelTask::SpeechRecognition) => ("volc.asr_file",Some("voice")),
+            ("ark", ModelTask::SpeechSynthesis) => ("volc.tts_v3",Some("voice")),
+            _ => return None,
+        };
+        Some(TaskRoute {protocol,connection_role})
     }
 
     fn capability_seed(platform: &str, task: ModelTask) -> CapabilitySeed {
-        let route = fixture_only_protocol(platform, task)
-            .map(|protocol| TaskRoute { protocol, connection_role: None })
+        let route = fixture_only_route(platform, task)
             .or_else(|| preset_protocol_recommendation(platform, task))
             .unwrap_or_else(|| panic!("test platform {platform:?} has no route for {task:?}"));
         let descriptor = protocol_task_descriptor(route.protocol, task)

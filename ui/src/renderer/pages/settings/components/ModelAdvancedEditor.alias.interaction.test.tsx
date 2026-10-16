@@ -13,7 +13,7 @@ import { aliasCapability, aliasProtocolManifest, aliasProviderBaseUrl, aliasProv
 
 const originalFetch = globalThis.fetch;
 const originalWindowFetch = window.fetch;
-const testFetch = (async () => new Response(JSON.stringify({ success: true, data: {} }), {
+const testFetch = (async () => new Response(JSON.stringify({ success: true, data: { candidates: [], elapsed_ms: 1 } }), {
   headers: { 'Content-Type': 'application/json' },
 })) as typeof fetch;
 const installTransport = () => { globalThis.fetch = testFetch; window.fetch = testFetch; };
@@ -68,6 +68,7 @@ describe('existing model alias editing', () => {
     expect(input.value).toBe('原有别名');
     expect((page.getByLabelText(zhSettings.modelId) as HTMLInputElement).readOnly).toBe(true);
     fireEvent.change(input, { target: { value: '  新别名  ' } });
+    await waitFor(() => expect((page.getByRole('button', { name: zhCommon.save }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(page.getByRole('button', { name: zhCommon.save }));
     await waitFor(() => expect(saved).toHaveLength(1));
     expect(saved[0]).toEqual({ display_name: '新别名', capabilities: [capabilityInputFromResponse(aliasCapability)] });
@@ -77,6 +78,7 @@ describe('existing model alias editing', () => {
   test('clearing the alias saves explicit removal and does not restore the previous value', async () => {
     const { page, open, saved } = mount();
     fireEvent.change(await open(), { target: { value: '' } });
+    await waitFor(() => expect((page.getByRole('button', { name: zhCommon.save }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(page.getByRole('button', { name: zhCommon.save }));
     await waitFor(() => expect(saved).toHaveLength(1));
     expect(saved[0].display_name).toBeNull();
@@ -95,6 +97,7 @@ describe('existing model alias editing', () => {
   test('a failed save keeps the alias draft available for retry', async () => {
     const { page, open, saved } = mount(true);
     fireEvent.change(await open(), { target: { value: '等待重试' } });
+    await waitFor(() => expect((page.getByRole('button', { name: zhCommon.save }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(page.getByRole('button', { name: zhCommon.save }));
     await waitFor(() => expect(saved).toHaveLength(1));
     expect((page.getByLabelText(aliasLabel) as HTMLInputElement).value).toBe('等待重试');

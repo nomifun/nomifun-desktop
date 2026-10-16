@@ -26,7 +26,7 @@ import type { ModelAdvancedPatch } from './ModelAdvancedEditor';
 
 const originalFetch = globalThis.fetch;
 const originalWindowFetch = window.fetch;
-const testFetch = (async () => new Response(JSON.stringify({ success: true, data: {} }), {
+const testFetch = (async () => new Response(JSON.stringify({ success: true, data: { candidates: [], elapsed_ms: 1 } }), {
   headers: { 'Content-Type': 'application/json' },
 })) as typeof fetch;
 const installTransport = () => { globalThis.fetch = testFetch; window.fetch = testFetch; };
@@ -135,6 +135,7 @@ describe('scenario entry existing model editor', () => {
       expect(page.queryByRole('button', { name: zhSettings.removeModelTask })).toBeNull();
       const params = task === 'speech_recognition' ? { language: 'en' } : { voice: 'nova', speed: 0.9 };
       await editParameters(params);
+      await waitFor(() => expect((page.getByRole('button', { name: zhCommon.save }) as HTMLButtonElement).disabled).toBe(false));
       fireEvent.click(page.getByRole('button', { name: zhCommon.save }));
       await waitFor(() => expect(saved).toHaveLength(1));
       expect(saved[0].capabilities).toHaveLength(3);
@@ -159,6 +160,7 @@ describe('scenario entry existing model editor', () => {
     const { page, ready, editParameters, saved, closed } = mount('speech_synthesis', 1);
     await ready();
     await editParameters({ voice: 'nova', speed: 0.9 });
+    await waitFor(() => expect((page.getByRole('button', { name: zhCommon.save }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(page.getByRole('button', { name: zhCommon.save }));
     await waitFor(() => expect(saved).toHaveLength(1));
     expect(closed).toHaveLength(0);
@@ -184,6 +186,7 @@ describe('scenario entry existing model editor', () => {
     const input = page.getByLabelText(zhSettings.modelDescriptionTitle) as HTMLTextAreaElement;
     expect(input.value).toBe('原有描述');
     fireEvent.change(input, { target: { value: '  新描述  ' } });
+    await waitFor(() => expect((page.getByRole('button', { name: zhCommon.save }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(page.getByRole('button', { name: zhCommon.save }));
     await waitFor(() => expect(saved).toHaveLength(1));
     expect(saved[0].description).toBe('新描述');
@@ -194,6 +197,7 @@ describe('scenario entry existing model editor', () => {
     const { page, ready, saved } = mount('speech_synthesis', 0, capabilities, '原有描述');
     await ready();
     fireEvent.change(page.getByLabelText(zhSettings.modelDescriptionTitle), { target: { value: '' } });
+    await waitFor(() => expect((page.getByRole('button', { name: zhCommon.save }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(page.getByRole('button', { name: zhCommon.save }));
     await waitFor(() => expect(saved).toHaveLength(1));
     expect(saved[0].description).toBeNull();

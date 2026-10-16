@@ -24,7 +24,7 @@ import {
   type SessionReasoningEffort,
 } from '@/common/types/reasoningEffort';
 import { validateProviderParameterControls, type ProviderParameterIssue } from './providerParameterValidation';
-import { refreshCapabilityTransitionIssues, transitionCapabilityParams, type ProtocolParameterStash, type ProtocolParameterTransitionNotice } from './chatProtocolDraftTransition';
+import { refreshCapabilityTransitionIssues, transitionCapabilityParams, type CapabilityProtocolTransitionOptions, type ProtocolParameterStash, type ProtocolParameterTransitionNotice } from './chatProtocolDraftTransition';
 
 /** The endpoint fields owned by a task capability on the wire. */
 export const CAPABILITY_ENDPOINT_FIELDS = [
@@ -59,6 +59,10 @@ export interface ModelCapabilityDraft {
    */
   transportSource: 'blank' | 'recommendation' | 'user' | 'persisted';
   protocol: string;
+  /** Explicit protocol choice is separate from editing parameters or URLs. */
+  protocolSelectionSource?: 'automatic' | 'manual';
+  /** Untouched automatic discovery belongs to one exact model, never the next ID. */
+  protocolDiscoveryModel?: string;
   connectionRole: string;
   baseUrlOverride: string;
   endpoint: string;
@@ -87,7 +91,7 @@ export interface ModelCapabilityDraft {
 }
 
 export type ModelCapabilityDraftPatch = Partial<
-  Omit<ModelCapabilityDraft, 'task' | 'routeSource' | 'transportSource' | 'modelDefaults' | 'providerParamsSource' | 'protocolParameterStash' | 'protocolParameterTransition'>
+  Omit<ModelCapabilityDraft, 'task' | 'routeSource' | 'transportSource' | 'modelDefaults' | 'providerParamsSource' | 'protocolParameterStash' | 'protocolParameterTransition' | 'protocolSelectionSource' | 'protocolDiscoveryModel'>
 > & { providerParamsEditedKeys?: readonly string[] };
 
 export interface ModelDefinitionDraft {
@@ -238,7 +242,7 @@ export const changeModelDefinitionId = (
   return {
     model,
     capabilities: definition.capabilities.filter((capability) => capability.routeSource !== 'automatic')
-      .map(removeModelConfigurationDefaults),
+      .map(capability => releaseAutomaticDiscoveryModel(capability, model)),
   };
 };
 
@@ -331,21 +335,23 @@ export const capabilityDraftFromResponse = (capability: {
   traits?: ModelTrait[];
   protocol: string;
   connection_role: string;
-  base_url_override?: string;
-  endpoint?: string;
-  poll_endpoint?: string;
-  content_endpoint?: string;
-  realtime_endpoint?: string;
+  base_url_override?: string | null;
+  endpoint?: string | null;
+  poll_endpoint?: string | null;
+  content_endpoint?: string | null;
+  realtime_endpoint?: string | null;
   allow_cross_origin_credentials?: boolean;
   provider_params?: unknown;
-  context_limit?: number;
-  output_limit?: number;
-  compaction_threshold_pct?: number;
+  context_limit?: number | null;
+  output_limit?: number | null;
+  compaction_threshold_pct?: number | null;
 }): ModelCapabilityDraft => ({
   task: capability.task,
   traits: capability.traits ?? [],
   routeSource: 'persisted',
   transportSource: 'persisted',
+  providerParamsSource: 'user',
+  protocolSelectionSource: 'manual',
   protocol: capability.protocol,
   connectionRole: capability.connection_role,
   baseUrlOverride: capability.base_url_override ?? '',
@@ -358,9 +364,9 @@ export const capabilityDraftFromResponse = (capability: {
     isPlainObject(capability.provider_params) && Object.keys(capability.provider_params).length > 0
       ? JSON.stringify(capability.provider_params, null, 2)
       : '',
-  contextLimit: capability.context_limit,
-  outputLimit: capability.output_limit,
-  compactionThresholdPct: capability.compaction_threshold_pct,
+  contextLimit: capability.context_limit ?? undefined,
+  outputLimit: capability.output_limit ?? undefined,
+  compactionThresholdPct: capability.compaction_threshold_pct ?? undefined,
 });
 
 /** Append one task without disturbing any existing task draft. */
@@ -402,6 +408,12 @@ const withDeclaredContextKind = (raw: string, kind: CatalogCapabilitySuggestion[
   return JSON.stringify({ ...parsed.value, _nomifun_context_limit_kind: kind }, null, 2);
 };
 
+function releaseAutomaticDiscoveryModel(capability: ModelCapabilityDraft, model: string): ModelCapabilityDraft {
+  const next = removeModelConfigurationDefaults(capability);
+  if (!capability.protocolDiscoveryModel || capability.protocolDiscoveryModel === model.trim() || capability.protocolSelectionSource === 'manual') return next;
+  return { ...resetCapabilityTransport(next, 'blank'), protocolSelectionSource: 'automatic', protocolDiscoveryModel: undefined, providerParamsSource: undefined };
+}
+
 /**
  * Select any catalog model without making metadata a prerequisite.
  *
@@ -421,7 +433,7 @@ export const applyCatalogSuggestion = (
     ...previousDefinition,
     capabilities: previousDefinition.capabilities.map((capability) => {
       if (normalizeModelId(previousDefinition.model) !== normalizeModelId(suggestion.model)) {
-        return removeModelConfigurationDefaults(capability);
+        return releaseAutomaticDiscoveryModel(capability, suggestion.model);
       }
       const previous = capability.modelDefaults;
       if (!previous || !suggestion.tasks.includes(capability.task)) return capability;
@@ -705,7 +717,7 @@ export const patchCapabilityDraft = (
   ...(Object.keys(fields).some((key) =>
     TRANSPORT_DRAFT_FIELDS.has(key as keyof ModelCapabilityDraft)
   )
-    ? { transportSource: 'user' as const }
+    ? { transportSource: 'user' as const, protocolDiscoveryModel: undefined }
     : {}),
   };
   return paramsEdited ? refreshCapabilityTransitionIssues(next) : next;
@@ -718,12 +730,13 @@ export const patchCapabilityDraft = (
 export const changeCapabilityProtocol = (
   capability: ModelCapabilityDraft,
   protocol: string,
-  manifest?: ModelProtocolManifest
+  manifest?: ModelProtocolManifest,
+  options?: CapabilityProtocolTransitionOptions,
 ): ModelCapabilityDraft => {
   const normalizedProtocol = protocol.trim();
-  const transitioned = transitionCapabilityParams(capability, normalizedProtocol);
+  const transitioned = transitionCapabilityParams(capability, normalizedProtocol, options);
   if (normalizedProtocol === capability.protocol.trim()) {
-    return { ...transitioned, routeSource: 'user', transportSource: 'user' };
+    return { ...transitioned, routeSource: 'user', transportSource: 'user', protocolSelectionSource: 'manual', protocolDiscoveryModel: undefined };
   }
   const recommendation = manifest?.recommendation;
   const isRecommendation = recommendation?.protocol_id === normalizedProtocol;
@@ -740,6 +753,8 @@ export const changeCapabilityProtocol = (
     ...resetCapabilityTransport(transitioned, 'user'),
     routeSource: 'user',
     protocol: normalizedProtocol,
+    protocolSelectionSource: 'manual',
+    protocolDiscoveryModel: undefined,
     connectionRole,
     baseUrlOverride,
   };

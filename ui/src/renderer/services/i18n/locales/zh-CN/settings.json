@@ -577,16 +577,29 @@
     "fallback": "接口在线确认未完成，暂用通用协议 {{protocols}}；可检测当前模型后再确认。",
     "urlAdjusted": "API 地址已自动修正。"
   },
-  "modelProtocolDetection": {
-    "action": "检测并选择可用协议",
-    "hint": "使用当前模型和参数发送短请求，最多验证两种协议，可能产生少量费用；仅在点击时检测，结果只写入草稿，需保存后生效。",
-    "needsConfiguration": "填写模型、地址和凭据，并修正参数 JSON 后可检测。",
-    "stale": "配置已更改，先前检测结果已失效；请按需重新检测。",
-    "selected": "已验证并选择 {{protocol}}；请保存配置。",
-    "unavailable": "尚未找到可用协议；原配置保持不变，请检查下方结果。",
-    "verified": "模型调用通过",
-    "incompatible": "不兼容",
-    "failed": "检测未完成"
+  "modelProtocolDiscovery": {
+    "configure": "配置 {{protocol}}",
+    "configureNative": "暂存旧设置并配置 {{protocol}}",
+    "nativeSwitchImpact": "原生协议的参数无法自动等价转换。此操作会在本次编辑中暂存当前供应商参数，改用目标协议配置值或默认值；输出格式、声音等要求可能改变。切回原协议可恢复。连接设置需重新确认。",
+    "diagnostics": "技术诊断",
+    "connectionSettings": "连接设置",
+    "title": "可用协议",
+    "recheck": "重新检查",
+    "awaitCommit": "输入模型后自动配置",
+    "needsConfiguration": "补全连接信息后自动配置",
+    "checking": "正在自动配置…",
+    "connected": "连接正常",
+    "configured": "已配置",
+    "reviewConfiguration": "请确认模型和连接设置后重试。",
+    "unavailable": "检查暂未完成，可在连接设置中重试。",
+    "verified": "对话与工具调用实测通过",
+    "documented": "官方文档支持，未实际生成",
+    "catalog": "供应商目录声明，未实际生成",
+    "registered": "已注册，尚未确认模型支持",
+    "recommended": "官方推荐",
+    "incompatible": "已确认不兼容",
+    "inconclusive": "检查未完成，尚无结论",
+    "blocked": "当前设置需要处理"
   },
   "providerCompatibilityMode": {
     "title": "接口模式",
@@ -594,7 +607,7 @@
     "openai": "Chat Completions",
     "responses": "OpenAI Responses",
     "anthropic": "Claude 兼容",
-    "autoHint": "探测可用协议；无法确认时使用 Chat Completions。仅支持 Responses 的网关请选择 OpenAI Responses。",
+    "autoHint": "自动检测并填写配置，通用模板默认使用 Chat Completions；需要时可选择 Responses。",
     "responsesHint": "使用 /responses，适合新版 OpenAI 模型及支持 Responses 的网关；网关需明确支持此接口。",
     "openaiHint": "使用 /chat/completions，适合提供该接口的 OpenAI 兼容供应商；与 Responses 是不同接口。",
     "anthropicHint": "使用 anthropic.messages 和 x-api-key 鉴权；最大输出需按模型文档配置。"

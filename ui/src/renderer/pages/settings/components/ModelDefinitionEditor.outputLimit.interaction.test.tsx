@@ -27,7 +27,7 @@ const originalFetch = globalThis.fetch;
 const originalWindowFetch = window.fetch;
 // Hooks consume isolated SWR fixtures; incidental app initialization also uses
 // this local response rather than an account, credential, or remote provider.
-const testFetch = (async () => new Response(JSON.stringify({ success: true, data: {} }), {
+const testFetch = (async () => new Response(JSON.stringify({ success: true, data: { candidates: [], elapsed_ms: 1 } }), {
   headers: { 'Content-Type': 'application/json' },
 })) as typeof fetch;
 const installTransport = () => { globalThis.fetch = testFetch; window.fetch = testFetch; };
@@ -102,6 +102,7 @@ function mount(initialOutput?: number) {
     return branch!;
   };
   const save = async () => {
+    await waitFor(() => expect((page.getByRole('button', { name: zhCommon.save }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(page.getByRole('button', { name: zhCommon.save }));
     await waitFor(() => expect(saved).toHaveLength(1));
     return saved[0].capabilities[0];

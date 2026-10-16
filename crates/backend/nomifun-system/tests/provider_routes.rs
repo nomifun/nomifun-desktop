@@ -192,7 +192,7 @@ async fn aggregate_create_validates_the_trimmed_platform_before_writing() {
     for platform in ["ark", " ark ", "volcengine", "\tvolcengine\n"] {
         let mut body = create_body("Invalid Ark model");
         body["platform"] = json!(platform);
-        body["initial_model"]["model"] = json!("doubao-seedance-1.5-pro");
+        body["initial_model"]["model"] = json!("doubao-seed-2-0-mini-260428");
         body["initial_model"]["capabilities"] = json!([{
             "task": "video_generation",
             "protocol": "ark.video_jobs",
@@ -205,7 +205,7 @@ async fn aggregate_create_validates_the_trimmed_platform_before_writing() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{platform:?}");
         let error = body_json(response).await;
-        assert!(error.to_string().contains("console display name"), "{error}");
+        assert!(error.to_string().contains("Seed and Seedance"), "{error}");
     }
     assert!(
         SqliteProviderRepository::new(db.pool().clone())
@@ -214,6 +214,24 @@ async fn aggregate_create_validates_the_trimmed_platform_before_writing() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn aggregate_create_preserves_provider_scoped_seedance_model_ids() {
+    let db=init_database_memory().await.unwrap();
+    let app=system_routes(build_state(&db));
+    for (platform,model) in [(" ark ","doubao-seedance-2.0-mini"),("ark-agent-plan","doubao-seedance-2.0-mini"),("ctyun","doubao-seedance-1-5-pro")] {
+        let mut body=create_body("Provider-scoped video model");
+        body["platform"]=json!(platform);body["initial_model"]["model"]=json!(model);
+        body["initial_model"]["capabilities"]=json!([{"task":"video_generation","protocol":"ark.video_jobs","connection_role":"default","provider_params":{}}]);
+        let response=app.clone().oneshot(request("POST","/api/providers",Some(body))).await.unwrap();
+        let status=response.status();let created=body_json(response).await;
+        assert_eq!(status,StatusCode::CREATED,"{created}");
+        assert_eq!(created["data"]["models"][0]["model"],model);
+        let id=created["data"]["provider_id"].as_str().unwrap();
+        let listed=app.clone().oneshot(request("GET",&format!("/api/provider-models?provider_id={id}"),None)).await.unwrap();
+        assert_eq!(body_json(listed).await["data"][0]["model"],model);
+    }
 }
 
 #[tokio::test]

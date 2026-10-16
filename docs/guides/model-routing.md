@@ -69,12 +69,11 @@ tools. Check the [official OpenAI migration guide](https://developers.openai.com
 and the model or gateway documentation. To migrate an existing model, explicitly
 change its invocation protocol and save. Catalog refresh does not migrate saved routes.
 
-Presets now follow each provider's official documentation. Services confirming
-and recommending Responses prefer it; services primarily or only supporting
-Chat Completions retain that protocol. Plans and exact models can differ,
-including Alibaba metered versus Coding Plan and Kimi K3 versus K2.x. Check the
-URL alongside the protocol: some Zhipu Responses models use `/api/v1` rather
-than the Chat `/api/paas/v4` root.
+Generic OpenAI-compatible system and manual templates default to Chat Completions.
+OpenAI, MiniMax and xAI retain explicit Responses templates. Automatic checking and
+filling remain available, and Responses can still be chosen manually. Working saved
+configurations are preserved. The chosen protocol still needs the matching root,
+including Zhipu's `/api/v1` for Responses versus `/api/paas/v4` for Chat.
 
 After an exact model ID is entered, the editor offers verified context, output
 and reasoning suggestions with official sources and a review date. Native
@@ -102,20 +101,29 @@ Loading the model list or observing a reachable endpoint does not verify that a
 particular model can generate an answer or call tools. Run the model health check
 against the saved route.
 
-For an OpenAI Chat route, choose **Detect and select a working protocol** to send
-a small real request with the current model, connection and parameters. This
-verifies visible output and a valid stream terminal through the application's
-actual decoder. It checks the current protocol first, trying the other OpenAI
-interface only on confirmed incompatibility. Authentication, quota, throttling
-and timeout failures do not establish that another protocol works. This action
-may incur small model usage and checks at most two protocols; typing an ID never
-starts a paid request. A verified selection updates the draft and takes effect
-only after saving. Background discovery does not replace a working manual choice.
+Selecting a catalog model, or committing a complete ID with Enter or blur,
+automatically checks the current task. Connection, protocol and parameter changes
+start a new check; each keystroke and alias edits do not. Identical configurations
+reuse results within the editor. The normal view shows only the connection result; Connection settings lists
+all available candidates when needed. A documented
+recommendation wins among available candidates, otherwise the first available
+candidate wins. A working saved or manual selection is preserved.
+
+Chat checks use the production stream decoder and one harmless tool round trip;
+they may incur small model usage. All candidates matching the configured
+authentication are checked rather than stopping after the first success.
+Authentication, quota and rate-limit failures are not incompatibility evidence.
+Image, video, music, speech, embedding and rerank candidates instead require native
+catalog or exact documented model/protocol evidence, without submitting generation
+jobs. The UI distinguishes real verification from documentation/catalog support.
+Retired, unimplemented and unverified combinations are not working recommendations.
+Results update the draft and take effect after saving. Saving waits for pending
+checks; closing the editor cancels its requests.
 Manually switching Chat Completions and Responses converts equivalent output
 formats, verbosity and reasoning settings, and resets incompatible standard output
 field names. Options belonging to the previous protocol are held in the current
 editing draft and can be restored by switching back. Held options are neither sent
-to the model nor written into saved parameter JSON. Switching alone makes no paid call.
+to the model nor written into saved parameter JSON. The completed switch also starts automatic verification as described above.
 For conflicts or options without an equivalent, the editor explains the affected
 settings and offers a single action to hold them and use the target protocol's
 configuration, or you can switch back. No manual JSON deletion is needed. Actual-model

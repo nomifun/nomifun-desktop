@@ -162,12 +162,12 @@ mod tests {
             "https://platform.stepfun.com/docs/zh/guides/developer/integrations/codex",
         ]);
         assert_eq!(provider_profile("stepfun").unwrap().sources.len(),8);
-        assert_eq!(defaults.protocol_id,"openai.responses");
+        assert_eq!(defaults.protocol_id,"openai.chat_text");
         assert_eq!(defaults.context_limit,Some(1_000_000));
         assert_eq!(defaults.context_limit_kind,Some(ModelContextLimitKind::Combined));
         assert_eq!(defaults.output_limit,None);
         assert_eq!(defaults.reasoning_efforts,Some(vec!["low".into(),"medium".into(),"high".into()]));
-        assert_eq!(defaults.provider_params,serde_json::json!({"reasoning_effort":"medium","chain_rounds":false,"include":null}));
+        assert_eq!(defaults.provider_params,serde_json::json!({"reasoning_effort":"medium"}));
     }
 
     #[test]
@@ -177,7 +177,7 @@ mod tests {
             assert!(!provider.notes.trim().is_empty());
             assert!(!provider.sources.is_empty());
             assert!(provider.sources.iter().all(|source| source.starts_with("https://")));
-            assert_eq!(provider.checked_at,"2026-10-15");
+            assert!(matches!(provider.checked_at.as_str(),"2026-10-15" | "2026-10-16"));
             for platform in &provider.platforms {
                 assert!(platforms.insert(platform.clone()),"duplicate provider profile {platform}");
                 let mut ids = BTreeSet::new();
@@ -236,20 +236,20 @@ mod tests {
         assert_eq!(absent.context_limit,Some(1050000));
         assert_eq!(absent.tasks_source,Some(ModelTaskSource::OfficialDocumentation));
         for (platform,model,protocol) in [
-            ("dashscope","qwen3.7-plus","openai.responses"),
+            ("dashscope","qwen3.7-plus","openai.chat_text"),
             ("dashscope-coding","qwen3.7-plus","openai.chat_text"),
-            ("moonshot-cn","kimi-k3","openai.responses"),
+            ("moonshot-cn","kimi-k3","openai.chat_text"),
             ("moonshot-cn","kimi-k2.7-code","openai.chat_text"),
         ] {
             let manifest = protocol_manifest_for_model_connection(platform,None,Some(model),ModelTask::Chat);
             assert_eq!(manifest.recommendation.unwrap().protocol_id,protocol,"{platform}/{model}");
         }
         let glm = protocol_manifest_for_model_connection("glm-coding-plan",None,Some("glm-5.3"),ModelTask::Chat).recommendation.unwrap();
-        assert_eq!(glm.default_base_url.as_deref(),Some("https://open.bigmodel.cn/api/v1"));
-        assert!(glm.base_url_override_required);
+        assert_eq!(glm.default_base_url.as_deref(),Some("https://open.bigmodel.cn/api/coding/paas/v4"));
+        assert!(!glm.base_url_override_required);
         let relay = protocol_manifest_for_model_connection("glm-coding-plan",Some("https://relay.example/company/v1"),
             Some("glm-5.3"),ModelTask::Chat).recommendation.unwrap();
-        assert_eq!(relay.protocol_id,"openai.responses");
+        assert_eq!(relay.protocol_id,"openai.chat_text");
         assert_eq!(relay.default_base_url.as_deref(),Some("https://relay.example/company/v1"));
         assert!(!relay.base_url_override_required);
         assert!(documented_model_defaults("glm-coding-plan","glm-5.3-flashx").is_none());

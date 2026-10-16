@@ -16,11 +16,11 @@ import React, { useEffect, useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ContextLimitSelect } from './ContextLimitSelect';
 import { OutputLimitInput } from './OutputLimitInput';
-import ModelProtocolDetectionControl from './ModelProtocolDetectionControl';
+import ModelProtocolDiscoveryControl from './ModelProtocolDiscoveryControl';
 import ModelConfigurationReference from './ModelConfigurationReference';
 import ProtocolParameterTransitionFeedback from './ProtocolParameterTransitionFeedback';
-import { applyDetectedChatProtocol, chatProtocolDetectionSnapshot, isDetectableChatProtocol,
-  type ModelProtocolDetectionContext } from './modelProtocolDetection';
+import { applyDiscoveredModelProtocol, modelProtocolDiscoveryAppliesDefaults, modelProtocolDiscoverySnapshot,
+  type ModelProtocolDiscoveryContext } from './modelProtocolDiscovery';
 import {
   compactCapabilityUrlSummary,
   createCapabilityDisclosureState,
@@ -106,8 +106,8 @@ export interface ModelDefinitionEditorProps {
   providerBaseUrl: string;
   providerAuthScheme: string;
   providerLabel?: string;
-  protocolDetection?: ModelProtocolDetectionContext;
-  onProtocolDetectionPendingChange?: (pending: boolean) => void;
+  protocolDiscovery?: ModelProtocolDiscoveryContext;
+  onProtocolDiscoveryPendingChange?: (pending: boolean) => void;
   manifests: ModelProtocolManifestMap;
   manifestLoadingTasks?: readonly ModelTask[];
   manifestErrorTasks?: readonly ModelTask[];
@@ -398,8 +398,8 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
   providerBaseUrl,
   providerAuthScheme,
   providerLabel,
-  protocolDetection,
-  onProtocolDetectionPendingChange,
+  protocolDiscovery,
+  onProtocolDiscoveryPendingChange,
   manifests,
   manifestLoadingTasks = EMPTY_TASKS,
   manifestErrorTasks = EMPTY_TASKS,
@@ -514,7 +514,14 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
   const [protocolParamsOpenByTask, setProtocolParamsOpenByTask] = useState<
     Partial<Record<ModelTask, boolean>>
   >({});
-  const [protocolDetectionEpoch, setProtocolDetectionEpoch] = useState(0);
+  const [protocolDiscoveryEpoch, setProtocolDiscoveryEpoch] = useState(0);
+  const [committedModel, setCommittedModel] = useState(() => value.model.trim());
+  const latestModel = React.useRef(value.model);
+  latestModel.current = value.model;
+  const discoveryPendingTasks = React.useRef(new Set<ModelTask>());
+  useEffect(() => {
+    if (modelReadOnly) setCommittedModel(value.model.trim());
+  }, [modelReadOnly, value.model]);
 
   useEffect(() => {
     if (recommendationPending) {
@@ -590,7 +597,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
   };
 
   const finishCallConfig = (task: ModelTask, restoreBaseline: boolean) => {
-    if (restoreBaseline) setProtocolDetectionEpoch(epoch => epoch + 1);
+    if (restoreBaseline) setProtocolDiscoveryEpoch(epoch => epoch + 1);
     const baseline = callConfigBaselineByTask[task];
     if (restoreBaseline && baseline) {
       onChange((current) => ({
@@ -626,6 +633,8 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
   );
 
   const selectCatalogSuggestion = (profile: ModelCatalogSuggestion) => {
+    latestModel.current = profile.value;
+    setCommittedModel(profile.value.trim());
     onChange((current) => applyCatalogSuggestion(current, {
       model: profile.value,
       ...(profile.displayName ? { displayName: profile.displayName } : {}),
@@ -780,6 +789,8 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               onChange={(model, option) => {
                 const manualModel = resolveModelInputChange(model, option);
                 if (manualModel !== undefined) {
+                  latestModel.current = manualModel;
+                  if (manualModel.trim() !== value.model.trim()) setCommittedModel('');
                   onChange((current) =>
                     current.model === manualModel
                       ? current
@@ -808,7 +819,11 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                 'aria-describedby': `${modelInputId}-hint`,
                 onKeyDown: (event) => {
                   if (event.key === 'Escape') setCatalogPopupVisible(false);
+                  if (event.key === 'Enter') setCommittedModel(latestModel.current.trim());
                 },
+                // Arco may deliver blur after a catalog option has already
+                // been selected. A render-time closure would commit its old ID.
+                onBlur: () => setCommittedModel(latestModel.current.trim()),
                 suffix: (
                   <Button
                     type='text'
@@ -1079,6 +1094,10 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
           (error) => error.task === capability.task && error.code !== 'manifest_loading'
         );
         const hasValidationError = taskValidationErrors.length > 0;
+        // Editable limits belong beside their inputs, not in a global alarm.
+        const headerValidationErrors = taskValidationErrors.filter(error => capability.task !== 'chat'
+          || !['invalid_token_limit', 'output_ceiling_required'].includes(error.code));
+        const hasHeaderValidationError = headerValidationErrors.length > 0;
         const expanded = disclosureState.expandedTasks.has(capability.task);
         const preparing = loading || validationPending || recommendationPendingTasks.has(capability.task);
         const statusColor = hasValidationError
@@ -1243,7 +1262,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               focusedCallConfigTask === capability.task
                 ? 'overflow-hidden'
                 : `overflow-hidden rounded-8px border border-solid ${
-                    hasValidationError ? 'border-danger-4' : 'border-[var(--color-border-2)]'
+                    hasHeaderValidationError ? 'border-danger-4' : 'border-[var(--color-border-2)]'
                   }`
             }
             data-capability-card={capability.task}
@@ -1262,7 +1281,9 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   <span className='font-600 text-t-primary'>
                     {t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task })}
                   </span>
-                  <Tag size='small' color={statusColor}>{statusText}</Tag>
+                  {(!protocolDiscovery || hasHeaderValidationError) && <Tag size='small' color={hasHeaderValidationError ? 'red' : statusColor}>
+                    {protocolDiscovery ? t('settings.modelAdvanced.callConfigNeedsAttention') : statusText}
+                  </Tag>}
                   <div className='ml-auto flex shrink-0 items-center gap-6px'>
                     <Button
                       size='mini'
@@ -1300,7 +1321,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                     </Popconfirm>}
                   </div>
                 </div>
-                <div
+                {(!protocolDiscovery || expanded || hasHeaderValidationError) && <div
                   className='flex min-w-0 flex-wrap items-center gap-x-6px gap-y-2px text-11px text-t-secondary'
                   data-capability-summary={capability.task}
                 >
@@ -1309,25 +1330,17 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   <span>{selectedRole}</span>
                   <span aria-hidden='true'>·</span>
                   <span className='max-w-300px truncate' title={baseUrlSummary}>{baseUrlSummary}</span>
-                </div>
+                </div>}
               </div>
             </div>
-            {/*
-              What is actually missing, in words, outside the disclosure.
-              The card used to state only a count ("待处理 1 项") while the
-              offending control showed a bare red border, so a `new-api`
-              provider — which legitimately requires an explicit protocol per
-              model — reported "incomplete" with nothing to act on. Rendered
-              above the fold because a collapsed card must still say why it
-              blocks the save.
-            */}
-            {hasValidationError && (
+            {/* Only missing information that needs user action belongs above the fold. */}
+            {hasHeaderValidationError && (
               <div
                 className='space-y-4px border-0 border-t border-solid border-[var(--color-border-2)] bg-danger-1 px-14px py-10px'
                 role='alert'
                 data-capability-error-list={capability.task}
               >
-                {taskValidationErrors.map((error) => (
+                {headerValidationErrors.slice(0, 1).map((error) => (
                   <div
                     key={`${error.code}:${error.parameter ?? ''}`}
                     className='text-11px leading-4 text-danger-6'
@@ -1339,17 +1352,28 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               </div>
             )}
 
-            {protocolDetection && capability.task === 'chat' &&
-              (isDetectableChatProtocol(capability.protocol) ||
-                (!capability.protocol && isDetectableChatProtocol(manifest?.recommendation?.protocol_id ?? ''))) && (
-              <ModelProtocolDetectionControl
-                key={protocolDetectionEpoch}
+            {protocolDiscovery && (
+              <ModelProtocolDiscoveryControl
+                key={protocolDiscoveryEpoch}
                 model={value.model}
-                capability={capabilityInputsFromDefinition({ model: value.model, capabilities: [capability] })?.[0]}
-                snapshot={chatProtocolDetectionSnapshot(value.model, capability)}
-                context={protocolDetection}
-                onSelect={(snapshot, selected) => onChange(current => applyDetectedChatProtocol(current, snapshot, selected))}
-                onPendingChange={onProtocolDetectionPendingChange}
+                committed={Boolean(committedModel) && committedModel === value.model.trim()}
+                applyRecommendedDefaults={modelProtocolDiscoveryAppliesDefaults(capability)}
+                capability={preparing ? undefined : capabilityInputsFromDefinition({ model: value.model, capabilities: [capability] })?.[0]}
+                snapshot={modelProtocolDiscoverySnapshot(value.model, capability)}
+                context={protocolDiscovery}
+                preferredProtocol={capability.protocolSelectionSource === 'manual' || capability.transportSource === 'persisted' ? capability.protocol : undefined}
+                onSelect={(snapshot, selected, source) => onChange(current => applyDiscoveredModelProtocol(current, snapshot, selected, source))}
+                onConfigureProtocol={(protocol, suspendNativeParams) => {
+                  if (!disclosureState.expandedTasks.has(capability.task)) toggleCallConfig(capability.task);
+                  setCallConfigIntentByTask(current => ({ ...current, [capability.task]: 'protocol' }));
+                  onChange(current => ({ ...current, capabilities: current.capabilities.map(candidate => candidate.task === capability.task
+                    ? changeCapabilityProtocol(candidate, protocol, manifest, { suspendNativeParams, restoreTarget: false }) : candidate) }));
+                }}
+                onPendingChange={(pending) => {
+                  if (pending) discoveryPendingTasks.current.add(capability.task);
+                  else discoveryPendingTasks.current.delete(capability.task);
+                  onProtocolDiscoveryPendingChange?.(discoveryPendingTasks.current.size > 0);
+                }}
               />
             )}
 
@@ -1374,11 +1398,16 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                       value={capability.contextLimit}
                       onChange={(contextLimit) => updateCapability(capability.task, { contextLimit })}
                     />
-                    <div className='text-11px leading-4 text-t-tertiary'>
+                    {capability.contextLimit != null && !isValidModelTokenLimit(capability.contextLimit) && (
+                      <div className='text-11px text-danger-6' role='alert' data-capability-error='invalid_token_limit'>
+                        {t(capabilityValidationMessageKey('invalid_token_limit'))}
+                      </div>
+                    )}
+                    {!protocolDiscovery && <div className='text-11px leading-4 text-t-tertiary'>
                       {t('settings.modelAdvanced.contextLimitCompactHint', {
                         defaultValue: '未填写不覆盖模型上下文。仅采用供应商明确提供的窗口；未知时请按模型文档填写，安全预算独立。',
                       })}
-                    </div>
+                    </div>}
                   </div>
                   <div className='space-y-6px' data-model-output-settings={capability.task}>
                     <div className='text-12px text-t-secondary'>
@@ -1389,8 +1418,13 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                       onChange={(outputLimit) => updateCapability(capability.task, { outputLimit })}
                       compact
                     />
+                    {!outputLimitMissing && capability.outputLimit != null && !isValidModelTokenLimit(capability.outputLimit) && (
+                      <div className='text-11px text-danger-6' role='alert' data-capability-error='invalid_token_limit'>
+                        {t(capabilityValidationMessageKey('invalid_token_limit'))}
+                      </div>
+                    )}
                     {outputLimitMissing && (
-                      <div className='text-11px text-danger-6' role='alert' data-output-limit-required>
+                      <div className='text-11px text-danger-6' role='alert' data-output-limit-required data-capability-error='output_ceiling_required'>
                         {t('settings.outputLimitRequired')}
                       </div>
                     )}
@@ -1419,11 +1453,11 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                       })}
                       data-model-compaction-threshold
                     />
-                    <div className='text-11px leading-4 text-t-tertiary'>
+                    {!protocolDiscovery && <div className='text-11px leading-4 text-t-tertiary'>
                       {t('settings.modelAdvanced.compactionThresholdHint', {
                         defaultValue: '达到可用输入空间的这个比例时自动压缩；调低会更早压缩。',
                       })}
-                    </div>
+                    </div>}
                   </div>
               </div>
             )}

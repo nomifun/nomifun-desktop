@@ -340,26 +340,10 @@ impl ProtocolAdapter for ArkVideoJobsAdapter {
 /// top-level `resolution`, `ratio`, and `duration` fields; the first input asset
 /// (i2v first frame), when present, rides as a data-URI `image_url` content entry.
 /// Pure — unit tested.
-fn ark_seedance_api_model_id_hint(model: &str) -> Option<&'static str> {
-    match model.trim().to_ascii_lowercase().replace('_', "-").as_str() {
-        "doubao-seedance-1.5-pro" => Some("doubao-seedance-1-5-pro-251215"),
-        "doubao-seedance-2.0-mini" => Some("doubao-seedance-2-0-mini-260615"),
-        _ => None,
-    }
-}
-
 fn validate_ark_video_model(model: &str) -> Result<(), InvokeError> {
     let normalized = model.trim().to_ascii_lowercase().replace('_', "-");
-    if let Some(model_id) = ark_seedance_api_model_id_hint(model) {
-        return Err(InvokeError::new(
-            InvokeErrorKind::InvalidParams,
-            format!(
-                "Ark video model {model:?} is a console display name, not an API Model ID; \
-                 use {model_id:?} exactly or an \"ep-\" inference endpoint ID shown in \
-                 the Ark console"
-            ),
-        ));
-    }
+    // Exact IDs vary across PAYG, Agent Plan and compatible services. This
+    // shared wire adapter must not rewrite or reject a provider's Seedance ID.
     if normalized.starts_with("doubao-seed-") && !normalized.starts_with("doubao-seedance-") {
         return Err(InvokeError::new(
             InvokeErrorKind::InvalidParams,
@@ -721,24 +705,13 @@ mod tests {
     }
 
     #[test]
-    fn video_body_rejects_console_display_names_with_exact_api_id_hint() {
+    fn video_body_keeps_provider_scoped_seedance_ids_unchanged() {
         let TaskRequest::VideoGeneration(req) = video_request(None, None, vec![]) else {
             unreachable!()
         };
-        for (display_name, model_id) in [
-            (
-                "Doubao-Seedance-1.5-pro",
-                "doubao-seedance-1-5-pro-251215",
-            ),
-            (
-                "Doubao-Seedance-2.0-mini",
-                "doubao-seedance-2-0-mini-260615",
-            ),
-        ] {
-            let error = build_video_submit_body(display_name, &req).unwrap_err();
-            assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
-            assert!(error.message.contains("console display name"), "{}", error.message);
-            assert!(error.message.contains(model_id), "{}", error.message);
+        for model in ["doubao-seedance-2.0-mini","doubao-seedance-2-0-mini",
+            "doubao-seedance-1-5-pro","doubao-seedance-1.5-pro","doubao-seedance-2-0-mini-260615","ep-user-endpoint"] {
+            assert_eq!(build_video_submit_body(model,&req).unwrap()["model"],model);
         }
     }
 
@@ -1015,6 +988,21 @@ mod tests {
     }
 
     // -- ark.video_jobs wiremock --------------------------------------------------
+
+    #[tokio::test]
+    async fn video_submit_preserves_agent_plan_and_compatible_service_ids_on_the_wire() {
+        for (platform,model) in [("ark-agent-plan","doubao-seedance-2.0-mini"),("ctyun","doubao-seedance-1-5-pro")] {
+            let server=MockServer::start().await;
+            Mock::given(method("POST")).and(path("/api/v3/contents/generations/tasks"))
+                .and(body_partial_json(json!({"model":model})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"task-exact-id"}))).expect(1).mount(&server).await;
+            let mut call=video_call(&server.uri(),model,video_request(None,None,vec![]));call.platform=platform.into();
+            let outcome=ArkVideoJobsAdapter.submit(&reqwest::Client::new(),&call).await.unwrap();
+            assert!(matches!(outcome,TaskOutcome::Pending(handle) if handle.remote_id=="task-exact-id"));
+            let requests=server.received_requests().await.unwrap();let body:Value=serde_json::from_slice(&requests[0].body).unwrap();
+            assert_eq!(body["model"],model);assert_eq!(call.model,model);
+        }
+    }
 
     #[tokio::test]
     async fn video_submit_posts_top_level_params_and_returns_pending_handle() {

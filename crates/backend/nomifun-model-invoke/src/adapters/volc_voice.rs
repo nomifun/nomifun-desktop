@@ -249,20 +249,33 @@ impl ProtocolAdapter for VolcTtsV3Adapter {
         // v3 语音要求客户端发号：X-Api-Request-Id 由我们生成（同 ASR）。
         let request_id = nomifun_common::generate_id();
 
-        // req_params 载荷形状（text/speaker/model）置信度中（※）——
-        // 接入时需真实调用校准（含 speaker 缺省行为与 audio 格式参数位）。
+        // The capability model identifies a resource/profile, not the
+        // optional native voice-cloning engine. Only explicit native config
+        // may supply req_params.model.
         let mut req_params = json!({
             "text": req.text,
-            "model": call.model,
         });
         if let Some(voice) = req.voice.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             req_params["speaker"] = serde_json::Value::String(voice.to_string());
         }
-        let body = json_request_body(
+        if let Some(format) = req.format.as_deref() {
+            let format = format.trim();
+            if format.is_empty() {return Err(InvokeError::new(InvokeErrorKind::InvalidParams,"volc.tts_v3 format must not be empty"));}
+            req_params["audio_params"] = json!({"format":format});
+        }
+        let mut body = json_request_body(
             &call.model_params,
             &req.extra,
             json!({ "req_params": req_params }),
         )?;
+        let params = body["req_params"].as_object_mut().expect("typed req_params object");
+        if !params.get("speaker").and_then(serde_json::Value::as_str).is_some_and(|speaker| !speaker.trim().is_empty()) {
+            return Err(InvokeError::new(InvokeErrorKind::InvalidParams,
+                "volc.tts_v3 requires an explicit voice or configured req_params.speaker"));
+        }
+        if !params.entry("audio_params").or_insert_with(|| json!({})).is_object() {
+            return Err(InvokeError::new(InvokeErrorKind::InvalidParams,"volc.tts_v3 req_params.audio_params must be an object"));
+        }
 
         let resp = send_with_rotation(&call.connection.auth, || {
             Ok(http.post(&url).timeout(TTS_TIMEOUT).header(REQUEST_ID_HEADER, &request_id).json(&body))
@@ -294,11 +307,10 @@ impl ProtocolAdapter for VolcTtsV3Adapter {
 
         let raw = read_body_capped(resp, MAX_ARTIFACT_BYTES).await?;
         let text = String::from_utf8_lossy(&raw);
-        let bytes = aggregate_tts_json_lines(&text)?;
+        let bytes = aggregate_tts_json_lines(&text).map_err(|error| error.redacted(&response_redactor))?;
 
-        // 输出编码/容器默认值置信度中（※接入时需真实调用校准）；无请求格式时
-        // 按 mp3 报告。
-        let mime = match req.format.as_deref() {
+        // Match the actual requested native encoding, whose default is mp3.
+        let mime = match body["req_params"]["audio_params"]["format"].as_str() {
             Some("wav") => "audio/wav",
             Some("pcm") => "audio/pcm",
             Some("ogg" | "ogg_opus" | "opus") => "audio/ogg",
@@ -312,26 +324,29 @@ impl ProtocolAdapter for VolcTtsV3Adapter {
 }
 
 /// Aggregate a v3 TTS JSON-lines body: each non-blank line is one JSON object;
-/// a non-empty `data` field is a base64 audio chunk (appended in order); a
-/// data-less line is the sentinel/heartbeat when `code` ∈ {0, 20000000} and a
-/// terminal remote failure otherwise (message field | code). An aggregate with
-/// no audio at all is a parse error. Pure — unit tested.
+/// code 0 permits audio/subtitle frames; code 20000000 is the required terminal
+/// success. Error codes take priority over audio data. A missing terminal,
+/// trailing frames, or an aggregate without audio fails closed.
 pub(crate) fn aggregate_tts_json_lines(body: &str) -> Result<Vec<u8>, InvokeError> {
     let mut out: Vec<u8> = Vec::new();
+    let mut terminal = false;
     for line in body.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if terminal {return Err(InvokeError::parse("volc tts stream has data after its terminal frame"));}
         let value: serde_json::Value = serde_json::from_str(line).map_err(|e| {
             let snippet: String = line.chars().take(200).collect();
             InvokeError::parse(format!("volc tts stream line is not JSON ({e}): {snippet}"))
         })?;
-        if let Some(data) = value.get("data").and_then(|d| d.as_str()).filter(|s| !s.trim().is_empty()) {
-            let chunk =
-                decode_b64(data).ok_or_else(|| InvokeError::parse("volc tts chunk data is not valid base64"))?;
-            out.extend_from_slice(&chunk);
+        let code = value.get("code").and_then(|code| code.as_i64())
+            .ok_or_else(|| InvokeError::parse("volc tts stream frame requires an integer code"))?;
+        if code == 20_000_000 {
+            if value.get("data").is_some_and(|data| !data.is_null() && data.as_str() != Some("")) {
+                return Err(InvokeError::parse("volc tts terminal frame unexpectedly contains audio data"));
+            }
+            terminal = true;
             continue;
         }
-        // Data-less line: sentinel (ok codes) or a terminal in-stream failure.
-        let code = value.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
-        if code != 0 && code != 20_000_000 {
+        // A failed frame may still contain data; never accept that audio.
+        if code != 0 {
             let msg = value
                 .get("message")
                 .and_then(|m| m.as_str())
@@ -343,7 +358,17 @@ pub(crate) fn aggregate_tts_json_lines(body: &str) -> Result<Vec<u8>, InvokeErro
                 format!("volc tts failed (code {code}): {msg}"),
             ));
         }
+        match value.get("data") {
+            None | Some(serde_json::Value::Null) => {},
+            Some(serde_json::Value::String(data)) if data.is_empty() => {},
+            Some(serde_json::Value::String(data)) => {
+                let chunk=decode_b64(data).ok_or_else(|| InvokeError::parse("volc tts chunk data is not valid base64"))?;
+                out.extend_from_slice(&chunk);
+            }
+            Some(_) => return Err(InvokeError::parse("volc tts chunk data must be base64 text or null")),
+        }
     }
+    if !terminal {return Err(InvokeError::parse("volc tts stream closed without its terminal success frame"));}
     if out.is_empty() {
         return Err(InvokeError::parse("volc tts stream produced no audio chunks"));
     }
@@ -732,6 +757,34 @@ mod tests {
         assert!(err.message.contains("no audio"), "message: {}", err.message);
     }
 
+    #[test]
+    fn tts_json_lines_require_a_terminal_and_never_accept_audio_from_failed_frames() {
+        for invalid in [
+            "{\"code\":0,\"data\":\"aGk=\"}\n",
+            "{\"data\":\"aGk=\"}\n{\"code\":20000000}\n",
+            "{\"code\":0,\"data\":\"aGk=\"}\n{\"code\":20000000,\"data\":\"aGk=\"}\n",
+            "{\"code\":0,\"data\":\"aGk=\"}\n{\"code\":20000000}\n{\"code\":0,\"data\":\"aGk=\"}\n",
+        ] {assert_eq!(aggregate_tts_json_lines(invalid).unwrap_err().kind,InvokeErrorKind::ParseError);}
+        let failed=aggregate_tts_json_lines("{\"code\":45000000,\"data\":\"aGk=\",\"message\":\"speaker denied\"}\n").unwrap_err();
+        assert_eq!(failed.kind,InvokeErrorKind::ProviderError);
+        assert!(failed.message.contains("speaker denied"));
+        assert_eq!(aggregate_tts_json_lines("{\"code\":0,\"data\":\"aGk=\"}\n{\"code\":0,\"data\":null,\"sentence\":{}}\n{\"code\":20000000,\"data\":null}\n").unwrap(),b"hi");
+    }
+
+    #[tokio::test]
+    async fn tts_stream_failures_redact_credentials_and_eof_never_returns_partial_audio() {
+        for (reply,kind) in [
+            ("{\"code\":0,\"data\":\"aGk=\"}\n{\"code\":45000000,\"data\":\"aGk=\",\"message\":\"rejected ak-1\"}\n",InvokeErrorKind::ProviderError),
+            ("{\"code\":0,\"data\":\"aGk=\"}\n",InvokeErrorKind::ParseError),
+        ] {
+            let server=MockServer::start().await;
+            Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_string(reply)).expect(1).mount(&server).await;
+            let call=tts_call(&server.uri(),"resource-profile",tts("hi",Some("voice-fixture"),Some("mp3")));
+            let error=VolcTtsV3Adapter.submit(&reqwest::Client::new(),&call).await.unwrap_err();
+            assert_eq!(error.kind,kind);assert!(!error.message.contains("ak-1"));
+        }
+    }
+
     #[tokio::test]
     async fn tts_sends_four_headers_req_params_body_and_aggregates_stream() {
         let server = MockServer::start().await;
@@ -742,7 +795,7 @@ mod tests {
             .and(header("X-Api-Access-Key", "ak-1"))
             .and(header("X-Api-Resource-Id", "volc.bigasr.auc"))
             .and(body_partial_json(json!({
-                "req_params": {"text": "你好", "speaker": "zh_female_1", "model": "seed-tts"},
+                "req_params": {"text": "你好", "speaker": "zh_female_1", "audio_params": {}},
             })))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -764,30 +817,54 @@ mod tests {
         let requests = server.received_requests().await.unwrap();
         let sent_id = requests[0].headers.get(REQUEST_ID_HEADER).unwrap().to_str().unwrap();
         assert!(!sent_id.is_empty(), "X-Api-Request-Id must be client-generated");
+        let body:Value=serde_json::from_slice(&requests[0].body).unwrap();
+        assert!(body["req_params"].get("model").is_none(),"a directory/resource model must not be injected as an engine ID");
     }
 
     #[tokio::test]
-    async fn tts_omits_speaker_when_voice_absent_and_maps_format_mime() {
+    async fn tts_requires_a_speaker_before_http_and_maps_format_to_wire_and_mime() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v3/tts/unidirectional"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header(STATUS_HEADER, "20000000")
-                    .set_body_string("{\"code\":0,\"data\":\"aGk=\"}\n"),
+                    .set_body_string("{\"code\":0,\"data\":\"aGk=\"}\n{\"code\":20000000,\"data\":null}\n"),
             )
             .expect(1)
             .mount(&server)
             .await;
 
         let call = tts_call(&server.uri(), "seed-tts", tts("hi", None, Some("wav")));
-        let out = VolcTtsV3Adapter.submit(&reqwest::Client::new(), &call).await.unwrap();
+        let error=VolcTtsV3Adapter.submit(&reqwest::Client::new(),&call).await.unwrap_err();
+        assert_eq!(error.kind,InvokeErrorKind::InvalidParams);
+        assert!(server.received_requests().await.unwrap().is_empty());
+        let configured=tts_call(&server.uri(),"seed-tts",tts("hi",Some("voice-fixture"),Some("wav")));
+        let out = VolcTtsV3Adapter.submit(&reqwest::Client::new(), &configured).await.unwrap();
         let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
         assert_eq!(assets[0].mime.as_deref(), Some("audio/wav"));
 
         let requests = server.received_requests().await.unwrap();
         let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
-        assert!(body["req_params"].get("speaker").is_none(), "speaker must be omitted");
+        assert_eq!(body["req_params"]["speaker"],"voice-fixture");
+        assert_eq!(body["req_params"]["audio_params"]["format"],"wav");
+    }
+
+    #[tokio::test]
+    async fn tts_typed_format_overrides_configured_encoding_without_losing_audio_options() {
+        let server=MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v3/tts/unidirectional"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{\"code\":0,\"data\":\"aGk=\"}\n{\"code\":20000000,\"data\":null}\n")).expect(2).mount(&server).await;
+        for (typed,expected,mime) in [(Some("wav"),"wav","audio/wav"),(None,"pcm","audio/pcm")] {
+            let mut call=tts_call(&server.uri(),"seed-tts",tts("hi",None,typed));
+            call.model_params["req_params"]=json!({"speaker":"voice-fixture","model":"seed-tts-2.0-expressive","audio_params":{"format":"pcm","sample_rate":24000}});
+            let output=VolcTtsV3Adapter.submit(&reqwest::Client::new(),&call).await.unwrap();
+            let TaskOutcome::Done(TaskResult::Assets(assets))=output else {panic!("expected audio asset");};
+            assert_eq!(assets[0].mime.as_deref(),Some(mime));
+            let requests=server.received_requests().await.unwrap();let body:Value=serde_json::from_slice(&requests.last().unwrap().body).unwrap();
+            assert_eq!(body["req_params"]["audio_params"],json!({"format":expected,"sample_rate":24000}));
+            assert_eq!(body["req_params"]["model"],"seed-tts-2.0-expressive");
+        }
     }
 
     #[tokio::test]
@@ -803,7 +880,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = tts_call(&server.uri(), "seed-tts", tts("hi", None, None));
+        let call = tts_call(&server.uri(), "seed-tts", tts("hi", Some("voice-fixture"), None));
         let err = VolcTtsV3Adapter.submit(&reqwest::Client::new(), &call).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::ProviderError);
         assert!(err.message.contains("45000001"), "message: {}", err.message);
@@ -823,7 +900,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = tts_call(&server.uri(), "seed-tts", tts("hi", None, None));
+        let call = tts_call(&server.uri(), "seed-tts", tts("hi", Some("voice-fixture"), None));
         let err = VolcTtsV3Adapter.submit(&reqwest::Client::new(), &call).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::ProviderError);
         assert!(err.message.contains("text too long"), "message: {}", err.message);
@@ -838,7 +915,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = tts_call(&server.uri(), "seed-tts", tts("hi", None, None));
+        let call = tts_call(&server.uri(), "seed-tts", tts("hi", Some("voice-fixture"), None));
         let err = VolcTtsV3Adapter.submit(&reqwest::Client::new(), &call).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::Auth);
         assert_eq!(err.http_status, Some(401));

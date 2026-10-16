@@ -6,7 +6,7 @@ use axum::routing::{delete, get, post};
 use std::path::PathBuf;
 
 use nomifun_api_types::{
-    DetectChatProtocolAnonymousRequest, DetectChatProtocolRequest, DetectChatProtocolResponse,
+    DiscoverModelProtocolsAnonymousRequest, DiscoverModelProtocolsRequest, DiscoverModelProtocolsResponse,
     ApiResponse, ClientPreferencesResponse, CloneProviderRequest, CreateProviderRequest,
     FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse, ModelTask,
     SaveProviderConnectionRequest,
@@ -88,7 +88,7 @@ pub fn system_routes(state: SystemRouterState) -> Router {
         // provider id.
         .route("/api/providers/fetch-models", post(fetch_models_anonymous))
         .route("/api/providers/probe-connection", post(probe_connection_anonymous))
-        .route("/api/providers/detect-chat-protocol", post(detect_chat_protocol_anonymous))
+        .route("/api/providers/discover-model-protocols", post(discover_model_protocols_anonymous))
         .route("/api/providers/model-gateway/meta", post(gateway_meta_anonymous))
         .route("/api/providers/model-gateway/catalog", post(gateway_catalog_anonymous))
         .route("/api/providers/model-gateway/create", post(create_model_gateway))
@@ -125,7 +125,7 @@ pub fn system_routes(state: SystemRouterState) -> Router {
             "/api/providers/{provider_id}/probe-connection",
             post(probe_connection),
         )
-        .route("/api/providers/{provider_id}/detect-chat-protocol", post(detect_chat_protocol))
+        .route("/api/providers/{provider_id}/discover-model-protocols", post(discover_model_protocols))
         // One configuration write surface: PUT atomically saves model metadata
         // and replaces its complete task-capability set.
         .route(
@@ -460,23 +460,23 @@ async fn probe_connection_anonymous(
     Ok(Json(ApiResponse::ok(result)))
 }
 
-async fn detect_chat_protocol(
+async fn discover_model_protocols(
     State(state): State<SystemRouterState>,
     Path(provider_id): Path<String>,
-    body: Result<Json<DetectChatProtocolRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<DetectChatProtocolResponse>>, AppError> {
+    body: Result<Json<DiscoverModelProtocolsRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<DiscoverModelProtocolsResponse>>, AppError> {
     let Json(req) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
-    let result = state.model_fetch_service.detect_chat_protocol(
+    let result = state.model_fetch_service.discover_model_protocols(
         &provider_id, &req, &state.provider_connection_service).await?;
     Ok(Json(ApiResponse::ok(result)))
 }
 
-async fn detect_chat_protocol_anonymous(
+async fn discover_model_protocols_anonymous(
     State(state): State<SystemRouterState>,
-    body: Result<Json<DetectChatProtocolAnonymousRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<DetectChatProtocolResponse>>, AppError> {
+    body: Result<Json<DiscoverModelProtocolsAnonymousRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<DiscoverModelProtocolsResponse>>, AppError> {
     let Json(req) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
-    let result = state.model_fetch_service.detect_chat_protocol_anonymous(&req).await?;
+    let result = state.model_fetch_service.discover_model_protocols_anonymous(&req).await?;
     Ok(Json(ApiResponse::ok(result)))
 }
 

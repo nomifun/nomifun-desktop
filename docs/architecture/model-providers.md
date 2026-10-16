@@ -24,11 +24,11 @@ Tasks under one provider may use different domains, named connections and creden
 `provider_params` obeys the protocol's strict encoding contract and cannot carry credentials or local transport fields. Values that cannot be encoded losslessly are rejected on save. Responses expose `has_credentials` without returning secrets. Invocation-graph changes atomically increment `config_revision`; resolution, asynchronous jobs and health observations use a consistent revision, so stale probes cannot overwrite new configuration.
 
 Chat suggestions come from the [official-document profiles](../../crates/backend/nomifun-model-invoke/src/model_profiles.rs),
-reviewed provider by provider on 2026-10-15. Prefer `openai.responses` where the
-service confirms and recommends it; services primarily or only documenting Chat
-Completions retain `openai.chat_text`. Metered plans, subscriptions, regions and
-exact models remain distinct. Custom/New API discovery tries Responses first;
-the NomiFun gateway retains its catalog's exact protocol declarations. Saved protocols are never rewritten automatically.
+with generic OpenAI-compatible system/manual templates defaulting to `openai.chat_text`.
+OpenAI, MiniMax and xAI retain their documented Responses defaults. Responses support alone
+does not promote a template. Only defaults and their parameters change: automatic checking,
+automatic filling and explicit user choices keep their existing behavior. The NomiFun gateway
+retains the catalog's exact protocol declarations. Saved protocols are never rewritten automatically.
 Responses uses its own typed serializers for input, function calls and stream events.
 Tool schemas set `strict: false` explicitly to retain optional platform arguments.
 Reasoning summary parts are validated separately by item and summary/content index.
@@ -75,24 +75,56 @@ models use `/api/v1`, while Alibaba Coding Plan retains Chat Completions.
 Bedrock's new Mantle endpoints are not advertised as existing InvokeModel routes.
 Aggregator limits and availability are never inferred from an upstream model name.
 
+Task/protocol evidence is recorded separately for [global platforms](../../crates/backend/nomifun-model-invoke/src/provider_protocol_audit/global-and-gateways.json),
+[Chinese platforms, plans and voice](../../crates/backend/nomifun-model-invoke/src/provider_protocol_audit/china-and-voice.json),
+and [aggregators](../../crates/backend/nomifun-model-invoke/src/provider_protocol_audit/gateways.json).
+Each group covers all ten tasks with supported, catalog-required, unimplemented,
+unverified or retired status. Restrictions are specific to the platform, region
+and plan, without inheriting an upstream model's capabilities. Added native
+contracts include Gemini Interactions images/TTS and batch embeddings,
+MiniMax/Zhipu/SiliconFlow ASR, Zhipu TTS, and InfiniAI rerank. Current Volcano voice auth and
+URL-only ASR input, and several vendor video/music/realtime surfaces, still
+require dedicated implementations. A similarly named OpenAI serializer is not
+a working default. Unknown catalog IDs without declared tasks stay unconfigured
+rather than automatically acquiring Chat.
+
 ## Actual protocol verification during setup
 
-An explicit action calls `/api/providers/detect-chat-protocol` or the saved
-provider's corresponding subroute with the exact model and capability draft.
-It reuses production OpenAI/Responses serializers and stream decoders, checking
-the current protocol before trying the alternative on confirmed incompatibility.
-Reachability, empty-JSON probes, authentication, quota and transient failures
-cannot create a verified choice. The returned capability is the URL, endpoint
-and parameters actually tested. Model limits remain unchanged; the response
-separately declares the bounded verification output budget.
+After model selection is committed, the editor calls
+`/api/providers/discover-model-protocols` or
+`/api/providers/{provider_id}/discover-model-protocols` with the exact model and
+capability draft. Chat checks reuse production OpenAI, Responses, Anthropic,
+Gemini and Bedrock providers, validating a streamed tool call, its real constant
+result, and a final visible answer. They create no Session and run no user tools.
+Each candidate has output/time bounds; production HTTP may perform finite retries.
+All candidates retain their outcome. An available saved/manual choice wins,
+followed by the verified documented recommendation, then the first available
+candidate. Global authentication, quota and rate-limit failures stop further calls.
 
-This action creates no Session, writes no catalog and grants no runtime protocol
-fallback. Saved providers use server-side encrypted credentials and revision
-fences; new providers use the explicitly supplied connections. The editor checks
-the draft snapshot before applying results, blocks duplicate submissions and
-discards stale results after model, credential or manual changes. A click and a
-usage notice precede real requests; normal typing and reachability discovery do
-not trigger billable model calls.
+Media candidates use the [vendor protocol audit](../../crates/backend/nomifun-model-invoke/src/provider_protocol_audit.rs)
+with exact documented model selectors or native catalog task declarations. The
+codec, root, endpoints and native parameters travel together. A registered
+serializer alone does not establish vendor support, and generic catalog task
+labels cannot bypass per-model protocol restrictions. Evidence distinguishes live
+verification, documented models, catalog declarations and unverified serializers.
+Automatic checks submit no image, video, music or other generation jobs.
+
+Discovery writes no catalog and grants no runtime protocol fallback. Saved
+providers use encrypted credentials and revision fences; new providers use the
+current form connections. Vendor defaults never replace custom relay roots.
+Documented regional connections can select native root paths while preserving
+the configured region and credential origin.
+Catalog selection, Enter or blur commits an ID; a 300ms debounce and editor-local
+cache prevent duplicate checks. Parameter/credential changes cancel stale requests,
+while alias edits do not recheck. Applying results checks the exact draft snapshot,
+and saving waits for every pending task. The normal view shows only the connection result. Available protocols are
+inside Connection settings, with raw alternative failures behind Technical diagnostics.
+Optional null numeric values mean unset rather than an invalid limit; genuine
+input errors belong beside the relevant field.
+Saved or user-edited parameters send `apply_recommended_defaults: false`, so
+checks cannot restore explicitly deleted fields. Recommendations fill only new,
+unmodified drafts. Automatically owned values are released when the model ID
+changes, while persisted/manual values remain authoritative.
 Chat/Responses parameter conversion is verified against shared frontend/backend
 test vectors. It maps `response_format` and `text.format` using the
 [official OpenAI migration shapes](https://developers.openai.com/api/docs/guides/migrate-to-responses),

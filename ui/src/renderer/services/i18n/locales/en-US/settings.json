@@ -577,16 +577,29 @@
     "fallback": "Endpoint confirmation did not finish. Using {{protocols}} for now; verify the current model before confirming.",
     "urlAdjusted": "The API URL was corrected automatically."
   },
-  "modelProtocolDetection": {
-    "action": "Detect and select a working protocol",
-    "hint": "Sends a short request with the current model and parameters to verify up to two protocols. Small usage charges may apply. Runs only when clicked; results update the draft and require saving.",
-    "needsConfiguration": "Enter the model, URL, and credentials, and fix parameter JSON before checking.",
-    "stale": "Configuration changed; the previous check is no longer valid. Run it again if needed.",
-    "selected": "Verified and selected {{protocol}}. Save the configuration to apply it.",
-    "unavailable": "No working protocol was confirmed. The original configuration is unchanged; review the results below.",
-    "verified": "Model call passed",
-    "incompatible": "Incompatible",
-    "failed": "Check incomplete"
+  "modelProtocolDiscovery": {
+    "configure": "Configure {{protocol}}",
+    "configureNative": "Suspend previous settings and configure {{protocol}}",
+    "nativeSwitchImpact": "Native protocol parameters cannot be converted equivalently. This action suspends the current provider parameters during this edit and uses the target protocol's configured values or defaults. Output format, voice, and other requirements may change. Switch back to restore them. Review the connection settings again.",
+    "diagnostics": "Technical diagnostics",
+    "connectionSettings": "Connection settings",
+    "title": "Available protocols",
+    "recheck": "Check again",
+    "awaitCommit": "Enter a model to configure automatically",
+    "needsConfiguration": "Complete the connection details to configure automatically",
+    "checking": "Configuring automatically…",
+    "connected": "Connection ready",
+    "configured": "Configured",
+    "reviewConfiguration": "Confirm the model and connection settings, then try again.",
+    "unavailable": "The check did not finish. Retry in connection settings.",
+    "verified": "Conversation and tool calls verified",
+    "documented": "Supported by official documentation; no generation performed",
+    "catalog": "Declared by the provider catalog; no generation performed",
+    "registered": "Registered; model support unconfirmed",
+    "recommended": "Official recommendation",
+    "incompatible": "Confirmed incompatible",
+    "inconclusive": "Check incomplete; no conclusion",
+    "blocked": "Current settings need attention"
   },
   "providerCompatibilityMode": {
     "title": "API mode",
@@ -594,7 +607,7 @@
     "openai": "Chat Completions",
     "responses": "OpenAI Responses",
     "anthropic": "Claude compatible",
-    "autoHint": "Probes available protocols; falls back to Chat Completions when unconfirmed. Choose OpenAI Responses for a Responses-only gateway.",
+    "autoHint": "Automatically checks and fills configuration. The generic template defaults to Chat Completions; select Responses when needed.",
     "responsesHint": "Uses /responses for newer OpenAI models and gateways that explicitly support the Responses API.",
     "openaiHint": "Uses /chat/completions for OpenAI-compatible providers exposing that endpoint. This is a different API from Responses.",
     "anthropicHint": "Uses anthropic.messages with x-api-key authentication. Set the output limit from the model documentation."

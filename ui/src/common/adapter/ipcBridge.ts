@@ -13,9 +13,9 @@
  */
 
 import { bridge } from '@/platform';
-import type { DetectChatProtocolRequest } from '@/common/protocolBindings/DetectChatProtocolRequest';
-import type { DetectChatProtocolAnonymousRequest } from '@/common/protocolBindings/DetectChatProtocolAnonymousRequest';
-import type { DetectChatProtocolResponse } from '@/common/protocolBindings/DetectChatProtocolResponse';
+import type { DiscoverModelProtocolsRequest } from '@/common/protocolBindings/DiscoverModelProtocolsRequest';
+import type { DiscoverModelProtocolsAnonymousRequest } from '@/common/protocolBindings/DiscoverModelProtocolsAnonymousRequest';
+import type { DiscoverModelProtocolsResponse } from '@/common/protocolBindings/DiscoverModelProtocolsResponse';
 import type { TurnFileSummary } from '@/common/types/platform/turnFiles';
 import type { PrepareStorageRelocationRequest } from '@/common/protocolBindings/PrepareStorageRelocationRequest';
 import type { StorageRelocationOperationRequest } from '@/common/protocolBindings/StorageRelocationOperationRequest';
@@ -329,6 +329,7 @@ import {
   httpGet,
   httpPatch,
   httpPost,
+  httpPostAbortable,
   httpPut,
   httpRequest,
   stubProvider,
@@ -1682,13 +1683,14 @@ export const mode = {
   probeConnection: httpPost<ProbeProviderConnectionResponse, ProbeProviderConnectionAnonymousRequest>(
     '/api/providers/probe-connection'
   ),
-  /** Explicit small actual-model requests. Never called by background reachability discovery. */
-  detectChatProtocol: httpPost<DetectChatProtocolResponse, DetectChatProtocolAnonymousRequest>(
-    '/api/providers/detect-chat-protocol'
+  /** Model setup discovery; non-generative task checks never create jobs. */
+  discoverModelProtocols: httpPostAbortable<DiscoverModelProtocolsResponse, DiscoverModelProtocolsAnonymousRequest>(
+    '/api/providers/discover-model-protocols'
   ),
-  detectProviderChatProtocol: httpPost<DetectChatProtocolResponse, DetectChatProtocolRequest & { provider_id: ProviderId }>(
-    (p) => `/api/providers/${p.provider_id}/detect-chat-protocol`,
-    ({ model, capability }) => ({ model, capability })
+  discoverProviderModelProtocols: httpPostAbortable<DiscoverModelProtocolsResponse, DiscoverModelProtocolsRequest & { provider_id: ProviderId }>(
+    (p) => `/api/providers/${p.provider_id}/discover-model-protocols`,
+    ({ model, capability, preferred_protocol, apply_recommended_defaults }) => ({ model, capability,
+      ...(preferred_protocol ? { preferred_protocol } : {}), ...(apply_recommended_defaults === undefined ? {} : { apply_recommended_defaults }) })
   ),
 };
 

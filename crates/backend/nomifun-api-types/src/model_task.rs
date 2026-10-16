@@ -186,6 +186,20 @@ pub fn verified_catalog_tasks_and_traits(
     let base = model.trim().to_ascii_lowercase();
 
     match platform {
+        // Lingyi shut down its own API on 2026-09-03. This is scoped to that
+        // provider, so independently hosted Yi models remain configurable.
+        "lingyi" => Some((vec![], vec![])),
+        // OpenAI ended DALL-E 2/3 API service on 2026-05-12. Explicit empty
+        // suggestions suppress the generic image-name heuristic as well.
+        "openai" if matches!(base.as_str(), "dall-e-2" | "dall-e-3") => Some((vec![], vec![])),
+        // StepFun stopped every public and Step Plan image endpoint on
+        // 2026-10-10. An exact empty suggestion also prevents the generic
+        // image/edit name heuristics from reintroducing these retired IDs.
+        "stepfun" | "stepfun-plan"
+            if matches!(base.as_str(), "step-2x-large" | "step-image-edit-2" | "step-1x-edit") =>
+        {
+            Some((vec![], vec![]))
+        }
         "agnes" => crate::agnes_model_contract(&base).map(|contract| {
             use crate::AgnesModelContract::*;
             match contract {
@@ -194,18 +208,32 @@ pub fn verified_catalog_tasks_and_traits(
                 VideoV20 | Video { .. } => (vec![VideoGeneration], vec![]),
             }
         }),
+        "deepseek" => match base.as_str() {
+            "deepseek-flash" => Some((vec![Chat], vec![ModelTrait::VisionInput])),
+            "deepseek-v4-pro" => Some((vec![Chat], vec![])),
+            _ => None,
+        },
         "mimo" | "mimo-token-plan-cn" | "mimo-token-plan-sgp" | "mimo-token-plan-ams" => {
             match base.as_str() {
-                "mimo-v2.5-pro" | "mimo-v2.5-pro-ultraspeed" => Some((vec![Chat], vec![])),
+                "mimo-v2.6-pro" | "mimo-v2.6-flash" => {
+                    Some((vec![Chat], vec![ModelTrait::VisionInput]))
+                }
+                "mimo-v2.6-pro-ultraspeed" if platform == "mimo" => {
+                    Some((vec![Chat], vec![ModelTrait::VisionInput]))
+                }
+                "mimo-v2.5-pro" => Some((vec![Chat], vec![])),
                 "mimo-v2.5" => Some((vec![Chat], vec![ModelTrait::VisionInput])),
                 "mimo-v2.5-asr" => Some((vec![SpeechRecognition], vec![])),
-                "mimo-v2.5-tts" | "mimo-v2.5-tts-voicedesign" | "mimo-v2.5-tts-voiceclone" => {
+                "mimo-v2.5-tts" => {
                     Some((vec![SpeechSynthesis], vec![]))
                 }
                 _ => None,
             }
         }
-        "minimax" | "minimax-code" | "minimax-coding-plan" => match base.as_str() {
+        "minimax-coding-plan" if base == "minimax-m3.1-flash-preview" => {
+            Some((vec![Chat], vec![ModelTrait::VisionInput]))
+        }
+        "minimax" | "minimax-code" => match base.as_str() {
             "minimax-m3" => Some((vec![Chat], vec![ModelTrait::VisionInput])),
             "minimax-m2.7" | "minimax-m2.7-highspeed" => Some((vec![Chat], vec![])),
             "minimax-h3"
@@ -214,6 +242,7 @@ pub fn verified_catalog_tasks_and_traits(
             | "minimax-hailuo-02" => Some((vec![VideoGeneration], vec![])),
             "image-01" | "image-01-live" => Some((vec![ImageGeneration], vec![])),
             "speech-2.8-hd" | "speech-2.8-turbo" => Some((vec![SpeechSynthesis], vec![])),
+            "asr-1.0" => Some((vec![SpeechRecognition], vec![])),
             "music-3.0" | "music-2.6" => Some((vec![MusicGeneration], vec![])),
             _ => None,
         },
@@ -223,8 +252,6 @@ pub fn verified_catalog_tasks_and_traits(
             | "gpt-image-1.5"
             | "gpt-image-1-mini"
             | "chatgpt-image-latest" => Some((vec![ImageGeneration, ImageEdit], vec![])),
-            "dall-e-2" => Some((vec![ImageGeneration, ImageEdit], vec![])),
-            "dall-e-3" => Some((vec![ImageGeneration], vec![])),
             // `sora-*` is deliberately absent: OpenAI shuts the Sora video API
             // down permanently on 2026-09-24 with no successor path, so
             // classifying it as a video model would only steer users into a
@@ -243,15 +270,36 @@ pub fn verified_catalog_tasks_and_traits(
             _ => None,
         },
         "stepfun" | "stepfun-plan" => match base.as_str() {
+            "stepaudio-3-asr-max" if platform == "stepfun" => {
+                Some((vec![SpeechRecognition], vec![]))
+            }
+            "stepaudio-3-tts" | "step-tts-2" | "step-tts-mini" if platform == "stepfun" => {
+                Some((vec![SpeechSynthesis], vec![]))
+            }
+            "stepaudio-3-realtime-preview" if platform == "stepfun" => {
+                Some((vec![RealtimeConversation], vec![]))
+            }
             "stepaudio-2.5-asr" => Some((vec![SpeechRecognition], vec![])),
             "stepaudio-2.5-tts" => Some((vec![SpeechSynthesis], vec![])),
             "stepaudio-2.5-realtime" => Some((vec![RealtimeConversation], vec![])),
+            "stepaudio-2.5-chat" if platform == "stepfun-plan" => Some((vec![Chat], vec![])),
             "stepaudio-2.5-chat" => Some((vec![Chat], vec![ModelTrait::AudioInput])),
-            "step-3.7-flash" => Some((
+            "step-5-preview" | "step-3.7-flash" => Some((
                 vec![Chat],
                 vec![ModelTrait::VisionInput, ModelTrait::VideoInput],
             )),
-            "step-image-edit-2" => Some((vec![ImageGeneration, ImageEdit], vec![])),
+            "step-3.5-flash" | "step-3.5-flash-2603" => Some((vec![Chat], vec![])),
+            "step-router-v1" if platform == "stepfun-plan" => Some((vec![Chat], vec![])),
+            "step-1o-turbo-vision" if platform == "stepfun" => {
+                Some((vec![Chat], vec![ModelTrait::VisionInput]))
+            }
+            _ => None,
+        },
+        "ark-agent-plan" => match base.as_str() {
+            "doubao-seedream-5-0-pro" => Some((vec![ImageGeneration, ImageEdit], vec![])),
+            "doubao-seedance-2.0" | "doubao-seedance-2.0-fast" | "doubao-seedance-2.5" => {
+                Some((vec![VideoGeneration], vec![]))
+            }
             _ => None,
         },
         "gemini" => match base.as_str() {
@@ -262,6 +310,7 @@ pub fn verified_catalog_tasks_and_traits(
             _ => None,
         },
         "zhipu" => match base.as_str() {
+            "glm-5.3-flash" | "glm-5.3-flashx" => Some((vec![Chat], vec![ModelTrait::VisionInput])),
             "glm-image" | "cogview-4-250304" | "cogview-4" | "cogview-3-flash" => {
                 Some((vec![ImageGeneration], vec![]))
             }
@@ -300,7 +349,6 @@ pub fn verified_catalog_tasks_and_traits(
             }
             _ => None,
         },
-        "lingyi" if base == "yi-vision-v2" => Some((vec![Chat], vec![ModelTrait::VisionInput])),
         "hunyuan" | "hunyuan-global" => match base.as_str() {
             "hy-vision-2.0-instruct"
             | "hunyuan-t1-vision-20250916"
@@ -319,8 +367,9 @@ pub fn verified_catalog_tasks_and_traits(
 ///
 /// This function is never invocation authority; users persist explicit
 /// task-scoped capability rows before a model can run. Known catalog presets
-/// take precedence over name heuristics. A model that matches no specialized
-/// signal receives a Chat suggestion.
+/// take precedence over name heuristics. Without a documented exact ID or
+/// recognizable task signal, the task stays unknown; callers can use native
+/// catalog declarations or explicit user-authored capabilities.
 pub fn infer_catalog_tasks_and_traits(
     platform: &str,
     model: &str,
@@ -379,11 +428,6 @@ pub fn infer_catalog_tasks_and_traits(
         traits.push(ModelTrait::VisionInput);
     }
 
-    // 6. Default: no specialized task means it is a Chat model.
-    if tasks.is_empty() {
-        tasks.push(ModelTask::Chat);
-    }
-
     (tasks, traits)
 }
 
@@ -397,8 +441,17 @@ mod tests {
 
     #[test]
     fn chat_model_is_chat() {
-        assert_eq!(tasks_of("openai", "gpt-4o-mini"), vec![ModelTask::Chat]);
-        assert_eq!(tasks_of("deepseek", "deepseek-chat"), vec![ModelTask::Chat]);
+        assert_eq!(tasks_of("stepfun", "step-3.5-flash"), vec![ModelTask::Chat]);
+        assert_eq!(tasks_of("minimax", "MiniMax-M3"), vec![ModelTask::Chat]);
+    }
+
+    #[test]
+    fn opaque_catalog_ids_do_not_acquire_a_chat_task() {
+        for platform in ["custom", "openai", "stepfun", "deepseek", "dashscope", "hunyuan"] {
+            let (tasks, traits) = infer_catalog_tasks_and_traits(platform, "future-opaque-id");
+            assert!(tasks.is_empty(), "{platform}");
+            assert!(traits.is_empty(), "{platform}");
+        }
     }
 
     #[test]
@@ -413,7 +466,7 @@ mod tests {
 
     #[test]
     fn vision_chat_model_has_chat_task_and_vision_trait() {
-        let (tasks, traits) = infer_catalog_tasks_and_traits("openai", "gpt-4o");
+        let (tasks, traits) = infer_catalog_tasks_and_traits("stepfun", "step-5-preview");
         assert_eq!(tasks, vec![ModelTask::Chat]);
         assert!(traits.contains(&ModelTrait::VisionInput));
     }
@@ -483,7 +536,7 @@ mod tests {
     fn verified_multi_task_image_models_are_filterable_in_both_picker_modes() {
         for (platform, model) in [
             ("gemini", "gemini-3.1-flash-image"),
-            ("stepfun-plan", "step-image-edit-2"),
+            ("ark-agent-plan", "doubao-seedream-5-0-pro"),
             ("xai", "grok-imagine-image"),
         ] {
             let tasks = tasks_of(platform, model);
@@ -493,6 +546,38 @@ mod tests {
             );
             assert!(tasks.contains(&ModelTask::ImageEdit), "{platform}/{model}");
         }
+    }
+
+    #[test]
+    fn retired_stepfun_images_do_not_reenter_through_name_inference() {
+        for platform in ["stepfun", "stepfun-plan"] {
+            for model in ["step-2x-large", "step-image-edit-2", "step-1x-edit"] {
+                assert_eq!(verified_catalog_tasks_and_traits(platform, model), Some((vec![], vec![])));
+                assert_eq!(infer_catalog_tasks_and_traits(platform, model), (vec![], vec![]));
+            }
+        }
+    }
+
+    #[test]
+    fn current_speech_profiles_preserve_commercial_channel_boundaries() {
+        for (model, task) in [
+            ("stepaudio-3-asr-max", ModelTask::SpeechRecognition),
+            ("stepaudio-3-tts", ModelTask::SpeechSynthesis),
+            ("stepaudio-3-realtime-preview", ModelTask::RealtimeConversation),
+        ] {
+            assert_eq!(verified_catalog_tasks_and_traits("stepfun", model), Some((vec![task], vec![])));
+            assert!(verified_catalog_tasks_and_traits("stepfun-plan", model).is_none());
+        }
+        assert_eq!(verified_catalog_tasks_and_traits("stepfun-plan", "stepaudio-2.5-chat"),
+            Some((vec![ModelTask::Chat], vec![])), "the plan documents text-only audio chat");
+        for platform in ["minimax", "minimax-code"] {
+            assert_eq!(verified_catalog_tasks_and_traits(platform, "asr-1.0"),
+                Some((vec![ModelTask::SpeechRecognition], vec![])));
+        }
+        assert!(verified_catalog_tasks_and_traits("minimax-coding-plan", "asr-1.0").is_none());
+        assert!(verified_catalog_tasks_and_traits("mimo-token-plan-cn", "mimo-v2.6-pro-ultraspeed").is_none());
+        assert_eq!(verified_catalog_tasks_and_traits("mimo", "mimo-v2.6-pro-ultraspeed"),
+            Some((vec![ModelTask::Chat], vec![ModelTrait::VisionInput])));
     }
 
     #[test]
@@ -540,8 +625,17 @@ mod tests {
     }
 
     #[test]
-    fn dall_e_is_image_generation() {
-        assert!(tasks_of("openai", "dall-e-3").contains(&ModelTask::ImageGeneration));
+    fn retired_dall_e_and_lingyi_do_not_acquire_new_task_suggestions() {
+        for model in ["dall-e-2", "dall-e-3"] {
+            assert_eq!(infer_catalog_tasks_and_traits("openai", model),(vec![],vec![]));
+        }
+        for model in ["yi-lightning", "yi-vision-v2", "future-hosted-yi"] {
+            assert_eq!(infer_catalog_tasks_and_traits("lingyi", model),(vec![],vec![]));
+        }
+        assert!(verified_catalog_tasks_and_traits("custom","yi-vision-v2").is_none());
+        assert!(verified_catalog_tasks_and_traits("openrouter","yi-vision-v2").is_none());
+        assert!(infer_catalog_tasks_and_traits("custom","yi-vision-v2").1.contains(&ModelTrait::VisionInput));
+        assert_eq!(tasks_of("openai","gpt-image-2"),vec![ModelTask::ImageGeneration,ModelTask::ImageEdit]);
     }
 
     #[test]
@@ -586,9 +680,8 @@ mod tests {
     #[test]
     fn stepfun_vision_models_carry_the_vision_trait() {
         for m in [
-            "step-1v-32k",
-            "step-1v-8k",
             "step-1o-turbo-vision",
+            "step-5-preview",
             "step-3.7-flash",
         ] {
             let (tasks, traits) = infer_catalog_tasks_and_traits("stepfun", m);
@@ -664,8 +757,8 @@ mod tests {
         }
         assert_eq!(
             tasks_of("ark", "Doubao-Seed-2.0-mini"),
-            vec![ModelTask::Chat],
-            "Doubao Seed is a chat family; Seedance is the video family"
+            vec![],
+            "a console display name cannot prove a callable Chat or Seedance task"
         );
         // OpenAI's Sora API shuts down permanently on 2026-09-24 and has no
         // preset route left, so it must not be steered into VideoGeneration.

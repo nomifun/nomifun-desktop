@@ -6,7 +6,7 @@
 //! - video generation submits to `/videos/generations` and polls
 //!   `/videos/{request_id}`;
 //! - batch TTS is `/tts` with `{text, voice_id, language}` and raw audio;
-//! - batch STT is `/stt` multipart and does not take an OpenAI `model` field.
+//! - batch STT is `/stt` multipart with an optional explicit transcription model.
 //!
 //! Every transport path is supplied by the selected typed capability; the
 //! adapter never infers media endpoints from the provider name or task.
@@ -689,6 +689,9 @@ fn value_as_form_fields(
 }
 
 fn stt_options(call: &ResolvedCall, req: &AsrRequest) -> Result<Vec<(String, String)>, InvokeError> {
+    if req.prompt.as_deref().is_some_and(|prompt| !prompt.trim().is_empty()) {
+        return Err(InvokeError::new(InvokeErrorKind::InvalidParams,"xAI STT does not support the typed prompt parameter; configure native keyterm explicitly"));
+    }
     let keyterm = req
         .extra
         .get("keyterm")
@@ -704,6 +707,10 @@ fn stt_options(call: &ResolvedCall, req: &AsrRequest) -> Result<Vec<(String, Str
     }
     let mut merged = scalar_request_fields(&configured, &extra)?;
     merged.remove("file");
+    // xai-stt is a logical selector for the endpoint's default engine. An
+    // explicit engine ID is authoritative over opaque provider/request fields.
+    merged.remove("model");
+    if call.model.trim() != "xai-stt" {merged.insert("model".into(),call.model.clone());}
     if let Some(language) = req.language.as_deref().map(str::trim).filter(|language| !language.is_empty()) {
         merged.insert("language".into(), language.into());
     }
@@ -1089,7 +1096,7 @@ mod tests {
         let request = TaskRequest::SpeechRecognition(AsrRequest {
             audio: input("audio", "audio/mpeg", b"audio"),
             language: Some("en".into()),
-            prompt: Some("Nomifun".into()),
+            prompt: None,
             extra: json!({"diarize": true}),
         });
         let mut call = stt_call(&xai_base(&server), "xai-stt", request);
@@ -1110,7 +1117,35 @@ mod tests {
         let language_pos = body.find("name=\"language\"").unwrap();
         let file_pos = body.find("name=\"file\"").unwrap();
         assert!(language_pos < file_pos, "xAI requires STT options before the file part");
-        assert!(!body.contains("name=\"model\""), "xAI STT does not take an OpenAI model field");
+        assert!(!body.contains("name=\"model\""), "the logical xai-stt selector delegates to the documented engine default");
+    }
+
+    #[test]
+    fn stt_rejects_an_unsupported_typed_prompt_before_sending_audio() {
+        let request=TaskRequest::SpeechRecognition(AsrRequest {audio:input("audio","audio/mpeg",b"audio"),language:None,
+            prompt:Some("context must not be lost".into()),extra:json!({})});
+        let call=stt_call("http://127.0.0.1:9/v1","grok-voice-transcribe-2.0",request);
+        let TaskRequest::SpeechRecognition(req)=&call.request else {unreachable!();};
+        let error=stt_options(&call,req).unwrap_err();
+        assert_eq!(error.kind,InvokeErrorKind::InvalidParams);assert!(error.message.contains("prompt"));
+    }
+
+    #[tokio::test]
+    async fn stt_explicit_model_is_sent_before_audio_and_cannot_be_replaced_by_opaque_fields() {
+        let server=MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/stt")).and(header("authorization","Bearer sk-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"text":"recognized"}))).expect(1).mount(&server).await;
+        let request=TaskRequest::SpeechRecognition(AsrRequest {audio:input("audio","audio/mpeg",b"actual-audio"),language:Some("en".into()),prompt:None,
+            extra:json!({"model":"wrong-request-model","file":"wrong-audio","language":"fr","vad_threshold":0.2})});
+        let mut call=stt_call(&xai_base(&server),"grok-voice-transcribe-2.0",request);
+        call.model_params=json!({"endpoint":"/stt","model":"wrong-configured-model","api_key":"must-not-leak"});
+        let output=XaiSttAdapter.submit(&test_http(),&call).await.unwrap();
+        assert!(matches!(output,TaskOutcome::Done(TaskResult::Transcript {model:Some(model),..}) if model=="grok-voice-transcribe-2.0"));
+        let requests=server.received_requests().await.unwrap();let body=String::from_utf8_lossy(&requests[0].body);
+        assert!(body.contains("name=\"model\"\r\n\r\ngrok-voice-transcribe-2.0"));
+        assert!(body.find("name=\"model\"").unwrap()<body.find("name=\"file\"").unwrap());
+        assert!(body.contains("actual-audio"));assert!(body.contains("name=\"language\"\r\n\r\nen"));assert!(body.contains("name=\"vad_threshold\""));
+        for shadow in ["wrong-request-model","wrong-configured-model","wrong-audio","must-not-leak"] {assert!(!body.contains(shadow));}
     }
 
     #[test]

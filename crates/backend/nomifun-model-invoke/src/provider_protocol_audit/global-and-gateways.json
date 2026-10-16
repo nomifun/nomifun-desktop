@@ -1,0 +1,759 @@
+[
+  {
+    "platforms": [
+      "openai"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://developers.openai.com/api/docs/models",
+      "https://developers.openai.com/api/docs/guides/migrate-to-responses",
+      "https://developers.openai.com/api/docs/deprecations"
+    ],
+    "notes": "逐项区分对话、图像、文件转写、语音及向量接口。图像工具不是任意GPT的独立生图接口；2026-09-24已停服的Videos API不再作为新配置建议。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "Responses为官方长期推荐；Chat是否能完成Agent工具往返由实际检查确定，新GPT的纯文本成功不代表工具可用。",
+        "provider_params": {
+          "chain_rounds": false
+        }
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方Live/Realtime为持久连接；当前通用模型任务注册表未注册对应OpenAI会话适配器，不能借用StepFun协议。",
+        "sources": [
+          "https://developers.openai.com/api/docs/guides/realtime"
+        ]
+      },
+      {
+        "task": "image_generation",
+        "status": "supported",
+        "protocols": [
+          "openai.images"
+        ],
+        "notes": "当前GPT Image使用独立/images/generations；不发送该系列拒绝的response_format。",
+        "model_ids": [
+          "gpt-image-2",
+          "gpt-image-1.5",
+          "gpt-image-1",
+          "gpt-image-1-mini",
+          "chatgpt-image-latest"
+        ],
+        "sources": [
+          "https://developers.openai.com/api/docs/guides/image-generation"
+        ]
+      },
+      {
+        "task": "image_edit",
+        "status": "supported",
+        "protocols": [
+          "openai.images"
+        ],
+        "notes": "使用/images/edits与原生multipart图像，不复用文本Responses的input形状。",
+        "model_ids": [
+          "gpt-image-2",
+          "gpt-image-1.5",
+          "gpt-image-1",
+          "gpt-image-1-mini",
+          "chatgpt-image-latest"
+        ],
+        "sources": [
+          "https://developers.openai.com/api/docs/guides/image-generation"
+        ]
+      },
+      {
+        "task": "video_generation",
+        "status": "retired",
+        "protocols": [],
+        "notes": "Videos API及Sora 2系列已于2026-09-24停服，无已公布替代路径。",
+        "model_ids": [
+          "sora-2",
+          "sora-2-pro",
+          "sora-2-2025-10-06",
+          "sora-2-2025-12-08",
+          "sora-2-pro-2025-10-06"
+        ],
+        "sources": [
+          "https://developers.openai.com/api/docs/deprecations"
+        ]
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "supported",
+        "protocols": [
+          "openai.audio_speech"
+        ],
+        "notes": "独立/audio/speech的JSON请求与二进制音频响应。",
+        "model_ids": [
+          "gpt-4o-mini-tts",
+          "tts-1",
+          "tts-1-hd"
+        ],
+        "sources": [
+          "https://developers.openai.com/api/docs/guides/text-to-speech"
+        ]
+      },
+      {
+        "task": "speech_recognition",
+        "status": "supported",
+        "protocols": [
+          "openai.audio_transcriptions"
+        ],
+        "notes": "独立/audio/transcriptions文件接口；不把Realtime或需要专属分段参数的说话人分离模型冒充通用转写。",
+        "model_ids": [
+          "gpt-transcribe",
+          "gpt-4o-transcribe",
+          "gpt-4o-mini-transcribe",
+          "whisper-1"
+        ],
+        "sources": [
+          "https://developers.openai.com/api/docs/guides/speech-to-text"
+        ]
+      },
+      {
+        "task": "embedding",
+        "status": "supported",
+        "protocols": [
+          "openai.embeddings"
+        ],
+        "notes": "独立/embeddings返回有序向量，不是Chat调用。",
+        "model_ids": [
+          "text-embedding-3-small",
+          "text-embedding-3-large",
+          "text-embedding-ada-002"
+        ],
+        "sources": [
+          "https://developers.openai.com/api/docs/models/text-embedding-3-large",
+          "https://developers.openai.com/api/docs/guides/embeddings"
+        ]
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "anthropic"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://platform.claude.com/docs/en/models/overview",
+      "https://platform.claude.com/docs/en/api/messages/create"
+    ],
+    "notes": "Claude直接API使用Messages与x-api-key。文本和图像输入属于Chat；并不等于独立生图、语音、视频或Embedding产品接口。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "anthropic.messages"
+        ],
+        "notes": "原生/v1/messages、版本header及实际thinking签名按原值续传；不投递OpenAI请求体。",
+        "model_prefixes": [
+          "claude-"
+        ]
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "image_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "video_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "gemini"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://ai.google.dev/gemini-api/docs/models",
+      "https://ai.google.dev/gemini-api/docs/interactions",
+      "https://ai.google.dev/gemini-api/docs/image-generation",
+      "https://ai.google.dev/gemini-api/docs/speech-generation",
+      "https://ai.google.dev/api/embeddings"
+    ],
+    "notes": "Google GenerateContent与Interactions属于不同线协议。对话仍验证已实现的GenerateContent工具往返；媒体明确按当前Interactions或已有GenerateContent区分，禁止套OpenAI路径。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "gemini.generate_text"
+        ],
+        "notes": "已实现的/v1beta/models/{model}:streamGenerateContent原生工具及thought签名由真实检查验证；文档首选Interactions不代表旧模型接口已停服。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "Gemini Live持久音视频连接未进入通用Realtime任务注册表；不借用StepFun会话。",
+        "model_ids": [
+          "gemini-3.8-live",
+          "gemini-3.8-live-extended-thinking",
+          "gemini-3.1-flash-live-preview"
+        ]
+      },
+      {
+        "task": "image_generation",
+        "status": "supported",
+        "protocols": [
+          "gemini.interactions_images",
+          "gemini.generate_content"
+        ],
+        "notes": "新Nano Banana使用/v1beta/interactions，输出位于steps[].content[]；保留既有GenerateContent供相应型号。",
+        "model_ids": [
+          "gemini-nano-banana-2.1",
+          "gemini-3.1-flash-image",
+          "gemini-3.1-flash-lite-image",
+          "gemini-3-pro-image",
+          "gemini-2.5-flash-image"
+        ],
+        "protocol_model_ids": {
+          "gemini.generate_content": [
+            "gemini-3.1-flash-image",
+            "gemini-3.1-flash-lite-image",
+            "gemini-3-pro-image",
+            "gemini-2.5-flash-image"
+          ]
+        },
+        "sources": [
+          "https://ai.google.dev/gemini-api/docs/image-generation"
+        ]
+      },
+      {
+        "task": "image_edit",
+        "status": "supported",
+        "protocols": [
+          "gemini.interactions_images",
+          "gemini.generate_content"
+        ],
+        "notes": "Interactions图像输入为带mime_type/data的JSON内容，不是OpenAI multipart；旧型号保留GenerateContent原生内联输入。",
+        "model_ids": [
+          "gemini-nano-banana-2.1",
+          "gemini-3.1-flash-image",
+          "gemini-3.1-flash-lite-image",
+          "gemini-3-pro-image",
+          "gemini-2.5-flash-image"
+        ],
+        "protocol_model_ids": {
+          "gemini.generate_content": [
+            "gemini-3.1-flash-image",
+            "gemini-3.1-flash-lite-image",
+            "gemini-3-pro-image",
+            "gemini-2.5-flash-image"
+          ]
+        },
+        "sources": [
+          "https://ai.google.dev/gemini-api/docs/image-generation"
+        ]
+      },
+      {
+        "task": "video_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "Veo/Omni使用Google独立生成与操作轮询，现模型调用层未实现该任务codec，不能误选OpenAI视频。",
+        "model_ids": [
+          "veo-3.1-generate-preview",
+          "veo-3.1-lite-generate-preview",
+          "gemini-omni-1.1-flash"
+        ]
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "supported",
+        "protocols": [
+          "gemini.interactions_tts"
+        ],
+        "notes": "Gemini 3.8 TTS使用Interactions speech_config，单次默认返回完整WAV。旧2.5 TTS的GenerateContent不同，不自动混用。",
+        "model_ids": [
+          "gemini-3.8-flash-tts",
+          "gemini-3.8-flash-lite-tts"
+        ],
+        "provider_params": {
+          "generation_config": {
+            "speech_config": [
+              {
+                "voice": "Kore"
+              }
+            ]
+          }
+        },
+        "sources": [
+          "https://ai.google.dev/gemini-api/docs/speech-generation"
+        ]
+      },
+      {
+        "task": "speech_recognition",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "Gemini 3.5 Transcribe及Live转写需要独立线协议，目前不作为已实现的一次性转写接口推荐。",
+        "model_ids": [
+          "gemini-3.5-transcribe",
+          "gemini-3.5-transcribe-live"
+        ]
+      },
+      {
+        "task": "embedding",
+        "status": "supported",
+        "protocols": [
+          "gemini.embeddings"
+        ],
+        "notes": "原生batchEmbedContents，每条输入包含models/{model}与content.parts，不能使用OpenAI input请求。",
+        "model_ids": [
+          "gemini-embedding-001",
+          "gemini-embedding-2",
+          "gemini-embedding-2-preview"
+        ],
+        "sources": [
+          "https://ai.google.dev/api/embeddings",
+          "https://ai.google.dev/gemini-api/docs/embeddings"
+        ]
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "music_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "Lyria为独立音乐模型/Interactions或Realtime音频合同，不能使用MiniMax Music serializer。",
+        "model_ids": [
+          "lyria-3.5",
+          "lyria-3-clip-preview",
+          "lyria-3-pro-preview",
+          "lyria-realtime-exp"
+        ]
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "bedrock"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://docs.aws.amazon.com/bedrock/latest/userguide/apis.html",
+      "https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-claude.html",
+      "https://platform.claude.com/docs/en/build-with-claude/claude-in-amazon-bedrock"
+    ],
+    "notes": "Bedrock Runtime与Mantle的API、签名目标及模型覆盖不同。当前仅旧Anthropic InvokeModel/InvokeModelWithResponseStream codec，不把新的Responses/Mantle当已实现。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "catalog_required",
+        "protocols": [
+          "bedrock.anthropic_messages"
+        ],
+        "notes": "仅原生Runtime目录确证的Anthropic族，再由生产SDK验证；不从品牌或同名Claude继承Mantle-only型号。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "Bedrock相关模型需要各自Invoke/Converse或异步合同；当前未注册该任务原生codec。"
+      },
+      {
+        "task": "image_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "Bedrock相关模型需要各自Invoke/Converse或异步合同；当前未注册该任务原生codec。"
+      },
+      {
+        "task": "image_edit",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "Bedrock相关模型需要各自Invoke/Converse或异步合同；当前未注册该任务原生codec。"
+      },
+      {
+        "task": "video_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "Bedrock相关模型需要各自Invoke/Converse或异步合同；当前未注册该任务原生codec。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "Bedrock相关模型需要各自Invoke/Converse或异步合同；当前未注册该任务原生codec。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "Bedrock相关模型需要各自Invoke/Converse或异步合同；当前未注册该任务原生codec。"
+      },
+      {
+        "task": "embedding",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "Bedrock相关模型需要各自Invoke/Converse或异步合同；当前未注册该任务原生codec。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "gemini-vertex-ai",
+      "vertex-ai",
+      "vertex"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://docs.cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude",
+      "https://platform.claude.com/docs/en/build-with-claude/claude-on-vertex-ai"
+    ],
+    "notes": "Vertex目标需项目、位置、publisher和云鉴权。当前通用配置未实现完整目标合同，不把首方Gemini/Claude地址直接套到Vertex。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "当前配置目标与云鉴权合同不足，须专属适配器后再推荐。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "当前配置目标与云鉴权合同不足，须专属适配器后再推荐。"
+      },
+      {
+        "task": "image_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "当前配置目标与云鉴权合同不足，须专属适配器后再推荐。"
+      },
+      {
+        "task": "image_edit",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "当前配置目标与云鉴权合同不足，须专属适配器后再推荐。"
+      },
+      {
+        "task": "video_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "当前配置目标与云鉴权合同不足，须专属适配器后再推荐。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "当前配置目标与云鉴权合同不足，须专属适配器后再推荐。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "当前配置目标与云鉴权合同不足，须专属适配器后再推荐。"
+      },
+      {
+        "task": "embedding",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "当前配置目标与云鉴权合同不足，须专属适配器后再推荐。"
+      },
+      {
+        "task": "rerank",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "当前配置目标与云鉴权合同不足，须专属适配器后再推荐。"
+      },
+      {
+        "task": "music_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "当前配置目标与云鉴权合同不足，须专属适配器后再推荐。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "custom",
+      "new-api",
+      "nomifun-model-gateway"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://developers.openai.com/api/docs/guides/migrate-to-responses"
+    ],
+    "notes": "自定义服务器没有统一供应商承诺。Chat以用户实际连接逐协议工具验证；其他模态依赖该服务器的确切目录/能力合同，不能由OpenAI兼容名称推出。NomiFun网关保留自身确切能力。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "catalog_required",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text",
+          "anthropic.messages",
+          "gemini.generate_text"
+        ],
+        "notes": "注册协议只是待检查候选，实际鉴权/URL兼容后实测；不把任意OpenAI网关当作所有native协议。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "image_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "video_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "xai"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://docs.x.ai/developers/models",
+      "https://docs.x.ai/developers/model-capabilities/images/generation",
+      "https://docs.x.ai/developers/model-capabilities/video/generation",
+      "https://docs.x.ai/developers/model-capabilities/audio/text-to-speech",
+      "https://docs.x.ai/developers/model-capabilities/audio/speech-to-text"
+    ],
+    "notes": "Grok文本优先Responses；图像编辑、视频任务、TTS和STT分别有独立codec。xai-tts/xai-stt是已有NomiFun语音服务配置ID，不是发给供应商的伪模型名。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "Responses为官方推荐，Chat是legacy，工具与原生推理续传由实际检查决定。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "Grok语音持久会话不等于REST /tts或/stt；通用Realtime注册表未实现该原生会话。"
+      },
+      {
+        "task": "image_generation",
+        "status": "supported",
+        "protocols": [
+          "xai.images_json"
+        ],
+        "notes": "原生JSON图片接口，使用aspect_ratio而非把OpenAI size直接透传。",
+        "model_ids": [
+          "grok-imagine-image-2.0",
+          "grok-imagine-image",
+          "grok-imagine-image-quality"
+        ],
+        "sources": [
+          "https://docs.x.ai/developers/model-capabilities/images/generation"
+        ]
+      },
+      {
+        "task": "image_edit",
+        "status": "supported",
+        "protocols": [
+          "xai.images_json"
+        ],
+        "notes": "编辑使用JSON数据URI输入，不是OpenAI multipart；质量型号未来退役日期不当作现在停服。",
+        "model_ids": [
+          "grok-imagine-image-2.0",
+          "grok-imagine-image",
+          "grok-imagine-image-quality"
+        ],
+        "sources": [
+          "https://docs.x.ai/developers/model-capabilities/images/editing"
+        ]
+      },
+      {
+        "task": "video_generation",
+        "status": "supported",
+        "protocols": [
+          "xai.video_jobs"
+        ],
+        "notes": "JSON /videos/generations返回request_id，再GET /videos/{id}解析video.url。",
+        "model_ids": [
+          "grok-imagine-video",
+          "grok-imagine-video-1.5",
+          "grok-imagine-video-1.5-lite",
+          "grok-imagine-video-1.5-preview",
+          "grok-imagine-video-1.5-2026-05-30"
+        ],
+        "sources": [
+          "https://docs.x.ai/developers/model-capabilities/video/generation"
+        ]
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "supported",
+        "protocols": [
+          "xai.tts"
+        ],
+        "notes": "独立/tts为text/voice_id/language到二进制音频；xai-tts是配置服务选择器，上游接口无model字段。",
+        "model_ids": [
+          "xai-tts"
+        ],
+        "provider_params": {
+          "language": "auto"
+        },
+        "sources": [
+          "https://docs.x.ai/developers/model-capabilities/audio/text-to-speech"
+        ]
+      },
+      {
+        "task": "speech_recognition",
+        "status": "supported",
+        "protocols": [
+          "xai.stt"
+        ],
+        "notes": "原生/stt multipart；旧xai-stt服务别名使用上游默认，明确模型ID须按原值发送。",
+        "model_ids": [
+          "xai-stt",
+          "grok-voice-transcribe-2.0"
+        ],
+        "sources": [
+          "https://docs.x.ai/developers/model-capabilities/audio/speech-to-text"
+        ]
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实此任务在当前配置协议表中的可执行接口。"
+      }
+    ]
+  }
+]

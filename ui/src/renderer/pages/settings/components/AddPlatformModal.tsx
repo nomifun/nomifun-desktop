@@ -122,6 +122,7 @@ const AddPlatformModal = ModalHOC<{
     preset,
     tasks,
     bootstrapTask: 'chat',
+    baseUrlHint: baseUrl,
     modelHint: definition.model,
   });
   const providerManifest =
@@ -723,12 +724,13 @@ const AddPlatformModal = ModalHOC<{
           providerBaseUrl={baseUrl}
           providerAuthScheme={authScheme}
           providerLabel={providerName || selectedPlatform?.name || preset || ''}
-          protocolDetection={modalProps.visible ? {
+          protocolDiscovery={modalProps.visible ? {
             platform: runtimePlatform, baseUrl, authScheme,
             ...(credentialsResult.ok && credentialsResult.credentials !== undefined ? { credentials: credentialsResult.credentials } : {}),
             connections: pendingConnections,
+            ...(bedrockConfig ? { bedrockConfig } : {}),
           } : undefined}
-          onProtocolDetectionPendingChange={setProtocolDetecting}
+          onProtocolDiscoveryPendingChange={setProtocolDetecting}
           manifests={manifestState.manifests}
           manifestLoadingTasks={manifestState.loadingTasks}
           manifestErrorTasks={manifestState.errorTasks}

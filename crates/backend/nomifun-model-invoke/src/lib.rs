@@ -23,6 +23,7 @@ mod provider_diagnostic;
 pub mod default_model;
 pub mod manifest;
 pub mod model_profiles;
+pub mod provider_protocol_audit;
 pub mod realtime;
 pub mod materialize;
 pub mod resolve;

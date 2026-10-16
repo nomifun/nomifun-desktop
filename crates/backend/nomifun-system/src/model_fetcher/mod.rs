@@ -1,6 +1,6 @@
 mod fetchers;
 mod probe;
-mod protocol_detection;
+mod protocol_discovery;
 mod url_fixer;
 
 use std::sync::Arc;
@@ -204,8 +204,15 @@ fn prepare_catalog_models(platform: &str, models: &mut [ModelInfo]) {
             continue;
         }
         nomifun_model_invoke::model_profiles::supplement_documented_catalog_model(platform, model);
-        let (tasks, traits) = infer_catalog_tasks_and_traits(platform, &model.id);
         if model.tasks.is_empty() {
+            let documented = nomifun_model_invoke::provider_protocol_audit::documented_model_tasks(platform, &model.id);
+            if !documented.is_empty() {
+                model.tasks = documented;
+                model.tasks_source = Some(ModelTaskSource::OfficialDocumentation);
+            }
+        }
+        let (tasks, traits) = infer_catalog_tasks_and_traits(platform, &model.id);
+        if model.tasks.is_empty() && !tasks.is_empty() {
             model.tasks = tasks;
             model.tasks_source = Some(if verified_catalog_tasks_and_traits(platform, &model.id).is_some() {
                 ModelTaskSource::OfficialDocumentation
@@ -213,7 +220,7 @@ fn prepare_catalog_models(platform: &str, models: &mut [ModelInfo]) {
                 ModelTaskSource::Inferred
             });
         }
-        if model.traits.is_empty() {
+        if model.traits.is_empty() && model.tasks.contains(&nomifun_api_types::ModelTask::Chat) {
             model.traits = traits;
         }
     }
@@ -772,7 +779,7 @@ mod tests {
         // Inline suggestions must not overwrite the only automatic source for
         // the capability's context limit.
         let mut models = vec![ModelInfo {
-            id: "gemini-3.1-pro".into(),
+            id: "gemini-3.1-pro-preview".into(),
             name: None,
             tasks: Vec::new(),
             tasks_source: None,
@@ -796,9 +803,10 @@ mod tests {
             {"id":"gpt-image-1"}
         ])).unwrap();
         prepare_catalog_models("openai", &mut models);
-        assert_eq!(models[0].tasks, vec![nomifun_api_types::ModelTask::Chat]);
+        assert!(models[0].tasks.is_empty());
+        assert_eq!(models[0].tasks_source, None);
         assert_eq!(models[1].tasks, vec![nomifun_api_types::ModelTask::SpeechRecognition]);
-        for model in &models[..3] {
+        for model in &models[1..3] {
             assert_eq!(model.tasks_source, Some(ModelTaskSource::Inferred), "{}", model.id);
         }
         assert_eq!(models[3].tasks_source, Some(ModelTaskSource::OfficialDocumentation));
@@ -823,7 +831,8 @@ mod tests {
         ])).unwrap();
         let response = fetch_models_response("mimo", models, ModelCatalogSource::OfficialDocumentation, None);
         assert_eq!(response.models[0].tasks_source, Some(ModelTaskSource::OfficialDocumentation));
-        assert_eq!(response.models[1].tasks_source, Some(ModelTaskSource::Inferred));
+        assert!(response.models[1].tasks.is_empty());
+        assert_eq!(response.models[1].tasks_source, None);
     }
 
     #[test]
@@ -849,7 +858,8 @@ mod tests {
             Some(nomifun_api_types::ModelContextLimitKind::InputOnly));
         assert_eq!(models[2].id, "future-unlisted-model");
         assert!(models[2].context_limit.is_none() && models[2].output_limit.is_none());
-        assert_eq!(models[2].tasks_source, Some(ModelTaskSource::Inferred));
+        assert!(models[2].tasks.is_empty());
+        assert_eq!(models[2].tasks_source, None);
     }
 
     #[test]
@@ -866,5 +876,27 @@ mod tests {
         prepare_catalog_models("deepseek", &mut models);
         assert_eq!(models[0].tasks, vec![nomifun_api_types::ModelTask::SpeechSynthesis]);
         assert!(models[0].context_limit.is_none() && models[0].output_limit.is_none());
+    }
+
+    #[test]
+    fn native_non_chat_tasks_never_receive_chat_name_traits() {
+        let mut models: Vec<ModelInfo> = serde_json::from_value(serde_json::json!([
+            {"id":"step-5-preview","tasks":["embedding"],"tasks_source":"provider_declared"}
+        ])).unwrap();
+        prepare_catalog_models("stepfun",&mut models);
+        assert_eq!(models[0].tasks,vec![nomifun_api_types::ModelTask::Embedding]);
+        assert!(models[0].traits.is_empty());
+        assert!(models[0].context_limit.is_none());
+    }
+
+    #[test]
+    fn current_native_media_documents_fill_taskless_catalog_rows() {
+        let mut models: Vec<ModelInfo> = serde_json::from_value(serde_json::json!([
+            {"id":"gemini-embedding-2"}, {"id":"gemini-nano-banana-2.1"}
+        ])).unwrap();
+        prepare_catalog_models("gemini",&mut models);
+        assert_eq!(models[0].tasks,vec![nomifun_api_types::ModelTask::Embedding]);
+        assert_eq!(models[1].tasks,vec![nomifun_api_types::ModelTask::ImageGeneration,nomifun_api_types::ModelTask::ImageEdit]);
+        assert!(models.iter().all(|model| model.tasks_source == Some(ModelTaskSource::OfficialDocumentation)));
     }
 }

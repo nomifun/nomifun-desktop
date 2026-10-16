@@ -43,6 +43,8 @@ const STEPFUN_SYSTEM_VOICES = [
 
 export const TTS_VOICE_OPTIONS_BY_PROTOCOL: Record<string, readonly string[]> = {
   'openai.audio_speech': ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'],
+  'zhipu.audio_speech': ['tongtong'],
+  'gemini.interactions_tts': ['Kore', 'Puck', 'Aoede', 'Charon', 'Fenrir', 'Leda', 'Orus', 'Zephyr'],
   // StepFun (阶跃星辰) system voices for the current
   // `stepaudio-2.5-tts` surface. Both the metered API and Step Plan use these
   // ids. The control remains free text so newly published or cloned voices do
@@ -81,6 +83,9 @@ export const ttsVoiceOptionsFor = (
   protocol: string | undefined,
   model?: string
 ): readonly string[] => {
+  if (protocol === 'openai.audio_speech' && model?.trim() === 'glm-tts') {
+    return ['tongtong'];
+  }
   if (protocol === 'siliconflow.audio_speech') {
     return SILICONFLOW_SYSTEM_VOICES_BY_MODEL[model?.trim() ?? ''] ?? [];
   }
@@ -99,17 +104,17 @@ export const ttsUsesModelIdAsVoice = (protocol: string | undefined): boolean =>
  * Deliberately a short allowlist, verified against each adapter:
  * - `stepfun.audio_speech` merges provider params and then requires a
  *   non-empty `voice`, so the saved default is what makes it work at all.
- * - `siliconflow.audio_speech` falls back to a configured `voice` when the
- *   request carries none.
+ * - OpenAI, SiliconFlow and Gemini Interactions use a configured `voice`
+ *   when the request carries none; Gemini maps it to native speech_config.
  *
  * Everything else is excluded on purpose. MiniMax nests
  * `voice_setting.voice_id`, Volcengine uses `speaker` and xAI uses
- * `voice_id`, so a flat `voice` key is a field they never read. OpenAI reads
- * the right key but writes its typed value (defaulting to `alloy`) AFTER the
- * provider params, which overwrites the saved default. In all of those cases
- * a generic "default voice" box would look accepted and silently do nothing.
+ * `voice_id`, so their defaults require the corresponding native parameter.
  */
 const PROTOCOLS_WITH_PROVIDER_PARAM_VOICE = new Set([
+  'openai.audio_speech',
+  'gemini.interactions_tts',
+  'zhipu.audio_speech',
   'stepfun.audio_speech',
   'siliconflow.audio_speech',
 ]);

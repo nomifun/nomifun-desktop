@@ -4,8 +4,8 @@ use ts_rs::{Config, TS};
 use nomifun_api_types::model_gateway::*;
 
 use nomifun_api_types::{
-    ChatProtocolDetectionAttempt, ChatProtocolDetectionStatus, DetectChatProtocolAnonymousRequest,
-    DetectChatProtocolRequest, DetectChatProtocolResponse,
+    ModelProtocolCandidate, ModelProtocolCandidateStatus, ModelProtocolCandidateEvidence,
+    DiscoverModelProtocolsAnonymousRequest, DiscoverModelProtocolsRequest, DiscoverModelProtocolsResponse,
     PrepareStorageRelocationRequest, StorageRelocationBlocker,
     StorageRelocationOperationRequest, StorageRelocationResponse, SystemInfoResponse,
     AuthSchemeDescriptor, CapabilityHealth, CloneProviderRequest, EndpointRootShape,
@@ -160,11 +160,12 @@ fn export_provider_domain_bindings() {
     export_binding_if_changed::<ProtocolRecommendation>("ProtocolRecommendation.ts");
     export_binding_if_changed::<AuthSchemeDescriptor>("AuthSchemeDescriptor.ts");
     export_binding_if_changed::<ModelProtocolManifestResponse>("ModelProtocolManifestResponse.ts");
-    export_binding_if_changed::<DetectChatProtocolRequest>("DetectChatProtocolRequest.ts");
-    export_binding_if_changed::<DetectChatProtocolAnonymousRequest>("DetectChatProtocolAnonymousRequest.ts");
-    export_binding_if_changed::<DetectChatProtocolResponse>("DetectChatProtocolResponse.ts");
-    export_binding_if_changed::<ChatProtocolDetectionAttempt>("ChatProtocolDetectionAttempt.ts");
-    export_binding_if_changed::<ChatProtocolDetectionStatus>("ChatProtocolDetectionStatus.ts");
+    export_binding_if_changed::<DiscoverModelProtocolsRequest>("DiscoverModelProtocolsRequest.ts");
+    export_binding_if_changed::<DiscoverModelProtocolsAnonymousRequest>("DiscoverModelProtocolsAnonymousRequest.ts");
+    export_binding_if_changed::<DiscoverModelProtocolsResponse>("DiscoverModelProtocolsResponse.ts");
+    export_binding_if_changed::<ModelProtocolCandidate>("ModelProtocolCandidate.ts");
+    export_binding_if_changed::<ModelProtocolCandidateStatus>("ModelProtocolCandidateStatus.ts");
+    export_binding_if_changed::<ModelProtocolCandidateEvidence>("ModelProtocolCandidateEvidence.ts");
 }
 
 #[test]

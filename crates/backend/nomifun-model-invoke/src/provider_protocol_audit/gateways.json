@@ -1,0 +1,996 @@
+[
+  {
+    "platforms": [
+      "novita"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://docs.novita.ai/llms.txt",
+      "https://docs.novita.ai/api-reference/model-apis-llm-create-chat-completion",
+      "https://docs.novita.ai/api-reference/model-apis-llm-create-embeddings",
+      "https://docs.novita.ai/api-reference/model-apis-llm-create-rerank",
+      "https://docs.novita.ai/api-reference/model-apis-minimax-speech-2.8-hd.md"
+    ],
+    "notes": "已实际读取当前官方索引、Chat/Embedding/Rerank及MiniMax语音协议。LLM根为https://api.novita.ai/openai/v1；媒体使用其他原生路径，不能因模型来自相同上游就继承其协议。动态模型必须由当前目录确认用途；未找到可核实的Responses协议。旧txt2img/img2img页面现为404，不将旧搜索缓存当作当前可配置接口。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "catalog_required",
+        "protocols": [
+          "openai.chat_text"
+        ],
+        "notes": "官方公开Chat Completions JSON/SSE协议；模型与工具能力需由当前目录和真实工具往返检查确认，不按名字推断。",
+        "sources": [
+          "https://docs.novita.ai/api-reference/model-apis-llm-create-chat-completion"
+        ]
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未找到模型实时双向会话的WebSocket/WebRTC协议；Agent Sandbox终端流不属于实时语音会话。"
+      },
+      {
+        "task": "image_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "官方产品覆盖生图，但当前可读索引未提供可核实的新生图报文；旧原生异步页面已404，不能改用同步OpenAI Images冒充支持。"
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实当前图像编辑请求与任务生命周期；旧img2img页面已404，不能把编辑当作OpenAI multipart。"
+      },
+      {
+        "task": "video_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "平台说明包含视频生成，但未核实当前可保存的模型ID、创建/查询报文和现有视频codec的一致性。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "当前官方索引未核实独立音乐生成协议或模型ID；语音合成不等于音乐生成。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "当前MiniMax Speech 2.8使用/v3/minimax-speech-2.8-hd，text/voice_setting/audio_setting及audio/status响应；现OpenAI Speech二进制和MiniMax data.audio解析器都不是该响应形状，需网关专用codec。",
+        "sources": [
+          "https://docs.novita.ai/api-reference/model-apis-minimax-speech-2.8-hd.md"
+        ]
+      },
+      {
+        "task": "speech_recognition",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实独立转录API的文件上传/响应形状；不能从平台有音频服务推导OpenAI Transcriptions兼容。"
+      },
+      {
+        "task": "embedding",
+        "status": "catalog_required",
+        "protocols": [
+          "openai.embeddings"
+        ],
+        "notes": "官方/openai/v1/embeddings接收model/input并返回data[].embedding；仅为当前目录明确声明的向量模型提供候选。",
+        "sources": [
+          "https://docs.novita.ai/api-reference/model-apis-llm-create-embeddings"
+        ]
+      },
+      {
+        "task": "rerank",
+        "status": "catalog_required",
+        "protocols": [
+          "generic.rerank"
+        ],
+        "notes": "官方/openai/v1/rerank接收model/query/documents/top_n并返回results[].index/relevance_score，符合现有通用重排codec。",
+        "sources": [
+          "https://docs.novita.ai/api-reference/model-apis-llm-create-rerank"
+        ]
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "openrouter"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://openrouter.ai/docs/llms.txt",
+      "https://openrouter.ai/docs/api_reference/responses/overview.md",
+      "https://openrouter.ai/docs/api/api-reference/images/generate-an-image.md",
+      "https://openrouter.ai/api/v1/images/models",
+      "https://openrouter.ai/docs/api/api-reference/video-generation/submit-a-video-generation-request.md",
+      "https://openrouter.ai/docs/api/api-reference/tts/create-speech.md",
+      "https://openrouter.ai/docs/api/api-reference/stt/create-transcription.md",
+      "https://openrouter.ai/docs/api/api-reference/rerank/submit-a-rerank-request.md",
+      "https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion.md"
+    ],
+    "notes": "已实际读取最新官方OpenAPI、SDK文档和公开原生图像目录。Responses为无状态接口，拒绝store:true及非空previous_response_id；不得开启服务端响应ID续接。代理模型的上游名称不建立用途或参数能力，仍需当前目录声明；媒体新接口不直接继承OpenAI同名接口。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "catalog_required",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "官方提供Responses及Chat；Responses仅无状态，必须发送完整历史，不能使用chain_rounds服务端响应ID续接。实际对话与工具往返决定可用性。",
+        "sources": [
+          "https://openrouter.ai/docs/api_reference/responses/overview.md",
+          "https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion.md"
+        ],
+        "provider_params": {
+          "chain_rounds": false
+        }
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实与现有实时会话codec匹配的双向音频会话协议；流式Chat、Agent工具和STT/TTS独立接口不等于Realtime。"
+      },
+      {
+        "task": "image_generation",
+        "status": "catalog_required",
+        "protocols": [
+          "openai.images"
+        ],
+        "notes": "新同步JSON生成路由为/images，返回data[].b64_json。仅列当前原生图像目录中的GPT Image精确ID：现codec对它们不发response_format，model/prompt/n/size/quality与官方形状一致。其他图片模型需专用参数处理，不能因目录标image就继承此codec。",
+        "sources": [
+          "https://openrouter.ai/docs/api/api-reference/images/generate-an-image.md",
+          "https://openrouter.ai/api/v1/images/models"
+        ],
+        "model_ids": [
+          "openai/gpt-image-2.5-sunburst",
+          "openai/gpt-image-2.5-flare",
+          "openai/gpt-image-2",
+          "openai/gpt-image-1-mini",
+          "openai/gpt-image-1"
+        ],
+        "protocol_model_ids": {
+          "openai.images": [
+            "openai/gpt-image-2.5-sunburst",
+            "openai/gpt-image-2.5-flare",
+            "openai/gpt-image-2",
+            "openai/gpt-image-1-mini",
+            "openai/gpt-image-1"
+          ]
+        },
+        "endpoint": "/images"
+      },
+      {
+        "task": "image_edit",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "编辑/参考图通过/images的JSON input_references数组传入；现OpenAI Images编辑发送multipart image/image[]，只改路径不能保留输入。",
+        "sources": [
+          "https://openrouter.ai/docs/api/api-reference/images/generate-an-image.md"
+        ]
+      },
+      {
+        "task": "video_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "/videos使用application/json、duration/frame_images/input_references及pending任务状态；现openai.videos发送multipart与seconds/input_reference，无法只改URL完成适配。",
+        "sources": [
+          "https://openrouter.ai/docs/api/api-reference/video-generation/submit-a-video-generation-request.md"
+        ]
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "当前已读官方目录未核实独立音乐生成协议；视频带音轨与TTS不构成音乐生成能力。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "catalog_required",
+        "protocols": [
+          "openai.audio_speech"
+        ],
+        "notes": "官方/audio/speech JSON接收model/input/voice/response_format并返回audio/*原始字节，符合现codec。voice必须按所选供应商模型配置；不向所有模型套用alloy或统一格式默认。",
+        "sources": [
+          "https://openrouter.ai/docs/api/api-reference/tts/create-speech.md"
+        ]
+      },
+      {
+        "task": "speech_recognition",
+        "status": "catalog_required",
+        "protocols": [
+          "openai.audio_transcriptions"
+        ],
+        "notes": "官方/audio/transcriptions明确支持OpenAI式multipart file/model/language/response_format=json并返回text；本候选只使用现codec已实现的文件上传子集。",
+        "sources": [
+          "https://openrouter.ai/docs/api/api-reference/stt/create-transcription.md"
+        ]
+      },
+      {
+        "task": "embedding",
+        "status": "catalog_required",
+        "protocols": [
+          "openai.embeddings"
+        ],
+        "notes": "官方统一/embeddings提供model/input与向量列表；仅对当前目录声明的向量用途提供候选，不从Chat模型名继承。",
+        "sources": [
+          "https://openrouter.ai/docs/api_reference/embeddings.md"
+        ]
+      },
+      {
+        "task": "rerank",
+        "status": "catalog_required",
+        "protocols": [
+          "generic.rerank"
+        ],
+        "notes": "官方/rerank的model/query/documents/top_n与results[].index/relevance_score符合通用codec；当前仅发送字符串文档，不承诺多模态文档编码。",
+        "sources": [
+          "https://openrouter.ai/docs/api/api-reference/rerank/submit-a-rerank-request.md"
+        ]
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "ppio"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://ppio.com/docs/llms.txt",
+      "https://ppio.com/docs/models/reference-llm-create-chat-completion.md",
+      "https://ppio.com/docs/third-party/codex.md",
+      "https://ppio.com/docs/models/reference-llm-create-embeddings",
+      "https://ppio.com/docs/models/reference-llm-create-rerank",
+      "https://ppio.com/docs/model/llm-anthropic-compatibility.md",
+      "https://ppio.com/docs/models/reference-minimax-h3.md",
+      "https://ppio.com/docs/models/reference-minimax-speech-2.8-hd.md"
+    ],
+    "notes": "已实际读取当前官方文档：通用根为https://api.ppio.com/openai/v1，旧api.ppinfra.com/v3地址不作为新默认。Chat为主要公开请求规范，官方Codex指南另明确Responses接入。Anthropic兼容服务另用/anthropic根并要求Authorization Bearer覆盖SDK头，不能把现连接静默换成x-api-key。动态模型用途需目录确认。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "catalog_required",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "主要接口为Chat；已实际读取官方Codex指南的wire_api=responses及同一/openai/v1根，因此Responses可作为实测候选。Anthropic不同根/鉴权需单独配置连接，不混入本行共享路由。",
+        "sources": [
+          "https://ppio.com/docs/models/reference-llm-create-chat-completion.md",
+          "https://ppio.com/docs/third-party/codex.md",
+          "https://ppio.com/docs/model/llm-anthropic-compatibility.md"
+        ]
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实实时双向模型会话协议；Sandbox实时终端和音频生成流不能视作Realtime模型。"
+      },
+      {
+        "task": "image_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "模型广场宣称图像服务，但当前可读API索引未给出足以匹配现codec的统一生图请求和响应；不直接继承所代理图像模型的原厂接口。"
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实统一图像编辑传图编码与返回形状；目录图片模态不等于OpenAI multipart编辑兼容。"
+      },
+      {
+        "task": "video_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "当前MiniMax H3原厂视频路径/v3/minimax/v2/video_generation及query/video_generation/{task_id}，返回task/content.url专属结构；现视频codec没有该生命周期。",
+        "sources": [
+          "https://ppio.com/docs/models/reference-minimax-h3.md"
+        ]
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实独立音乐生成接口和可用模型ID，不从MiniMax或其他上游名称推断。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "MiniMax Speech 2.8同步端点使用text/voice_setting/audio_setting及audio/status响应，异步端点另有任务流程；与现OpenAI二进制/MiniMax data.audio解析不一致。",
+        "sources": [
+          "https://ppio.com/docs/models/reference-minimax-speech-2.8-hd.md"
+        ]
+      },
+      {
+        "task": "speech_recognition",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "当前官方索引未核实可配置的转录端点和文件/返回形状。"
+      },
+      {
+        "task": "embedding",
+        "status": "catalog_required",
+        "protocols": [
+          "openai.embeddings"
+        ],
+        "notes": "当前官方接口为/openai/v1/embeddings，model/input及data[].embedding匹配；文档明确baai/bge-m3，仍按当前目录确认用途。",
+        "sources": [
+          "https://ppio.com/docs/models/reference-llm-create-embeddings"
+        ],
+        "model_ids": [
+          "baai/bge-m3"
+        ]
+      },
+      {
+        "task": "rerank",
+        "status": "catalog_required",
+        "protocols": [
+          "generic.rerank"
+        ],
+        "notes": "当前官方接口为/openai/v1/rerank，model/query/documents/top_n及results[].relevance_score匹配；不再默认旧/v3/openai/rerank地址。",
+        "sources": [
+          "https://ppio.com/docs/models/reference-llm-create-rerank"
+        ]
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "modelscope"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://www.modelscope.cn/docs/model-service/API-Inference/intro",
+      "https://resouces.modelscope.cn/document/docdata/2026-9-28_15-49-CN/dist/model-service/API-Inference/intro/intro_CN.md"
+    ],
+    "notes": "已实际读取官方页面引用的2026-09-28中文静态文档全文。模型示例可能下线，必须以模型页面/当前API目录声明的用途为准。Chat和Anthropic beta已有示例，Responses明确仅Qwen3.5系列；AIGC需专属异步头与任务查询，不能套同步OpenAI Images。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "catalog_required",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "官方Chat兼容接口已核实；Responses仅Create接口且明确只支持Qwen3.5系列，按官方namespace/family精确限制。Anthropic beta有独立原生鉴权示例，需对应连接，未与默认Bearer候选合并。",
+        "sources": [
+          "https://resouces.modelscope.cn/document/docdata/2026-9-28_15-49-CN/dist/model-service/API-Inference/intro/intro_CN.md"
+        ],
+        "model_prefixes": [
+          "Qwen/Qwen3.5-"
+        ],
+        "protocol_model_prefixes": {
+          "openai.responses": [
+            "Qwen/Qwen3.5-"
+          ]
+        }
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实公开API-Inference的实时双向会话接口；流式Chat不等同Realtime。"
+      },
+      {
+        "task": "image_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "/v1/images/generations要求X-ModelScope-Async-Mode:true，返回task_id；GET /v1/tasks/{id}还需X-ModelScope-Task-Type并读取task_status/output_images。现codec无此专属异步流程。",
+        "sources": [
+          "https://resouces.modelscope.cn/document/docdata/2026-9-28_15-49-CN/dist/model-service/API-Inference/intro/intro_CN.md"
+        ]
+      },
+      {
+        "task": "image_edit",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方编辑通过同一AIGC JSON接口的image_url及Base64 Data URI输入，并使用ModelScope异步任务流程；不是OpenAI multipart。",
+        "sources": [
+          "https://resouces.modelscope.cn/document/docdata/2026-9-28_15-49-CN/dist/model-service/API-Inference/intro/intro_CN.md"
+        ]
+      },
+      {
+        "task": "video_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "当前官方API-Inference文档未核实与现视频codec一致的生成/查询协议；模型仓库的video任务标签不证明托管API支持。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实托管API的音乐生成协议，不能从开源模型仓库任务名称推导线上可调用性。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实托管TTS API请求/响应，模型仓库和推理Demo不等于可配置的统一语音接口。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实OpenAI文件转录兼容接口；开源ASR模型存在不建立API-Inference可调用证据。"
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "当前已读API-Inference说明未公布统一/embeddings托管契约，不把仓库embedding标签当作OpenAI协议兼容。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "当前已读API-Inference说明未公布统一/rerank托管契约，不能从模型名称或仓库任务推导。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "infiniai"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://docs.infini-ai.com/llms.txt",
+      "https://docs.infini-ai.com/_copy/gen-studio/api/text-generation/tutorial.md",
+      "https://docs.infini-ai.com/_copy/gen-studio/api/retrieval/tutorial-embeddings.md",
+      "https://docs.infini-ai.com/_copy/gen-studio/api/retrieval/tutorial-rerank.md",
+      "https://docs.infini-ai.com/_copy/gen-studio/api/multimodal/image-generation.md",
+      "https://docs.infini-ai.com/_copy/gen-studio/api/multimodal/video-generation.md",
+      "https://docs.infini-ai.com/openapi/maas-v1.openapi.yaml"
+    ],
+    "notes": "已实际读取官方GenStudio文档。文本/检索统一根为https://cloud.infini-ai.com/maas/v1；闭源图片和视频采用原厂透传，需模型广场逐模型提供专用Base URL，不能用统一LLM根自动继承上游协议。当前未核实Responses服务。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "catalog_required",
+        "protocols": [
+          "openai.chat_text"
+        ],
+        "notes": "官方Chat Completions教程和模型目录为依据；每模型思考/工具参数由该网关文档及实际调用确认，不复用原厂同名模型能力。",
+        "sources": [
+          "https://docs.infini-ai.com/_copy/gen-studio/api/text-generation/tutorial.md"
+        ]
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实公开GenStudio实时双向模型会话API。"
+      },
+      {
+        "task": "image_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "官方声明Seedream等闭源模型按原厂协议透传，但要求在模型详情获取专用Base URL；文档未给出可验证的统一模型ID/端点，不能自动套统一LLM根。",
+        "sources": [
+          "https://docs.infini-ai.com/_copy/gen-studio/api/multimodal/image-generation.md"
+        ]
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "原厂图片透传需逐模型详情确认编辑能力、传图编码与专用地址；当前没有足够可保存证据。",
+        "sources": [
+          "https://docs.infini-ai.com/_copy/gen-studio/api/multimodal/image-generation.md"
+        ]
+      },
+      {
+        "task": "video_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方现列Minimax Hailuo、Vidu等原厂透传视频服务及专用地址；现仓库没有对应Hailuo/Vidu任务codec，不能套OpenAI Videos。",
+        "sources": [
+          "https://docs.infini-ai.com/_copy/gen-studio/api/multimodal/video-generation.md"
+        ]
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "当前官方GenStudio目录未核实独立音乐生成接口。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "当前官方文档未核实统一语音合成API与现codec一致的报文。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "当前官方文档未核实统一文件转录API及其上传/返回形状。"
+      },
+      {
+        "task": "embedding",
+        "status": "catalog_required",
+        "protocols": [
+          "openai.embeddings"
+        ],
+        "notes": "官方示例/maas/v1/embeddings使用model=bge-m3、input字符串数组和data[].embedding浮点向量。",
+        "sources": [
+          "https://docs.infini-ai.com/_copy/gen-studio/api/retrieval/tutorial-embeddings.md"
+        ],
+        "model_ids": [
+          "bge-m3"
+        ]
+      },
+      {
+        "task": "rerank",
+        "status": "supported",
+        "protocols": [
+          "infiniai.rerank"
+        ],
+        "notes": "Native /maas/v1/rerank accepts model/query/documents. Unsupported top_n is not sent; the adapter implements the requested result limit locally after validating and ordering scores. rank_fields/truncate/truncate_direction are explicitly rejected.",
+        "sources": [
+          "https://docs.infini-ai.com/_copy/gen-studio/api/retrieval/tutorial-rerank.md",
+          "https://docs.infini-ai.com/openapi/maas-v1.openapi.yaml"
+        ],
+        "model_ids": [
+          "bge-reranker-v2-m3"
+        ]
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "ctyun"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://www.ctyun.cn/document/11061839/11099156",
+      "https://www.ctyun.cn/document/11061839/11099117",
+      "https://www.ctyun.cn/document/11061839/11099154",
+      "https://www.ctyun.cn/document/11061839/11099137",
+      "https://www.ctyun.cn/document/11061839/11099410",
+      "https://www.ctyun.cn/document/11061839/11062291",
+      "https://www.ctyun.cn/document/11061839/11099291",
+      "https://www.ctyun.cn/document/11061839/11075357",
+      "https://www.ctyun.cn/document/11061839/11099147"
+    ],
+    "notes": "已实际读取2026-09更新的TokenHub官方协议，旧Image通用页已404。国内根https://ai.ctaigw.cn/v1，全球分区另有/amer、/eu、/as地址，不能静默换区或混用凭据。Seedream/Seedance仅对官方请求示例的精确ID复用原生codec；Qwen/Wan/Minimax等其他媒体报文不共享该codec。BGE与阿里检索还存在路径/字段差异。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "catalog_required",
+        "protocols": [
+          "openai.chat_text",
+          "anthropic.messages"
+        ],
+        "notes": "新版官方同时声明OpenAI Chat与Anthropic Messages，JSON/SSE及工具契约已核实。Chat用Bearer APP Key；Messages文档流式示例要求x-api-key，必须有真实对应连接，不能自动改头投递。未核实Responses。",
+        "sources": [
+          "https://www.ctyun.cn/document/11061839/11099156",
+          "https://www.ctyun.cn/document/11061839/11099117"
+        ]
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实TokenHub的实时双向音频会话协议；Qwen非实时ASR不是Realtime。"
+      },
+      {
+        "task": "image_generation",
+        "status": "catalog_required",
+        "protocols": [
+          "ark.images"
+        ],
+        "notes": "已核实Seedream同步JSON model/prompt/size/response_format及data[]，可复用Ark生成codec；当前仅限制到官方curl示例精确ID。Qwen/Wan使用input/parameters等另一套报文，不继承此候选。",
+        "sources": [
+          "https://www.ctyun.cn/document/11061839/11099154"
+        ],
+        "model_ids": [
+          "doubao-seedream-4.5"
+        ],
+        "protocol_model_ids": {
+          "ark.images": [
+            "doubao-seedream-4.5"
+          ]
+        }
+      },
+      {
+        "task": "image_edit",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "Seedream文档要求image为字符串数组，现Ark编辑codec单图发字符串；Qwen/Wan编辑另用嵌套JSON和异步流程，不能以OpenAI multipart或现单图codec冒充通用支持。",
+        "sources": [
+          "https://www.ctyun.cn/document/11061839/11099154",
+          "https://www.ctyun.cn/document/11061839/11099336"
+        ]
+      },
+      {
+        "task": "video_generation",
+        "status": "catalog_required",
+        "protocols": [
+          "ark.video_jobs"
+        ],
+        "notes": "Seedance的JSON content/role/duration/generate_audio、创建id及status/content.video_url与现Ark生命周期一致；只列官方curl示例精确ID，不扩Minimax/Vidu/Wan。",
+        "sources": [
+          "https://www.ctyun.cn/document/11061839/11099137"
+        ],
+        "model_ids": [
+          "doubao-seedance-1-5-pro"
+        ],
+        "protocol_model_ids": {
+          "ark.video_jobs": [
+            "doubao-seedance-1-5-pro"
+          ]
+        }
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "当前TokenHub官方API目录未核实独立音乐生成契约。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "平台计费说明有语音模型类别，但当前已读TokenHub API目录没有足够TTS请求/响应证据；不能混用天翼云另一个独立TTS产品。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "Qwen同步ASR走/services/aigc/multimodal-generation/generation，input.messages的input_audio、parameters.format和X-DashScope-SSE专属头；现OpenAI multipart和其他ASR codec不匹配。",
+        "sources": [
+          "https://www.ctyun.cn/document/11061839/11099147"
+        ]
+      },
+      {
+        "task": "embedding",
+        "status": "catalog_required",
+        "protocols": [
+          "openai.embeddings"
+        ],
+        "notes": "阿里文本向量明确/embeddings、model/input、data[].embedding，按精确调用ID限制。BGE页面却记录data[].embeddings复数，与现解析器不一致，未把BGE目录条目混入此候选。",
+        "sources": [
+          "https://www.ctyun.cn/document/11061839/11099410",
+          "https://www.ctyun.cn/document/11061839/11062291"
+        ],
+        "model_ids": [
+          "text-embedding-v3",
+          "text-embedding-v4"
+        ],
+        "protocol_model_ids": {
+          "openai.embeddings": [
+            "text-embedding-v3",
+            "text-embedding-v4"
+          ]
+        }
+      },
+      {
+        "task": "rerank",
+        "status": "catalog_required",
+        "protocols": [
+          "generic.rerank"
+        ],
+        "notes": "qwen3-rerank明确使用复数/reranks且顶层model/query/documents与results[].relevance_score兼容。BGE另用/rerank但模型为动态opaque ID；gte-rerank-v2另用嵌套input/output，不能混为此精确候选。",
+        "sources": [
+          "https://www.ctyun.cn/document/11061839/11099291",
+          "https://www.ctyun.cn/document/11061839/11075357"
+        ],
+        "model_ids": [
+          "qwen3-rerank"
+        ],
+        "protocol_model_ids": {
+          "generic.rerank": [
+            "qwen3-rerank"
+          ]
+        },
+        "endpoint": "/reranks"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "lingyi"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://platform.lingyiwanwu.com/",
+      "https://platform.lingyiwanwu.com/_next/static/chunks/app/page-276ce40cfdd8932a.js"
+    ],
+    "notes": "已实际读取官方首页所加载的公告脚本全文：2026-08-03公告停止新注册与充值，2026-09-03 24:00停止模型体验和API调用，退款窗口至2026-12-03 24:00。作为托管服务整体退役，不再为任何用途产生新推荐；不删除用户已保存配置。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "retired",
+        "protocols": [],
+        "notes": "该官方托管平台已于2026-09-03停止API调用；开放权重或第三方继续托管Yi模型不属于本平台服务。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "retired",
+        "protocols": [],
+        "notes": "该官方托管平台已于2026-09-03停止API调用；开放权重或第三方继续托管Yi模型不属于本平台服务。"
+      },
+      {
+        "task": "image_generation",
+        "status": "retired",
+        "protocols": [],
+        "notes": "该官方托管平台已于2026-09-03停止API调用；开放权重或第三方继续托管Yi模型不属于本平台服务。"
+      },
+      {
+        "task": "image_edit",
+        "status": "retired",
+        "protocols": [],
+        "notes": "该官方托管平台已于2026-09-03停止API调用；开放权重或第三方继续托管Yi模型不属于本平台服务。"
+      },
+      {
+        "task": "video_generation",
+        "status": "retired",
+        "protocols": [],
+        "notes": "该官方托管平台已于2026-09-03停止API调用；开放权重或第三方继续托管Yi模型不属于本平台服务。"
+      },
+      {
+        "task": "music_generation",
+        "status": "retired",
+        "protocols": [],
+        "notes": "该官方托管平台已于2026-09-03停止API调用；开放权重或第三方继续托管Yi模型不属于本平台服务。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "retired",
+        "protocols": [],
+        "notes": "该官方托管平台已于2026-09-03停止API调用；开放权重或第三方继续托管Yi模型不属于本平台服务。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "retired",
+        "protocols": [],
+        "notes": "该官方托管平台已于2026-09-03停止API调用；开放权重或第三方继续托管Yi模型不属于本平台服务。"
+      },
+      {
+        "task": "embedding",
+        "status": "retired",
+        "protocols": [],
+        "notes": "该官方托管平台已于2026-09-03停止API调用；开放权重或第三方继续托管Yi模型不属于本平台服务。"
+      },
+      {
+        "task": "rerank",
+        "status": "retired",
+        "protocols": [],
+        "notes": "该官方托管平台已于2026-09-03停止API调用；开放权重或第三方继续托管Yi模型不属于本平台服务。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "poe"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://creator.poe.com/docs/external-applications/openai-compatible-api"
+    ],
+    "notes": "已实际读取Poe官方OpenAI兼容文档：支持/v1/chat/completions与/v1/responses。图片、视频、音频bot的示例仍通过Chat消息与流返回内容，不能当成独立Images/Videos/Audio端点；动态bot必须由Poe当前原生目录确认用途及接口支持。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "catalog_required",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "官方提供Responses（reasoning/text.format/tools/previous_response_id）及Chat；具体bot是否支持工具和所选协议须实际工具往返，不照搬其上游模型名称。",
+        "sources": [
+          "https://creator.poe.com/docs/external-applications/openai-compatible-api"
+        ]
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实双向实时音频会话接口；Poe聊天流和音频bot不是现Realtime协议。"
+      },
+      {
+        "task": "image_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方图像bot经/chat/completions返回消息/内容，未提供与现OpenAI Images同步结果契约一致的独立接口，需Poe媒体bot专用解码。"
+      },
+      {
+        "task": "image_edit",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "媒体bot使用Chat消息中的图片输入；现OpenAI Images编辑的multipart请求和返回解析不能复用。"
+      },
+      {
+        "task": "video_generation",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "官方Veo等视频bot仍通过Chat调用并在消息中返回媒体内容；没有与现任务创建/轮询codec匹配的独立Videos生命周期。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实独立音乐生成端点和协议；媒体bot存在不能建立现音乐codec兼容性。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "not_implemented",
+        "protocols": [],
+        "notes": "音频生成bot经聊天内容返回，未核实OpenAI /audio/speech二进制协议；现TTS codec无法把bot消息当音频字节。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "未核实Poe独立文件转录端点及text响应形状；聊天音频输入不等于OpenAI Transcriptions。"
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "当前官方外部API文档未核实向量嵌入端点。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "当前官方外部API文档未核实独立重排端点。"
+      }
+    ]
+  },
+  {
+    "platforms": [
+      "agnes"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://agnes-ai.com/zh-Hans/docs/agnes-25-flash",
+      "https://raw.githubusercontent.com/AgnesAI-Labs/AgnesAI-Models/main/MODEL_CATALOG.md",
+      "https://raw.githubusercontent.com/AgnesAI-Labs/skills/main/agnes-ai-models/references/model_catalog.md",
+      "https://agnes-ai.com/en/docs/agnes-image-25-flash",
+      "https://agnes-ai.com/en/docs/agnes-video-25"
+    ],
+    "notes": "已实际读取官方模型仓库、2026-09-24参考及当前2.5媒体文档。文本走Chat；图像和视频使用项目已实现的Agnes原生codec。视频以video_id查询/agnesapi并携带model_name，不是OpenAI Videos默认轮询。仅列官方精确ID，旧兼容ID保留但新建优先2.5。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "notes": "Latest official Agnes 2.5 Flash reference explicitly documents Responses and Chat with tools. Prefer Responses after real verification; 2.0 is deprecated and must not be recommended as a fallback. Encrypted reasoning include is not documented.",
+        "sources": [
+          "https://agnes-ai.com/zh-Hans/docs/agnes-25-flash",
+          "https://raw.githubusercontent.com/AgnesAI-Labs/AgnesAI-Models/main/MODEL_CATALOG.md",
+          "https://raw.githubusercontent.com/AgnesAI-Labs/skills/main/agnes-ai-models/references/model_catalog.md"
+        ],
+        "model_ids": [
+          "agnes-2.5-flash"
+        ],
+        "protocol_model_ids": {
+          "openai.responses": [
+            "agnes-2.5-flash"
+          ]
+        },
+        "provider_params": {
+          "include": null
+        }
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "官方未核实实时双向会话协议；文本模型低延迟描述不构成Realtime会话能力。"
+      },
+      {
+        "task": "image_generation",
+        "status": "supported",
+        "protocols": [
+          "agnes.images"
+        ],
+        "notes": "Agnes原生图像JSON需要size，return_base64/extra_body控制格式，不能使用OpenAI顶层quality/response_format；现专用codec已处理。",
+        "sources": [
+          "https://raw.githubusercontent.com/AgnesAI-Labs/AgnesAI-Models/main/MODEL_CATALOG.md",
+          "https://raw.githubusercontent.com/AgnesAI-Labs/skills/main/agnes-ai-models/references/model_catalog.md",
+          "https://agnes-ai.com/en/docs/agnes-image-25-flash"
+        ],
+        "model_ids": [
+          "agnes-image-2.0-flash",
+          "agnes-image-2.1-flash",
+          "agnes-image-2.5-flash"
+        ],
+        "protocol_model_ids": {
+          "agnes.images": [
+            "agnes-image-2.0-flash",
+            "agnes-image-2.1-flash",
+            "agnes-image-2.5-flash"
+          ]
+        }
+      },
+      {
+        "task": "image_edit",
+        "status": "supported",
+        "protocols": [
+          "agnes.images"
+        ],
+        "notes": "编辑与合图走/images/generations的JSON extra_body.image数组，支持URL/Data URI；现Agnes codec转换输入，不使用OpenAI multipart。",
+        "sources": [
+          "https://raw.githubusercontent.com/AgnesAI-Labs/skills/main/agnes-ai-models/references/model_catalog.md",
+          "https://agnes-ai.com/en/docs/agnes-image-25-flash"
+        ],
+        "model_ids": [
+          "agnes-image-2.0-flash",
+          "agnes-image-2.1-flash",
+          "agnes-image-2.5-flash"
+        ],
+        "protocol_model_ids": {
+          "agnes.images": [
+            "agnes-image-2.0-flash",
+            "agnes-image-2.1-flash",
+            "agnes-image-2.5-flash"
+          ]
+        }
+      },
+      {
+        "task": "video_generation",
+        "status": "supported",
+        "protocols": [
+          "agnes.video_jobs"
+        ],
+        "notes": "官方2.5及旧v2.0兼容ID创建后取video_id，GET /agnesapi?video_id=...&model_name=...，顶层status completed/failed与url由现Agnes生命周期处理。",
+        "sources": [
+          "https://raw.githubusercontent.com/AgnesAI-Labs/AgnesAI-Models/main/MODEL_CATALOG.md",
+          "https://raw.githubusercontent.com/AgnesAI-Labs/skills/main/agnes-ai-models/references/model_catalog.md",
+          "https://agnes-ai.com/en/docs/agnes-video-25"
+        ],
+        "model_ids": [
+          "agnes-video-v2.0",
+          "agnes-video-2.5",
+          "agnes-video-2.5-flash"
+        ],
+        "protocol_model_ids": {
+          "agnes.video_jobs": [
+            "agnes-video-v2.0",
+            "agnes-video-2.5",
+            "agnes-video-2.5-flash"
+          ]
+        }
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "官方模型目录未列独立音乐生成模型/接口。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "官方模型目录未列独立TTS模型/接口；视频音轨不等于TTS。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "官方模型目录未列独立ASR上传/转录接口。"
+      },
+      {
+        "task": "embedding",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "官方模型目录未列嵌入模型和/embeddings契约。"
+      },
+      {
+        "task": "rerank",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "官方模型目录未列重排模型和/rerank契约。"
+      }
+    ]
+  }
+]
