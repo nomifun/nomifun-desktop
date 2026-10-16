@@ -120,6 +120,8 @@ Health observations are stored per task. Text chat requires the same harmless
 tool round trip as protocol verification: the model must call the probe tool,
 receive its constant result and finish with a complete, visible response; a
 model that answers without calling the probe tool is **not fully verified**.
+The check sends the saved **Maximum output** exactly as conversations do, so a
+limit above the model's maximum fails here rather than on every message.
 Media, embedding and rerank probes validate their typed results. Empty
 audio, damaged images, invalid vectors and failed jobs are unhealthy. A present
 empty transcription remains valid for silence. Accepted async jobs, remote output

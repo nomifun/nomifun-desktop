@@ -52,7 +52,15 @@ at end of stream, which still ends the stream, while any other unterminated
 record remains a framing error. Within one attempt, OpenAI Chat frames without
 an `id` (such as an Azure-style `prompt_filter_results` prelude) belong to the
 attempt's single response, which the first identified frame adopts;
-contradicting identified ids remain a stream violation.
+contradicting identified ids remain a stream violation. An in-stream
+`upstream_error` relayed by a gateway before any output is retried on the same
+route like `server_error`; pre-stream validation failures still arrive as HTTP
+errors, and a more specific error code still wins. Anthropic-family Messages
+encoders (Anthropic, Bedrock and Vertex) send each tool's `input_schema`
+without the root `oneOf`/`anyOf`/`allOf` that those services reject; the root
+object keeps its properties (hoisted from the branches when the root lists
+none), and the runtime still validates every call against the full canonical
+schema.
 Parameter JSON cannot inject protocol-owned model, input, tool, streaming or
 retained cloud-state fields.
 Reasoning effort uses the normalized `reasoning_effort` control. Saving native
@@ -112,8 +120,10 @@ request per round with SSE or AWS event-stream framing, a fresh per-attempt
 decoder, and the broker's canonical event-sequence rules. They validate a
 streamed tool call, its real constant result, and a final visible answer,
 creating no Session and running no user tools.
-Each candidate has output/time bounds and issues exactly one request per round
-without retry.
+Each candidate sends the capability's own output ceiling exactly as Agent turns
+do (4096 only when none is configured), so a ceiling above the model's maximum
+fails verification instead of every later turn. Each candidate has a time bound
+and issues exactly one request per round without retry.
 All candidates retain their outcome. An available saved/manual choice wins,
 followed by the verified documented recommendation, then the first available
 candidate. Global authentication, quota and rate-limit failures stop further calls.

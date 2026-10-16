@@ -139,7 +139,13 @@ fn classify(code: &str) -> Option<(ChatModelErrorCode, ChatRetryDirective, &'sta
             Retry::RetrySameRoute,
             "provider rate limit rejected the attempt",
         ),
-        "overloaded_error" | "server_error" | "internal_server_error" => (
+        // New-API-style gateways relay an upstream failure as
+        // `type: upstream_error`; inside a stream it means the upstream
+        // accepted the request and then failed (pre-stream validation
+        // failures arrive as HTTP errors), so it is retried on the same route
+        // like server_error before any semantic output. A more specific
+        // `code` still wins because code is classified first.
+        "overloaded_error" | "server_error" | "internal_server_error" | "upstream_error" => (
             Code::ProviderUnavailable,
             Retry::RetrySameRoute,
             "provider is temporarily unavailable",
@@ -402,6 +408,31 @@ mod tests {
         })).unwrap();
         assert_eq!(permission.code, ChatModelErrorCode::AuthenticationFailed);
         assert_eq!(permission.diagnostic.unwrap().reason, ModelFailureReason::PermissionDenied);
+    }
+
+    #[test]
+    fn in_stream_gateway_upstream_error_retries_unless_a_specific_code_wins() {
+        let retryable = decode(ChatProtocol::OpenaiChat, "message", &serde_json::json!({
+            "error": {"message": "x", "type": "upstream_error", "param": "", "code": null}
+        }))
+        .unwrap();
+        assert_eq!(retryable.code, ChatModelErrorCode::ProviderUnavailable);
+        assert_eq!(retryable.retry, ChatRetryDirective::RetrySameRoute);
+        assert_eq!(
+            retryable.diagnostic.as_ref().unwrap().provider_type.as_deref(),
+            Some("upstream_error")
+        );
+        let rate_limited = decode(ChatProtocol::OpenaiChat, "message", &serde_json::json!({
+            "error": {"message": "x", "type": "upstream_error", "code": "rate_limit_exceeded"}
+        }))
+        .unwrap();
+        assert_eq!(rate_limited.code, ChatModelErrorCode::RateLimited);
+        let too_long = decode(ChatProtocol::OpenaiChat, "message", &serde_json::json!({
+            "error": {"message": "x", "type": "upstream_error", "code": "context_length_exceeded"}
+        }))
+        .unwrap();
+        assert_eq!(too_long.code, ChatModelErrorCode::PromptTooLong);
+        assert_eq!(too_long.retry, ChatRetryDirective::Never);
     }
 
     fn google_error_info(machine: &str, domain: &str) -> Value {

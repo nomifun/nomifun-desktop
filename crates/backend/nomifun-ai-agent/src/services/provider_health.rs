@@ -15,8 +15,9 @@ use tracing::{info, warn};
 
 /// Whole-exchange deadline for the Chat health round trip.
 const CHAT_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
-/// Default probe output ceiling; the capability's own `output_limit` wins when
-/// it is lower, matching the saved configuration exactly.
+/// Default probe output ceiling, used only when no `output_limit` is
+/// configured. A configured ceiling is sent exactly as Agent turns send it, so
+/// a ceiling above the model's maximum fails this check instead of every turn.
 const CHAT_PROBE_OUTPUT_TOKENS: u32 = 4096;
 
 pub struct ProviderHealthCheckService {
@@ -66,8 +67,7 @@ impl ProviderHealthCheckService {
                 .output_limit
                 .and_then(|limit| u32::try_from(limit).ok())
                 .filter(|limit| *limit > 0)
-                .unwrap_or(CHAT_PROBE_OUTPUT_TOKENS)
-                .min(CHAT_PROBE_OUTPUT_TOKENS);
+                .unwrap_or(CHAT_PROBE_OUTPUT_TOKENS);
             match ChatVerificationTarget::from_resolved(&resolved)
                 .map_err(ChatVerificationFailure::Transport)
             {
@@ -601,6 +601,13 @@ mod tests {
     async fn managed_task_health_fixture(
         server: &MockServer, platform: &str, protocol: &str, auth_scheme: &str, endpoint_path: &str, task: ModelTask,
     ) -> (ProviderHealthCheckService, Arc<SqliteProviderModelCapabilityRepository>) {
+        managed_task_health_fixture_with_limit(server,platform,protocol,auth_scheme,endpoint_path,task,Some(4096)).await
+    }
+
+    async fn managed_task_health_fixture_with_limit(
+        server: &MockServer, platform: &str, protocol: &str, auth_scheme: &str, endpoint_path: &str,
+        task: ModelTask, output_limit: Option<i64>,
+    ) -> (ProviderHealthCheckService, Arc<SqliteProviderModelCapabilityRepository>) {
         const KEY: [u8;32] = [0xA8;32];
         let db = init_database_memory().await.unwrap();
         let pool = db.pool().clone();
@@ -611,7 +618,7 @@ mod tests {
         let task_name = serde_json::to_value(task).unwrap();
         let capabilities = [NewProviderModelCapability {
             task:task_name.as_str().unwrap(),traits:"[]",protocol,connection_role:"default",
-            endpoint:Some(&endpoint),provider_params:"{}",context_limit:Some(64000),output_limit:Some(4096),
+            endpoint:Some(&endpoint),provider_params:"{}",context_limit:Some(64000),output_limit,
             ..Default::default()
         }];
         provider_repo.create(CreateProviderParams {
@@ -918,6 +925,64 @@ mod tests {
         assert_chat_health_scenarios("gemini","gemini.generate_text","header_key:x-goog-api-key",
             &format!("/v1beta/models/{CHAT_MODEL}:streamGenerateContent?alt=sse"),"x-goog-api-key",
             "functionResponse",gemini_tool_stream,gemini_health_stream).await;
+    }
+
+    #[tokio::test]
+    async fn chat_health_sends_the_configured_output_ceiling_exactly() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/messages")).and(header("x-api-key",CHAT_KEY))
+            .respond_with(StrictAnthropicEndpoint {
+                first:anthropic_tool_stream("nomifun_protocol_echo"),
+                second:anthropic_text_stream("OK","end_turn",true)})
+            .expect(2).mount(&server).await;
+        let (service,_) = managed_task_health_fixture_with_limit(&server,"anthropic","anthropic.messages",
+            "header_key:x-api-key","/v1/messages",ModelTask::Chat,Some(131072)).await;
+        let response = service.health_check(ProviderHealthCheckRequest {
+            provider_id:CHAT_PROVIDER_ID.into(),model:CHAT_MODEL.into(),task:ModelTask::Chat,
+        }).await.unwrap();
+        assert_eq!(response.status,HealthStatus::Healthy,"{response:?}");
+        let first: serde_json::Value = serde_json::from_slice(
+            &server.received_requests().await.unwrap()[0].body).unwrap();
+        assert_eq!(first["max_tokens"],131072,"{first}");
+
+        for (configured,expected) in [(Some(131072),131072),(None,4096)] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST")).and(path("/v1/chat/completions"))
+                .and(header("authorization",format!("Bearer {CHAT_KEY}")))
+                .respond_with(TwoRoundSse {
+                    first:openai_chat_tool_stream(),
+                    second:openai_chat_health_stream(ChatHealthScenario::Complete),
+                    marker:"\"tool_call_id\""})
+                .expect(2).mount(&server).await;
+            let (service,_) = managed_task_health_fixture_with_limit(&server,"openai","openai.chat_text",
+                "bearer","/v1/chat/completions",ModelTask::Chat,configured).await;
+            let response = service.health_check(ProviderHealthCheckRequest {
+                provider_id:CHAT_PROVIDER_ID.into(),model:CHAT_MODEL.into(),task:ModelTask::Chat,
+            }).await.unwrap();
+            assert_eq!(response.status,HealthStatus::Healthy,"{configured:?}: {response:?}");
+            let first: serde_json::Value = serde_json::from_slice(
+                &server.received_requests().await.unwrap()[0].body).unwrap();
+            assert_eq!(first["max_tokens"],expected,"{configured:?}: {first}");
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_health_reports_a_provider_rejected_output_ceiling_as_invalid_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/messages")).and(header("x-api-key",CHAT_KEY))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "type":"error","error":{"type":"invalid_request_error",
+                    "message":"max_tokens: 131072 > 128000, which is the maximum allowed number of output tokens for claude-opus-5-5"}
+            }))).expect(1).mount(&server).await;
+        let (service,_) = managed_task_health_fixture_with_limit(&server,"anthropic","anthropic.messages",
+            "header_key:x-api-key","/v1/messages",ModelTask::Chat,Some(131072)).await;
+        let response = service.health_check(ProviderHealthCheckRequest {
+            provider_id:CHAT_PROVIDER_ID.into(),model:CHAT_MODEL.into(),task:ModelTask::Chat,
+        }).await.unwrap();
+        assert_eq!(response.status,HealthStatus::Unhealthy,"{response:?}");
+        assert_eq!(response.error_kind,Some(ProviderHealthCheckErrorKind::InvalidRequest),"{response:?}");
+        assert_eq!(response.http_status,Some(400),"{response:?}");
+        assert!(response.message.as_deref().is_some_and(|message| message.contains("128000")),"{response:?}");
     }
 
     #[tokio::test]

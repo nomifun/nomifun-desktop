@@ -42,7 +42,11 @@ Anthropic 事件 union 中为 null 的成员按缺失处理；Responses item 的
 不得携带内容成员。SSE 记录只在空行处提交；唯一例外是流结束时缺少最后分隔空行、但内容
 完整的 `[DONE]` 结束标记仍按正常结束处理，其他未终止记录仍是分帧错误。同一次尝试中，
 没有 `id` 的 OpenAI Chat 帧（如 Azure 风格的 `prompt_filter_results` 前导帧）属于该次
-尝试唯一的响应，并由第一个带 id 的帧接管；相互矛盾的 id 仍是流违规。
+尝试唯一的响应，并由第一个带 id 的帧接管；相互矛盾的 id 仍是流违规。网关在任何输出之前于
+流内转发的 `upstream_error` 与 `server_error` 一样在同一路由上重试；请求校验失败仍在流开始
+前以 HTTP 错误返回，更具体的错误码仍优先。Anthropic 系列 Messages 编码器（Anthropic、Bedrock、
+Vertex）发送工具 `input_schema` 时去掉这些服务拒绝的根级 `oneOf`/`anyOf`/`allOf`；根对象保留其
+属性（根上没有属性时从各分支提升），运行时仍按完整的规范 schema 校验每次调用。
 协议拥有的模型、输入、工具、流模式和云端状态字段不能由参数 JSON 注入。
 推理强度只使用标准化的 `reasoning_effort` 配置；Responses 的原生 `reasoning.effort`
 在保存时提示改用该字段，`summary`、`mode` 和 `context` 等其他原生设置保留。
@@ -84,8 +88,10 @@ OpenAI serializer 作为可用默认值。原生目录缺少用途时，未知�
 对话发现和已保存 capability 的 Chat 健康检查使用与 Agent 完全相同的 wire stack 运行同一
 次无副作用工具往返：broker serializer 加共享 provider 参数合并、每轮一次单尝试 HTTP 请求
 （SSE 或 AWS 事件流分帧）、每次尝试独立解码器并执行 broker 的事件序列规则。检查验证流式
-工具调用、真实工具结果回传及最终可见回答；不创建 Session、不执行用户工具。每个候选有
-输出和时长预算，每轮只发一次请求，不重试。所有候选均记录结果，已有可用选择优先，
+工具调用、真实工具结果回传及最终可见回答；不创建 Session、不执行用户工具。每个候选按
+Agent 相同的方式发送 capability 自身的输出上限（仅在未配置时使用 4096），因此超过模型最大值
+的上限会在验证时失败，而不是在之后每轮对话失败；每个候选有时长预算，每轮只发一次请求，
+不重试。所有候选均记录结果，已有可用选择优先，
 否则选择已验证的文档推荐项，再回退到第一个可用项。全局鉴权、额度和限流失败停止后续请求。
 
 多模态候选使用 [供应商协议审计](../../crates/backend/nomifun-model-invoke/src/provider_protocol_audit.rs)

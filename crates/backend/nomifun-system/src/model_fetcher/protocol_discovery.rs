@@ -18,6 +18,9 @@ const CHAT_PROTOCOLS: [&str;5] = [RESPONSES,CHAT,"anthropic.messages","gemini.ge
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
 const CHAT_DISCOVERY_BUDGET: Duration = Duration::from_secs(60);
 const CHAT_DISCOVERY_CONCURRENCY: usize = 3;
+// Default probe output ceiling, used only when the capability draft has no
+// output_limit. A configured ceiling is sent exactly as Agent turns send it,
+// so a ceiling above the model's maximum fails verification.
 const PROBE_OUTPUT_LIMIT: u32 = 4096;
 
 impl ModelFetchService {
@@ -275,7 +278,7 @@ fn prepare_candidate(platform: &str, model: &str, original: &ProviderModelCapabi
     }
     let output_limit = candidate.output_limit.map(|limit| u32::try_from(limit).ok().filter(|limit| *limit > 0)
         .ok_or_else(|| AppError::BadRequest("output_limit must be positive and fit in u32".into())))
-        .transpose()?.unwrap_or(PROBE_OUTPUT_LIMIT).min(PROBE_OUTPUT_LIMIT);
+        .transpose()?.unwrap_or(PROBE_OUTPUT_LIMIT);
     Ok((candidate,output_limit))
 }
 

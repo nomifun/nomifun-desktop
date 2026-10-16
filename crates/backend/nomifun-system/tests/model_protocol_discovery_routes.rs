@@ -262,6 +262,27 @@ async fn verified_stepfun_discovery_preserves_default_limits_as_omitted_fields()
 }
 
 #[tokio::test]
+async fn the_configured_output_ceiling_is_sent_exactly_like_agent_turns_send_it() {
+    let server=MockServer::start().await; openai_tools(&server).await;
+    let (router,_)=setup().await;
+    let mut draft=anonymous(&server,"openai.chat_text");
+    draft["capability"]["output_limit"]=json!(131072);
+    let (status,body)=post(&router,ROUTE,draft).await;
+    assert_eq!(status,StatusCode::OK,"{body}");
+    for protocol in ["openai.responses","openai.chat_text"] {
+        assert_eq!(candidate(&body,protocol)["probe_output_limit"],131072,"{body}");
+    }
+    for request in &server.received_requests().await.unwrap() {
+        let wire:Value=serde_json::from_slice(&request.body).unwrap();
+        if request.url.path().ends_with("/responses") {
+            assert_eq!(wire["max_output_tokens"],131072,"{wire}");
+        } else {
+            assert_eq!(wire["max_tokens"],131072,"{wire}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn plain_text_success_does_not_claim_agent_support() {
     let server=MockServer::start().await;
     Mock::given(method("POST")).and(path("/v1/responses")).respond_with(ResponseTemplate::new(200).set_body_raw(responses_round(false),"text/event-stream")).expect(1).mount(&server).await;
@@ -432,11 +453,11 @@ async fn documented_defaults_and_current_params_remain_scoped_to_the_protocol_ac
         for request in requests {
             let wire:Value=serde_json::from_slice(&request.body).unwrap();
             if request.url.path().ends_with("/responses") {
-                assert_eq!(wire["reasoning"]["effort"],"high");assert_eq!(wire["max_output_tokens"],4096);
+                assert_eq!(wire["reasoning"]["effort"],"high");assert_eq!(wire["max_output_tokens"],16000);
                 assert!(wire.get("stream_options").is_none());assert!(wire.get("include").is_none());
             } else {
                 assert_eq!(wire["reasoning_effort"],"high");assert!(wire.get("include").is_none());
-                if source=="openai.chat_text" {assert_eq!(wire["max_completion_tokens"],4096);assert_eq!(wire["stream_options"]["include_usage"],false);}
+                if source=="openai.chat_text" {assert_eq!(wire["max_completion_tokens"],16000);assert_eq!(wire["stream_options"]["include_usage"],false);}
             }
             assert!(wire.get("chain_rounds").is_none());assert!(wire.get("require_reasoning_content").is_none());
         }

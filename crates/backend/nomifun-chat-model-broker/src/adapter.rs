@@ -452,6 +452,152 @@ define_adapter!(
     encode_vertex_request
 );
 
+/// Anthropic-family Messages services (Anthropic, Bedrock, Vertex) reject a
+/// root `oneOf`/`anyOf`/`allOf` in a tool's `input_schema`, but canonical tool
+/// contracts may carry cross-field unions there. The wire schema keeps the
+/// root object and drops only those combinators (hoisting branch fields when
+/// the root lists none) while the runtime keeps validating every call against
+/// the full canonical schema. Nested schemas, `$defs`, `additionalProperties`,
+/// root `not`/`if`/`then`/`else` and descriptions are never touched.
+fn anthropic_input_schema(schema: &Value) -> Value {
+    let Some(object) = schema.as_object() else {
+        return schema.clone();
+    };
+    if !["oneOf", "anyOf", "allOf"]
+        .iter()
+        .any(|key| object.contains_key(*key))
+    {
+        return schema.clone();
+    }
+    let mut lowered = object.clone();
+    let mut one_of_branches: Vec<serde_json::Map<String, Value>> = Vec::new();
+    let mut any_of_branches: Vec<serde_json::Map<String, Value>> = Vec::new();
+    let mut all_branches: Vec<serde_json::Map<String, Value>> = Vec::new();
+    for (key, branches) in [
+        ("oneOf", &mut one_of_branches),
+        ("anyOf", &mut any_of_branches),
+        ("allOf", &mut all_branches),
+    ] {
+        if let Some(Value::Array(items)) = lowered.remove(key) {
+            branches.extend(items.into_iter().filter_map(|branch| match branch {
+                Value::Object(map) => Some(map),
+                _ => None,
+            }));
+        }
+    }
+    let mut properties = lowered
+        .get("properties")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if properties.is_empty() {
+        // Hoist one distinct definition per name; conflicting definitions keep
+        // every variant under a nested anyOf, which is still valid.
+        for branch in one_of_branches
+            .iter()
+            .chain(&any_of_branches)
+            .chain(&all_branches)
+        {
+            if let Some(branch_properties) = branch.get("properties").and_then(Value::as_object) {
+                for (name, definition) in branch_properties {
+                    match properties.entry(name.clone()) {
+                        serde_json::map::Entry::Vacant(slot) => {
+                            slot.insert(definition.clone());
+                        }
+                        serde_json::map::Entry::Occupied(mut slot) => {
+                            if slot.get() != definition {
+                                let existing = slot.get_mut();
+                                match existing {
+                                    Value::Object(existing)
+                                        if existing
+                                            .get("anyOf")
+                                            .and_then(Value::as_array)
+                                            .is_some_and(|options| {
+                                                options.iter().all(Value::is_object)
+                                            }) =>
+                                    {
+                                        existing
+                                            .get_mut("anyOf")
+                                            .and_then(Value::as_array_mut)
+                                            .expect("checked above")
+                                            .push(definition.clone());
+                                    }
+                                    _ => {
+                                        *existing =
+                                            json!({"anyOf": [existing.clone(), definition.clone()]});
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !properties.is_empty() {
+            lowered.insert("properties".to_owned(), Value::Object(properties));
+        }
+    }
+    if !lowered.contains_key("required") {
+        let mut required: Option<BTreeSet<String>> = None;
+        let mut intersect = |branches: &[serde_json::Map<String, Value>]| {
+            if branches.is_empty() {
+                return;
+            }
+            let mut branch_required = branches.iter().map(|branch| {
+                branch
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect::<BTreeSet<String>>()
+                    })
+                    .unwrap_or_default()
+            });
+            let mut shared = branch_required.next().unwrap_or_default();
+            for set in branch_required {
+                shared = shared.intersection(&set).cloned().collect();
+            }
+            required
+                .get_or_insert_with(BTreeSet::new)
+                .extend(shared.into_iter());
+        };
+        intersect(&one_of_branches);
+        intersect(&any_of_branches);
+        for branch in &all_branches {
+            if let Some(names) = branch.get("required").and_then(Value::as_array) {
+                required.get_or_insert_with(BTreeSet::new).extend(
+                    names
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned),
+                );
+            }
+        }
+        if let Some(mut names) = required {
+            let available = lowered
+                .get("properties")
+                .and_then(Value::as_object)
+                .map(|properties| {
+                    properties.keys().cloned().collect::<BTreeSet<_>>()
+                })
+                .unwrap_or_default();
+            names.retain(|name| available.contains(name));
+            if !names.is_empty() {
+                lowered.insert(
+                    "required".to_owned(),
+                    Value::Array(
+                        names.into_iter().map(Value::String).collect(),
+                    ),
+                );
+            }
+        }
+    }
+    Value::Object(lowered)
+}
+
 fn encode_anthropic_request(
     input: &ChatModelInput,
     model: &str,
@@ -476,7 +622,7 @@ fn encode_anthropic_request(
                     json!({
                         "name": tool.name,
                         "description": tool.description,
-                        "input_schema": tool.input_schema.0.clone(),
+                        "input_schema": anthropic_input_schema(&tool.input_schema.0),
                     })
                 })
                 .collect(),
@@ -999,6 +1145,96 @@ mod standalone_input_tests {
         }
         assert_eq!(output_tokens_from_usage(&json!({"input_tokens":100})),None);
         assert_eq!(parse_usage(&json!({"input_tokens":100})).output_tokens,0);
+    }
+
+    fn tool_input(schema: Value) -> ChatModelInput {
+        let mut value = input();
+        value.tool_choice = ChatToolChoice::Auto;
+        value.tools = serde_json::from_value(json!([
+            {"name":"probe","description":"probe tool","input_schema":schema}
+        ]))
+        .unwrap();
+        value
+    }
+
+    #[test]
+    fn anthropic_tool_schemas_drop_only_root_combinators() {
+        let union = json!({
+            "type":"object","additionalProperties":false,
+            "properties":{"cmd":{"type":"string"},"command":{"type":"string"},
+                "args":{"type":"array","items":{"type":"string"}}},
+            "oneOf":[{"required":["cmd"],"not":{"required":["command"]}},
+                {"required":["command"],"not":{"required":["cmd"]}}]
+        });
+        let mut expected = union.clone();
+        expected.as_object_mut().unwrap().remove("oneOf");
+        let body = encode_anthropic_request(&tool_input(union),"model").unwrap();
+        assert_eq!(body["tools"][0]["input_schema"],expected);
+
+        let conditional = json!({
+            "type":"object","properties":{"format":{"type":"string"},
+                "offset":{"type":"integer"}},"required":["format"],
+            "allOf":[{"if":{"required":["start_line"]},"then":{"not":{"required":["offset"]}}}]
+        });
+        let mut expected = conditional.clone();
+        expected.as_object_mut().unwrap().remove("allOf");
+        let body = encode_anthropic_request(&tool_input(conditional),"model").unwrap();
+        assert_eq!(body["tools"][0]["input_schema"],expected);
+
+        let untouched = json!({
+            "type":"object","properties":{"mode":{"oneOf":[{"const":"a"},{"const":"b"}]},
+                "limit":{"type":"integer"}},"not":{"required":["limit","other"]},
+            "if":{"required":["mode"]},"then":{"properties":{"limit":{"minimum":1}}},
+            "else":{"properties":{"limit":{"maximum":1}}}
+        });
+        let body = encode_anthropic_request(&tool_input(untouched.clone()),"model").unwrap();
+        assert_eq!(body["tools"][0]["input_schema"],untouched);
+    }
+
+    #[test]
+    fn anthropic_tool_schemas_hoist_branch_fields_when_the_root_lists_none() {
+        let union = json!({
+            "type":"object",
+            "oneOf":[{"type":"object","properties":{"a":{"type":"string"}},"required":["a","c"]},
+                {"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"string"}},
+                    "required":["a"]}]
+        });
+        let body = encode_anthropic_request(&tool_input(union),"model").unwrap();
+        assert_eq!(body["tools"][0]["input_schema"],json!({
+            "type":"object",
+            "properties":{"a":{"anyOf":[{"type":"string"},{"type":"integer"}]},
+                "b":{"type":"string"}},
+            "required":["a"]
+        }));
+
+        let conjunction = json!({
+            "type":"object",
+            "allOf":[{"properties":{"a":{"type":"string"}},"required":["a"]},
+                {"properties":{"b":{"type":"string"}},"required":["b"]}]
+        });
+        let body = encode_anthropic_request(&tool_input(conjunction),"model").unwrap();
+        assert_eq!(body["tools"][0]["input_schema"],json!({
+            "type":"object",
+            "properties":{"a":{"type":"string"},"b":{"type":"string"}},
+            "required":["a","b"]
+        }));
+    }
+
+    #[test]
+    fn only_the_anthropic_family_lowers_tool_schemas() {
+        let union = json!({
+            "type":"object","properties":{"cmd":{"type":"string"}},
+            "oneOf":[{"required":["cmd"]},{"required":["command"]}]
+        });
+        for encode in [encode_bedrock_request as fn(&ChatModelInput,&str) -> _,
+            encode_vertex_request] {
+            let body = encode(&tool_input(union.clone()),"model").unwrap();
+            assert!(body["tools"][0]["input_schema"].get("oneOf").is_none());
+        }
+        let body = encode_openai_chat_request(&tool_input(union.clone()),"model").unwrap();
+        assert!(body["tools"][0]["function"]["parameters"].get("oneOf").is_some());
+        let body = encode_openai_responses_request(&tool_input(union.clone()),"model").unwrap();
+        assert!(body["tools"][0]["parameters"].get("oneOf").is_some());
     }
 }
 

@@ -2523,6 +2523,33 @@ async fn single_route_recovers_two_transient_provider_errors_without_exposing_fa
 }
 
 #[tokio::test(start_paused = true)]
+async fn single_route_retries_an_in_stream_gateway_upstream_error_before_output() {
+    let primary_route = route(ChatProtocol::OpenaiChat, "upstream-error-fixture", 1);
+    let request = basic_request(&primary_route);
+    let transport = ScriptedTransport::new([
+        TransportScript::Frames(vec![frame("message", serde_json::json!({
+            "error":{"message":"upstream failed","type":"upstream_error","param":"","code":null}
+        }))]),
+        TransportScript::Frames(successful_frames("second-attempt", "recovered")),
+    ]);
+    let transports = transport_map([(
+        ChatProtocol::OpenaiChat,
+        provider_transport(&transport),
+    )]);
+    let broker = broker(
+        StaticCausalityGate::allow(),
+        ResolvedChatRouteSet { primary: primary_route, failovers: Vec::new() },
+        Arc::new(StaticCredentialStore { mismatch: false }),
+        &transports,
+        BrokerRetryPolicy::default(),
+    );
+    let events = broker.open_stream(request).await.unwrap().collect::<Vec<_>>().await;
+    assert_eq!(transport.calls(), 2);
+    assert!(events.iter().all(Result::is_ok));
+    assert!(events.last().unwrap().as_ref().unwrap().event.is_terminal());
+}
+
+#[tokio::test(start_paused = true)]
 async fn single_route_retry_waits_for_retry_after_before_opening_provider_again() {
     let mut error = ChatModelError::new(
         ChatModelErrorCode::RateLimited, "cooldown", ChatRetryDirective::RetrySameRoute,

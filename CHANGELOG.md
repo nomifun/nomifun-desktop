@@ -12,6 +12,12 @@ notes at a high level rather than a complete historical log.
   re-encrypted Responses reasoning items, content-less vendor event kinds,
   id-less OpenAI Chat prelude chunks and a final `[DONE]` sentinel missing its
   SSE delimiter.
+- Send the saved output ceiling in Chat health checks and protocol discovery
+  exactly as Agent turns do, and retry gateway-relayed in-stream `upstream_error`
+  failures on the same route before any output.
+- Send Anthropic-family tool schemas without the root `oneOf`/`anyOf`/`allOf`
+  those services reject, while still validating every call against the
+  canonical schema.
 
 ## v0.8.10 - 2026-10-16
 
