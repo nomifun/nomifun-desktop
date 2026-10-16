@@ -619,7 +619,7 @@ async fn system_permission_result_sequence_uses_the_real_host_ack_after_buffer_f
         assert!(host.record_event(&message, &AgentEngineEvent::OutputTextDelta {
             step: 1, text: format!("buffered before {call_id}"),
         }).await.unwrap().is_none());
-        let seq = host.record_event(&message, &AgentEngineEvent::ToolCompleted { step: 1,
+        let seq = host.record_event(&message, &AgentEngineEvent::ToolCompleted { runtime_hold: None, step: 1,
             result: AgentToolResult::text(call_id.clone().into(), "owner observation", is_error),
         }).await.unwrap().expect("actual canonical ToolCompleted acknowledgement");
         let persisted: i64 = sqlx::query_scalar("SELECT seq FROM agent_events WHERE session_id=? \

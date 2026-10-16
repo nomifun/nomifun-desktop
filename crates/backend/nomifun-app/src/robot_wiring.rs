@@ -822,6 +822,7 @@ impl SpokenReplyReducer {
                 }
                 Vec::new()
             }
+            AgentStreamEvent::CanonicalTimeline(_) => Vec::new(),
             AgentStreamEvent::TaskPlanChanged
             | AgentStreamEvent::ToolCall(_)
             | AgentStreamEvent::ToolGroup(_) => {
@@ -1114,7 +1115,6 @@ mod tests {
             input: None,
             output: None,
             description: None,
-            retry: None,
             artifacts: Vec::new(),
         })
     }

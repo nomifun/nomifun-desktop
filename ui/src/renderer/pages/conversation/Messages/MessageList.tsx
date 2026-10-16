@@ -16,6 +16,9 @@ import type {
 } from '@/common/chat/chatLib';
 import { toDisplayText } from '@/common/chat/displayText';
 import { normalizeToolMessages } from '@/common/chat/normalizeToolCall';
+import { formatToolPresentationLabel, resolveToolPresentation } from '@/common/chat/toolPresentation';
+import { mergeAgentTurnOutcome } from '@/common/chat/turnOutcome';
+import type { AgentTurnOutcome } from '@/common/protocolBindings/AgentTurnOutcome';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 import { useThinkingDisplayPreferences } from '@/renderer/hooks/config/useThinkingDisplayPreferences';
 import { iconColors } from '@/renderer/styles/colors';
@@ -35,20 +38,15 @@ import HOC from '@renderer/utils/ui/HOC';
 import { useMessageList, useMessageListLoading } from './hooks';
 import MessageAgentStatus from './components/MessageAgentStatus';
 import MessageTips from './components/MessageTips';
-import MessageToolCall from './components/MessageToolCall';
-import MessageToolGroup from './components/MessageToolGroup';
 import MessageText from './components/MessageText';
 import MessageThinking from './components/MessageThinking';
 import MessageListSkeleton from './components/MessageListSkeleton';
 import TurnProcessDisclosure from './components/TurnProcessDisclosure';
 import TurnProcessReceipt, { type TurnProcessReceiptIcon } from './components/TurnProcessReceipt';
 import {
-  buildToolReceiptDetailRows,
   buildToolReceiptSummaryParts,
   countBoundedSearchResults,
-  countNonFatalToolFailures,
   getToolReceiptIconFromSummaryParts,
-  type ToolReceiptSummaryPart,
 } from './components/toolGroupSummaryModel';
 import ProcessTraceItem from './components/ProcessTraceItem';
 import { isContextCompressionTip } from './processTipModel';
@@ -68,6 +66,7 @@ import {
   type TurnDisclosureOutputItem,
 } from './turnDisclosureModel';
 import { getProcessItemState } from './turnProcessState';
+import { projectProcessSegments, orderProcessSegments, type ProcessSegmentIdentity } from './processSegments';
 import {
   buildTurnFileItems,
   collectVerifiedTurnImages,
@@ -92,9 +91,12 @@ import SystemPermissionNotice from './components/SystemPermissionNotice';
 type SourceMessageId = MessageId;
 
 type IMessageVO =
-  | TMessage
+  | (TMessage & ProcessSegmentIdentity)
   | {
       type: 'tool_summary';
+      processGroupId?: string;
+      processSequence?: number;
+      processSegmentState?: TurnDisclosureProcessState;
       id: string;
       msg_id?: MessageId;
       turn_id?: MessageId;
@@ -102,7 +104,6 @@ type IMessageVO =
       sourceMessageIds: SourceMessageId[];
       created_at: number;
     };
-type ToolSummaryVO = Extract<IMessageVO, { type: 'tool_summary' }>;
 type IRenderableItem = IMessageVO;
 type ITurnProcessDisclosureVO = {
   type: 'turn_process_disclosure';
@@ -132,7 +133,7 @@ type IProcessReceiptVO = {
   icon: TurnProcessReceiptIcon;
   defaultExpanded: boolean;
   hasDetail?: boolean;
-  recovered?: boolean;
+  attention?: boolean;
 };
 type ITurnDeliverablesVO = {
   type: 'turn_deliverables';
@@ -293,7 +294,7 @@ const isTerminalAssistantItem = (item: IRenderableItem): boolean =>
 const isHiddenProcessItem = (item: IRenderableItem): boolean => {
   if (item.type !== 'thinking' && item.type !== 'text') return false;
   const text = toDisplayText(item.content.content).trim();
-  if (!text) return true;
+  if (!text) return !(item.type === 'thinking' && item.processGroupId);
   return item.type === 'thinking' && /^\[Private reasoning omitted(?: from replay)?\]$/i.test(text);
 };
 
@@ -338,121 +339,6 @@ const compactReceiptText = (value: unknown, fallback: string): string => {
   return compacted || fallback;
 };
 
-const formatToolReceiptPart = (
-  part: ToolReceiptSummaryPart,
-  t: TranslationFn
-): string => {
-  if (part.skipped) {
-    return t('messages.processReceipt.skippedAfterFailure', {
-      defaultValue: 'Skipped after an earlier failed operation',
-    });
-  }
-
-  if (part.notExecutedReason === 'invalid_arguments') {
-    return t('messages.processReceipt.invalidArguments', {
-      defaultValue: 'Invalid arguments; operation not run',
-    });
-  }
-
-  if (part.notExecutedReason === 'runtime_preflight') {
-    return part.action === 'run_commands'
-      ? t('messages.processReceipt.commandNotExecuted', { defaultValue: 'Command not run' })
-      : t('messages.processReceipt.operationNotExecuted', { defaultValue: 'Operation not run' });
-  }
-  if (part.notExecutedReason === 'process_reference') {
-    return t('messages.processReceipt.processReferenceInvalid', {
-      defaultValue: 'Process not found in this execution; operation not run',
-    });
-  }
-
-  if (part.commandNotStarted) {
-    return t('messages.processReceipt.commandNotStarted', {
-      count: part.count,
-      defaultValue: '{{count}} commands did not start',
-    });
-  }
-
-  if (part.commandTimedOut) {
-    return t('messages.processReceipt.commandTimedOut', {
-      count: part.count,
-      defaultValue: '{{count}} commands reached their time limit; process cleanup completed',
-    });
-  }
-
-  if (part.state === 'failed') {
-    return t('messages.processReceipt.failedOperations', {
-      count: part.count,
-      defaultValue: '{{count}} operations did not complete',
-    });
-  }
-  if (part.commandExitCode !== undefined && part.commandExitCode !== 0) {
-    return t('messages.processReceipt.commandNonzero', {
-      count: part.count, code: part.commandExitCode,
-      defaultValue: '{{count}} commands ended with exit code {{code}}',
-    });
-  }
-  if (part.state === 'canceled') {
-    return t('messages.processReceipt.canceledOperation', { defaultValue: 'Operation canceled' });
-  }
-
-  switch (part.action) {
-    case 'read_files':
-      return part.state === 'running'
-        ? t('messages.processReceipt.readingFileOperations', {
-            count: part.count,
-            defaultValue: 'File reads in progress: {{count}}',
-          })
-        : t('messages.processReceipt.fileReadOperations', {
-            count: part.count,
-            defaultValue: 'File reads completed: {{count}}',
-          });
-    case 'edit_files':
-      return part.state === 'running'
-        ? t('messages.processReceipt.editingFileOperations', {
-            count: part.count,
-            defaultValue: 'File edits in progress: {{count}}',
-          })
-        : t('messages.processReceipt.fileEditOperations', {
-            count: part.count,
-            defaultValue: 'File edits completed: {{count}}',
-          });
-    case 'run_commands':
-      return part.state === 'running'
-        ? t('messages.processReceipt.runningCommands', {
-            count: part.count,
-            defaultValue: 'Running {{count}} commands',
-          })
-        : t('messages.processReceipt.runCommands', {
-            count: part.count,
-            defaultValue: 'Ran {{count}} commands',
-          });
-    case 'search_code':
-      return part.state === 'running'
-        ? t('messages.processReceipt.searchingCode', { defaultValue: 'Searching code' })
-        : t('messages.processReceipt.searchedCode', { defaultValue: 'Searched code' });
-    case 'list_files':
-      return part.state === 'running'
-        ? t('messages.processReceipt.listingFiles', { defaultValue: 'Listing files' })
-        : t('messages.processReceipt.listedFiles', { defaultValue: 'Listed files' });
-    case 'load_tools':
-      return part.state === 'running'
-        ? t('messages.processReceipt.loadingTools', {
-            count: part.count,
-            defaultValue: 'Loading {{count}} tools',
-          })
-        : t('messages.processReceipt.loadedTools', {
-            count: part.count,
-            defaultValue: 'Loaded {{count}} tools',
-          });
-    case 'generic':
-    default:
-      return t('messages.processReceipt.tools', {
-        count: part.count,
-        defaultValue: '{{count}} tools',
-      });
-  }
-};
-
 const getToolReceiptIcon = (
   messages: Array<IMessageToolGroup | IMessageToolCall>
 ): TurnProcessReceiptIcon => {
@@ -479,17 +365,7 @@ type ProcessReceiptSummary = {
   icon: TurnProcessReceiptIcon;
   defaultExpanded: boolean;
   hasDetail?: boolean;
-  recovered?: boolean;
-};
-
-const countRecoveredToolFailures = (
-  tools: ReturnType<typeof normalizeToolMessages>
-): number => {
-  const retryFailures = buildToolReceiptDetailRows(tools).reduce(
-    (count, row) => count + (row.attempts?.filter((attempt) => attempt.state === 'failed').length ?? 0),
-    0
-  );
-  return retryFailures + countNonFatalToolFailures(tools);
+  attention?: boolean;
 };
 
 const buildProcessReceiptSummary = (
@@ -497,35 +373,19 @@ const buildProcessReceiptSummary = (
   state: TurnDisclosureProcessState,
   t: TranslationFn,
   workspaceRoots: string[] = [],
-  options: { recovered?: boolean; language?: string } = {}
+  options: { language?: string } = {}
 ): ProcessReceiptSummary => {
   if ('type' in item && item.type === 'tool_summary') {
     const tools = normalizeToolMessages(item.messages);
     const receiptParts = buildToolReceiptSummaryParts(tools, state, options.language);
     const summarySeparator = t('messages.processReceipt.summarySeparator', { defaultValue: ', ' });
     const boundedSearchCount = countBoundedSearchResults(tools);
-    const recoveredFailureCount = options.recovered
-      ? buildToolReceiptDetailRows(tools).filter((row) => row.state === 'failed').length
-      : countRecoveredToolFailures(tools);
-    const recovered = recoveredFailureCount > 0;
-    const nativeOutcomeParts = options.recovered ? receiptParts.filter((part) => part.commandNotStarted || part.commandTimedOut) : [];
-    const otherRecoveredCount = recoveredFailureCount - nativeOutcomeParts.reduce((count, part) => count + part.count, 0);
-    const label = recovered
-      ? [
-          ...nativeOutcomeParts.map((part) => formatToolReceiptPart(part, t)),
-          ...(otherRecoveredCount > 0
-            ? [t('messages.processReceipt.recoveredOperations', {
-                count: otherRecoveredCount,
-                defaultValue: '{{count}} operations encountered an error',
-              })]
-            : []),
-        ].join(summarySeparator)
-      : boundedSearchCount > 0
+    const label = boundedSearchCount > 0
         ? t('messages.processReceipt.searchResultsLimited', {
             defaultValue: 'Search results limited; full reconciliation required',
           })
       : receiptParts.length
-        ? receiptParts.map((part) => formatToolReceiptPart(part, t)).join(summarySeparator)
+        ? tools.map(tool => formatToolPresentationLabel(resolveToolPresentation(tool, options.language))).join(summarySeparator)
         : t('messages.processReceipt.tools', {
             count: item.messages.length,
             defaultValue: '{{count}} tools',
@@ -535,7 +395,7 @@ const buildProcessReceiptSummary = (
       icon: getToolReceiptIconFromSummaryParts(receiptParts) ?? getToolReceiptIcon(item.messages),
       defaultExpanded: false,
       hasDetail: true,
-      ...(recovered || boundedSearchCount > 0 ? { recovered: true } : {}),
+      ...(boundedSearchCount > 0 ? { attention: true } : {}),
     };
   }
 
@@ -543,12 +403,7 @@ const buildProcessReceiptSummary = (
     case 'agent_status':
       return {
         label:
-          options.recovered
-            ? t('messages.processReceipt.recoveredOperations', {
-                count: 1,
-                defaultValue: '{{count}} operations encountered an error',
-              })
-            : item.content.status === 'preparing'
+item.content.status === 'preparing'
             ? t('messages.processReceipt.preparingAction', { defaultValue: 'Preparing next action' })
             : item.content.status === 'prepared'
               ? t('messages.processReceipt.preparedAction', { defaultValue: 'Prepared next action' })
@@ -564,7 +419,6 @@ const buildProcessReceiptSummary = (
         icon: 'status',
         defaultExpanded: false,
         hasDetail: false,
-        ...(options.recovered ? { recovered: true } : {}),
       };
     case 'tips':
       if (isContextCompressionTip(item)) {
@@ -576,19 +430,13 @@ const buildProcessReceiptSummary = (
         };
       }
       return {
-        label: options.recovered
-          ? t('messages.processReceipt.recoveredOperations', {
-              count: 1,
-              defaultValue: '{{count}} operations encountered an error',
-            })
-          : compactReceiptText(
+        label: compactReceiptText(
               item.content.content,
               t('messages.processReceipt.status', { target: t('messages.processing'), defaultValue: '{{target}}' })
             ),
         icon: 'status',
         defaultExpanded: state === 'failed',
         hasDetail: false,
-        ...(options.recovered ? { recovered: true } : {}),
       };
     case 'tool_call':
     case 'tool_group':
@@ -608,19 +456,13 @@ const buildProcessReceiptSummary = (
       );
     default:
       return {
-        label: options.recovered
-          ? t('messages.processReceipt.recoveredOperations', {
-              count: 1,
-              defaultValue: '{{count}} operations encountered an error',
-            })
-          : t('messages.processReceipt.status', {
+        label: t('messages.processReceipt.status', {
               target: t('messages.processing'),
               defaultValue: '{{target}}',
             }),
         icon: 'status',
         defaultExpanded: false,
         hasDetail: false,
-        ...(options.recovered ? { recovered: true } : {}),
       };
   }
 };
@@ -643,15 +485,13 @@ const renderProcessTraceItem = (
   item: IRenderableItem,
   variant: 'list' | 'receipt' = 'list',
   workspaceRoots: string[] = [],
-  stateOverride?: TurnDisclosureProcessState,
-  recoverFailures = false
+  stateOverride?: TurnDisclosureProcessState
 ) => (
   <ProcessTraceItem
     item={item}
     variant={variant}
     workspaceRoots={workspaceRoots}
     stateOverride={stateOverride}
-    recoverFailures={recoverFailures}
   />
 );
 
@@ -707,9 +547,8 @@ const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean; hideActi
       case 'tips':
         return <MessageTips message={message} compactError={compactError}></MessageTips>;
       case 'tool_call':
-        return <MessageToolCall message={message}></MessageToolCall>;
       case 'tool_group':
-        return <MessageToolGroup message={message}></MessageToolGroup>;
+        return <ProcessTraceItem item={message} variant='receipt' />;
       case 'agent_status':
         if (message.content.turn_outcome?.kind === 'unavailable') {
           return <div role='note' data-testid='turn-outcome-unavailable' className='text-t-secondary text-13px'>
@@ -790,69 +629,23 @@ const MessageList: React.FC<{
       isRunning: (message) => getProcessItemState(message) === 'running',
     });
     const result: Array<IMessageVO> = [];
-    let toolList: Array<IMessageToolGroup | IMessageToolCall> = [];
-    let toolSourceMessageIds: SourceMessageId[] = [];
-    const pushToolList = (message: IMessageToolGroup | IMessageToolCall) => {
-      const groupedTurnId = toolList.find((tool) => tool.turn_id)?.turn_id;
-      if (groupedTurnId && message.turn_id && groupedTurnId !== message.turn_id) {
-        // A delayed event from another explicit turn must start a new receipt;
-        // otherwise the synthetic summary would inherit the first tool's turn
-        // and visually attach the delayed failure to the wrong request.
-        toolList = [];
-        toolSourceMessageIds = [];
-      }
-      if (!toolList.length) {
-        toolSourceMessageIds = [];
-        const summary: ToolSummaryVO = {
-          type: 'tool_summary',
-          id: `tool-summary-${message.id}`,
-          msg_id: message.msg_id,
-          turn_id: message.turn_id,
-          messages: toolList,
-          sourceMessageIds: toolSourceMessageIds,
-          created_at: message.created_at ?? 0,
-        };
-        result.push(summary);
-      }
-      toolList.push(message);
-      const sourceMessageId = getMessageBusinessIdentity(message);
-      if (sourceMessageId) toolSourceMessageIds.push(sourceMessageId);
-    };
-
-    for (let i = 0, len = journalSources.length; i < len; i++) {
-      const message = journalSources[i];
-      // Skip hidden messages
-      if (message.hidden) continue;
-      if (isInternalInstructionToolCall(message)) continue;
-      // A progress declaration closes the preceding group without adding a
-      // duplicate plan card or merging unrelated operations across it.
-      if (isTaskPlanControlReceipt(message)) {
-        toolList = [];
-        toolSourceMessageIds = [];
-        continue;
-      }
-      // Connection-handshake status banners (connecting/connected/authenticated/
-      // session_active) are implementation noise: never render them as chat
-      // items, and never let them fragment the tool-execution trace below.
-      // Actionable 'error' status still surfaces. (Phase 3 UX)
-      if (message.type === 'agent_status') {
-        const st = (message.content as { status?: string })?.status;
-        if (st === 'connecting' || st === 'connected' || st === 'authenticated' || st === 'session_active') {
-          continue;
-        }
-      }
-      if (message.type === 'tool_group') {
-        pushToolList(message);
-        continue;
-      }
-      if (message.type === 'tool_call') {
-        pushToolList(message);
-        continue;
-      }
-      toolList = [];
-      toolSourceMessageIds = [];
+    const publicSources = new Set<string>();
+    const outcomes = new Map<MessageId, AgentTurnOutcome>();
+    for (const message of list) {
+      const outcome = message.type === 'tips' || message.type === 'agent_status' ? message.content.turn_outcome : undefined;
+      if (outcome && message.turn_id) outcomes.set(message.turn_id, mergeAgentTurnOutcome(outcomes.get(message.turn_id), outcome)!);
+    }
+    for (const outcome of outcomes.values()) if ('message_ids' in outcome) for (const id of outcome.message_ids) publicSources.add(id);
+    for (const message of projectProcessSegments(journalSources, publicSources)) {
+      if (message.hidden || isInternalInstructionToolCall(message) || isTaskPlanControlReceipt(message)) continue;
+      if (message.type === 'agent_status' && ['connecting', 'connected', 'authenticated', 'session_active'].includes(message.content.status)) continue;
       if (message.type === 'thinking' && !thinkingDisplay.visible) continue;
-      result.push(message);
+      if (message.type === 'tool_call' || message.type === 'tool_group') {
+        const businessId = getMessageBusinessIdentity(message);
+        result.push({ type: 'tool_summary', id: message.id, msg_id: message.msg_id, turn_id: message.turn_id,
+          messages: [message], sourceMessageIds: businessId ? [businessId] : [], created_at: message.created_at ?? 0,
+          processGroupId: message.processGroupId, processSequence: message.processSequence, processSegmentState: message.processSegmentState });
+      } else result.push(message);
     }
     return result;
   }, [list, thinkingDisplay.visible, conversationContext?.isProcessing]);
@@ -958,7 +751,7 @@ const MessageList: React.FC<{
             icon: summary.icon,
             defaultExpanded: summary.defaultExpanded,
             hasDetail: summary.hasDetail,
-            recovered: summary.recovered,
+            attention: summary.attention,
           };
         }
 
@@ -1283,6 +1076,9 @@ const MessageList: React.FC<{
 
     const targetIndex = displayList.findIndex((item) => matchesTargetMessage(item, targetMessageId));
     if (targetIndex === -1) {
+      if (hasMoreOlder && onLoadOlder) setPendingQuestionJump(current => current?.messageId === targetMessageId ? current : {
+        conversation_id: conversationContext!.conversation_id!, messageId: targetMessageId, loadOlder: true, align: 'center', behavior: 'smooth',
+      });
       return;
     }
 
@@ -1290,20 +1086,22 @@ const MessageList: React.FC<{
     setHighlightedMessageId(targetMessageId);
     hideScrollButton();
 
-    requestAnimationFrame(() => {
-      const targetElement = document.getElementById(`message-${getProcessedItemAnchorId(displayList[targetIndex])}`);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const root = document.getElementById(`message-${getProcessedItemAnchorId(displayList[targetIndex])}`);
+      const targetElement = Array.from(root?.querySelectorAll<HTMLElement>('[data-process-source-message-id]') ?? [])
+        .find(element => element.dataset.processSourceMessageId === targetMessageId) ?? root;
       scrollElementIntoView(targetElement, {
         behavior: 'smooth',
         block: 'center',
       });
-    });
+    }));
 
     const timer = window.setTimeout(() => {
       setHighlightedMessageId((current) => (current === targetMessageId ? undefined : current));
     }, 2400);
 
     return () => window.clearTimeout(timer);
-  }, [displayList, hideScrollButton, location.key, scrollElementIntoView, targetMessageId]);
+  }, [displayList, hideScrollButton, location.key, scrollElementIntoView, targetMessageId, hasMoreOlder, onLoadOlder, conversationContext]);
 
   useEffect(() => {
     const handleMessageJump = (event: Event) => {
@@ -1323,17 +1121,19 @@ const MessageList: React.FC<{
         return;
       }
       setPendingQuestionJump(null);
+      setHighlightedMessageId(detail.messageId ?? detail.msgId);
 
       hideScrollButton();
-      requestAnimationFrame(() => {
-        const targetElement = document.getElementById(
-          `message-${getProcessedItemAnchorId(displayList[targetIndex])}`
-        );
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const root = document.getElementById(`message-${getProcessedItemAnchorId(displayList[targetIndex])}`);
+        const target = detail.messageId ?? detail.msgId;
+        const targetElement = Array.from(root?.querySelectorAll<HTMLElement>('[data-process-source-message-id]') ?? [])
+          .find(element => element.dataset.processSourceMessageId === target) ?? root;
         scrollElementIntoView(targetElement, {
           block: detail.align || 'start',
           behavior: detail.behavior || 'smooth',
         });
-      });
+      }));
     };
 
     window.addEventListener(CHAT_MESSAGE_JUMP_EVENT, handleMessageJump);
@@ -1386,14 +1186,14 @@ const MessageList: React.FC<{
     const linkedDelegation = delegation?.turnId === item.msg_id ? delegation : undefined;
     const presentation = delegatedTurnPresentation(item, linkedDelegation);
     const getDisclosureProcessItemState = (processItem: IRenderableItem): TurnDisclosureProcessState =>
-      item.processItemStates[getProcessedItemAnchorId(processItem)] ?? getProcessItemState(processItem);
-    const visibleProcessItems = selectJournalProcessItems(item.processItems, {
+      processItem.processSegmentState ?? item.processItemStates[getProcessedItemAnchorId(processItem)] ?? getProcessItemState(processItem);
+    const visibleProcessItems = orderProcessSegments(selectJournalProcessItems(item.processItems, {
       running: item.running,
       isPrivateActivity: isPrivateJournalActivity,
       isRunning: (processItem) => getDisclosureProcessItemState(processItem) === 'running',
       textOf: (processItem) => processItem.type === 'text' ? toDisplayText(processItem.content.content) : undefined,
       finalText: item.finalAnswer,
-    });
+    }));
     const renderJournalProcessItem = (processItem: IRenderableItem) => {
       const processState = getDisclosureProcessItemState(processItem);
       const layoutKind = getProcessItemLayoutKind(processItem);
@@ -1403,20 +1203,18 @@ const MessageList: React.FC<{
           processItem,
           layoutKind === 'tool' ? 'receipt' : 'list',
           workspaceRoots,
-          layoutKind === 'thinking' || !item.running ? processState : undefined,
-          processState === 'failed' && item.state !== 'failed'
+          layoutKind === 'thinking' || !item.running ? processState : undefined
         );
       }
 
-      const recoveredByTurn = processState === 'failed' && item.state !== 'failed';
       const summary = buildProcessReceiptSummary(
         processItem,
         processState,
         t,
         workspaceRoots,
-        { recovered: recoveredByTurn, language: toolLanguage }
+        { language: toolLanguage }
       );
-      const recovered = recoveredByTurn || summary.recovered === true;
+      const attention = summary.attention === true;
       return (
         <TurnProcessReceipt
           receipt={{
@@ -1427,7 +1225,7 @@ const MessageList: React.FC<{
             icon: summary.icon,
             defaultExpanded: summary.defaultExpanded,
             hasDetail: summary.hasDetail,
-            recovered,
+            attention,
           }}
           highlighted={highlighted}
           renderProcessItem={(detailItem) =>
@@ -1435,8 +1233,7 @@ const MessageList: React.FC<{
               detailItem,
               'receipt',
               workspaceRoots,
-              item.running ? undefined : processState,
-              recovered
+              item.running ? undefined : processState
             )
           }
         />
@@ -1456,6 +1253,14 @@ const MessageList: React.FC<{
         getProcessItemKey={getProcessedItemAnchorId}
         getProcessItemState={getDisclosureProcessItemState}
         getProcessItemLayoutKind={getProcessItemLayoutKind}
+        getProcessGroupId={(processItem) => processItem.processGroupId}
+        getProcessItemSourceId={(processItem) => getProcessedItemSourceMessageIds(processItem)[0]}
+        isProcessItemHighlighted={(processItem) => Boolean(highlightedMessageId && getProcessedItemSourceMessageIds(processItem).includes(highlightedMessageId))}
+        getProcessGroupLabel={(items) => {
+          const labels = items.flatMap(processItem => processItem.type === 'tool_summary'
+            ? normalizeToolMessages(processItem.messages).map(tool => resolveToolPresentation(tool, toolLanguage).title) : []);
+          return [...new Set(labels)].slice(0, 3).join(t('messages.processReceipt.summarySeparator')) || t(items.some(processItem => getDisclosureProcessItemState(processItem) === 'running') ? 'conversation.thinking.label' : 'conversation.thinking.complete');
+        }}
       />
     );
   };
@@ -1466,7 +1271,7 @@ const MessageList: React.FC<{
         receipt={item}
         highlighted={highlighted}
         renderProcessItem={(processItem) =>
-          renderProcessTraceItem(processItem, 'receipt', workspaceRoots, undefined, item.recovered === true)
+          renderProcessTraceItem(processItem, 'receipt', workspaceRoots)
         }
       />
     );
@@ -1543,18 +1348,6 @@ const MessageList: React.FC<{
           style={highlighted ? highlightStyle : undefined}
         >
           <MessageText message={item.message} actionsOnly />
-        </div>
-      );
-    }
-    if ('type' in item && item.type === 'tool_summary') {
-      return (
-        <div
-          key={item.id}
-          id={`message-${getProcessedItemAnchorId(item)}`}
-          className={'min-w-0 message-item m-t-10px ' + item.type}
-          style={highlighted ? highlightStyle : undefined}
-        >
-          {renderProcessTraceItem(item, 'list', workspaceRoots)}
         </div>
       );
     }

@@ -7,7 +7,7 @@ use nomifun_agent_contracts::DigestHex;
 use nomifun_chat_model_broker::{ChatToolCall, ChatToolDefinition, ToolCallId};
 use serde_json::{Value, json};
 
-use crate::{AgentEngineError, AgentToolPlan, AgentToolResult, input_schema_digest};
+use crate::{AgentEngineError, AgentToolPlan, AgentToolResult, RuntimeToolHoldReason, input_schema_digest};
 
 const MAX_CACHED_SCHEMAS: usize = 256;
 const MAX_ISSUES_PER_CALL: usize = 8;
@@ -31,7 +31,7 @@ impl ToolArgumentValidators {
         calls: &[ChatToolCall],
         plan: &AgentToolPlan,
         exposed: &[ChatToolDefinition],
-    ) -> Result<Option<Vec<(ToolCallId, Result<AgentToolResult, AgentEngineError>)>>, AgentEngineError> {
+    ) -> Result<Option<Vec<(ToolCallId, Result<AgentToolResult, AgentEngineError>, RuntimeToolHoldReason)>>, AgentEngineError> {
         let mut failures = BTreeMap::new();
         for call in calls {
             let definition = exposed.iter().find(|item| item.name == call.name).ok_or_else(|| {
@@ -186,7 +186,9 @@ impl ToolArgumentValidators {
                 }
             }
             let result = AgentToolResult::text(call.call_id.clone(), payload.to_string(), true);
-            (call.call_id.clone(), Ok(result))
+            (call.call_id.clone(), Ok(result), if issues.is_some() {
+                RuntimeToolHoldReason::ArgumentsRejected
+            } else { RuntimeToolHoldReason::BatchRejected })
         }).collect()))
     }
 }
@@ -297,8 +299,10 @@ mod tests {
             call("valid", json!({"path":"a"})),
             call("invalid", json!({"path":42,"secret":"MUST_NOT_APPEAR_IN_FEEDBACK"})),
         ], &plan, &exposed).unwrap().unwrap();
-        assert!(results.iter().all(|(_, result)| result.as_ref().unwrap().is_error));
+        assert!(results.iter().all(|(_, result, _)| result.as_ref().unwrap().is_error));
         assert!(results[0].1.as_ref().unwrap().output_text().contains("BATCH_ARGUMENTS_REJECTED"));
+        assert_eq!(results[0].2, RuntimeToolHoldReason::BatchRejected);
+        assert_eq!(results[1].2, RuntimeToolHoldReason::ArgumentsRejected);
         let error = results[1].1.as_ref().unwrap().output_text();
         assert!(error.contains("/properties/path/type"));
         assert!(error.contains("string"));
@@ -555,7 +559,7 @@ mod tests {
             let results = ToolArgumentValidators::default().reject_invalid_batch(&calls, &plan, &exposed)
                 .unwrap().expect("a malformed current control must hold the entire batch");
             assert_eq!(results.len(), 2);
-            assert!(results.iter().all(|(_, result)| result.as_ref().unwrap().is_error));
+            assert!(results.iter().all(|(_, result, _)| result.as_ref().unwrap().is_error));
             assert!(results[0].1.as_ref().unwrap().output_text().contains("BATCH_ARGUMENTS_REJECTED"));
             assert!(results[1].1.as_ref().unwrap().output_text().contains("INVALID_TOOL_ARGUMENTS"));
         }
@@ -563,8 +567,8 @@ mod tests {
             control("invalid-report", "report_completion", json!({"summary":"done","criteria":[],"unknown":true}))];
         let results = ToolArgumentValidators::default().reject_invalid_batch(&calls, &plan, &exposed)
             .unwrap().expect("a malformed completion report must hold the entire batch");
-        assert!(results.iter().all(|(_, result)| result.as_ref().unwrap().is_error));
-        assert!(results.iter().all(|(_, result)| !result.as_ref().unwrap().output_text().contains("Repair only the completion arguments")),
+        assert!(results.iter().all(|(_, result, _)| result.as_ref().unwrap().is_error));
+        assert!(results.iter().all(|(_, result, _)| !result.as_ref().unwrap().output_text().contains("Repair only the completion arguments")),
             "a mixed batch must not imply that its unexecuted requested write can be discarded");
     }
 }

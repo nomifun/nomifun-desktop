@@ -203,7 +203,7 @@ mod tests {
                         crate::AgentEngineEvent::ToolCallCompleted {step:1,call:nomifun_chat_model_broker::ChatToolCall {
                             call_id:"original-read".into(),name:"read_file".into(),
                             arguments:nomifun_agent_contracts::StrictJsonValue(json!({"path":"result.txt"})),provider_metadata:None}},
-                        crate::AgentEngineEvent::ToolCompleted {step:1,result:crate::AgentToolResult::text(
+                        crate::AgentEngineEvent::ToolCompleted { runtime_hold: None, step:1,result:crate::AgentToolResult::text(
                             "original-read".into(),"第一行 MAC-B\n第二行 after\n",false)},
                         crate::AgentEngineEvent::TurnFailed {model_steps:1,message:"old report failure".into(),failure:None},
                     ],

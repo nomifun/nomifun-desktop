@@ -55,6 +55,12 @@ async fn idmm_notice_is_canonical_metadata_and_never_changes_question_or_runtime
     let store = AgentSessionStore::open_in_memory().await.unwrap();
     let (session, question) = question_fixture(&store, "idmm-notice").await;
     let original = store.messages_after(&session.agent_session_id, 0).await.unwrap();
+    let raw_page = store.messages_before(&session.agent_session_id, None, 2).await.unwrap();
+    let display_page = store.renderer_messages_before(&session.agent_session_id, None, 2).await.unwrap();
+    assert_eq!((raw_page.1,raw_page.2),(display_page.1,display_page.2));
+    assert_eq!(raw_page.0.iter().map(|row|(&row.projection_id,row.first_seq,&row.semantic_digest)).collect::<Vec<_>>(),
+        display_page.0.iter().map(|row|(&row.projection_id,row.first_seq,&row.semantic_digest)).collect::<Vec<_>>(),
+        "display decoration preserves raw page membership, cursor and source fingerprints");
     let notice = notice(&question);
     let result = store.append_idmm_notice(&owner(), &session.agent_session_id, "notice-once", notice.clone()).await.unwrap().unwrap();
     assert!(!result.duplicate);
@@ -62,6 +68,8 @@ async fn idmm_notice_is_canonical_metadata_and_never_changes_question_or_runtime
     assert_eq!(event.kind.0, "idmm/notice-recorded");
     assert_eq!(event.event_id.as_ref(), notice.decision.intervention_id);
     assert_eq!(event.correlation_id.as_ref(), event.event_id.as_ref());
+    assert_eq!(store.messages_before(&session.agent_session_id, None, 2).await.unwrap(),raw_page,
+        "an unrelated display notice cannot change canonical message fingerprints or raw pagination");
     let messages = store.messages_after(&session.agent_session_id, 0).await.unwrap();
     for before in original {
         let after = messages.iter().find(|message| message.projection_id == before.projection_id).unwrap();
@@ -213,7 +221,14 @@ async fn idmm_renderer_history_paginates_counts_and_rebuilds_notices_without_exp
         assert_eq!(pages[0].0[0].projection["reference"]["status"], "failed");
         assert_eq!(pages[1].0[0].presentation_intent, "idmm_notice");
         assert_eq!(pages[1].0[0].projection["reference"]["status"], "waiting_for_human");
-        assert_eq!(pages[2].0[0], source);
+        let mut rendered_source=pages[2].0[0].clone();
+        let timeline:nomifun_agent_contracts::MessageTimeline=serde_json::from_value(
+            rendered_source.projection.as_object_mut().unwrap().remove("timeline").expect("renderer source carries canonical timeline references"))
+            .unwrap();
+        assert_eq!(timeline.segments.len(),1);
+        assert_eq!(timeline.segments[0].segment_id,"part-idmm-history-notices");
+        assert_eq!(timeline.through_seq,store.head(&session.agent_session_id).await.unwrap().last_seq);
+        assert_eq!(rendered_source, source,"the only renderer addition is the read-only timeline; all canonical source fields remain exact");
         if let Some(expected) = &original_pages { assert_eq!(&pages, expected); }
         else { original_pages = Some(pages); }
         let messages = store.messages_before(&session.agent_session_id, None, 10).await.unwrap();

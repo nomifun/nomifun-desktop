@@ -93,7 +93,7 @@ pub fn reconcile_execution_tail(
                 if calls.get(call_id).is_none_or(|(recorded, _)| recorded != current) { return Err(invalid("tool admission has no exact completed proposal")); }
                 admitted.insert(call_id.clone());
             }
-            AgentEngineEvent::ToolCompleted { step: current, result }
+            AgentEngineEvent::ToolCompleted { step: current, result, .. }
             | AgentEngineEvent::ToolOutcomeReconciled { step: current, result, .. } => {
                 let (recorded_step, call) = calls.get(&result.call_id).ok_or_else(|| invalid("result has no proposal"))?;
                 if recorded_step != current || !completed.insert(result.call_id.clone()) { return Err(invalid("duplicate or mismatched result")); }

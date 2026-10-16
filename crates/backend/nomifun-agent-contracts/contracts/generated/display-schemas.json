@@ -1,0 +1,251 @@
+{
+  "message_timeline": {
+    "$defs": {
+      "MessageTimelineSegment": {
+        "additionalProperties": false,
+        "properties": {
+          "call_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "end_utf16": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "first_seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "group_id": {
+            "description": "Stable process anchor: the accepted root, or preceding narration segment.\nNarration itself is independent of process disclosure.",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/TimelineSegmentKind"
+          },
+          "last_seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "segment_id": {
+            "description": "The first canonical event in this uninterrupted source segment.",
+            "type": "string"
+          },
+          "start_utf16": {
+            "description": "Half-open range in the owning projection's content, measured in UTF-16\ncode units, matching JavaScript String.slice. Absent for tool segments.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "state": {
+            "$ref": "#/$defs/TimelineSegmentState"
+          }
+        },
+        "required": [
+          "segment_id",
+          "group_id",
+          "first_seq",
+          "last_seq",
+          "kind",
+          "state"
+        ],
+        "type": "object"
+      },
+      "TimelineSegmentKind": {
+        "enum": [
+          "reasoning",
+          "narration",
+          "tool"
+        ],
+        "type": "string"
+      },
+      "TimelineSegmentState": {
+        "enum": [
+          "running",
+          "completed",
+          "failed",
+          "cancelled",
+          "interrupted"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "segments": {
+        "items": {
+          "$ref": "#/$defs/MessageTimelineSegment"
+        },
+        "type": "array"
+      },
+      "through_seq": {
+        "description": "Exact committed Session cursor of the read snapshot used by this view.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "through_seq",
+      "segments"
+    ],
+    "title": "MessageTimeline",
+    "type": "object"
+  },
+  "message_timeline_update": {
+    "$defs": {
+      "MessageTimeline": {
+        "additionalProperties": false,
+        "properties": {
+          "segments": {
+            "items": {
+              "$ref": "#/$defs/MessageTimelineSegment"
+            },
+            "type": "array"
+          },
+          "through_seq": {
+            "description": "Exact committed Session cursor of the read snapshot used by this view.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "through_seq",
+          "segments"
+        ],
+        "type": "object"
+      },
+      "MessageTimelineSegment": {
+        "additionalProperties": false,
+        "properties": {
+          "call_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "end_utf16": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "first_seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "group_id": {
+            "description": "Stable process anchor: the accepted root, or preceding narration segment.\nNarration itself is independent of process disclosure.",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/TimelineSegmentKind"
+          },
+          "last_seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "segment_id": {
+            "description": "The first canonical event in this uninterrupted source segment.",
+            "type": "string"
+          },
+          "start_utf16": {
+            "description": "Half-open range in the owning projection's content, measured in UTF-16\ncode units, matching JavaScript String.slice. Absent for tool segments.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "state": {
+            "$ref": "#/$defs/TimelineSegmentState"
+          }
+        },
+        "required": [
+          "segment_id",
+          "group_id",
+          "first_seq",
+          "last_seq",
+          "kind",
+          "state"
+        ],
+        "type": "object"
+      },
+      "TimelineSegmentKind": {
+        "enum": [
+          "reasoning",
+          "narration",
+          "tool"
+        ],
+        "type": "string"
+      },
+      "TimelineSegmentState": {
+        "enum": [
+          "running",
+          "completed",
+          "failed",
+          "cancelled",
+          "interrupted"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "call_id": {
+        "description": "Tool consumers match this within the exact Turn, because live display\nmessage identities need not equal historical tool projection identities.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "source_message_id": {
+        "description": "Correlation identity of the canonical owning message projection.",
+        "type": "string"
+      },
+      "timeline": {
+        "$ref": "#/$defs/MessageTimeline"
+      }
+    },
+    "required": [
+      "source_message_id",
+      "timeline"
+    ],
+    "title": "MessageTimelineUpdate",
+    "type": "object"
+  },
+  "runtime_tool_hold_reason": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One proposal did not reach its owner port. This is neither an authority\ndecision nor an Effect/Turn outcome. A write-ahead admission intent may\nalready exist; earlier calls and their receipts remain unchanged.",
+    "enum": [
+      "tool_not_exposed",
+      "arguments_rejected",
+      "batch_rejected",
+      "phase_restricted",
+      "input_superseded",
+      "prior_call_failed",
+      "runtime_gate"
+    ],
+    "title": "RuntimeToolHoldReason",
+    "type": "string"
+  }
+}

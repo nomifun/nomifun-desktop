@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 pub use nomifun_engine_core::{
     EngineEffectClass as AgentEffectClass, EngineToolBinding as AgentToolBinding,
     EngineToolInvocation as AgentToolInvocation, EngineToolPlan as AgentToolPlan,
-    EngineToolResult as AgentToolResult,
+    EngineToolResult as AgentToolResult, RuntimeToolHoldReason,
 };
 
 #[async_trait]
@@ -35,6 +35,7 @@ pub(crate) enum ToolBatchDisposition {
 
 pub(crate) struct ToolBatchRefusal {
     pub(crate) disposition: ToolBatchDisposition,
+    pub(crate) hold_reason: RuntimeToolHoldReason,
     pub(crate) results: Vec<(ToolCallId, Result<AgentToolResult, AgentEngineError>)>,
 }
 
@@ -49,10 +50,12 @@ pub(crate) fn reject_tool_surface_batch(
     if phase != AgentExecutionPhase::Execution
         && let Some(results) = report_only_refusal(calls, definitions, execution_surface, phase)
     {
-        return Some(ToolBatchRefusal { disposition: ToolBatchDisposition::PhaseCorrection, results });
+        return Some(ToolBatchRefusal { disposition: ToolBatchDisposition::PhaseCorrection,
+            hold_reason: RuntimeToolHoldReason::PhaseRestricted, results });
     }
     reject_unexposed_batch(calls, definitions).map(|results| ToolBatchRefusal {
         disposition: ToolBatchDisposition::WorkAccounting, results,
+        hold_reason: RuntimeToolHoldReason::ToolNotExposed,
     })
 }
 
@@ -178,6 +181,7 @@ mod tests {
         let calls = [call("repeat", "ssh_exec"), call("account", crate::completion::TOOL_NAME)];
         let rejected = reject_tool_surface_batch(&calls, &definitions, &surface, AgentExecutionPhase::CompletionReview).unwrap();
         assert_eq!(rejected.disposition, ToolBatchDisposition::PhaseCorrection);
+        assert_eq!(rejected.hold_reason, RuntimeToolHoldReason::PhaseRestricted);
         assert_eq!(rejected.results.len(), 2, "the mixed report cannot be accepted alongside a held action");
         for (_, result) in rejected.results {
             let result = result.unwrap();
@@ -187,6 +191,8 @@ mod tests {
             assert!(payload["message"].as_str().unwrap().contains("same accepted turn"));
         }
         let unknown = [call("unknown", "invented_ssh")];
+        assert_eq!(reject_tool_surface_batch(&unknown, &definitions, &surface, AgentExecutionPhase::CompletionReview).unwrap().hold_reason,
+            RuntimeToolHoldReason::ToolNotExposed);
         assert_eq!(reject_tool_surface_batch(&unknown, &definitions, &surface, AgentExecutionPhase::CompletionReview).unwrap().disposition,
             ToolBatchDisposition::WorkAccounting);
         assert_eq!(reject_tool_surface_batch(&calls, &definitions, &surface, AgentExecutionPhase::Execution).unwrap().disposition,

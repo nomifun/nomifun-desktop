@@ -197,7 +197,7 @@ pub fn canonical_turn_output_files(
                     return Err(invalid("duplicate mutation call admission"));
                 }
             }
-            AgentEngineEvent::ToolCompleted { step, result } if !result.is_error => {
+            AgentEngineEvent::ToolCompleted { step, result, .. } if !result.is_error => {
                 if let Some((started_step, capability, action, admitted_seq)) = runtime_starts.get(result.call_id.as_ref()) {
                     if *started_step != step || *admitted_seq >= event.seq { return Err(invalid("mutation result does not match its admission")); }
                     let output: Value = serde_json::from_str(&result.output_text()).map_err(|error| invalid(format!("mutation result is not a receipt: {error}")))?;
@@ -452,7 +452,7 @@ mod tests {
             let mut settled = identity;
             settled["result"] = output.clone();
             self.push("effect/succeeded", &effect_id, Some(start.event_id.as_ref()), settled);
-            self.runtime(AgentEngineEvent::ToolCompleted {
+            self.runtime(AgentEngineEvent::ToolCompleted { runtime_hold: None,
                 step: 1, result: AgentToolResult::text(call_id.into(), output.to_string(), false),
             });
         }
@@ -692,7 +692,7 @@ mod tests {
         let completed = fixture.facts.events.iter().find(|event| event.kind.0 == "runtime/progress-recorded"
             && fixture.facts.event_payloads[event.event_id.as_ref()].pointer("/event/event").and_then(Value::as_str) == Some("tool_completed")).unwrap().clone();
         let native: AgentEngineEvent = decode(&fixture.facts.event_payloads[completed.event_id.as_ref()]["event"]).unwrap();
-        let AgentEngineEvent::ToolCompleted { step, result } = native else { panic!("fixture result"); };
+        let AgentEngineEvent::ToolCompleted { step, result, .. } = native else { panic!("fixture result"); };
         fixture.facts.events.retain(|event| event.event_id != completed.event_id);
         fixture.runtime(AgentEngineEvent::ToolOutcomeReconciled {
             step, result: AgentToolResult::text(result.call_id, "Historical canonical owner receipt. Inspect current state.", false),

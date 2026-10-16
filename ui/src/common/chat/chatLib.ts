@@ -31,6 +31,9 @@ import { computerPermissionKindsForOperation } from './computerPermissionContrac
 import type { AgentUserInputRequest } from '../protocolBindings/AgentUserInputRequest';
 import type { AgentTurnOutcome } from '../protocolBindings/AgentTurnOutcome';
 import { normalizeAgentTurnOutcome, mergeAgentTurnOutcome } from './turnOutcome';
+import type { MessageTimeline } from '../protocolBindings/MessageTimeline';
+import type { RuntimeToolHoldReason } from '../protocolBindings/RuntimeToolHoldReason';
+import { normalizeMessageTimeline, preferMessageTimeline } from './messageTimeline';
 
 export { joinLocalPath as joinPath } from '../utils/localPath';
 
@@ -69,7 +72,7 @@ interface IMessage<T extends TMessageType, Content extends Record<string, any>> 
   /**
    * 消息内容
    */
-  content: Content;
+  content: Content & { timeline?: MessageTimeline };
   /**
    * 消息创建时间
    */
@@ -277,15 +280,8 @@ export type IMessageToolCall = IMessage<
     input?: Record<string, unknown>;
     output?: string;
     description?: string;
-    /**
-     * Engine-authored retry identity. The UI must require a complete,
-     * contiguous chain and never infer retries from timing or similar args.
-     */
-    retry?: {
-      retry_group_id: string;
-      attempt_no: number;
-      retry_of_call_id?: string;
-    };
+    /** Runtime-authored pre-owner hold; never inferred from tool output text. */
+    runtime_hold?: RuntimeToolHoldReason;
     /** Verified, durable outputs emitted by the backend. */
     artifacts?: PersistedToolArtifact[];
     /** Persisted rows expose receipts only after the enclosing turn commits. */
@@ -302,7 +298,16 @@ export const mergeToolCallContent = (
   existing: IMessageToolCall['content'],
   incoming: IMessageToolCall['content']
 ): IMessageToolCall['content'] => {
-  const merged = { ...existing, ...incoming };
+  const olderResult = existing.result_seq !== undefined
+    && (incoming.result_seq === undefined || incoming.result_seq < existing.result_seq);
+  const evidence = olderResult ? existing : incoming;
+  const merged = { ...existing, ...incoming,
+    timeline: preferMessageTimeline(existing.timeline, incoming.timeline),
+    result_seq: evidence.result_seq ?? existing.result_seq,
+    runtime_hold: evidence.runtime_hold ?? existing.runtime_hold,
+    ...(olderResult ? { output: existing.output, error_code: existing.error_code,
+      permission_required: existing.permission_required } : {}),
+  };
 
   if (existing.status === 'error' || incoming.status === 'error') {
     return { ...merged, status: 'error', artifacts: [] };
@@ -374,6 +379,7 @@ export type IMessageAgentStatus = IMessage<
 >;
 
 type ResponseTextData = {
+  timeline?: unknown;
   content: unknown;
   continuation_of_message_id?: unknown;
   replace?: boolean;
@@ -567,6 +573,7 @@ export const preferTextMessageVersion = (primary: IMessageText, secondary: IMess
   const primaryIsReplace = isTextContentReplacement(primary.content);
   const secondaryIsReplace = isTextContentReplacement(secondary.content);
   const mergePreferredMetadata = (preferred: IMessageText, fallback: IMessageText): IMessageText => {
+    const timeline = preferMessageTimeline(primary.content.timeline, secondary.content.timeline);
     const interaction = preferred.content.interaction ?? fallback.content.interaction;
     // Durable history is passed as primary and owns the decision explanation,
     // even while a longer live text fragment wins the body.
@@ -574,11 +581,12 @@ export const preferTextMessageVersion = (primary: IMessageText, secondary: IMess
     const observations = (preferred.content.observations?.length ?? 0) >= (fallback.content.observations?.length ?? 0)
       ? preferred.content.observations : fallback.content.observations;
     const managedFilePaths = primary.content.managed_file_paths ?? secondary.content.managed_file_paths;
-    if (!interaction && !observations && !decision && !managedFilePaths) return preferred;
+    if (!interaction && !observations && !decision && !managedFilePaths && !timeline) return preferred;
     return {
       ...preferred,
       content: {
         ...preferred.content,
+        ...(timeline ? { timeline } : {}),
         ...(interaction ? { interaction } : {}),
         ...(decision ? { idmm_decision: decision } : {}),
         ...(observations ? { observations } : {}),
@@ -887,6 +895,9 @@ export const normalizeToolCallContent = (
   return {
     ...data,
     ...(status ? { status } : {}),
+    timeline: normalizeMessageTimeline(data.timeline),
+    runtime_hold: ['tool_not_exposed', 'arguments_rejected', 'batch_rejected', 'phase_restricted', 'input_superseded', 'prior_call_failed', 'runtime_gate'].includes(String(data.runtime_hold))
+      ? data.runtime_hold as RuntimeToolHoldReason : undefined,
     permission_required: data.error_code === 'SYSTEM_PERMISSION_REQUIRED' && status === 'error'
       ? normalizeSystemPermissionRequired(data.permission_required, data.action_id) : undefined,
     result_seq: typeof data.result_seq === 'number' && Number.isSafeInteger(data.result_seq) && data.result_seq >= 0 ? data.result_seq : undefined,
@@ -1028,6 +1039,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
               ...(shouldReplace ? { replace: true } : {}),
               ...(decision ? { idmm_decision: decision } : {}),
               ...normalizeTextContinuation(data),
+              ...(normalizeMessageTimeline(data.timeline) ? { timeline: normalizeMessageTimeline(data.timeline) } : {}),
               ...(message.stream_complete && !message.turn_id ? { standalone_projection: true as const } : {}),
               ...normalizeWireAgentMessageMetadata(data as Record<string, unknown>),
             }
@@ -1091,6 +1103,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
           ...(data.subject != null ? { subject: toDisplayText(data.subject) } : {}),
           ...(duration !== undefined ? { duration } : {}),
           status: normalizeThinkingStatus(data.status),
+          ...(normalizeMessageTimeline(data.timeline) ? { timeline: normalizeMessageTimeline(data.timeline) } : {}),
         },
       };
     }
@@ -1102,6 +1115,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
     case 'cron_trigger':
     case 'info': // Stream retry notifications and similar transient agent updates
     case 'request_trace': // Transient request traces are not persisted or rendered.
+    case 'canonical_timeline': // Applied to existing rows by the canonical timeline queue.
       return undefined;
     case 'system':
       return undefined;

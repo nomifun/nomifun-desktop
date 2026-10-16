@@ -54,11 +54,6 @@ describe('turn process continuous work journal layout', () => {
     expect(bodyRule.includes('overflow-y: auto')).toBe(false);
     expect(bodyRule.includes('border-bottom')).toBe(false);
     expect(
-      cssRuleFor('\n.turn-process-trace__row {').includes(
-        'color: var(--color-text-2'
-      )
-    ).toBe(true);
-    expect(
       cssRuleFor('.turn-process-disclosure__body .turn-process-trace__paragraph').includes(
         'color: var(--color-text-1'
       )

@@ -77,6 +77,8 @@ mod history_transition_projection;
 mod history_turn_outcome;
 #[path = "history_standalone_projection.rs"]
 mod history_standalone_projection;
+#[path = "message_timeline.rs"]
+mod message_timeline;
 
 #[path = "knowledge_writeback.rs"]
 mod knowledge_writeback;
@@ -2872,6 +2874,18 @@ impl AgentSessionStore {
         before_seq: Option<u64>,
         limit: u32,
     ) -> Result<(Vec<MessageProjection>, bool, u64), SessionStoreError> {
+        self.read_message_projection_page_before(session_id, before_seq, limit, false).await
+    }
+
+    /// Renderer metadata over the original message-only page selection. This
+    /// preserves its cursor slots and total; it does not add thinking/Turn rows.
+    pub async fn renderer_messages_before(&self, session_id: &AgentSessionId, before_seq: Option<u64>, limit: u32)
+        -> Result<(Vec<MessageProjection>, bool, u64), SessionStoreError> {
+        self.read_message_projection_page_before(session_id, before_seq, limit, true).await
+    }
+
+    async fn read_message_projection_page_before(&self, session_id: &AgentSessionId, before_seq: Option<u64>, limit: u32,
+        renderer_metadata: bool) -> Result<(Vec<MessageProjection>, bool, u64), SessionStoreError> {
         if limit == 0 || limit > MAX_EVENT_PAGE_SIZE {
             return Err(SessionStoreError::InvalidEvent(format!(
                 "message projection page limit must be between 1 and {MAX_EVENT_PAGE_SIZE}",
@@ -2907,6 +2921,10 @@ impl AgentSessionStore {
             .map(projection_from_row)
             .collect::<Result<Vec<_>, _>>()?;
         history_transition_projection::hydrate(&mut tx, session_id, &mut messages).await?;
+        if renderer_metadata {
+            history_standalone_projection::hydrate(&mut tx, session_id, &mut messages).await?;
+            message_timeline::hydrate(&mut tx, session_id, head.last_seq, &mut messages).await?;
+        }
         let total = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM agent_messages WHERE session_id = ? \
                AND presentation_intent IN ('message', 'tool', 'agent_transition')",
@@ -2958,25 +2976,65 @@ impl AgentSessionStore {
         Ok(history)
     }
 
-    /// Resolve one derived Runtime history message without mutating canonical
-    /// events or requiring it to remain in the newest renderer page.
-    pub async fn runtime_tool_history_message(
-        &self, session_id: &AgentSessionId, message_id: &str,
-    ) -> Result<Option<MessageProjection>, SessionStoreError> {
+    /// The exact source body and its read-only display references share one
+    /// snapshot. Detail/annotation reads need not scan the whole transcript.
+    pub async fn message_by_id(&self, session: &AgentSessionId, message_id: &str)
+        -> Result<Option<MessageProjection>, SessionStoreError> {
         let mut tx = self.pool.begin().await?;
-        require_live_session_tx(&mut tx, session_id.as_ref()).await?;
-        let projection = crate::history_tool_projection::by_message_id(&mut tx, session_id, message_id).await?;
+        require_live_session_tx(&mut tx, session.as_ref()).await?;
+        let head = head_by_id_tx(&mut tx, session.as_ref()).await?;
+        let row = sqlx::query_as::<_, StoredProjectionRow>(
+            "SELECT session_id,projection_id,first_seq,last_seq,presentation_intent,projection_json,semantic_digest \
+             FROM agent_messages WHERE session_id=? AND json_extract(projection_json,'$.correlation_id')=? \
+             AND presentation_intent IN ('message','thinking','tool','agent_transition','idmm_notice')")
+            .bind(session.as_ref()).bind(message_id).fetch_optional(&mut *tx).await?;
+        let mut projection = match row {
+            Some(row) => Some(projection_from_row(row)?),
+            None => crate::history_tool_projection::by_message_id(&mut tx, session, message_id).await?,
+        };
+        if let Some(projection) = &mut projection {
+            let rows = std::slice::from_mut(projection);
+            history_transition_projection::hydrate(&mut tx, session, rows).await?;
+            history_standalone_projection::hydrate(&mut tx, session, rows).await?;
+            message_timeline::hydrate(&mut tx, session, head.last_seq, rows).await?;
+        }
         tx.commit().await?;
         Ok(projection)
     }
 
-    pub async fn hydrate_message_history_metadata(&self,session:&AgentSessionId,rows:&mut [MessageProjection])
+    /// Exercise source-window validation against an older held body without
+    /// retaining a production API that decorates messages in a second read.
+    #[cfg(test)]
+    pub(crate) async fn test_hydrate_message_history_metadata(&self,session:&AgentSessionId,rows:&mut [MessageProjection])
         ->Result<(),SessionStoreError> {
         let mut tx=self.pool.begin().await?;
         require_live_session_tx(&mut tx,session.as_ref()).await?;
+        let head = head_by_id_tx(&mut tx, session.as_ref()).await?;
         history_standalone_projection::hydrate(&mut tx,session,rows).await?;
+        for row in rows {
+            // A caller may hold a body from an earlier snapshot. Never attach
+            // newer text ranges to it merely because metadata is read later.
+            let through = row.projection.pointer("/timeline/through_seq").and_then(Value::as_u64).unwrap_or(row.last_seq);
+            if through < row.first_seq || through > head.last_seq {
+                return Err(SessionStoreError::InvalidEvent("message timeline metadata cursor differs from its committed source".into()));
+            }
+            message_timeline::hydrate(&mut tx, session, through, std::slice::from_mut(row)).await?;
+        }
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Read exact canonical timeline references for one accepted Turn source.
+    /// Live consumers call this after a committed journal batch, never using
+    /// transient token delivery as a canonical cursor or new content source.
+    pub async fn message_timeline_updates_for_turn(&self, session: &AgentSessionId, source_message_id: &str)
+        -> Result<Vec<nomifun_agent_contracts::MessageTimelineUpdate>, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        require_live_session_tx(&mut tx, session.as_ref()).await?;
+        let head = head_by_id_tx(&mut tx, session.as_ref()).await?;
+        let updates = message_timeline::for_root(&mut tx, session, source_message_id, head.last_seq).await?;
+        tx.commit().await?;
+        Ok(updates)
     }
 
     /// Read the renderer-facing conversation history. In addition to canonical
@@ -3073,6 +3131,7 @@ impl AgentSessionStore {
         knowledge_writeback::hydrate(&mut tx, session_id, &mut history).await?;
         history_transition_projection::hydrate(&mut tx, session_id, &mut history).await?;
         history_standalone_projection::hydrate(&mut tx, session_id, &mut history).await?;
+        message_timeline::hydrate(&mut tx, session_id, head.last_seq, &mut history).await?;
 
         let message_total = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM agent_messages WHERE session_id = ? \

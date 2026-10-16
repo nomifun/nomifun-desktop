@@ -75,7 +75,7 @@ async fn standalone_history_requires_the_exact_projected_assistant_event_and_doe
     assert_eq!(display.projection["standalone_projection"],true);
     assert_eq!(display.projection["content"],"The collaboration result.");
     let mut forged=raw.clone();forged.projection["content"]=json!("Different content");
-    assert!(store.hydrate_message_history_metadata(sid,std::slice::from_mut(&mut forged)).await.is_err());
+    assert!(store.test_hydrate_message_history_metadata(sid,std::slice::from_mut(&mut forged)).await.is_err());
     let (accepted,_)=store.start_turn(sid,"session_api".into(),"standalone-user".into(),"standalone-turn".into(),
         StrictJsonValue(json!({"content":"Next task"}))).await.unwrap();
     let accepted_id=accepted.ack.unwrap().event_id;

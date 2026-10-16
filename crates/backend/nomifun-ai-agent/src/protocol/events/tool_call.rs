@@ -70,19 +70,12 @@ pub fn validate_artifact_receipt_integrity(
     Ok(())
 }
 
-/// Data for the `ToolCall` event.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ToolCallRetryData {
-    pub retry_group_id: String,
-    pub attempt_no: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retry_of_call_id: Option<String>,
-}
-
 /// Display projection of an admitted canonical action and its settled result,
 /// never model-supplied authority or an independent permission fact.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolCallIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_hold: Option<nomifun_agent_contracts::RuntimeToolHoldReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -111,11 +104,6 @@ pub struct ToolCallEventData {
     pub output: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Explicit, engine-authored retry identity. Consumers must fail closed
-    /// when this chain is absent or malformed instead of guessing by timing or
-    /// similar arguments.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retry: Option<ToolCallRetryData>,
     /// Verified user-visible outputs. Inline base64 is never placed on the
     /// event bus or in conversation history; only durable metadata is stored.
     // Keep an explicit empty array on Running/Error correction frames. Live
@@ -173,7 +161,6 @@ mod tests {
             input: None,
             output: None,
             description: None,
-            retry: None,
             artifacts,
         }
     }

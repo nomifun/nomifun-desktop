@@ -7,14 +7,6 @@
     "stateUnconfirmed": "会话状态尚未确认，请稍后重试",
     "clearAfterTurn": "当前任务结束并释放会话后可清空上下文"
   },
-  "completionSummary": {
-    "nativeTimeout": "本轮 {{commandCount}} 次命令达到了运行时限，进程已结束并清理。该结果计入 {{toolCount}} 次调用结果；可在执行步骤中查看输出和清理详情。",
-    "nativeNonzero": "本轮 {{commandCount}} 次命令已结束并返回非零结果（退出码 {{codes}}）。这些结果计入了 {{toolCount}} 次未成功调用，请查看执行步骤中的命令输出。",
-    "nativeNonzeroAndArguments": "本轮 {{commandCount}} 次命令已结束并返回非零结果（退出码 {{codes}}）；另有 {{argumentCount}} 次调用因参数检查未通过而未执行。以上共计 {{toolCount}} 次未成功结果，命令输出和参数详情保留在执行步骤中。",
-    "argumentsNotExecuted": "本轮 {{argumentCount}} 次调用因参数检查未通过而未执行，共计 {{toolCount}} 次未成功结果。请在执行步骤中查看参数详情。",
-    "nativeNonzeroAndOther": "本轮 {{commandCount}} 次命令已结束并返回非零结果（退出码 {{codes}}）；另有 {{otherCount}} 条未成功结果，其类别尚未确认。以上共计 {{toolCount}} 次未成功结果，请结合执行步骤中的输出和错误详情核对。",
-    "counts": "本轮未成功结果：调用 {{toolCount}} 次，命令 {{commandCount}} 次。请在执行步骤中查看退出码、参数检查及错误详情。"
-  },
   "turnOutcomeReadFailed": "暂时无法显示本轮回复，请重新打开会话重试。",
   "turnOutcomeUnavailable": "本轮已结束，但没有可显示的回复。你可以再次发送消息继续。",
   "missingReplyContinuation": "这条回复接续了尚未加载的前文。请加载更早的消息以阅读完整回复。",
@@ -22,6 +14,7 @@
   "toolGroupViewSteps": "查看步骤",
   "toolDetailInput": "输入",
   "toolDetailOutput": "输出",
+  "toolResultUnconfirmed": "结果未确认",
   "toolDetailIdentity": "调用标识",
   "delegation": {
     "title": "子智能体任务",
@@ -30,8 +23,6 @@
     "openTask": "查看子任务：{{title}}"
   },
   "toolDetailTruncated": "输出已截断，当前显示已保存的内容",
-  "toolRetryCount": "已重试 {{count}} 次",
-  "toolRetryAttempt": "第 {{number}} 次尝试",
   "toolDetailLoading": "加载中...",
   "toolDetailLoadFailed": "加载完整输出失败",
   "toolSummary": {
@@ -83,12 +74,9 @@
     "preparingResponse": "正在整理结果",
     "preparedResponse": "已整理结果",
     "prepareResponse": "整理结果",
-    "failedOperations": "{{count}} 项操作未完成",
-    "recoveredOperations": "曾有 {{count}} 次尝试未成功",
     "commandNonzero": "{{count}} 条命令已结束，退出码 {{code}}",
     "commandNotStarted": "{{count}} 条命令未启动",
     "searchResultsLimited": "搜索结果受限，需要完整核对",
-    "recoveredAfterRetry": "{{target}} 已恢复 · 重试 {{count}} 次",
     "summarySeparator": "，",
     "skippedAfterFailure": "此前操作失败，已跳过后续调用",
     "invalidArguments": "参数不符合要求，操作未执行",

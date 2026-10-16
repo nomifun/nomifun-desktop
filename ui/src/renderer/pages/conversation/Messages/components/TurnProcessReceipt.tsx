@@ -20,8 +20,8 @@ export interface TurnProcessReceiptView<T> {
   icon: TurnProcessReceiptIcon;
   defaultExpanded: boolean;
   hasDetail?: boolean;
-  /** The operation failed transiently, but the owning turn continued. */
-  recovered?: boolean;
+  /** A typed bounded-result notice needs attention independently of Turn outcome. */
+  attention?: boolean;
 }
 
 interface TurnProcessReceiptProps<T> {
@@ -59,10 +59,10 @@ export function shouldResetTurnProcessReceiptExpansion(
 const ReceiptIcon: React.FC<{
   icon: TurnProcessReceiptIcon;
   state: TurnDisclosureProcessState;
-  recovered?: boolean;
-}> = ({ icon, state, recovered = false }) => {
+  attention?: boolean;
+}> = ({ icon, state, attention = false }) => {
   if (state === 'running') return <Spin size={12} />;
-  if (recovered || state === 'failed' || state === 'canceled') {
+  if (attention || state === 'failed' || state === 'canceled') {
     return <Attention theme='outline' size='15' fill='currentColor' />;
   }
   if (icon === 'file') return <FolderOpen theme='outline' size='15' fill='currentColor' />;
@@ -98,13 +98,13 @@ function TurnProcessReceipt<T>({ receipt, highlighted = false, renderProcessItem
   const receiptIconMarker =
     receipt.state === 'running'
       ? 'loading'
-      : receipt.recovered || receipt.state === 'failed' || receipt.state === 'canceled'
+      : receipt.attention || receipt.state === 'failed' || receipt.state === 'canceled'
         ? 'attention'
         : receiptIconMarkerByIcon[receipt.icon];
   const headerContent = (
     <>
       <span className='turn-process-receipt__icon' aria-hidden='true' data-receipt-icon={receiptIconMarker}>
-        <ReceiptIcon icon={receipt.icon} state={receipt.state} recovered={receipt.recovered} />
+        <ReceiptIcon icon={receipt.icon} state={receipt.state} attention={receipt.attention} />
       </span>
       <span className='turn-process-receipt__label'>{receipt.label}</span>
       {canExpand && (
@@ -122,7 +122,7 @@ function TurnProcessReceipt<T>({ receipt, highlighted = false, renderProcessItem
       className={classNames(
         'turn-process-receipt',
         `turn-process-receipt--${receipt.state}`,
-        receipt.recovered && 'turn-process-receipt--recovered'
+        receipt.attention && 'turn-process-receipt--attention'
       )}
     >
       {canExpand ? (

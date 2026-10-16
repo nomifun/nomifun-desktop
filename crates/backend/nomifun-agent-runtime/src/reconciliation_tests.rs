@@ -53,7 +53,7 @@ fn exact_action_reservation_and_owner_success_reconcile_without_replay() {
     assert!(restored.checkpoint.plan.exact_actions[0].settled);
     let AgentEngineEvent::ToolCallCompleted {call,..}=proposal("fresh-replay") else {unreachable!()};
     assert!(restored.checkpoint.plan.exact_action_gate(&call,true).is_some());
-    tail.push(AgentEngineEvent::ToolCompleted {step:1,result:receipt});
+    tail.push(AgentEngineEvent::ToolCompleted { runtime_hold: None, step:1,result:receipt});
     let recorded=reconcile_execution_tail(&cp,1,&tail,&BTreeSet::from(["written".into()]),&BTreeMap::new(),&Default::default()).unwrap();
     assert!(recorded.checkpoint.plan.exact_actions[0].succeeded,"owner result before PlanUpdated settle must restore satisfied");
     assert!(!recorded.observations.iter().any(|event|matches!(event,AgentEngineEvent::ToolStarted{..})));
@@ -104,7 +104,7 @@ fn incomplete_proposal_can_only_be_discarded_without_admitted_effects() {
 #[test]
 fn completed_results_are_not_replaced_by_late_attestations_or_counted_twice() {
     let tail = vec![started(),proposal("written"),admitted("written"),
-        AgentEngineEvent::ToolCompleted { step:1,result:AgentToolResult::text("written".into(),"original-receipt",false) }];
+        AgentEngineEvent::ToolCompleted { runtime_hold: None, step:1,result:AgentToolResult::text("written".into(),"original-receipt",false) }];
     let result = reconcile_execution_tail(&checkpoint(),1,&tail,&BTreeSet::from(["written".into()]),
         &BTreeMap::from([("written".into(),outcome("written"))]),&Default::default()).unwrap();
     assert_eq!(result.checkpoint.tool_call_count, 1);

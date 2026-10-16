@@ -103,7 +103,7 @@ mod immediate_correction;
 pub use immediate_correction::AgentImmediateCorrectionPort;
 pub use tool::{
     input_schema_digest, AgentEffectClass, AgentToolBinding, AgentToolInvocation,
-    AgentToolInvoker, AgentToolPlan, AgentToolResult,
+    AgentToolInvoker, AgentToolPlan, AgentToolResult, RuntimeToolHoldReason,
 };
 pub use tool_discovery::{
     AgentToolDiscoveryCandidate, AgentToolDiscoveryPort,

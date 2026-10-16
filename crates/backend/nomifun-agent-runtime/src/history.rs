@@ -494,7 +494,7 @@ fn replay_into(
                     provider_metadata: call.provider_metadata.clone(),
                 });
             }
-            AgentEngineEvent::ToolCompleted { step, result } | AgentEngineEvent::ToolOutcomeReconciled { step, result, .. } if *step > 0 => {
+            AgentEngineEvent::ToolCompleted { step, result, .. } | AgentEngineEvent::ToolOutcomeReconciled { step, result, .. } if *step > 0 => {
                 result.validate_for(&result.call_id)?;
                 if !batch.calls.contains_key(&result.call_id) {
                     return Err(AgentEngineError::ReplayContract(
@@ -780,7 +780,7 @@ impl ReplayBatch {
             AgentEngineEvent::ToolCallDelta { step, call_id, .. }
             | AgentEngineEvent::ToolStarted { step, call_id, .. } => Some((*step, call_id)),
             AgentEngineEvent::ToolCallCompleted { step, call } => Some((*step, &call.call_id)),
-            AgentEngineEvent::ToolCompleted { step, result } | AgentEngineEvent::ToolOutcomeReconciled { step, result, .. } => Some((*step, &result.call_id)),
+            AgentEngineEvent::ToolCompleted { step, result, .. } | AgentEngineEvent::ToolOutcomeReconciled { step, result, .. } => Some((*step, &result.call_id)),
             _ => None,
         };
         if let Some((step, call_id)) = tool {
@@ -1016,7 +1016,7 @@ mod tests {
             AgentEngineEvent::OutputTextDelta {step:1,text:old.into()},
             AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"read".into(),name:"read_file".into(),
                 arguments:StrictJsonValue(serde_json::json!({"path":"result.txt"})),provider_metadata:None}},
-            AgentEngineEvent::ToolCompleted {step:1,result:result.clone()},
+            AgentEngineEvent::ToolCompleted { runtime_hold: None, step:1,result:result.clone()},
             AgentEngineEvent::TurnFailed {model_steps:1,message:"old report failed".into(),failure:None},
         ];
         let original=serde_json::to_value(&events).unwrap();let input=requirement();let mut history=Vec::new();
@@ -1118,8 +1118,8 @@ mod tests {
             AgentEngineEvent::ToolCallCompleted { step: 1, call: first.clone() },
             AgentEngineEvent::OutputTextDelta { step: 1, text: "再查第二份。\n".into() },
             AgentEngineEvent::ToolCallCompleted { step: 1, call: second.clone() },
-            AgentEngineEvent::ToolCompleted { step: 1, result: second_result.clone() },
-            AgentEngineEvent::ToolCompleted { step: 1, result: first_result.clone() },
+            AgentEngineEvent::ToolCompleted { runtime_hold: None, step: 1, result: second_result.clone() },
+            AgentEngineEvent::ToolCompleted { runtime_hold: None, step: 1, result: first_result.clone() },
             AgentEngineEvent::ToolResultsOrdered { step: 1, call_ids: vec![first.call_id.clone(), second.call_id.clone()] },
             AgentEngineEvent::ModelStepStarted { step: 2, operation_id: "mixed:model:2".into(), correction_source: None },
             AgentEngineEvent::OutputTextDelta { step: 2, text: "## 结果\n\n- 第一份\n- 第二份\n".into() },
@@ -1249,7 +1249,7 @@ mod tests {
                 AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old-turn:model:1".into(), correction_source: None },
                 AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"old-control".into(),name:name.into(),
                     arguments:StrictJsonValue(serde_json::json!({})),provider_metadata:None}},
-                AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("old-control".into(),original,true)},
+                AgentEngineEvent::ToolCompleted { runtime_hold: None, step:1,result:AgentToolResult::text("old-control".into(),original,true)},
                 AgentEngineEvent::TurnFailed {model_steps:1,message:"original failure".into(),failure:None},
             ];
             let persisted = serde_json::to_value(&events).unwrap();
@@ -1293,7 +1293,7 @@ mod tests {
             AgentEngineEvent::ToolCallCompleted { step:1, call:ChatToolCall { call_id:"completion".into(),
                 name:crate::completion::TOOL_NAME.into(), arguments:StrictJsonValue(serde_json::json!({})), provider_metadata:None } },
             AgentEngineEvent::CompletionReported { report:report.clone() },
-            AgentEngineEvent::ToolCompleted { step:1, result:AgentToolResult::text("completion".into(), "accepted", false) },
+            AgentEngineEvent::ToolCompleted { runtime_hold: None, step:1, result:AgentToolResult::text("completion".into(), "accepted", false) },
             AgentEngineEvent::CompletionDelivered { step:1, text:delivery },
             AgentEngineEvent::TurnCompleted { model_steps:1, finish_reason:nomifun_chat_model_broker::ChatFinishReason::Completed },
         ];
@@ -1325,6 +1325,18 @@ mod tests {
         data_metadata(message);
         assert_eq!(message.content[1],ChatContentPart::Text { text: delivery },
             "v3 uses its durable resolved snapshot, not a new archive lookup");
+
+        let mut current = report.clone(); current.public_format = Some("plain_en_v5".into());
+        let delivery = current.delivery_text();
+        assert_eq!(delivery, current.summary);
+        let mut journal = events(delivery.clone());
+        if let AgentEngineEvent::CompletionReported { report } = &mut journal[3] { *report = current.clone(); }
+        let mut history = Vec::new(); replay_closed_turn(&mut history, requirement(), &journal).unwrap();
+        assert_eq!(history.last().unwrap().content[1], ChatContentPart::Text { text: delivery });
+        let cold: crate::AgentCompletionReport = serde_json::from_value(serde_json::to_value(&current).unwrap()).unwrap();
+        assert_eq!(cold.observed_tool_error_count, 1);
+        assert_eq!(cold.observed_command_failure_count, 2);
+        assert!(cold.matches_delivery(&current.summary));
     }
 
     #[test]
@@ -1408,7 +1420,7 @@ mod tests {
             AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"closed-input".into(),name:"close_process_stdin".into(),
                 arguments:StrictJsonValue(serde_json::json!({"process_id":requested})),provider_metadata:None}},
             AgentEngineEvent::ToolStarted {step:1,call_id:"closed-input".into(),capability_id:capability.into(),action_id:"workspace.process/close_stdin".into()},
-            AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("closed-input".into(),serde_json::json!({
+            AgentEngineEvent::ToolCompleted { runtime_hold: None, step:1,result:AgentToolResult::text("closed-input".into(),serde_json::json!({
                 "process_id":"echo-process","state":"running","env":"PRIVATE_EXTRA",
                 "cleanup":{"reaped":false,"private":"PRIVATE_EXTRA"},
                 "output":{"text":text,"next_cursor":61,"dropped_bytes":0,"private":"PRIVATE_EXTRA"}}).to_string(),false)},
@@ -1483,7 +1495,7 @@ mod tests {
             AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"eof".into(),name:"close_process_stdin".into(),
                 arguments:StrictJsonValue(serde_json::json!({"process_id":"process"})),provider_metadata:None}},
             AgentEngineEvent::ToolStarted {step:1,call_id:"eof".into(),capability_id:"workspace.process".into(),action_id:"workspace.process/close_stdin".into()},
-            AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("eof".into(),serde_json::json!({"process_id":"process","state":"running",
+            AgentEngineEvent::ToolCompleted { runtime_hold: None, step:1,result:AgentToolResult::text("eof".into(),serde_json::json!({"process_id":"process","state":"running",
                 "output":{"text":eof,"next_cursor":44,"dropped_bytes":0}}).to_string(),false)},
             AgentEngineEvent::ContextCompacted {input_bytes_before:1000,input_bytes_after:100,summary:"Echo received 18 bytes.".into(),retained_tool_call_ids:vec![],retained_context:None},
             AgentEngineEvent::TurnCancelled {model_steps:1},

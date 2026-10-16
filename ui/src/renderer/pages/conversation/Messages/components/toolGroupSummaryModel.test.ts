@@ -10,7 +10,6 @@ import {
   buildToolReceiptDetailRows,
   buildToolReceiptSummaryParts,
   countBoundedSearchResults,
-  countNonFatalToolFailures,
   getToolReceiptIconFromSummaryParts,
 } from './toolGroupSummaryModel';
 
@@ -20,7 +19,7 @@ const tool = (item: Partial<NormalizedToolCall> & Pick<NormalizedToolCall, 'key'
 });
 
 describe('buildToolReceiptSummaryParts', () => {
-  test('keeps clean timeouts separate from unknown errors and preserves a timed-out retry attempt', () => {
+  test('keeps clean timeouts separate from unknown errors and preserves its receipt', () => {
     const timeout = tool({ key: 'timeout', name: 'poll_process', status: 'error', commandTimedOut: true,
       output: 'exact timeout and cleanup receipt' });
     const unknown = tool({ key: 'unknown', name: 'poll_process', status: 'error', output: 'cleanup unknown' });
@@ -31,15 +30,9 @@ describe('buildToolReceiptSummaryParts', () => {
     expect(buildToolReceiptDetailRows([timeout])[0]).toMatchObject({
       state: 'failed', commandTimedOut: true, output: timeout.output,
     });
-    const retried = buildToolReceiptDetailRows([
-      { ...timeout, retry: { retryGroupId: timeout.key, attemptNo: 1 } },
-      tool({ key: 'later', name: 'poll_process', commandExitCode: 0,
-        retry: { retryGroupId: timeout.key, attemptNo: 2, retryOfCallId: timeout.key } }),
-    ])[0];
-    expect(retried.commandTimedOut).toBeUndefined();
-    expect(retried.attempts?.[0]).toMatchObject({ state: 'failed', commandTimedOut: true, output: timeout.output });
+
   });
-  test('separates a proven launch refusal from other failures and keeps it in retry history', () => {
+  test('separates a proven launch refusal from other failures and preserves its receipt', () => {
     const first = tool({ key: 'not-started', name: 'exec_command', status: 'error',
       commandNotStarted: true, output: 'original launch diagnostic' });
     const other = tool({ key: 'system', name: 'exec_command', status: 'error', output: 'unknown failure' });
@@ -51,16 +44,7 @@ describe('buildToolReceiptSummaryParts', () => {
     const rows = buildToolReceiptDetailRows([first, other]);
     expect(rows[0]?.commandNotStarted).toBe(true);
     expect(rows[0]?.output).toBe('original launch diagnostic');
-    const retried = buildToolReceiptDetailRows([
-      { ...first, retry: { retryGroupId: first.key, attemptNo: 1 } },
-      tool({ key: 'started', name: 'exec_command', commandExitCode: 0,
-        retry: { retryGroupId: first.key, attemptNo: 2, retryOfCallId: first.key } }),
-    ]);
-    expect(retried[0]?.state).toBe('completed');
-    expect(retried[0]?.commandNotStarted).toBeUndefined();
-    expect(retried[0]?.attempts?.[0]).toMatchObject({
-      state: 'failed', commandNotStarted: true, output: 'original launch diagnostic',
-    });
+
   });
 
   test('separates command exit codes from system failures and retains raw detail', () => {
@@ -76,7 +60,6 @@ describe('buildToolReceiptSummaryParts', () => {
       { state: 'completed', commandExitCode: 1 },
       { state: 'failed', commandExitCode: undefined },
     ]);
-    expect(countNonFatalToolFailures(tools)).toBe(0);
     const rows = buildToolReceiptDetailRows(tools);
     expect(rows[1]?.commandExitCode).toBe(1);
     expect(rows[1]?.output).toBe('intentional test failure');
@@ -91,68 +74,9 @@ describe('buildToolReceiptSummaryParts', () => {
       tool({ key: 'failed', name: 'search_files', status: 'error' }),
     ];
     expect(countBoundedSearchResults(tools)).toBe(1);
-    expect(countNonFatalToolFailures(tools)).toBe(1);
   });
 
-  test('collapses a complete explicit retry chain and preserves attempt history', () => {
-    const firstAttempt = tool({
-      key: 'call-1',
-      name: 'nomi_delegate',
-      status: 'canceled',
-      input: '{"tasks":["bad"]}',
-      output: 'invalid arguments',
-      retry: { retryGroupId: 'call-1', attemptNo: 1 },
-    });
-    const beforeRetry = buildToolReceiptDetailRows([firstAttempt]);
-    const rows = buildToolReceiptDetailRows([
-      firstAttempt,
-      tool({
-        key: 'call-2',
-        name: 'nomi_delegate',
-        input: '{"tasks":[{"title":"ok"}]}',
-        output: 'planned',
-        retry: { retryGroupId: 'call-1', attemptNo: 2, retryOfCallId: 'call-1' },
-      }),
-    ]);
 
-    expect(rows).toHaveLength(1);
-    expect(rows[0].key).toBe('call-1');
-    expect(rows[0].key).toBe(beforeRetry[0].key);
-    expect(rows[0].retryCount).toBe(1);
-    expect(rows[0].state).toBe('completed');
-    expect(rows[0].attempts?.map(({ key, attemptNo }) => ({ key, attemptNo }))).toEqual([
-      { key: 'call-1', attemptNo: 1 },
-      { key: 'call-2', attemptNo: 2 },
-    ]);
-  });
-
-  test('fails closed for malformed or ambiguous retry metadata', () => {
-    const rows = buildToolReceiptDetailRows([
-      tool({
-        key: 'call-1',
-        name: 'nomi_delegate',
-        retry: { retryGroupId: 'call-1', attemptNo: 1 },
-      }),
-      tool({
-        key: 'call-2',
-        name: 'nomi_delegate',
-        retry: { retryGroupId: 'call-1', attemptNo: 3, retryOfCallId: 'call-1' },
-      }),
-      tool({
-        key: 'call-3',
-        name: 'other_tool',
-        retry: { retryGroupId: 'call-1', attemptNo: 2, retryOfCallId: 'call-1' },
-      }),
-      tool({
-        key: 'call-4',
-        name: 'nomi_delegate',
-        retry: { retryGroupId: 'call-1', attemptNo: 2, retryOfCallId: 'call-1' },
-      }),
-    ]);
-
-    expect(rows).toHaveLength(4);
-    expect(rows.every((row) => row.retryCount === undefined)).toBe(true);
-  });
 
   test('does not classify update_plan as a file edit', () => {
     const parts = buildToolReceiptSummaryParts(
@@ -249,33 +173,15 @@ describe('buildToolReceiptSummaryParts', () => {
     ]);
   });
 
-  test('classifies ToolSearch as tool loading', () => {
+  test('keeps discovery distinct and preserves its query without claiming schema counts', () => {
     const parts = buildToolReceiptSummaryParts(
-      [tool({ key: 'tool-search', name: 'ToolSearch', status: 'completed' })],
+      [tool({ key: 'tool-search', name: 'ToolSearch', status: 'completed', input: '{"query":"browser/navigate"}' })],
       'completed'
     );
 
-    expect(parts).toEqual([{ action: 'load_tools', count: 1, state: 'completed' }]);
+    expect(parts).toEqual([{ action: 'discover_tools', count: 1, state: 'completed', target: 'Find tools · browser/navigate' }]);
   });
 
-  test('uses an explicit protocol kind before a conflicting tool-name action', () => {
-    const parts = buildToolReceiptSummaryParts(
-      [
-        tool({
-          key: 'protocol-read',
-          name: 'write_file',
-          kind: 'read',
-          description: 'config.yaml',
-          input: '{"path":"config.yaml"}',
-        }),
-      ],
-      'completed'
-    );
-
-    expect(parts).toEqual([
-      { action: 'read_files', count: 1, state: 'completed', target: 'config.yaml' },
-    ]);
-  });
 
   test('summarizes mixed file reads and commands as separate receipt parts', () => {
     const parts = buildToolReceiptSummaryParts(

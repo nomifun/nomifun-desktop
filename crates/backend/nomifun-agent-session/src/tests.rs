@@ -46,6 +46,8 @@ mod app_project_tests;
 mod knowledge_writeback_tests;
 #[path = "turn_outcome_history_tests.rs"]
 mod turn_outcome_history_tests;
+#[path = "message_timeline_history_tests.rs"]
+mod message_timeline_history_tests;
 #[path = "context_clear_tests.rs"]
 mod context_clear_tests;
 

@@ -12,7 +12,7 @@ import type { IConversationTurnCompletedEvent, IResponseMessage, IUserMessageCre
 import { isUserInputRequestPresentation, isTurnOutcomePresentation, isTurnReadErrorPresentation, type TMessage } from '@/common/chat/chatLib';
 import type { CompanionId, ConversationId, MessageId } from '@/common/types/ids';
 import { reconcileConversationAuthoritativeRuntime, terminalReconcileDelayForAttempt } from '../conversation/platforms/reconcileConversationTurnAfterStreamTerminal';
-import { browserNarrationFor } from './browserNarration';
+import { toolActivityLabel } from '@/common/chat/toolActivityLabel';
 import { companionErrorKey, streamErrorCode } from './companionError';
 import {
   beginCompanionSessionBubble, clearCompanionSessionBubble, emptyCompanionSessionBubble, hydrateCompanionSessionBubble,
@@ -23,7 +23,9 @@ const COMPLETED_BUBBLE_MS = 24_000;
 
 /** Every sending surface observes the same canonical Session and Turn. */
 export function useCompanionSessionBubble(companionId: CompanionId | null, companionName?: string) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const languageRef = useRef(i18n.resolvedLanguage ?? i18n.language);
+  languageRef.current = i18n.resolvedLanguage ?? i18n.language;
   const tRef = useRef(t);
   tRef.current = t;
   const nameRef = useRef('Nomi');
@@ -83,9 +85,8 @@ export function useCompanionSessionBubble(companionId: CompanionId | null, compa
     };
     const doneText = () => tRef.current('nomi.companion.done');
     const applyStream = (message: IResponseMessage) => {
-      const browser = browserNarrationFor(message.data);
-      const toolHint = browser ? tRef.current(browser.key, { name: nameRef.current, ...browser.params })
-        : tRef.current('nomi.companion.usingTools', { name: nameRef.current });
+      const toolHint = toolActivityLabel(message.data, languageRef.current)
+        ?? tRef.current('nomi.companion.usingTools', { name: nameRef.current });
       const queryError = isTurnReadErrorPresentation(message);
       update(current => streamCompanionSessionBubble(current, message, toolHint,
         queryError ? tRef.current('messages.turnOutcomeReadFailed') : tRef.current(companionErrorKey(streamErrorCode(message.data))),

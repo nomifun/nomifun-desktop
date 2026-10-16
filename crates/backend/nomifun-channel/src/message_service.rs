@@ -1061,6 +1061,7 @@ impl ChannelMessageService {
             | AgentStreamEvent::ToolGroup(_)
             | AgentStreamEvent::AgentStatus(_)
             | AgentStreamEvent::TaskPlanChanged
+            | AgentStreamEvent::CanonicalTimeline(_)
             | AgentStreamEvent::SkillSuggest(_)
             | AgentStreamEvent::CronTrigger(_)
             | AgentStreamEvent::TurnCompleted(_)
@@ -1718,7 +1719,6 @@ mod tests {
             input: None,
             output: None,
             artifacts: Vec::new(),
-            retry: None,
         });
         let action = ChannelMessageService::process_stream_event(&event);
         match action {
@@ -1765,7 +1765,6 @@ mod tests {
                     .into(),
             ),
             artifacts: Vec::new(),
-            retry: None,
         });
         match ChannelMessageService::process_stream_event(&event) {
             Some(StreamAction::MediaProduced(ids)) => {
@@ -1796,7 +1795,6 @@ mod tests {
             input: None,
             output: Some("done".into()),
             artifacts: vec![artifact.clone()],
-            retry: None,
         });
 
         match ChannelMessageService::process_stream_event(&event) {
@@ -1819,7 +1817,6 @@ mod tests {
             input: None,
             output: None,
             artifacts: Vec::new(),
-            retry: None,
         });
         assert!(matches!(
             ChannelMessageService::process_stream_event(&event),
@@ -1839,7 +1836,6 @@ mod tests {
             input: None,
             output: Some("just some text output".into()),
             artifacts: Vec::new(),
-            retry: None,
         });
         assert!(matches!(
             ChannelMessageService::process_stream_event(&event),
@@ -1866,7 +1862,6 @@ mod tests {
                 input: None,
                 output: Some(output.into()),
                 artifacts: Vec::new(),
-                retry: None,
             });
             match ChannelMessageService::process_stream_event(&event) {
                 Some(StreamAction::StopDenied { target_conversation_id }) => {
@@ -1890,7 +1885,6 @@ mod tests {
             input: Some(serde_json::json!({ "conversation_id": target })),
             output: Some("'nomi_stop_conversation' is not permitted on the Channel surface".into()),
             artifacts: Vec::new(),
-            retry: None,
         });
         match ChannelMessageService::process_stream_event(&event) {
             Some(StreamAction::StopDenied { target_conversation_id }) => {
@@ -1913,7 +1907,6 @@ mod tests {
             input: None,
             output: Some("{\"result\":{\"stopped\":true}}".into()),
             artifacts: Vec::new(),
-            retry: None,
         });
         assert!(matches!(
             ChannelMessageService::process_stream_event(&event),
@@ -1931,7 +1924,6 @@ mod tests {
             input: None,
             output: Some("'nomi_delete_conversation' is not permitted on the Channel surface".into()),
             artifacts: Vec::new(),
-            retry: None,
         });
         assert!(matches!(
             ChannelMessageService::process_stream_event(&event),

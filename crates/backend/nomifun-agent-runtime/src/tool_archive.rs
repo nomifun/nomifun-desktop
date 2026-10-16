@@ -630,7 +630,7 @@ impl ToolArchive {
                 crate::AgentEngineEvent::ToolCallCompleted { step, call } if *step > 0 => {
                     calls.insert(&call.call_id, call);
                 }
-                crate::AgentEngineEvent::ToolCompleted { step, result } if *step > 0 => {
+                crate::AgentEngineEvent::ToolCompleted { step, result, .. } if *step > 0 => {
                     let call = calls
                         .remove(&result.call_id)
                         .ok_or_else(|| invalid("historical result has no exact call"))?;
@@ -863,7 +863,7 @@ mod tests {
                 AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"read".into(),name:"read_file".into(),
                     arguments:StrictJsonValue(json!({"path":"file.txt"})),provider_metadata:None}},
                 AgentEngineEvent::ToolStarted {step:1,call_id:"read".into(),capability_id:"workspace.files".into(),action_id:"workspace.files/read".into()},
-                AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("read".into(),"exact\n",false)},
+                AgentEngineEvent::ToolCompleted { runtime_hold: None, step:1,result:AgentToolResult::text("read".into(),"exact\n",false)},
                 AgentEngineEvent::TurnCompleted {model_steps:1,finish_reason:ChatFinishReason::Completed},
             ],
         })}
@@ -1151,7 +1151,7 @@ mod tests {
         current["build_digest"]=json!(if source.build_digest().as_ref()=="d".repeat(64) {"e".repeat(64)} else {"d".repeat(64)});
         let current:EngineBinding=serde_json::from_value(current).unwrap();assert_ne!(current,source);
         let expected=events.iter().filter_map(|event|match event {
-            AgentEngineEvent::ToolCompleted {step,result} if *step>0=>Some(result.clone()),_=>None,
+            AgentEngineEvent::ToolCompleted {step,result, ..} if *step>0=>Some(result.clone()),_=>None,
         }).collect::<Vec<_>>();
         let mut archive=ToolArchive::new("closed-journal-audit".into());
         let loaded=archive.import(crate::AgentHistoryPage {has_older:false,turn:Some(AgentRecordedTurn {

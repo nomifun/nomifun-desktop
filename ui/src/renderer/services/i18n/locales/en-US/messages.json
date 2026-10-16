@@ -7,14 +7,6 @@
     "stateUnconfirmed": "Session state is not confirmed; try again shortly",
     "clearAfterTurn": "Clear context after the current task releases the session"
   },
-  "completionSummary": {
-    "nativeTimeout": "{{commandCount}} command(s) reached their time limit; their processes ended and cleanup completed. These outcomes are included in {{toolCount}} call results. See output and cleanup details in the execution steps.",
-    "nativeNonzero": "{{commandCount}} command(s) ended with nonzero results (exit codes: {{codes}}). These results are included in {{toolCount}} unsuccessful calls; see each command's output in the execution steps.",
-    "nativeNonzeroAndArguments": "{{commandCount}} command(s) ended with nonzero results (exit codes: {{codes}}); another {{argumentCount}} call(s) did not run because their arguments failed validation. These account for {{toolCount}} unsuccessful results. Command output and argument details remain in the execution steps.",
-    "argumentsNotExecuted": "{{argumentCount}} call(s) did not run because their arguments failed validation, accounting for {{toolCount}} unsuccessful results. See argument details in the execution steps.",
-    "nativeNonzeroAndOther": "{{commandCount}} command(s) ended with nonzero results (exit codes: {{codes}}); another {{otherCount}} unsuccessful result(s) have not been classified. These account for {{toolCount}} unsuccessful results. Check the output and error details in the execution steps.",
-    "counts": "Unsuccessful results this turn: {{toolCount}} calls and {{commandCount}} command observations. See exit codes, argument checks and error details in the execution steps."
-  },
   "turnOutcomeReadFailed": "The reply could not be displayed. Reopen this conversation to try again.",
   "turnOutcomeUnavailable": "This turn ended without a displayable reply. You can send another message to continue.",
   "missingReplyContinuation": "This reply continues an earlier part not loaded on this history page. Load earlier messages to read the complete reply.",
@@ -22,6 +14,7 @@
   "toolGroupViewSteps": "View Steps",
   "toolDetailInput": "Input",
   "toolDetailOutput": "Output",
+  "toolResultUnconfirmed": "Result unconfirmed",
   "toolDetailIdentity": "Call identity",
   "delegation": {
     "title": "Subagent tasks",
@@ -30,8 +23,6 @@
     "openTask": "View subtask: {{title}}"
   },
   "toolDetailTruncated": "Output was truncated; showing retained content",
-  "toolRetryCount": "Retried {{count}} times",
-  "toolRetryAttempt": "Attempt {{number}}",
   "toolDetailLoading": "Loading...",
   "toolDetailLoadFailed": "Failed to load full output",
   "toolSummary": {
@@ -83,12 +74,9 @@
     "preparingResponse": "Preparing the result",
     "preparedResponse": "Prepared the result",
     "prepareResponse": "Prepare the result",
-    "failedOperations": "{{count}} operations did not complete",
-    "recoveredOperations": "{{count}} earlier attempts did not succeed",
     "commandNonzero": "{{count}} commands ended with exit code {{code}}",
     "commandNotStarted": "{{count}} commands did not start",
     "searchResultsLimited": "Search results limited; full reconciliation required",
-    "recoveredAfterRetry": "{{target}} recovered · retried {{count}} times",
     "summarySeparator": ", ",
     "skippedAfterFailure": "Skipped after an earlier failed operation",
     "invalidArguments": "Invalid arguments; operation not run",

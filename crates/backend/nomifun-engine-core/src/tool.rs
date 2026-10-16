@@ -24,6 +24,8 @@ pub enum EngineEffectClass {
     ExternalUncertainEffect,
 }
 
+pub use nomifun_agent_contracts::RuntimeToolHoldReason;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EngineToolBinding {

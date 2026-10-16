@@ -28,7 +28,7 @@ describe('replayed process trace', () => {
     const view = render(<I18nextProvider i18n={locale}><ProcessTraceItem item={item} variant='receipt' /></I18nextProvider>);
     const header = view.getByRole('button');
     expect(header.textContent).toContain('读取网页 · pvp.qq.com');
-    expect(header.textContent).toContain('INVALID_PAYLOAD');
+    expect(header.textContent).not.toContain('INVALID_PAYLOAD');
     expect(header.querySelector('.turn-process-trace__status')).toBeNull();
     expect(header.textContent).not.toContain('platform__');
     expect(view.queryByText(name)).toBeNull();
@@ -131,12 +131,12 @@ describe('replayed process trace', () => {
   });
 
   test.each([
-    ['Skipped because a previous tool call in this assistant turn failed.', 'Skipped'],
-    ["Invalid arguments for tool 'write_file': JSON Schema validation failed: missing path. Correct the arguments and retry; the tool was not executed.", 'Arguments did not pass validation'],
-  ])('pre-dispatch rejection stays neutral and inspectable: %s', (output, label) => {
+    ['Skipped because a previous tool call in this assistant turn failed.', 'Skipped', 'prior_call_failed'],
+    ["Invalid arguments for tool 'write_file': JSON Schema validation failed: missing path. Correct the arguments and retry; the tool was not executed.", 'Arguments did not pass validation', 'arguments_rejected'],
+  ])('pre-dispatch rejection stays neutral and inspectable: %s', (output, label, runtime_hold) => {
     const item: IMessageToolCall = { id: 'not-executed', type: 'tool_call', conversation_id: conversationId,
       created_at: 1, content: { call_id: 'not-executed', name: 'write_file', status: 'error',
-        args: { path: 'src/app.ts' }, output, artifacts: [] } };
+        args: { path: 'src/app.ts' }, output, runtime_hold: runtime_hold as 'prior_call_failed' | 'arguments_rejected', artifacts: [] } };
     const { container, getByRole } = render(
       <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} stateOverride='completed' /></I18nextProvider>
     );
@@ -260,7 +260,7 @@ describe('replayed process trace', () => {
       id: 'deferred-write', type: 'tool_call', conversation_id: conversationId,
       position: 'left', created_at: 2,
       content: {
-        call_id: 'call-write', name: 'write_file', status: 'error',
+        call_id: 'call-write', name: 'write_file', status: 'error', runtime_hold: 'input_superseded',
         args: { path: 'snake_game.html' },
         output: 'Operations not executed: instruction scope changed before write',
         artifacts: [],
@@ -297,48 +297,7 @@ describe('replayed process trace', () => {
     expect(settled.container.querySelector('.turn-process-trace__row--current-activity')).toBeNull();
   });
 
-  test('multiple failed calls collapse into one summary until explicitly expanded', () => {
-    const item: IMessageToolGroup = {
-      id: 'failed-tools', type: 'tool_group', conversation_id: conversationId,
-      position: 'left', created_at: 4,
-      content: ['first_tool', 'second_tool', 'third_tool'].map((name, index) => ({
-        call_id: `failed-${index}`,
-        name,
-        description: `${name} failed detail`,
-        status: 'Error' as const,
-      })),
-    };
-    const { container, getByRole } = render(
-      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>
-    );
 
-    expect(container.textContent).toContain('3 operations did not complete');
-    expect(container.textContent).not.toContain('first_tool');
-    const toggle = getByRole('button');
-    fireEvent.click(toggle);
-    expect(container.textContent).toContain('first_tool');
-    expect(container.textContent).toContain('third_tool');
-  });
-
-  test('intermediate failures in a continuing turn use a recovered receipt', () => {
-    const item: IMessageToolGroup = {
-      id: 'recovered-tools', type: 'tool_group', conversation_id: conversationId,
-      position: 'left', created_at: 4,
-      content: [{
-        call_id: 'failed-once', name: 'run_command', description: 'targeted test',
-        status: 'Error' as const,
-      }],
-    };
-    const { container, getByRole } = render(
-      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} recoverFailures /></I18nextProvider>
-    );
-
-    expect(container.querySelector('.turn-process-trace__row--failed')).toBeNull();
-    expect(container.querySelector('.turn-process-trace__row--recovered')).not.toBeNull();
-    expect(container.textContent).toContain('Run command · targeted test');
-    fireEvent.click(getByRole('button'));
-    expect(container.textContent).toContain('targeted test');
-  });
 
   test('distinct calls with identical labels retain their own inspectable input and output', () => {
     const item = {
@@ -370,7 +329,7 @@ describe('replayed process trace', () => {
     });
   });
 
-  test('failed calls in the journal are individually visible with a short diagnostic', () => {
+  test('failed call diagnostics remain in their opened details', () => {
     const item = {
       id: 'visible-failures', type: 'tool_summary' as const, created_at: 5, sourceMessageIds: [],
       messages: [0, 1].map<IMessageToolCall>((index) => ({
@@ -387,7 +346,7 @@ describe('replayed process trace', () => {
     const rows = container.querySelectorAll('[data-tool-call-id]');
     expect(rows).toHaveLength(2);
     rows.forEach((row, index) => {
-      expect(row.querySelector('.turn-process-trace__diagnostic')?.textContent).toContain(`Missing plugin-${index}`);
+      expect(row.textContent).not.toContain(`Missing plugin-${index}`);
       expect(row.querySelector('.turn-process-trace-detail')).toBeNull();
       fireEvent.click(row.querySelector('button')!);
       expect(row.querySelector('.turn-process-trace-detail')?.textContent).toContain(String(item.messages[index].content.output));
@@ -395,22 +354,30 @@ describe('replayed process trace', () => {
     });
   });
 
-  test('retry attempts retain separate call identities and outputs in journal order', () => {
-    const first: IMessageToolCall = { id: 'retry-first', type: 'tool_call', conversation_id: conversationId,
-      created_at: 1, content: { call_id: 'root-call', name: 'read_file', status: 'error',
-        args: { path: 'first.txt' }, output: 'first failure', artifacts: [],
-        retry: { retry_group_id: 'root-call', attempt_no: 1 } } };
-    const next: IMessageToolCall = { ...first, id: 'retry-next', created_at: 2,
-      content: { ...first.content, call_id: 'next-call', status: 'completed', output: 'second result',
-        retry: { retry_group_id: 'root-call', retry_of_call_id: 'root-call', attempt_no: 2 } } };
-    const { container } = render(<I18nextProvider i18n={i18n}><ProcessTraceItem
-      item={{ type: 'tool_summary', id: 'retry-stage', created_at: 1, sourceMessageIds: [], messages: [first, next] }}
-      variant='receipt' /></I18nextProvider>);
-    const rows = container.querySelectorAll('[data-tool-call-id]');
-    expect(Array.from(rows, (row) => row.getAttribute('data-tool-call-id'))).toEqual(['root-call', 'next-call']);
-    expect(rows[1].textContent).toContain('Attempt 2');
-    rows.forEach((row) => fireEvent.click(row.querySelector('button')!));
-    expect(rows[0].textContent).toContain('first failure');
-    expect(rows[1].textContent).toContain('second result');
-  });
+
+});
+
+test('an admitted call without a result ends neutrally and offers only observation details', async () => {
+  const localized = createInstance();
+  await localized.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: {
+    messages: { ...messagesLocale, toolResultUnconfirmed: 'Result unconfirmed' },
+  } } } });
+  const item: IMessageToolCall = { id: 'tool-start', type: 'tool_call', conversation_id: conversationId,
+    content: { call_id: 'unresolved-call', name: 'browser_navigate', status: 'running', args: { url: 'https://example.com' },
+      timeline: { through_seq: 20, segments: [{ segment_id: 'tool-start', group_id: 'process-start', first_seq: 3,
+        last_seq: 20, kind: 'tool', call_id: 'unresolved-call', state: 'interrupted' }] } } };
+  const page = render(<I18nextProvider i18n={localized}><ProcessTraceItem item={item} stateOverride='completed' /></I18nextProvider>);
+  const row = page.container.querySelector('[data-tool-call-id="unresolved-call"]')!;
+  expect(row.textContent).toContain('Result unconfirmed');
+  expect(row.querySelector('.turn-process-trace__row--running')).toBeNull();
+  expect(row.querySelector('.turn-process-trace__row--completed')).toBeNull();
+  expect(row.querySelector('.turn-process-trace__row--canceled')).toBeNull();
+  expect(row.querySelector('.turn-process-trace__row--failed')).toBeNull();
+  expect(row.textContent).not.toMatch(/Canceled|Failed|Ran /);
+  expect(page.getAllByRole('button')).toHaveLength(1);
+  fireEvent.click(page.getByRole('button'));
+  expect(row.querySelector('.turn-process-trace-detail')?.textContent).toContain('Result unconfirmed');
+  expect(row.textContent).toContain('https://example.com');
+  expect(page.getAllByRole('button')).toHaveLength(1);
+  expect(item.content.status).toBe('running');
 });

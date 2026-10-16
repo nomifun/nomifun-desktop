@@ -46,6 +46,7 @@ pub enum EngineProgress {
     Text(TextEventData),
     Thinking(ThinkingEventData),
     ToolCall(ToolCallEventData),
+    CanonicalTimeline(Vec<nomifun_agent_contracts::MessageTimelineUpdate>),
     TaskPlanChanged,
 }
 
@@ -77,6 +78,7 @@ impl EngineTurnOutput {
         if !progress_state.open {
             return false;
         }
+        let display_only = matches!(&progress, EngineProgress::CanonicalTimeline(_));
         let event = match progress {
             EngineProgress::Started => AgentStreamEvent::Start(StartEventData {
                 session_id: Some(self.state.conversation_id().to_owned()),
@@ -84,10 +86,11 @@ impl EngineTurnOutput {
             EngineProgress::Text(data) => AgentStreamEvent::Text(data),
             EngineProgress::Thinking(data) => AgentStreamEvent::Thinking(data),
             EngineProgress::ToolCall(data) => AgentStreamEvent::ToolCall(data),
+            EngineProgress::CanonicalTimeline(data) => AgentStreamEvent::CanonicalTimeline(data),
             EngineProgress::TaskPlanChanged => AgentStreamEvent::TaskPlanChanged,
         };
         let published = self.state.emit_for_turn(self.turn, event);
-        if published {
+        if published && !display_only {
             self.state.bump_activity();
         }
         published

@@ -173,7 +173,6 @@ impl AgentRuntimeControl for SettlementErrorMockAgent {
             input: None,
             output: None,
             description: None,
-            retry: None,
             artifacts: Vec::new(),
         }));
 
@@ -222,7 +221,6 @@ impl AgentRuntimeControl for SettlementErrorMockAgent {
             input: None,
             output: Some(SETTLEMENT_ERROR.to_owned()),
             description: None,
-            retry: None,
             artifacts: Vec::new(),
         }));
 
@@ -290,7 +288,7 @@ struct RealtimeApp {
 async fn start_realtime_app() -> RealtimeApp {
     let root = tempfile::Builder::new()
         .prefix("nomifun-w155-realtime-")
-        .tempdir()
+        .tempdir_in(std::env::temp_dir().canonicalize().unwrap())
         .unwrap()
         .keep();
     let config = AppConfig {
@@ -1036,6 +1034,7 @@ async fn settlement_error_streams_over_realtime_and_recovers_via_durable_cursor_
 
     let mut seen_running = false;
     let mut seen_error_frame = false;
+    let mut final_timeline: Option<Value> = None;
     let mut completed: Option<Value> = None;
     for _ in 0..8 {
         let frame = read_text(&mut owner_rx).await;
@@ -1059,6 +1058,18 @@ async fn settlement_error_streams_over_realtime_and_recovers_via_durable_cursor_
                             panic!("unexpected tool_call status: {frame}");
                         }
                     }
+                    "canonical_timeline" => {
+                        final_timeline = frame["data"]["data"].as_array().unwrap().iter()
+                            .find(|update| update["call_id"] == "w155-call-2")
+                            .map(|update| update["timeline"].clone());
+                    }
+                    "tips" => {
+                        // The canonical public result is a separate display
+                        // receipt, not a second failure or lifecycle terminal.
+                        assert_eq!(frame["data"]["data"]["type"], "error");
+                        assert_eq!(frame["data"]["data"]["turn_outcome"]["kind"], "failed");
+                        assert_eq!(frame["data"]["stream_complete"], true);
+                    }
                     "error" => {
                         assert_eq!(
                             frame["data"]["data"]["message"].as_str().unwrap(),
@@ -1077,6 +1088,8 @@ async fn settlement_error_streams_over_realtime_and_recovers_via_durable_cursor_
     }
     assert!(seen_running, "live tool running frame missing");
     assert!(seen_error_frame, "live tool error frame missing");
+    let final_timeline = final_timeline.expect("terminal relay publishes final canonical segment references");
+    assert_eq!(final_timeline["segments"][0]["state"], "failed");
     let completed = completed.expect("turn.completed must arrive live");
     assert_eq!(completed["data"]["turn_id"], turn_two_root);
     assert_eq!(completed["data"]["state"], "error");
@@ -1156,6 +1169,10 @@ async fn settlement_error_streams_over_realtime_and_recovers_via_durable_cursor_
     for tool in &history_tools {
         assert_eq!(tool["status"], "error");
         assert!(tool["content"]["output"].as_str().unwrap().contains("Do not retry"));
+        if tool["content"]["call_id"] == "w155-call-2" {
+            assert_eq!(tool["content"]["timeline"]["segments"], final_timeline["segments"],
+                "live terminal and cold history use the same canonical segment projection");
+        }
     }
 
     expect_silent(

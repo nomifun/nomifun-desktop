@@ -34,7 +34,7 @@ fn completed_correction() -> Vec<AgentEngineEvent> {
     events.extend([start(2, Some(1)), AgentEngineEvent::ToolCallCompleted { step: 2, call: call.clone() },
         AgentEngineEvent::ModelResponseValidated { step: 2 }, AgentEngineEvent::ToolStarted { step: 2, call_id: call.call_id.clone(),
             capability_id: "workspace.files".into(), action_id: "workspace.files/write".into() },
-        AgentEngineEvent::ToolCompleted { step: 2, result: AgentToolResult::text(call.call_id.clone(), "REAL_OWNER_OUTPUT", false) },
+        AgentEngineEvent::ToolCompleted { runtime_hold: None, step: 2, result: AgentToolResult::text(call.call_id.clone(), "REAL_OWNER_OUTPUT", false) },
         AgentEngineEvent::ToolResultsOrdered { step: 2, call_ids: vec![call.call_id] },
         AgentEngineEvent::TurnCompleted { model_steps: 2, finish_reason: ChatFinishReason::Completed }]);
     events

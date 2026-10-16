@@ -264,6 +264,10 @@ pub enum AgentEngineEvent {
     ToolCompleted {
         step: u16,
         result: AgentToolResult,
+        /// Absent on existing facts and ordinary control/owner observations.
+        /// Never infer this decision from result prose or missing admission.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime_hold: Option<crate::RuntimeToolHoldReason>,
     },
     /// An owner-backed observation of an earlier invocation, never another
     /// tool admission or current completion evidence.
@@ -404,6 +408,21 @@ pub(crate) type SharedAgentEventSink = Arc<dyn AgentEventSink>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_hold_is_optional_for_existing_facts_and_preserves_its_typed_reason() {
+        let old = serde_json::json!({"event":"tool_completed","step":1,
+            "result":{"call_id":"call","output":[{"type":"text","text":"original feedback"}],"is_error":true}});
+        let mut parsed: AgentEngineEvent = serde_json::from_value(old).unwrap();
+        assert!(matches!(&parsed, AgentEngineEvent::ToolCompleted { runtime_hold: None, .. }));
+        assert!(serde_json::to_value(&parsed).unwrap().get("runtime_hold").is_none());
+        if let AgentEngineEvent::ToolCompleted { runtime_hold, .. } = &mut parsed {
+            *runtime_hold = Some(crate::RuntimeToolHoldReason::ToolNotExposed);
+        }
+        let encoded = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(encoded["runtime_hold"], "tool_not_exposed");
+        assert_eq!(serde_json::from_value::<AgentEngineEvent>(encoded).unwrap(), parsed);
+    }
 
     #[test]
     fn failed_turn_keeps_optional_typed_cause_without_duplicating_its_diagnostic() {

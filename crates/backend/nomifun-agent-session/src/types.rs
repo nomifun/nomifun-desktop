@@ -117,6 +117,8 @@ pub struct MessageProjection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_status: Option<String>,
     pub projection: serde_json::Value,
+    /// Canonical source fingerprint. Renderer-only timeline metadata does not
+    /// alter this identity or the source's question/annotation CAS authority.
     pub semantic_digest: String,
 }
 

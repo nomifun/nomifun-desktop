@@ -5,7 +5,7 @@ use futures::StreamExt;
 use nomifun_agent_contracts::{AgentSessionId, OperationId, PrincipalRef, digest_bytes};
 use nomifun_chat_model_broker::{
     ChatCausality, ChatContentPart, ChatFinishReason, ChatMessage, ChatModelErrorCode, ChatModelEvent,
-    ChatModelRequest, ChatRole, ChatToolCall, ChatToolChoice, ProviderRoundId, ToolCallId,
+    ChatModelRequest, ChatRole, ChatToolCall, ChatToolChoice, ChatToolDefinition, ProviderRoundId, ToolCallId,
     ToolArgumentDiagnostic,
 };
 use tokio_util::sync::CancellationToken;
@@ -513,7 +513,7 @@ pub(crate) async fn run_turn(
             for event in &recovery.prefix {
                 match event {
                     AgentEngineEvent::ToolCallCompleted { call, step } if *step > 0 => { calls.insert(call.call_id.clone(), call); }
-                    AgentEngineEvent::ToolCompleted { result, step } | AgentEngineEvent::ToolOutcomeReconciled { result, step, .. } if *step > 0 => {
+                    AgentEngineEvent::ToolCompleted { result, step, .. } | AgentEngineEvent::ToolOutcomeReconciled { result, step, .. } if *step > 0 => {
                         if let Some(call) = calls.get(&result.call_id) {
                             archive.record(&call.name, &call.call_id, &call.arguments, &result.output, result.is_error, None, None)?;
                         }
@@ -1551,7 +1551,7 @@ pub(crate) async fn run_turn(
                 append_assistant_step(&mut model_request, &step)?;
                 let deferred = step.call_order.iter().map(|id| (id.clone(), Ok(AgentToolResult::text(id.clone(),
                     "Not executed: a new accepted user instruction arrived. Reconsider the task and update_plan before further effects.", true)))).collect();
-                let results = finish_tool_results(deferred, event_sink.as_ref(), model_steps, &cancellation).await?;
+                let results = finish_tool_results_with_hold(deferred, Some(crate::RuntimeToolHoldReason::InputSuperseded), event_sink.as_ref(), model_steps, &cancellation).await?;
                 tool_call_count = tool_call_count.saturating_add(results.len() as u32);
                 for (_, result) in results {
                     if let Some(call) = step.calls.get(&result.call_id).and_then(|pending| pending.completed.as_ref()) {
@@ -1593,6 +1593,7 @@ pub(crate) async fn run_turn(
                 (phase == AgentExecutionPhase::Execution && !process_settlement.allows_batch(&completed, &request.tool_plan))
                     .then(|| crate::tool::ToolBatchRefusal {
                         disposition: ToolBatchDisposition::WorkAccounting,
+                        hold_reason: crate::RuntimeToolHoldReason::RuntimeGate,
                         results: completed.iter().map(|call| (call.call_id.clone(), Ok(AgentToolResult::text(call.call_id.clone(),
                             "Not executed: this entire batch was held before dispatch at the pending execution-window boundary. Continue only authorized controls for its original owned process IDs, read_file for their input, or update_plan for accepted steering. No new work or process launch was admitted; original effects and cumulative budgets remain unchanged.", true)))).collect(),
                     })
@@ -1689,7 +1690,8 @@ pub(crate) async fn run_turn(
             ).is_some();
             let invocation = if let Some(refusal) = exposure_refusal {
                 if disposition == ToolBatchDisposition::WorkAccounting { state.completion.invalidate_report(); }
-                finish_tool_results(refusal.results, event_sink.as_ref(), model_steps, &cancellation).await
+                finish_tool_surface_refusal(refusal, &completed, &model_request.input.tools,
+                    event_sink.as_ref(), model_steps, &cancellation).await
             } else { invoke_tool_calls(
                 &agent_session_id,
                 &request.principal,
@@ -3122,9 +3124,9 @@ async fn invoke_tool_calls(
         if cancellation.is_cancelled() { return Err(AgentEngineError::Cancelled); }
         if completed.iter().any(|call| call.name == crate::completion::TOOL_NAME) {
             completion.invalidate_report();
-            let rejected = results.iter().filter(|(_, result)|result.as_ref().is_ok_and(|result|result.is_error)).count() as u32;
+            let rejected = results.iter().filter(|(_, result, _)|result.as_ref().is_ok_and(|result|result.is_error)).count() as u32;
             let next_count = work_status.failed_tools.saturating_add(rejected);
-            for (id, result) in &mut results {
+            for (id, result, _) in &mut results {
                 if completed.iter().any(|call| &call.call_id == id && call.name == crate::completion::TOOL_NAME)
                     && let Ok(result) = result {
                     let mut feedback: serde_json::Value = serde_json::from_str(&result.output_text())
@@ -3135,7 +3137,12 @@ async fn invoke_tool_calls(
                 }
             }
         }
-        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+        if cancellation.is_cancelled() { return Err(AgentEngineError::Cancelled); }
+        let mut recorded = Vec::with_capacity(results.len());
+        for (call_id, result, reason) in results {
+            recorded.push(record_tool_result_with_hold(call_id, result, Some(reason), event_sink, model_step).await?);
+        }
+        return Ok(recorded);
     }
     if completed.iter().any(|call| call.name == crate::user_input_request::TOOL_NAME) {
         let refusal = if completed.len() != 1 {
@@ -3147,11 +3154,19 @@ async fn invoke_tool_calls(
         } else if !work_status.running_processes.is_empty() || patch_recovery.pending() || patch_recovery.unresolved() {
             Some("Not executed: settle the original owned processes and patch obligations before handing back input; this request cannot cancel work, declare completion or erase unknown results.".to_owned())
         } else { None };
+        let mut runtime_hold = refusal.as_ref().map(|_| if completed.len() != 1 {
+            crate::RuntimeToolHoldReason::BatchRejected
+        } else if !matches!(phase, AgentExecutionPhase::Execution | AgentExecutionPhase::EndIntentReview) {
+            crate::RuntimeToolHoldReason::PhaseRestricted
+        } else { crate::RuntimeToolHoldReason::RuntimeGate });
         let result = if let Some(reason) = refusal { AgentToolResult::text(completed[0].call_id.clone(), reason, true) }
         else {
             let call = &completed[0];
             match crate::user_input_request::from_call(call) {
-                Err(reason) => AgentToolResult::text(call.call_id.clone(), reason, true),
+                Err(reason) => {
+                    runtime_hold = Some(crate::RuntimeToolHoldReason::ArgumentsRejected);
+                    AgentToolResult::text(call.call_id.clone(), reason, true)
+                },
                 Ok(request) => {
                     let refusal = match user_input_request_port.filter(|port| port.enabled()) {
                         Some(port) => tokio::select! { biased;
@@ -3161,6 +3176,7 @@ async fn invoke_tool_calls(
                         None => Some("User-input handoff is unavailable under this turn's host policy.".into()),
                     };
                     if let Some(reason) = refusal {
+                        runtime_hold = Some(crate::RuntimeToolHoldReason::RuntimeGate);
                         AgentToolResult::text(call.call_id.clone(), crate::user_input_request::bounded_rejection(&reason), true)
                     } else {
                         if cancellation.is_cancelled() { return Err(AgentEngineError::Cancelled); }
@@ -3183,7 +3199,7 @@ async fn invoke_tool_calls(
             }
         };
         let results = completed.iter().map(|call| (call.call_id.clone(), Ok(AgentToolResult::text(call.call_id.clone(), result.output_text(), result.is_error)))).collect();
-        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+        return finish_tool_results_with_hold(results, runtime_hold, event_sink, model_step, cancellation).await;
     }
     let protected=|call:&ChatToolCall|plan.binding(&call.name).is_some_and(|binding|
         crate::execution_policy::affects_workspace(binding)&&!matches!(binding.effect_class,AgentEffectClass::ReadOnly)
@@ -3193,7 +3209,7 @@ async fn invoke_tool_calls(
     if exact_gate.is_some() || (has_exact_call&&completed.len()!=1) {
         let reason=exact_gate.unwrap_or_else(||"Not executed: submit one exact action alone; later actions cannot assume an earlier call succeeded before its owner receipt.".into());
         let results=completed.iter().map(|call|(call.call_id.clone(),Ok(AgentToolResult::text(call.call_id.clone(),reason.clone(),true)))).collect();
-        return finish_tool_results(results,event_sink,model_step,cancellation).await;
+        return finish_tool_results_with_hold(results,Some(crate::RuntimeToolHoldReason::RuntimeGate),event_sink,model_step,cancellation).await;
     }
     if completed
         .iter()
@@ -3228,7 +3244,9 @@ async fn invoke_tool_calls(
             };
             results.push((call.call_id.clone(), Ok(result)));
         }
-        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+        let runtime_hold = if !discovery_only { Some(crate::RuntimeToolHoldReason::BatchRejected) }
+            else if tool_discovery_port.is_none() { Some(crate::RuntimeToolHoldReason::RuntimeGate) } else { None };
+        return finish_tool_results_with_hold(results, runtime_hold, event_sink, model_step, cancellation).await;
     }
     if completed.iter().any(|call| call.name == crate::tool_archive::LOAD) {
         let mut results = Vec::new();
@@ -3240,7 +3258,9 @@ async fn invoke_tool_calls(
             };
             results.push((call.call_id.clone(), Ok(result)));
         }
-        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+        let runtime_hold = if completed.len() != 1 { Some(crate::RuntimeToolHoldReason::BatchRejected) }
+            else if history_port.is_none() { Some(crate::RuntimeToolHoldReason::RuntimeGate) } else { None };
+        return finish_tool_results_with_hold(results, runtime_hold, event_sink, model_step, cancellation).await;
     }
     if completed.iter().any(|call| matches!(call.name.as_str(), crate::tool_archive::SEARCH | crate::tool_archive::READ)) {
         let isolated = completed.len() == 1;
@@ -3250,14 +3270,19 @@ async fn invoke_tool_calls(
             };
             (call.call_id.clone(), Ok(result))
         }).collect();
-        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+        return finish_tool_results_with_hold(results, (!isolated).then_some(crate::RuntimeToolHoldReason::BatchRejected), event_sink, model_step, cancellation).await;
     }
     if completed.iter().any(|call| matches!(call.name.as_str(), crate::remote_resources::LIST | crate::remote_resources::READ | crate::remote_resources::TEMPLATES)) {
         let mut results = Vec::new();
+        let mut runtime_hold = if completed.len() != 1 { Some(crate::RuntimeToolHoldReason::BatchRejected) }
+            else if resource_port.is_none() { Some(crate::RuntimeToolHoldReason::RuntimeGate) } else { None };
         for call in &completed {
             let result = if let Some(port) = resource_port.filter(|_| completed.len() == 1) {
                 match crate::remote_resources::prepare(call, *context_image_input) {
-                    Err(result) => result,
+                    Err(result) => {
+                        runtime_hold = Some(crate::RuntimeToolHoldReason::ArgumentsRejected);
+                        result
+                    },
                     Ok(prepared) => {
                         if cancellation.is_cancelled() { return Err(AgentEngineError::Cancelled); }
                         // Resource sessions can start stdio/OAuth/remote work.
@@ -3278,7 +3303,7 @@ async fn invoke_tool_calls(
             };
             results.push((call.call_id.clone(), Ok(result)));
         }
-        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+        return finish_tool_results_with_hold(results, runtime_hold, event_sink, model_step, cancellation).await;
     }
     if completed.iter().any(|call| call.name == crate::task_continuation::TOOL_NAME) {
         let mut results = Vec::new();
@@ -3291,7 +3316,7 @@ async fn invoke_tool_calls(
             };
             results.push((call.call_id.clone(), Ok(result)));
         }
-        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+        return finish_tool_results_with_hold(results, (completed.len() != 1).then_some(crate::RuntimeToolHoldReason::BatchRejected), event_sink, model_step, cancellation).await;
     }
     // Internal control updates are isolated from effects. No Kernel capability
     // is invented and no model-selected name can shadow the engine planner.
@@ -3299,9 +3324,10 @@ async fn invoke_tool_calls(
         && completed[1].name == crate::completion::TOOL_NAME {
         if let Some(reason)=validate_exact_declarations(&completed[0],plan,&model_request.input.tools) {
             let results=completed.iter().map(|call|(call.call_id.clone(),Ok(AgentToolResult::text(call.call_id.clone(),reason.clone(),true)))).collect();
-            return finish_tool_results(results,event_sink,model_step,cancellation).await;
+            return finish_tool_results_with_hold(results,Some(crate::RuntimeToolHoldReason::ArgumentsRejected),event_sink,model_step,cancellation).await;
         }
         let planned = execution_plan.update(&completed[0], accepted_inputs, event_sink).await?;
+        let report_hold = planned.is_error.then_some(crate::RuntimeToolHoldReason::PriorCallFailed);
         let report = if planned.is_error {
             AgentToolResult::text(completed[1].call_id.clone(), "Completion was not applied because the preceding plan update failed. The prior plan and effects remain unchanged.", true)
         } else {
@@ -3316,13 +3342,15 @@ async fn invoke_tool_calls(
             patch_recovery.accept_scope_change();
             patch_recovery.persist(event_sink).await?;
         }
-        return finish_tool_results(vec![
-            (completed[0].call_id.clone(), Ok(planned)),
-            (completed[1].call_id.clone(), Ok(report)),
-        ], event_sink, model_step, cancellation).await;
+        if cancellation.is_cancelled() { return Err(AgentEngineError::Cancelled); }
+        return Ok(vec![
+            record_tool_result(completed[0].call_id.clone(), Ok(planned), event_sink, model_step).await?,
+            record_tool_result_with_hold(completed[1].call_id.clone(), Ok(report), report_hold, event_sink, model_step).await?,
+        ]);
     }
     if completed.iter().any(|call| call.name == crate::completion::TOOL_NAME) {
         let mut results = Vec::new();
+        let mut runtime_hold = (completed.len() != 1).then_some(crate::RuntimeToolHoldReason::BatchRejected);
         for call in &completed {
             let result = if completed.len() == 1 {
                 let strict=model_request.input.tools.iter().find(|tool|tool.name==crate::completion::TOOL_NAME)
@@ -3334,7 +3362,10 @@ async fn invoke_tool_calls(
                     Ok(normalized)=>completion.submit_with_history(&normalized, execution_plan, work_status, accepted_inputs,
                     patch_recovery.pending() || patch_recovery.unresolved(),
                     patch_recovery.unresolved_before_input(), event_sink,Some(tool_archive)).await?,
-                    Err(reason)=>AgentToolResult::text(call.call_id.clone(),reason,true),
+                    Err(reason)=> {
+                        runtime_hold = Some(crate::RuntimeToolHoldReason::ArgumentsRejected);
+                        AgentToolResult::text(call.call_id.clone(),reason,true)
+                    },
                 }
             } else {
                 AgentToolResult::text(call.call_id.clone(), "No tools executed: submit report_completion alone after the plan and all observations are settled.", true)
@@ -3348,13 +3379,15 @@ async fn invoke_tool_calls(
             }
             results.push((call.call_id.clone(), Ok(result)));
         }
-        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+        return finish_tool_results_with_hold(results, runtime_hold, event_sink, model_step, cancellation).await;
     }
     if completed.iter().any(|call| call.name == crate::planning::TOOL_NAME) {
         let mut results = Vec::new();
+        let mut runtime_hold = (completed.len() != 1).then_some(crate::RuntimeToolHoldReason::BatchRejected);
         for call in &completed {
             let result = if completed.len() == 1 {
                 if let Some(reason)=validate_exact_declarations(call,plan,&model_request.input.tools) {
+                    runtime_hold = Some(crate::RuntimeToolHoldReason::ArgumentsRejected);
                     AgentToolResult::text(call.call_id.clone(),reason,true)
                 } else {execution_plan.update(call, accepted_inputs, event_sink).await?}
             } else {
@@ -3362,7 +3395,7 @@ async fn invoke_tool_calls(
             };
             results.push((call.call_id.clone(), Ok(result)));
         }
-        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+        return finish_tool_results_with_hold(results, runtime_hold, event_sink, model_step, cancellation).await;
     }
     if completed.iter().any(|call| call.name == crate::context_resources::TOOL_NAME) {
         let isolated = completed.iter().all(|call| call.name == crate::context_resources::TOOL_NAME);
@@ -3371,7 +3404,7 @@ async fn invoke_tool_calls(
                 else { AgentToolResult::text(call.call_id.clone(), "No tools executed: read context resources in a separate batch before workspace calls.", true) };
             (call.call_id.clone(), Ok(result))
         }).collect();
-        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+        return finish_tool_results_with_hold(results, (!isolated).then_some(crate::RuntimeToolHoldReason::BatchRejected), event_sink, model_step, cancellation).await;
     }
     let workspace_image = completed.iter().any(|call|
         plan.binding(&call.name).is_some_and(|binding| binding.action_id.as_ref() == "workspace.files/read")
@@ -3379,7 +3412,7 @@ async fn invoke_tool_calls(
     if workspace_image && (completed.len() != 1 || !*context_image_input) {
         let results = completed.into_iter().map(|call| (call.call_id.clone(), Ok(AgentToolResult::text(
             call.call_id, "No tools executed: workspace image reads require a compatible exact model route and a single-call batch. Use read_file format=image without offset/limit only when image input is available; this turn cannot change model features.", true)))).collect();
-        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+        return finish_tool_results_with_hold(results, Some(crate::RuntimeToolHoldReason::RuntimeGate), event_sink, model_step, cancellation).await;
     }
     let gate = completed.iter().find_map(|call| {
         plan.binding(&call.name).and_then(|binding| {
@@ -3410,7 +3443,7 @@ async fn invoke_tool_calls(
         else { scoped_instructions.before_calls(&completed, invoker, event_sink, cancellation.clone()).await? };
     if let Some(reason) = deferred {
         let results = completed.into_iter().map(|call| (call.call_id.clone(), Ok(AgentToolResult::text(call.call_id, reason.clone(), true)))).collect();
-        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+        return finish_tool_results_with_hold(results, Some(crate::RuntimeToolHoldReason::RuntimeGate), event_sink, model_step, cancellation).await;
     }
     let mut calls = Vec::with_capacity(step.call_order.len());
     let mut can_parallelize = !has_exact_call && !step.call_order.is_empty();
@@ -3451,6 +3484,7 @@ async fn invoke_tool_calls(
     if can_parallelize {
         let invocations = calls.into_iter().enumerate().map(|(index, invocation)| async move {
             let call_id = invocation.call.call_id.clone();
+            let mut runtime_hold = None;
             let result = async {
                 if cancellation.is_cancelled() {
                     return Err(AgentEngineError::Cancelled);
@@ -3458,16 +3492,18 @@ async fn invoke_tool_calls(
                 if let Some(port) = input_port {
                     if port.has_pending(&model_request.causality).await? {
                         if voice_boundary_ready(voice_immediate,&model_request.causality,model_step).await?{return Err(AgentEngineError::VoiceCorrectionBoundary);}
+                        runtime_hold = Some(crate::RuntimeToolHoldReason::InputSuperseded);
                         return Ok(steering_deferred(call_id.clone()));
                     }
                 }
                 if !record_tool_admission(event_sink, model_step, &invocation).await? {
                     if voice_boundary_ready(voice_immediate,&model_request.causality,model_step).await?{return Err(AgentEngineError::VoiceCorrectionBoundary);}
+                    runtime_hold = Some(crate::RuntimeToolHoldReason::InputSuperseded);
                     return Ok(steering_deferred(call_id.clone()));
                 }
                 invoker.invoke(invocation, cancellation.clone()).await
             }.await;
-            (index, call_id, result)
+            (index, call_id, result, runtime_hold)
         });
         let mut pending = invocations.collect::<futures::stream::FuturesUnordered<_>>();
         let mut ordered = vec![None; completed.len()];
@@ -3480,7 +3516,7 @@ async fn invoke_tool_calls(
                 _ = cancellation.cancelled() => return Err(AgentEngineError::Cancelled),
                 next = pending.next() => next,
             };
-            let Some((index, call_id, result)) = next else { break; };
+            let Some((index, call_id, result, runtime_hold)) = next else { break; };
             let call = completed.get(index).ok_or_else(|| AgentEngineError::InvalidContract(
                 "parallel result index is outside its frozen batch".into()))?;
             if call.call_id != call_id || ordered[index].is_some() {
@@ -3494,7 +3530,7 @@ async fn invoke_tool_calls(
                 Err(AgentEngineError::VoiceCorrectionBoundary)=>return Err(AgentEngineError::VoiceCorrectionBoundary),
                 Err(error) => Err(error),
             };
-            ordered[index] = Some(record_tool_result(call_id, result, event_sink, model_step).await?);
+            ordered[index] = Some(record_tool_result_with_hold(call_id, result, runtime_hold, event_sink, model_step).await?);
         }
         if cancellation.is_cancelled() { return Err(AgentEngineError::Cancelled); }
         let results = ordered.into_iter().map(|result| result.ok_or_else(||
@@ -3509,24 +3545,24 @@ async fn invoke_tool_calls(
     }
 
     let mut results = Vec::new();
-    let mut defer_remaining: Option<String> = None;
+    let mut defer_remaining: Option<(String, crate::RuntimeToolHoldReason)> = None;
     for invocation in calls {
         if cancellation.is_cancelled() {
             return Err(AgentEngineError::Cancelled);
         }
         let call_id = invocation.call.call_id.clone();
-        if let Some(reason) = &defer_remaining {
+        if let Some((reason, hold_reason)) = &defer_remaining {
             let result = AgentToolResult::text(call_id.clone(), reason.clone(), true);
-            results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
+            results.push(record_tool_result_with_hold(call_id, Ok(result), Some(*hold_reason), event_sink, model_step).await?);
             continue;
         }
         // A preceding serial effect can change repository instructions. Do
         // not let later calls in the same batch use the pre-effect view.
         if !results.is_empty() {
             if let Some(reason) = scoped_instructions.before_calls(std::slice::from_ref(&invocation.call), invoker, event_sink, cancellation.clone()).await? {
-                defer_remaining = Some(reason.clone());
+                defer_remaining = Some((reason.clone(), crate::RuntimeToolHoldReason::RuntimeGate));
                 let result = AgentToolResult::text(call_id.clone(), reason, true);
-                results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
+                results.push(record_tool_result_with_hold(call_id, Ok(result), Some(crate::RuntimeToolHoldReason::RuntimeGate), event_sink, model_step).await?);
                 continue;
             }
         }
@@ -3534,16 +3570,16 @@ async fn invoke_tool_calls(
             if port.has_pending(&model_request.causality).await? {
                 if voice_boundary_ready(voice_immediate,&model_request.causality,model_step).await?{return Err(AgentEngineError::VoiceCorrectionBoundary);}
                 let reason = "Not executed: new user input is waiting at the next model boundary; reconsider remaining calls.".to_owned();
-                defer_remaining = Some(reason.clone());
+                defer_remaining = Some((reason.clone(), crate::RuntimeToolHoldReason::InputSuperseded));
                 let result = AgentToolResult::text(call_id.clone(), reason, true);
-                results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
+                results.push(record_tool_result_with_hold(call_id, Ok(result), Some(crate::RuntimeToolHoldReason::InputSuperseded), event_sink, model_step).await?);
                 continue;
             }
         }
         if let Some(reason) = patch_recovery.gate(&invocation.binding, &invocation.call) {
-            defer_remaining = Some(reason.to_owned());
+            defer_remaining = Some((reason.to_owned(), crate::RuntimeToolHoldReason::RuntimeGate));
             let result = AgentToolResult::text(call_id.clone(), reason, true);
-            results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
+            results.push(record_tool_result_with_hold(call_id, Ok(result), Some(crate::RuntimeToolHoldReason::RuntimeGate), event_sink, model_step).await?);
             continue;
         }
         let exact_armed=execution_plan.arm_exact_action(&invocation.call,event_sink).await?;
@@ -3551,8 +3587,8 @@ async fn invoke_tool_calls(
             let result = steering_deferred(call_id.clone());
             if exact_armed {execution_plan.settle_exact_action(&invocation.call,&result,true,event_sink).await?;}
             if voice_boundary_ready(voice_immediate,&model_request.causality,model_step).await?{return Err(AgentEngineError::VoiceCorrectionBoundary);}
-            defer_remaining = Some(result.output_text());
-            results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
+            defer_remaining = Some((result.output_text(), crate::RuntimeToolHoldReason::InputSuperseded));
+            results.push(record_tool_result_with_hold(call_id, Ok(result), Some(crate::RuntimeToolHoldReason::InputSuperseded), event_sink, model_step).await?);
             continue;
         }
         let patch_call = (invocation.binding.action_id.as_ref() == "workspace.files/patch").then(|| invocation.call.clone());
@@ -3561,10 +3597,10 @@ async fn invoke_tool_calls(
             // and crash windows where no engine result can ever be observed.
             if let Err(error) = patch_recovery.arm(call, accepted_inputs.len()) {
                 let reason = format!("Not executed: {error}");
-                defer_remaining = Some(reason.clone());
+                defer_remaining = Some((reason.clone(), crate::RuntimeToolHoldReason::RuntimeGate));
                 let result = AgentToolResult::text(call_id.clone(), reason, true);
                 if exact_armed {execution_plan.settle_exact_action(&invocation.call,&result,true,event_sink).await?;}
-                results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
+                results.push(record_tool_result_with_hold(call_id, Ok(result), Some(crate::RuntimeToolHoldReason::RuntimeGate), event_sink, model_step).await?);
                 continue;
             }
             patch_recovery.persist(event_sink).await?;
@@ -3588,7 +3624,7 @@ async fn invoke_tool_calls(
                 result.validate_for(&call_id)?;
                 let (result, reconsider) = scoped_instructions.after_call(&observed_call, result, invoker, event_sink, cancellation.clone()).await?;
                 if reconsider {
-                    defer_remaining = Some("Not executed: an earlier search discovered changed repository instructions or withheld its snippets because required context was unavailable. Read the current context, reconsider remaining calls and submit new call identities.".into());
+                    defer_remaining = Some(("Not executed: an earlier search discovered changed repository instructions or withheld its snippets because required context was unavailable. Read the current context, reconsider remaining calls and submit new call identities.".into(), crate::RuntimeToolHoldReason::RuntimeGate));
                 }
                 Ok(result)
             }
@@ -3609,7 +3645,7 @@ async fn invoke_tool_calls(
             crate::execution_policy::failed_process_observation(binding, &recorded.1)
         ) {
             if let Some(call) = patch_call { patch_recovery.failed(&call, patch_failure.as_ref()); }
-            defer_remaining = Some("Not executed: an earlier serial call or command failed. Inspect its result and correct the call before proposing remaining effects again. Replan if scope changed or an attempted effect has an uncertain outcome; read/argument errors alone do not require a new plan.".into());
+            defer_remaining = Some(("Not executed: an earlier serial call or command failed. Inspect its result and correct the call before proposing remaining effects again. Replan if scope changed or an attempted effect has an uncertain outcome; read/argument errors alone do not require a new plan.".into(), crate::RuntimeToolHoldReason::PriorCallFailed));
         } else {
             if patch_call.is_some() { patch_recovery.published_successfully(); }
             else { patch_recovery.observe_successful_file_repair(&observed_binding, &recorded.1); }
@@ -3654,11 +3690,9 @@ async fn record_tool_admission(sink: &dyn AgentEventSink, step: u16, invocation:
     }).await
 }
 
-async fn finish_tool_results(
-    results: Vec<(
-        ToolCallId,
-        Result<AgentToolResult, AgentEngineError>,
-    )>,
+async fn finish_tool_results_with_hold(
+    results: Vec<(ToolCallId, Result<AgentToolResult, AgentEngineError>)>,
+    runtime_hold: Option<crate::RuntimeToolHoldReason>,
     event_sink: &dyn AgentEventSink,
     model_step: u16,
     cancellation: &CancellationToken,
@@ -3668,9 +3702,31 @@ async fn finish_tool_results(
     }
     let mut normalized = Vec::with_capacity(results.len());
     for (call_id, result) in results {
-        normalized.push(record_tool_result(call_id, result, event_sink, model_step).await?);
+        normalized.push(record_tool_result_with_hold(call_id, result, runtime_hold, event_sink, model_step).await?);
     }
     Ok(normalized)
+}
+
+async fn finish_tool_surface_refusal(
+    refusal: crate::tool::ToolBatchRefusal,
+    calls: &[ChatToolCall],
+    definitions: &[ChatToolDefinition],
+    event_sink: &dyn AgentEventSink,
+    model_step: u16,
+    cancellation: &CancellationToken,
+) -> Result<Vec<(ToolCallId, AgentToolResult)>, AgentEngineError> {
+    if cancellation.is_cancelled() { return Err(AgentEngineError::Cancelled); }
+    let mut recorded = Vec::with_capacity(refusal.results.len());
+    for (call_id, result) in refusal.results {
+        // Exposed peers were held because of their batch, not their own name.
+        let reason = if refusal.hold_reason == crate::RuntimeToolHoldReason::ToolNotExposed
+            && calls.iter().find(|call| call.call_id == call_id).is_some_and(|call|
+                definitions.iter().any(|tool| tool.name == call.name)) {
+            crate::RuntimeToolHoldReason::BatchRejected
+        } else { refusal.hold_reason };
+        recorded.push(record_tool_result_with_hold(call_id, result, Some(reason), event_sink, model_step).await?);
+    }
+    Ok(recorded)
 }
 
 /// Do not discard a returned observation merely because its token changed.
@@ -3680,6 +3736,16 @@ async fn finish_tool_results(
 async fn record_tool_result(
     call_id: ToolCallId,
     result: Result<AgentToolResult, AgentEngineError>,
+    event_sink: &dyn AgentEventSink,
+    model_step: u16,
+) -> Result<(ToolCallId, AgentToolResult), AgentEngineError> {
+    record_tool_result_with_hold(call_id, result, None, event_sink, model_step).await
+}
+
+async fn record_tool_result_with_hold(
+    call_id: ToolCallId,
+    result: Result<AgentToolResult, AgentEngineError>,
+    runtime_hold: Option<crate::RuntimeToolHoldReason>,
     event_sink: &dyn AgentEventSink,
     model_step: u16,
 ) -> Result<(ToolCallId, AgentToolResult), AgentEngineError> {
@@ -3700,8 +3766,11 @@ async fn record_tool_result(
         Err(error) => return Err(error),
     };
     result.validate_for(&call_id)?;
+    if runtime_hold.is_some() && !result.is_error {
+        return Err(AgentEngineError::InvalidContract("a held tool proposal cannot have a successful result".into()));
+    }
     event_sink.emit(AgentEngineEvent::ToolCompleted {
-        step: model_step, result: result.clone(),
+        step: model_step, result: result.clone(), runtime_hold,
     }).await?;
     Ok((call_id, result))
 }
@@ -4067,6 +4136,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_holds_distinguish_pre_dispatch_correction_from_owner_failure() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event); Ok(())
+            }
+        }
+        #[derive(Debug)]
+        struct Discovery;
+        #[async_trait]
+        impl crate::AgentToolDiscoveryPort for Discovery {
+            async fn select(&self, _: &ChatCausality, _: u64, _: &str,
+                _: &[crate::AgentToolDiscoveryCandidate], _: usize, _: CancellationToken,
+            ) -> Result<Vec<String>, AgentEngineError> { panic!("a mixed discovery batch must not run") }
+        }
+        #[derive(Default)]
+        struct Owner(std::sync::Mutex<Vec<String>>);
+        #[async_trait]
+        impl AgentToolInvoker for Owner {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+                if let Some(result) = instruction_result(&invocation) { return Ok(result); }
+                self.0.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                Ok(AgentToolResult::text(invocation.call.call_id, "Not executed: owner-authored diagnostic is not a Runtime decision", true))
+            }
+        }
+        use crate::RuntimeToolHoldReason::*;
+        let scenarios = [
+            (vec![("held", "invented_tool", json!({}))], vec![("held", Some(ToolNotExposed))], vec![]),
+            (vec![("unknown", "invented_tool", json!({})), ("held", "read_file", json!({"path":"a"}))],
+                vec![("unknown", Some(ToolNotExposed)), ("held", Some(BatchRejected))], vec![]),
+            (vec![("held", "read_file", json!({"path":42}))], vec![("held", Some(ArgumentsRejected))], vec![]),
+            (vec![("invalid", "read_file", json!({"path":42})), ("held", "read_file", json!({"path":"a"}))],
+                vec![("invalid", Some(ArgumentsRejected)), ("held", Some(BatchRejected))], vec![]),
+            (vec![("search", "ToolSearch", json!({"query":"read_file"})), ("held", "read_file", json!({"path":"a"}))],
+                vec![("search", Some(BatchRejected)), ("held", Some(BatchRejected))], vec![]),
+            (vec![("failed", "read_file", json!({"path":"a"})), ("held", "read_file", json!({"path":"b"}))],
+                vec![("failed", None), ("held", Some(PriorCallFailed))], vec!["failed"]),
+        ];
+        for (calls, expected, invoked) in scenarios {
+            let mut batch = Vec::new();
+            for (id, name, args) in calls {
+                let mut call = control_step(id, name, args); call.pop(); batch.extend(call);
+            }
+            batch.push(Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }));
+            let model = Arc::new(ObservingModel { steps: std::sync::Mutex::new(vec![batch]), requests: Default::default() });
+            let owner = Arc::new(Owner::default());
+            let sink = Arc::new(Sink::default());
+            let plan = AgentToolPlan::new([tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, false)]).unwrap();
+            let _ = run_turn(binding(), model, owner.clone(), sink.clone(),
+                AgentTurnRequest::new(request(), plan, principal(), 0).with_max_model_steps(1)
+                    .with_tool_discovery_port(Arc::new(Discovery)),
+                AgentContextBudget::default(), CancellationToken::new()).await;
+            assert_eq!(owner.0.lock().unwrap().as_slice(), invoked.as_slice());
+            let events = sink.0.lock().unwrap();
+            for (id, reason) in expected {
+                assert!(events.iter().any(|event| matches!(event,
+                    AgentEngineEvent::ToolCompleted { result, runtime_hold, .. }
+                        if result.call_id.as_ref() == id && *runtime_hold == reason)), "missing typed outcome for {id}");
+                if reason.is_some() {
+                    assert!(!events.iter().any(|event| matches!(event,
+                        AgentEngineEvent::ToolStarted { call_id, .. } if call_id.as_ref() == id)));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn settlement_loss_becomes_an_error_tool_result_and_completed_event() {
         #[derive(Default)]
         struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
@@ -4103,7 +4241,7 @@ mod tests {
         let events = sink.0.lock().unwrap();
         assert_eq!(events.len(),3);
         for (index,event) in events.iter().enumerate() {
-            let AgentEngineEvent::ToolCompleted { step,result } = event else {
+            let AgentEngineEvent::ToolCompleted { step, result, .. } = event else {
                 panic!("settlement loss emitted a non-tool event")
             };
             assert_eq!(*step,(index+1) as u16);
@@ -4368,7 +4506,7 @@ mod tests {
                         AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old:model:1".into(),correction_source:None},
                         AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"original-read".into(),name:"read_file".into(),
                             arguments:nomifun_agent_contracts::StrictJsonValue(json!({"path":"result.txt"})),provider_metadata:None}},
-                        AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("original-read".into(),"第一行 MAC-B\n第二行 after\n",false)},
+                        AgentEngineEvent::ToolCompleted { runtime_hold: None, step:1,result:AgentToolResult::text("original-read".into(),"第一行 MAC-B\n第二行 after\n",false)},
                         AgentEngineEvent::TurnFailed {model_steps:1,message:"original report failure".into(),failure:None},
                     ],
                 })})
@@ -4414,7 +4552,7 @@ mod tests {
                         AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old:model:1".into(),correction_source:None},
                         AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"read".into(),name:"read_file".into(),
                             arguments:nomifun_agent_contracts::StrictJsonValue(json!({"path":"result.txt"})),provider_metadata:None}},
-                        AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("read".into(),"第一行 MAC-B\n第二行 after\n",false)},
+                        AgentEngineEvent::ToolCompleted { runtime_hold: None, step:1,result:AgentToolResult::text("read".into(),"第一行 MAC-B\n第二行 after\n",false)},
                         AgentEngineEvent::WorkStatus {status:crate::AgentWorkStatus {failed_tools:10,failed_commands:2,..Default::default()}},
                         AgentEngineEvent::TurnFailed {model_steps:1,message:"old report failed".into(),failure:None},
                     ]})})
@@ -4496,7 +4634,7 @@ mod tests {
             AgentTurnRequest::new(sample.clone(),AgentToolPlan::default(),principal(),0).with_history_port(Arc::new(History))).await.unwrap();
         assert_eq!(model.calls.load(Ordering::SeqCst),2);assert!(matches!(result.terminal,AgentTurnTerminal::Completed {..}));
         assert!(result.output_text.contains("第一行 MAC-B\n第二行 after\n"));
-        assert!(result.output_text.contains("原回合未成功的工具结果：10 次"));assert!(!result.output_text.contains("failed_tools"));
+        assert!(!result.output_text.contains("原回合未成功的工具结果"));assert!(!result.output_text.contains("failed_tools"));
         let required=Arc::new(Model {required_mode:true,..Default::default()});
         let mut strict=sample.clone();strict.input.messages[0]=crate::context_lifecycle::text_message(ChatRole::User,
             format!("只依据已关闭回合的历史记录整理完整报告。不要修改任何文件，不要执行命令，不要新增当前文件检查。operation_id:{SOURCE}"));
@@ -4507,6 +4645,7 @@ mod tests {
         assert!(matches!(published.terminal,AgentTurnTerminal::Completed {..}));
         assert!(published.output_text.contains("第一行 MAC-B\n第二行 after\n"));assert_eq!(required.calls.load(Ordering::SeqCst),1);
         assert!(!published.output_text.contains("DRAFT_ONLY")&&!published.output_text.contains("failed_commands"),"strict mode publishes the validated report, not an unchecked second answer");
+        assert!(!published.output_text.contains("原回合未成功的工具结果"));
         assert_eq!(instructions.0.load(Ordering::SeqCst),2,"root instructions are loaded before the single model round");
         // A fresh report closes an optional empty plan, but must not override
         // a real replan obligation from the current turn.
@@ -5430,6 +5569,19 @@ mod tests {
         PrincipalRef {
             principal_kind: "user".to_owned(),
             principal_id: "user-1".to_owned(),
+        }
+    }
+
+    fn assert_attempt_counts_remain_accounted_without_public_notices(
+        model: &ObservingModel, result: &AgentTurnResult, tools: u32, commands: u32,
+    ) {
+        let requests = model.requests.lock().unwrap();
+        let report = requests.iter().rev().flat_map(|request| &request.input.tools)
+            .find(|tool| tool.name == crate::completion::TOOL_NAME).expect("completion accounting schema");
+        assert_eq!(report.input_schema.0["properties"]["observed_tool_error_count"]["const"], tools);
+        assert_eq!(report.input_schema.0["properties"]["observed_command_failure_count"]["const"], commands);
+        for notice in ["Unsuccessful tool attempts", "Unsuccessful command attempts", "本轮未成功的操作尝试", "本轮未成功的命令尝试"] {
+            assert!(!result.output_text.contains(notice), "automatic count notice was publicly delivered: {notice}");
         }
     }
 
@@ -6671,7 +6823,7 @@ mod tests {
         assert_eq!(model.requests.lock().unwrap().len(),3,"no unnecessary update_plan or repaired report round");
         assert_eq!(*tools.0.lock().unwrap(),["start-once","timeout-terminal"]);
         assert!(result.output_text.contains("timed out") && result.output_text.contains("reaped"));
-        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 1"),"the real timeout remains recorded");
+        assert_attempt_counts_remain_accounted_without_public_notices(&model, &result, 1, 1);
     }
 
     #[tokio::test]
@@ -6701,8 +6853,7 @@ mod tests {
         assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
         assert_eq!(model.requests.lock().unwrap().len(), 2);
         assert_eq!(*tools.calls.lock().unwrap(), ["diagnostic"]);
-        assert!(result.output_text.contains("Unsuccessful command attempts in this turn: 1"));
-        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 1"));
+        assert_attempt_counts_remain_accounted_without_public_notices(&model, &result, 1, 1);
         assert!(result.output_text.contains("no success claim"));
         let requests = model.requests.lock().unwrap();
         assert!(requests[1].input.instructions.iter().any(|text|
@@ -6850,8 +7001,7 @@ mod tests {
         assert_eq!(model.requests.lock().unwrap().len(),5);
         assert_eq!(model.requests.lock().unwrap()[4].input.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
             [crate::completion::TOOL_NAME], "a rejected proposal must not reopen the completion review's action surface");
-        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 1"));
-        assert!(result.output_text.contains("Unsuccessful command attempts in this turn: 1"));
+        assert_attempt_counts_remain_accounted_without_public_notices(&model, &result, 1, 1);
     }
 
     #[tokio::test]
@@ -7902,22 +8052,22 @@ mod tests {
         let plan=AgentToolPlan::new([deferred_alpha,deferred_beta,visible]).unwrap();
         let events=[
             AgentEngineEvent::ToolCallCompleted {step:1,call:discovery_call("search-ok")},
-            AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("search-ok".into(),json!([
+            AgentEngineEvent::ToolCompleted { runtime_hold: None, step:1,result:AgentToolResult::text("search-ok".into(),json!([
                 {"name":"deferred_alpha","activated":true},
                 {"name":"always_visible","activated":true},
                 {"name":"not_in_plan","activated":true},
             ]).to_string(),false)},
             // Error results restore nothing.
             AgentEngineEvent::ToolCallCompleted {step:2,call:discovery_call("search-error")},
-            AgentEngineEvent::ToolCompleted {step:2,result:AgentToolResult::text("search-error".into(),
+            AgentEngineEvent::ToolCompleted { runtime_hold: None, step:2,result:AgentToolResult::text("search-error".into(),
                 json!([{"name":"deferred_beta"}]).to_string(),true)},
             // Malformed output restores nothing.
             AgentEngineEvent::ToolCallCompleted {step:3,call:discovery_call("search-malformed")},
-            AgentEngineEvent::ToolCompleted {step:3,result:AgentToolResult::text("search-malformed".into(),
+            AgentEngineEvent::ToolCompleted { runtime_hold: None, step:3,result:AgentToolResult::text("search-malformed".into(),
                 "not a json array".to_owned(),false)},
             // Results for unrelated calls are ignored.
             AgentEngineEvent::ToolCallCompleted {step:4,call:other_call("read-1")},
-            AgentEngineEvent::ToolCompleted {step:4,result:AgentToolResult::text("read-1".into(),
+            AgentEngineEvent::ToolCompleted { runtime_hold: None, step:4,result:AgentToolResult::text("read-1".into(),
                 json!([{"name":"deferred_beta"}]).to_string(),false)},
         ];
         let restored=restore_discovered_tools(events.iter(),&plan).unwrap();
@@ -7950,7 +8100,7 @@ mod tests {
             let entries = (batch * 5..batch * 5 + 5).map(|index| json!({
                 "name":format!("deferred_{index:03}"), "activated":true,
             })).collect::<Vec<_>>();
-            events.push(AgentEngineEvent::ToolCompleted { step: batch + 1,
+            events.push(AgentEngineEvent::ToolCompleted { runtime_hold: None, step: batch + 1,
                 result: AgentToolResult::text(id.into(), serde_json::to_string(&entries).unwrap(), false) });
         }
         let restored = restore_discovered_tools(events.iter(), &plan).unwrap();
@@ -8212,7 +8362,7 @@ mod tests {
         let result=result.unwrap();
         assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
         assert_eq!(model.requests.lock().unwrap()[6].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),[crate::completion::TOOL_NAME]);
-        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 2"));
+        assert_attempt_counts_remain_accounted_without_public_notices(&model, &result, 2, 0);
         let requests=model.requests.lock().unwrap();
         assert!(requests[1].input.tools.iter().any(|tool|tool.name=="update_plan"));
         assert!(requests[1].input.messages.iter().flat_map(|message|&message.content).any(|part|
@@ -8243,7 +8393,7 @@ mod tests {
         assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
         assert_eq!(model.requests.lock().unwrap().len(), 3);
         assert_eq!(*tools.calls.lock().unwrap(), ["diagnostic"]);
-        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 2"));
+        assert_attempt_counts_remain_accounted_without_public_notices(&model, &result, 2, 1);
     }
 
     #[tokio::test]
@@ -8295,8 +8445,8 @@ mod tests {
         assert_eq!(requests.len(),3);
         assert_eq!(*tools.calls.lock().unwrap(),["diagnostic"]);
         assert_eq!(model.steps.lock().unwrap().len(),2);
-        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 2"));
-        assert!(result.output_text.contains("Unsuccessful command attempts in this turn: 1"));
+        drop(requests);
+        assert_attempt_counts_remain_accounted_without_public_notices(&model, &result, 2, 1);
     }
 
     #[tokio::test]
@@ -8325,8 +8475,8 @@ mod tests {
             [crate::completion::TOOL_NAME],"a rejected terminal account must not advertise a plan reset or repeat effect");
         assert_eq!(requests[3].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),[crate::completion::TOOL_NAME]);
         assert_eq!(model.steps.lock().unwrap().len(),1);
-        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 2"),
-            "the real command failure and rejected account remain counted; the report-only plan proposal is a phase correction");
+        drop(requests);
+        assert_attempt_counts_remain_accounted_without_public_notices(&model, &result, 2, 1);
     }
 
     #[tokio::test]
@@ -8358,7 +8508,6 @@ mod tests {
         assert_eq!(requests[3].input.tool_choice,ChatToolChoice::Auto);
         assert_eq!(requests.len(),6);
         assert_eq!(model.steps.lock().unwrap().len(),1);
-        assert!(result.output_text.contains("Unsuccessful command attempts in this turn: 1"));
     }
 
     #[tokio::test]
@@ -9681,7 +9830,7 @@ mod tests {
             AgentTurnRequest::new(request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0),
         ).await.unwrap();
         assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
-        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 1"));
+        assert_attempt_counts_remain_accounted_without_public_notices(&model, &result, 1, 0);
         assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
         assert_eq!(result.model_steps, 8);
     }
@@ -9716,7 +9865,7 @@ mod tests {
             AgentTurnRequest::new(request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0),
         ).await.unwrap();
         assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
-        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 2"));
+        assert_attempt_counts_remain_accounted_without_public_notices(&model, &result, 2, 0);
         assert_eq!(tools.writes.load(Ordering::SeqCst), 2, "the valid prefix of the rejected batch must not execute");
         let requests = model.requests.lock().unwrap();
         for id in ["held-valid", "held-invalid"] {

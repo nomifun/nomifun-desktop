@@ -19,14 +19,14 @@ export type ToolReceiptAction =
   | 'run_commands'
   | 'search_code'
   | 'list_files'
-  | 'load_tools'
+  | 'discover_tools'
   | 'generic';
 
 export type ToolReceiptIcon = 'tool' | 'file' | 'edit';
 
 export interface ToolReceiptSummaryPart {
   action: ToolReceiptAction;
-  /** Logical tool calls with explicit retries collapsed, not a count of distinct files. */
+  /** Number of calls, never the number of matched or loaded schemas. */
   count: number;
   state: TurnDisclosureProcessState;
   target?: string;
@@ -52,82 +52,10 @@ export interface ToolReceiptDetailRow {
   commandExitCode?: number;
   commandNotStarted?: boolean;
   commandTimedOut?: boolean;
-  retryCount?: number;
-  attempts?: ToolReceiptAttemptRow[];
 }
 
 export const countBoundedSearchResults = (tools: NormalizedToolCall[]): number =>
   tools.filter((tool) => tool.boundedResult === 'search_context_withheld').length;
-
-export const countNonFatalToolFailures = (tools: NormalizedToolCall[]): number =>
-  tools.filter((tool) => tool.nonFatalFailure === true && tool.boundedResult === undefined
-    && tool.commandExitCode === undefined).length;
-
-interface ToolReceiptAttemptRow {
-  key: string;
-  attemptNo: number;
-  state: TurnDisclosureProcessState;
-  input?: string;
-  output?: string;
-  truncated?: boolean;
-  notExecutedReason?: NormalizedToolNotExecutedReason;
-  commandNotStarted?: boolean;
-  commandTimedOut?: boolean;
-}
-
-interface ToolRetryGroup {
-  attempts: NormalizedToolCall[];
-  latest: NormalizedToolCall;
-}
-
-/**
- * Collapse only a complete explicit retry chain. Legacy calls and malformed,
- * ambiguous, or out-of-order metadata fail closed as independent rows.
- */
-const groupExplicitToolRetries = (tools: NormalizedToolCall[]): ToolRetryGroup[] => {
-  const groups: ToolRetryGroup[] = [];
-  const openGroups = new Map<string, ToolRetryGroup>();
-
-  for (const tool of tools) {
-    const retry = tool.retry;
-    if (
-      retry &&
-      retry.attemptNo === 1 &&
-      retry.retryGroupId === tool.key &&
-      retry.retryOfCallId === undefined
-    ) {
-      if (openGroups.has(retry.retryGroupId)) {
-        openGroups.delete(retry.retryGroupId);
-        groups.push({ attempts: [tool], latest: tool });
-        continue;
-      }
-      const group = { attempts: [tool], latest: tool };
-      groups.push(group);
-      openGroups.set(retry.retryGroupId, group);
-      continue;
-    }
-
-    const existing = retry ? openGroups.get(retry.retryGroupId) : undefined;
-    const previous = existing?.latest;
-    if (
-      retry &&
-      existing &&
-      previous &&
-      tool.name === previous.name &&
-      retry.attemptNo === existing.attempts.length + 1 &&
-      retry.retryOfCallId === previous.key
-    ) {
-      existing.attempts.push(tool);
-      existing.latest = tool;
-      continue;
-    }
-
-    if (retry && existing) openGroups.delete(retry.retryGroupId);
-    groups.push({ attempts: [tool], latest: tool });
-  }
-
-  return groups;
-};
 
 const toolReceiptIconByAction: Record<ToolReceiptAction, ToolReceiptIcon> = {
   read_files: 'file',
@@ -135,7 +63,7 @@ const toolReceiptIconByAction: Record<ToolReceiptAction, ToolReceiptIcon> = {
   run_commands: 'tool',
   search_code: 'file',
   list_files: 'file',
-  load_tools: 'tool',
+  discover_tools: 'tool',
   generic: 'tool',
 };
 
@@ -261,7 +189,6 @@ const codeSearchToolNames = new Set(['grep', 'rg', 'search', 'find']);
 const fileListToolNames = new Set(['glob', 'list', 'ls', 'directory', 'dir']);
 const fileEditToolNames = new Set(['write', 'edit', 'patch', 'apply patch', 'multi edit', 'replace']);
 const fileReadToolNames = new Set(['read', 'open', 'view', 'cat']);
-const toolLoaderNames = new Set(['toolsearch', 'tool search']);
 
 const commandActionTokens = new Set(['exec', 'execute', 'run']);
 const commandSuffixes = new Set(['command', 'commands']);
@@ -306,14 +233,8 @@ const matchesAnchoredToolAction = (
 };
 
 const classifyToolForReceipt = (tool: NormalizedToolCall): ToolReceiptAction => {
-  const kind = normalizeToolSearchText(compactToolText(tool.kind)).trim();
   const { name, isMcp } = getNamespacedToolActionName(tool.name);
 
-  if (kind === 'execute') return 'run_commands';
-  if (['search', 'grep', 'find'].includes(kind)) return 'search_code';
-  if (['glob', 'list'].includes(kind)) return 'list_files';
-  if (['edit', 'write'].includes(kind)) return 'edit_files';
-  if (kind === 'read') return 'read_files';
   const explicitAction = resolveToolPresentation(tool).receiptAction;
   if (explicitAction) return explicitAction as ToolReceiptAction;
   // A server-local MCP name is descriptive metadata, not a trusted semantic
@@ -321,7 +242,6 @@ const classifyToolForReceipt = (tool: NormalizedToolCall): ToolReceiptAction => 
   // do not turn ambiguous one-word names such as search/read/run/list into
   // code, file, or command receipts. Native built-ins keep their exact-name UI.
   const allowExactName = !isMcp;
-  if (allowExactName && toolLoaderNames.has(name)) return 'load_tools';
   if (
     matchesAnchoredToolAction(
       name,
@@ -387,6 +307,7 @@ const getToolReceiptTarget = (tool: NormalizedToolCall, action: ToolReceiptActio
   if (action === 'read_files' || action === 'edit_files') {
     return getFileTarget(tool);
   }
+  if (action === 'discover_tools') return formatToolTarget(tool, language);
   if (action !== 'generic') return undefined;
   return formatToolTarget(tool, language);
 };
@@ -396,7 +317,7 @@ const getToolReceiptDetailTarget = (tool: NormalizedToolCall, action: ToolReceip
   const rawName = compactToolText(tool.name);
   const name = compactToolText(formatToolDisplayName(rawName));
 
-  if (action === 'generic') return formatToolTarget(tool, language);
+  if (action === 'generic' || action === 'discover_tools') return formatToolTarget(tool, language);
   if (action === 'read_files' || action === 'edit_files') return getFileTarget(tool);
   if (description && description !== name && description !== rawName) return description;
   if (action === 'run_commands') return getCommandTarget(tool);
@@ -435,7 +356,7 @@ export const buildToolReceiptSummaryParts = (
     }
   >();
 
-  groupExplicitToolRetries(tools).forEach(({ latest: tool }) => {
+  tools.forEach((tool) => {
     const action = classifyToolForReceipt(tool);
     const target = getToolReceiptTarget(tool, action, language);
     // A pre-dispatch rejection is a different receipt outcome from a tool that
@@ -481,16 +402,13 @@ export const getToolReceiptIconFromSummaryParts = (parts: ToolReceiptSummaryPart
 };
 
 export const buildToolReceiptDetailRows = (tools: NormalizedToolCall[], language = 'en-US'): ToolReceiptDetailRow[] =>
-  groupExplicitToolRetries(tools).map(({ attempts, latest: tool }) => {
+  tools.map((tool) => {
     const action = classifyToolForReceipt(tool);
     const presentation = resolveToolPresentation(tool, language);
     const title = presentation.title;
     const target = getToolReceiptDetailTarget(tool, action, language);
     return {
-      // Keep the rendered detail row anchored to the immutable retry root.
-      // Using the latest call id here remounted the row whenever a retry
-      // arrived, which discarded its expanded/collapsed state.
-      key: attempts[0]?.key ?? tool.key,
+      key: tool.key,
       action,
       state: getToolProcessState(tool),
       title,
@@ -505,21 +423,6 @@ export const buildToolReceiptDetailRows = (tools: NormalizedToolCall[], language
       ...(tool.commandExitCode !== undefined ? { commandExitCode: tool.commandExitCode } : {}),
       ...(tool.commandNotStarted ? { commandNotStarted: true } : {}),
       ...(tool.commandTimedOut ? { commandTimedOut: true } : {}),
-      ...(attempts.length > 1
-        ? {
-            retryCount: attempts.length - 1,
-            attempts: attempts.map((attempt, index) => ({
-              key: attempt.key,
-              attemptNo: attempt.retry?.attemptNo ?? index + 1,
-              state: getToolProcessState(attempt),
-              ...(attempt.input ? { input: attempt.input } : {}),
-              ...(attempt.output ? { output: attempt.output } : {}),
-              ...(attempt.truncated ? { truncated: attempt.truncated } : {}),
-              ...(attempt.notExecutedReason ? { notExecutedReason: attempt.notExecutedReason } : {}),
-              ...(attempt.commandNotStarted ? { commandNotStarted: true } : {}),
-              ...(attempt.commandTimedOut ? { commandTimedOut: true } : {}),
-            })),
-          }
-        : {}),
+
     };
   });

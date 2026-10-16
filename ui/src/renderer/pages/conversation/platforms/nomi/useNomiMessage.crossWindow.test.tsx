@@ -176,3 +176,40 @@ test('shared cross-window broadcasts keep each Session list isolated and never d
   });
   expect([...first.result.current.messages, ...second.result.current.messages].some(row => row.msg_id === hiddenMessageId)).toBe(false);
 });
+
+test('late canonical timeline updates an old Turn without reviving or disturbing execution', async () => {
+  const broadcasts = mockConversationBroadcasts();
+  const oldRoot = hiddenMessageId;
+  const oldSource = otherMessageId;
+  const oldMessage: IMessageText = { id: 'old-result', msg_id: oldSource, turn_id: oldRoot,
+    conversation_id: conversationId, type: 'text', position: 'left', content: { content: 'Saved prior result.' } };
+  const onError = mock(() => {});
+  const oldWrapper = ({ children }: PropsWithChildren) => createElement(MessageListProvider, { initialValue: [oldMessage] }, children);
+  const hook = renderHook(() => ({ activity: useNomiMessage(conversationId, { onError }), messages: useMessageList() }), { wrapper: oldWrapper });
+  await waitFor(() => expect(hook.result.current.activity.hasHydratedRunningState).toBe(true));
+  const reads = (ipcBridge.conversation.get.invoke as ReturnType<typeof mock>).mock.calls.length;
+  const notify = (through_seq: number) => broadcasts.stream({ type: 'canonical_timeline', conversation_id: conversationId,
+    msg_id: oldSource, turn_id: oldRoot, data: [{ source_message_id: oldSource, timeline: { through_seq, segments: [{
+      segment_id: 'old-part', group_id: `process:${oldRoot}`, first_seq: 3, last_seq: 5,
+      kind: 'narration', state: 'completed', start_utf16: 0, end_utf16: oldMessage.content.content.length,
+    }] } }] });
+  act(() => notify(10));
+  await waitFor(() => expect(hook.result.current.messages[0].content.timeline?.through_seq).toBe(10));
+  expect(hook.result.current.activity.running).toBe(false);
+  expect(hook.result.current.activity.activeTurnId).toBeUndefined();
+  expect(hook.result.current.activity.getTurnCompletionGeneration()).toBe(0);
+  expect(onError).not.toHaveBeenCalled();
+  expect((ipcBridge.conversation.get.invoke as ReturnType<typeof mock>).mock.calls.length).toBe(reads);
+  act(() => broadcasts.start(conversationId));
+  await waitFor(() => expect(hook.result.current.activity.activeTurnId).toBe(turnId));
+  const activeThought = hook.result.current.activity.thought;
+  act(() => notify(20));
+  await waitFor(() => expect(hook.result.current.messages[0].content.timeline?.through_seq).toBe(20));
+  expect(hook.result.current.messages).toHaveLength(1);
+  expect(hook.result.current.messages[0].id).toBe('old-result');
+  expect(hook.result.current.activity.activeTurnId).toBe(turnId);
+  expect(hook.result.current.activity.running).toBe(true);
+  expect(hook.result.current.activity.thought).toEqual(activeThought);
+  expect(hook.result.current.activity.getTurnCompletionGeneration()).toBe(0);
+  expect(onError).not.toHaveBeenCalled();
+});

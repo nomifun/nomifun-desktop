@@ -9,7 +9,6 @@ import type { ToolReceiptDetailRow } from './components/toolGroupSummaryModel';
 import {
   isProcessTextEchoOfFinal,
   selectJournalProcessItems,
-  shouldShowFileListDetail,
   shouldShowToolRowDetail,
   stripInternalToolCallPayload,
 } from './processTraceDisplayModel';
@@ -25,14 +24,13 @@ describe('process trace display model', () => {
   test('keeps a single file receipt collapsed but expandable for exact-path inspection', () => {
     const writeRow = row({ action: 'edit_files', target: 'snake.html' });
 
-    expect(shouldShowToolRowDetail(writeRow, { fileRowCount: 1 })).toBe(true);
-    expect(shouldShowFileListDetail([writeRow])).toBe(false);
+    expect(shouldShowToolRowDetail(writeRow)).toBe(true);
   });
 
   test('keeps a completed single file row expandable even when output is terse', () => {
     const writeRow = row({ action: 'edit_files', target: 'snake.html', output: 'snake.html' });
 
-    expect(shouldShowToolRowDetail(writeRow, { fileRowCount: 1 })).toBe(true);
+    expect(shouldShowToolRowDetail(writeRow)).toBe(true);
   });
 
   test('keeps failed single file rows expandable so the error remains inspectable', () => {
@@ -43,7 +41,7 @@ describe('process trace display model', () => {
       output: 'Permission denied',
     });
 
-    expect(shouldShowToolRowDetail(writeRow, { fileRowCount: 1 })).toBe(true);
+    expect(shouldShowToolRowDetail(writeRow)).toBe(true);
   });
 
   test('keeps multi-file receipts expandable so the file list remains inspectable', () => {
@@ -52,8 +50,7 @@ describe('process trace display model', () => {
       row({ key: 'read-2', action: 'read_files', target: 'ProcessTraceItem.tsx' }),
     ];
 
-    expect(shouldShowFileListDetail(rows)).toBe(true);
-    expect(shouldShowToolRowDetail(rows[0], { fileRowCount: rows.length })).toBe(true);
+    expect(shouldShowToolRowDetail(rows[0])).toBe(true);
   });
 
   test('keeps command rows expandable for command input and output', () => {

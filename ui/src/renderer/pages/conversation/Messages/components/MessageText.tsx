@@ -26,7 +26,6 @@ import { MESSAGE_BODY_CLASS_NAME, MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIG
 import { parseMessageFileMarker } from './messageFileMarker';
 import { projectAssistantText } from '../processTraceDisplayModel';
 import AssistantProtocolNotice from './AssistantProtocolNotice';
-import { projectCompletionOutcomes } from '../completionOutcomeDisplayModel';
 import { IdmmDecisionExplanation } from './IdmmDecisionExplanation';
 import decisionStyles from './IdmmDecisionExplanation.module.css';
 import { resolveMessageFilePath } from './messageFilePath';
@@ -97,19 +96,7 @@ const MessageText: React.FC<{
       ? projectAssistantText(content)
       : { text: content, hasToolPayload: false };
   }, [message.content.content, message.position]);
-  const completion = useMemo(() => presentation.hasToolPayload ? undefined
-    : projectCompletionOutcomes(message, presentation.text, messageList), [message, presentation, messageList]);
-  const completionKey = completion?.kind === 'native_nonzero' ? 'messages.completionSummary.nativeNonzero'
-    : completion?.kind === 'native_timeout' ? 'messages.completionSummary.nativeTimeout'
-    : completion?.kind === 'native_nonzero_and_arguments' ? 'messages.completionSummary.nativeNonzeroAndArguments'
-    : completion?.kind === 'native_nonzero_and_unclassified' ? 'messages.completionSummary.nativeNonzeroAndOther'
-    : completion?.kind === 'arguments_not_executed' ? 'messages.completionSummary.argumentsNotExecuted'
-    : 'messages.completionSummary.counts';
-  const contentToRender = completion
-    ? `${completion.body}\n\n${t(completionKey,
-      { toolCount: completion.toolCount, commandCount: completion.commandCount,
-        argumentCount: completion.argumentCount, otherCount: completion.otherCount, codes: completion.exitCodes.join(', ') })}`
-    : presentation.text;
+  const contentToRender = presentation.text;
 
   const { text, files } = parseMessageFileMarker(contentToRender, message.position);
   const { data, json } = useFormatContent(text);

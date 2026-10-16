@@ -7,20 +7,12 @@ export type NormalizedToolStatus = 'pending' | 'running' | 'completed' | 'error'
 export type NormalizedToolNotExecutedReason = 'invalid_arguments' | 'runtime_preflight' | 'process_reference';
 export type NormalizedToolBoundedResult = 'search_context_withheld';
 
-interface NormalizedToolRetry {
-  retryGroupId: string;
-  attemptNo: number;
-  retryOfCallId?: string;
-}
-
 export interface NormalizedToolCall {
   key: string;
   name: string;
   capabilityId?: string;
   actionId?: string;
   status: NormalizedToolStatus;
-  /** Explicit protocol/tool semantic kind when the source provides one. */
-  kind?: string;
   /** Tool reported an error-like outcome, but it should not fail the turn-level process receipt. */
   nonFatalFailure?: boolean;
   /** Exit status of a native command whose completion and cleanup are proven. */
@@ -41,7 +33,6 @@ export interface NormalizedToolCall {
   truncated?: boolean;
   messageId?: MessageId;
   conversationId?: ConversationId;
-  retry?: NormalizedToolRetry;
 }
 
 const formatValue = (value: unknown): string => toDisplayText(value);
@@ -243,29 +234,6 @@ const isSearchContextWithheld = (name: unknown, status: unknown, output: unknown
   }
 };
 
-const skippedAfterPriorErrorPrefix = 'Skipped because a previous tool call in this assistant turn failed.';
-
-const isSkippedAfterPriorError = (status: unknown, output: unknown): boolean =>
-  status === 'error' && toDisplayText(output).trimStart().startsWith(skippedAfterPriorErrorPrefix);
-
-const invalidArgumentsNotExecutedSuffix =
-  'Correct the arguments and retry; the tool was not executed.';
-
-const localRuntimeToolNames = new Set([
-  'read_file', 'search_files', 'write_file', 'apply_patch', 'delete_path',
-  'exec_command', 'start_process', 'poll_process', 'write_process_stdin',
-  'close_process_stdin', 'resize_process', 'cancel_process',
-  'git_status', 'git_diff', 'git_stage', 'git_commit', 'git_push',
-  'update_plan', 'report_completion',
-  'search_tool_history', 'read_tool_history', 'load_tool_history',
-]);
-
-const isRuntimePreflightNotExecuted = (name: unknown, status: unknown, output: unknown): boolean => {
-  if (status !== 'error' || !localRuntimeToolNames.has(toDisplayText(name).trim())) return false;
-  const text = toDisplayText(output).trimStart();
-  return /^(?:No tools executed: |Operations? not executed: |Requested calls deferred[:;]|Not executed: |Call update_plan with an in_progress step before |Call update_plan alone first; report_completion cannot close a missing or stale plan|The plan needs reconsideration after |Capability Kernel rejected Agent Runtime Tool \(CAPABILITY_UNAVAILABLE\): Process launch failed\. The command field must contain only the executable;)/.test(text);
-};
-
 const processControlOperations: Record<string, string> = {
   poll_process: 'poll', write_process_stdin: 'stdin', close_process_stdin: 'close_stdin',
   resize_process: 'resize', cancel_process: 'cancel',
@@ -287,58 +255,19 @@ const isProcessReferenceNotExecuted = (name: unknown, status: unknown, output: u
   }
 };
 
-/**
- * Match only the local runtime's standardized pre-dispatch rejection. A null
- * `args` value alone is not sufficient: remote tools can fail without echoing
- * their input, and those failures must remain fatal.
- */
-const isInvalidArgumentsNotExecuted = (name: unknown, status: unknown, output: unknown): boolean => {
-  if (status !== 'error') return false;
-
-  const toolName = toDisplayText(name).trim();
-  const text = toDisplayText(output).trim();
-  if (localRuntimeToolNames.has(toolName)) {
-    try {
-      const rejection = JSON.parse(text);
-      if (rejection?.status === 'not_executed' && rejection.code === 'INVALID_TOOL_ARGUMENTS'
-        && rejection.tool === toolName && Array.isArray(rejection.issues) && rejection.issues.length > 0
-        && typeof rejection.message === 'string' && rejection.message.length > 0) return true;
-    } catch {
-      // Legacy rejections use plain text.
-    }
-  }
-  if (!toolName || !text.startsWith(`Invalid arguments for tool '${toolName}':`)) return false;
-  if (!text.endsWith(invalidArgumentsNotExecutedSuffix)) return false;
-
-  return text.includes('JSON Schema validation failed:') || text.includes('expected a JSON object.');
-};
-
 export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall | undefined {
-  const { call_id, name, capability_id, action_id, status, input, output, args, description, artifacts, retry } = message.content;
+  const { call_id, name, capability_id, action_id, status, input, output, args, description, artifacts } = message.content;
   if (!call_id) return undefined;
-  const normalizedRetry =
-    retry &&
-    typeof retry.retry_group_id === 'string' &&
-    retry.retry_group_id.length > 0 &&
-    Number.isInteger(retry.attempt_no) &&
-    retry.attempt_no >= 1 &&
-    (retry.retry_of_call_id === undefined ||
-      (typeof retry.retry_of_call_id === 'string' && retry.retry_of_call_id.length > 0))
-      ? {
-          retryGroupId: retry.retry_group_id,
-          attemptNo: retry.attempt_no,
-          ...(retry.retry_of_call_id ? { retryOfCallId: retry.retry_of_call_id } : {}),
-        }
-      : undefined;
-
   const displayInput = input
     ? formatValue(input)
     : args && Object.keys(args).length > 0
       ? formatValue(args)
       : undefined;
-  const skipped = isSkippedAfterPriorError(status, output);
-  const invalidArgumentsNotExecuted = isInvalidArgumentsNotExecuted(name, status, output);
-  const runtimePreflightNotExecuted = !skipped && isRuntimePreflightNotExecuted(name, status, output);
+  const rawHold = (message.content as { runtime_hold?: string }).runtime_hold;
+  const hold = status === 'error' && rawHold && new Set(['tool_not_exposed', 'arguments_rejected', 'batch_rejected', 'phase_restricted', 'input_superseded', 'prior_call_failed', 'runtime_gate']).has(rawHold) ? rawHold : undefined;
+  const skipped = hold === 'prior_call_failed';
+  const invalidArgumentsNotExecuted = hold === 'arguments_rejected';
+  const runtimePreflightNotExecuted = Boolean(hold) && !skipped && !invalidArgumentsNotExecuted;
   const searchContextWithheld = isSearchContextWithheld(name, status, output);
   const processReferenceNotExecuted = isProcessReferenceNotExecuted(name, status, output);
   const commandExitCode = getNativeCommandExitCode(name, status, output);
@@ -376,7 +305,6 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
             .filter(Boolean)
             .join('\n')
         : undefined,
-    ...(normalizedRetry ? { retry: normalizedRetry } : {}),
   };
 }
 

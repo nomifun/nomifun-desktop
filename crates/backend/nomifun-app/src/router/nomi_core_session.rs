@@ -1990,6 +1990,16 @@ impl NomiCoreSessionOwner {
                     // producer owns the Turn. Only a matching canonical
                     // terminal may close the product stream.
                     if !Self::canonical_stream_terminal_agrees(&store, &session_id, &operation_id, turn_generation, &event).await { break; }
+                    // The SDK has already closed its execution progress port.
+                    // Publish only read-only final references through this
+                    // existing, receipt-verified terminal relay.
+                    if let Ok(Ok(updates)) = tokio::time::timeout(std::time::Duration::from_millis(100),
+                        store.message_timeline_updates_for_turn(&session_id, &root_message_id)).await
+                        && !updates.is_empty()
+                        && let Some(wire) = Self::canonical_stream_wire_event(&session_id, &root_message_id,
+                            &assistant_message_id, &AgentStreamEvent::CanonicalTimeline(updates)) {
+                        sink.send_to_user(&owner_id, wire);
+                    }
                     if matches!(event, AgentStreamEvent::Error(_))
                         && let Ok(receipt) = store.read_turn_receipt(&session_id, &operation_id).await
                         && let Some(terminal) = receipt.terminal_event
@@ -3728,13 +3738,12 @@ impl nomifun_channel::ChannelSessionPort for NomiCoreSessionOwner {
             .await
             .map_err(agent_session_store_error)?;
         let limit = query.page_size.unwrap_or(100).clamp(1, 500);
-        let (mut projections, has_more, total) = self
+        let (projections, has_more, total) = self
             .canonical
             .store()
-            .messages_before(&session_id, None, limit)
+            .renderer_messages_before(&session_id, None, limit)
             .await
             .map_err(agent_session_store_error)?;
-        super::history_thinking_display::hydrate_thinking_lifecycle(&self.pool, &session_id, &mut projections).await?;
         let mut items = Vec::new();
         for projection in projections {
             if let Some(message) = canonical_message_response(&session_id, created_at, projection)
@@ -14792,7 +14801,7 @@ fn canonical_message_response_with_observation(
     {
         return Ok(None);
     }
-    let (message_type, content, position) = match projection.presentation_intent.as_str() {
+    let (message_type, mut content, position) = match projection.presentation_intent.as_str() {
         "message" if state != "accepted" && document.get("content").and_then(Value::as_str).is_none_or(|text|text.trim().is_empty()) => return Ok(None),
         "message" => (
             MessageType::Text,
@@ -14860,6 +14869,9 @@ fn canonical_message_response_with_observation(
                         summary.entry("output".to_owned()).or_insert_with(|| json!(error));
                     }
                     if let Some(observation) = observation {
+                        if let Some(runtime_hold) = &observation.runtime_hold {
+                            summary.insert("runtime_hold".to_owned(), json!(runtime_hold));
+                        }
                         // Derived only from the matching canonical Runtime call
                         // and result, never from a message projection or prose.
                         if let Some(capability_id) = &observation.capability_id {
@@ -14959,6 +14971,9 @@ fn canonical_message_response_with_observation(
         }
         _ => return Ok(None),
     };
+    if let Some(timeline) = document.get("timeline") {
+        content["timeline"] = timeline.clone();
+    }
     let status = match state {
         "streaming" | "started" => MessageStatus::Work,
         "failed" | "error" | "uncertain" => MessageStatus::Error,
@@ -15105,7 +15120,7 @@ async fn get_nomi_core_agent_session_message_history(
             })
         })
         .transpose()?;
-    let (mut projections, has_more, total, raw_next_before_seq) = state
+    let (projections, has_more, total, raw_next_before_seq) = state
         .session_owner
         .canonical()
         .store()
@@ -15120,7 +15135,6 @@ async fn get_nomi_core_agent_session_message_history(
             i64::try_from(oldest).unwrap_or(i64::MAX),
         ), session_id.as_ref())
     });
-    super::history_thinking_display::hydrate_thinking_lifecycle(&state.session_owner.pool, &session_id, &mut projections).await?;
     let observations = load_historical_tool_observations(
         &state.session_owner.pool,
         &session_id,
@@ -15180,37 +15194,10 @@ async fn get_nomi_core_agent_session_message(
         .session_created_at(&session_id)
         .await
         .map_err(agent_session_store_error)?;
-    let projection = state
-        .session_owner
-        .canonical()
-        .store()
-        .messages_after(&session_id, 0)
-        .await
-        .map_err(agent_session_store_error)?
-        .into_iter()
-        .find(|projection| {
-            projection
-                .projection
-                .get("correlation_id")
-                .and_then(Value::as_str)
-                == Some(message_id.as_str())
-        });
-    let mut projection = match projection {
-        Some(projection) => Some(projection),
-        None => state.session_owner.canonical().store()
-            .runtime_tool_history_message(&session_id, &message_id).await.map_err(agent_session_store_error)?,
-    }.ok_or_else(|| {
-            NomiCoreApiError::new(
-                StatusCode::NOT_FOUND,
-                "AGENT_SESSION_MESSAGE_NOT_FOUND",
-                "message projection does not exist",
-            )
-        })?;
-    super::history_thinking_display::hydrate_thinking_lifecycle(
-        &state.session_owner.pool, &session_id, std::slice::from_mut(&mut projection),
-    ).await?;
-    state.session_owner.canonical().store().hydrate_message_history_metadata(&session_id,std::slice::from_mut(&mut projection))
-        .await.map_err(agent_session_store_error)?;
+    let projection = state.session_owner.canonical().store()
+        .message_by_id(&session_id, &message_id).await.map_err(agent_session_store_error)?
+        .ok_or_else(|| NomiCoreApiError::new(StatusCode::NOT_FOUND,
+            "AGENT_SESSION_MESSAGE_NOT_FOUND", "message projection does not exist"))?;
     let observations = load_historical_tool_observations(
         &state.session_owner.pool, &session_id, std::slice::from_ref(&projection),
     ).await?;
@@ -17796,7 +17783,7 @@ mod failure_pause_settlement_tests {
                 call_id:"read-before-failure".into(), name:"read_file".into(), arguments:StrictJsonValue(json!({"path":"result.txt"})),
                 provider_metadata:None,
             } }).unwrap(),
-            serde_json::to_value(AgentEngineEvent::ToolCompleted { step:1, result:historical_result.clone() }).unwrap(),
+            serde_json::to_value(AgentEngineEvent::ToolCompleted { runtime_hold: None, step:1, result:historical_result.clone() }).unwrap(),
             json!({"event":"host_cleanup_proven"}),
             serde_json::to_value(AgentEngineEvent::TurnPaused { model_steps:1, reason:"EXECUTION_MODEL_PROVIDER_UNAVAILABLE".into() }).unwrap(),
         ];

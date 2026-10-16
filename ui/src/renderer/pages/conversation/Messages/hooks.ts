@@ -42,6 +42,7 @@ import { createContext } from '@renderer/utils/ui/createContext';
 import { addEventListener } from '@/renderer/utils/emitter';
 import { isAuthoritativeCompletionRuntimeIdle } from '../platforms/authoritativeTurnLifecyclePolicy';
 import { normalizeAgentTurnOutcome } from '@/common/chat/turnOutcome';
+import { applyCanonicalTimeline, normalizeMessageTimeline, preferMessageTimeline, type TimelineNotification } from '@/common/chat/messageTimeline';
 
 const [useMessageList, MessageListProvider, useUpdateMessageList] = createContext<TMessage[]>(() => []);
 const [useMessageListLoading, MessageListLoadingProvider, useUpdateMessageListLoading] = createContext(() => false);
@@ -217,6 +218,13 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
         if ((message.content as { agentMessage?: boolean })?.agentMessage) {
           return list;
         }
+        // Content identity is canonical. Reading segments come from the
+        // backend timeline, never from adjacency of transient stream frames.
+        const newList = list.slice();
+        newList[existingIdx] = { ...existingMsg, ...message, id: existingMsg.id,
+          created_at: existingMsg.created_at ?? message.created_at,
+          content: mergeTextMessageContent(existingMsg.content, message.content) };
+        return newList;
       }
     }
 
@@ -318,7 +326,7 @@ export function composeMessageForTest(message: TMessage | undefined, list: TMess
   return composeMessageWithIndex(message, list, buildMessageIndex(list));
 }
 
-type PendingMessageUpdate = { message: TMessage; add: boolean };
+type PendingMessageUpdate = { message: TMessage | TimelineNotification; add: boolean };
 type PendingMessageUpdateRef = { current: PendingMessageUpdate[] };
 type MessageListFunctionalUpdate = (updater: (list: TMessage[]) => TMessage[]) => void;
 
@@ -347,6 +355,11 @@ export function drainPendingMessageUpdates(
 
     for (const item of pending) {
       if (!item.message) {
+        continue;
+      }
+
+      if (item.message.type === 'canonical_timeline') {
+        newList = applyCanonicalTimeline(newList, item.message);
         continue;
       }
 
@@ -396,7 +409,7 @@ export const useAddOrUpdateMessage = () => {
   }, [flush]);
 
   return useCallback(
-    (message: TMessage | undefined, add = false) => {
+    (message: TMessage | TimelineNotification | undefined, add = false) => {
       if (!message) {
         return;
       }
@@ -709,6 +722,12 @@ export function normalizeDbMessage(msg: TMessage): TMessage {
       status: content.some((item) => item.status === 'Error') ? 'error' : msg.status,
     };
   }
+  if (msg.type === 'thinking') {
+    const parsed = parseJsonRecord(msg.content);
+    return parsed ? { ...msg, content: { ...msg.content, ...parsed,
+      content: toDisplayText(parsed.content), status: parsed.status === 'thinking' ? 'thinking' : 'done',
+      timeline: normalizeMessageTimeline(parsed.timeline) } } : msg;
+  }
   if (msg.type !== 'text') return msg;
   const parsed = parseJsonRecord(msg.content);
   if (!parsed || typeof parsed.content !== 'string') return msg;
@@ -717,6 +736,7 @@ export function normalizeDbMessage(msg: TMessage): TMessage {
     turn_id: msg.turn_id,
     content: {
       content: parsed.content,
+      timeline: normalizeMessageTimeline(parsed.timeline),
       ...normalizeDecodedTextMetadata(parsed),
       ...normalizeWireAgentMessageMetadata(parsed),
     },
@@ -788,6 +808,8 @@ const preferThinkingMessageVersion = (
 const withFetchedCanonicalIdentity = <T extends TMessage>(dbMessage: T, preferred: T): T =>
   ({
     ...preferred,
+    ...(preferred.type !== 'tool_group' ? { content: { ...preferred.content,
+      timeline: preferMessageTimeline(dbMessage.content.timeline, preferred.content.timeline) } } : {}),
     // The fetched row owns durable identity and chronological placement even
     // when a longer/live payload wins for display content.
     id: dbMessage.id,
@@ -848,7 +870,10 @@ export const mergeFetchedMessagesForConversation = (
     if (dbMessage.type === 'text' && streamMessage.type === 'text') {
       // A completed turn's durable step owns its final content. While running,
       // the same per-step identity may have a newer live suffix than history.
-      if (dbMessage.turn_id && settledTurnIds.has(dbMessage.turn_id)) return dbMessage;
+      if (dbMessage.turn_id && settledTurnIds.has(dbMessage.turn_id)) return {
+        ...dbMessage, content: { ...dbMessage.content,
+          timeline: preferMessageTimeline(dbMessage.content.timeline, streamMessage.content.timeline) },
+      };
       return withFetchedCanonicalIdentity(dbMessage, preferTextMessageVersion(dbMessage, streamMessage));
     }
     if (dbMessage.type === 'thinking' && streamMessage.type === 'thinking') {
@@ -861,7 +886,8 @@ export const mergeFetchedMessagesForConversation = (
         ? 'done'
         : queryStartByKey.get(key!) === streamMessage ? dbMessage.content.status : streamMessage.content.status;
       return withFetchedCanonicalIdentity(dbMessage, {
-        ...preferred, content: { ...preferred.content, status },
+        ...preferred, content: { ...preferred.content, status,
+          timeline: preferMessageTimeline(dbMessage.content.timeline, streamMessage.content.timeline) },
       });
     }
     if (dbMessage.type === 'tool_call' && streamMessage.type === 'tool_call') {

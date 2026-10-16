@@ -8,6 +8,7 @@ use nomifun_agent_contracts::{
     AgentPresetRevisionPayload, AgentSessionAggregate, ArtifactEnvelope,
     AgentStoreSchemaManifestPayload,
     IdmmDecisionExplanation, IdmmDecisionNotice, ContextClearedPayloadV1, AgentTurnOutcome,
+    MessageTimeline, MessageTimelineUpdate, RuntimeToolHoldReason,
     TurnWorkspaceFilesObservedV1, KnowledgeWritebackStartedV1, KnowledgeWritebackSettledV1,
     CanonicalAgentStoreSchemaManifestPayload, CanonicalApiInventoryPayload, CanonicalHttpMethod,
     CanonicalErrorRegistryPayload,
@@ -120,6 +121,9 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let schemas = generated_schemas()?;
     validate_generated_schemas(&schemas)?;
+    // Transport-only views must not change a persisted database lineage or
+    // frozen Snapshot merely because its renderer gains a new read model.
+    let display_schemas = generated_display_schemas()?;
     let rust_contract_schema_digest = digest_payload(&schemas)?;
     let package_schema_digest = digest_payload(&schema_subset(
         &schemas,
@@ -239,6 +243,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         (
             "schemas.json".to_owned(),
             pretty_json(&schemas)?,
+        ),
+        (
+            "display-schemas.json".to_owned(),
+            pretty_json(&display_schemas)?,
         ),
         (
             "canonical-agent-store-schema-manifest.envelope.json".to_owned(),
@@ -593,6 +601,14 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
     Ok(schemas)
 }
 
+fn generated_display_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
+    let mut schemas = BTreeMap::new();
+    add_schema::<MessageTimeline>(&mut schemas, "message_timeline")?;
+    add_schema::<MessageTimelineUpdate>(&mut schemas, "message_timeline_update")?;
+    add_schema::<RuntimeToolHoldReason>(&mut schemas, "runtime_tool_hold_reason")?;
+    Ok(schemas)
+}
+
 fn validate_generated_schemas(
     schemas: &BTreeMap<String, Value>,
 ) -> Result<(), Box<dyn Error>> {
@@ -726,4 +742,21 @@ fn schema_subset(
         .iter()
         .filter_map(|name| schemas.get(*name).cloned().map(|value| ((*name).to_owned(), value)))
         .collect()
+}
+
+#[cfg(test)]
+mod display_schema_tests {
+    use super::*;
+
+    #[test]
+    fn display_views_do_not_change_the_persisted_schema_contract() {
+        let storage = generated_schemas().unwrap();
+        let display = generated_display_schemas().unwrap();
+        assert_eq!(display.len(), 3);
+        assert!(display.keys().all(|key| !storage.contains_key(key)));
+        let published: Value = serde_json::from_str(include_str!(
+            "../../contracts/generated/canonical-agent-store-schema-manifest.envelope.json")).unwrap();
+        assert_eq!(digest_payload(&storage).unwrap().as_ref(),
+            published["payload"]["rust_contract_schema_digest"].as_str().unwrap());
+    }
 }

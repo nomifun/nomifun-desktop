@@ -68,8 +68,8 @@ pub struct AgentCompletionReport {
     /// Explicitly selected, bounded owner data; never fresh proof or actions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delivery_items: Vec<AgentDeliveryItem>,
-    /// Host-selected presentation, never model authority. Absent on historical
-    /// reports so their exact immutable delivery remains reproducible.
+    /// Host-selected formatter version, never model authority. Existing absent
+    /// and versioned values retain their exact immutable delivery behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_format: Option<String>,
     /// Historical publication data only; never current observations or authority.
@@ -1432,10 +1432,7 @@ impl CompletionTracker {
         // Presentation fallback only: this does not interpret user intent or
         // translate arbitrary owner text. Persist it before moving the summary.
         let chinese=submission.summary.chars().any(|c| matches!(c as u32, 0x3400..=0x9fff));
-        let public_format = match (chinese,submission.historical_results.is_empty()) {
-            (true,true)=>"plain_zh_v2",(false,true)=>"plain_en_v2",
-            (true,false)=>"plain_zh_v4",(false,false)=>"plain_en_v4",
-        };
+        let public_format = if chinese { "plain_zh_v5" } else { "plain_en_v5" };
         Ok(AgentCompletionReport {
             plan_revision: plan.revision,
             observation_revision: self.revision,
@@ -1619,7 +1616,7 @@ mod tests {
         let events=vec![AgentEngineEvent::TurnStarted {binding:binding.clone(),turn_operation_id:SOURCE.into()},
             AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old:model:1".into(), correction_source: None },
             AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"read".into(),name:"read_file".into(),arguments:StrictJsonValue(serde_json::json!({"path":path})),provider_metadata:None}},
-            AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("read".into(),"第一行\n第二行\n",false)},
+            AgentEngineEvent::ToolCompleted { runtime_hold: None, step:1,result:AgentToolResult::text("read".into(),"第一行\n第二行\n",false)},
             AgentEngineEvent::WorkStatus {status:AgentWorkStatus {failed_tools:10,failed_commands:2,..Default::default()}},
             AgentEngineEvent::TurnFailed {model_steps:1,message:"old failure".into(),failure:None}];
         let mut archive=crate::tool_archive::ToolArchive::new("current".into());
@@ -1945,6 +1942,79 @@ mod tests {
         }
         assert_eq!(escape_public_json(serde_json::json!([text,[],{}]).to_string(),true)
             .parse::<serde_json::Value>().unwrap(),serde_json::json!([text,[],{}]));
+    }
+
+    #[test]
+    fn public_v5_omits_attempt_notices_without_changing_v1_through_v4_deliveries_or_counters() {
+        for (language, summary, notices) in [
+            ("en", "Recorded result.", concat!(
+                "\n\nUnsuccessful tool attempts in this turn: 2 (including argument checks and command outcomes). Details remain available in the execution steps.",
+                "\n\nUnsuccessful command attempts in this turn: 1. Each command's exit status and output explain the result.")),
+            ("zh", "已保留结果。", concat!(
+                "\n\n本轮未成功的操作尝试：2 次（包括参数检查和命令结果）。具体原因保留在过程记录中。",
+                "\n\n本轮未成功的命令尝试：1 次。各次退出状态和输出已保留，后续成功不抵消这些记录。")),
+        ] {
+            let mut report: AgentCompletionReport = serde_json::from_value(serde_json::json!({
+                "plan_revision":1,"observation_revision":1,"input_revision":1,"workspace_epoch":0,
+                "summary":summary,"criteria":[],"observed_tool_error_count":2,"observed_command_failure_count":1,
+            })).unwrap();
+            let old_delivery = format!("{summary}{notices}");
+            for version in 1..=4 {
+                report.public_format = Some(format!("plain_{language}_v{version}"));
+                assert_eq!(report.delivery_text(), old_delivery);
+                assert!(report.matches_delivery(&old_delivery));
+                assert!(!report.matches_delivery(summary), "old facts cannot silently drop their exact notice bytes");
+                let cold: AgentCompletionReport = serde_json::from_value(serde_json::to_value(&report).unwrap()).unwrap();
+                assert_eq!(cold.delivery_text(), old_delivery);
+            }
+            report.public_format = Some(format!("plain_{language}_v5"));
+            assert_eq!(report.delivery_text(), summary);
+            assert!(report.matches_delivery(summary));
+            assert!(!report.matches_delivery(&old_delivery));
+            assert!(report.tool_error_disclosure().is_none());
+            assert!(report.command_failure_disclosure().is_none());
+            let cold: AgentCompletionReport = serde_json::from_value(serde_json::to_value(&report).unwrap()).unwrap();
+            assert_eq!(cold.observed_tool_error_count, 2);
+            assert_eq!(cold.observed_command_failure_count, 1);
+            assert_eq!(cold.delivery_text(), summary);
+        }
+    }
+
+    #[test]
+    fn public_v5_keeps_current_and_historical_owner_data_without_aggregated_source_counts() {
+        let exact = "original output\nsecond line\n";
+        let command = "printf 'original output\\nsecond line\\n'";
+        let mut report: AgentCompletionReport = serde_json::from_value(serde_json::json!({
+            "plan_revision":1,"observation_revision":1,"input_revision":1,"workspace_epoch":0,
+            "summary":"已整理结果。","criteria":[],"observed_tool_error_count":2,"observed_command_failure_count":1,
+            "public_format":"plain_zh_v4",
+            "delivery_items":[{"item_id":"current","status":"delivered","results":[{"result_ref":"read","label":"当前文件",
+                "data":{"observed_text":{"content":"current exact\n"},"offset":0,"eof":true,"total_bytes":14}}]}],
+            "historical_results":[{"origin":{"source_turn":"turn:user:msg:session:old","archive_id":"a".repeat(64)},
+                "label":"原调用","data":{"tool":"exec_command","result_order":0,"original_arguments":{"cmd":command},
+                    "text_parts":[{"text":exact,"truncated":false}],"original_is_error":false,
+                    "source_work_status":{"failed_tools":10,"failed_commands":3},"current_evidence":false}}],
+        })).unwrap();
+        let legacy = report.clone();
+        let old_delivery = legacy.delivery_text();
+        assert!(old_delivery.contains("原回合未成功的工具结果：10 次"));
+        report.public_format = Some("plain_zh_v5".into());
+        let delivery = report.delivery_text();
+        assert!(delivery.contains(exact));
+        assert!(delivery.contains("current exact\n"));
+        assert!(delivery.contains("脚本文本"));
+        for notice in ["原回合未成功的工具结果", "命令失败观察", "本轮未成功的操作尝试", "本轮未成功的命令尝试"] {
+            assert!(!delivery.contains(notice));
+        }
+        assert_eq!(report.historical_results, legacy.historical_results);
+        assert_eq!(report.delivery_items, legacy.delivery_items);
+        assert_eq!(report.observed_tool_error_count, 2);
+        assert_eq!(report.observed_command_failure_count, 1);
+        assert!(report.matches_delivery(&delivery));
+        assert!(!report.matches_delivery(&old_delivery));
+        assert!(legacy.matches_delivery(&old_delivery));
+        let cold: AgentCompletionReport = serde_json::from_value(serde_json::to_value(&report).unwrap()).unwrap();
+        assert_eq!(cold.delivery_text(), delivery);
     }
 
     #[test]
@@ -3629,7 +3699,9 @@ mod tests {
         assert!(!result.is_error, "{}", result.output_text());
         let report = tracker.current(&plan, &work, 1).unwrap();
         assert_eq!(report.observed_tool_error_count, 2);
-        assert!(report.tool_error_disclosure().unwrap().contains("turn: 2"));
+        assert_eq!(report.public_format.as_deref(), Some("plain_en_v5"));
+        assert!(report.tool_error_disclosure().is_none());
+        assert!(!report.delivery_text().contains("Unsuccessful tool attempts"));
 
         let mut changed = work.clone();
         changed.failed_tools = 3;
@@ -3701,12 +3773,9 @@ mod tests {
         assert!(!result.is_error, "{}", result.output_text());
         let report = tracker.current(&plan, &work, 1).unwrap();
         assert_eq!(report.observed_command_failure_count, 2);
-        assert!(
-            report
-                .command_failure_disclosure()
-                .unwrap()
-                .contains("turn: 2")
-        );
+        assert_eq!(report.public_format.as_deref(), Some("plain_en_v5"));
+        assert!(report.command_failure_disclosure().is_none());
+        assert!(!report.delivery_text().contains("Unsuccessful command attempts"));
 
         let mut changed = work.clone();
         changed.failed_commands = 3;
@@ -4314,20 +4383,20 @@ fn historical_public_result_versioned(data:&serde_json::Value,chinese:bool,inclu
 
 impl AgentCompletionReport {
     pub(crate) fn delivery_text(&self) -> String {
-        let version4=self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v4"|"plain_en_v4"));
-        self.delivery_text_versioned(true,version4)
+        let include_shell_script=self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v4"|"plain_en_v4"|"plain_zh_v5"|"plain_en_v5"));
+        self.delivery_text_versioned(true,include_shell_script)
     }
 
     fn delivery_text_versioned(&self,include_invocation:bool,include_shell_script:bool) -> String {
         let mut delivery = self.summary.clone();
         if !self.historical_results.is_empty() {
-            let chinese=self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v3"|"plain_zh_v4"));
+            let chinese=self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v3"|"plain_zh_v4"|"plain_zh_v5"));
             delivery.push_str(if chinese {"\n\n以下为所选历史回合的记录，未重新执行，也不代表当前状态核验。"}
                 else {"\n\nSelected historical observations follow. They were not reexecuted and do not verify current state."});
             let mut sources=BTreeSet::new();
             for (index,result) in self.historical_results.iter().enumerate() {
                 let Some(data)=&result.data else {continue};
-                if sources.insert(result.origin.source_turn.as_str()) {
+                if !self.omits_attempt_count_notices() && sources.insert(result.origin.source_turn.as_str()) {
                     if let Some(counts)=data.get("source_work_status").filter(|value|!value.is_null()) {
                         if let (Some(tools),Some(commands))=(counts["failed_tools"].as_u64(),counts["failed_commands"].as_u64()) {
                             delivery.push_str(&if chinese {format!("\n原回合未成功的工具结果：{tools} 次；命令失败观察：{commands} 次。两种统计可能重叠，不相加。")}
@@ -4344,10 +4413,10 @@ impl AgentCompletionReport {
             for result in &item.results {
                 if let Some(data) = &result.data {
                     delivery.push_str(&format!("\n\n{}\n", result.label));
-                    if self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v1"|"plain_en_v1"|"plain_zh_v2"|"plain_en_v2")) {
-                        let chinese=self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v1"|"plain_zh_v2"));
-                        let version2=self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v2"|"plain_en_v2"));
-                        delivery.push_str(&if version2 {public_structured_result(data,chinese).unwrap_or_else(||plain_public_result_versioned(data,chinese,true))}
+                    if self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v1"|"plain_en_v1"|"plain_zh_v2"|"plain_en_v2"|"plain_zh_v5"|"plain_en_v5")) {
+                        let chinese=self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v1"|"plain_zh_v2"|"plain_zh_v5"));
+                        let structured=self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v2"|"plain_en_v2"|"plain_zh_v5"|"plain_en_v5"));
+                        delivery.push_str(&if structured {public_structured_result(data,chinese).unwrap_or_else(||plain_public_result_versioned(data,chinese,true))}
                             else {plain_public_result(data,chinese)});
                         continue;
                     }
@@ -4388,7 +4457,7 @@ impl AgentCompletionReport {
         if text == current || text == format!("\n\n{current}") { return true; }
         // v3 has two known immutable formats around the complete-history
         // enhancement. Accept only their exact derivations; canonical text
-        // remains unchanged. New submitted shell context is v4 only.
+        // remains unchanged. Submitted shell context starts with v4.
         if !self.historical_results.is_empty() && self.public_format.as_deref()
             .is_some_and(|format|matches!(format,"plain_zh_v3"|"plain_en_v3")) {
             let previous=self.delivery_text_versioned(false,false);
@@ -4450,6 +4519,7 @@ impl AgentCompletionReport {
     }
 
     pub(crate) fn tool_error_disclosure(&self) -> Option<String> {
+        if self.omits_attempt_count_notices() { return None; }
         if self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v1"|"plain_zh_v2"|"plain_zh_v3"|"plain_zh_v4")) {
             return (self.observed_tool_error_count>0).then(||format!("\n\n本轮未成功的操作尝试：{} 次（包括参数检查和命令结果）。具体原因保留在过程记录中。",self.observed_tool_error_count));
         }
@@ -4460,6 +4530,7 @@ impl AgentCompletionReport {
     }
 
     pub(crate) fn command_failure_disclosure(&self) -> Option<String> {
+        if self.omits_attempt_count_notices() { return None; }
         if self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v1"|"plain_zh_v2"|"plain_zh_v3"|"plain_zh_v4")) {
             return (self.observed_command_failure_count>0).then(||format!("\n\n本轮未成功的命令尝试：{} 次。各次退出状态和输出已保留，后续成功不抵消这些记录。",self.observed_command_failure_count));
         }
@@ -4467,6 +4538,13 @@ impl AgentCompletionReport {
             "\n\nUnsuccessful command attempts in this turn: {}. Each command's exit status and output explain the result.",
             self.observed_command_failure_count
         ))
+    }
+
+    /// v5 changes public presentation only. Earlier reports must keep their
+    /// exact committed delivery; accounting and completion gates still use
+    /// the unchanged observed counters above.
+    fn omits_attempt_count_notices(&self) -> bool {
+        matches!(self.public_format.as_deref(), Some("plain_zh_v5" | "plain_en_v5"))
     }
 }
 

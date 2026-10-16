@@ -81,6 +81,14 @@ pub trait UnifiedRuntimeHost: Send + Sync {
         event: &AgentEngineEvent,
     ) -> Result<Option<u64>, AppError>;
 
+    /// Optional display references after a canonical commit. Read failures do
+    /// not confer execution authority and must not fail an otherwise valid Turn.
+    async fn timeline_updates(
+        &self, _message: &SendMessageData,
+    ) -> Result<Vec<nomifun_agent_contracts::MessageTimelineUpdate>, AppError> {
+        Ok(Vec::new())
+    }
+
     /// Hosts accepting concurrent steering must override this and atomically
     /// check the inbox and persist admission. False must record no ToolStarted.
     async fn admit_tool(
@@ -164,7 +172,6 @@ struct TurnProjection {
     message: SendMessageData,
     output: EngineTurnOutput,
     calls: Mutex<BTreeMap<String, ToolCallEventData>>,
-    thinking_step: Mutex<Option<u16>>,
     terminal: Mutex<Option<AgentEngineEvent>>,
     last_model_step: std::sync::atomic::AtomicU16,
 }
@@ -208,46 +215,34 @@ impl AgentEventSink for TurnProjection {
             AgentEngineEvent::ExecutionResumed { model_steps, .. } => { self.output.record_model_steps(*model_steps); }
             _ => {}
         }
-        self.project(event, event_seq)
+        self.project(event, event_seq)?;
+        if event_seq.is_some() { self.publish_timeline().await; }
+        Ok(())
     }
 
     async fn admit_tool(&self, event: AgentEngineEvent) -> Result<bool, AgentEngineError> {
         let admitted = self.host.admit_tool(&self.message, &event).await
             .map_err(|error| AgentEngineError::InvalidContract(error.to_string()))?;
-        if admitted { self.project(event, None)?; }
+        if admitted { self.project(event, None)?; self.publish_timeline().await; }
         Ok(admitted)
     }
 }
 
 impl TurnProjection {
-    fn complete_thinking(&self) {
-        let step = self.thinking_step.lock().unwrap_or_else(|e| e.into_inner()).take();
-        if let Some(step) = step {
-            self.output.publish(EngineProgress::Thinking(ThinkingEventData {
-                content: String::new(),
-                step: Some(step),
-                subject: None,
-                duration: None,
-                status: Some("done".into()),
-            }));
+    async fn publish_timeline(&self) {
+        // Presentation cannot become an unbounded wait before an admitted
+        // owner invocation. Dropping this read never drops execution evidence.
+        match tokio::time::timeout(std::time::Duration::from_millis(100),
+            self.host.timeline_updates(&self.message)).await {
+            Ok(Ok(updates)) if !updates.is_empty() => {
+                self.output.publish(EngineProgress::CanonicalTimeline(updates));
+            }
+            Ok(Ok(_)) | Err(_) => {},
+            Ok(Err(error)) => tracing::warn!(%error, "canonical timeline display could not be refreshed"),
         }
     }
 
     fn project(&self, event: AgentEngineEvent, event_seq: Option<u64>) -> Result<(), AgentEngineError> {
-        // This runs only after the typed transition is recorded by the host.
-        // Closing one reasoning phase does not complete the enclosing Turn;
-        // its terminal remains owned by the cleanup and receipt path.
-        match event.reasoning_display_transition() {
-            Some(Some(step)) => {
-                let previous = *self.thinking_step.lock().unwrap_or_else(|e| e.into_inner());
-                if previous.is_some_and(|previous| previous != step) {
-                    self.complete_thinking();
-                }
-                *self.thinking_step.lock().unwrap_or_else(|e| e.into_inner()) = Some(step);
-            }
-            Some(None) => self.complete_thinking(),
-            None => {}
-        }
         let projected = match event {
             // The host has committed the full plan. Re-read the canonical
             // snapshot, including lifecycle and reset state, for presentation.
@@ -277,7 +272,6 @@ impl TurnProjection {
                         input: None,
                         output: None,
                         description: None,
-                        retry: None,
                         artifacts: Vec::new(),
                     },
                 );
@@ -300,7 +294,7 @@ impl TurnProjection {
                         EngineProgress::ToolCall(call.clone())
                     })
             }
-            AgentEngineEvent::ToolCompleted { result, .. } => {
+            AgentEngineEvent::ToolCompleted { result, runtime_hold, .. } => {
                 let mut call = self
                     .calls
                     .lock()
@@ -323,6 +317,7 @@ impl TurnProjection {
                     ToolCallStatus::Completed
                 };
                 call.identity.result_seq = event_seq;
+                call.identity.runtime_hold = runtime_hold;
                 call.identity.permission_required = nomifun_engine_core::project_system_permission_required(
                     call.identity.capability_id.as_deref(), call.identity.action_id.as_deref(),
                     result.is_error, &result.output_text(),
@@ -361,7 +356,6 @@ impl EngineSessionDriver for UnifiedSessionDriver {
         let projection = Arc::new(TurnProjection {
             host: self.host.clone(), message: message.clone(), output,
             calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
-            thinking_step: Mutex::new(None),
             last_model_step: std::sync::atomic::AtomicU16::new(0),
         });
         let session = self.engine.open_session(self.binding.clone(), self.model.clone(),
@@ -651,6 +645,8 @@ mod tests {
         allow_user_input: AtomicBool,
         fail_terminal_record: AtomicBool,
         fail_record: AtomicBool,
+        fail_timeline_read: AtomicBool,
+        timeline_reads: AtomicUsize,
         events: Mutex<Vec<AgentEngineEvent>>,
         cleanup_turns: AtomicUsize,
         cleanup_sessions: AtomicUsize,
@@ -673,6 +669,8 @@ mod tests {
                 allow_user_input: AtomicBool::new(false),
                 fail_terminal_record: AtomicBool::new(false),
                 fail_record: AtomicBool::new(false),
+                fail_timeline_read: AtomicBool::new(false),
+                timeline_reads: AtomicUsize::new(0),
                 events: Mutex::new(Vec::new()),
                 cleanup_turns: AtomicUsize::new(0),
                 cleanup_sessions: AtomicUsize::new(0),
@@ -801,6 +799,14 @@ mod tests {
             let mut events = self.events.lock().unwrap();
             events.push(event.clone());
             Ok(Some(events.len() as u64))
+        }
+        async fn timeline_updates(&self, _: &SendMessageData)
+            -> Result<Vec<nomifun_agent_contracts::MessageTimelineUpdate>, AppError> {
+            self.timeline_reads.fetch_add(1, Ordering::SeqCst);
+            if self.fail_timeline_read.load(Ordering::Acquire) {
+                return Err(AppError::Conflict("presentation read unavailable".into()));
+            }
+            Ok(Vec::new())
         }
         async fn cleanup_turn(&self, _message: &SendMessageData) -> Result<(), AppError> {
             if self.block_cleanup.load(Ordering::Acquire) {
@@ -1110,6 +1116,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn timeline_read_failure_does_not_change_tool_admission_results_or_turn_status() {
+        let host = Host::new();
+        host.fail_timeline_read.store(true, Ordering::Release);
+        let state = AgentRuntimeState::new(SESSION, "projection-workspace", 32);
+        let turn = state.reset_for_new_turn(ConversationStatus::Running);
+        let projection = TurnProjection {
+            host: host.clone(), message: message(), output: EngineTurnOutput::new(state.clone(), turn),
+            calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
+            last_model_step: std::sync::atomic::AtomicU16::new(0),
+        };
+        let mut events = state.subscribe();
+        let proposed = AgentEngineEvent::ToolCallCompleted { step: 1,
+            call: nomifun_chat_model_broker::ChatToolCall { call_id: "read".into(), name: "read_file".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(serde_json::json!({"path":"a"})), provider_metadata: None } };
+        projection.emit(proposed.clone()).await.unwrap();
+        let admitted = AgentEngineEvent::ToolStarted { step: 1, call_id: "read".into(),
+            capability_id: "workspace.files".into(), action_id: "workspace.files/read".into() };
+        assert!(projection.admit_tool(admitted.clone()).await.unwrap());
+        let completed = AgentEngineEvent::ToolCompleted { step: 1, runtime_hold: None,
+            result: AgentToolResult::text("read".into(), "owner observation", false) };
+        projection.emit(completed.clone()).await.unwrap();
+        assert_eq!(host.events.lock().unwrap().as_slice(), &[proposed, admitted, completed]);
+        assert_eq!(host.timeline_reads.load(Ordering::Acquire), 3);
+        assert!(matches!(events.try_recv().unwrap(), AgentStreamEvent::ToolCall(data) if data.status == ToolCallStatus::Running));
+        assert!(matches!(events.try_recv().unwrap(), AgentStreamEvent::ToolCall(data) if data.status == ToolCallStatus::Completed));
+        assert!(events.try_recv().is_err());
+        assert!(projection.terminal.lock().unwrap().is_none());
+        assert_eq!(state.status(), Some(ConversationStatus::Running));
+
+        host.fail_record.store(true, Ordering::Release);
+        assert!(projection.emit(AgentEngineEvent::ReasoningDelta { step: 2, text: "uncommitted".into() }).await.is_err());
+        assert_eq!(host.timeline_reads.load(Ordering::Acquire), 3, "failed canonical writes cannot trigger metadata publication");
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn task_plan_change_is_published_only_after_its_canonical_record() {
         let host = Host::new();
         let state = AgentRuntimeState::new(SESSION, "projection-workspace", 32);
@@ -1117,7 +1159,6 @@ mod tests {
         let projection = TurnProjection {
             host: host.clone(), message: message(), output: EngineTurnOutput::new(state.clone(), turn),
             calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
-            thinking_step: Mutex::new(None),
             last_model_step: std::sync::atomic::AtomicU16::new(0),
         };
         let mut events = state.subscribe();
@@ -1139,13 +1180,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn thinking_completes_before_committed_public_text_without_completing_the_turn() {
+    async fn public_text_commit_preserves_reasoning_content_without_synthetic_completion_frames() {
         let host = Host::new();
         let state = AgentRuntimeState::new(SESSION, "projection-workspace", 32);
         let turn = state.reset_for_new_turn(ConversationStatus::Running);
         let projection = TurnProjection {
             host: host.clone(), message: message(), output: EngineTurnOutput::new(state.clone(), turn),
-            calls: Mutex::new(BTreeMap::new()), thinking_step: Mutex::new(None), terminal: Mutex::new(None),
+            calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
             last_model_step: std::sync::atomic::AtomicU16::new(0),
         };
         let mut events = state.subscribe();
@@ -1164,103 +1205,33 @@ mod tests {
         assert!(events.try_recv().is_err(), "uncommitted text must not close reasoning");
         host.fail_record.store(false, Ordering::Release);
         projection.emit(text).await.unwrap();
-        let AgentStreamEvent::Thinking(completed) = events.try_recv().unwrap() else {
-            panic!("expected reasoning completion before text");
-        };
-        assert_eq!(completed.step, Some(1));
-        assert_eq!(completed.status.as_deref(), Some("done"));
-        assert!(completed.content.is_empty());
         assert!(matches!(events.try_recv().unwrap(), AgentStreamEvent::Text(_)));
         assert!(events.try_recv().is_err());
         assert_eq!(state.status(), Some(ConversationStatus::Running));
 
         projection.emit(AgentEngineEvent::OutputTextDelta { step: 1, text: "More progress".into() }).await.unwrap();
         assert!(matches!(events.try_recv().unwrap(), AgentStreamEvent::Text(_)));
-        assert!(events.try_recv().is_err(), "reasoning completion is emitted once per active phase");
+        assert!(events.try_recv().is_err(), "display references alone own canonical phase completion");
     }
 
     #[tokio::test]
-    async fn thinking_completion_tracks_tool_handoffs_and_model_step_changes() {
-        use nomifun_agent_contracts::StrictJsonValue;
-        use nomifun_chat_model_broker::{ChatToolCall, ToolCallId};
-
+    async fn thinking_deltas_do_not_fabricate_phase_completion_or_turn_terminal() {
         let host = Host::new();
         let state = AgentRuntimeState::new(SESSION, "projection-workspace", 32);
         let turn = state.reset_for_new_turn(ConversationStatus::Running);
         let projection = TurnProjection {
             host, message: message(), output: EngineTurnOutput::new(state.clone(), turn),
-            calls: Mutex::new(BTreeMap::new()), thinking_step: Mutex::new(None), terminal: Mutex::new(None),
+            calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
             last_model_step: std::sync::atomic::AtomicU16::new(0),
         };
         let mut events = state.subscribe();
-        projection.emit(AgentEngineEvent::ReasoningDelta { step: 1, text: "Read the source".into() }).await.unwrap();
-        assert!(matches!(events.try_recv().unwrap(), AgentStreamEvent::Thinking(_)));
-        projection.emit(AgentEngineEvent::ToolCallCompleted {
-            step: 1,
-            call: ChatToolCall {
-                call_id: ToolCallId::from("read-source"), name: "read_file".into(),
-                arguments: StrictJsonValue(serde_json::json!({"path":"README.md"})), provider_metadata: None,
-            },
-        }).await.unwrap();
-        let AgentStreamEvent::Thinking(completed) = events.try_recv().unwrap() else {
-            panic!("expected reasoning completion at the tool handoff");
-        };
-        assert_eq!(completed.step, Some(1));
-        assert_eq!(completed.status.as_deref(), Some("done"));
-        assert!(events.try_recv().is_err());
-
-        // Providers can expose another reasoning phase within the same step.
-        projection.emit(AgentEngineEvent::ReasoningDelta { step: 1, text: "Check the next detail".into() }).await.unwrap();
-        let AgentStreamEvent::Thinking(reopened) = events.try_recv().unwrap() else {
-            panic!("expected new reasoning phase");
-        };
-        assert_eq!(reopened.step, Some(1));
-        assert_eq!(reopened.status.as_deref(), Some("thinking"));
-        projection.emit(AgentEngineEvent::ModelStepStarted { step: 2, operation_id: OperationId::from("model:2"), correction_source: None }).await.unwrap();
-        let AgentStreamEvent::Thinking(completed) = events.try_recv().unwrap() else {
-            panic!("expected old step completion before the new model step");
-        };
-        assert_eq!(completed.step, Some(1));
-        assert_eq!(completed.status.as_deref(), Some("done"));
-        projection.emit(AgentEngineEvent::ReasoningDelta { step: 2, text: "Verify the result".into() }).await.unwrap();
-        let AgentStreamEvent::Thinking(next) = events.try_recv().unwrap() else {
-            panic!("expected next step reasoning");
-        };
-        assert_eq!(next.step, Some(2));
-        assert_eq!(next.status.as_deref(), Some("thinking"));
-
-        let model_operation_id = OperationId::from("model:2");
-        let task = tokio::spawn(async {});
-        let task_id = task.id().to_string();
-        task.await.unwrap();
-        projection.emit(AgentEngineEvent::VoiceModelStepSuperseded {
-            step: 2,
-            model_operation_id: model_operation_id.clone(),
-            steering_receipt_ids: vec!["voice-steer".into()],
-            discarded_tool_call_ids: vec![],
-            cleanup: nomifun_chat_model_broker::OwnedModelCleanupReceipt {
-                operation_id: model_operation_id,
-                task_id,
-                stage: nomifun_chat_model_broker::OwnedModelCleanupStage::Producer,
-                outcome: nomifun_chat_model_broker::OwnedModelCleanupOutcome::Joined,
-            },
-        }).await.unwrap();
-        let AgentStreamEvent::Thinking(completed) = events.try_recv().unwrap() else {
-            panic!("expected withdrawn voice model step to close its reasoning");
-        };
-        assert_eq!(completed.step, Some(2));
-        assert_eq!(completed.status.as_deref(), Some("done"));
-        assert!(events.try_recv().is_err());
-        assert_eq!(state.status(), Some(ConversationStatus::Running));
-
-        projection.emit(AgentEngineEvent::ReasoningDelta { step: 3, text: "Use the corrected input".into() }).await.unwrap();
-        let AgentStreamEvent::Thinking(corrected) = events.try_recv().unwrap() else {
-            panic!("expected reasoning from the replacement model step");
-        };
-        assert_eq!(corrected.step, Some(3));
-        assert_eq!(corrected.status.as_deref(), Some("thinking"));
-        projection.emit(AgentEngineEvent::TurnCancelled { model_steps: 3 }).await.unwrap();
-        assert!(events.try_recv().is_err(), "deferred terminal must not publish before the owner receipt");
+        projection.emit(AgentEngineEvent::ReasoningDelta { step: 1, text: "Inspect".into() }).await.unwrap();
+        assert!(matches!(events.try_recv().unwrap(), AgentStreamEvent::Thinking(data) if data.content == "Inspect"));
+        projection.emit(AgentEngineEvent::ModelStepStarted { step: 2,
+            operation_id: OperationId::from("model:2"), correction_source: None }).await.unwrap();
+        assert!(events.try_recv().is_err(), "only canonical timeline references close a displayed phase");
+        projection.emit(AgentEngineEvent::TurnCancelled { model_steps: 2 }).await.unwrap();
+        assert!(events.try_recv().is_err(), "terminal publication waits for owner cleanup");
         assert_eq!(state.status(), Some(ConversationStatus::Running));
     }
 
@@ -1278,7 +1249,6 @@ mod tests {
             message: message(),
             output: EngineTurnOutput::new(state.clone(), turn),
             calls: Mutex::new(BTreeMap::new()),
-            thinking_step: Mutex::new(None),
             terminal: Mutex::new(None),
             last_model_step: std::sync::atomic::AtomicU16::new(0),
         };
@@ -1317,7 +1287,7 @@ mod tests {
         assert_eq!(started.identity.capability_id.as_deref(), Some("workspace.files"));
         assert_eq!(started.identity.action_id.as_deref(), Some("workspace.files/read"));
         projection
-            .emit(AgentEngineEvent::ToolCompleted {
+            .emit(AgentEngineEvent::ToolCompleted { runtime_hold: None,
                 step: 1,
                 result: AgentToolResult::text(call_id, "file unavailable", true),
             })
@@ -1351,7 +1321,6 @@ mod tests {
             message: message(),
             output: EngineTurnOutput::new(state.clone(), turn),
             calls: Mutex::new(BTreeMap::new()),
-            thinking_step: Mutex::new(None),
             terminal: Mutex::new(None),
             last_model_step: std::sync::atomic::AtomicU16::new(0),
         };
@@ -1372,7 +1341,7 @@ mod tests {
             capability_id: CapabilityId::from("workspace.files"),
             action_id: ActionId::from("workspace.files/read"),
         }).await.unwrap();
-        projection.emit(AgentEngineEvent::ToolCompleted {
+        projection.emit(AgentEngineEvent::ToolCompleted { runtime_hold: None,
             step: 0,
             result: AgentToolResult::text(call_id, "instruction discovery failed", true),
         }).await.unwrap();
@@ -1391,7 +1360,7 @@ mod tests {
         let turn = state.reset_for_new_turn(ConversationStatus::Running);
         let projection = TurnProjection {
             host: host.clone(), message: message(), output: EngineTurnOutput::new(state.clone(), turn),
-            calls: Mutex::new(BTreeMap::new()), thinking_step: Mutex::new(None), terminal: Mutex::new(None),
+            calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
             last_model_step: std::sync::atomic::AtomicU16::new(0),
         };
         let body = serde_json::json!({"schema":"system-permission-required.v1","capability":"computer",
@@ -1414,7 +1383,7 @@ mod tests {
             let AgentStreamEvent::ToolCall(started) = events.recv().await.unwrap() else { panic!("start") };
             assert!(started.identity.permission_required.is_none());
             assert!(started.identity.result_seq.is_none());
-            projection.emit(AgentEngineEvent::ToolCompleted { step: 1,
+            projection.emit(AgentEngineEvent::ToolCompleted { runtime_hold: None, step: 1,
                 result: AgentToolResult::text(call_id, output, is_error),
             }).await.unwrap();
             let AgentStreamEvent::ToolCall(completed) = events.recv().await.unwrap() else { panic!("result") };

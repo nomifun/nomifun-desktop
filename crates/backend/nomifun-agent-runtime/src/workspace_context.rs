@@ -258,7 +258,7 @@ impl InstructionReader<'_> {
         };
         result.validate_for(&call.call_id)?;
         self.sink
-            .emit(AgentEngineEvent::ToolCompleted {
+            .emit(AgentEngineEvent::ToolCompleted { runtime_hold: None,
                 step: 0,
                 result: result.clone(),
             })

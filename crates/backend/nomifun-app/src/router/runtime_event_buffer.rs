@@ -81,20 +81,22 @@ impl AgentEventBuffer {
                 self.flush(&mut records);
                 records.push(event.clone());
             }
-            AgentEngineEvent::ToolCompleted { step, result }
+            AgentEngineEvent::ToolCompleted { step, result, runtime_hold }
                 if self.instruction_reads.remove(&result.call_id) =>
             {
                 self.flush(&mut records);
                 records.push(AgentEngineEvent::ToolCompleted {
                     step: *step,
                     result: instruction_result(result),
+                    runtime_hold: *runtime_hold,
                 });
             }
-            AgentEngineEvent::ToolCompleted { step, result } => {
+            AgentEngineEvent::ToolCompleted { step, result, runtime_hold } => {
                 self.flush(&mut records);
                 records.push(AgentEngineEvent::ToolCompleted {
                     step: *step,
                     result: bounded_result(result),
+                    runtime_hold: *runtime_hold,
                 });
             }
             AgentEngineEvent::InstructionsUpdated { context } => {
@@ -267,6 +269,20 @@ pub(super) fn bounded_result(
 #[cfg(test)]
 mod thinking_lifecycle_tests {
     use super::*;
+
+    #[test]
+    fn bounded_tool_results_preserve_runtime_hold_without_classifying_owner_errors() {
+        for runtime_hold in [None, Some(nomifun_agent_runtime::RuntimeToolHoldReason::ArgumentsRejected)] {
+            let event = AgentEngineEvent::ToolCompleted { step: 1, runtime_hold,
+                result: nomifun_agent_runtime::AgentToolResult::text("call".into(), "x".repeat(100_000), true) };
+            let records = AgentEventBuffer::default().project(&event);
+            assert_eq!(records.len(), 1);
+            let AgentEngineEvent::ToolCompleted { runtime_hold: recorded, result, .. } = &records[0] else { panic!("missing tool result") };
+            assert_eq!(*recorded, runtime_hold);
+            assert!(result.output_text().len() < 100_000);
+            assert!(result.is_error);
+        }
+    }
 
     #[test]
     fn reasoning_phase_boundaries_commit_before_publication_and_keep_intermediate_chunks_buffered() {

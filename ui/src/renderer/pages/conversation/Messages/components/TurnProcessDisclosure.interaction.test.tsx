@@ -143,3 +143,38 @@ test('opens when the first live process items arrive', () => {
   expect(page.getByRole('button').getAttribute('aria-expanded')).toBe('true');
   expect(page.getByText('thinking')).toBeDefined();
 });
+
+test('canonical groups keep narration outside, current work open, and manual choices across increments', () => {
+  type Entry = { id: string; group?: string; kind: 'thinking' | 'tool' | 'text'; state: 'running' | 'completed' };
+  const items: Entry[] = [
+    { id: 'past-thinking', group: 'canonical-first', kind: 'thinking', state: 'completed' },
+    { id: 'past-tool', group: 'canonical-first', kind: 'tool', state: 'completed' },
+    { id: 'public-narration', kind: 'text', state: 'completed' },
+    { id: 'current-tool', group: 'canonical-second', kind: 'tool', state: 'running' },
+  ];
+  const stageView = (running: boolean, entries = items) => <I18nextProvider i18n={i18n}>
+    <TurnProcessDisclosure item={{ id: 'turn', processItems: entries, startAt: 1, endAt: 10,
+      state: running ? 'running' : 'completed', running, defaultCollapsed: !running }}
+      renderProcessItem={entry => <span>{entry.id}</span>} getProcessItemKey={entry => entry.id}
+      getProcessItemState={entry => entry.state} getProcessItemLayoutKind={entry => entry.kind}
+      getProcessGroupId={entry => entry.group} getProcessGroupLabel={entries => entries[0].group!} />
+  </I18nextProvider>;
+  const page = render(stageView(true));
+  const first = () => page.container.querySelector('[data-process-group-id="canonical-first"] > button')!;
+  const second = () => page.container.querySelector('[data-process-group-id="canonical-second"] > button')!;
+  expect(first().getAttribute('aria-expanded')).toBe('false');
+  expect(second().getAttribute('aria-expanded')).toBe('true');
+  expect(first().parentElement?.classList.contains('turn-process-group--running')).toBe(false);
+  expect(second().parentElement?.classList.contains('turn-process-group--running')).toBe(true);
+  expect(page.getByText('public-narration').closest('.turn-process-group')).toBeNull();
+  fireEvent.click(first());
+  fireEvent.click(second());
+  page.rerender(stageView(true, [...items, { id: 'later-output', group: 'canonical-second', kind: 'tool', state: 'running' }]));
+  expect(first().getAttribute('aria-expanded')).toBe('true');
+  expect(second().getAttribute('aria-expanded')).toBe('false');
+  expect(second().parentElement?.classList.contains('turn-process-group--running')).toBe(true);
+  page.rerender(stageView(false));
+  expect(page.container.querySelector('.turn-process-disclosure__body')).toBeNull();
+  fireEvent.click(page.container.querySelector('.turn-process-disclosure__toggle')!);
+  expect(page.container.querySelector('.turn-process-group--running')).toBeNull();
+});

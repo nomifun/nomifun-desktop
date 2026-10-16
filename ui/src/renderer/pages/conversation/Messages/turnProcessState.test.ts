@@ -59,7 +59,7 @@ describe('turn process state', () => {
       content: {
         call_id: 'call-bash',
         name: 'Bash',
-        status: 'error',
+        status: 'error', runtime_hold: 'prior_call_failed',
         args: { command: 'find /workspace -maxdepth 2 -type d' },
         output:
           'Skipped because a previous tool call in this assistant turn failed. Inspect the failed result first.',
@@ -85,7 +85,7 @@ describe('turn process state', () => {
     const rejected = {
       type: 'tool_call',
       content: {
-        call_id: 'call-invalid',
+        call_id: 'call-invalid', runtime_hold: 'arguments_rejected',
         name,
         status: 'error',
         args: null,

@@ -554,10 +554,9 @@ test('a completed journal defaults closed and expands its full reasoning and cal
   const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };
   const firstCall: IMessageToolCall = { ...base, id: 'first-call', message_id: messageId(3), msg_id: messageId(3), created_at: 3,
     type: 'tool_call', content: { call_id: 'read-1', name: 'read_file', status: 'error', args: { path: 'src/first.ts' },
-      output: 'First attempt failed', artifacts: [], retry: { retry_group_id: 'read-1', attempt_no: 1 } } };
+      output: 'First attempt failed', artifacts: [] } };
   const retry: IMessageToolCall = { ...firstCall, id: 'retry-call', message_id: messageId(6), msg_id: messageId(6), created_at: 6,
-    content: { ...firstCall.content, call_id: 'read-2', status: 'completed', output: 'Second attempt result',
-      retry: { retry_group_id: 'read-1', retry_of_call_id: 'read-1', attempt_no: 2 } } };
+    content: { ...firstCall.content, call_id: 'read-2', status: 'completed', output: 'Second attempt result' } };
   const messages: TMessage[] = [
     { ...base, id: 'user', message_id: turnId, msg_id: turnId, type: 'text', created_at: 1, position: 'right', content: { content: 'Inspect the files' } },
     { ...base, id: 'thought-1', msg_id: messageId(2), type: 'thinking', created_at: 2, content: { content: '**First reasoning**\n\nInspect the source.', status: 'done' } },
@@ -796,4 +795,48 @@ test('paused and resumed Turns hide file headings and image gallery until canoni
   expect(page.getByText('report.docx')).toBeTruthy();
   expect(page.getByTestId('turn-deliverables-images')).toBeTruthy();
   expect(query).toHaveBeenCalledWith({ conversation_id: conversationId, turn_ids: [turnId] });
+});
+
+test('canonical segment references restore narration between mixed reasoning and tool groups', () => {
+  const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };
+  const timeline = (segments: unknown[]) => ({ through_seq: 30, segments });
+  const ref = (id: string, group: string, seq: number, kind: string, start = 0, end = 1, state = 'completed') => ({
+    segment_id: id, group_id: group, first_seq: seq, last_seq: seq, kind, state, start_utf16: start, end_utf16: end,
+  });
+  const messages: TMessage[] = [
+    { ...base, id: 'segment-user', msg_id: turnId, type: 'text', position: 'right', created_at: 1, content: { content: 'Inspect the files' } },
+    { ...base, id: 'segment-thinking', msg_id: messageId(801), type: 'thinking', created_at: 2, content: { content: 'First.Second.', status: 'thinking', timeline: timeline([
+      ref('reasoning-first', 'canonical-first', 2, 'reasoning', 0, 6), ref('reasoning-second', 'canonical-second', 8, 'reasoning', 6, 13, 'running'),
+    ]) } } as TMessage,
+    { ...base, id: 'segment-tool', msg_id: messageId(802), type: 'tool_call', created_at: 3, content: { call_id: 'segment-read', name: 'read_file', status: 'completed', args: { path: 'source.ts' },
+      timeline: timeline([{ ...ref('tool-first', 'canonical-first', 4, 'tool'), call_id: 'segment-read' }]) } } as TMessage,
+    { ...base, id: 'segment-progress', msg_id: messageId(803), type: 'text', created_at: 4, content: { content: 'The source is available.', timeline: timeline([
+      ref('public-between', 'canonical-first', 6, 'narration', 0, 24),
+    ]) } } as TMessage,
+    { ...base, id: 'segment-final', msg_id: messageId(804), type: 'text', created_at: 9, content: { content: 'Final deliverable remains outside.' } },
+    { ...base, id: 'segment-summary', msg_id: messageId(805), type: 'agent_status', created_at: 10, content: { backend: 'nomi', status: 'prepared', turn_summary: true,
+      turn_state: 'completed', turn_outcome: { kind: 'answered', message_ids: [messageId(804)] } } },
+  ];
+  const view = (running: boolean) => <MemoryRouter><I18nextProvider i18n={i18n}>
+    <PreviewProvider persistNamespace='canonical-segments-integration' subscribeGlobalOpen={false}>
+      <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', readOnly: true, isProcessing: running }}>
+        <MessageListProvider initialValue={messages}><MessageList /></MessageListProvider>
+      </ConversationProvider>
+    </PreviewProvider>
+  </I18nextProvider></MemoryRouter>;
+  const page = render(view(true));
+  const first = page.container.querySelector('[data-process-group-id="canonical-first"]')!;
+  const second = page.container.querySelector('[data-process-group-id="canonical-second"]')!;
+  expect(first.querySelector('button')?.getAttribute('aria-expanded')).toBe('false');
+  expect(second.querySelector('button')?.getAttribute('aria-expanded')).toBe('true');
+  const narration = page.container.querySelector('[data-process-segment-id="public-between"] [data-testid="process-narration"]')!;
+  expect(narration).not.toBeNull();
+  expect(narration.closest('.turn-process-group')).toBeNull();
+  expect(first.compareDocumentPosition(narration) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(narration.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  page.rerender(view(false));
+  expect(page.container.querySelector('.turn-process-disclosure__body')).toBeNull();
+  const answer = page.container.querySelector('#message-segment-final')!;
+  expect(answer).not.toBeNull();
+  expect(answer.closest('.turn-process-disclosure')).toBeNull();
 });

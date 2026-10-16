@@ -180,6 +180,9 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-agent-runtime/src/stream_limits.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/tool_context.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/events.rs"),
+                    include_str!("../../../nomifun-agent-contracts/src/runtime_tool_hold.rs"),
+                    include_str!("../../../nomifun-agent-contracts/src/message_timeline.rs"),
+                    include_str!("../../../nomifun-agent-session/src/message_timeline.rs"),
                     include_str!("../../../nomifun-ai-agent/src/unified_runtime.rs"),
                     include_str!("../../../nomifun-ai-agent/src/engine_sdk.rs"),
                     include_str!("../../../nomifun-ai-agent/src/engine_tasks.rs"),
@@ -1354,6 +1357,9 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 return Err(record_error);
             }
         };
+        // Only actual commits trigger a display snapshot. Buffered token
+        // deltas retain their ephemeral tail without a database read per token.
+        result_seq = event_seq.or(result_seq);
         if let AgentEngineEvent::ToolCompleted { result, .. } = event
             && completed_call_id == Some(result.call_id.as_ref())
         {
@@ -1396,6 +1402,16 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             phase,
         );
         Ok(result_seq)
+    }
+
+    async fn timeline_updates(
+        &self, message: &SendMessageData,
+    ) -> Result<Vec<nomifun_agent_contracts::MessageTimelineUpdate>, AppError> {
+        self.session_host.canonical_store()?
+            .message_timeline_updates_for_turn(
+                &nomifun_agent_contracts::AgentSessionId::from(self.options.conversation_id.clone()),
+                self.root(message),
+            ).await.map_err(error)
     }
 
     async fn cleanup_turn(&self, message: &SendMessageData) -> Result<(), AppError> {

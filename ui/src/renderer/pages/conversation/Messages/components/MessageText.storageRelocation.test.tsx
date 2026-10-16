@@ -7,11 +7,13 @@ import { MemoryRouter } from 'react-router-dom';
 import { ipcBridge } from '@/common';
 import type { IMessageText, IMessageToolCall } from '@/common/chat/chatLib';
 import { NOMIFUN_FILES_MARKER } from '@/common/config/constants';
-import { parseConversationId, parsePersistedArtifactId } from '@/common/types/ids';
+import { parseConversationId, parsePersistedArtifactId, parseMessageId } from '@/common/types/ids';
 import { ConversationProvider } from '@/renderer/hooks/context/ConversationContext';
 import { PreviewProvider } from '@/renderer/pages/conversation/Preview';
+import { usePreviewContext } from '@/renderer/pages/conversation/Preview/context/PreviewContext';
 import MessageText from './MessageText';
-import MessageToolCall from './MessageToolCall';
+import TurnDeliverablesCard from './TurnDeliverablesCard';
+import { collectVerifiedTurnImages } from '../turnDeliverablesModel';
 import { resolveMessageFilePath } from './messageFilePath';
 
 const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000051');
@@ -33,6 +35,10 @@ afterEach(() => {
   restoreSubscriptions.forEach((restore) => restore());
   localStorage.removeItem('storage-relocation-preview-test');
 });
+
+function PreviewPathProbe() {
+  return <output data-testid='mapped-preview-path'>{usePreviewContext().activeTab?.metadata?.file_path}</output>;
+}
 
 const renderInSession = (child: ReactNode) => render(
   <MemoryRouter><I18nextProvider i18n={i18n}><ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', workspace }}>
@@ -76,18 +82,18 @@ describe('canonical managed file locations', () => {
     } finally { cleanup(); metadata.mockRestore(); image.mockRestore(); }
   });
 
-  test('historical Edit file preview reads the mapped current path and leaves provider arguments unchanged', async () => {
-    const original = 'C:/old/conversations/session/report.txt';
-    const mapped = `${workspace}/report.txt`;
+  test('canonical file preview opens the mapped current path while provider arguments remain historical', async () => {
+    const original = 'C:/old/conversations/session/report.docx';
+    const mapped = `${workspace}/report.docx`;
     const message: IMessageToolCall = { id: 'relocated-edit', type: 'tool_call', conversation_id: conversationId,
-      content: { call_id: 'edit', name: 'Edit', status: 'completed', args: { file_path: original, old_string: 'Old', new_string: 'New' },
+      content: { call_id: 'edit', name: 'apply_patch', status: 'completed', args: { file_path: original, old_string: 'Old', new_string: 'New' },
         managed_file_paths: { [original]: mapped } } };
     const read = spyOn(ipcBridge.fs.readFile, 'invoke').mockResolvedValue('Current file');
     const metadata = spyOn(ipcBridge.fs.getFileMetadata, 'invoke').mockResolvedValue({ size: 8 } as Awaited<ReturnType<typeof ipcBridge.fs.getFileMetadata.invoke>>);
     try {
-      const view = renderInSession(<MessageToolCall message={message} />);
-      fireEvent.click(view.getByText('Preview'));
-      await waitFor(() => expect(read).toHaveBeenCalledWith({ path: mapped, workspace }));
+      const view = renderInSession(<><TurnDeliverablesCard workspace={workspace} items={[{ identity: original, relativePath: 'report.docx', fileName: 'report.docx', absolutePath: mapped, operation: 'modify', tier: 'change', sourceMessageIds: [] }]} /><PreviewPathProbe /></>);
+      fireEvent.click(await view.findByText('Preview'));
+      await waitFor(() => expect(view.getByTestId('mapped-preview-path').textContent).toBe(mapped));
       expect(message.content.args?.file_path).toBe(original);
     } finally { cleanup(); read.mockRestore(); metadata.mockRestore(); }
   });
@@ -101,7 +107,9 @@ describe('canonical managed file locations', () => {
           relative_path: 'output.png', mime_type: 'image/png', size_bytes: 8, sha256: 'a'.repeat(64) }] } };
     const image = spyOn(ipcBridge.fs.getImageBase64, 'invoke').mockResolvedValue('data:image/png;base64,AA==');
     try {
-      renderInSession(<MessageToolCall message={message} />);
+      const turn = parseMessageId('0190f5fe-7c00-7a00-8000-000000000053');
+      const images = collectVerifiedTurnImages([{ turnId: turn, toolMessages: [message] }], new Map([[turn, { running: false, state: 'completed' }]]), [workspace]);
+      renderInSession(<TurnDeliverablesCard workspace={workspace} items={images.get(turn) ?? []} />);
       await waitFor(() => expect(image.mock.calls[0]?.[0].path).toBe(mapped));
       expect(message.content.artifacts?.[0].path).toBe(original);
     } finally { cleanup(); image.mockRestore(); }

@@ -12,7 +12,7 @@ import MarkdownView from '@renderer/components/Markdown';
 import { useThinkingDisplayPreferences } from '@renderer/hooks/config/useThinkingDisplayPreferences';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT } from '../typography';
+import { MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT, PROCESS_FONT_SIZE, PROCESS_LINE_HEIGHT } from '../typography';
 
 interface MessageThinkingProps {
   message: IMessageThinking;
@@ -63,8 +63,8 @@ const MessageThinking: React.FC<MessageThinkingProps> = ({
     >
       <MarkdownView
         variant={variant === 'process' ? 'process' : undefined}
-        fontSize={MESSAGE_BODY_FONT_SIZE}
-        lineHeight={MESSAGE_BODY_LINE_HEIGHT}
+        fontSize={variant === 'process' ? PROCESS_FONT_SIZE : MESSAGE_BODY_FONT_SIZE}
+        lineHeight={variant === 'process' ? PROCESS_LINE_HEIGHT : MESSAGE_BODY_LINE_HEIGHT}
       >
         {text}
       </MarkdownView>

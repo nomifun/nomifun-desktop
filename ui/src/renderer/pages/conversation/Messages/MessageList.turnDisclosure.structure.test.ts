@@ -14,7 +14,7 @@ const buildSummarySource = source.slice(
 );
 
 describe('MessageList turn completion disclosure structure', () => {
-  test('summarizes each adjacent tool stage behind one localized disclosure row', () => {
+  test('keeps unclassified tool details inspectable without inventing process boundaries', () => {
     expect(source.includes('const summarySeparator = t(')).toBe(true);
     expect(source.includes("messages.processReceipt.summarySeparator")).toBe(true);
     expect(source.includes('defaultExpanded: false')).toBe(true);
@@ -49,21 +49,9 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(source.includes("if (isContextCompressionTip(item)) return 'process';")).toBe(true);
   });
 
-  test('renders barrier-skipped receipt summaries with dedicated copy', () => {
-    expect(source.includes('part.skipped')).toBe(true);
-    expect(source.includes('messages.processReceipt.skippedAfterFailure')).toBe(true);
-  });
 
-  test('renders pre-dispatch argument rejection with dedicated neutral copy', () => {
-    expect(source.includes("part.notExecutedReason === 'invalid_arguments'")).toBe(true);
-    expect(source.includes('messages.processReceipt.invalidArguments')).toBe(true);
-    expect(source.includes('messages.processReceipt.commandNotExecuted')).toBe(true);
-  });
 
-  test('uses progress control receipts as boundaries between tool groups', () => {
-    const planBoundary = source.match(/if \(isTaskPlanControlReceipt\(message\)\) \{[\s\S]*?continue;[\s\S]*?\}/)?.[0] ?? '';
 
-    expect(planBoundary.includes('toolList = [];')).toBe(true);
-    expect(planBoundary.includes('toolSourceMessageIds = [];')).toBe(true);
-  });
+
+
 });

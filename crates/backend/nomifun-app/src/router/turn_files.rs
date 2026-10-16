@@ -819,7 +819,7 @@ mod tests {
         assert!(!f.show().complete);
         let operation = f.facts.event_payloads.values().find_map(|value|
             value.get("call_id").and_then(Value::as_str)).unwrap().to_owned();
-        f.push("runtime/progress-recorded", TURN, None, json!({"event":AgentEngineEvent::ToolCompleted {
+        f.push("runtime/progress-recorded", TURN, None, json!({"event":AgentEngineEvent::ToolCompleted { runtime_hold: None,
             step:1, result:nomifun_agent_runtime::AgentToolResult::text(operation.into(), result.to_string(), false),
         }}));
         assert_eq!(f.show().files.len(), 1);

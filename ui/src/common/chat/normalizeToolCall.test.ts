@@ -121,7 +121,7 @@ describe('normalizeToolCall', () => {
         expected: '^[0-9a-f]{64}$', parameter_path_template: '/id' }],
       message: 'No call in this batch was executed.' });
     const result = normalizeToolCall({ type: 'tool_call', content: {
-      call_id: 'bad-history-id', name: 'read_tool_history', status: 'error', output,
+      call_id: 'bad-history-id', name: 'read_tool_history', status: 'error', runtime_hold: 'arguments_rejected', output,
     } } as any);
     expect(result?.notExecutedReason).toBe('invalid_arguments');
     expect(result?.output).toBe(output);
@@ -137,29 +137,6 @@ describe('normalizeToolCall', () => {
     }} as any);
     expect(result?.status).toBe('canceled');
     expect(result?.output).toBe('STARTED');
-  });
-
-  it('preserves only structurally valid explicit retry identity', () => {
-    const result = normalizeToolCall({
-      type: 'tool_call',
-      content: {
-        call_id: 'call-2',
-        name: 'nomi_delegate',
-        status: 'completed',
-        args: { tasks: [] },
-        retry: {
-          retry_group_id: 'call-1',
-          attempt_no: 2,
-          retry_of_call_id: 'call-1',
-        },
-      },
-    } as any);
-
-    expect(result?.retry).toEqual({
-      retryGroupId: 'call-1',
-      attemptNo: 2,
-      retryOfCallId: 'call-1',
-    });
   });
 
   it('ignores tool_call messages without call_id', () => {
@@ -235,7 +212,7 @@ describe('normalizeToolCall', () => {
     const result = normalizeToolCall({
       type: 'tool_call',
       content: {
-        call_id: 'call-skipped',
+        call_id: 'call-skipped', runtime_hold: 'prior_call_failed',
         name: 'Bash',
         status: 'error',
         args: { command: 'find /workspace -maxdepth 2 -type d' },
@@ -254,7 +231,7 @@ describe('normalizeToolCall', () => {
     const result = normalizeToolCall({
       type: 'tool_call',
       content: {
-        call_id: 'call-invalid-arguments',
+        call_id: 'call-invalid-arguments', runtime_hold: 'arguments_rejected',
         name,
         status: 'error',
         args: null,
@@ -276,7 +253,7 @@ describe('normalizeToolCall', () => {
     const result = normalizeToolCall({
       type: 'tool_call',
       content: {
-        call_id: 'call-preflight', name: 'write_file', status: 'error',
+        call_id: 'call-preflight', name: 'write_file', status: 'error', runtime_hold: 'input_superseded',
         args: { path: 'snake_game.html' }, output,
       },
     } as any);
@@ -290,7 +267,7 @@ describe('normalizeToolCall', () => {
     const result = normalizeToolCall({
       type: 'tool_call',
       content: {
-        call_id: 'call-command-shape', name: 'exec_command', status: 'error',
+        call_id: 'call-command-shape', name: 'exec_command', status: 'error', runtime_hold: 'runtime_gate',
         args: { command: 'ls -la' }, output,
       },
     } as any);

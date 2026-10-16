@@ -13,6 +13,7 @@ use serde_json::Value;
 
 #[derive(Default, Debug)]
 pub(super) struct HistoricalToolObservation {
+    pub runtime_hold: Option<nomifun_agent_contracts::RuntimeToolHoldReason>,
     pub turn_id: Option<String>,
     pub args: Option<Value>,
     pub output: Option<String>,
@@ -57,11 +58,12 @@ fn observe_tool_event(event: &Value, event_seq: u64, observations: &mut HashMap<
             observation.capability_id = Some(capability_id.as_ref().to_owned());
             observation.action_id = Some(action_id.as_ref().to_owned());
         }
-        AgentEngineEvent::ToolCompleted { result, .. } => {
+        AgentEngineEvent::ToolCompleted { result, runtime_hold, .. } => {
             let observation = observations
                 .entry(result.call_id.as_ref().to_owned())
                 .or_default();
             observation.output = Some(result.output_text());
+            observation.runtime_hold = runtime_hold;
             observation.is_error = Some(result.is_error);
             observation.result_seq = Some(event_seq);
             observation.permission_required = nomifun_engine_core::project_system_permission_required(
@@ -140,6 +142,10 @@ pub(super) async fn load_historical_tool_observations(
             .iter()
             .map(|(_, call_id)| *call_id)
             .collect::<BTreeSet<_>>();
+        let through_seq = selected.iter().map(|(projection, _)| {
+            projection.projection.pointer("/timeline/through_seq").and_then(Value::as_u64)
+                .unwrap_or(projection.last_seq)
+        }).min().unwrap_or_default();
         let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
             "SELECT event.seq, event.inline_json, payload.body FROM agent_events event \
              LEFT JOIN agent_payloads payload ON payload.payload_id = event.payload_id \
@@ -150,6 +156,8 @@ pub(super) async fn load_historical_tool_observations(
         query.push_bind(&turn_id);
         query.push(" AND event.kind = 'runtime/progress-recorded' AND event.seq >= ");
         query.push_bind(started_at);
+        query.push(" AND event.seq <= ");
+        query.push_bind(i64::try_from(through_seq).map_err(|error| AppError::Internal(error.to_string()))?);
         query.push(
             " AND COALESCE( \
              json_extract(event.inline_json, '$.event.call.call_id'), \
@@ -265,7 +273,7 @@ mod tests {
         let output = json!({"status":"not_executed","code":"INVALID_TOOL_ARGUMENTS","tool":"report_completion",
             "issues":[{"instance_path":"/criteria","error":"missing criterion"}],
             "message":"No call in this batch was executed."}).to_string();
-        let completed = AgentEngineEvent::ToolCompleted {step:1,
+        let completed = AgentEngineEvent::ToolCompleted { runtime_hold: None, step:1,
             result:AgentToolResult::text(ToolCallId::from("rejected-report"),output.clone(),true)};
         journal.append(serde_json::to_string(&completed).unwrap(),None,EngineJournalWrite::Progress).await.unwrap();
         // An unpaired proposal never becomes an executed or rejected result.
@@ -275,7 +283,7 @@ mod tests {
         journal.append(json!({"event":"tool_call_completed","step":3,
             "call":{"call_id":"wrong-step","name":"report_completion","arguments":{}}}
         ).to_string(),None,EngineJournalWrite::Progress).await.unwrap();
-        journal.append(serde_json::to_string(&AgentEngineEvent::ToolCompleted {step:4,
+        journal.append(serde_json::to_string(&AgentEngineEvent::ToolCompleted { runtime_hold: None, step:4,
             result:AgentToolResult::text(ToolCallId::from("wrong-step"),"foreign step",true)}).unwrap(),
             None,EngineJournalWrite::Progress).await.unwrap();
         let store = AgentSessionStore::from_pool(pool.clone()).await.unwrap();
@@ -301,11 +309,11 @@ mod tests {
         assert_eq!(detail.is_error,Some(true));
         assert!(detail.turn_id.is_some());
         let display_id = tool.projection["correlation_id"].as_str().unwrap();
-        let lookup = store.runtime_tool_history_message(&session_id,display_id).await.unwrap().unwrap();
+        let lookup = store.message_by_id(&session_id,display_id).await.unwrap().unwrap();
         assert_eq!(lookup,tool.clone());
-        assert!(store.runtime_tool_history_message(&other_id,display_id).await.unwrap().is_none());
-        assert!(store.runtime_tool_history_message(&session_id,&uuid::Uuid::now_v7().to_string()).await.unwrap().is_none());
-        assert!(store.runtime_tool_history_message(&session_id,"bad-id").await.unwrap().is_none());
+        assert!(store.message_by_id(&other_id,display_id).await.unwrap().is_none());
+        assert!(store.message_by_id(&session_id,&uuid::Uuid::now_v7().to_string()).await.unwrap().is_none());
+        assert!(store.message_by_id(&session_id,"bad-id").await.unwrap().is_none());
         let mut cursor = None;
         let mut paged = Vec::new();
         loop {
@@ -355,7 +363,7 @@ mod tests {
             journal.append(json!({"event":"host_tool_settled","operation_id":format!("operation-{index}"),
                 "call_id":call_id,"result":null,"error":"typed Kernel refusal"
             }).to_string(), None, EngineJournalWrite::Settlement).await.unwrap();
-            let completed = AgentEngineEvent::ToolCompleted { step: 1,
+            let completed = AgentEngineEvent::ToolCompleted { runtime_hold: None, step: 1,
                 result: AgentToolResult::text(call_id.clone().into(), output, is_error),
             };
             let ack_seq = journal.append_with_receipt(serde_json::to_string(&completed).unwrap(),
@@ -407,7 +415,7 @@ mod tests {
             "error": null
         }).to_string(), None, EngineJournalWrite::Settlement).await.unwrap();
         let large_output = "file contents".repeat(6_000);
-        let completed = AgentEngineEvent::ToolCompleted {
+        let completed = AgentEngineEvent::ToolCompleted { runtime_hold: None,
             step: 1,
             result: AgentToolResult::text(ToolCallId::from("call-1"), large_output.clone(), false),
         };

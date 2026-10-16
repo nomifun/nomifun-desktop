@@ -37,8 +37,10 @@ describe('MessageThinking expansion', () => {
     expect(cssSource.includes('font-size: var(--conversation-message-font-size')).toBe(true);
   });
 
-  test('frames thinking content with a light thin border', () => {
-    expect(cssSource.includes('border: 1px solid var(--color-border-2')).toBe(true);
+  test('uses one shallow detail surface without a border or left rule', () => {
+    expect(cssSource.includes('border: 1px solid var(--color-border-2')).toBe(false);
+    expect(cssSource.includes('border-left')).toBe(false);
+    expect(cssSource.includes('background: var(--color-fill-1)')).toBe(true);
     expect(cssSource.includes('border-radius: 6px')).toBe(true);
   });
 

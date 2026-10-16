@@ -399,6 +399,11 @@ export const useNomiMessage = (
       if (conversation_id !== message.conversation_id) {
         return;
       }
+      if (message.type === 'canonical_timeline') {
+        if (message.turn_id) addOrUpdateMessage({ type: 'canonical_timeline',
+          conversation_id: message.conversation_id, turn_id: message.turn_id, updates: message.data });
+        return;
+      }
 
       // These canonical receipts update the original reply's compact notice.
       // They must not reconcile or re-raise the current Turn's busy state.

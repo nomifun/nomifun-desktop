@@ -9,6 +9,7 @@ import type { MessageId } from '@/common/types/ids';
 import type { PersistedToolArtifact } from '@/common/types/platform/toolCallTypes';
 import type { TurnFileSummary } from '@/common/types/platform/turnFiles';
 import type { TurnDisclosureProcessState } from './turnDisclosureModel';
+import { resolveMessageFilePath } from './components/messageFilePath';
 
 export interface TurnDeliverableItem {
   identity: string;
@@ -97,7 +98,7 @@ export function collectVerifiedTurnImages(
           identity: `artifact:${artifact.id}`,
           relativePath,
           fileName: relativePath.split('/').at(-1) || relativePath,
-          absolutePath: artifact.path,
+          absolutePath: resolveMessageFilePath(artifact.path, workspaceRoots[0], message.content.managed_file_paths),
           sizeBytes: artifact.size_bytes,
           sha256: artifact.sha256,
           artifactId: artifact.id,

@@ -6,6 +6,7 @@
 
 import { extractResponseTextChunk, toDisplayText } from '@/common/chat/displayText';
 import i18n from 'i18next';
+import { toolActivityLabel } from '@/common/chat/toolActivityLabel';
 import { agentUserInputRequestText, normalizeAgentStreamError, normalizeAgentUserInputRequest } from '@/common/chat/chatLib';
 import type { AgentUserInputRequest } from '@/common/protocolBindings/AgentUserInputRequest';
 import type {
@@ -226,6 +227,10 @@ const activityFromResponse = (event: IResponseMessage): string | null => {
       'creativeStudio.agent.activity.completing',
       'Agent is completing this task'
     );
+  }
+  if (event.type === 'tool_call') {
+    return toolActivityLabel(event.data, i18n.resolvedLanguage ?? i18n.language)
+      ?? activityCopy('creativeStudio.agent.activity.executingTool', 'Agent is executing a tool');
   }
   if (event.type === 'tool_group') {
     const tools = Array.isArray(event.data) ? event.data : [];

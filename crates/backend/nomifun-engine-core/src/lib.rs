@@ -28,5 +28,5 @@ pub use process::{
 };
 pub use tool::{
     EngineEffectClass, EngineToolBinding, EngineToolInvocation, EngineToolInvoker, EngineToolPlan,
-    EngineToolResult, input_schema_digest, parse_completed_arguments, validate_tool_argument_size,
+    EngineToolResult, RuntimeToolHoldReason, input_schema_digest, parse_completed_arguments, validate_tool_argument_size,
 };
