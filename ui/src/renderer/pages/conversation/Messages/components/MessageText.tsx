@@ -29,6 +29,7 @@ import AssistantProtocolNotice from './AssistantProtocolNotice';
 import { IdmmDecisionExplanation } from './IdmmDecisionExplanation';
 import decisionStyles from './IdmmDecisionExplanation.module.css';
 import { resolveMessageFilePath } from './messageFilePath';
+import ConversationProse from './ConversationProse';
 export { resolveMessageFilePath } from './messageFilePath';
 
 /**
@@ -294,14 +295,14 @@ const MessageText: React.FC<{
               </CollapsibleContent>
             ) : (
               <div data-testid='message-text-content'>
-                <MarkdownView
+                <ConversationProse
+                  message={message}
+                  text={text}
                   codeStyle={CODE_STYLE}
                   fontSize={MESSAGE_BODY_FONT_SIZE}
                   lineHeight={MESSAGE_BODY_LINE_HEIGHT}
                   allowUnverifiedImages={isUserMessage}
-                >
-                  {data}
-                </MarkdownView>
+                />
               </div>
             )}
           </div>

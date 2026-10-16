@@ -2,7 +2,6 @@ import type { IMessageToolCall, IMessageToolGroup, TMessage } from '@/common/cha
 import { toDisplayText } from '@/common/chat/displayText';
 import { normalizeToolMessages } from '@/common/chat/normalizeToolCall';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
-import MarkdownView from '@renderer/components/Markdown';
 import { hasSkillSuggest, stripSkillSuggest } from '@renderer/utils/chat/skillSuggestParser';
 import { hasThinkTags, stripThinkTags } from '@renderer/utils/chat/thinkTagFilter';
 import { Attention, Code, Right } from '@icon-park/react';
@@ -19,6 +18,7 @@ import { getProcessItemState } from '../turnProcessState';
 import { isToolObservationUnconfirmed } from '../processSegments';
 import AssistantProtocolNotice from './AssistantProtocolNotice';
 import MessageThinking from './MessageThinking';
+import ConversationProse from './ConversationProse';
 import { MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT } from '../typography';
 import { buildToolReceiptDetailRows, type ToolReceiptDetailRow } from './toolGroupSummaryModel';
 
@@ -249,7 +249,7 @@ const ProcessTraceItem: React.FC<{ item: ProcessTraceRenderableItem; variant?: '
     const protocol = projectAssistantText(toDisplayText(item.content.content)).hasToolPayload;
     if (!content && !protocol) return null;
     return <div className='turn-process-trace__narration'>
-      {content && <div className='turn-process-trace__paragraph' data-testid='process-narration'><MarkdownView variant='process' fontSize={MESSAGE_BODY_FONT_SIZE} lineHeight={MESSAGE_BODY_LINE_HEIGHT}>{content}</MarkdownView></div>}
+      {content && <div className='turn-process-trace__paragraph' data-testid='process-narration'><ConversationProse message={item} text={content} variant='process' fontSize={MESSAGE_BODY_FONT_SIZE} lineHeight={MESSAGE_BODY_LINE_HEIGHT} /></div>}
       {protocol && <AssistantProtocolNotice raw={toDisplayText(item.content.content)} />}
     </div>;
   }

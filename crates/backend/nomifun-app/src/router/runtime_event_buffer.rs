@@ -8,12 +8,18 @@ use std::collections::BTreeSet;
 const FLUSH_BYTES: usize = 16 * 1024;
 const MAX_THINKING_BYTES_PER_TURN: usize = 512 * 1024;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContentPhase {
+    Narration(u16),
+    Reasoning(u16),
+}
+
 #[derive(Default)]
 pub(super) struct AgentEventBuffer {
     text: Option<(u16, String)>,
     thinking: Option<(u16, String)>,
     thinking_bytes: usize,
-    active_thinking_step: Option<u16>,
+    active_phase: Option<ContentPhase>,
     instruction_reads: BTreeSet<ToolCallId>,
     proposal_ids: BTreeSet<ToolCallId>,
 }
@@ -21,12 +27,20 @@ pub(super) struct AgentEventBuffer {
 impl AgentEventBuffer {
     pub(super) fn project(&mut self, event: &AgentEngineEvent) -> Vec<AgentEngineEvent> {
         let mut records = Vec::new();
-        let starts_thinking = matches!(event.reasoning_display_transition(), Some(Some(step))
-            if self.active_thinking_step != Some(step));
-        let closes_thinking = self.active_thinking_step.is_some()
-            && event.reasoning_display_transition() == Some(None);
-        if let Some(next) = event.reasoning_display_transition() {
-            self.active_thinking_step = next;
+        let transition = match event {
+            AgentEngineEvent::OutputTextDelta { text, .. } if text.is_empty() => None,
+            AgentEngineEvent::OutputTextDelta { step, .. }
+            | AgentEngineEvent::CompletionDelivered { step, .. } => Some(Some(ContentPhase::Narration(*step))),
+            AgentEngineEvent::ReasoningDelta { step, .. } => Some(Some(ContentPhase::Reasoning(*step))),
+            _ => event.reasoning_display_transition().map(|_| None),
+        };
+        let starts_narration = matches!(transition, Some(Some(ContentPhase::Narration(_))))
+            && transition != Some(self.active_phase);
+        let starts_thinking = matches!(transition, Some(Some(ContentPhase::Reasoning(_))))
+            && transition != Some(self.active_phase);
+        let closes_phase = self.active_phase.is_some() && transition == Some(None);
+        if let Some(next) = transition {
+            self.active_phase = next;
         }
         match event {
             AgentEngineEvent::ContextCompacted {
@@ -66,7 +80,7 @@ impl AgentEventBuffer {
                 // one identity-only proposal fact, not private/partial JSON,
                 // so replay can corroborate ModelOutputTruncated exactly.
                 let new_proposal = self.proposal_ids.len() < 64 && self.proposal_ids.insert(call_id.clone());
-                if closes_thinking || new_proposal {
+                if closes_phase || new_proposal {
                     self.flush(&mut records);
                     records.push(AgentEngineEvent::ToolCallDelta {
                         step: *step,
@@ -106,6 +120,7 @@ impl AgentEventBuffer {
                 });
             }
             AgentEngineEvent::OutputTextDelta { step, text } => {
+                if text.is_empty() { return records; }
                 if self.thinking.is_some()
                     || self.text.as_ref().is_some_and(|(previous, _)| previous != step)
                 {
@@ -113,7 +128,10 @@ impl AgentEventBuffer {
                 }
                 let (_, pending) = self.text.get_or_insert_with(|| (*step, String::new()));
                 pending.push_str(text);
-                if closes_thinking || pending.len() >= FLUSH_BYTES {
+                // The first actual fragment owns the canonical narration
+                // boundary, including same-step resumes after a tool/thought.
+                // Later fragments keep the normal bounded write cadence.
+                if starts_narration || pending.len() >= FLUSH_BYTES {
                     self.flush(&mut records);
                 }
             }
@@ -267,8 +285,114 @@ pub(super) fn bounded_result(
 }
 
 #[cfg(test)]
-mod thinking_lifecycle_tests {
+mod content_lifecycle_tests {
     use super::*;
+
+    #[test]
+    fn first_narration_commits_before_publication_without_flushing_each_later_delta() {
+        let mut buffer = AgentEventBuffer::default();
+        let start = AgentEngineEvent::ModelStepStarted { step: 1, operation_id: "model:1".into(), correction_source: None };
+        assert_eq!(buffer.project(&start), vec![start]);
+        assert!(buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: String::new() }).is_empty());
+        let first = AgentEngineEvent::OutputTextDelta { step: 1, text: "开始检查😀。".into() };
+        assert_eq!(buffer.project(&first), vec![first]);
+        let suffix = AgentEngineEvent::OutputTextDelta { step: 1, text: "后续内容。".into() };
+        assert!(buffer.project(&suffix).is_empty());
+        let mut committed = Vec::new();
+        buffer.flush(&mut committed);
+        assert_eq!(committed, vec![suffix.clone()]);
+        assert!(buffer.project(&suffix).is_empty(), "checkpoint flush does not restart the same phase");
+    }
+
+    #[test]
+    fn narration_reopens_after_typed_model_tool_and_control_boundaries() {
+        let boundaries = [
+            AgentEngineEvent::ReasoningDelta { step: 1, text: "Inspect.".into() },
+            AgentEngineEvent::ToolCallDelta { step: 1, call_id: "call".into(), name: "read_file".into(), arguments_delta: "PRIVATE_ARGUMENTS".into() },
+            AgentEngineEvent::ToolStarted { step: 1, call_id: "call".into(), capability_id: "workspace.files".into(), action_id: "read".into() },
+            AgentEngineEvent::ModelStepStarted { step: 2, operation_id: "model:2".into(), correction_source: None },
+            AgentEngineEvent::ExecutionResumed { checkpoint_revision: 1, checkpoint_step: 1, model_steps: 1, execution_fence: 2, discarded_tool_call_ids: vec![] },
+            AgentEngineEvent::DeliveryReviewSuperseded { step: 1, discarded_tool_call_ids: vec![], continuation: true },
+        ];
+        for boundary in boundaries {
+            let mut buffer = AgentEventBuffer::default();
+            buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: "Before.".into() });
+            let suffix = AgentEngineEvent::OutputTextDelta { step: 1, text: "Pending suffix.".into() };
+            assert!(buffer.project(&suffix).is_empty());
+            let committed = buffer.project(&boundary);
+            assert_eq!(committed.first(), Some(&suffix), "{boundary:?}");
+            let step = if matches!(boundary, AgentEngineEvent::ModelStepStarted { step: 2, .. }) { 2 } else { 1 };
+            let resumed = AgentEngineEvent::OutputTextDelta { step, text: "After.".into() };
+            assert_eq!(buffer.project(&resumed), vec![resumed], "{boundary:?}");
+            assert!(buffer.project(&AgentEngineEvent::OutputTextDelta { step, text: "Still the same phase.".into() }).is_empty());
+        }
+    }
+
+    #[test]
+    fn repeated_proposals_cannot_swallow_a_resumed_narration_boundary_or_private_arguments() {
+        let mut buffer = AgentEventBuffer::default();
+        let proposal = AgentEngineEvent::ToolCallDelta { step: 1, call_id: "same-call".into(), name: "read_file".into(), arguments_delta: "PRIVATE_ARGUMENTS".into() };
+        buffer.project(&proposal);
+        buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: "Narration.".into() });
+        let suffix = AgentEngineEvent::OutputTextDelta { step: 1, text: "Buffered suffix.".into() };
+        assert!(buffer.project(&suffix).is_empty());
+        let committed = buffer.project(&proposal);
+        assert_eq!(committed.len(), 2);
+        assert_eq!(committed[0], suffix);
+        assert!(matches!(&committed[1], AgentEngineEvent::ToolCallDelta { arguments_delta, .. } if arguments_delta.is_empty()));
+        assert!(!serde_json::to_string(&committed).unwrap().contains("PRIVATE_ARGUMENTS"));
+        let resumed = AgentEngineEvent::OutputTextDelta { step: 1, text: "Resumed.".into() };
+        assert_eq!(buffer.project(&resumed), vec![resumed]);
+    }
+
+    #[test]
+    fn long_narration_keeps_exact_text_with_bounded_batches_after_its_first_anchor() {
+        let mut buffer = AgentEventBuffer::default();
+        let fragment = "x".repeat(1024);
+        let mut committed = Vec::new();
+        for _ in 0..50 {
+            committed.extend(buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: fragment.clone() }));
+        }
+        assert_eq!(committed.len(), 4, "one phase anchor followed by three 16KiB batches");
+        buffer.flush(&mut committed);
+        let chunks = committed.iter().map(|event| match event {
+            AgentEngineEvent::OutputTextDelta { step: 1, text } => text.as_str(),
+            _ => panic!("unexpected narration record"),
+        }).collect::<Vec<_>>();
+        assert_eq!(chunks[0].len(), 1024);
+        assert!(chunks.iter().all(|text| text.len() <= FLUSH_BYTES));
+        assert_eq!(chunks.concat(), fragment.repeat(50));
+        let mut duplicate = Vec::new();
+        buffer.flush(&mut duplicate);
+        assert!(duplicate.is_empty());
+    }
+
+    #[test]
+    fn late_results_flush_pending_text_without_reopening_its_canonical_phase() {
+        let mut buffer = AgentEventBuffer::default();
+        let first = AgentEngineEvent::OutputTextDelta { step: 1, text: "Answer.".into() };
+        assert_eq!(buffer.project(&first), vec![first]);
+        let suffix = AgentEngineEvent::OutputTextDelta { step: 1, text: " More.".into() };
+        assert!(buffer.project(&suffix).is_empty());
+        let result = AgentEngineEvent::ToolCompleted { step: 1, result: AgentToolResult::text("earlier-call".into(), "done", false), runtime_hold: None };
+        let committed = buffer.project(&result);
+        assert_eq!(committed[0], suffix);
+        assert_eq!(committed.len(), 2);
+        assert!(buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: " Continued.".into() }).is_empty());
+    }
+
+    #[test]
+    fn accepted_completion_delivery_remains_one_unchanged_atomic_record() {
+        let mut buffer = AgentEventBuffer::default();
+        buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: "Progress.".into() });
+        let suffix = AgentEngineEvent::OutputTextDelta { step: 1, text: " Buffered progress.".into() };
+        assert!(buffer.project(&suffix).is_empty());
+        let delivery = AgentEngineEvent::CompletionDelivered { step: 1, text: "完整的已验收结果😀\n\n保留原始交付内容。".into() };
+        assert_eq!(buffer.project(&delivery), vec![suffix, delivery]);
+        let mut tail = Vec::new();
+        buffer.flush(&mut tail);
+        assert!(tail.is_empty(), "an accepted delivery is not split or written twice");
+    }
 
     #[test]
     fn bounded_tool_results_preserve_runtime_hold_without_classifying_owner_errors() {
