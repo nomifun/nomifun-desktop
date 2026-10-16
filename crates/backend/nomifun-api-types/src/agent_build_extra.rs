@@ -120,14 +120,6 @@ pub struct NomiBuildExtra {
     /// prompt provider so the persona can acknowledge the remote context.
     #[serde(default)]
     pub channel_platform: Option<String>,
-    /// Marks a dedicated external-channel conversation whose sender was
-    /// admitted automatically by an `all_members` group policy rather than by
-    /// explicit pairing approval. The Nomi factory treats this as a strictly
-    /// subtractive authority marker and applies the model-only ceiling even
-    /// though channel conversations are physically owned by the installation
-    /// owner. It never grants a capability.
-    #[serde(default)]
-    pub channel_group_guest: bool,
     /// The companion this session is bound to (multi-companion upgrade). Set by the
     /// channel layer on Channel Agent sessions (platform binding > default
     /// companion) and consumed by the companion prompt provider to pick the
@@ -288,24 +280,10 @@ mod tests {
     }
 
     #[test]
-    fn nomi_build_extra_group_guest_marker_defaults_false_and_parses_true() {
-        let plain: NomiBuildExtra = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert!(!plain.channel_group_guest);
-        assert!(!NomiBuildExtra::default().channel_group_guest);
-
-        let guest: NomiBuildExtra = serde_json::from_value(serde_json::json!({
-            "channel_group_guest": true,
-            "channel_platform": "lark"
-        }))
-        .unwrap();
-        assert!(guest.channel_group_guest);
-        assert_eq!(guest.channel_platform.as_deref(), Some("lark"));
-    }
-
-    #[test]
     fn retired_options_are_not_projected_into_runtime_extra() {
         let extra: NomiBuildExtra = serde_json::from_value(serde_json::json!({
             "backend": "claude",
+            "channel_group_guest": true,
             "summon": {
                 "companion_id": "0190f5fe-7c00-7a00-8abc-000000000001",
                 "memory_ids": ["0190f5fe-7c00-7a00-8abc-000000000002"],
@@ -319,6 +297,7 @@ mod tests {
         assert_eq!(extra.system_prompt.as_deref(), Some("keep the prompt"));
         let serialized = serde_json::to_value(extra).unwrap();
         assert!(serialized.get("summon").is_none());
+        assert!(serialized.get("channel_group_guest").is_none());
         assert!(
             serialized.get("backend").is_none(),
             "retired backend labels must not be re-emitted as runtime configuration"

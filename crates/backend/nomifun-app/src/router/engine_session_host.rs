@@ -20,6 +20,10 @@ use super::official_runtime::{OfficialRuntimeHost, binding_from_extra};
 
 #[path = "engine_recovery.rs"]
 mod recovery;
+#[path = "companion_shared_context.rs"]
+mod companion_shared_context;
+pub(super) use companion_shared_context::compose_live_observation;
+pub(super) use companion_shared_context::resolve_companion_turn_human_sources;
 
 /// Constructed by application assembly only. The sole official Driver receives
 /// this typed port owner from the composition root; there is no runtime
@@ -207,7 +211,9 @@ impl EngineSessionHost {
     ) -> Result<super::engine_skills::SelectedSkills, AppError> {
         let context = self.open_kernel_session(session)?;
         let registry = context.registry_snapshot()?;
-        let skills = super::engine_skills::compile(context.compiled(), &registry).await?;
+        let selected_only=super::unified_runtime_host::robot_interaction::uses_lean_robot_context(
+            self.is_canonical_robot_session(session).await?,context.compiled().content());
+        let skills = super::engine_skills::compile_projection(context.compiled(), &registry,selected_only).await?;
         Ok(skills)
     }
 

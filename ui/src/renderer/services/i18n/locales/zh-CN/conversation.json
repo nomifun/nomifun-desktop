@@ -47,6 +47,7 @@
     "renamePlaceholder": "请输入新名称",
     "renameSuccess": "重命名成功",
     "renameFailed": "重命名失败",
+    "renameTooLong": "名称过长，请缩短后再保存。",
     "batchSelect": "选择",
     "selectAll": "全选",
     "selectedCount": "已选 {{count}} 项",

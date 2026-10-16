@@ -3209,6 +3209,7 @@ mod tests {
                 archived: false,
                 pinned: false,
                 reasoning_effort: None,
+                companion: None,
             },
             agent_binding: AgentBindingValue {
                 preset_revision_ref: preset_ref,

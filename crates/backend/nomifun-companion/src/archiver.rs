@@ -1,8 +1,8 @@
 //! Session-window archiving loop (伙伴会话窗口归档).
 //!
-//! A companion has exactly one long-lived chat thread. Left unbounded its engine
-//! context only ever grows, so simple chats get expensive and the companion
-//! can't take on dense work. This loop cuts that thread into **windows**: when a
+//! Each companion can have several independent chat Sessions. Left unbounded,
+//! their engine contexts grow, so simple chats get expensive and the companion
+//! can't take on dense work. This loop cuts each Session into **windows**: when a
 //! window goes idle for `idle_minutes`, its messages are compressed into a
 //! day-partitioned digest (stored in `companion_session_windows`), the live
 //! model context is durably reset by the canonical Session owner,
@@ -183,19 +183,42 @@ impl Archiver {
         Ok(())
     }
 
-    /// Sweep one companion's active window. Returns the action taken (also used
-    /// by tests). Errors are per-companion and never abort the whole sweep.
+    /// Sweep every registered Session, independently of UI navigation. The
+    /// aggregate action uses Archive > Skip > Wait. One failed Session does not
+    /// prevent its siblings from being swept.
     pub async fn sweep_companion(
         &self,
         companion_id: &str,
         thresholds: &ArchiveThresholds,
         model: &ProviderWithModel,
     ) -> Result<SweepAction, AppError> {
-        // No active chat thread → nothing to archive.
-        let Some(conversation_id) = crate::companion::active_thread_ptr(&self.store, companion_id).await? else {
-            return Ok(SweepAction::Wait);
-        };
+        let threads = self.store.list_companion_threads(Some(companion_id)).await?;
+        let mut action = SweepAction::Wait;
+        let mut first_error = None;
+        for thread in threads {
+            match self.sweep_session(companion_id, &thread.conversation_id, thresholds, model).await {
+                Ok(SweepAction::Archive) => action = SweepAction::Archive,
+                Ok(SweepAction::Skip) if action == SweepAction::Wait => action = SweepAction::Skip,
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(companion = %companion_id, conversation = %thread.conversation_id, error = %error, "companion Session archive failed");
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(action),
+        }
+    }
 
+    async fn sweep_session(
+        &self,
+        companion_id: &str,
+        conversation_id: &str,
+        thresholds: &ArchiveThresholds,
+        model: &ProviderWithModel,
+    ) -> Result<SweepAction, AppError> {
         // The first window covers all current history (boundary 0); rolled
         // windows set their own boundary at close time.
         let window = self.store.ensure_open_window(companion_id, &conversation_id, 0).await?;
@@ -383,8 +406,7 @@ mod tests {
             .await
             .unwrap();
         let store = CompanionStore::open_memory().await.unwrap();
-        // Point the companion at a chat thread the port will answer for.
-        crate::companion::set_active_thread_ptr(&store, &companion.companion_id, Some(&conversation_fixture())).await.unwrap();
+        store.insert_companion_thread(&conversation_fixture(), &companion.companion_id, "伙伴会话").await.unwrap();
         let resets = Arc::new(StdMutex::new(Vec::new()));
         let calls = Arc::new(StdMutex::new(0usize));
         let archiver = Archiver {
@@ -450,6 +472,40 @@ mod tests {
         let open = archiver.store.open_window(&id).await.unwrap().unwrap();
         assert_eq!(open.status, "open");
         assert!(open.boundary_ts > old, "new window excludes the archived messages");
+    }
+
+    #[tokio::test]
+    async fn all_sessions_archive_without_an_active_navigation_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = now_ms() - 40 * 60_000;
+        let msgs = vec![WindowMessage {
+            is_user: true,
+            content: "请记录今天讨论的报告方案和接下来的工作安排".into(),
+            created_at: old,
+        }];
+        let (archiver, id, resets, calls) = make_archiver(dir.path(), msgs, GOOD_DIGEST).await;
+        let robot_session = nomifun_common::ConversationId::new().into_string();
+        archiver.store.insert_companion_thread_for_role(
+            &robot_session, &id, "机器人会话", crate::CompanionRole::Robot,
+            Some("robot-one"), Some("robot:one"),
+        ).await.unwrap();
+        let model = archiver.registry.get(&id).await.unwrap().learn.model.clone().unwrap();
+        assert_eq!(archiver.sweep_companion(&id, &thr(30, 20), &model).await.unwrap(), SweepAction::Archive);
+        let digests = archiver.store.list_digests(&id, 10).await.unwrap();
+        assert_eq!(digests.len(), 2);
+        assert_eq!(*calls.lock().unwrap(), 2);
+        {
+            let resets = resets.lock().unwrap();
+            assert!(resets.contains(&conversation_fixture()));
+            assert!(resets.contains(&robot_session));
+            assert_eq!(resets.len(), 2);
+        }
+        let desktop_session = conversation_fixture();
+        for session in [desktop_session.as_str(), robot_session.as_str()] {
+            let open = archiver.store.open_window_for_session(&id, session).await.unwrap().unwrap();
+            assert_eq!(open.conversation_id, session);
+            assert!(open.boundary_ts > old);
+        }
     }
 
     #[tokio::test]

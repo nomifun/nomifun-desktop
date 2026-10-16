@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ipcBridge } from '@/common';
 import type { ICompanionDayDigest } from '@/common/adapter/ipcBridge';
 import type { CompanionId, ConversationId } from '@/common/types/ids';
+import { parseConversationId } from '@/common/types/ids';
 import { toHistoryEntry, type DayKey, type HistoryEntry } from './historyFormat';
 
 /**
@@ -56,12 +57,12 @@ export interface DayContent {
  *
  * Read-only by construction: the conversation is RESOLVED with
  * `getCompanionSession` (never `ensureCompanionSession`, which would MINT one and
- * 400 for a companion with no model configured), and the index endpoint resolves
- * it the same way. The days are the backend's LOCAL calendar days — the same key
+ * 400 for a companion with no model configured). Explicit navigation selects an
+ * exact Session; the index and digests use that same scope. The days are the backend's LOCAL calendar days — the same key
  * that partitions archive digests — so nothing here re-buckets timestamps in a
  * browser whose timezone need not match the backend's.
  */
-export const useHistoryDays = (companionId: CompanionId): HistoryIndex => {
+export const useHistoryDays = (companionId: CompanionId, selectedSession?: string | null): HistoryIndex => {
   const [conversationId, setConversationId] = useState<ConversationId | null | undefined>(undefined);
   const [days, setDays] = useState<HistoryDay[]>([]);
   const [loading, setLoading] = useState(true);
@@ -82,12 +83,12 @@ export const useHistoryDays = (companionId: CompanionId): HistoryIndex => {
 
     void (async () => {
       try {
-        const [active, index] = await Promise.all([
-          ipcBridge.companion.getCompanionSession.invoke({ companion_id: companionId }),
-          ipcBridge.companion.listHistoryDays.invoke({ companion_id: companionId }),
-        ]);
+        const selectedId = selectedSession ? parseConversationId(selectedSession)
+          : (await ipcBridge.companion.getCompanionSession.invoke({ companion_id: companionId })).conversation_id;
+        const index = selectedId
+          ? await ipcBridge.companion.listHistoryDays.invoke({ companion_id: companionId, conversation_id: selectedId }) : [];
         if (runRef.current !== run) return;
-        setConversationId(active.conversation_id);
+        setConversationId(selectedId);
         setDays(
           index.map((entry) => ({
             day: entry.day,
@@ -108,7 +109,7 @@ export const useHistoryDays = (companionId: CompanionId): HistoryIndex => {
     return () => {
       runRef.current += 1;
     };
-  }, [companionId, attempt]);
+  }, [companionId, selectedSession, attempt]);
 
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
   const messageCount = useMemo(() => days.reduce((total, entry) => total + entry.messageCount, 0), [days]);
@@ -173,6 +174,7 @@ export const useDayMessages = (
           since: day,
           until: day,
           limit: DAY_DIGEST_LIMIT,
+          conversation_id: conversationId,
         });
         if (runRef.current === run) setDigests(rows);
       } catch {

@@ -598,12 +598,8 @@ impl ChannelMessageService {
         // never read or pollute the owner's private transcript. Non-companion and
         // unbound channels are dedicated as before.
         //
-        // The old "open-group guests may only use the restricted Nomi agent"
-        // check lived here. It is gone because `parse_agent_type` above now
-        // enforces something strictly stronger: a session naming any engine
-        // other than nomi is rejected for EVERY caller, guest or owner. Keeping
-        // the guest-only form would have asserted a condition that can no longer
-        // be true.
+        // Engine identity and guest authority are independent. A repository-
+        // authenticated group guest uses the dedicated model-only Session port.
         let agent_type = parse_agent_type(&session.agent_type)?;
         let is_direct = session.chat_kind == CHANNEL_CHAT_KIND_DIRECT;
         let is_group = session.chat_kind == CHANNEL_CHAT_KIND_GROUP;
@@ -676,12 +672,15 @@ impl ChannelMessageService {
         // Dedicated per-chat channel conversations keep their extra-derived marker
         // (marker None → send_message falls back to extra).
         let channel_platform = uses_shared_companion_session.then(|| platform.to_string());
+        let guest_creation_key = auto_group_guest.then(|| group_guest_creation_key(
+            &self.owner_user_id, session));
         self.dispatch_to_conversation(
             &session.channel_session_id,
             conversation_id,
             text,
             channel_platform,
             idempotency_key,
+            guest_creation_key.as_deref(),
         )
             .await
     }
@@ -698,6 +697,7 @@ impl ChannelMessageService {
         text: &str,
         channel_platform: Option<String>,
         idempotency_key: &str,
+        guest_creation_key: Option<&str>,
     ) -> Result<SendResult, ChannelError> {
         // `msg_id` is server-generated inside the service; channel plugins that
         // need to correlate the user message back to the conversation should use
@@ -717,16 +717,12 @@ impl ChannelMessageService {
         // runtime build. That gate is also the only safe place to recover a
         // pre-admission edit reservation; an observer-only precheck here used
         // to make that crash cutpoint permanently unrecoverable.
-        let turn = match self
-            .sessions
-            .send_turn(
-                user_id,
-                &conversation_id,
-                idempotency_key,
-                req,
-            )
-            .await
-        {
+        let delivery = if let Some(creation_key) = guest_creation_key {
+            self.sessions.send_group_guest_turn(user_id, &conversation_id, idempotency_key, req, creation_key).await
+        } else {
+            self.sessions.send_turn(user_id, &conversation_id, idempotency_key, req).await
+        };
+        let turn = match delivery {
             Ok(delivery) => delivery,
             // A Conflict is only "please wait" when the (now shared) session is
             // actually working a turn — the turn-claim race the per-chat busy
@@ -760,60 +756,32 @@ impl ChannelMessageService {
         })
     }
 
-    /// A group session may only reuse a conversation created for that exact
-    /// group chat and authorization tier. This is a defensive backstop for
-    /// legacy/stale bindings: a row that still points at the companion owner's
-    /// private conversation, or an unrestricted conversation attached to an
-    /// `auto_group` identity, is never dispatched into.
+    /// A group chat reuses only its exact canonical opening command, with
+    /// independent identities for approved and automatically admitted guests.
+    /// Mutable row pointers and projected extra fields do not prove that scope.
     async fn reusable_session_conversation(
         &self,
         session: &ChannelSessionRow,
         auto_group_guest: bool,
     ) -> Result<Option<String>, ChannelError> {
-        let Some(conversation_id) = session.conversation_id.as_deref() else {
-            return Ok(None);
-        };
         if session.chat_kind == CHANNEL_CHAT_KIND_DIRECT {
-            return Ok(Some(conversation_id.to_owned()));
+            return Ok(session.conversation_id.clone());
         }
         if session.chat_kind != CHANNEL_CHAT_KIND_GROUP {
             warn!(
                 channel_session_id = %session.channel_session_id,
-                conversation_id,
                 "discarding conversation binding for unknown chat kind"
             );
             return Ok(None);
         }
-
-        let conversation = match self
-            .sessions
-            .get(&self.owner_user_id, conversation_id)
-            .await
-        {
-            Ok(conversation) => conversation,
-            Err(nomifun_common::AppError::NotFound(_)) => return Ok(None),
-            Err(error) => return Err(ChannelError::MessageSendFailed(error.to_string())),
-        };
-        let belongs_to_group = session.chat_id.is_some()
-            && conversation.channel_chat_id.as_deref() == session.chat_id.as_deref();
-        let is_group_guest = conversation
-            .extra
-            .get("channel_group_guest")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        if !belongs_to_group || is_group_guest != auto_group_guest {
-            warn!(
-                channel_session_id = %session.channel_session_id,
-                conversation_id,
-                belongs_to_group,
-                expected_group_guest = auto_group_guest,
-                actual_group_guest = is_group_guest,
-                "discarding unsafe or stale group conversation binding"
-            );
-            return Ok(None);
+        let purpose = if auto_group_guest { "dedicated-group-guest" } else { "dedicated-group-approved" };
+        let existing = self.sessions.find_created_session(&self.owner_user_id,
+            &channel_creation_key(&self.owner_user_id,session,purpose)).await
+            .map_err(|error|ChannelError::MessageSendFailed(error.to_string()))?;
+        if let Some(id) = existing.as_deref() && session.conversation_id.as_deref() != Some(id) {
+            self.repo.update_session_conversation(&session.channel_session_id,id).await?;
         }
-
-        Ok(Some(conversation_id.to_owned()))
+        Ok(existing)
     }
 
     /// Creates a new conversation for a channel session.
@@ -836,9 +804,9 @@ impl ChannelMessageService {
         // row's own companion binding (per-bot, the multi-bot path) > the
         // per-platform binding. NO default-companion fallback — an unbound channel
         // is hosted by no companion. Recorded in extra.companion_id so the
-        // persona/memory layers and gateway tools know which companion owns the
-        // session. Companion persona and memory context apply to Nomi only; every
-        // channel session receives the base channel Agent context.
+        // persona/memory layers know the approved channel's companion. A guest
+        // can use the same selected model, while its trusted creation port drops
+        // these presentation extras and freezes a model-only Agent contract.
         let channel_companion_id = if agent_type == AgentType::Nomi {
             self.resolve_session_companion(session, platform).await
         } else {
@@ -863,9 +831,6 @@ impl ChannelMessageService {
         }
 
         let mut extra = Self::build_channel_extra(agent_config.backend.as_deref());
-        if auto_group_guest {
-            extra["channel_group_guest"] = serde_json::Value::Bool(true);
-        }
         apply_channel_agent_context(&mut extra, agent_type, platform, channel_companion_id.as_deref());
         let name = channel_conversation_name(
             platform,
@@ -912,11 +877,11 @@ impl ChannelMessageService {
             "dedicated"
         };
         let creation_key = channel_creation_key(&self.owner_user_id, session, creation_scope);
-        let response = self
-            .sessions
-            .create_idempotent(&self.owner_user_id, req, &creation_key)
-            .await
-            .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))?;
+        let response = if auto_group_guest {
+            self.sessions.create_group_guest_idempotent(&self.owner_user_id, req, &creation_key).await
+        } else {
+            self.sessions.create_idempotent(&self.owner_user_id, req, &creation_key).await
+        }.map_err(|e| ChannelError::MessageSendFailed(e.to_string()))?;
 
         debug!(
             conversation_id = %response.conversation_id,
@@ -1161,6 +1126,12 @@ impl ChannelMessageService {
         extra
     }
 
+}
+
+/// Exact host opening identity for the dedicated guest Session. This carries
+/// no authority by itself; the host also verifies the canonical opening owner.
+pub fn group_guest_creation_key(owner_user_id: &str, session: &ChannelSessionRow) -> String {
+    channel_creation_key(owner_user_id, session, "dedicated-group-guest")
 }
 
 fn channel_creation_key(

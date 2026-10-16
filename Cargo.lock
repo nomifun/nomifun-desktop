@@ -5580,6 +5580,7 @@ dependencies = [
 name = "nomifun-agent-domain-wave4"
 version = "0.8.11"
 dependencies = [
+ "jsonschema",
  "nomifun-agent-contracts",
  "nomifun-agent-kernel",
  "serde_json",
@@ -6594,6 +6595,7 @@ dependencies = [
  "nomifun-model-invoke",
  "nomifun-realtime",
  "nomifun-robot",
+ "nomifun-voice-contracts",
  "opusic-sys",
  "ort",
  "rand 0.9.4",

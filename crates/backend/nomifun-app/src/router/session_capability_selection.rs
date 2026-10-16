@@ -24,7 +24,7 @@ async fn editable(state: &NomiCoreAgentApiState, observation: &nomifun_agent_ses
     }
     let attempt: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversation_execution_links WHERE conversation_id = ? AND relation IN ('attempt', 'automation'))")
         .bind(session_id.as_ref()).fetch_one(&state.session_owner.pool).await.map_err(|error| AppError::Internal(error.to_string()))?;
-    Ok(attempt == 0)
+    Ok(attempt == 0 && !state.session_owner.is_companion_associated_task(&observation.session.owner_ref.principal_id, session_id).await?)
 }
 
 pub(super) async fn get_selection(
@@ -54,14 +54,28 @@ pub(super) async fn update_selection(
         return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "AGENT_SESSION_BINDING_CHANGED", "the Session configuration changed; refresh its selection before applying"));
     }
     let current = agent_binding_dto(&observation.session.agent_binding)?;
-    let mut replacement = state.control_plane.resolve_agent_session_capabilities_binding(&owner.0, &current, Some(&request.selection)).await?;
+    let companion_origin = canonical_companion_origin(owner.as_ref(), &observation)?;
+    let companion_role = companion_origin.as_ref().map(|scope| scope.role);
+    let mut replacement = if companion_role == Some(nomifun_agent_contracts::CompanionSessionRole::Robot) {
+        state.control_plane.resolve_agent_session_capabilities_binding_selected_skills(&owner.0, &current, &request.selection).await?
+    } else {
+        state.control_plane.resolve_agent_session_capabilities_binding(&owner.0, &current, Some(&request.selection)).await?
+    };
+    // Extension compilation returns unbound immutable artifacts. Carry the
+    // Session's exact non-MCP choices, then rebuild MCP from its newly selected
+    // locks below. An extension edit must retain its exact persona and device.
+    replacement.typed_resource_bindings = current.typed_resource_bindings.iter()
+        .filter(|resource| resource.resource_kind != "mcp_server").cloned().collect();
     if replacement.resolved_snapshot_ref == current.resolved_snapshot_ref && replacement.preset_revision_ref == current.preset_revision_ref {
         let (_, _, snapshot) = state.control_plane.saved_binding_artifacts(&owner.0, &current).await?;
         return Ok(Json(ApiResponse::ok(AgentSessionCapabilitySelectionDto { selection: selection(&snapshot), binding_version: current.binding_version, editable: true })));
     }
     let mcp = state.resource_bindings.resolve_mcp_for_saved_binding(&state.control_plane, &owner.0, &replacement).await?;
-    replacement.typed_resource_bindings = current.typed_resource_bindings.iter().filter(|resource| resource.resource_kind != "mcp_server").cloned().chain(mcp).collect();
+    replacement.typed_resource_bindings = replacement.typed_resource_bindings.into_iter().filter(|resource| resource.resource_kind != "mcp_server").chain(mcp).collect();
     replacement.typed_resource_bindings.sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+    if let Some(origin) = companion_origin.as_ref() {
+        companion_sessions::validate_role_resources(origin, &replacement)?;
+    }
     let (_, _, snapshot) = state.control_plane.saved_binding_artifacts(&owner.0, &replacement).await?;
     let previous_active = state.session_owner.canonical().active_capability_ids(&principal, &id).await?.into_iter().collect::<BTreeSet<_>>();
     let active = snapshot.content.contributions().filter(|capability| previous_active.contains(capability.capability.id.as_ref())

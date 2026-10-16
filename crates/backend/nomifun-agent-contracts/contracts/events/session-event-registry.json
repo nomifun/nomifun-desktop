@@ -280,17 +280,25 @@
       "persistence": "persistent",
       "payload_schema": "events/idmm-notice-recorded/v1",
       "producer": {
-        "allowed": ["session_api"]
+        "allowed": [
+          "session_api"
+        ]
       },
       "predecessor": {
         "mode": "any_of",
-        "kinds": ["message/completed", "message/assistant-projected", "turn/completed"]
+        "kinds": [
+          "message/completed",
+          "message/assistant-projected",
+          "turn/completed"
+        ]
       },
       "correlation": "message",
       "idempotency": "producer_scoped_required",
       "projector": {
         "required": true,
-        "reducers": ["message-projection"]
+        "reducers": [
+          "message-projection"
+        ]
       },
       "replay_rule": "rebuild_projection"
     },
@@ -1094,11 +1102,23 @@
       "version": 1,
       "persistence": "persistent",
       "payload_schema": "events/turn-workspace-files-observed/v1",
-      "producer": { "allowed": ["runtime_supervisor"] },
-      "predecessor": { "mode": "any_of", "kinds": ["turn/started"] },
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/started"
+        ]
+      },
       "correlation": "turn",
       "idempotency": "operation_scoped_required",
-      "projector": { "required": false, "reducers": [] },
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
       "replay_rule": "cache_metadata_only"
     },
     {
@@ -1203,6 +1223,30 @@
         ]
       },
       "replay_rule": "rehydrate_runtime_input"
+    },
+    {
+      "kind": "robot/question-playback-accepted",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/robot-question-playback-accepted/v1",
+      "producer": {
+        "allowed": [
+          "session_api"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "message/assistant-projected"
+        ]
+      },
+      "correlation": "message",
+      "idempotency": "producer_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "no_effect"
     }
   ]
 }

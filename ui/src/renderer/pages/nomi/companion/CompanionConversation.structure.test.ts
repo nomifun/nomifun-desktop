@@ -22,7 +22,7 @@ describe('CompanionConversation structure', () => {
     const models = readSource('../workspace/tabs/OverviewTab/ModelsSection.tsx');
 
     expect(conversation.includes('<ProductAgentBindingSelect')).toBe(true);
-    expect(conversation.includes("targetKind='companion'")).toBe(true);
+    expect(conversation.includes('targetKind={role}')).toBe(true);
     expect(conversation.includes('conversationId={conversation.id}')).toBe(true);
     expect(conversation.includes('onChanged={refreshSession}')).toBe(true);
     expect(conversation.includes('creationEnabled={false}')).toBe(true);

@@ -71,6 +71,8 @@ fn attempt_session_target(
             },
             AgentExecutionAttemptSessionKind::AutomationLead,
         ))
+    } else if let Some(source) = crate::engine::directed_delegation_source(initial_plan_input)? {
+        Ok((AttemptSessionTarget::DirectedChildAttempt { source }, AgentExecutionAttemptSessionKind::ChildAttempt))
     } else {
         Ok((
             AttemptSessionTarget::ChildAttempt,
@@ -234,6 +236,9 @@ pub(crate) trait ConversationEffects: Send + Sync {
         detail: &AgentExecutionDetail,
         operation_id: &str,
     ) -> Result<(), AppError>;
+
+    async fn report_lead_input(&self, _owner_id: &str, _detail: &AgentExecutionDetail,
+        _request: &nomifun_api_types::AgentExecutionEvent) -> Result<(),AppError> { Ok(()) }
 }
 
 pub(crate) struct ExecutionSchedulerDeps {
@@ -645,6 +650,9 @@ impl ExecutionScheduler {
         owner_id: &str,
         detail: &AgentExecutionDetail,
     ) -> Result<(), AppError> {
+        if detail.execution.status==AgentExecutionStatus::WaitingInput {
+            return self.reconcile_lead_input_notice_once(owner_id,detail).await;
+        }
         if !detail.execution.status.is_terminal()
             || detail.execution.lead_conversation_id.is_none()
         {
@@ -742,6 +750,39 @@ impl ExecutionScheduler {
             )
             .await?;
         self.publish().await;
+        Ok(())
+    }
+
+    async fn reconcile_lead_input_notice_once(&self,owner_id:&str,detail:&AgentExecutionDetail)->Result<(),AppError> {
+        let row=self.inner.deps.repository.get_execution(owner_id,&detail.execution.execution_id).await?
+            .ok_or_else(||AppError::NotFound("input notice Execution is missing".into()))?;
+        if crate::engine::directed_delegation_source(&row.initial_plan_input)?.is_none() { return Ok(()); }
+        let mut requests=Vec::new();let mut reconciled=HashSet::new();let mut after=0;
+        loop {
+            let events=self.inner.deps.repository.list_events(owner_id,&detail.execution.execution_id,after,500).await?;
+            for event in &events {
+                let payload:serde_json::Value=serde_json::from_str(&event.payload)
+                    .map_err(|error|AppError::Internal(format!("invalid input notice event: {error}")))?;
+                if event.event_type==AgentExecutionEventKind::DecisionRequested.as_str() {
+                    requests.push(domain_mapper::event(event.clone())?);
+                }
+                if payload.get("change").and_then(serde_json::Value::as_str)==Some("lead_input_notice_reconciled")
+                    && let Some(sequence)=payload.get("request_event_sequence").and_then(serde_json::Value::as_i64) { reconciled.insert(sequence); }
+            }
+            let Some(last)=events.last() else { break; };after=last.sequence;if events.len()<500 {break;}
+        }
+        for attempt in detail.attempts.iter().filter(|attempt|attempt.status==ExecutionAttemptStatus::WaitingInput) {
+            let Some(request)=requests.iter().rev().find(|request|request.step_id.as_deref()==Some(attempt.step_id.as_str())
+                &&request.attempt_id.as_deref()==Some(attempt.attempt_id.as_str())
+                &&request.payload.get("question").and_then(serde_json::Value::as_str)==attempt.question.as_deref()) else {continue;};
+            if reconciled.contains(&request.sequence) {continue;}
+            self.inner.deps.conversation_effects.report_lead_input(owner_id,detail,request).await?;
+            let current=self.detail(owner_id,&detail.execution.execution_id).await?;
+            self.inner.deps.repository.append_event(owner_id,&detail.execution.execution_id,current.execution.version,
+                &system_event(AgentExecutionEventKind::StatusChanged,Some(&attempt.step_id),Some(&attempt.attempt_id),
+                    json!({"change":"lead_input_notice_reconciled","request_event_sequence":request.sequence}))).await?;
+            self.publish().await;
+        }
         Ok(())
     }
 
@@ -1039,6 +1080,9 @@ impl ExecutionScheduler {
                 if detail.attempts.iter().any(|attempt| {
                     attempt.status == ExecutionAttemptStatus::WaitingInput
                 }) {
+                    if let Err(error)=self.reconcile_lead_report(owner_id,&detail).await {
+                        tracing::warn!(%execution_id,%error,"directed input notice remains in its existing outbox");
+                    }
                     // WaitingInput is an aggregate attention signal.  All
                     // independent runnable work above has been exhausted, so
                     // release the lease until a durable answer wakes us.
@@ -1421,6 +1465,10 @@ impl ExecutionScheduler {
             } else {
                 self.recover_attempt_output(owner_id, attempt).await?
             };
+            let recovered_turn_key = attempt.runtime_state.clone()
+                .map(serde_json::from_value::<AttemptConversationEffects>).transpose()
+                .map_err(|error| AppError::Internal(format!("invalid recovered Attempt effects: {error}")))?
+                .unwrap_or_default().current_turn_operation_key(&attempt.attempt_id)?;
             let recovered = self.inner
                 .deps
                 .repository
@@ -1440,6 +1488,7 @@ impl ExecutionScheduler {
                         json!({
                             "reason": if was_queued { "queued_before_restart" } else { "process_restart" },
                             "reconciliation":"initial_turn_receipt",
+                            "turn_operation_key": recovered_turn_key,
                         }),
                     ),
                 )
@@ -2127,6 +2176,10 @@ impl ExecutionScheduler {
                 )
             }
         };
+        let settled_turn_key = attempt.runtime_state.clone()
+            .map(serde_json::from_value::<AttemptConversationEffects>).transpose()
+            .map_err(|error| AppError::Internal(format!("invalid settled Attempt effects: {error}")))?
+            .unwrap_or_default().current_turn_operation_key(attempt_id)?;
         let output_files = serde_json::to_string(&output_files)
             .map_err(|error| AppError::Internal(format!("encode verified attempt output files: {error}")))?;
         let settled = self.inner
@@ -2161,7 +2214,8 @@ impl ExecutionScheduler {
                     AgentExecutionEventKind::AttemptChanged,
                     Some(step_id),
                     Some(attempt_id),
-                    json!({"attempt_status":attempt_status,"step_status":step_status}),
+                    json!({"attempt_status":attempt_status,"step_status":step_status,
+                        "turn_operation_key":settled_turn_key}),
                 ),
             )
             .await;
@@ -3290,6 +3344,14 @@ mod tests {
             should_project_lead_report(r#"{"mode":"explicit","plan":{"steps":[]}}"#)
                 .unwrap()
         );
+        let source = crate::DirectedDelegationSource {
+            agent_session_id: lead.into(), turn_operation_id:"source-turn".into(),
+            tool_operation_id:"source-tool".into(), effect_id:"source-effect".into(),
+        };
+        let directed = serde_json::json!({"mode":"directed","source":source,"plan":{"steps":[]}}).to_string();
+        assert_eq!(attempt_session_target(&directed, Some(lead)).unwrap(),
+            (AttemptSessionTarget::DirectedChildAttempt { source }, AgentExecutionAttemptSessionKind::ChildAttempt));
+        assert!(should_project_lead_report(&directed).unwrap());
     }
 
     #[derive(Debug)]
@@ -4154,7 +4216,7 @@ mod tests {
                 .expect("harness brief log is not poisoned")
                 .push((step_title.to_owned(), brief.to_owned()));
             let conversation_id = match session_target {
-                AttemptSessionTarget::ChildAttempt => {
+                AttemptSessionTarget::ChildAttempt | AttemptSessionTarget::DirectedChildAttempt { .. } => {
                     nomifun_common::ConversationId::new().into_string()
                 }
                 AttemptSessionTarget::AutomationLead { conversation_id } => conversation_id,

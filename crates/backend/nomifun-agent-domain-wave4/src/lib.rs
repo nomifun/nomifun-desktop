@@ -271,7 +271,6 @@ pub enum Wave4CapabilityOperation {
     CompanionLearn { input: StrictJsonValue },
     CompanionEvolve { input: StrictJsonValue },
     CompanionMemoryRecall { input: StrictJsonValue },
-    CompanionMemoryWrite { input: StrictJsonValue },
     CustomerServiceNotesRead { input: StrictJsonValue },
     CustomerServiceNotesWrite { input: StrictJsonValue },
     CustomerServiceHandoff { input: StrictJsonValue },
@@ -287,7 +286,7 @@ impl Wave4CapabilityOperation {
         CapabilityId::from(match self {
             Self::ChannelReply { .. } | Self::ChannelSend { .. } => CHANNEL_MESSAGING_MODULE_ID,
             Self::CompanionLearn { .. } | Self::CompanionEvolve { .. } => COMPANION_MODULE_ID,
-            Self::CompanionMemoryRecall { .. } | Self::CompanionMemoryWrite { .. } => {
+            Self::CompanionMemoryRecall { .. } => {
                 COMPANION_MEMORY_MODULE_ID
             }
             Self::CustomerServiceNotesRead { .. }
@@ -308,7 +307,6 @@ impl Wave4CapabilityOperation {
             Self::CompanionLearn { .. } => COMPANION_LEARN_ACTION_ID,
             Self::CompanionEvolve { .. } => COMPANION_EVOLVE_ACTION_ID,
             Self::CompanionMemoryRecall { .. } => COMPANION_MEMORY_RECALL_ACTION_ID,
-            Self::CompanionMemoryWrite { .. } => COMPANION_MEMORY_WRITE_ACTION_ID,
             Self::CustomerServiceNotesRead { .. } => CUSTOMER_SERVICE_NOTES_READ_ACTION_ID,
             Self::CustomerServiceNotesWrite { .. } => CUSTOMER_SERVICE_NOTES_WRITE_ACTION_ID,
             Self::CustomerServiceHandoff { .. } => CUSTOMER_SERVICE_HANDOFF_ACTION_ID,
@@ -326,7 +324,7 @@ impl Wave4CapabilityOperation {
             Self::CompanionLearn { .. }
             | Self::CompanionEvolve { .. }
             | Self::CompanionMemoryRecall { .. }
-            | Self::CompanionMemoryWrite { .. } => Wave4OwnerDomain::Companion,
+            => Wave4OwnerDomain::Companion,
             Self::CustomerServiceNotesRead { .. }
             | Self::CustomerServiceNotesWrite { .. }
             | Self::CustomerServiceHandoff { .. } => Wave4OwnerDomain::CustomerService,
@@ -344,7 +342,6 @@ impl Wave4CapabilityOperation {
             | Self::CompanionLearn { input }
             | Self::CompanionEvolve { input }
             | Self::CompanionMemoryRecall { input }
-            | Self::CompanionMemoryWrite { input }
             | Self::CustomerServiceNotesRead { input }
             | Self::CustomerServiceNotesWrite { input }
             | Self::CustomerServiceHandoff { input }
@@ -2280,24 +2277,8 @@ pub fn action_input_schema(capability_id: &str) -> StrictJsonValue {
             "properties": {},
             "additionalProperties": false
         }),
-        COMPANION_MEMORY_RECALL_ACTION_ID => serde_json::json!({
-            "type": "object",
-            "properties": {
-                "per_kind": { "type": "integer", "minimum": 1, "maximum": 20 },
-                "char_budget": { "type": "integer", "minimum": 1, "maximum": 65536 }
-            },
-            "additionalProperties": false
-        }),
-        COMPANION_MEMORY_WRITE_ACTION_ID => serde_json::json!({
-            "type": "object",
-            "properties": {
-                "kind": { "type": "string", "minLength": 1, "maxLength": 64 },
-                "content": { "type": "string", "minLength": 1, "maxLength": 65536 },
-                "tags": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 128 } }
-            },
-            "required": ["kind", "content"],
-            "additionalProperties": false
-        }),
+        COMPANION_MEMORY_RECALL_ACTION_ID => nomifun_agent_contracts::companion_memory_recall_input_schema(),
+        COMPANION_MEMORY_WRITE_ACTION_ID => nomifun_agent_contracts::companion_memory_write_input_schema(),
         CUSTOMER_SERVICE_NOTES_READ_ACTION_ID => serde_json::json!({
             "type": "object",
             "properties": {
@@ -2769,9 +2750,6 @@ pub fn operation_from_action_input(
         }
         (COMPANION_MEMORY_MODULE_ID, COMPANION_MEMORY_RECALL_ACTION_ID) => {
             Wave4CapabilityOperation::CompanionMemoryRecall { input }
-        }
-        (COMPANION_MEMORY_MODULE_ID, COMPANION_MEMORY_WRITE_ACTION_ID) => {
-            Wave4CapabilityOperation::CompanionMemoryWrite { input }
         }
         (CUSTOMER_SERVICE_MODULE_ID, CUSTOMER_SERVICE_NOTES_READ_ACTION_ID) => {
             Wave4CapabilityOperation::CustomerServiceNotesRead { input }

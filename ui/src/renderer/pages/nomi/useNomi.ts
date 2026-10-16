@@ -23,6 +23,12 @@ const mergeProfile = (prev: ICompanionProfile, patch: ICompanionProfilePatch): I
   ...(patch.mood_override !== undefined ? { mood_override: patch.mood_override } : {}),
   ...(patch.persona ? { persona: { ...prev.persona, ...patch.persona } } : {}),
   ...(patch.model !== undefined ? { model: patch.model } : {}),
+  ...(patch.robot ? { robot: {
+    model: patch.robot.model !== undefined ? patch.robot.model : prev.robot?.model ?? null,
+    skills: { enabled: patch.robot.skills?.enabled ?? prev.robot?.skills.enabled ?? [],
+      disabled_auto: patch.robot.skills?.disabled_auto ?? prev.robot?.skills.disabled_auto ?? [] },
+    mcp_servers: patch.robot.mcp_servers ?? prev.robot?.mcp_servers ?? [],
+  } } : {}),
   ...(patch.fallback_model !== undefined ? { fallback_model: patch.fallback_model } : {}),
   ...(patch.vision_model !== undefined ? { vision_model: patch.vision_model } : {}),
   // `voice.vad` sits one level below `voice`: a single spread would replace the

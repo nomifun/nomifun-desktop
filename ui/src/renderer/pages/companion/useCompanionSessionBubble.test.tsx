@@ -56,11 +56,12 @@ afterEach(() => { cleanup(); jest.useRealTimers(); mock.restore(); });
 function transport(initial: TChatConversation = idle) {
   let authority = initial;
   let saved: TMessage[] = [];
-  let bindingListener: ((value: { conversation_id: typeof conversationId }) => void) | null = null;
+  let bindingListener: ((value: { conversation_id: typeof conversationId | null }) => void) | null = null;
+  let inputTarget: typeof conversationId | null = conversationId;
   let delayBinding = false;
   let runtimeQuery: (() => Promise<TChatConversation>) | null = null;
   spyOn(ipcBridge.companion.getCompanionSession, 'invoke').mockImplementation(() => delayBinding
-    ? new Promise(resolve => { bindingListener = resolve; }) : Promise.resolve({ conversation_id: conversationId }));
+    ? new Promise(resolve => { bindingListener = resolve; }) : Promise.resolve({ conversation_id: inputTarget }));
   spyOn(ipcBridge.conversation.get, 'invoke').mockImplementation(() => runtimeQuery ? runtimeQuery() : Promise.resolve(authority));
   const history = spyOn(ipcBridge.database.getConversationMessages, 'invoke').mockImplementation(() =>
     Promise.resolve({ items: saved, total: saved.length, has_more: false }));
@@ -70,12 +71,16 @@ function transport(initial: TChatConversation = idle) {
   let finish: (event: IConversationTurnCompletedEvent) => void = () => {};
   let stream: (event: IResponseMessage) => void = () => {};
   let reconnect: () => void = () => {};
+  let deleted: () => void = () => {};
   spyOn(ipcBridge.conversation.userCreated, 'on').mockImplementation(listener => { user = listener; return () => {}; });
   spyOn(ipcBridge.conversation.turnStarted, 'on').mockImplementation(listener => { start = listener; return () => {}; });
   spyOn(ipcBridge.conversation.turnCompleted, 'on').mockImplementation(listener => { finish = listener; return () => {}; });
   spyOn(ipcBridge.conversation.responseStream, 'on').mockImplementation(listener => { stream = listener; return () => {}; });
   spyOn(ipcBridge.conversation.reconnected, 'on').mockImplementation(listener => { reconnect = () => listener(); return () => {}; });
   spyOn(ipcBridge.conversation.turnPaused, 'on').mockImplementation(() => () => {});
+  spyOn(ipcBridge.conversation.listChanged, 'on').mockImplementation(listener => {
+    deleted = () => listener({ action: 'deleted', conversation_id: conversationId }); return () => {};
+  });
   spyOn(ipcBridge.companion.onConfigUpdated, 'on').mockImplementation(() => () => {});
   return { user: (event: IUserMessageCreatedEvent) => user(event), finish: (event: IConversationTurnCompletedEvent) => finish(event),
     stream: (event: IResponseMessage) => stream(event), reconnect: () => reconnect(),
@@ -83,12 +88,26 @@ function transport(initial: TChatConversation = idle) {
       detail: '', can_send_message: false, runtime: busy(turn).runtime! }),
     setAuthority: (value: TChatConversation) => { authority = value; }, setSaved: (value: TMessage[]) => { saved = value; },
     deferBinding: () => { delayBinding = true; }, resolveBinding: () => {
-      delayBinding = false; bindingListener?.({ conversation_id: conversationId });
-    }, setRuntimeQuery: (value: (() => Promise<TChatConversation>) | null) => { runtimeQuery = value; }, stop, history };
+      delayBinding = false; bindingListener?.({ conversation_id: inputTarget });
+    }, setRuntimeQuery: (value: (() => Promise<TChatConversation>) | null) => { runtimeQuery = value; },
+    setInputTarget: (value: typeof conversationId | null) => { inputTarget = value; }, deleted: () => deleted(), stop, history };
 }
 const flush = async () => act(async () => { await Promise.resolve(); await Promise.resolve(); });
 
 describe('companion bubble observes canonical cross-window lifecycle', () => {
+  test('a canonical Session deletion clears the input observation without creating or redirecting a receiver', async () => {
+    const wire = transport();
+    const ensure = spyOn(ipcBridge.companion.ensureCompanionSession, 'invoke');
+    const view = renderHook(() => useCompanionSessionBubble(companionId), { wrapper });
+    await flush();
+    expect(view.result.current.conversationId).toBe(conversationId);
+    wire.setInputTarget(null);
+    await act(async () => wire.deleted());
+    await flush();
+    expect(view.result.current.conversationId).toBeNull();
+    expect(view.result.current.bubble).toBe('');
+    expect(ensure).not.toHaveBeenCalled();
+  });
   test('main-window accepted input opens the bubble and long reasoning never times out', async () => {
     jest.useFakeTimers();
     const wire = transport();

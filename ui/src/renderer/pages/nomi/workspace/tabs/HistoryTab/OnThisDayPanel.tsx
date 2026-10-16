@@ -9,13 +9,14 @@ import { useTranslation } from 'react-i18next';
 import { Spin } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
 import type { ICompanionDayDigest } from '@/common/adapter/ipcBridge';
-import type { CompanionId } from '@/common/types/ids';
+import type { CompanionId, ConversationId } from '@/common/types/ids';
 import DigestCard from './DigestCard';
 import ReaderPanel from './ReaderPanel';
 import { formatDayKey, formatMmdd, todayMmdd } from './historyFormat';
 
 interface OnThisDayPanelProps {
   companionId: CompanionId;
+  conversationId?: ConversationId | null;
 }
 
 /**
@@ -23,7 +24,7 @@ interface OnThisDayPanelProps {
  * the only one that supports it (`on_day=MMDD`). Digests exist only when 会话归档
  * was enabled, so an empty result here is normal, not an error.
  */
-const OnThisDayPanel: React.FC<OnThisDayPanelProps> = ({ companionId }) => {
+const OnThisDayPanel: React.FC<OnThisDayPanelProps> = ({ companionId, conversationId }) => {
   const { t } = useTranslation();
   const mmdd = useMemo(() => todayMmdd(), []);
   const [digests, setDigests] = useState<ICompanionDayDigest[]>([]);
@@ -34,8 +35,9 @@ const OnThisDayPanel: React.FC<OnThisDayPanelProps> = ({ companionId }) => {
     let alive = true;
     setLoading(true);
     setFailed(false);
+    if (!conversationId) { setDigests([]); setLoading(false); return; }
     void ipcBridge.companion.listDayDigests
-      .invoke({ companion_id: companionId, on_day: mmdd, limit: 60 })
+      .invoke({ companion_id: companionId, conversation_id: conversationId, on_day: mmdd, limit: 60 })
       .then((rows) => {
         if (alive) setDigests(rows);
       })
@@ -51,7 +53,7 @@ const OnThisDayPanel: React.FC<OnThisDayPanelProps> = ({ companionId }) => {
     return () => {
       alive = false;
     };
-  }, [companionId, mmdd]);
+  }, [companionId, conversationId, mmdd]);
 
   const groups = useMemo(() => {
     const byDay = new Map<string, ICompanionDayDigest[]>();

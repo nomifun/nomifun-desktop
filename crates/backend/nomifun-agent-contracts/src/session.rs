@@ -381,6 +381,44 @@ impl SessionPurpose {
     pub fn is_conversation(&self) -> bool { *self == Self::Conversation }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CompanionSessionRole {
+    Companion,
+    Robot,
+}
+
+/// Immutable product origin from the canonical Session opening. Resources and
+/// their current grants remain in the frozen Agent binding.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CompanionSessionOrigin {
+    pub companion_id: String,
+    pub role: CompanionSessionRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub robot_id: Option<String>,
+}
+
+/// Trusted ingress evidence attached by the authenticated host, rather than
+/// inferred from user text or mutable message projections.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentInputSource {
+    AuthenticatedRobot {
+        companion_id: String,
+        robot_id: String,
+        connection_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        presented_question_id: Option<String>,
+    },
+    DirectedDelegationResult {
+        report_message_id: String,
+        report_seq: u64,
+        execution_id: String,
+        source_turn_operation_id: OperationId,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentSessionMetadata {
@@ -390,6 +428,10 @@ pub struct AgentSessionMetadata {
     /// It does not grant resource access or change the ordinary Runtime contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_project_id: Option<String>,
+    /// Companion identity and ingress role are fixed at creation, independent
+    /// of later Agent/model/resource transitions and mutable UI projections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub companion: Option<CompanionSessionOrigin>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub archived: bool,
@@ -408,6 +450,7 @@ mod session_purpose_tests {
         let ordinary = serde_json::json!({"title":"Chat","archived":false,"pinned":false});
         let metadata: AgentSessionMetadata = serde_json::from_value(ordinary.clone()).unwrap();
         assert_eq!(metadata.purpose, SessionPurpose::Conversation);
+        assert!(metadata.companion.is_none());
         assert_eq!(serde_json::to_value(metadata).unwrap(), ordinary);
         let authoring = serde_json::json!({"title":"App","archived":false,"pinned":false,"purpose":"plugin_authoring"});
         let metadata: AgentSessionMetadata = serde_json::from_value(authoring.clone()).unwrap();
@@ -417,6 +460,42 @@ mod session_purpose_tests {
             let mut invalid = ordinary.clone(); invalid["purpose"] = purpose;
             assert!(serde_json::from_value::<AgentSessionMetadata>(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn companion_origin_has_explicit_roles_and_strict_fields() {
+        let origin = serde_json::json!({
+            "companion_id": "019abcab-cdef-7000-8000-000000000000",
+            "role": "robot",
+            "robot_id": "robot-board-1",
+        });
+        let parsed: CompanionSessionOrigin = serde_json::from_value(origin.clone()).unwrap();
+        assert_eq!(parsed.role, CompanionSessionRole::Robot);
+        assert_eq!(serde_json::to_value(parsed).unwrap(), origin);
+        let mut unknown = origin.clone();
+        unknown["channel"] = serde_json::json!("desktop");
+        assert!(serde_json::from_value::<CompanionSessionOrigin>(unknown).is_err());
+        let mut invalid_role = origin;
+        invalid_role["role"] = serde_json::json!("desktop");
+        assert!(serde_json::from_value::<CompanionSessionOrigin>(invalid_role).is_err());
+    }
+
+    #[test]
+    fn authenticated_robot_source_is_typed_and_rejects_unknown_evidence() {
+        let source = serde_json::json!({
+            "kind": "authenticated_robot",
+            "companion_id": "019abcab-cdef-7000-8000-000000000000",
+            "robot_id": "robot-board-1",
+            "connection_id": "connection-1",
+        });
+        let parsed: AgentInputSource = serde_json::from_value(source.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), source);
+        let mut missing = source.clone();
+        missing.as_object_mut().unwrap().remove("connection_id");
+        assert!(serde_json::from_value::<AgentInputSource>(missing).is_err());
+        let mut unknown = source;
+        unknown["trusted"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<AgentInputSource>(unknown).is_err());
     }
 }
 

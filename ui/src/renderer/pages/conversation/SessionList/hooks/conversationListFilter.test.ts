@@ -34,15 +34,15 @@ describe('ordinary conversation list ownership', () => {
     expect(isOrdinaryWorkConversation(conversation as never)).toBe(true);
   });
 
-  test('device messages belong to the companion conversation', () => {
+  test('host-resolved companion ownership excludes every Session for the companion', () => {
     const companionSession = {
       execution_step_id: undefined,
-      extra: { companion_session: true, companion_id: '019b0000-0000-7000-8000-000000000001' },
+      extra: { companion_id: '019b0000-0000-7000-8000-000000000001' },
     };
     expect(isOrdinaryWorkConversation(companionSession as never)).toBe(false);
   });
 
-  test('companion sessions remain hidden when list summaries omit companion extra fields', () => {
+  test('an Agent template or capabilities do not claim companion product ownership', () => {
     const companionSession = {
       execution_step_id: undefined,
       extra: {
@@ -54,13 +54,25 @@ describe('ordinary conversation list ownership', () => {
         enabled_capabilities: ['companion', 'companion.memory'],
       },
     };
-    expect(isOrdinaryWorkConversation(companionSession as never)).toBe(false);
+    expect(isOrdinaryWorkConversation(companionSession as never)).toBe(true);
   });
 
-  test('robot companion sessions remain on the companion surface when list summaries are sparse', () => {
+  test('a robot Agent remains ordinary without host-resolved companion ownership', () => {
     expect(isOrdinaryWorkConversation({
       extra: {},
       agent_snapshot: { preset_name: 'companion.robot', enabled_capabilities: [] },
+    } as never)).toBe(true);
+  });
+
+  test('a retired companion marker does not claim product ownership', () => {
+    expect(isOrdinaryWorkConversation({
+      extra: { companion_session: true },
+    } as never)).toBe(true);
+  });
+
+  test('channel-sourced Sessions remain isolated from the work list', () => {
+    expect(isOrdinaryWorkConversation({
+      extra: { channel_platform: 'telegram' },
     } as never)).toBe(false);
   });
 });

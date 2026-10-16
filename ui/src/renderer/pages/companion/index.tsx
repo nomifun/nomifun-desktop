@@ -1045,10 +1045,10 @@ const CompanionPage: React.FC = () => {
     }
   }, []);
 
-  /** 解析（或幂等创建）该伙伴的唯一专属会话 id。单会话契约（FE2）：
+  /** Resolve the desktop window's explicitly selected input Session.
    *  先读 getCompanionSession，有 id 直接用；否则 ensureCompanionSession 幂等创建。
    *  创建会要求 profile.model 已配置，否则后端返回 400 — 这里向上抛，由 sendChat
-   *  捕获后给气泡一个简短提示并放弃本轮。多线程列表/新建/重命名/设活的旧 ipc 方法已废除。 */
+   *  捕获后给气泡一个简短提示并放弃本轮。浏览其他会话不会改变该接收目标。 */
   const ensureThread = useCallback(async (): Promise<ConversationId> => {
     if (!companionId) throw new Error('companion id not resolved yet');
     const active = await ipcBridge.companion.getCompanionSession.invoke({ companion_id: companionId });
@@ -1494,7 +1494,7 @@ const CompanionPage: React.FC = () => {
       if (action === 'open-chat') {
         void openMainAt(
           companionId
-            ? `/nomi?companion=${encodeURIComponent(companionId)}&mode=cohabit`
+            ? `/nomi?companion=${encodeURIComponent(companionId)}${sessionBubble.conversationId ? `&session=${encodeURIComponent(sessionBubble.conversationId)}` : ''}&mode=cohabit`
             : '/nomi?mode=cohabit'
         );
         return;
@@ -1520,7 +1520,7 @@ const CompanionPage: React.FC = () => {
       }
       void hideCompanion();
     },
-    [companionId, hideCompanion, openMainAt]
+    [companionId, hideCompanion, openMainAt, sessionBubble.conversationId]
   );
 
   const openNativeContextMenu = useCallback(async () => {
@@ -1739,7 +1739,7 @@ const CompanionPage: React.FC = () => {
                   setQuickMoreOpen(false);
                   void openMainAt(
                     companionId
-                      ? `/nomi?companion=${encodeURIComponent(companionId)}&mode=cohabit`
+                      ? `/nomi?companion=${encodeURIComponent(companionId)}${sessionBubble.conversationId ? `&session=${encodeURIComponent(sessionBubble.conversationId)}` : ''}&mode=cohabit`
                       : '/nomi?mode=cohabit'
                   );
                 }}

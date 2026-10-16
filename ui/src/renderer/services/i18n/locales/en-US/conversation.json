@@ -47,6 +47,7 @@
     "renamePlaceholder": "Please enter a new name",
     "renameSuccess": "Renamed successfully",
     "renameFailed": "Rename failed",
+    "renameTooLong": "This name is too long. Shorten it before saving.",
     "batchSelect": "Select",
     "selectAll": "Select All",
     "selectedCount": "{{count}} selected",

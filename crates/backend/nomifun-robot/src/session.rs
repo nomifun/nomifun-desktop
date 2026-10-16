@@ -8,7 +8,8 @@
 //! Model access is reached through the [`crate::services`] seam, so the whole
 //! conversation loop is exercised in tests with mocks and no provider.
 
-use std::{collections::VecDeque, sync::Arc};
+use std::{collections::{BTreeMap, VecDeque}, sync::Arc};
+use sha2::{Digest, Sha256};
 
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, interval};
@@ -24,7 +25,7 @@ use crate::protocol::{
     DeviceMessage, ListenState, ListeningMode, ServerMessage, parse_device_message,
     serialize_server_message,
 };
-use crate::registry::RobotRegistry;
+use crate::registry::{RobotRegistry, RobotPlaybackError};
 use crate::services::{CompanionTurnDispatcher, RobotTurnRequest, SpeechContext, SpeechServices, TurnEvent};
 use crate::status::{RobotPhase, RobotStatusRegistry};
 use crate::vad::build_engine;
@@ -37,6 +38,58 @@ pub const PING_INTERVAL_SECS: u64 = 60;
 /// provider is down and the device should be released.
 pub const MAX_CONSECUTIVE_TTS_FAILURES: usize = 2;
 
+/// Transport acceptance is scoped to this exact live connection. Reaching the
+/// bound rejects new sources instead of evicting one and authorizing a replay.
+const MAX_CANONICAL_PLAYBACK_SOURCES: usize = 256;
+#[derive(Default)]
+struct CanonicalPlaybackSources {
+    accepted: BTreeMap<String, (nomifun_voice_contracts::VoiceSpeechSourceRef, [u8; 32], Option<String>)>,
+}
+
+#[cfg(test)]
+mod canonical_playback_tests {
+    use super::*;
+    fn source(id: usize) -> nomifun_voice_contracts::VoiceSpeechSourceRef {
+        nomifun_voice_contracts::VoiceSpeechSourceRef { message_id:format!("answer-{id}"),revision:10,through_seq:10 }
+    }
+    #[test]
+    fn accepted_source_replays_acknowledgement_without_another_playback() {
+        let mut window = CanonicalPlaybackSources::default();
+        let original = source(1);
+        assert!(!window.already_accepted(&original,"finished",None).unwrap());
+        window.record(original.clone(),"finished",None);
+        assert!(window.already_accepted(&original,"finished",None).unwrap());
+        assert!(window.already_accepted(&original,"different words",None).is_err());
+        assert!(window.already_accepted(&original,"finished",Some("other-question")).is_err());
+        let mut changed = original; changed.revision += 1; changed.through_seq += 1;
+        assert!(window.already_accepted(&changed,"finished",None).is_err());
+    }
+    #[test]
+    fn capacity_never_evicts_a_previously_accepted_source() {
+        let mut window = CanonicalPlaybackSources::default();
+        for id in 0..MAX_CANONICAL_PLAYBACK_SOURCES { window.record(source(id),"result",None); }
+        assert!(window.already_accepted(&source(MAX_CANONICAL_PLAYBACK_SOURCES),"result",None).is_err());
+        assert!(window.already_accepted(&source(0),"result",None).unwrap());
+    }
+}
+impl CanonicalPlaybackSources {
+    fn already_accepted(&self, source: &nomifun_voice_contracts::VoiceSpeechSourceRef, text: &str, question_id:Option<&str>) -> Result<bool, RobotPlaybackError> {
+        source.validate().map_err(RobotPlaybackError::InvalidSource)?;
+        let digest: [u8; 32] = Sha256::digest(text.as_bytes()).into();
+        if let Some((prior, prior_digest, prior_question)) = self.accepted.get(&source.message_id) {
+            return if prior == source && *prior_digest == digest && prior_question.as_deref()==question_id { Ok(true) }
+                else { Err(RobotPlaybackError::SourceChanged) };
+        }
+        if self.accepted.len() >= MAX_CANONICAL_PLAYBACK_SOURCES {
+            return Err(RobotPlaybackError::SourceCapacity);
+        }
+        Ok(false)
+    }
+    fn record(&mut self, source: nomifun_voice_contracts::VoiceSpeechSourceRef, text: &str, question_id:Option<String>) {
+        self.accepted.insert(source.message_id.clone(), (source, Sha256::digest(text.as_bytes()).into(), question_id));
+    }
+}
+
 /// One ASR request runs at a time; two complete utterances may wait behind it.
 /// Each WAV is already bounded by the uplink pipeline's 60-second ceiling.
 const MAX_PENDING_TRANSCRIPTIONS: usize = 2;
@@ -46,12 +99,14 @@ struct PendingTranscription {
     session_id: String,
     companion_id: String,
     wav: Vec<u8>,
+    presented_question_id: Option<String>,
 }
 
 struct ActiveTranscription {
     request_id: String,
     session_id: String,
     companion_id: String,
+    presented_question_id: Option<String>,
     task: OwnedTask,
     result: oneshot::Receiver<anyhow::Result<Option<String>>>,
 }
@@ -65,10 +120,10 @@ struct Transcriptions {
 }
 
 impl Transcriptions {
-    fn enqueue(&mut self, session_id: String, companion_id: String, wav: Vec<u8>) -> bool {
+    fn enqueue(&mut self, session_id: String, companion_id: String, wav: Vec<u8>, presented_question_id:Option<String>) -> bool {
         if self.pending.len() >= MAX_PENDING_TRANSCRIPTIONS { return false; }
         self.pending.push_back(PendingTranscription {
-            request_id: uuid::Uuid::now_v7().to_string(), session_id, companion_id, wav,
+            request_id: uuid::Uuid::now_v7().to_string(), session_id, companion_id, wav, presented_question_id,
         });
         true
     }
@@ -115,7 +170,7 @@ impl Transcriptions {
         });
         self.active = Some(ActiveTranscription {
             request_id: request.request_id, session_id: request.session_id,
-            companion_id: request.companion_id, task, result,
+            companion_id: request.companion_id, presented_question_id:request.presented_question_id, task, result,
         });
     }
 
@@ -495,6 +550,7 @@ async fn start_turn(
     conversation_id: &str,
     session_id: &str,
     text: &str,
+    presented_question_id:Option<String>,
     tasks: &TaskScope,
     stopped: &tokio::sync::watch::Receiver<bool>,
     cleanup_errors: &mut Vec<String>,
@@ -503,7 +559,7 @@ async fn start_turn(
     let request = RobotTurnRequest {
         robot_id: robot_id.to_owned(), companion_id: companion_id.to_owned(),
         conversation_id: conversation_id.to_owned(), connection_id: session_id.to_owned(),
-        request_id: uuid::Uuid::now_v7().to_string(), text: text.to_owned(),
+        request_id: uuid::Uuid::now_v7().to_string(), text: text.to_owned(), presented_question_id,
     };
     let request_id = request.request_id.clone();
     *active_request = Some(request.clone());
@@ -612,7 +668,12 @@ pub(crate) async fn run_session_owned(
     let mut active_request: Option<RobotTurnRequest> = None;
     let mut active_playback: Option<String> = None;
     let mut playback: Option<mpsc::Receiver<crate::registry::RobotPlaybackCommand>> = None;
-    let mut utterance_queue = std::collections::VecDeque::<String>::new();
+    let mut playback_sources = CanonicalPlaybackSources::default();
+    let mut utterance_queue = std::collections::VecDeque::<(String,Option<String>)>::new();
+    // A question is attached when physical recording starts, before ASR or
+    // queueing can delay an utterance past a later question presentation.
+    let mut presented_question_id:Option<String>=None;
+    let mut recording_question_id:Option<String>=None;
     let mut transcriptions = Transcriptions::default();
     let mut ping = interval(Duration::from_secs(PING_INTERVAL_SECS));
     ping.tick().await; // the first tick is immediate; skip it
@@ -626,10 +687,10 @@ pub(crate) async fn run_session_owned(
             && let (Some(conversation), Some(sid), Some(bound)) = (
                 conversation_id.as_deref(), session_id.as_deref(), companion_id.as_deref(),
             )
-            && let Some(text) = utterance_queue.pop_front()
+            && let Some((text,question_id)) = utterance_queue.pop_front()
         {
             start_turn(&deps, &pacer, &writer, &turn_tx, &mut turn_task, &mut active_request,
-                &robot_id, bound, conversation, sid, &text, &tasks, &stopped, &mut cleanup_errors).await;
+                &robot_id, bound, conversation, sid, &text, question_id, &tasks, &stopped, &mut cleanup_errors).await;
         }
         // Set by whichever branch decided the user stopped talking; handled at
         // the end of the iteration so the read loop stays one flat match.
@@ -648,18 +709,30 @@ pub(crate) async fn run_session_owned(
                 let Some(command) = command else { playback = None; continue; };
                 if command.accepted.is_closed() { continue; }
                 let (Some(sid), Some(bound)) = (session_id.clone(), companion_id.clone()) else {
-                    let _ = command.accepted.send(Err("device is not connected".to_owned())); continue;
+                    let _ = command.accepted.send(Err(RobotPlaybackError::Unavailable)); continue;
                 };
                 let record = deps.registry.get(&robot_id).await;
-                let Some(record) = record.filter(|record| record.permissions.proactive_speech
+                let requested_response=command.requested_response;
+                let Some(record) = record.filter(|record| (requested_response||record.permissions.proactive_speech)
                     && record.companion_id.as_deref() == Some(bound.as_str())) else {
-                    let _ = command.accepted.send(Err("desktop playback is not allowed".to_owned())); continue;
+                    let _ = command.accepted.send(Err(RobotPlaybackError::PermissionDenied)); continue;
                 };
+                if let Some(source) = &command.source {
+                    match playback_sources.already_accepted(source, &command.text,command.question_presentation_id.as_deref()) {
+                        Ok(true) => { let _ = command.accepted.send(Ok(())); continue; }
+                        Err(error) => { let _ = command.accepted.send(Err(error)); continue; }
+                        Ok(false) => {}
+                    }
+                }
                 if turn_task.is_some() || active_request.is_some() {
-                    let _ = command.accepted.send(Err("device is busy".to_owned())); continue;
+                    let _ = command.accepted.send(Err(RobotPlaybackError::Busy)); continue;
                 }
                 if !deps.registry.connection_matches(&robot_id, &sid).await {
-                    let _ = command.accepted.send(Err("device connection changed".to_owned())); continue;
+                    let _ = command.accepted.send(Err(RobotPlaybackError::Unavailable)); continue;
+                }
+                if let Some(source) = command.source { playback_sources.record(source, &command.text,command.question_presentation_id.clone()); }
+                if let Some(question_id)=command.question_presentation_id {
+                    presented_question_id=Some(question_id);
                 }
                 let request_id = uuid::Uuid::now_v7().to_string();
                 active_playback = Some(request_id.clone());
@@ -676,8 +749,8 @@ pub(crate) async fn run_session_owned(
                     let generation = pacer.generation();
                     let watch = async {
                         loop {
-                            let valid = registry.get(&robot_id).await.is_some_and(|current| current.permissions.proactive_speech
-                                && current.authorization_revision == record.authorization_revision
+                            let valid = registry.get(&robot_id).await.is_some_and(|current| (requested_response||current.permissions.proactive_speech)
+                                && (requested_response||current.authorization_revision == record.authorization_revision)
                                 && current.companion_id.as_deref() == Some(bound.as_str()))
                                 && registry.connection_matches(&robot_id, &sid).await;
                             if !valid { break; }
@@ -768,7 +841,7 @@ pub(crate) async fn run_session_owned(
                 deps.status.publish_for_connection(&deps.registry, &robot_id,
                     Some(&sid), Some(&bound), RobotPhase::Speaking, now_ms()).await;
                 if utterance_queue.len() < 16 {
-                    utterance_queue.push_back(transcript);
+                    utterance_queue.push_back((transcript,request.presented_question_id));
                 } else {
                     show_voice_notice(&writer, &sid, "等待处理的消息过多，请稍后再说").await;
                 }
@@ -804,6 +877,9 @@ pub(crate) async fn run_session_owned(
                                 // identity; old audio/results cannot cross it.
                                 transcriptions.cancel(&mut cleanup_errors).await;
                                 utterance_queue.clear();
+                                presented_question_id=None;
+                                recording_question_id=None;
+                                playback_sources=CanonicalPlaybackSources::default();
                                 let record = deps.registry.list().await.into_iter().find(|r| r.robot_id == robot_id);
                                 let Some(bound) = record.as_ref().and_then(|r| r.companion_id.clone()) else {
                                     tracing::warn!(%robot_id, "robot: refusing session, not bound to a companion");
@@ -842,7 +918,7 @@ pub(crate) async fn run_session_owned(
                                 uplink = UplinkPipeline::new(engine).ok();
                                 conversation_id = deps
                                     .dispatcher
-                                    .ensure_companion_session(&bound)
+                                    .ensure_companion_session(&bound, &robot_id)
                                     .await
                                     .inspect_err(|error| {
                                         tracing::error!(%robot_id, %error, "robot: could not open a companion thread");
@@ -893,6 +969,7 @@ pub(crate) async fn run_session_owned(
                                 let Some(pipeline) = uplink.as_mut() else { continue };
                                 match state {
                                     ListenState::Start => {
+                                        recording_question_id=presented_question_id.clone();
                                         pipeline.begin(mode.unwrap_or(ListeningMode::Auto));
                                         if let Some(bound) = &companion_id {
                                             deps.status
@@ -926,6 +1003,7 @@ pub(crate) async fn run_session_owned(
                                     pipeline.abort();
                                 }
                                 utterance_queue.clear();
+                                recording_question_id=None;
                                 if let Some(request) = active_request.take()
                                     && let Err(error) = deps.dispatcher.cancel(&request).await
                                 {
@@ -959,7 +1037,7 @@ pub(crate) async fn run_session_owned(
 
         if let Some(wav) = utterance.take() {
             if conversation_id.is_none() && let Some(bound) = companion_id.as_deref() {
-                conversation_id = deps.dispatcher.ensure_companion_session(bound).await.ok();
+                conversation_id = deps.dispatcher.ensure_companion_session(bound, &robot_id).await.ok();
             }
             if conversation_id.is_none() {
                 if let Some(sid) = session_id.as_deref() {
@@ -976,7 +1054,7 @@ pub(crate) async fn run_session_owned(
             ) else {
                 continue;
             };
-            if !transcriptions.enqueue(sid.clone(), bound, wav) {
+            if !transcriptions.enqueue(sid.clone(), bound, wav,recording_question_id.take()) {
                 tracing::warn!(%robot_id, session_id = %sid, limit = MAX_PENDING_TRANSCRIPTIONS,
                     "robot: pending transcription queue is full");
                 show_voice_notice(&writer, &sid, "等待识别的语音过多，请稍后再说").await;
@@ -1179,6 +1257,61 @@ mod tests {
         assert!(held.reply.send(Ok("late".into())).is_err());
     }
 
+    #[tokio::test]
+    async fn delayed_asr_keeps_the_question_presented_when_recording_started() {
+        let (mut deps,link,tx,written,_dir)=harness(true).await;
+        let mut calls=controlled_asr(&mut deps);
+        let registry=deps.deps.registry.clone();
+        let robot="aa:bb:cc:dd:ee:ff";
+        let task=tokio::spawn(run_session(link,deps.deps.clone()));
+        tx.send(Frame::Text(r#"{"type":"hello","version":1,"transport":"websocket"}"#.into())).await.unwrap();
+        let connection=tokio::time::timeout(Duration::from_secs(3),async {
+            loop {if let Some(connection)=registry.current_connection(robot).await{break connection;}
+                tokio::task::yield_now().await;}
+        }).await.unwrap();
+        let q1=nomifun_voice_contracts::VoiceSpeechSourceRef{message_id:"question-1".into(),revision:11,through_seq:11};
+        let q2=nomifun_voice_contracts::VoiceSpeechSourceRef{message_id:"question-2".into(),revision:21,through_seq:21};
+
+        // This WAV predates every question. Presenting Q1 while the provider
+        // is still held must not bind the old answer at eventual admission.
+        manual_utterance(&tx).await;
+        let old=next_asr(&mut calls).await;
+        registry.speak_requested_question_source(robot,&connection,"请问你的名字？".into(),q1.clone(),"presentation-1".into()).await.unwrap();
+        await_frame(&written,|frame|frame["type"]=="tts"&&frame["state"]=="stop").await;
+        old.reply.send(Ok("旧的话语".into())).unwrap();
+        tokio::time::timeout(Duration::from_secs(3),async {
+            while deps.dispatcher.dispatched_requests().is_empty(){tokio::task::yield_now().await;}
+        }).await.unwrap();
+        assert_eq!(deps.dispatcher.dispatched_requests()[0].presented_question_id,None);
+
+        // A Q1 utterance is held across Q2 presentation. Its frozen cut must
+        // remain Q1, so the Host's exact-current-question check rejects it.
+        manual_utterance(&tx).await;
+        let first=next_asr(&mut calls).await;
+        tokio::time::timeout(Duration::from_secs(3),async {
+            loop{match registry.speak_requested_question_source(robot,&connection,"请问几点出发？".into(),q2.clone(),"presentation-2".into()).await {
+                Ok(())=>break,Err(RobotPlaybackError::Busy)=>tokio::task::yield_now().await,Err(error)=>panic!("question playback: {error}")
+            }}
+        }).await.unwrap();
+        // Re-acknowledging an older exact source never changes the cut back.
+        registry.speak_requested_question_source(robot,&connection,"请问你的名字？".into(),q1.clone(),"presentation-1".into()).await.unwrap();
+        assert!(matches!(registry.speak_requested_question_source(robot,&connection,"请问你的名字？".into(),q1,"presentation-changed".into()).await,Err(RobotPlaybackError::SourceChanged)));
+        first.reply.send(Ok("小明".into())).unwrap();
+        tokio::time::timeout(Duration::from_secs(3),async {
+            while deps.dispatcher.dispatched_requests().len()<2{tokio::task::yield_now().await;}
+        }).await.unwrap();
+        assert_eq!(deps.dispatcher.dispatched_requests()[1].presented_question_id.as_deref(),Some("presentation-1"));
+        manual_utterance(&tx).await;
+        next_asr(&mut calls).await.reply.send(Ok("九点".into())).unwrap();
+        tokio::time::timeout(Duration::from_secs(3),async {
+            while deps.dispatcher.dispatched_requests().len()<3{tokio::task::yield_now().await;}
+        }).await.unwrap();
+        let requests=deps.dispatcher.dispatched_requests();
+        assert_eq!(requests[2].presented_question_id.as_deref(),Some("presentation-2"));
+        assert!(requests.iter().all(|request|request.connection_id==connection));
+        drop(tx);task.await.unwrap();
+    }
+
     struct FloodingStream {
         inner: Box<dyn RobotLinkStream>,
         enabled: Arc<std::sync::atomic::AtomicBool>,
@@ -1362,7 +1495,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl CompanionTurnDispatcher for HeldDispatch {
-        async fn ensure_companion_session(&self, _: &str) -> anyhow::Result<String> { Ok("conversation".into()) }
+        async fn ensure_companion_session(&self, _: &str, _: &str) -> anyhow::Result<String> { Ok("conversation".into()) }
         async fn dispatch(&self, request: RobotTurnRequest) -> anyhow::Result<mpsc::Receiver<TurnEvent>> {
             self.accepted.lock().unwrap().push(request);
             self.entered.notify_one();
@@ -1394,7 +1527,7 @@ mod tests {
             let (turn_tx, _turn_rx) = mpsc::channel(1);
             let mut active = None; let mut turn = None; let mut errors = Vec::new();
             start_turn(&harness.deps, &Arc::new(pacer), &writer, &turn_tx, &mut turn, &mut active,
-                "robot", "companion", "conversation", "connection", "utterance", &tasks, &stopped, &mut errors).await;
+                "robot", "companion", "conversation", "connection", "utterance", None, &tasks, &stopped, &mut errors).await;
             assert!(turn.is_none() && active.is_none());
             assert!(errors.is_empty());
         });
@@ -1568,6 +1701,34 @@ mod tests {
         assert!(deps.dispatcher.cancelled().is_empty(), "stopping playback must not cancel conversation work");
         drop(tx);
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn canonical_result_playback_deduplicates_on_the_original_connection() {
+        let (deps,link,tx,written,_dir)=harness(true).await;
+        let registry=deps.deps.registry.clone();
+        let robot_id="aa:bb:cc:dd:ee:ff";
+        assert!(!registry.get(robot_id).await.unwrap().permissions.proactive_speech,
+            "requested replies must work without enabling unrelated proactive announcements");
+        let task=tokio::spawn(run_session(link,deps.deps.clone()));
+        tx.send(Frame::Text(r#"{"type":"hello","version":1,"transport":"websocket"}"#.into())).await.unwrap();
+        let connection=tokio::time::timeout(Duration::from_secs(2),async {
+            loop { if let Some(connection)=registry.current_connection(robot_id).await {break connection;}
+                tokio::time::sleep(Duration::from_millis(5)).await; }
+        }).await.unwrap();
+        let source=nomifun_voice_contracts::VoiceSpeechSourceRef {message_id:"canonical-answer".into(),revision:42,through_seq:42};
+        assert!(registry.speak(robot_id,&connection,"无请求的公告".into()).await.is_err());
+        registry.speak_requested_source(robot_id,&connection,"任务完成。".into(),source.clone()).await.unwrap();
+        registry.speak_requested_source(robot_id,&connection,"任务完成。".into(),source.clone()).await.unwrap();
+        await_frame(&written,|frame|frame["type"]=="tts"&&frame["state"]=="stop").await;
+        assert_eq!(deps.speech.synthesized_text(),vec!["任务完成。"]);
+        assert!(matches!(registry.speak_requested_source(robot_id,&connection,"改写的结果".into(),source.clone()).await,
+            Err(RobotPlaybackError::SourceChanged)));
+        assert!(matches!(registry.speak_requested_source(robot_id,"another-connection","任务完成。".into(),source).await,
+            Err(RobotPlaybackError::Unavailable)));
+        assert!(deps.dispatcher.dispatched_text().is_empty());
+        assert!(deps.dispatcher.cancelled().is_empty());
+        drop(tx);task.await.unwrap();
     }
 
     /// Poll until a written frame satisfies `predicate`, or fail loudly.

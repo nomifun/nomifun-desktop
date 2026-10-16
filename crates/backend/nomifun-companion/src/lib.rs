@@ -15,6 +15,7 @@
 
 pub mod collector;
 pub mod agent_capability;
+mod agent_memory_projection;
 pub mod companion;
 pub mod archiver;
 pub mod archive_port;
@@ -29,6 +30,8 @@ pub mod gamify;
 pub mod learner;
 pub mod matting_model;
 pub mod memory_search;
+pub mod memory_context;
+pub mod learning_commit;
 pub mod profile;
 pub mod prompt;
 pub mod registry;
@@ -40,6 +43,8 @@ pub mod store;
 mod skill_io;
 
 pub use events::CompanionEventEmitter;
+pub use agent_memory_projection::{AgentMemoryProjection, AgentMemorySearchHit};
+pub use companion::CompanionRoleLaunchConfiguration;
 pub use agent_capability::{
     COMPANION_AGENT_ACTION_IDS, COMPANION_EVOLVE_ACTION_ID,
     COMPANION_LEARN_ACTION_ID, COMPANION_MEMORY_ACTION_IDS,
@@ -53,14 +58,20 @@ pub use figures::FigureMeta;
 pub use memory_search::{
     CompanionMemoryRow, MemorySearchHit, MemorySearchQuery, MemoryStatusFilter,
 };
+pub use memory_context::CompanionMemoryContext;
+pub use learning_commit::{LearnedMemoryCandidate, LearnedMemoryReinforcement};
 pub use profile::{
-    CompanionEvolveConfig, CompanionLearnConfig, CompanionMood, CompanionProfileConfig, CompanionSkillConfig,
+    CompanionEvolveConfig, CompanionLearnConfig, CompanionMood, CompanionProfileConfig, CompanionRobotConfig, CompanionSkillConfig,
     CompanionWindowConfig, CustomFigureMeta, HeadBox, SharedArchiveConfig, SharedCompanionConfig,
 };
 pub use registry::CompanionRegistry;
 pub use routes::{companion_public_routes, companion_routes};
 pub use session_port::{
-    companion_ports_from_typed_host, CompanionHostPorts, CompanionSessionPort,
+    companion_ports_from_typed_host, CompanionHostPorts, CompanionRole,
+    CompanionSessionCreateContext, CompanionSessionPort,
+    CompanionDeletionGuard,
+    CompanionHistoryRecallQuery, CompanionHistoryRecallPage, CompanionHistoryFragment,
+    CompanionHistoryRecallCursor,
 };
 pub use service::CompanionService;
 pub use state::CompanionRouterState;

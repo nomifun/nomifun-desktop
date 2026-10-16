@@ -245,6 +245,32 @@ impl NomiCoreResourceBindingResolverRegistry {
         }))
     }
 
+    /// Validate physical-channel identity independently of whether this Agent
+    /// selected any hardware Actions. This reads the existing resource owner;
+    /// it creates no resource binding or executable grant.
+    pub(crate) async fn validate_robot_companion_identity(
+        &self,
+        owner_id: &str,
+        companion_id: &str,
+        robot_id: &str,
+    ) -> Result<(), ResourceSelectionResolutionError> {
+        let authority = self.authorities.get("robot").ok_or_else(||
+            ResourceSelectionResolutionError::not_found("robot", robot_id))?;
+        let resolved = authority.resolve(ResourceAuthorityRequest {
+            owner_id: owner_id.to_owned(), resource_id: robot_id.to_owned(),
+            required_operations: BTreeSet::new(), selected_capability_ids: BTreeSet::new(),
+            selections_by_kind: BTreeMap::from([
+                ("companion".to_owned(), companion_id.to_owned()),
+                ("companion_memory".to_owned(), companion_id.to_owned()),
+            ]),
+        }).await?;
+        if resolved.resource_id != robot_id
+            || resolved.typed_parameters.get("companion_id").map(String::as_str) != Some(companion_id) {
+            return Err(ResourceSelectionResolutionError::forbidden("robot"));
+        }
+        Ok(())
+    }
+
     /// Single-resource resolution for capability-owned resources and explicit
     /// resource-only MCP bindings. Per-tool MCP invoke authority additionally
     /// requires saved Snapshot locks, supplied by `resolve_for_saved_binding`.

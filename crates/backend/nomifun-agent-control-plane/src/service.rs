@@ -37,6 +37,12 @@ const CHAT_MODEL_TASK: &str = nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHA
 mod model_detachment;
 pub use model_detachment::PreparedAgentModelDetachment;
 
+#[path = "channel_guest_binding.rs"]
+mod channel_guest_binding;
+#[cfg(test)]
+#[path = "session_selected_skills_tests.rs"]
+mod session_selected_skills_tests;
+
 // This small product workflow is authored into new immutable AppDeveloper
 // Revisions. The detailed platform guide remains an on-demand tool resource.
 const APP_DEVELOPMENT_INSTRUCTIONS: &str = "You are NomiFun's built-in application developer. Treat a request to create, import or change an application as completing the usable application in this workspace, including its application record and preview, not just writing source files. At the start of application work, discover app.hosting/current and app.hosting/guide with ToolSearch, then call current_app and read_app_guide. When current_app returns an application, keep its exact app_id and edit its existing managed workspace; do not import a second copy or create another application. Infer a useful application name, short description and appropriate tags from the user's request, and use update_app to keep the actual application metadata and ordinary runtime settings aligned with the files you create. Read existing project scripts and configuration; preserve user data and existing explicit settings unless the requested change requires modifying them. Use update_app with detect_settings:true to recognize ordinary supported project commands, then inspect the returned settings and fill any missing custom commands or real web_url yourself. Settings that do not apply may remain null; never invent install or build commands. Once the files and configuration are ready, call preview_app or rebuild_app on the same application through the hosting owner; do not start a separate unmanaged web server. Verify the returned state, actual HTTP response and relevant business behavior using already-authorized tools, and use the same owner to repair and restart after changes. Clearly distinguish verified behavior from checks unavailable with your granted tools. A generated file, a running process, or an empty web_url does not prove that an embedded preview works. Finish with the application's actual name, preview result and any real remaining failure; never claim preview success from prose alone. For ordinary questions or an explicit request to inspect only, do not modify or start an application.";
@@ -44,7 +50,7 @@ const APP_DEVELOPMENT_INSTRUCTIONS: &str = "You are NomiFun's built-in applicati
 fn official_template_instructions(key: OfficialPresetKey) -> &'static str {
     match key {
         OfficialPresetKey::AppDeveloper => APP_DEVELOPMENT_INSTRUCTIONS,
-        OfficialPresetKey::CompanionRobot => "Prioritize responsive physical interaction while keeping the selected Companion's identity and memories. For a clear supported device request, call the already available authorized device tool immediately; do not search unrelated capabilities or perform preliminary narration. Discover a device tool only when the needed operation is not already visible. If the request is ambiguous or unsupported, ask one short clarification or explain the limitation. Keep spoken replies brief and natural. Report an action only from the device tool's actual result, distinguishing acceptance from completion; never claim physical success from your own text. Do not repeat a device action after an uncertain result without resolving its status.",
+        OfficialPresetKey::CompanionRobot => "Prioritize responsive physical interaction while keeping the selected Companion's identity and memories. For a clear supported device request, call the already available authorized device tool immediately; do not search unrelated capabilities or perform preliminary narration. Discover a device tool only when the needed operation is not already visible. If the request is ambiguous or unsupported, ask one short clarification or explain the limitation. For computer work, use the tools the owner explicitly enabled when available; otherwise call agent/delegate with strategy=planned, target_role=desktop and the explicit goal; the host delegates to this same Companion's desktop Agent. Once accepted, briefly acknowledge and end this Turn so conversation stays responsive. Acceptance is not completion; report progress or results only from actual linked Execution receipts. Keep spoken replies brief and natural. Report an action only from the device tool's actual result, distinguishing acceptance from completion; never claim physical success from your own text. Do not repeat a device action after an uncertain result without resolving its status.",
         _ => "",
     }
 }
@@ -700,6 +706,30 @@ impl AgentControlPlane {
         self.resolve_agent_session_binding_with_capabilities(owner, preset_id, model, None).await
     }
 
+    /// Resolve a trusted physical-role launch before global defaults can replace
+    /// its authored Skill choices. Ordinary Agent launches retain their existing
+    /// installation-wide discovery and default-selection behavior.
+    pub async fn resolve_companion_robot_session_binding_with_model(
+        &self,
+        owner: &UserId,
+        preset_id: &str,
+        model: Option<&nomifun_api_types::AgentChatModelSelectionDto>,
+    ) -> Result<AgentBindingValueDto, ControlPlaneError> {
+        let binding = self.resolve_base_agent_session_binding_with_model(owner, preset_id, model).await?;
+        let contract: AgentBindingValue = wire_cast(&binding)?;
+        let (_, snapshot) = self.load_binding_artifacts(owner, &contract).await?;
+        let selection = nomifun_api_types::SessionCapabilitySelectionDto {
+            skill_names: snapshot.content.skill_locks.iter().filter_map(|lock| match lock {
+                nomifun_agent_contracts::ResolvedSkillLock::Package(lock) => Some(lock.skill.id.as_ref().to_owned()),
+                nomifun_agent_contracts::ResolvedSkillLock::Library { skill, selected: true, .. } => Some(skill.name.clone()),
+                _ => None,
+            }).collect::<BTreeSet<_>>().into_iter().collect(),
+            mcp_server_ids: snapshot.content.mcp_tool_locks.iter().map(|lock| lock.server_id.as_ref().to_owned())
+                .collect::<BTreeSet<_>>().into_iter().collect(),
+        };
+        self.resolve_agent_session_capabilities_binding_selected_skills(owner, &binding, &selection).await
+    }
+
     pub async fn resolve_agent_session_binding_with_capabilities(
         &self,
         owner: &UserId,
@@ -718,6 +748,30 @@ impl AgentControlPlane {
         owner: &UserId,
         current: &AgentBindingValueDto,
         selection: Option<&nomifun_api_types::SessionCapabilitySelectionDto>,
+    ) -> Result<AgentBindingValueDto, ControlPlaneError> {
+        self.resolve_session_capabilities_binding(owner, current, selection, false).await
+    }
+
+    /// Freeze only the explicitly selected Skill data for a product role whose
+    /// host does not expose the installation's general-purpose Skill library.
+    /// The caller supplies its trusted role's selection; model input and host
+    /// extras do not choose this policy. Unselected frozen library locks from a
+    /// previous binding are retired through the same canonical compilation.
+    pub async fn resolve_agent_session_capabilities_binding_selected_skills(
+        &self,
+        owner: &UserId,
+        current: &AgentBindingValueDto,
+        selection: &nomifun_api_types::SessionCapabilitySelectionDto,
+    ) -> Result<AgentBindingValueDto, ControlPlaneError> {
+        self.resolve_session_capabilities_binding(owner, current, Some(selection), true).await
+    }
+
+    async fn resolve_session_capabilities_binding(
+        &self,
+        owner: &UserId,
+        current: &AgentBindingValueDto,
+        selection: Option<&nomifun_api_types::SessionCapabilitySelectionDto>,
+        selected_skills_only: bool,
     ) -> Result<AgentBindingValueDto, ControlPlaneError> {
         let Some(resolver) = &self.session_capabilities_resolver else {
             if selection.is_some() {
@@ -755,6 +809,21 @@ impl AgentControlPlane {
                 mcp_server_ids: selected.into_iter().collect(),
             };
             resolved = resolver.resolve(owner, Some(&explicit)).await?;
+        }
+        if selected_skills_only {
+            // Global discovery normally freezes every installed Skill, even
+            // when none is selected. A physical role must not receive that
+            // directory or its readable bodies through context resources.
+            let expected = requested_library.as_ref().ok_or_else(|| ControlPlaneError::canonical(
+                "SESSION_CAPABILITIES_INVALID", axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                "the product role requires an explicit Skill selection"))?
+                .skill_names.iter().cloned().collect::<BTreeSet<_>>();
+            if resolved.selected_skill_names != expected || expected.iter().any(|name|
+                !resolved.skills.iter().any(|skill| &skill.name == name)) {
+                return Err(ControlPlaneError::canonical("SESSION_CAPABILITIES_INVALID", axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    "resolved product Skills differ from the explicit selection"));
+            }
+            resolved.skills.retain(|skill| resolved.selected_skill_names.contains(&skill.name));
         }
         let source = self.owned_preset(owner, source_revision.reference.preset_id.as_ref()).await?;
         let catalog = self.catalog.snapshot()?;
@@ -3762,7 +3831,7 @@ mod tests {
         assert!(reloaded.draft.source_template_key.is_none());
     }
 
-    fn official_launch_request(reuse_existing: bool) -> CreateAgentPresetFromTemplateRequest {
+    pub(super) fn official_launch_request(reuse_existing: bool) -> CreateAgentPresetFromTemplateRequest {
         CreateAgentPresetFromTemplateRequest {
             model: None,
             reuse_existing,
@@ -3802,8 +3871,9 @@ mod tests {
         assert_eq!(created.draft.source_template_key, Some(nomifun_api_types::OfficialPresetKeyDto::CompanionRobot));
         assert_eq!(created.draft.document.instructions, official_template_instructions(OfficialPresetKey::CompanionRobot));
         assert!(!created.draft.document.instructions.is_empty());
+        assert!(created.draft.document.instructions.contains("use the tools the owner explicitly enabled when available; otherwise call agent/delegate"));
         assert_eq!(created.draft.document.enabled_capabilities.iter().map(|selection| selection.capability.id.as_str())
-            .collect::<BTreeSet<_>>(), BTreeSet::from(["companion", "companion.memory", "robot"]));
+            .collect::<BTreeSet<_>>(), BTreeSet::from(["agent.collaboration", "companion", "companion.memory", "robot", "session.management"]));
         let mut draft = created.draft.clone();
         draft.document.instructions = "My authored physical interaction rules".into();
         let saved = control.save_revision(&owner, &created.preset.preset_id, SaveAgentPresetRevisionRequest {
@@ -3821,6 +3891,49 @@ mod tests {
                 expected_current_revision: detached.current_revision.clone(), draft: detached, reason: None,
             }).await.unwrap_err();
             assert_eq!(error.code().as_ref(), "PRESET_REVISION_SAVE_FAILED");
+        }
+    }
+
+    #[tokio::test]
+    async fn companion_official_presets_preserve_explicit_capabilities_and_immutable_history() {
+        let templates = OfficialTemplateCatalog::load().unwrap();
+        for (key, extra_key) in [(OfficialPresetKey::CompanionDefault, OfficialPresetKey::CompanionRobot),
+            (OfficialPresetKey::CompanionRobot, OfficialPresetKey::CompanionDefault)] {
+            let store = Arc::new(InMemoryControlPlaneStore::new());
+            let extras = &templates.seed(extra_key).unwrap().enabled_capabilities;
+            let control = template_control_plane_with_extra_capabilities(store.clone(), key, false, false, extras);
+            let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+            let created = publish_official_fixture(&control, &owner, key, None).await;
+            let frozen = control.resolve_agent_session_binding(&owner, &created.preset.preset_id).await.unwrap();
+            let (_, original, original_snapshot) = control.saved_binding_artifacts(&owner, &frozen).await.unwrap();
+            let mut draft = created.draft;
+            draft.document.persona = "My explicit persona".into();
+            draft.document.instructions = "Use every capability I explicitly authorize".into();
+            for extra in extras {
+                if let Some(selected) = draft.document.enabled_capabilities.iter_mut().find(|selection| selection.capability.id == extra.capability.id.as_ref()) {
+                    selected.action_allowlist.extend(extra.action_allowlist.iter().map(|action| action.as_ref().to_owned()));
+                } else { draft.document.enabled_capabilities.push(wire_cast(extra).unwrap()); }
+            }
+            let expected = draft.document.clone();
+            let stale = draft.clone();
+            let saved = control.save_revision(&owner, &created.preset.preset_id, SaveAgentPresetRevisionRequest {
+                expected_current_revision: draft.current_revision.clone(), draft, reason: Some("Explicit authoring choice".into()),
+            }).await.unwrap();
+            assert_eq!(saved.revision.document, expected, "defaults must not limit explicit authoring");
+            let latest = control.resolve_agent_session_binding(&owner, &created.preset.preset_id).await.unwrap();
+            let (_, revision, snapshot) = control.saved_binding_artifacts(&owner, &latest).await.unwrap();
+            assert_eq!(revision.payload, document_payload(&expected).unwrap());
+            for extra in extras {
+                assert!(snapshot.content.enabled_capabilities.iter().any(|selection| selection.capability == extra.capability
+                    && extra.action_allowlist.is_subset(&selection.action_allowlist)));
+            }
+            assert_eq!(store.get_revision(&original.reference).await.unwrap().unwrap(), original);
+            assert_eq!(store.get_snapshot(&original.reference).await.unwrap().unwrap(), original_snapshot);
+            let reopened = control.create_from_template(&owner, key.as_str(), official_launch_request(true)).await.unwrap();
+            assert_eq!(reopened.draft.document, expected, "reopening must not apply role defaults over saved choices");
+            assert_eq!(control.save_revision(&owner, &created.preset.preset_id, SaveAgentPresetRevisionRequest {
+                expected_current_revision: stale.current_revision.clone(), draft: stale, reason: None,
+            }).await.unwrap_err().code().as_ref(), "PRESET_REVISION_DIGEST_MISMATCH");
         }
     }
 
@@ -4188,8 +4301,8 @@ mod tests {
     async fn companion_robot_recommendations_do_not_widen_saved_or_frozen_bindings() {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
-        let control = template_control_plane(store.clone(), OfficialPresetKey::CompanionDefault, false);
-        let created = publish_official_fixture(&control, &owner, OfficialPresetKey::CompanionDefault, None).await;
+        let control = template_control_plane(store.clone(), OfficialPresetKey::CompanionRobot, false);
+        let created = publish_official_fixture(&control, &owner, OfficialPresetKey::CompanionRobot, None).await;
         let id = &created.preset.preset_id;
         // An existing authored configuration can intentionally retain only
         // vision. Publishing broader recommendations must not overwrite it.
@@ -4205,8 +4318,8 @@ mod tests {
         let (_, old_revision, old_snapshot) = control.saved_binding_artifacts(&owner, &frozen).await.unwrap();
         let before = control.editor(&owner, id, None).await.unwrap();
 
-        let restarted = template_control_plane(store.clone(), OfficialPresetKey::CompanionDefault, false);
-        let reopened = restarted.create_from_template(&owner, "companion.default", official_launch_request(true)).await.unwrap();
+        let restarted = template_control_plane(store.clone(), OfficialPresetKey::CompanionRobot, false);
+        let reopened = restarted.create_from_template(&owner, "companion.robot", official_launch_request(true)).await.unwrap();
         assert_eq!(reopened.draft.document, before.draft.document, "ordinary launch preserves the saved action subset");
         assert_eq!(reopened.preset.current_stable_revision, before.preset.current_stable_revision);
         let proposal = restarted.recommended_capabilities(&owner, id).await.unwrap();
@@ -4720,7 +4833,7 @@ mod tests {
         }
     }
 
-    fn template_control_plane(store: Arc<InMemoryControlPlaneStore>, key: OfficialPresetKey, updated_schema: bool) -> AgentControlPlane {
+    pub(super) fn template_control_plane(store: Arc<InMemoryControlPlaneStore>, key: OfficialPresetKey, updated_schema: bool) -> AgentControlPlane {
         template_control_plane_with_order_contributions(store, key, updated_schema, false)
     }
 
@@ -4728,11 +4841,24 @@ mod tests {
         store: Arc<InMemoryControlPlaneStore>, key: OfficialPresetKey,
         updated_schema: bool, order_contributions: bool,
     ) -> AgentControlPlane {
+        template_control_plane_with_extra_capabilities(store, key, updated_schema, order_contributions, &[])
+    }
+
+    fn template_control_plane_with_extra_capabilities(
+        store: Arc<InMemoryControlPlaneStore>, key: OfficialPresetKey,
+        updated_schema: bool, order_contributions: bool, extras: &[CapabilitySelection],
+    ) -> AgentControlPlane {
         let templates = OfficialTemplateCatalog::load().unwrap();
         let mut registry = MaterializedRegistry::empty();
         let mut catalog = CatalogSnapshot::default();
-        for selected in &templates.seed(key).unwrap().enabled_capabilities {
-            let schema = if matches!(selected.capability.id.as_ref(), "creation.media" | "knowledge") && updated_schema {
+        let mut available = templates.seed(key).unwrap().enabled_capabilities.iter()
+            .map(|selection| (selection.capability.id.clone(), selection.clone())).collect::<BTreeMap<_, _>>();
+        for extra in extras {
+            available.entry(extra.capability.id.clone()).and_modify(|selection| selection.action_allowlist.extend(extra.action_allowlist.iter().cloned()))
+                .or_insert_with(|| extra.clone());
+        }
+        for selected in available.values() {
+            let schema = if matches!(selected.capability.id.as_ref(), "creation.media" | "knowledge" | "companion.memory") && updated_schema {
                 json!({"type":"object", "additionalProperties":false, "properties":{"model_selection":{"type":"object"}}})
             } else { json!({"type":"object", "additionalProperties":false}) };
             let (mut capability, mut entry) = catalog_capability_with_actions_schema(

@@ -44,9 +44,10 @@ pub fn companion_routes(state: CompanionRouterState) -> Router {
         )
         .route(
             "/api/companion/companions/{companion_id}/companion/threads",
-            post(create_thread),
+            get(list_threads).post(create_thread),
         )
-        .route("/api/companion/companions/{companion_id}/companion/active", get(get_active_thread))
+        .route("/api/companion/companions/{companion_id}/companion/threads/{session_id}", axum::routing::delete(delete_thread))
+        .route("/api/companion/companions/{companion_id}/companion/active", get(get_active_thread).post(set_active_thread))
         .route("/api/companion/memories", get(list_memories).post(add_memory))
         .route(
             "/api/companion/memories/{memory_id}",
@@ -238,6 +239,7 @@ async fn add_memory(
 /// is fixed at write time and no wire carries a new one.
 #[derive(Deserialize)]
 struct UpdateMemoryRequest {
+    expected_revision: i64,
     content: Option<String>,
     pinned: Option<bool>,
     status: Option<String>,
@@ -248,6 +250,7 @@ struct UpdateMemoryRequest {
 #[derive(Deserialize)]
 struct MemoryActorQuery {
     companion_id: String,
+    expected_revision: i64,
 }
 
 /// Reject a malformed `companion_id` before it reaches the store, on every
@@ -272,19 +275,20 @@ async fn update_memory(
     Extension(_user): Extension<CurrentUser>,
     Path(memory_id): Path<String>,
     body: Result<Json<UpdateMemoryRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<()>>, AppError> {
+) -> Result<Json<ApiResponse<CompanionMemory>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state
+    let updated = state
         .service
-        .update_memory(
+        .update_memory_cas(
             &memory_id,
+            req.expected_revision,
             req.content.as_deref(),
             req.pinned,
             req.status.as_deref(),
             &memory_actor(&req.companion_id)?,
         )
         .await?;
-    Ok(Json(ApiResponse::ok(())))
+    Ok(Json(ApiResponse::ok(updated)))
 }
 
 async fn delete_memory(
@@ -295,7 +299,7 @@ async fn delete_memory(
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     state
         .service
-        .delete_memory(&memory_id, &memory_actor(&query.companion_id)?)
+        .delete_memory_cas(&memory_id, query.expected_revision, &memory_actor(&query.companion_id)?)
         .await?;
     Ok(Json(ApiResponse::ok(())))
 }
@@ -310,6 +314,7 @@ struct BatchMemoriesRequest {
     kind: Option<String>,
     /// The asking companion; every id in the batch must be one of its memories.
     companion_id: String,
+    expected_revisions: std::collections::BTreeMap<String, i64>,
 }
 
 /// Atomic batch memory operation (single transaction; any bad id rolls back).
@@ -334,7 +339,7 @@ async fn batch_memories(
     };
     state
         .service
-        .batch_memories(&req.ids, &action, &memory_actor(&req.companion_id)?)
+        .batch_memories_cas(&req.ids, &action, &memory_actor(&req.companion_id)?, &req.expected_revisions)
         .await?;
     Ok(Json(ApiResponse::ok(())))
 }
@@ -366,6 +371,7 @@ struct MergeMemoriesRequest {
     kind: String,
     /// The asking companion; every member of the group must be one of its memories.
     companion_id: String,
+    expected_revisions: std::collections::BTreeMap<String, i64>,
 }
 
 /// Merge-assistant confirm: insert the merged memory, archive the source group.
@@ -378,11 +384,12 @@ async fn merge_memories(
     Ok(Json(ApiResponse::ok(
         state
             .service
-            .merge_memories(
+            .merge_memories_cas(
                 &req.group,
                 &req.merged_content,
                 &req.kind,
                 &memory_actor(&req.companion_id)?,
+                &req.expected_revisions,
             )
             .await?,
     )))
@@ -434,6 +441,7 @@ async fn weekly_digest(
 
 #[derive(Deserialize)]
 struct DayDigestsQuery {
+    conversation_id: Option<String>,
     /// Inclusive `YYYYMMDD` lower bound (empty/absent = open).
     since: Option<String>,
     /// Inclusive `YYYYMMDD` upper bound (empty/absent = open).
@@ -454,7 +462,14 @@ async fn list_day_digests(
     let limit = q.limit.unwrap_or(60).clamp(1, 365);
     let digests = if let Some(mmdd) = q.on_day.filter(|s| s.len() == 4) {
         let today = crate::store::local_day(nomifun_common::now_ms());
-        state.service.digests_on_this_day(&companion_id, &mmdd, &today, limit).await?
+        if let Some(session_id) = q.conversation_id.as_deref() {
+            state.service.digests_on_this_day_for_session(&companion_id, session_id, &mmdd, &today, limit).await?
+        } else {
+            state.service.digests_on_this_day(&companion_id, &mmdd, &today, limit).await?
+        }
+    } else if let Some(session_id) = q.conversation_id.as_deref() {
+        state.service.list_day_digests_for_session(&companion_id, session_id,
+            q.since.as_deref().unwrap_or(""), q.until.as_deref().unwrap_or(""), limit).await?
     } else {
         state
             .service
@@ -475,11 +490,15 @@ async fn history_days(
     State(state): State<CompanionRouterState>,
     Extension(_user): Extension<CurrentUser>,
     Path(companion_id): Path<String>,
+    Query(query): Query<SessionHistoryQuery>,
 ) -> Result<Json<ApiResponse<Vec<CompanionHistoryDay>>>, AppError> {
     Ok(Json(ApiResponse::ok(
-        state.service.history_day_index(&companion_id).await?,
+        state.service.history_day_index_for_session(&companion_id, query.conversation_id.as_deref()).await?,
     )))
 }
+
+#[derive(Deserialize)]
+struct SessionHistoryQuery { conversation_id: Option<String> }
 
 async fn get_companion_skill(
     State(state): State<CompanionRouterState>,
@@ -854,15 +873,19 @@ async fn get_figure_image(
         .map_err(|e| AppError::Internal(e.to_string()))
 }
 
-// ----- companion thread (per companion, single session) -----
+// ----- companion Sessions -----
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateThreadRequest {
     #[serde(default)]
     title: Option<String>,
+    #[serde(default)]
+    new_session: bool,
+    creation_key: Option<String>,
 }
 
-/// Idempotent ensure of the companion's single companion session: returns the
+/// Ensure the desktop receive Session or explicitly create another Session:
 /// existing one, or creates it (requires the companion's model to be configured).
 async fn create_thread(
     State(state): State<CompanionRouterState>,
@@ -870,10 +893,41 @@ async fn create_thread(
     Path(companion_id): Path<String>,
     body: Result<Json<CreateThreadRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<crate::store::CompanionThread>>, AppError> {
-    let title = body.map(|Json(b)| b.title).unwrap_or_default();
-    Ok(Json(ApiResponse::ok(
-        state.service.create_companion_thread(&companion_id, title).await?,
-    )))
+    let request = match body {
+        Ok(Json(request)) => request,
+        Err(JsonRejection::MissingJsonContentType(_)) => CreateThreadRequest::default(),
+        Err(error) => return Err(AppError::BadRequest(error.to_string())),
+    };
+    let thread = if request.new_session {
+        let key = request.creation_key.as_deref().ok_or_else(|| AppError::BadRequest("new_session requires creation_key".into()))?;
+        state.service.new_companion_thread(&companion_id, key, request.title).await?
+    } else {
+        state.service.create_companion_thread(&companion_id, request.title).await?
+    };
+    Ok(Json(ApiResponse::ok(thread)))
+}
+
+#[derive(serde::Serialize)]
+struct CompanionThreadPage {
+    items: Vec<crate::store::CompanionThread>,
+    total: usize,
+    has_more: bool,
+}
+
+async fn list_threads(
+    State(state): State<CompanionRouterState>, Extension(_user): Extension<CurrentUser>,
+    Path(companion_id): Path<String>,
+) -> Result<Json<ApiResponse<CompanionThreadPage>>, AppError> {
+    let items = state.service.list_companion_threads(&companion_id).await?;
+    Ok(Json(ApiResponse::ok(CompanionThreadPage { total: items.len(), items, has_more: false })))
+}
+
+async fn delete_thread(
+    State(state): State<CompanionRouterState>, Extension(_user): Extension<CurrentUser>,
+    Path((companion_id, session_id)): Path<(String, String)>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    state.service.delete_companion_thread(&companion_id, &session_id).await?;
+    Ok(Json(ApiResponse::ok(())))
 }
 
 #[derive(serde::Serialize)]
@@ -881,7 +935,20 @@ struct ActiveThreadResponse {
     conversation_id: Option<String>,
 }
 
-/// The companion's single companion session id (or null when none exists yet).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetActiveThreadRequest { conversation_id: String }
+
+async fn set_active_thread(
+    State(state): State<CompanionRouterState>, Extension(_user): Extension<CurrentUser>,
+    Path(companion_id): Path<String>, body: Result<Json<SetActiveThreadRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<ActiveThreadResponse>>, AppError> {
+    let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    state.service.set_companion_active_thread(&companion_id, &request.conversation_id).await?;
+    Ok(Json(ApiResponse::ok(ActiveThreadResponse { conversation_id: Some(request.conversation_id) })))
+}
+
+/// The desktop receive Session id (or null); viewing another Session does not change it.
 async fn get_active_thread(
     State(state): State<CompanionRouterState>,
     Extension(_user): Extension<CurrentUser>,
@@ -1029,6 +1096,23 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    fn put_json(uri: &str, body: serde_json::Value) -> Request<Body> {
+        Request::put(uri).header("content-type", "application/json")
+            .body(Body::from(body.to_string())).unwrap()
+    }
+
+    async fn memory_revision(service: &CompanionService, memory_id: &str) -> i64 {
+        service.store.get_memory(memory_id).await.unwrap().unwrap().revision
+    }
+
+    async fn memory_revisions(service: &CompanionService, memory_ids: &[&str]) -> serde_json::Value {
+        let mut versions = serde_json::Map::new();
+        for memory_id in memory_ids {
+            versions.insert((*memory_id).to_owned(), serde_json::json!(memory_revision(service, memory_id).await));
+        }
+        serde_json::Value::Object(versions)
     }
 
     #[tokio::test]
@@ -1248,7 +1332,8 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/batch",
-                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "archive", "companion_id": owner.as_str() }),
+                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "archive", "companion_id": owner.as_str(),
+                    "expected_revisions": memory_revisions(&service, &[&a.memory_id, &b.memory_id]).await }),
             ))
             .await
             .unwrap();
@@ -1260,7 +1345,8 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/batch",
-                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "restore", "companion_id": owner.as_str() }),
+                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "restore", "companion_id": owner.as_str(),
+                    "expected_revisions": memory_revisions(&service, &[&a.memory_id, &b.memory_id]).await }),
             ))
             .await
             .unwrap();
@@ -1272,7 +1358,8 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/batch",
-                serde_json::json!({ "ids": [a.memory_id.as_str()], "action": "reclassify", "kind": "knowledge", "companion_id": owner.as_str() }),
+                serde_json::json!({ "ids": [a.memory_id.as_str()], "action": "reclassify", "kind": "knowledge", "companion_id": owner.as_str(),
+                    "expected_revisions": memory_revisions(&service, &[&a.memory_id]).await }),
             ))
             .await
             .unwrap();
@@ -1282,7 +1369,8 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/batch",
-                serde_json::json!({ "ids": [a.memory_id.as_str()], "action": "reclassify", "kind": "bogus", "companion_id": owner.as_str() }),
+                serde_json::json!({ "ids": [a.memory_id.as_str()], "action": "reclassify", "kind": "bogus", "companion_id": owner.as_str(),
+                    "expected_revisions": memory_revisions(&service, &[&a.memory_id]).await }),
             ))
             .await
             .unwrap();
@@ -1290,11 +1378,16 @@ mod tests {
 
         // atomic: one bad id rolls the whole delete back
         let missing = nomifun_common::CompanionMemoryId::new().into_string();
+        let mut missing_versions = memory_revisions(&service, &[&a.memory_id]).await;
+        // A nonexistent row has no readable version; supply a positive version
+        // for that exact id so the test reaches the ownership/existence gate.
+        missing_versions[missing.as_str()] = serde_json::json!(1);
         let resp = app
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/batch",
-                serde_json::json!({ "ids": [a.memory_id.as_str(), missing.as_str()], "action": "delete", "companion_id": owner.as_str() }),
+                serde_json::json!({ "ids": [a.memory_id.as_str(), missing.as_str()], "action": "delete", "companion_id": owner.as_str(),
+                    "expected_revisions": missing_versions }),
             ))
             .await
             .unwrap();
@@ -1307,7 +1400,8 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/batch",
-                serde_json::json!({ "ids": [a.memory_id.as_str()], "action": "delete", "companion_id": stranger.as_str() }),
+                serde_json::json!({ "ids": [a.memory_id.as_str()], "action": "delete", "companion_id": stranger.as_str(),
+                    "expected_revisions": memory_revisions(&service, &[&a.memory_id]).await }),
             ))
             .await
             .unwrap();
@@ -1319,7 +1413,8 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/batch",
-                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "delete", "companion_id": owner.as_str() }),
+                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "delete", "companion_id": owner.as_str(),
+                    "expected_revisions": memory_revisions(&service, &[&a.memory_id, &b.memory_id]).await }),
             ))
             .await
             .unwrap();
@@ -1482,7 +1577,8 @@ mod tests {
         // Foreign asker: 404, and the content is untouched.
         let resp = app
             .clone()
-            .oneshot(put(serde_json::json!({ "content": "篡改", "companion_id": stranger.as_str() })))
+            .oneshot(put(serde_json::json!({ "content": "篡改", "companion_id": stranger.as_str(),
+                "expected_revision": memory_revision(&service, &mine.memory_id).await })))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -1490,8 +1586,8 @@ mod tests {
             .clone()
             .oneshot(
                 Request::delete(format!(
-                    "/api/companion/memories/{}?companion_id={stranger}",
-                    mine.memory_id
+                    "/api/companion/memories/{}?companion_id={stranger}&expected_revision={}",
+                    mine.memory_id, memory_revision(&service, &mine.memory_id).await
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -1503,12 +1599,14 @@ mod tests {
         assert_eq!(row.content, "主人喜欢深烘焙咖啡");
 
         // No asker at all: refused as a bad request, not silently unchecked.
-        let resp = app.clone().oneshot(put(serde_json::json!({ "content": "谁都能改" }))).await.unwrap();
+        let resp = app.clone().oneshot(put(serde_json::json!({ "content": "谁都能改",
+            "expected_revision": memory_revision(&service, &mine.memory_id).await }))).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let resp = app
             .clone()
             .oneshot(
-                Request::delete(format!("/api/companion/memories/{}", mine.memory_id))
+                Request::delete(format!("/api/companion/memories/{}?expected_revision={}",
+                    mine.memory_id, memory_revision(&service, &mine.memory_id).await))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1520,7 +1618,8 @@ mod tests {
         // The owner can do both.
         let resp = app
             .clone()
-            .oneshot(put(serde_json::json!({ "content": "主人现在只喝浅烘焙", "companion_id": owner.as_str() })))
+            .oneshot(put(serde_json::json!({ "content": "主人现在只喝浅烘焙", "companion_id": owner.as_str(),
+                "expected_revision": memory_revision(&service, &mine.memory_id).await })))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1532,8 +1631,8 @@ mod tests {
             .clone()
             .oneshot(
                 Request::delete(format!(
-                    "/api/companion/memories/{}?companion_id={owner}",
-                    mine.memory_id
+                    "/api/companion/memories/{}?companion_id={owner}&expected_revision={}",
+                    mine.memory_id, memory_revision(&service, &mine.memory_id).await
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -1542,6 +1641,147 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(service.store.get_memory(&mine.memory_id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn memory_put_returns_the_committed_revision_and_stale_put_cannot_replace_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, service) = test_app(dir.path()).await;
+        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
+        let stranger = service.create_companion("乙", "ink").await.unwrap().companion_id;
+        let memory = service.add_memory("preference", "原先的咖啡偏好", &[], Some(&owner)).await.unwrap();
+        let revision = memory_revision(&service, &memory.memory_id).await;
+        let uri = format!("/api/companion/memories/{}", memory.memory_id);
+        let response = app.clone().oneshot(put_json(&uri, serde_json::json!({
+            "companion_id": owner, "expected_revision": revision, "content": "现在改喝浅烘焙咖啡",
+        }))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let committed: CompanionMemory = serde_json::from_value(body["data"].clone()).unwrap();
+        assert_eq!(committed.revision, revision + 1);
+        assert_eq!(committed.content, "现在改喝浅烘焙咖啡");
+        assert_eq!(service.store.get_memory(&memory.memory_id).await.unwrap().unwrap(), committed);
+
+        let stale = app.clone().oneshot(put_json(&uri, serde_json::json!({
+            "companion_id": owner, "expected_revision": revision, "content": "另一个旧页面的改动",
+        }))).await.unwrap();
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        assert_eq!(service.store.get_memory(&memory.memory_id).await.unwrap().unwrap(), committed);
+        // A valid but stale version must not expose a different owner's row.
+        let foreign = app.oneshot(put_json(&uri, serde_json::json!({
+            "companion_id": stranger, "expected_revision": revision, "content": "跨伙伴改动",
+        }))).await.unwrap();
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+        assert_eq!(service.store.get_memory(&memory.memory_id).await.unwrap().unwrap(), committed);
+    }
+
+    #[tokio::test]
+    async fn memory_mutation_routes_require_versions_and_exact_revision_maps() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, service) = test_app(dir.path()).await;
+        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
+        let a = service.add_memory("preference", "第一条独立偏好", &[], Some(&owner)).await.unwrap();
+        let b = service.add_memory("preference", "第二条不同约定", &[], Some(&owner)).await.unwrap();
+        let a_before = service.store.get_memory(&a.memory_id).await.unwrap().unwrap();
+        let b_before = service.store.get_memory(&b.memory_id).await.unwrap().unwrap();
+        let missing = [
+            put_json(&format!("/api/companion/memories/{}", a.memory_id), serde_json::json!({
+                "companion_id": owner, "content": "没有版本的改动",
+            })),
+            Request::delete(format!("/api/companion/memories/{}?companion_id={owner}", a.memory_id)).body(Body::empty()).unwrap(),
+            post_json("/api/companion/memories/batch", serde_json::json!({
+                "companion_id": owner, "ids": [a.memory_id, b.memory_id], "action": "archive",
+            })),
+            post_json("/api/companion/memories/merge", serde_json::json!({
+                "companion_id": owner, "group": [a.memory_id, b.memory_id], "kind": "preference", "merged_content": "缺少版本的合并",
+            })),
+        ];
+        for request in missing {
+            assert_eq!(app.clone().oneshot(request).await.unwrap().status(), StatusCode::BAD_REQUEST);
+        }
+
+        let exact = memory_revisions(&service, &[&a.memory_id, &b.memory_id]).await;
+        let mut missing_member = exact.clone();
+        missing_member.as_object_mut().unwrap().remove(&b.memory_id);
+        let mut extra_member = exact.clone();
+        extra_member[nomifun_common::CompanionMemoryId::new().as_str()] = serde_json::json!(1);
+        let mut invalid_version = exact;
+        invalid_version[a.memory_id.as_str()] = serde_json::json!(0);
+        for expected in [missing_member, extra_member, invalid_version] {
+            let request = post_json("/api/companion/memories/batch", serde_json::json!({
+                "companion_id": owner, "ids": [a.memory_id, b.memory_id], "action": "archive", "expected_revisions": expected,
+            }));
+            assert_eq!(app.clone().oneshot(request).await.unwrap().status(), StatusCode::BAD_REQUEST);
+        }
+        assert_eq!(service.store.get_memory(&a.memory_id).await.unwrap().unwrap(), a_before);
+        assert_eq!(service.store.get_memory(&b.memory_id).await.unwrap().unwrap(), b_before);
+    }
+
+    #[tokio::test]
+    async fn one_stale_member_rolls_back_entire_batch_and_merge_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, service) = test_app(dir.path()).await;
+        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
+        let a = service.add_memory("preference", "保留第一条偏好", &[], Some(&owner)).await.unwrap();
+        let b = service.add_memory("preference", "待修正的第二条约定", &[], Some(&owner)).await.unwrap();
+        let versions = memory_revisions(&service, &[&a.memory_id, &b.memory_id]).await;
+        let a_before = service.store.get_memory(&a.memory_id).await.unwrap().unwrap();
+        let b_committed = service.store.update_memory_cas(&b.memory_id,
+            memory_revision(&service, &b.memory_id).await, Some("另一会话已经确认的新约定"), None, None,
+            &MemoryActor::Companion(owner.clone())).await.unwrap();
+        let response = app.clone().oneshot(post_json("/api/companion/memories/batch", serde_json::json!({
+            "companion_id": owner, "ids": [a.memory_id, b.memory_id], "action": "archive", "expected_revisions": versions,
+        }))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(service.store.get_memory(&a.memory_id).await.unwrap().unwrap(), a_before);
+        assert_eq!(service.store.get_memory(&b.memory_id).await.unwrap().unwrap(), b_committed);
+
+        let response = app.oneshot(post_json("/api/companion/memories/merge", serde_json::json!({
+            "companion_id": owner, "group": [a.memory_id, b.memory_id], "kind": "preference",
+            "merged_content": "旧页面发起的合并", "expected_revisions": versions,
+        }))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(service.store.get_memory(&a.memory_id).await.unwrap().unwrap(), a_before);
+        assert_eq!(service.store.get_memory(&b.memory_id).await.unwrap().unwrap(), b_committed);
+        assert_eq!(service.store.count_memories("active", Some(&owner)).await.unwrap(), 2);
+        assert_eq!(service.store.count_memories("archived", Some(&owner)).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn stale_memory_delete_preserves_the_corrections_existing_source_cut() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, service) = test_app(dir.path()).await;
+        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
+        let event = nomifun_common::CompanionEventId::new().into_string();
+        let candidate = crate::learning_commit::LearnedMemoryCandidate {
+            kind: "preference".into(), content: "可被用户明确忘记的偏好".into(), tags: vec![], importance: 0.8,
+            source_event_ids: vec![event.clone()],
+            source_message_refs: vec![],
+        };
+        let generation = service.store.memory_generation(&owner).await.unwrap();
+        assert_eq!(service.store.apply_learning_batch(&owner, &generation, &[], &[], &[candidate]).await.unwrap(), 1);
+        let memory = service.store.dump_memories_for_companion(&owner).await.unwrap().pop().unwrap();
+        let committed = service.store.update_memory_cas(&memory.memory_id, memory.revision,
+            Some("另一会话已修正的偏好"), None, None, &MemoryActor::Companion(owner.clone())).await.unwrap();
+        assert!(service.store.memory_source_is_retracted(&owner, &event).await.unwrap(), "content correction already invalidates its original source");
+        let before: Vec<(String, String)> = sqlx::query_as(
+            "SELECT state_key, value FROM companion_runtime_state WHERE companion_id = ? AND state_key GLOB 'memory_retracted_source:*' ORDER BY state_key",
+        ).bind(&owner).fetch_all(service.store.pool()).await.unwrap();
+        let response = app.clone().oneshot(Request::delete(format!(
+            "/api/companion/memories/{}?companion_id={owner}&expected_revision={}", memory.memory_id, memory.revision,
+        )).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(service.store.get_memory(&memory.memory_id).await.unwrap().unwrap(), committed);
+        let after: Vec<(String, String)> = sqlx::query_as(
+            "SELECT state_key, value FROM companion_runtime_state WHERE companion_id = ? AND state_key GLOB 'memory_retracted_source:*' ORDER BY state_key",
+        ).bind(&owner).fetch_all(service.store.pool()).await.unwrap();
+        assert_eq!(after, before, "a stale DELETE must not add or rewrite any source cut");
+        let response = app.oneshot(Request::delete(format!(
+            "/api/companion/memories/{}?companion_id={owner}&expected_revision={}", memory.memory_id, committed.revision,
+        )).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(service.store.get_memory(&memory.memory_id).await.unwrap().is_none());
+        assert!(service.store.memory_source_is_retracted(&owner, &event).await.unwrap());
     }
 
     /// The merge assistant end to end, plus the leak it used to have: the dry run
@@ -1621,6 +1861,7 @@ mod tests {
                     "merged_content": "抢来的",
                     "kind": "preference",
                     "companion_id": stranger.as_str(),
+                    "expected_revisions": memory_revisions(&service, &[&a.memory_id, &b.memory_id]).await,
                 }),
             ))
             .await
@@ -1637,6 +1878,7 @@ mod tests {
                     "merged_content": "主人喜欢深烘焙咖啡豆，常用手冲",
                     "kind": "preference",
                     "companion_id": owner.as_str(),
+                    "expected_revisions": memory_revisions(&service, &[&a.memory_id, &b.memory_id]).await,
                 }),
             ))
             .await
@@ -1661,7 +1903,8 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/merge",
-                serde_json::json!({ "group": [a.memory_id.as_str(), b.memory_id.as_str()], "merged_content": "x", "kind": "bogus", "companion_id": owner.as_str() }),
+                serde_json::json!({ "group": [a.memory_id.as_str(), b.memory_id.as_str()], "merged_content": "x", "kind": "bogus", "companion_id": owner.as_str(),
+                    "expected_revisions": memory_revisions(&service, &[&a.memory_id, &b.memory_id]).await }),
             ))
             .await
             .unwrap();
@@ -1688,6 +1931,11 @@ mod tests {
             updated_at,
             last_reinforced_at: updated_at,
             companion_id: None,
+            revision: 1,
+            source_session_id: None,
+            source_operation_id: None,
+            source_event_ids: vec![],
+            source_message_refs: vec![],
         };
         let old_archived = raw("主人上月研究了咖啡烘焙曲线", 0.9, "archived", 1_000);
         let new_active = raw("主人今天又聊起咖啡豆产区", 0.2, "active", 2_000);

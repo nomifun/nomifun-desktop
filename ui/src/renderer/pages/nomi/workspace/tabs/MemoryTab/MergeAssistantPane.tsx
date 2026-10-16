@@ -4,14 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Checkbox, Input, Message, Spin } from '@arco-design/web-react';
+import { Button, Checkbox, Input, Message, Spin } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
 import type { ICompanionMemoryKind, ICompanionMemoryMergeGroup } from '@/common/adapter/ipcBridge';
 import type { CompanionId, CompanionMemoryId } from '@/common/types/ids';
 import { MEMORY_KINDS } from './constants';
+import { isMemoryRevisionConflict, memoryMutationErrorKey } from './memoryMutationError';
 
 /** Per-group editable state: which members merge, into what text, under what kind. */
 interface MergeDraft {
@@ -41,6 +42,11 @@ const MergeAssistantPane: React.FC<MergeAssistantPaneProps> = ({ companionId, on
   const [loading, setLoading] = useState(true);
   const [groups, setGroups] = useState<ICompanionMemoryMergeGroup[]>([]);
   const [drafts, setDrafts] = useState<MergeDraft[]>([]);
+  const [conflict, setConflict] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const pending = useRef(false);
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
 
   /**
    * The dry run scans this companion's whole active layer and can outlive the
@@ -56,6 +62,7 @@ const MergeAssistantPane: React.FC<MergeAssistantPaneProps> = ({ companionId, on
         });
         if (!isAlive()) return;
         setGroups(groups);
+        setConflict(false);
         setDrafts(
           groups.map((group) => ({
             ids: group.memories.map((m) => m.memory_id),
@@ -67,8 +74,6 @@ const MergeAssistantPane: React.FC<MergeAssistantPaneProps> = ({ companionId, on
       } catch (e) {
         if (!isAlive()) return;
         Message.error(String(e));
-        setGroups([]);
-        setDrafts([]);
       } finally {
         if (isAlive()) setLoading(false);
       }
@@ -91,23 +96,34 @@ const MergeAssistantPane: React.FC<MergeAssistantPaneProps> = ({ companionId, on
   const submit = useCallback(
     async (index: number) => {
       const draft = drafts[index];
-      if (!draft || draft.ids.length < 2 || !draft.content.trim()) return;
+      const observed = groups[index];
+      if (!draft || !observed || pending.current || conflict || draft.ids.length < 2 || !draft.content.trim()) return;
+      pending.current = true;
+      setSubmitting(true);
       try {
         await ipcBridge.companion.mergeMemories.invoke({
           group: draft.ids,
+          expected_revisions: Object.fromEntries(observed.memories.filter(memory => draft.ids.includes(memory.memory_id))
+            .map(memory => [memory.memory_id, memory.revision])),
           merged_content: draft.content.trim(),
           kind: draft.kind,
           companion_id: companionId,
         });
+        if (!alive.current) return;
         Message.success(t('nomi.memories.merged', { defaultValue: '已合并' }));
         setGroups((prev) => prev.filter((_, i) => i !== index));
         setDrafts((prev) => prev.filter((_, i) => i !== index));
         onMerged();
       } catch (e) {
-        Message.error(String(e));
+        if (!alive.current) return;
+        setConflict(isMemoryRevisionConflict(e));
+        Message.error(t(memoryMutationErrorKey(e)));
+      } finally {
+        pending.current = false;
+        if (alive.current) setSubmitting(false);
       }
     },
-    [companionId, drafts, onMerged, t]
+    [companionId, drafts, groups, conflict, onMerged, t]
   );
 
   if (loading) {
@@ -128,6 +144,10 @@ const MergeAssistantPane: React.FC<MergeAssistantPaneProps> = ({ companionId, on
 
   return (
     <div className='flex flex-col gap-14px'>
+      {conflict && <div role='alert' className='text-12px text-t-secondary'>
+        {t('nomi.memory.conflictDraftKept')}
+        <Button size='mini' type='text' onClick={() => void load(() => alive.current)}>{t('nomi.memory.refreshMerge')}</Button>
+      </div>}
       <div className='text-12px leading-18px text-t-tertiary'>
         {t('nomi.memories.mergeHint', {
           defaultValue: '每组勾选要合并的条目，编辑合并后的内容并确认。被合并的原条目会归档留痕（不删除）。',
@@ -136,7 +156,7 @@ const MergeAssistantPane: React.FC<MergeAssistantPaneProps> = ({ companionId, on
       {groups.map((group, index) => {
         const draft = drafts[index];
         if (!draft) return null;
-        const ready = draft.ids.length >= 2 && draft.content.trim().length > 0;
+        const ready = !submitting && !conflict && draft.ids.length >= 2 && draft.content.trim().length > 0;
         return (
           <div
             key={group.memories[0]?.memory_id ?? index}
@@ -147,6 +167,7 @@ const MergeAssistantPane: React.FC<MergeAssistantPaneProps> = ({ companionId, on
                 <Checkbox
                   key={m.memory_id}
                   checked={draft.ids.includes(m.memory_id)}
+                  disabled={submitting}
                   onChange={() =>
                     patchDraft(index, {
                       ids: draft.ids.includes(m.memory_id)
@@ -169,6 +190,7 @@ const MergeAssistantPane: React.FC<MergeAssistantPaneProps> = ({ companionId, on
                 contentMaxWidth={130}
                 size='small'
                 value={draft.kind}
+                disabled={submitting}
                 onChange={(value: ICompanionMemoryKind) => patchDraft(index, { kind: value })}
               >
                 {MEMORY_KINDS.map((item) => (
@@ -181,6 +203,7 @@ const MergeAssistantPane: React.FC<MergeAssistantPaneProps> = ({ companionId, on
 
             <Input.TextArea
               value={draft.content}
+              disabled={submitting}
               onChange={(value: string) => patchDraft(index, { content: value })}
               autoSize={{ minRows: 3, maxRows: 10 }}
               className='!rd-8px text-13px leading-20px'

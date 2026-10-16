@@ -31,7 +31,7 @@ impl NomiCoreSessionOwner {
         .fetch_one(&self.pool)
         .await
         .map_err(|error| AppError::Internal(error.to_string()))?;
-        if attempt {
+        if attempt || self.is_companion_associated_task(owner_id, session_id).await? {
             return Ok(());
         }
         let control_plane = self.runtime_control_plane.get()
@@ -40,18 +40,25 @@ impl NomiCoreSessionOwner {
         let owner = UserId::from(owner_id.to_owned());
         let current = agent_binding_dto(&observation.session.agent_binding)
             .map_err(|error| AppError::Conflict(error.message))?;
-        let candidate = control_plane.resolve_agent_session_contract_evolution(&owner, &current)
+        let mut candidate = control_plane.resolve_agent_session_contract_evolution(&owner, &current)
             .await.map_err(control_plane_error_to_app)?;
         if candidate == current {
             return Ok(());
         }
+        candidate.binding_version = current.binding_version.checked_add(1)
+            .ok_or_else(|| AppError::Conflict("AgentSession binding version cannot advance".into()))?;
+        let (_, _, next_snapshot) = control_plane.saved_binding_artifacts(&owner, &candidate)
+            .await.map_err(control_plane_error_to_app)?;
+        let next_capabilities = next_snapshot.content.enabled_capabilities.iter()
+            .map(|capability| capability.capability.id.as_ref().to_owned()).collect::<BTreeSet<_>>();
         let replacement: AgentBindingValue = serde_json::to_value(&candidate)
             .and_then(serde_json::from_value)
             .map_err(|error| AppError::Conflict(format!("evolved Session binding is invalid: {error}")))?;
         let (label, _) = control_plane.saved_binding_presentation(&owner, &current)
             .await.map_err(control_plane_error_to_app)?;
         let active = self.canonical.store().active_capability_ids(session_id)
-            .await.map_err(agent_session_store_error)?;
+            .await.map_err(agent_session_store_error)?.into_iter()
+            .filter(|id| next_capabilities.contains(id)).collect();
         self.settle_session_binding_runtime(owner_id, session_id).await?;
         let transition_id = Uuid::now_v7().to_string();
         let request_digest = digest_payload(&json!({

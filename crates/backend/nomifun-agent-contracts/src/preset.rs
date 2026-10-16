@@ -1304,7 +1304,6 @@ impl OfficialPresetSeedManifestPayload {
             "companion",
             "companion.memory",
             "channel.messaging",
-            "robot",
         ] {
             if !companion_union.contains(capability) {
                 return Err(PresetContractViolation {
@@ -1316,13 +1315,12 @@ impl OfficialPresetSeedManifestPayload {
         let robot_actions = BTreeSet::from([
             "robot/vision", "robot/display", "robot/motion", "robot/device",
         ].map(crate::ActionId::from));
-        if companion.enabled_capabilities.iter()
-            .find(|selection| selection.capability.id.as_ref() == "robot")
-            .is_none_or(|selection| selection.action_allowlist != robot_actions)
+        if companion_union.contains("robot")
+            || companion.required_resource_kinds.contains(&ResourceKind::from("robot"))
         {
             return Err(PresetContractViolation {
                 code: CanonicalErrorCode::from(ROLE_COVERAGE_INCOMPLETE),
-                message: "companion.default must recommend all four explicit Robot actions; device permissions remain independent".into(),
+                message: "companion.default owns desktop work; physical Robot authority belongs to the independent Robot role".into(),
             });
         }
 
@@ -1333,12 +1331,19 @@ impl OfficialPresetSeedManifestPayload {
         let robot_capabilities = robot.enabled_capabilities.iter()
             .map(|selection| (selection.capability.id.as_ref(), &selection.action_allowlist))
             .collect::<BTreeMap<_, _>>();
-        let expected_capabilities = ["companion", "companion.memory", "robot"]
+        let expected_capabilities = ["agent.collaboration", "companion", "companion.memory", "robot", "session.management"]
             .into_iter().collect::<BTreeSet<_>>();
         let expected_resources = ["companion", "companion_memory", "robot"]
             .into_iter().map(ResourceKind::from).collect::<BTreeSet<_>>();
         if robot_capabilities.keys().copied().collect::<BTreeSet<_>>() != expected_capabilities
             || robot_capabilities.get("robot").is_none_or(|actions| **actions != robot_actions)
+            || robot_capabilities.get("agent.collaboration").is_none_or(|actions| {
+                **actions != BTreeSet::from([crate::ActionId::from("agent/delegate")])
+            })
+            || robot_capabilities.get("session.management").is_none_or(|actions| {
+                **actions != ["session.management/execution_answer_decision", "session.management/execution_cancel", "session.management/execution_status"]
+                    .into_iter().map(crate::ActionId::from).collect()
+            })
             || ["companion", "companion.memory"].into_iter().any(|id| {
                 let general_actions = companion.enabled_capabilities.iter()
                     .find(|selection| selection.capability.id.as_ref() == id)
@@ -1351,7 +1356,7 @@ impl OfficialPresetSeedManifestPayload {
         {
             return Err(PresetContractViolation {
                 code: CanonicalErrorCode::from(ROLE_COVERAGE_INCOMPLETE),
-                message: "companion.robot must preserve Companion identity and memory with only the explicit Robot actions and resources".into(),
+                message: "companion.robot preserves identity, memory, device authority and only the targeted desktop delegation Action".into(),
             });
         }
 
@@ -2124,11 +2129,13 @@ mod tests {
         let seed = &manifest.templates[&OfficialPresetKey::CompanionRobot];
         assert_eq!(seed.enabled_capabilities.iter()
             .map(|selection| selection.capability.id.as_ref()).collect::<BTreeSet<_>>(),
-            BTreeSet::from(["companion", "companion.memory", "robot"]));
+            BTreeSet::from(["agent.collaboration", "companion", "companion.memory", "robot", "session.management"]));
         assert_eq!(seed.required_resource_kinds, ["companion", "companion_memory", "robot"]
             .into_iter().map(ResourceKind::from).collect());
         assert_eq!(official_actions(&manifest, OfficialPresetKey::CompanionRobot), BTreeSet::from([
             "companion/evolve", "companion/learn", "companion.memory/recall", "companion.memory/write",
+            "agent/delegate",
+            "session.management/execution_answer_decision", "session.management/execution_cancel", "session.management/execution_status",
             "robot/device", "robot/display", "robot/motion", "robot/vision",
         ]));
 
@@ -2270,10 +2277,6 @@ mod tests {
             "companion.memory/write",
             "channel.messaging/reply",
             "channel.messaging/send",
-            "robot/vision",
-            "robot/display",
-            "robot/motion",
-            "robot/device",
         ] {
             assert!(companion.contains(action), "Companion identity or follow-up lost {action}");
         }
@@ -2464,17 +2467,19 @@ mod tests {
     }
 
     #[test]
-    fn companion_recommendations_cover_each_robot_action_without_implicit_module_authority() {
+    fn physical_actions_belong_only_to_the_robot_role() {
         let manifest = official_preset_seed_manifest_payload();
         let expected = BTreeSet::from([
             "robot/vision", "robot/display", "robot/motion", "robot/device",
         ].map(crate::ActionId::from));
-        let robot = manifest.templates[&OfficialPresetKey::CompanionDefault].enabled_capabilities.iter()
+        assert!(!manifest.templates[&OfficialPresetKey::CompanionDefault].enabled_capabilities.iter()
+            .any(|selection| selection.capability.id.as_ref() == "robot"));
+        let robot = manifest.templates[&OfficialPresetKey::CompanionRobot].enabled_capabilities.iter()
             .find(|selection| selection.capability.id.as_ref() == "robot").unwrap();
         assert_eq!(robot.action_allowlist, expected);
         for action in &expected {
             let mut incomplete = manifest.clone();
-            incomplete.templates.get_mut(&OfficialPresetKey::CompanionDefault).unwrap()
+            incomplete.templates.get_mut(&OfficialPresetKey::CompanionRobot).unwrap()
                 .enabled_capabilities.iter_mut().find(|selection| selection.capability.id.as_ref() == "robot")
                 .unwrap().action_allowlist.remove(action);
             assert_eq!(incomplete.validate().unwrap_err().code.as_ref(), ROLE_COVERAGE_INCOMPLETE);

@@ -22,7 +22,7 @@ import { saveCompanionChatModel, type CompanionChatModel } from './saveCompanion
 type NomiConversation = Extract<TChatConversation, { type: 'nomi' }>;
 
 interface Props {
-  /** 该伙伴的唯一专属 nomi 会话。 */
+  /** Exact companion-owned canonical Session selected by navigation. */
   conversation: NomiConversation;
   /** 伙伴 profile defaults; the current Session owns its frozen model. */
   companion: ReturnType<typeof useCompanion>;
@@ -34,6 +34,8 @@ interface Props {
 const CompanionConversation: React.FC<Props> = ({ conversation, companion, compact = false }) => {
   const { t } = useTranslation();
   const { profile, patchCompanion } = companion;
+  const role = conversation.extra?.companion_role === 'robot' ? 'robot' : 'companion';
+  const profileModel = role === 'robot' ? profile?.robot?.model : profile?.model;
   const { groups } = useModelsForTask('chat');
   const [modelSaving, setModelSaving] = useState(false);
   const [agentSaving, setAgentSaving] = useState(false);
@@ -63,7 +65,8 @@ const CompanionConversation: React.FC<Props> = ({ conversation, companion, compa
       const result = await saveCompanionChatModel({
         conversation,
         sessionModel: sessionModelRef.current,
-        profileModel: profile?.model,
+        profileModel,
+        role,
         next: { provider_id: provider.id, model: modelName },
         patchCompanion,
         onSessionChanged: (model) => { sessionModelRef.current = model; refreshSession(); },
@@ -83,7 +86,7 @@ const CompanionConversation: React.FC<Props> = ({ conversation, companion, compa
       savingRef.current = false;
       setModelSaving(false);
     }
-  }, [conversation, profile?.model, sessionBlocked, patchCompanion, refreshSession, t]);
+  }, [conversation, profileModel, role, sessionBlocked, patchCompanion, refreshSession, t]);
   const modelSelection = useNomiModelSelection({
     initialModel,
     onSelectModel,
@@ -95,7 +98,7 @@ const CompanionConversation: React.FC<Props> = ({ conversation, companion, compa
       modelSelection={modelSelection}
       modelSelectionHint={t('nomi.chat.sessionModelConfigHint', { defaultValue: '空闲时切换当前会话模型，下一条消息生效；同时保存为伙伴默认模型。' })}
       modelSelectionDisabled={modelSaving || agentSaving || sessionBlocked}
-      emptySlot={!profile?.model
+      emptySlot={!profile
         ? <div className='p-20px text-center text-t-secondary'>{t('nomi.chat.modelMissing')}</div>
         : compact
           ? (
@@ -112,18 +115,19 @@ const CompanionConversation: React.FC<Props> = ({ conversation, companion, compa
                 {t('nomi.cohabit.emptyTitle', { name: profile.name, defaultValue: '从和 {{name}} 的第一句话开始' })}
               </strong>
               <span className='max-w-360px text-12px leading-19px'>
-                {t('nomi.cohabit.emptyHint', { defaultValue: '这里会延续桌面、消息渠道和机器人中的同一段相处历史。' })}
+                {t('nomi.cohabit.emptyHint', { defaultValue: '每段会话独立保留上下文，伙伴的人格与长期记忆持续陪伴。' })}
               </span>
             </div>
           )
           : undefined}
       agentSelectorNode={compact || !profile ? undefined : <ProductAgentBindingSelect
         compact
-        targetKind='companion'
+        targetKind={role}
         targetId={profile.companion_id}
-        defaultTemplateKey='companion.default'
+        defaultTemplateKey={role === 'robot' ? 'companion.robot' : 'companion.default'}
         model={conversation.model}
         conversationId={conversation.id}
+        updateDefault
         disabled={modelSaving || sessionBlocked}
         onChanged={refreshSession}
         onSavingChange={(saving) => { agentSavingRef.current = saving; setAgentSaving(saving); }}

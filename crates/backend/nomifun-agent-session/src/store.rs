@@ -14,7 +14,7 @@ use nomifun_agent_contracts::{
     ActionId, AgentBindingChangedPayloadV1, AgentBindingValue, AgentHandoffBindingRefV1,
     AgentHandoffMode, AgentSessionDeletedState, AgentSessionDeletingRecord, AgentSessionId,
     AgentSessionLiveRecord, AgentSessionTombstone, ArtifactId, CapabilityId, ChatRouteIdentity,
-    CompactionCompletedPayload, ConnectionConfigRef, CorrelationId, DeleteAgentSessionCommand,
+    CompactionCompletedPayload, CompanionSessionOrigin, CompanionSessionRole, ConnectionConfigRef, CorrelationId, DeleteAgentSessionCommand,
     DigestHex, EventId,
     EventProducerId, AGENT_STORE_DATA_GENERATION,
     AGENT_STORE_MIGRATION_HEAD, AGENT_STORE_PROJECTION_SCHEMA_VERSION, IdempotencyKey, PrincipalRef,
@@ -2630,6 +2630,63 @@ impl AgentSessionStore {
         self.read_chat_causality_facts(session_id, operation, CausalityFactScope::TurnOutput).await
     }
 
+    /// Read one exact Turn's accepted input, including after its terminal
+    /// boundary. This is an identity-checked fact query, not recovery authority
+    /// or a search through the Session's history or message projections.
+    pub async fn turn_accepted_input(
+        &self, session: &AgentSessionId, operation: &OperationId,
+    ) -> Result<(SessionEventRecord, StrictJsonValue), SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        let result = Self::turn_accepted_input_tx(&mut tx, session, operation).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    async fn turn_accepted_input_tx(
+        tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionId, operation: &OperationId,
+    ) -> Result<(SessionEventRecord, StrictJsonValue), SessionStoreError> {
+        require_live_session_tx(tx, session.as_ref()).await?;
+        let (turn_id, started_id, source_id): (String, Option<String>, Option<String>) =
+            sqlx::query_as(
+                "SELECT turn_id, started_event_id, source_message_id FROM agent_turns \
+                 WHERE session_id = ? AND operation_id = ?",
+            )
+            .bind(session.as_ref())
+            .bind(operation.as_ref())
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or_else(|| SessionStoreError::NotFound(operation.as_ref().into()))?;
+        let invalid = || SessionStoreError::InvalidEvent(
+            "Turn accepted input identity is inconsistent".into(),
+        );
+        let started = event_by_event_id_tx(
+            tx, started_id.as_deref().ok_or_else(invalid)?,
+        ).await?.map(event_from_row).transpose()?.ok_or_else(invalid)?;
+        if turn_id != operation.as_ref() || started.agent_session_id != *session
+            || started.kind.0 != "turn/started" || started.kind_version != 1
+            || started.producer_id.as_ref() != "session_api"
+            || started.correlation_id.as_ref() != operation.as_ref() {
+            return Err(invalid());
+        }
+        let root_id = started.causation_event_id.as_ref().ok_or_else(invalid)?;
+        let root = event_by_event_id_tx(tx, root_id.as_ref())
+            .await?.map(event_from_row).transpose()?.ok_or_else(invalid)?;
+        let started_payload = payload_value_for_event_tx(tx, &started).await?;
+        if root.agent_session_id != *session || root.seq >= started.seq
+            || root.kind.0 != "message/user-accepted" || root.kind_version != 1
+            || root.producer_id != started.producer_id
+            || root.correlation_id.as_ref() != root.event_id.as_ref()
+            || source_id.as_deref() != Some(root.event_id.as_ref())
+            || started_payload.get("source_message_id").and_then(Value::as_str)
+                != Some(root.event_id.as_ref())
+            || started_payload.get("operation_id").and_then(Value::as_str)
+                != Some(operation.as_ref()) {
+            return Err(invalid());
+        }
+        let input = StrictJsonValue(payload_value_for_event_tx(tx, &root).await?);
+        Ok((root, input))
+    }
+
     async fn read_chat_causality_facts(&self, session_id: &AgentSessionId, turn_operation_id: &OperationId, scope: CausalityFactScope)
         -> Result<ChatCausalityFacts, SessionStoreError> {
         let mut tx = self.pool.begin().await?;
@@ -4304,7 +4361,8 @@ impl AgentSessionStore {
         if let Some(receipt) = existing_fork_receipt_tx(&mut tx, &request.child_owner_ref, parent_session_id,
             request.parent_through_seq, request.child_metadata.title.as_deref(), &request.producer_id, &request.idempotency_key).await? {
             if receipt.child_session.metadata.purpose != request.child_metadata.purpose
-                || receipt.child_session.metadata.app_project_id != request.child_metadata.app_project_id {
+                || receipt.child_session.metadata.app_project_id != request.child_metadata.app_project_id
+                || receipt.child_session.metadata.companion != request.child_metadata.companion {
                 return Err(SessionStoreError::IdempotencyConflict("fork replay changed its product purpose".into()));
             }
             tx.commit().await?;
@@ -4317,7 +4375,8 @@ impl AgentSessionStore {
             ));
         }
         if parent.metadata.purpose != request.child_metadata.purpose
-            || parent.metadata.app_project_id != request.child_metadata.app_project_id {
+            || parent.metadata.app_project_id != request.child_metadata.app_project_id
+            || parent.metadata.companion != request.child_metadata.companion {
             return Err(SessionStoreError::Conflict("fork must preserve its parent's product purpose".into()));
         }
 
@@ -4709,6 +4768,18 @@ impl AgentSessionStore {
         require_owner(&row, owner)?;
         if row.state == "deleted" { return Ok(None); }
         Ok(live_from_row(row)?.metadata.app_project_id)
+    }
+
+    /// Exact canonical product origin, including a fenced deleting Session.
+    /// Mutable bindings and product navigation records do not establish it.
+    pub async fn companion_origin(
+        &self, owner: &PrincipalRef, session_id: &AgentSessionId,
+    ) -> Result<Option<CompanionSessionOrigin>, SessionStoreError> {
+        validate_principal(owner)?;
+        let row = session_row_by_id(&self.pool, session_id.as_ref()).await?;
+        require_owner(&row, owner)?;
+        if row.state == "deleted" { return Ok(None); }
+        Ok(live_from_row(row)?.metadata.companion)
     }
 
     async fn append_event_tx(
@@ -5457,6 +5528,7 @@ fn validate_live_session(session: &AgentSessionLiveRecord) -> Result<(), Session
             return Err(SessionStoreError::InvalidSession("application projects require ordinary local Sessions".into()));
         }
     }
+    validate_companion_origin(&session.metadata, session.remote_binding_provenance.is_some())?;
     if session
         .metadata
         .title
@@ -5476,6 +5548,22 @@ fn validate_live_session(session: &AgentSessionLiveRecord) -> Result<(), Session
         }
     }
     Ok(())
+}
+
+fn validate_companion_origin(
+    metadata: &nomifun_agent_contracts::AgentSessionMetadata, remote: bool,
+) -> Result<(), SessionStoreError> {
+    let Some(origin) = metadata.companion.as_ref() else { return Ok(()); };
+    validate_uuidv7(&origin.companion_id, "companion_id")?;
+    if metadata.purpose != nomifun_agent_contracts::SessionPurpose::Conversation
+        || metadata.app_project_id.is_some() || remote {
+        return Err(SessionStoreError::InvalidSession("companion origin requires an ordinary local Session without application ownership".into()));
+    }
+    match (&origin.role, origin.robot_id.as_deref()) {
+        (CompanionSessionRole::Companion, None) => Ok(()),
+        (CompanionSessionRole::Robot, Some(robot)) if !robot.trim().is_empty() && robot == robot.trim() => Ok(()),
+        _ => Err(SessionStoreError::InvalidSession("companion role cannot select a robot; robot role requires a canonical non-empty robot_id".into())),
+    }
 }
 
 fn validate_principal(owner: &PrincipalRef) -> Result<(), SessionStoreError> {
@@ -6858,7 +6946,7 @@ fn live_from_row(row: StoredSessionRow) -> Result<AgentSessionLiveRecord, Sessio
         )));
     }
     let owner_ref: PrincipalRef = serde_json::from_str(&row.owner_ref_json)?;
-    let (purpose, app_project_id) = opening_metadata(&row)?;
+    let (purpose, app_project_id, companion) = opening_metadata(&row)?;
     let binding_json = row.agent_binding_json.ok_or_else(|| {
         SessionStoreError::InvalidSession("live AgentSession lost agent_binding".to_owned())
     })?;
@@ -6883,12 +6971,16 @@ fn live_from_row(row: StoredSessionRow) -> Result<AgentSessionLiveRecord, Sessio
     if app_project_id.is_some() && remote_binding_provenance.is_some() {
         return Err(SessionStoreError::InvalidSession("application projects require ordinary local Sessions".into()));
     }
+    if companion.is_some() && remote_binding_provenance.is_some() {
+        return Err(SessionStoreError::InvalidSession("companion origin requires an ordinary local Session".into()));
+    }
     Ok(AgentSessionLiveRecord {
         agent_session_id: AgentSessionId(row.agent_session_id),
         owner_ref,
         metadata: nomifun_agent_contracts::AgentSessionMetadata {
             purpose,
             app_project_id,
+            companion,
             title: row.title,
             archived: bool_from_i64(row.archived, "archived")?,
             pinned: bool_from_i64(row.pinned, "pinned")?,
@@ -6917,7 +7009,7 @@ fn push_workspace_filter<'a>(query: &mut sqlx::QueryBuilder<'a, Sqlite>, owner: 
         .push_bind(root).push(")");
 }
 
-fn opening_metadata(row: &StoredSessionRow) -> Result<(nomifun_agent_contracts::SessionPurpose, Option<String>), SessionStoreError> {
+fn opening_metadata(row: &StoredSessionRow) -> Result<(nomifun_agent_contracts::SessionPurpose, Option<String>, Option<CompanionSessionOrigin>), SessionStoreError> {
     #[derive(serde::Deserialize)]
     struct OpeningMetadata {
         operation_id: OperationId,
@@ -6935,6 +7027,7 @@ fn opening_metadata(row: &StoredSessionRow) -> Result<(nomifun_agent_contracts::
     // Parsing the original binding validates its typed shape without requiring
     // it to equal the current binding after an explicit Agent/model switch.
     if let Some(metadata) = opening.metadata {
+        validate_companion_origin(&metadata, false)?;
         let app_project_id = match metadata.app_project_id {
             Some(app) => {
                 validate_uuidv7(&app, "app_project_id")?;
@@ -6947,7 +7040,10 @@ fn opening_metadata(row: &StoredSessionRow) -> Result<(nomifun_agent_contracts::
                 current_generation_app_opening(row, &opening.agent_binding)?,
             None => None,
         };
-        return Ok((metadata.purpose, app_project_id));
+        if metadata.companion.is_some() && app_project_id.is_some() {
+            return Err(SessionStoreError::InvalidSession("companion origin cannot share application ownership".into()));
+        }
+        return Ok((metadata.purpose, app_project_id, metadata.companion));
     }
     // Current-generation fork openings predate purpose and did not include
     // metadata. Recognize that exact canonical shape; do not recover a purpose
@@ -6957,7 +7053,7 @@ fn opening_metadata(row: &StoredSessionRow) -> Result<(nomifun_agent_contracts::
         && opening.fork_base_payload_id.as_ref().map(AsRef::as_ref) == row.fork_base_payload_id.as_deref()
         && row.parent_agent_session_id.is_some() && row.fork_base_payload_id.is_some()
         && value.as_object().is_some_and(|value| value.contains_key("fork_request_title") && !value.contains_key("metadata"))
-    { return Ok((nomifun_agent_contracts::SessionPurpose::Conversation, None)); }
+    { return Ok((nomifun_agent_contracts::SessionPurpose::Conversation, None, None)); }
     Err(SessionStoreError::InvalidSession("canonical opening metadata is missing".into()))
 }
 

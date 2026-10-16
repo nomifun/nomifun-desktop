@@ -13,13 +13,7 @@ type ConversationListItem = Pick<TChatConversation, 'app_project_id' | 'executio
  * work-conversation list. */
 export const isOrdinaryWorkConversation = (conversation: ConversationListItem): boolean => {
   const extra = conversation.extra;
-  const isCompanionConversation =
-    !!extra?.companion_session ||
-    !!extra?.companion_id ||
-    !!extra?.channel_platform ||
-    conversation.agent_snapshot?.preset_name === 'companion.default' ||
-    conversation.agent_snapshot?.preset_name === 'companion.robot' ||
-    conversation.agent_snapshot?.enabled_capabilities.includes('companion') === true;
+  const isCompanionConversation = Boolean(extra?.companion_id || extra?.channel_platform);
   const isSshHostConversation = conversationSshHostId(conversation) != null;
   const isExecutionAttemptTranscript = Boolean(conversation.execution_step_id);
   return (

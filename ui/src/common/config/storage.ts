@@ -131,6 +131,11 @@ export type TChatConversation = IChatConversation<
     companion_session?: boolean;
     /** The companion this session belongs to when `companion_session` is set. */
     companion_id?: CompanionId;
+    /** Canonical product role projected by the Host, independent of Agent identity. */
+    companion_role?: 'companion' | 'robot';
+    /** Canonical archive annotation projected by the Host. */
+    canonical_archived?: boolean;
+    robot_id?: string | null;
     /** IM-channel platform when a companion turn originated from an external
      * channel (telegram/lark/…). Present on channel-sourced companion turns. */
     channel_platform?: string;

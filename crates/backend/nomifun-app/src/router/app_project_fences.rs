@@ -108,7 +108,7 @@ pub(super) async fn guard_agent_import_exact(owner: &NomiCoreSessionOwner,
     Ok(AgentAppProjectImportFence { _directory: directory, _sessions: sessions, _mutation: mutation })
 }
 
-fn directory_lock(owner: &NomiCoreSessionOwner, owner_id: &str, root: &std::path::Path)
+pub(super) fn directory_lock(owner: &NomiCoreSessionOwner, owner_id: &str, root: &std::path::Path)
     -> Arc<tokio::sync::RwLock<()>> {
     // The path has already passed the ordinary workspace canonicalization.
     // Delimit and hash both fields so arbitrary path text cannot collide with

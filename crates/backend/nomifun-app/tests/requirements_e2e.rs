@@ -194,6 +194,7 @@ async fn seed_canonical_agent_session(
         metadata: AgentSessionMetadata {
             purpose: Default::default(),
             app_project_id: None,
+            companion: None,
             title: Some("AutoWork AgentSession".to_owned()),
             archived: false,
             pinned: false,

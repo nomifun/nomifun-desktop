@@ -233,7 +233,28 @@ impl Learner {
         let events: Vec<_> = events
             .into_iter()
             .filter(|event| event.name != "companion.reply")
+            .filter(|event| event.name != "companion.user_message"
+                || event.data.get("companion_id").and_then(serde_json::Value::as_str).is_none_or(|id| id == owner))
             .collect();
+        // Capture the publication generation before examining retraction state
+        // or materializing the model input. Later changes invalidate the batch.
+        self.store.decay_memories().await?;
+        let base_generation = self.store.memory_generation(&owner).await?;
+        let mut unrevoked_events = Vec::with_capacity(events.len());
+        for event in events {
+            if self.store.memory_source_is_retracted(&owner, &event.event_id).await? { continue; }
+            if let (Some(session_id), Some(message_id)) = (
+                event.data.get("conversation_id").and_then(serde_json::Value::as_str),
+                event.data.get("msg_id").and_then(serde_json::Value::as_str),
+            ) {
+                if nomifun_common::ConversationId::try_from(session_id).is_ok()
+                    && nomifun_common::validate_uuidv7(message_id).is_ok()
+                    && self.store.memory_message_is_retracted(&owner, session_id, message_id).await?
+                { continue; }
+            }
+            unrevoked_events.push(event);
+        }
+        let events = unrevoked_events;
         if events.is_empty() {
             // Nothing but stale replies. Advance anyway — leaving the cursor here
             // would re-read the same records every run and stall learning until
@@ -250,6 +271,7 @@ impl Learner {
         // 记忆写给谁、气泡/心情落在谁头上、XP 记在谁账上，全是同一个伙伴，
         // 三者不允许分叉。
         self.emitter.emit_learn_started(&owner);
+
 
         // Existing-memory digest for reinforcement/conflict matching — only the
         // owner's own memories: the learner must never reinforce or supersede
@@ -284,7 +306,26 @@ impl Learner {
                 .await
             {
                 Ok(raw) => match prompt::parse_learn_output(&raw) {
-                    Ok(out) => {
+                    Ok(mut out) => {
+                        let available: std::collections::HashSet<&str> = events.iter().map(|event| event.event_id.as_str()).collect();
+                        let mut bad_source = false;
+                        for sources in out.memories.iter_mut().map(|memory| &mut memory.source_event_ids)
+                            .chain(out.reinforce_memories.iter_mut().map(|reinforcement| &mut reinforcement.source_event_ids))
+                        {
+                            // A single input has an unambiguous host-derived
+                            // source. A larger batch must identify precise
+                            // support for each new fact and confirmation.
+                            if sources.is_empty() && events.len() == 1 {
+                                sources.push(events[0].event_id.clone());
+                            }
+                            if sources.is_empty()
+                                || sources.iter().any(|id| !available.contains(id.as_str()))
+                            { bad_source = true; break; }
+                        }
+                        if bad_source {
+                            last_err = "learned memory must reference supporting events from this exact batch".into();
+                            continue;
+                        }
                         parsed = Some(out);
                         break;
                     }
@@ -338,19 +379,17 @@ impl Learner {
             .set_companion_state(&owner, PARSE_FAIL_STREAK_KEY, "0")
             .await;
 
-        // Apply: decay first, then reinforce/supersede/insert.
-        let _ = self.store.decay_memories().await;
-        // The two id lists come back from the MODEL, and `reinforce_memories` /
-        // `archive_memories` address rows by id alone — so they are filtered to
-        // the ids this run actually showed it (the owner's own active memories).
+        // Model-selected memory ids may only address this owner's active rows
+        // from the exact snapshot presented to this run.
         // 共享记忆删除后这道过滤是必需的：事件流里可能出现别的伙伴的 memory_id
         // （例如 owner agent 调用过 nomi_memory_list 这个跨伙伴视图，其输出被采集
         // 成了事件），模型把它抄进 supersede_memory_ids 就会静默归档别人的记忆。
-        let owned_ids: std::collections::HashSet<&str> =
-            existing.iter().map(|m| m.memory_id.as_str()).collect();
-        let keep_owned = |ids: &[String], what: &str| -> Vec<String> {
+        let owned_ids: std::collections::HashMap<&str, i64> = existing.iter()
+            .filter(|memory| memory.companion_id.as_deref() == Some(owner.as_str()))
+            .map(|m| (m.memory_id.as_str(), m.revision)).collect();
+        let keep_owned = |ids: &[String], what: &str| -> Vec<(String, i64)> {
             let (mine, foreign): (Vec<String>, Vec<String>) =
-                ids.iter().cloned().partition(|id| owned_ids.contains(id.as_str()));
+                ids.iter().cloned().partition(|id| owned_ids.contains_key(id.as_str()));
             if !foreign.is_empty() {
                 tracing::warn!(
                     companion_id = %owner,
@@ -358,37 +397,42 @@ impl Learner {
                     "companion learn output referenced {what} outside this companion's memories; ignored"
                 );
             }
-            mine
+            mine.into_iter().map(|id| { let revision = owned_ids[id.as_str()]; (id, revision) }).collect()
         };
-        self.store
-            .reinforce_memories(&keep_owned(&output.reinforce_memory_ids, "reinforce_memory_ids"))
-            .await?;
-        self.store
-            .archive_memories(&keep_owned(&output.supersede_memory_ids, "supersede_memory_ids"))
-            .await?;
-
-        // 每条蒸馏记忆都落在 owner 名下（共享记忆概念已删除）。
-        for m in &output.memories {
-            if self
-                .store
-                .find_similar_active(&m.kind, &m.content, &owner)
-                .await?
-                .is_some()
-            {
-                continue;
-            }
-            self.store
-                .insert_memory_scoped(
-                    &m.kind,
-                    &m.content,
-                    &m.tags,
-                    m.importance,
-                    "learn",
-                    Some(&owner),
-                )
-                .await?;
-            run.memories_added += 1;
-        }
+        // The only publication step: SQLite checks the same-owner generation,
+        // exact observed revisions and source retractions in one write transaction.
+        self.registry.get(&owner).await.ok_or_else(|| AppError::NotFound(format!("companion '{owner}' not found")))?;
+        let canonical_sources = |source_ids: &[String]| -> Vec<crate::store::CompanionMemoryMessageSource> {
+            source_ids.iter().filter_map(|source_id| {
+                let event = events.iter().find(|event| &event.event_id == source_id)?;
+                let session_id = event.data.get("conversation_id")?.as_str()?;
+                let message_id = event.data.get("msg_id")?.as_str()?;
+                nomifun_common::ConversationId::try_from(session_id).ok()?;
+                nomifun_common::validate_uuidv7(message_id).ok()?;
+                Some(crate::store::CompanionMemoryMessageSource {
+                    session_id: session_id.to_owned(), message_id: message_id.to_owned(),
+                })
+            }).collect()
+        };
+        let candidates: Vec<_> = output.memories.iter().map(|memory| crate::LearnedMemoryCandidate {
+            kind: memory.kind.clone(), content: memory.content.clone(), tags: memory.tags.clone(),
+            importance: memory.importance, source_event_ids: memory.source_event_ids.clone(),
+            source_message_refs: canonical_sources(&memory.source_event_ids),
+        }).collect();
+        let reinforcements: Vec<_> = output.reinforce_memories.iter().filter_map(|reinforcement| {
+            let Some(revision) = owned_ids.get(reinforcement.memory_id.as_str()) else {
+                tracing::warn!(companion_id = %owner, "companion learn output reinforced a memory outside this companion's snapshot; ignored");
+                return None;
+            };
+            Some(crate::LearnedMemoryReinforcement {
+                memory_id: reinforcement.memory_id.clone(), expected_revision: *revision,
+                source_event_ids: reinforcement.source_event_ids.clone(),
+                source_message_refs: canonical_sources(&reinforcement.source_event_ids),
+            })
+        }).collect();
+        run.memories_added = self.store.apply_learning_batch(&owner, &base_generation,
+            &reinforcements,
+            &keep_owned(&output.supersede_memory_ids, "supersede_memory_ids"), &candidates).await? as i64;
         // Mood belongs to the companion that just learned. It was a single global
         // `companion_state` row until 2026-08, which made the whole family share
         // one mood — the last run to finish overwrote everyone's.
@@ -739,7 +783,7 @@ mod tests {
 
         // 模型把两条 id 都塞进 supersede/reinforce：只有自己的那条可以生效。
         let reply = format!(
-            r#"{{"memories":[],"supersede_memory_ids":["{}"],"reinforce_memory_ids":["{}"],"mood":"content","diary":"d"}}"#,
+            r#"{{"memories":[],"supersede_memory_ids":["{}"],"reinforce_memories":[{{"memory_id":"{}"}}],"mood":"content","diary":"d"}}"#,
             theirs.memory_id, theirs.memory_id
         );
         let learner = Learner { completer: Arc::new(CannedCompleter(reply)), ..learner };
@@ -1014,5 +1058,170 @@ mod tests {
         .into_iter()
         .collect();
         assert_eq!(actual_keys, expected_keys, "live result exposes only its stable receipt and bounded outcome");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_learned_fact_prevents_relearning_the_same_source() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_event(dir.path());
+        let (learner, owner) = make_learner(dir.path(),
+            r#"{"memories":[{"kind":"preference","content":"主人喜欢先看具体报错","importance":0.8}]}"#).await;
+        assert_eq!(learner.run_for(&owner).await.unwrap().memories_added, 1);
+        let memories = learner.store.list_memories(&MemoryFilter { companion_id: Some(owner.clone()), ..Default::default() }).await.unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].source_event_ids.len(), 1);
+        learner.store.delete_memory(&memories[0].memory_id, &crate::store::MemoryActor::Companion(owner.clone())).await.unwrap();
+        learner.store.set_companion_state(&owner, LEARN_CURSOR_KEY, "0").await.unwrap();
+        assert_eq!(learner.run_for(&owner).await.unwrap().status, "no_events");
+        assert!(learner.store.list_memories(&MemoryFilter { companion_id: Some(owner), ..Default::default() }).await.unwrap().is_empty());
+    }
+
+    fn canonical_user_event(owner: &str, ts: i64, source: &crate::store::CompanionMemoryMessageSource, content: &str) -> CollectedEvent {
+        CollectedEvent {
+            event_id: nomifun_common::CompanionEventId::new().into_string(), ts,
+            source: "companion_dialogues".into(), name: "companion.user_message".into(),
+            data: serde_json::json!({"companion_id": owner, "conversation_id": source.session_id,
+                "msg_id": source.message_id, "content": content}),
+        }
+    }
+
+    fn canonical_source() -> crate::store::CompanionMemoryMessageSource {
+        crate::store::CompanionMemoryMessageSource {
+            session_id: generate_id(), message_id: generate_id(),
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_confirmation_preserves_both_sources_and_deletion_blocks_fresh_collector_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut learner, owner) = make_learner(dir.path(), "{}").await;
+        let ts = now_ms();
+        let first_source = canonical_source();
+        let second_source = canonical_source();
+        let first = canonical_user_event(&owner, ts, &first_source, "我喜欢先看具体报错");
+        append_event(dir.path(), &first).unwrap();
+        learner.completer = Arc::new(CannedCompleter(serde_json::json!({"memories": [{
+            "kind": "preference", "content": "主人喜欢先看具体报错", "importance": 0.6,
+            "source_event_ids": [first.event_id],
+        }]}).to_string()));
+        assert_eq!(learner.run_for(&owner).await.unwrap().memories_added, 1);
+        let before = learner.store.dump_memories_all().await.unwrap().remove(0);
+        // Keep unrelated time decay out of the confirmation revision assertion.
+        let before = learner.store.update_memory_cas(&before.memory_id, before.revision, None, Some(true), None,
+            &crate::store::MemoryActor::Companion(owner.clone())).await.unwrap();
+        let second = canonical_user_event(&owner, ts + 1, &second_source, "对，还是先看具体报错");
+        append_event(dir.path(), &second).unwrap();
+        learner.completer = Arc::new(CannedCompleter(serde_json::json!({"memories": [], "reinforce_memories": [{
+            "memory_id": before.memory_id, "source_event_ids": [second.event_id],
+        }]}).to_string()));
+        let run = learner.run_for(&owner).await.unwrap();
+        assert_eq!(run.status, "ok");
+        assert_eq!(run.memories_added, 0, "a confirmation must not create a second fact");
+        let current = learner.store.get_memory(&before.memory_id).await.unwrap().unwrap();
+        assert_eq!(current.revision, before.revision + 1);
+        assert!(current.strength > before.strength);
+        assert_eq!(current.source_event_ids.iter().collect::<std::collections::BTreeSet<_>>(),
+            [&first.event_id, &second.event_id].into_iter().collect());
+        assert_eq!(current.source_message_refs.iter().collect::<std::collections::BTreeSet<_>>(),
+            [&first_source, &second_source].into_iter().collect());
+        learner.store.delete_memory(&current.memory_id, &crate::store::MemoryActor::Companion(owner.clone())).await.unwrap();
+        for event in [&first, &second] {
+            assert!(learner.store.memory_source_is_retracted(&owner, &event.event_id).await.unwrap());
+        }
+        for source in [&first_source, &second_source] {
+            assert!(learner.store.memory_message_is_retracted(&owner, &source.session_id, &source.message_id).await.unwrap());
+        }
+        // Re-importing the same canonical messages creates different collector
+        // ids. Canonical cuts must still suppress both before an LLM is called.
+        for (offset, source) in [first_source, second_source].iter().enumerate() {
+            append_event(dir.path(), &canonical_user_event(&owner, ts + 2 + offset as i64, source, "我喜欢先看具体报错")).unwrap();
+        }
+        assert_eq!(learner.run_for(&owner).await.unwrap().status, "no_events");
+        assert!(learner.store.dump_memories_all().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_batch_resolves_each_confirmation_to_only_its_precise_supporting_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut learner, owner) = make_learner(dir.path(), "{}").await;
+        let first = learner.store.insert_memory_scoped("preference", "主人喜欢茶", &[], 0.5, "manual", Some(&owner)).await.unwrap();
+        let second = learner.store.insert_memory_scoped("profile", "主人住在北京", &[], 0.5, "manual", Some(&owner)).await.unwrap();
+        let first_source = canonical_source();
+        let second_source = canonical_source();
+        let unrelated_source = canonical_source();
+        let ts = now_ms();
+        let first_event = canonical_user_event(&owner, ts, &first_source, "我还是喜欢茶");
+        let second_event = canonical_user_event(&owner, ts + 1, &second_source, "我仍住北京");
+        let unrelated_event = canonical_user_event(&owner, ts + 2, &unrelated_source, "今天下雨");
+        for event in [&first_event, &second_event, &unrelated_event] { append_event(dir.path(), event).unwrap(); }
+        learner.completer = Arc::new(CannedCompleter(serde_json::json!({"reinforce_memories": [
+            {"memory_id": first.memory_id, "source_event_ids": [first_event.event_id]},
+            {"memory_id": second.memory_id, "source_event_ids": [second_event.event_id]},
+        ]}).to_string()));
+        assert_eq!(learner.run_for(&owner).await.unwrap().status, "ok");
+        let first = learner.store.get_memory(&first.memory_id).await.unwrap().unwrap();
+        let second = learner.store.get_memory(&second.memory_id).await.unwrap().unwrap();
+        assert_eq!(first.source_event_ids, vec![first_event.event_id]);
+        assert_eq!(first.source_message_refs, vec![first_source]);
+        assert_eq!(second.source_event_ids, vec![second_event.event_id]);
+        assert_eq!(second.source_message_refs, vec![second_source]);
+    }
+
+    #[tokio::test]
+    async fn multi_event_confirmation_with_missing_or_unknown_support_is_rejected_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut learner, owner) = make_learner(dir.path(), "{}").await;
+        let memory = learner.store.insert_memory_scoped("profile", "主人住北京", &[], 0.5, "manual", Some(&owner)).await.unwrap();
+        for offset in 0..2 {
+            append_event(dir.path(), &canonical_user_event(&owner, now_ms() + offset, &canonical_source(), "我住北京")).unwrap();
+        }
+        let generation = learner.store.memory_generation(&owner).await.unwrap();
+        for sources in [vec![], vec![nomifun_common::CompanionEventId::new().into_string()]] {
+            learner.completer = Arc::new(CannedCompleter(serde_json::json!({"reinforce_memories": [{
+                "memory_id": memory.memory_id, "source_event_ids": sources,
+            }]}).to_string()));
+            assert_eq!(learner.run_for(&owner).await.unwrap().status, "error");
+            assert_eq!(learner.store.memory_generation(&owner).await.unwrap(), generation);
+            assert_eq!(learner.store.get_companion_state_i64(&owner, LEARN_CURSOR_KEY).await.unwrap(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn single_event_confirmation_can_use_the_hosts_unambiguous_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut learner, owner) = make_learner(dir.path(), "{}").await;
+        let memory = learner.store.insert_memory_scoped("profile", "主人住北京", &[], 0.5, "manual", Some(&owner)).await.unwrap();
+        let source = canonical_source();
+        let event = canonical_user_event(&owner, now_ms(), &source, "我仍住北京");
+        append_event(dir.path(), &event).unwrap();
+        learner.completer = Arc::new(CannedCompleter(serde_json::json!({"reinforce_memories": [{"memory_id": memory.memory_id}]}).to_string()));
+        assert_eq!(learner.run_for(&owner).await.unwrap().status, "ok");
+        let current = learner.store.get_memory(&memory.memory_id).await.unwrap().unwrap();
+        assert_eq!(current.revision, memory.revision + 1);
+        assert_eq!(current.source_event_ids, vec![event.event_id]);
+        assert_eq!(current.source_message_refs, vec![source]);
+    }
+
+    #[tokio::test]
+    async fn a_correction_during_learning_rejects_the_stale_batch_without_advancing_cursor() {
+        struct CorrectDuringCompletion { store: CompanionStore, owner: String, memory_id: String }
+        #[async_trait::async_trait]
+        impl CompanionCompleter for CorrectDuringCompletion {
+            async fn complete(&self, _: &str, _: &str, _: &str, _: &str, _: Option<u32>) -> Result<String, AppError> {
+                self.store.update_memory(&self.memory_id, Some("主人现在只喝茶"), None, None,
+                    &crate::store::MemoryActor::Companion(self.owner.clone())).await?;
+                Ok(format!(r#"{{"memories":[{{"kind":"preference","content":"主人仍然喜欢咖啡","importance":0.8}}],"supersede_memory_ids":["{}"]}}"#, self.memory_id))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        seed_event(dir.path());
+        let (mut learner, owner) = make_learner(dir.path(), "{}").await;
+        let memory = learner.store.insert_memory_scoped("preference", "主人喜欢咖啡", &[], 0.8, "manual", Some(&owner)).await.unwrap();
+        learner.completer = Arc::new(CorrectDuringCompletion { store: learner.store.clone(), owner: owner.clone(), memory_id: memory.memory_id.clone() });
+        assert!(matches!(learner.run_for(&owner).await, Err(AppError::Conflict(_))));
+        let current = learner.store.get_memory(&memory.memory_id).await.unwrap().unwrap();
+        assert_eq!(current.content, "主人现在只喝茶");
+        assert_eq!(current.status, "active");
+        assert_eq!(learner.store.get_companion_state_i64(&owner, LEARN_CURSOR_KEY).await.unwrap(), 0);
     }
 }

@@ -1705,6 +1705,11 @@ mod tests {
             updated_at: 2_222,
             last_reinforced_at: 3_333,
             companion_id: None,
+            revision: 1,
+            source_session_id: None,
+            source_operation_id: None,
+            source_event_ids: vec![],
+            source_message_refs: vec![],
         }
     }
 

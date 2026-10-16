@@ -12,6 +12,32 @@ use nomifun_agent_kernel::{
     InMemoryPluginStatePersistence, KernelRegistry, MaterializationPolicy,
 };
 
+#[test]
+fn companion_recall_search_and_memory_corrections_have_strict_wire_contracts() {
+    let recall = action_input_schema(COMPANION_MEMORY_RECALL_ACTION_ID);
+    let read = jsonschema::options().build(&recall.0).unwrap();
+    for valid in [
+        serde_json::json!({"per_kind":4,"char_budget":1024}),
+        serde_json::json!({"query":"咖啡","limit":5,"updated_since":0}),
+        serde_json::json!({"scope":"history","query":"九点出发","since_ts":0}),
+    ] { assert!(read.is_valid(&valid), "valid recall request was rejected: {valid}"); }
+    for invalid in [
+        serde_json::json!({"query":"咖啡","limit":51}),
+        serde_json::json!({"source_session_id":"0190f5fe-7c00-7a00-8000-000000000001"}),
+        serde_json::json!({"scope":"history"}),
+        serde_json::json!({"scope":"facts","query":"coffee","since_ts":0}),
+        serde_json::json!({"query":"coffee","companion_id":"another-companion"}),
+    ] { assert!(!read.is_valid(&invalid), "unsafe recall request was accepted: {invalid}"); }
+    let write = action_input_schema(COMPANION_MEMORY_WRITE_ACTION_ID);
+    let write = jsonschema::options().build(&write.0).unwrap();
+    assert!(write.is_valid(&serde_json::json!({"kind":"preference","content":"prefer tea"})));
+    let mut correction = serde_json::json!({"kind":"preference","content":"prefer tea",
+        "memory_id":"0190f5fe-7c00-7a00-8000-000000000001","expected_revision":2});
+    assert!(write.is_valid(&correction));
+    correction.as_object_mut().unwrap().remove("expected_revision");
+    assert!(!write.is_valid(&correction), "a correction must name its exact observed revision");
+}
+
 fn context(
     module_id: &str,
     action_id: &str,

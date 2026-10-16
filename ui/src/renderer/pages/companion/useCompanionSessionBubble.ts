@@ -326,6 +326,9 @@ export function useCompanionSessionBubble(companionId: CompanionId | null, compa
         clearHistoryRetry();
         resolveBinding();
       }),
+      ipcBridge.conversation.listChanged.on(event => {
+        if (event.action === 'deleted' && event.conversation_id === stateRef.current.conversationId) resolveBinding();
+      }),
       ipcBridge.companion.onConfigUpdated.on(event => {
         if (event.scope === companionId) resolveBinding();
       }),

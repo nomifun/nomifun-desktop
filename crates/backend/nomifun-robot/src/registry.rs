@@ -153,7 +153,36 @@ pub struct RobotActionLease {
 
 pub struct RobotPlaybackCommand {
     pub text: String,
-    pub accepted: tokio::sync::oneshot::Sender<Result<(), String>>,
+    /// Optional exact canonical answer identity. The connection actor owns its
+    /// bounded acceptance deduplication; this never claims the user heard it.
+    pub source: Option<nomifun_voice_contracts::VoiceSpeechSourceRef>,
+    /// Only canonical pending-question delivery may establish this physical
+    /// presentation cut. Replays of the source do not renew the question.
+    pub question_presentation_id: Option<String>,
+    pub(crate) requested_response: bool,
+    pub accepted: tokio::sync::oneshot::Sender<Result<(), RobotPlaybackError>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RobotPlaybackError {
+    #[error("device is busy")]
+    Busy,
+    #[error("device connection is unavailable")]
+    Unavailable,
+    #[error("device playback permission is unavailable")]
+    PermissionDenied,
+    #[error("canonical playback source capacity reached for this connection")]
+    SourceCapacity,
+    #[error("canonical playback source changed after acceptance")]
+    SourceChanged,
+    #[error("invalid canonical playback source: {0}")]
+    InvalidSource(String),
+    #[error("device playback acceptance is unconfirmed")]
+    Unconfirmed,
+}
+
+impl RobotPlaybackError {
+    pub fn can_retry_same_source(&self) -> bool { matches!(self,Self::Busy|Self::Unconfirmed) }
 }
 
 /// SHA-256 of `token`, lowercase hex (64 chars). Mirrors
@@ -532,15 +561,47 @@ impl RobotRegistry {
     }
 
     pub async fn speak(&self, robot_id: &str, connection_id: &str, text: String) -> Result<(), String> {
-        if text.trim().is_empty() || text.chars().count() > 12000 { return Err("reply is empty or too long".to_owned()); }
+        self.speak_with_source(robot_id, connection_id, text, None, false, None).await.map_err(|error|error.to_string())
+    }
+
+    pub async fn speak_source(&self, robot_id: &str, connection_id: &str, text: String,
+        source: nomifun_voice_contracts::VoiceSpeechSourceRef) -> Result<(), RobotPlaybackError> {
+        source.validate().map_err(RobotPlaybackError::InvalidSource)?;
+        self.speak_with_source(robot_id, connection_id, text, Some(source), false, None).await
+    }
+
+    /// A delayed response to the same authenticated user's exact request.
+    /// The Host must validate the canonical request and this original socket;
+    /// an arbitrary desktop announcement must use `speak` instead.
+    pub async fn speak_requested_source(&self, robot_id: &str, connection_id: &str, text: String,
+        source: nomifun_voice_contracts::VoiceSpeechSourceRef) -> Result<(), RobotPlaybackError> {
+        source.validate().map_err(RobotPlaybackError::InvalidSource)?;
+        self.speak_with_source(robot_id, connection_id, text, Some(source), true, None).await
+    }
+
+    /// Present one exact current desktop question on its original connection.
+    /// The Host must validate the question owner and immutable presentation.
+    pub async fn speak_requested_question_source(&self, robot_id: &str, connection_id: &str, text: String,
+        source: nomifun_voice_contracts::VoiceSpeechSourceRef, presentation_id: String) -> Result<(), RobotPlaybackError> {
+        source.validate().map_err(RobotPlaybackError::InvalidSource)?;
+        if presentation_id.is_empty() || presentation_id.len() > 512 {
+            return Err(RobotPlaybackError::InvalidSource("question presentation identity is invalid".into()));
+        }
+        self.speak_with_source(robot_id, connection_id, text, Some(source), true, Some(presentation_id)).await
+    }
+
+    async fn speak_with_source(&self, robot_id: &str, connection_id: &str, text: String,
+        source: Option<nomifun_voice_contracts::VoiceSpeechSourceRef>, requested_response:bool,
+        question_presentation_id: Option<String>) -> Result<(), RobotPlaybackError> {
+        if text.trim().is_empty() || text.chars().count() > 12000 { return Err(RobotPlaybackError::InvalidSource("reply is empty or too long".into())); }
         let sender = self.playback.read().await.get(robot_id)
             .filter(|(current, _)| current == connection_id).map(|(_, sender)| sender.clone())
-            .ok_or("device is offline")?;
+            .ok_or(RobotPlaybackError::Unavailable)?;
         let (accepted, rx) = tokio::sync::oneshot::channel();
-        sender.try_send(RobotPlaybackCommand { text, accepted }).map_err(|_| "device is busy".to_owned())?;
+        sender.try_send(RobotPlaybackCommand { text, source, question_presentation_id, requested_response, accepted }).map_err(|_| RobotPlaybackError::Busy)?;
         tokio::time::timeout(std::time::Duration::from_secs(5), rx).await
-            .map_err(|_| "device did not accept playback".to_owned())?
-            .map_err(|_| "device connection closed".to_owned())?
+            .map_err(|_| RobotPlaybackError::Unconfirmed)?
+            .map_err(|_| RobotPlaybackError::Unconfirmed)?
     }
 
     /// A late disconnect from an old socket cannot revoke its replacement.

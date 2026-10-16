@@ -105,8 +105,9 @@ async fn project_memory_real_kernel_host_shares_between_sessions_and_isolates_ot
     let other = services.app_hosting.create("Other memory project".into(), Default::default()).await.unwrap();
     let persistence = Arc::new(InMemoryPluginStatePersistence::new());
     let kernel = KernelRegistry::new(MaterializationPolicy::stable("1.0.0"), persistence.clone()).unwrap();
+    let canonical = nomifun_conversation::CanonicalAgentSessionOwner::from_pool(services.database.pool().clone()).await.unwrap();
     let materialized = kernel.replace_all(super::super::agent_wave1_host::wave1_registrations_for_nomi_core(
-        services.knowledge_service.clone(), None, services.companion_service.clone(), services.database.pool().clone()).unwrap()).unwrap();
+        services.knowledge_service.clone(), None, services.companion_service.clone(), services.database.pool().clone(), canonical.store().clone()).unwrap()).unwrap();
     let mut revision = revision(&owner);
     revision.contribution_locks = vec![materialized.capability(&"project.memory".into()).unwrap().contribution_lock.clone()];
     revision.reference.revision_digest = revision.revision_digest().unwrap();
@@ -126,7 +127,6 @@ async fn project_memory_real_kernel_host_shares_between_sessions_and_isolates_ot
         .find(|resource| resource.resource_kind.as_ref() == "project_memory").unwrap().resource_id.clone();
     assert_eq!(memory_id(&first_binding), memory_id(&same_binding));
     assert_ne!(memory_id(&first_binding), memory_id(&other_binding));
-    let canonical = nomifun_conversation::CanonicalAgentSessionOwner::from_pool(services.database.pool().clone()).await.unwrap();
     let mut sessions = Vec::new();
     for (index, binding) in [&first_binding, &same_binding, &other_binding].into_iter().enumerate() {
         sessions.push(canonical.open(owner.clone(), binding.clone(), Some(format!("Memory Session {index}")),

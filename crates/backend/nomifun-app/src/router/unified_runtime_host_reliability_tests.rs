@@ -10,6 +10,12 @@ use tower::ServiceExt;
 #[path = "engine_knowledge_writeback_tests.rs"]
 mod knowledge_writeback_tests;
 
+#[path = "companion_directed_flow_tests.rs"]
+mod companion_directed_flow_tests;
+
+#[path = "robot_authored_execution_tests.rs"]
+mod robot_authored_execution_tests;
+
 type HostMap = BTreeMap<String, Weak<ConversationRuntimeHost>>;
 static HOSTS: OnceLock<Mutex<HostMap>> = OnceLock::new();
 
@@ -329,10 +335,10 @@ async fn voice_actual_lazy_recovery_admits_known_queued_original_key_once_and_un
     port.shutdown_pending_inputs().await.unwrap();fixture.owner.canonical().cancel_exact_turn(&PrincipalRef {principal_kind:"user".into(),principal_id:owner},&id,"recovery-cleanup",&receipt.operation_id).await.unwrap();fixture.finish().await;server.abort();let _=server.await;
 }
 
-async fn voice_pending_decision_fixture(fixture:&Fixture)->nomifun_agent_contracts::AgentSessionId {
+async fn voice_running_decision_attempt_fixture(fixture:&Fixture)->(String,String,nomifun_db::AgentExecutionStepDetailRow) {
     use nomifun_db::{IAgentExecutionRepository,SqliteAgentExecutionRepository,CreateAgentExecutionParams,NewAgentExecutionParticipant,NewAgentExecutionEvent,ReconcileAgentExecutionPlanParams,
-        NewAgentExecutionStep,CreateAgentExecutionAttemptParams,AgentExecutionAttemptSessionKind,SettleAgentExecutionAttemptParams,AgentExecutionActiveTurnGuard,AttemptConversationEffects};
-    use nomifun_common::{AgentExecutionStatus,AgentExecutionEventKind,AgentExecutionActor,ExecutionStepStatus,ExecutionAttemptStatus};
+        NewAgentExecutionStep,CreateAgentExecutionAttemptParams,AgentExecutionAttemptSessionKind};
+    use nomifun_common::{AgentExecutionStatus,AgentExecutionEventKind,AgentExecutionActor,ExecutionStepStatus};
     fixture.voice_execution.shutdown().await.unwrap();let repository=SqliteAgentExecutionRepository::new(fixture.pool().clone());
     let owner=&fixture.host.options.user_id;let session=&fixture.host.options.conversation_id;let participant=nomifun_common::generate_id();let step=nomifun_common::generate_id();
     let event=|kind|NewAgentExecutionEvent {event_type:kind,step_id:None,attempt_id:None,actor:AgentExecutionActor::system(),payload:"{}".into()};
@@ -357,9 +363,18 @@ async fn voice_pending_decision_fixture(fixture:&Fixture)->nomifun_agent_contrac
         trigger_reason:"initial".into(),effective_config:"{}".into(),retry_after:None,runtime_state:None},&event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();
     let attempt=queued.current_attempt.unwrap().attempt;
     let running=repository.start_attempt(owner,&created.execution_id,&step,queued.step.version,&attempt.attempt_id,attempt.version,session,AgentExecutionAttemptSessionKind::ChildAttempt,None,
-        &event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();let attempt=running.current_attempt.unwrap().attempt;let stop=nomifun_common::generate_id();
+        &event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();
+    (created.execution_id,step,running)
+}
+
+async fn voice_pending_decision_fixture(fixture:&Fixture)->nomifun_agent_contracts::AgentSessionId {
+    use nomifun_db::{IAgentExecutionRepository,SqliteAgentExecutionRepository,NewAgentExecutionEvent,SettleAgentExecutionAttemptParams,AgentExecutionActiveTurnGuard,AttemptConversationEffects};
+    use nomifun_common::{AgentExecutionStatus,AgentExecutionEventKind,AgentExecutionActor,ExecutionStepStatus,ExecutionAttemptStatus};
+    let (execution,step,running)=voice_running_decision_attempt_fixture(fixture).await;
+    let repository=SqliteAgentExecutionRepository::new(fixture.pool().clone());let owner=&fixture.host.options.user_id;let session=&fixture.host.options.conversation_id;
+    let attempt=running.current_attempt.unwrap().attempt;let stop=nomifun_common::generate_id();
     let mut effects=AttemptConversationEffects::default();effects.push_stop_turn(stop.clone(),"cleanup-retry-turn".into()).unwrap();
-    repository.settle_attempt(owner,&created.execution_id,&step,running.step.version,&attempt.attempt_id,attempt.version,None,&SettleAgentExecutionAttemptParams {
+    repository.settle_attempt(owner,&execution,&step,running.step.version,&attempt.attempt_id,attempt.version,None,&SettleAgentExecutionAttemptParams {
         expected_user_input_turn:None,
         expected_active_session_turn:Some(AgentExecutionActiveTurnGuard {conversation_id:session.clone(),canonical_operation_id:"cleanup-retry-turn".into()}),attempt_status:ExecutionAttemptStatus::WaitingInput,
         step_status:ExecutionStepStatus::WaitingInput,execution_status:Some(AgentExecutionStatus::WaitingInput),question:Some(Some("Choose option A or option B?".into())),error:None,output_summary:None,
@@ -394,6 +409,122 @@ async fn voice_off_original_decision_cas_keeps_its_unextended_payload() {
     let events=fixture.voice_execution.events(owner,&target.execution_id,None,Some(128)).await.unwrap();let answer=events.iter().find(|event|event.event_type==nomifun_common::AgentExecutionEventKind::DecisionAnswered).unwrap();
     assert_eq!(answer.payload.as_object().unwrap().len(),2);assert_eq!(answer.payload["answered"],true);assert!(answer.payload["operation_id"].is_string());
     assert!(answer.payload.get("voice_operation_key").is_none());fixture.finish().await;
+}
+
+#[tokio::test]
+async fn voice_actual_normal_input_handoff_presents_the_exact_native_turn_and_answers_once() {
+    use nomifun_db::{IAgentExecutionRepository,SqliteAgentExecutionRepository,NewAgentExecutionEvent,
+        SettleAgentExecutionAttemptParams,AgentExecutionUserInputTurnGuard,AttemptConversationEffects};
+    use nomifun_common::{AgentExecutionStatus,AgentExecutionEventKind,AgentExecutionActor,ExecutionStepStatus,ExecutionAttemptStatus};
+    use nomifun_voice_contracts::{VoiceApprovalAnswer,VoiceWorkStatus};
+
+    let server=InputHandoffModelServer::new().await;
+    let fixture=Fixture::with_input_model("voice-normal-input-handoff",&server.url).await;
+    let (execution,step,running)=voice_running_decision_attempt_fixture(&fixture).await;
+    let attempt=running.current_attempt.unwrap().attempt;
+    let owner=&fixture.host.options.user_id;let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let store=fixture.owner.canonical().store();
+    // The default fixture root was never dispatched. The real Attempt uses
+    // its durable initial-input identity, which the WaitingInput writer checks.
+    let (_,cancelled)=store.cancel_exact_turn(&session,&"cleanup-retry-turn".into(),
+        "voice-handoff-fixture-root-cancel".into(),"session_api".into()).await.unwrap();
+    let other_terminal=cancelled.record.unwrap().event_id;
+    let key=AttemptConversationEffects::default().current_turn_operation_key(&attempt.attempt_id).unwrap();
+    let operation:OperationId=format!("turn:user:{owner}:{}:{key}",session.as_ref()).into();
+    let content="Prepare the report and ask for its destination.";
+    let (input,_)=store.start_turn(&session,"session_api".into(),key.into(),operation.clone(),StrictJsonValue(json!({
+        "content":content,"admission":{"route_identity":fixture.host.route,"resolved_snapshot_ref":fixture.host.snapshot_ref}
+    }))).await.unwrap();
+    let message=SendMessageData {content:content.into(),msg_id:"voice-normal-input-handoff-wire".into(),
+        source_message_id:Some(input.record.unwrap().event_id.as_ref().into()),files:vec![],inject_skills:vec![],origin:None};
+    let events=fixture.runtime.subscribe();fixture.runtime.send_message(message).await.unwrap();
+    let received=receive_input_handoff_terminal(events).await;
+    assert!(received.iter().any(|event|matches!(event,nomifun_ai_agent::AgentStreamEvent::Finish(data)
+        if data.stop_reason==Some(nomifun_ai_agent::protocol::events::TurnStopReason::InputRequired))));
+    assert_eq!(server.requests.lock().unwrap().len(),1,"the native handoff closes before another model request");
+    let receipt=store.read_turn_receipt(&session,&operation).await.unwrap();
+    assert_eq!(receipt.status,nomifun_agent_session::TurnReceiptStatus::Completed);
+    let terminal=receipt.terminal_event.as_ref().unwrap();
+    let nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload)=&terminal.payload else{panic!("inline native terminal expected");};
+    let request:nomifun_agent_contracts::AgentUserInputRequest=serde_json::from_value(payload.0["user_input_request"].clone()).unwrap();
+    assert_eq!(request.request_id.as_ref(),"ask-report-path");
+    assert_eq!(request.question,"Where should the report be saved?");
+    let source=store.turn_output_facts(&session,&operation).await.unwrap();
+    let delivery=nomifun_agent_execution::canonical_turn_delivery(&source,&receipt,true).unwrap();
+    assert_eq!(delivery.user_input_request.as_ref(),Some(&request));
+    assert!(source.execution_generation>0,"the presentation must preserve a real native generation");
+
+    let repository=SqliteAgentExecutionRepository::new(fixture.pool().clone());
+    let guard=AgentExecutionUserInputTurnGuard {conversation_id:session.as_ref().into(),canonical_operation_id:operation.as_ref().into(),
+        terminal_event_id:terminal.event_id.as_ref().into(),user_input_request:request.clone()};
+    let params=|guard|SettleAgentExecutionAttemptParams {expected_active_session_turn:None,expected_user_input_turn:Some(guard),
+        attempt_status:ExecutionAttemptStatus::WaitingInput,step_status:ExecutionStepStatus::WaitingInput,execution_status:Some(AgentExecutionStatus::WaitingInput),
+        question:Some(Some(request.question.clone())),error:Some(None),output_summary:None,output_files:None,tokens:None,retry_after:None,
+        runtime_state:Some(None),started_at:None,finished_at:None,loop_repeat_reset:None};
+    let payload=json!({"canonical_operation_id":operation,"terminal_event_id":terminal.event_id,"question":request.question,"user_input_request":request});
+    let event=|payload:Value|NewAgentExecutionEvent {event_type:AgentExecutionEventKind::DecisionRequested,step_id:Some(step.clone()),
+        attempt_id:Some(attempt.attempt_id.clone()),actor:AgentExecutionActor::system(),payload:payload.to_string()};
+    let mut wrong_guard=guard.clone();wrong_guard.terminal_event_id=other_terminal.as_ref().into();
+    assert!(repository.settle_attempt(owner,&execution,&step,running.step.version,&attempt.attempt_id,attempt.version,None,
+        &params(wrong_guard),&event(payload.clone())).await.is_err(),"a different canonical terminal cannot settle this handoff");
+    let mut changed_guard=guard.clone();changed_guard.user_input_request.question="Use a changed question?".into();
+    assert!(repository.settle_attempt(owner,&execution,&step,running.step.version,&attempt.attempt_id,attempt.version,None,
+        &params(changed_guard),&event(payload.clone())).await.is_err(),"the canonical question cannot be replaced during settlement");
+
+    // Keep the real canonical source fixed while presenting stale Execution
+    // request metadata. The Host must verify that metadata against that source.
+    let mut wrong_terminal=payload.clone();wrong_terminal["terminal_event_id"]=json!(other_terminal);
+    repository.settle_attempt(owner,&execution,&step,running.step.version,&attempt.attempt_id,attempt.version,None,
+        &params(guard),&event(wrong_terminal)).await.unwrap();
+    let waiting=fixture.voice_execution.get(owner,&execution).await.unwrap();
+    assert_eq!(waiting.execution.status,AgentExecutionStatus::WaitingInput);
+    assert_eq!(waiting.attempts.iter().find(|current|current.attempt_id==attempt.attempt_id).unwrap().status,ExecutionAttemptStatus::WaitingInput);
+    let port=voice_port(&fixture);let binding=source.session.agent_binding.binding_version;
+    assert!(port.current_decision_presentations(owner,session.as_ref(),binding).await.unwrap().is_empty(),
+        "a WaitingInput event cannot borrow another terminal in the same Session");
+    let mut changed_question=payload.clone();changed_question["user_input_request"]["question"]=json!("Use a changed question?");
+    let version=fixture.voice_execution.get(owner,&execution).await.unwrap().execution.version;
+    repository.append_event(owner,&execution,version,&event(changed_question)).await.unwrap();
+    assert!(port.current_decision_presentations(owner,session.as_ref(),binding).await.unwrap().is_empty(),
+        "a changed typed question must not become a presentation");
+    let version=fixture.voice_execution.get(owner,&execution).await.unwrap().execution.version;
+    repository.append_event(owner,&execution,version,&event(payload)).await.unwrap();
+    let presentations=port.current_decision_presentations(owner,session.as_ref(),binding).await.unwrap();
+    assert_eq!(presentations.len(),1);let presentation=&presentations[0];let target=&presentation.target;
+    assert_eq!(presentation.question,request.question);
+    assert_eq!(target.work_target.agent_session_id,session);assert_eq!(target.work_target.turn_operation_id,operation);
+    assert_eq!(target.work_target.binding_version,binding);assert_eq!(target.work_target.execution_generation,source.execution_generation);
+    assert_eq!(target.interaction_agent_session_id,session);assert_eq!(target.action_id.as_ref(),"agent/request_user_decision");
+    assert_eq!(target.question_digest,nomifun_agent_contracts::digest_bytes(request.question.as_bytes()));
+    assert_eq!(target.execution_id,execution);assert_eq!(target.step_id,step);assert_eq!(target.attempt_id,attempt.attempt_id);
+    let events=fixture.voice_execution.events(owner,&execution,None,Some(128)).await.unwrap();
+    let requested=events.iter().find(|event|event.sequence==target.request_event_sequence).unwrap();
+    assert!(requested.payload.get("stop_turn_operation_id").is_none(),"this is the ordinary completed input handoff path");
+    assert_eq!(requested.payload["terminal_event_id"],json!(terminal.event_id));
+    let answer=VoiceApprovalAnswer {target:target.clone(),answer:"Save it in reports/.".into(),presented_context_id:target.presentation_id.clone()};
+    let mut altered=answer.clone();altered.target.question_digest=nomifun_agent_contracts::digest_bytes(b"a different question");
+    assert!(port.answer_decision_presentation(owner,"normal-handoff-altered-question",altered).await.is_err());
+    // The fixture stops the scheduler. This proves the original answer CAS
+    // and durable continuation intent, rather than another model dispatch.
+    let first=port.answer_decision_presentation(owner,"normal-handoff-answer",answer.clone()).await.unwrap();
+    assert_eq!(first.status,VoiceWorkStatus::Applied);assert!(!first.duplicate);
+    let resumed=fixture.voice_execution.get(owner,&execution).await.unwrap();
+    assert_eq!(resumed.execution.status,AgentExecutionStatus::Running);
+    assert_eq!(resumed.attempts.iter().find(|current|current.attempt_id==attempt.attempt_id).unwrap().status,ExecutionAttemptStatus::Running);
+    let replay=port.answer_decision_presentation(owner,"normal-handoff-answer",answer.clone()).await.unwrap();
+    assert!(replay.duplicate);assert_eq!(replay.receipt_id,first.receipt_id);
+    assert!(port.answer_decision_presentation(owner,"normal-handoff-late-answer",answer.clone()).await.is_err(),
+        "the original pending presentation cannot be answered twice under another key");
+    let mut different=answer;different.answer="Save it somewhere else.".into();
+    assert!(port.answer_decision_presentation(owner,"normal-handoff-answer",different).await.is_err());
+    assert!(port.current_decision_presentations(owner,session.as_ref(),binding).await.unwrap().is_empty());
+    let events=fixture.voice_execution.events(owner,&execution,None,Some(128)).await.unwrap();
+    let answered=events.iter().filter(|event|event.event_type==AgentExecutionEventKind::DecisionAnswered).collect::<Vec<_>>();
+    assert_eq!(answered.len(),1);assert_eq!(answered[0].payload["request_event_sequence"],json!(target.request_event_sequence));
+    assert_eq!(answered[0].payload["voice_source_target"],json!(target.work_target));
+    assert_eq!(store.read_turn_receipt(&session,&operation).await.unwrap().terminal_event.unwrap().event_id,terminal.event_id,
+        "answering resumes the Attempt; it cannot reopen or replace the completed native Turn");
+    fixture.finish().await;server.close().await;
 }
 
 #[tokio::test]

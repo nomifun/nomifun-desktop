@@ -697,9 +697,12 @@ export const agentPlatform = {
   ),
   productBindingOptions: httpGet<
     ProductAgentOptions,
-    { target_kind: string; target_id: string; model?: { provider_id: string; model: string } }
+    { target_kind: string; target_id: string; model?: { provider_id: string; model: string }; conversation_id?: string }
   >((params) => {
-    const query = params.model ? `?${new URLSearchParams({ provider_id: params.model.provider_id, model: params.model.model })}` : '';
+    const search = new URLSearchParams();
+    if (params.model) { search.set('provider_id', params.model.provider_id); search.set('model', params.model.model); }
+    if (params.conversation_id) search.set('conversation_id', params.conversation_id);
+    const query = search.size ? `?${search}` : '';
     return `/api/product-agent-bindings/${encodeURIComponent(params.target_kind)}/${encodeURIComponent(params.target_id)}${query}`;
   }),
   selectProductBinding: httpPut<
@@ -4433,6 +4436,11 @@ export type ICompanionMemoryKind = 'profile' | 'preference' | 'knowledge' | 'epi
 
 export interface ICompanionMemory {
   memory_id: CompanionMemoryId;
+  revision: number;
+  source_session_id?: ConversationId | null;
+  source_operation_id?: string | null;
+  source_event_ids?: CompanionEventId[];
+  source_message_refs?: Array<{ session_id: ConversationId; message_id: MessageId }>;
   kind: ICompanionMemoryKind;
   content: string;
   tags: string[];
@@ -4606,13 +4614,25 @@ export interface ICompanionHistoryDay {
   has_digest: boolean;
 }
 
-/** 伙伴的唯一专属会话 — 一条真实的 `type='nomi'` 会话。每个伙伴生命周期内恒一条。 */
+export type CompanionSessionRole = 'companion' | 'robot';
+
+/** A companion-owned canonical Session. Its role is supplied by the Host. */
 export interface ICompanionThread {
   conversation_id: ConversationId;
   companion_id: CompanionId;
   title: string;
   created_at: number;
   updated_at: number;
+  role: CompanionSessionRole;
+  archived: boolean;
+  robot_id?: string | null;
+}
+
+export interface ICompanionThreadPage {
+  items: ICompanionThread[];
+  total: number;
+  has_more: boolean;
+  next_cursor?: string | null;
 }
 
 // ── Multi-companion (current ownership: docs/architecture/agent-session.md) ──
@@ -4719,6 +4739,8 @@ export interface ICompanionProfile {
   mood_override: ICompanionMood | null;
   persona: ICompanionPersona;
   model: ICompanionModelRef | null;
+  /** Independent defaults for the physical robot role. */
+  robot?: { model: ICompanionModelRef | null; skills: ICompanionSkillConfig; mcp_servers: string[] };
   /** 备用对话模型: replayed once when the main model's turn fails. */
   fallback_model: ICompanionModelRef | null;
   /** 视觉大模型; null = use the main chat model when it can see images. */
@@ -4813,6 +4835,7 @@ export type ICompanionProfilePatch = {
   mood_override?: ICompanionMood | null;
   persona?: Partial<ICompanionPersona>;
   model?: ICompanionModelRef | null;
+  robot?: { model?: ICompanionModelRef | null; skills?: Partial<ICompanionSkillConfig>; mcp_servers?: string[] };
   fallback_model?: ICompanionModelRef | null;
   vision_model?: ICompanionModelRef | null;
   voice?: {
@@ -4888,9 +4911,18 @@ const fromApiCompanionMemory = (raw: unknown): ICompanionMemory => {
       throw new TypeError(`companion memory must not contain retired field "${retiredField}"`);
     }
   }
+  if (!Number.isSafeInteger(value.revision) || (value.revision as number) < 1) {
+    throw new TypeError('companion memory revision must be a positive integer');
+  }
   return {
     ...(value as unknown as ICompanionMemory),
     memory_id: parseCompanionMemoryId(value.memory_id),
+    source_session_id: value.source_session_id == null ? null : parseConversationId(value.source_session_id),
+    source_event_ids: Array.isArray(value.source_event_ids) ? value.source_event_ids.map(parseCompanionEventId) : [],
+    source_message_refs: Array.isArray(value.source_message_refs) ? value.source_message_refs.map(raw => {
+      const source = asWireObject(raw, 'companion memory message source');
+      return { session_id: parseConversationId(source.session_id), message_id: parseMessageId(source.message_id) };
+    }) : [],
     companion_id: nullableCompanionId(value.companion_id),
   };
 };
@@ -5013,6 +5045,8 @@ const fromApiFigure = (raw: unknown): IFigureMeta => {
 
 const fromApiCompanionThread = (raw: unknown): ICompanionThread => {
   const value = asWireObject(raw, 'companion thread');
+  if (value.role !== 'companion' && value.role !== 'robot') throw new TypeError('companion thread role is required');
+  if (typeof value.archived !== 'boolean') throw new TypeError('companion thread archive annotation is required');
   return {
     ...(value as unknown as ICompanionThread),
     companion_id: parseCompanionId(value.companion_id),
@@ -5075,11 +5109,12 @@ export const companion = {
    * mutation below for the same reason: the invariant is enforced server-side, so
    * the caller has to say who it is.
    */
-  updateMemory: httpPut<
-    void,
+  updateMemory: withResponseMap(httpPut<
+    unknown,
     {
       memory_id: CompanionMemoryId;
       companion_id: CompanionId;
+      expected_revision: number;
       content?: string;
       pinned?: boolean;
       status?: string;
@@ -5091,16 +5126,18 @@ export const companion = {
       pinned: p.pinned,
       status: p.status,
       companion_id: p.companion_id,
+      expected_revision: p.expected_revision,
     })
-  ),
-  deleteMemory: httpDelete<void, { memory_id: CompanionMemoryId; companion_id: CompanionId }>(
-    (p) => `/api/companion/memories/${p.memory_id}?companion_id=${encodeURIComponent(p.companion_id)}`
+  ), fromApiCompanionMemory),
+  deleteMemory: httpDelete<void, { memory_id: CompanionMemoryId; companion_id: CompanionId; expected_revision: number }>(
+    (p) => `/api/companion/memories/${p.memory_id}?companion_id=${encodeURIComponent(p.companion_id)}&expected_revision=${p.expected_revision}`
   ),
   /** Atomic batch memory op (single transaction — any bad or foreign id rolls the whole batch back). */
   batchMemories: httpPost<
     void,
     {
       ids: CompanionMemoryId[];
+      expected_revisions: Record<string, number>;
       action: ICompanionMemoryBatchAction;
       kind?: ICompanionMemoryKind;
       companion_id: CompanionId;
@@ -5128,6 +5165,7 @@ export const companion = {
       unknown,
       {
         group: CompanionMemoryId[];
+        expected_revisions: Record<string, number>;
         merged_content: string;
         kind: ICompanionMemoryKind;
         companion_id: CompanionId;
@@ -5204,6 +5242,7 @@ export const companion = {
       until?: string;
       on_day?: string;
       limit?: number;
+      conversation_id?: ConversationId;
       }
     >((p) => {
       const q = new URLSearchParams();
@@ -5211,6 +5250,7 @@ export const companion = {
       if (p.until) q.set('until', p.until);
       if (p.on_day) q.set('on_day', p.on_day);
       if (p.limit) q.set('limit', String(p.limit));
+      if (p.conversation_id) q.set('conversation_id', p.conversation_id);
       const qs = q.toString();
       return `/api/companion/companions/${p.companion_id}/digests${qs ? `?${qs}` : ''}`;
     }),
@@ -5219,8 +5259,8 @@ export const companion = {
   /** The companion's complete history day index (聊天历史 左侧日期栏). Read-only:
    *  never mints a session, and a companion that has never chatted returns []. */
   listHistoryDays: withResponseMap(
-    httpGet<unknown[], { companion_id: CompanionId }>(
-      (p) => `/api/companion/companions/${p.companion_id}/history/days`
+    httpGet<unknown[], { companion_id: CompanionId; conversation_id?: ConversationId }>(
+      (p) => `/api/companion/companions/${p.companion_id}/history/days${p.conversation_id ? `?conversation_id=${encodeURIComponent(p.conversation_id)}` : ''}`
     ),
     (raw): ICompanionHistoryDay[] =>
       raw.map((entry) => asWireObject(entry, 'companion history day') as unknown as ICompanionHistoryDay)
@@ -5303,9 +5343,25 @@ export const companion = {
     fromApiFigure
   ),
   deleteFigure: httpDelete<void, { figure_id: FigureId }>((p) => `/api/companion/figures/${p.figure_id}`),
-  // ── 伙伴单会话（companion single session）──
-  // 每个伙伴生命周期内恒一条专属会话；多线程列表/新建/重命名/单删/设活已废除。
-  /** Return this companion's canonical Conversation id, or null. */
+  // ── Companion Sessions: browsing never changes input routing. ──
+  listCompanionSessions: withResponseMap(
+    httpGet<ICompanionThreadPage, { companion_id: CompanionId }>(
+      (p) => `/api/companion/companions/${p.companion_id}/companion/threads`
+    ),
+    (raw): ICompanionThreadPage => ({ ...raw, items: raw.items.map(fromApiCompanionThread) })
+  ),
+  createCompanionSession: withResponseMap(
+    httpPost<unknown, { companion_id: CompanionId; creation_key: string; title?: string }>(
+      (p) => `/api/companion/companions/${p.companion_id}/companion/threads`,
+      (p) => ({ new_session: true, creation_key: p.creation_key, ...(p.title ? { title: p.title } : {}) })
+    ),
+    fromApiCompanionThread
+  ),
+  continueInCompanionWindow: httpPost<{ conversation_id: string }, { companion_id: CompanionId; conversation_id: ConversationId }>(
+    (p) => `/api/companion/companions/${p.companion_id}/companion/active`,
+    (p) => ({ conversation_id: p.conversation_id })
+  ),
+  /** The desktop window's explicit input target; viewing another Session does not change it. */
   getCompanionSession: withResponseMap(
     httpGet<{ conversation_id: string | null }, { companion_id: CompanionId }>(
       (p) => `/api/companion/companions/${p.companion_id}/companion/active`
@@ -5314,7 +5370,7 @@ export const companion = {
       conversation_id: raw.conversation_id == null ? null : parseConversationId(raw.conversation_id),
     })
   ),
-  /** Idempotently ensure the companion's unique canonical Conversation. */
+  /** Idempotently ensure the desktop input Session without changing an existing target. */
   ensureCompanionSession: withResponseMap(
     httpPost<unknown, { companion_id: CompanionId }>(
       (p) => `/api/companion/companions/${p.companion_id}/companion/threads`,

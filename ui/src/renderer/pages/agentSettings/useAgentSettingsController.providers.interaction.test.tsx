@@ -62,6 +62,32 @@ async function mount(){
 }
 
 describe('provider changes in the Agent workbench',()=>{
+  test('saving adopts and clones the canonical returned document instead of marking the submitted draft as saved',async()=>{
+    const page=await mount();
+    const submitted=cloneDraft(page.result.current.draft!);
+    submitted.document.persona='Keep this authored persona';
+    submitted.document.instructions='Submitted instructions';
+    await act(async()=>{page.result.current.setDraft(submitted);});
+    const saved=editor(firstId,2);
+    saved.draft.document=structuredClone(submitted.document);
+    saved.draft.document.instructions='Canonical saved instructions';
+    saved.revision!.document=structuredClone(saved.draft.document);
+    page.editors.set(firstId,saved);
+    page.save.mockResolvedValueOnce({preset:saved.preset,revision:saved.revision!,
+      resolved_snapshot_ref:{snapshot_id:asResolvedSnapshotId('0190f5fe-7c00-7a00-8000-000000000509'),snapshot_digest:asDigestHex('f'.repeat(64))}});
+    await act(async()=>{await page.result.current.saveRevision();});
+    expect(page.save.mock.calls[0][0].request.draft.document.instructions).toBe('Submitted instructions');
+    expect(page.result.current.draft?.document).toEqual(saved.revision!.document);
+    expect(page.result.current.editor?.draft.document).toEqual(saved.revision!.document);
+    expect(page.result.current.draft?.document.persona).toBe('Keep this authored persona');
+    expect(page.result.current.draft?.document.instructions).toBe('Canonical saved instructions');
+    expect(page.result.current.draft?.current_revision?.revision).toBe(2);
+    expect(page.result.current.dirty).toBe(false);
+    saved.revision!.document.instructions='Later mutation';
+    expect(page.result.current.draft?.document.instructions).toBe('Canonical saved instructions');
+    expect(page.result.current.editor?.revision?.document.instructions).toBe('Canonical saved instructions');
+  });
+
   test('a pristine editor adopts the cleared server model without saving or choosing a replacement',async()=>{
     const page=await mount();
     page.editors.set(firstId,editor(firstId,2,null));

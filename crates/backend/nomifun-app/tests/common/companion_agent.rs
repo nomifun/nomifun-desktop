@@ -20,6 +20,9 @@ pub async fn companion_agent_test_request(
         .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+    if status == StatusCode::NO_CONTENT && bytes.is_empty() {
+        return (status, Value::Null);
+    }
     (status, serde_json::from_slice(&bytes).unwrap_or_else(|error|
         panic!("{method} {path} returned {status}: {error}; {}", String::from_utf8_lossy(&bytes))))
 }
@@ -39,7 +42,6 @@ pub async fn save_companion_core_agent_for_fixture(router: axum::Router) {
         {"capability":{"id":"companion.memory"},"action_allowlist":["companion.memory/recall","companion.memory/write"]},
         {"capability":{"id":"knowledge"},"action_allowlist":["knowledge/read","knowledge/search"]},
         {"capability":{"id":"channel.messaging"},"action_allowlist":["channel.messaging/reply"]},
-        {"capability":{"id":"robot"},"action_allowlist":["robot/vision"]},
         {"capability":{"id":"automation.schedule"},"action_allowlist":["automation.schedule/create","automation.schedule/delete","automation.schedule/list","automation.schedule/update"]}
     ]);
     let (status, saved_core) = call(router.clone(), "POST",

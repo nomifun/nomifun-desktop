@@ -70,28 +70,8 @@ pub fn companion_action_input_schema(action_id: &str) -> Option<Value> {
             nomifun_agent_domain_wave4::action_input_schema(COMPANION_EVOLVE_ACTION_ID)
             .0,
         ),
-        COMPANION_MEMORY_RECALL_ACTION_ID => Some(json!({
-            "type": "object",
-            "properties": {
-                "per_kind": { "type": "integer", "minimum": 1, "maximum": 20 },
-                "char_budget": { "type": "integer", "minimum": 1, "maximum": 65536 }
-            },
-            "additionalProperties": false
-        })),
-        COMPANION_MEMORY_WRITE_ACTION_ID => Some(json!({
-            "type": "object",
-            "properties": {
-                "kind": { "type": "string", "minLength": 1, "maxLength": 64 },
-                "content": { "type": "string", "minLength": 1, "maxLength": 65536 },
-                "tags": {
-                    "type": "array",
-                    "maxItems": 64,
-                    "items": { "type": "string", "minLength": 1, "maxLength": 128 }
-                }
-            },
-            "required": ["kind", "content"],
-            "additionalProperties": false
-        })),
+        COMPANION_MEMORY_RECALL_ACTION_ID => Some(nomifun_agent_contracts::companion_memory_recall_input_schema()),
+        COMPANION_MEMORY_WRITE_ACTION_ID => Some(nomifun_agent_contracts::companion_memory_write_input_schema()),
         _ => None,
     }
 }
@@ -186,6 +166,13 @@ impl CompanionAgentCapabilityOwner {
         principal_id: &str,
         bindings: &[TypedResourceBinding],
     ) -> Result<CompanionPersonaContext, Wave4HostPortError> {
+        self.persona_context_at(principal_id,bindings,None).await
+    }
+
+    async fn persona_context_at(
+        &self, principal_id:&str, bindings:&[TypedResourceBinding],
+        session:Option<(&nomifun_agent_contracts::AgentSessionId,&nomifun_agent_contracts::ResolvedSnapshotRef)>,
+    )->Result<CompanionPersonaContext,Wave4HostPortError>{
         self.require_owner(principal_id)?;
         let binding = exact_binding(
             bindings,
@@ -193,10 +180,16 @@ impl CompanionAgentCapabilityOwner {
             COMPANION_RESOURCE_KIND,
             "read",
         )?;
-        let platform = binding
+        let configured_platform = binding
             .typed_parameters
             .get("channel_platform")
             .map(String::as_str);
+        let role=match session {
+            Some((session,snapshot))=>self.service.context_role(binding.resource_id.as_ref(),session.as_ref(),snapshot)
+                .await.map_err(map_service_error)?,
+            None=>None,
+        };
+        let platform=persona_platform(role,configured_platform);
         let prompt = self
             .service
             .build_bound_system_prompt(binding.resource_id.as_ref(), platform)
@@ -279,40 +272,74 @@ impl CompanionAgentCapabilityOwner {
             }
             COMPANION_MEMORY_RECALL_ACTION_ID => {
                 let input: MemoryRecallInput = parse_input(input.0)?;
+                input.validate().map_err(Wave4HostPortError::invalid_request)?;
+                if input.limit.is_some_and(|limit| !(1..=50).contains(&limit))
+                    || input.char_budget.is_some_and(|budget| !(1..=65536).contains(&budget))
+                    || input.per_kind.is_some_and(|per_kind| !(1..=20).contains(&per_kind))
+                {
+                    return Err(Wave4HostPortError::invalid_request("memory recall limits exceed the bounded schema"));
+                }
+                let scope = input.scope.as_deref().unwrap_or("facts");
+                if scope == "history" {
+                    let budget = input.char_budget.unwrap_or(8192).min(32768);
+                    if budget < 768 {
+                        return Err(Wave4HostPortError::invalid_request("history recall char_budget must be at least 768 bytes including result metadata"));
+                    }
+                    let query = input.query.filter(|query| !query.trim().is_empty()).ok_or_else(||
+                        Wave4HostPortError::invalid_request("history recall requires query"))?;
+                    if input.updated_since.is_some() || input.updated_until.is_some() {
+                        return Err(Wave4HostPortError::invalid_request("history recall uses since_ts/until_ts"));
+                    }
+                    let before = input.before.map(|cursor| {
+                        if cursor.is_empty() || cursor.len() > 2048 {
+                            return Err(Wave4HostPortError::invalid_request("invalid history recall cursor size"));
+                        }
+                        serde_json::from_str::<crate::CompanionHistoryRecallCursor>(&cursor)
+                            .map_err(|error| Wave4HostPortError::invalid_request(format!("invalid history recall cursor: {error}")))
+                    }).transpose()?;
+                    let page = self.service.recall_companion_history_for_agent(binding.resource_id.as_ref(),
+                        crate::CompanionHistoryRecallQuery { query, limit: input.limit.unwrap_or(8).min(12) as u32,
+                            byte_budget: budget - 512, source_session_id: input.source_session_id,
+                            since_ts: input.since_ts, until_ts: input.until_ts, before })
+                        .await.map_err(map_service_error)?;
+                    let next_cursor = page.next_cursor.as_ref().map(serde_json::to_string).transpose()
+                        .map_err(|error| Wave4HostPortError::new(COMPANION_OPERATION_FAILED, error.to_string()))?;
+                    return bounded_recall_output(json!({ "companion_id": binding.resource_id, "scope": "history",
+                        "fragments": page.fragments, "has_more": page.has_more, "next_cursor": next_cursor, "truncated": page.truncated }), budget);
+                }
+                if scope != "facts" || input.since_ts.is_some() || input.until_ts.is_some() || input.before.is_some() {
+                    return Err(Wave4HostPortError::invalid_request("invalid fact recall scope or time fields"));
+                }
+                if let Some(query) = input.query {
+                    let budget = input.char_budget.unwrap_or(8192);
+                    let page = self.service.recall_memory_search_for_agent(binding.resource_id.as_ref(),
+                        crate::MemorySearchQuery { queries: vec![query], limit: input.limit.unwrap_or(8),
+                            source_session_id: input.source_session_id, updated_since: input.updated_since,
+                            updated_until: input.updated_until, ..Default::default() }, budget.saturating_sub(256).max(1))
+                        .await.map_err(map_service_error)?;
+                    return bounded_recall_output(json!({ "companion_id": binding.resource_id, "scope": "facts", "hits": page.hits, "has_more": page.has_more }), budget);
+                }
+                if input.source_session_id.is_some() || input.updated_since.is_some() || input.updated_until.is_some() {
+                    return Err(Wave4HostPortError::invalid_request("filtered memory recall requires query"));
+                }
                 let memories = self
                     .service
                     .recall_memories_for_agent(
                         binding.resource_id.as_ref(),
-                        input.per_kind.unwrap_or(8),
+                        input.per_kind.unwrap_or(8) as i64,
                         input.char_budget.unwrap_or(32 * 1024),
                     )
                     .await
                     .map_err(map_service_error)?;
-                Ok(StrictJsonValue(json!({
+                bounded_recall_output(json!({
                     "companion_id": binding.resource_id,
+                    "scope": "facts",
                     "memories": memories,
-                })))
+                }), input.char_budget.unwrap_or(32 * 1024))
             }
-            COMPANION_MEMORY_WRITE_ACTION_ID => {
-                let input: MemoryWriteInput = parse_input(input.0)?;
-                validate_memory_write_input(&input)?;
-                let memory = self
-                    .service
-                    .add_memory(
-                        &input.kind,
-                        &input.content,
-                        &input.tags,
-                        Some(binding.resource_id.as_ref()),
-                    )
-                    .await
-                    .map_err(map_service_error)?;
-                Ok(StrictJsonValue(json!({
-                    "companion_id": binding.resource_id,
-                    "receipt_id": memory.memory_id.clone(),
-                    "memory": memory,
-                })))
-            }
-            _ => unreachable!("validated Companion Action"),
+            _ => Err(Wave4HostPortError::action_operation_mismatch(
+                "this owner does not dispatch persistent memory writes; the installed Wave 1 owner owns canonical effects and input provenance",
+            )),
         }
     }
 
@@ -346,9 +373,6 @@ impl CompanionAgentCapabilityOwner {
             Wave4CapabilityOperation::CompanionMemoryRecall { input } => {
                 (COMPANION_MEMORY_RECALL_ACTION_ID, input)
             }
-            Wave4CapabilityOperation::CompanionMemoryWrite { input } => {
-                (COMPANION_MEMORY_WRITE_ACTION_ID, input)
-            }
             _ => {
                 return Err(Wave4HostPortError::action_operation_mismatch(
                     "Companion owner received a foreign operation",
@@ -362,6 +386,30 @@ impl CompanionAgentCapabilityOwner {
             input,
         )
         .await
+    }
+}
+
+/// The final envelope, including opaque-cursor escaping and exact source IDs,
+/// participates in the same byte budget. Whole hits may be omitted; a source
+/// identity is never partially truncated to make it fit.
+fn bounded_recall_output(mut payload: Value, max_bytes: usize) -> Result<StrictJsonValue, Wave4HostPortError> {
+    loop {
+        let encoded = serde_json::to_vec(&payload)
+            .map_err(|error| Wave4HostPortError::new(COMPANION_OPERATION_FAILED, error.to_string()))?;
+        if encoded.len() <= max_bytes { return Ok(StrictJsonValue(payload)); }
+        let mut removed = false;
+        for key in ["hits", "memories", "fragments"] {
+            if let Some(items) = payload.get_mut(key).and_then(Value::as_array_mut) {
+                if items.pop().is_some() { removed = true; break; }
+            }
+        }
+        if !removed {
+            return Err(Wave4HostPortError::invalid_request("recall char_budget is too small for result metadata; increase the budget"));
+        }
+        payload["truncated"] = Value::Bool(true);
+        if payload.get("scope").and_then(Value::as_str) != Some("history") {
+            payload["has_more"] = Value::Bool(true);
+        }
     }
 }
 
@@ -401,9 +449,10 @@ impl Wave4ContextHostPort for CompanionAgentCapabilityOwner {
                 ));
             }
             let context = self
-                .persona_context(
+                .persona_context_at(
                     &request.principal.principal_id,
                     &request.resource_bindings,
+                    Some((&request.agent_session_id,&request.resolved_snapshot_ref)),
                 )
                 .await?;
             serde_json::to_value(context)
@@ -414,6 +463,11 @@ impl Wave4ContextHostPort for CompanionAgentCapabilityOwner {
                 })
         })
     }
+}
+
+fn persona_platform<'a>(role:Option<crate::CompanionRole>,configured:Option<&'a str>)->Option<&'a str>{
+    if role==Some(crate::CompanionRole::Robot) {Some("robot")}
+    else {configured.filter(|platform|*platform!="robot")}
 }
 
 fn exact_binding<'a>(
@@ -484,42 +538,7 @@ fn validate_optional_reason(input: &StrictJsonValue) -> Result<(), Wave4HostPort
     Ok(())
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MemoryRecallInput {
-    #[serde(default)]
-    per_kind: Option<i64>,
-    #[serde(default)]
-    char_budget: Option<usize>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MemoryWriteInput {
-    kind: String,
-    content: String,
-    #[serde(default)]
-    tags: Vec<String>,
-}
-
-fn validate_memory_write_input(input: &MemoryWriteInput) -> Result<(), Wave4HostPortError> {
-    if input.kind.trim().is_empty()
-        || input.kind.chars().count() > 64
-        || input.content.trim().is_empty()
-        || input.content.chars().count() > 65_536
-        || input.tags.len() > 64
-        || input
-            .tags
-            .iter()
-            .any(|tag| tag.trim().is_empty() || tag.chars().count() > 128)
-    {
-        return Err(Wave4HostPortError::invalid_request(
-            "companion.memory/write input exceeds its bounded schema",
-        ));
-    }
-    Ok(())
-}
-
+type MemoryRecallInput = nomifun_agent_contracts::CompanionMemoryRecallInput;
 fn parse_input<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, Wave4HostPortError> {
     serde_json::from_value(value)
         .map_err(|error| Wave4HostPortError::invalid_request(error.to_string()))
@@ -557,6 +576,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn robot_persona_requires_the_trusted_session_role_not_a_resource_parameter() {
+        assert_eq!(persona_platform(Some(crate::CompanionRole::Robot), None), Some("robot"));
+        assert_eq!(persona_platform(Some(crate::CompanionRole::Robot), Some("telegram")), Some("robot"));
+        assert_eq!(persona_platform(Some(crate::CompanionRole::Companion), Some("robot")), None);
+        assert_eq!(persona_platform(None, Some("robot")), None);
+        assert_eq!(persona_platform(None, Some("telegram")), Some("telegram"));
+        assert_eq!(persona_platform(Some(crate::CompanionRole::Companion), None), None);
+    }
+
+    #[test]
     fn target_actions_have_exact_resource_requirements_and_no_context_grants() {
         assert_eq!(
             companion_action_resource_requirement(COMPANION_LEARN_ACTION_ID),
@@ -590,5 +619,24 @@ mod tests {
         assert!(
             validate_optional_reason(&StrictJsonValue(json!({ "unknown": true }))).is_err()
         );
+    }
+
+    #[test]
+    fn recall_budget_includes_the_envelope_and_opaque_cursor_escaping() {
+        let session = nomifun_common::ConversationId::new().into_string();
+        let cursor = serde_json::to_string(&crate::CompanionHistoryRecallCursor {
+            recorded_at: 123, session_id: session.clone(), source_seq: 7,
+        }).unwrap();
+        let fragment = json!({ "session_id": session, "turn_id": "exact-turn", "event_ids": ["exact-event"],
+            "recorded_at": 123, "text": "正文".repeat(80), "truncated": false });
+        let result = bounded_recall_output(json!({ "companion_id": nomifun_common::CompanionId::new().into_string(),
+            "scope": "history", "fragments": [fragment.clone(), fragment], "has_more": false,
+            "next_cursor": cursor, "truncated": false }), 1000).unwrap();
+        assert!(serde_json::to_vec(&result.0).unwrap().len() <= 1000);
+        assert_eq!(result.0["next_cursor"], cursor, "opaque source position stays intact");
+        assert_eq!(result.0["truncated"], true);
+        assert_eq!(result.0["fragments"].as_array().unwrap().len(), 1);
+        assert_eq!(result.0["fragments"][0]["event_ids"][0], "exact-event");
+        assert!(bounded_recall_output(json!({ "scope": "facts", "hits": [] }), 1).is_err());
     }
 }

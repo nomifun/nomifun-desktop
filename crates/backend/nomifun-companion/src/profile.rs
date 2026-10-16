@@ -438,6 +438,17 @@ impl CompanionMood {
     }
 }
 
+/// Independently configured physical-device role. An absent model explicitly
+/// inherits the Companion model; Skills and MCP always remain independent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CompanionRobotConfig {
+    #[serde(deserialize_with = "deserialize_optional_model", serialize_with = "serialize_optional_model")]
+    pub model: Option<ProviderWithModel>,
+    pub skills: CompanionSkillConfig,
+    pub mcp_servers: Vec<String>,
+}
+
 /// Per-companion profile persisted as `companion/companions/{companion_id}/config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -471,6 +482,9 @@ pub struct CompanionProfileConfig {
         serialize_with = "serialize_optional_model"
     )]
     pub model: Option<ProviderWithModel>,
+    /// The simultaneously available physical-device execution role.
+    #[serde(default)]
+    pub robot: CompanionRobotConfig,
     /// 备用对话模型: replayed once when the main model's turn fails, and used by
     /// the model-resolution chain when the main reference goes stale. Absent =
     /// no fallback, a failure is a failure.
@@ -528,6 +542,7 @@ impl CompanionProfileConfig {
             mood_override: None,
             persona: PersonaConfig::default(),
             model: None,
+            robot: CompanionRobotConfig::default(),
             fallback_model: None,
             vision_model: None,
             voice: CompanionVoiceConfig::default(),
@@ -557,6 +572,7 @@ impl CompanionProfileConfig {
         let mut slots = Vec::new();
         for (label, model) in [
             ("chat", self.model.as_ref()),
+            ("robot", self.robot.model.as_ref()),
             ("learn", self.learn.model.as_ref()),
             ("evolve", self.evolve.model.as_ref()),
             ("fallback", self.fallback_model.as_ref()),
@@ -587,6 +603,7 @@ impl CompanionProfileConfig {
         let mut detached = 0;
         for slot in [
             &mut self.model,
+            &mut self.robot.model,
             &mut self.learn.model,
             &mut self.evolve.model,
             &mut self.fallback_model,
@@ -1630,5 +1647,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(SharedCompanionConfig::config_path(dir.path()), "[oops").unwrap();
         assert!(SharedCompanionConfig::load(dir.path()).is_err());
+    }
+
+    #[test]
+    fn robot_role_defaults_to_model_inheritance_with_independent_empty_skills_and_mcp() {
+        let mut profile = CompanionProfileConfig::new("Nomi", "ink", 1);
+        profile.model = Some(ProviderWithModel { provider_id: nomifun_common::ProviderId::new().into_string(), model: "desktop".into(), use_model: None });
+        profile.skills.enabled.push("desktop-skill".into());
+        let mut prior = serde_json::to_value(&profile).unwrap();
+        prior.as_object_mut().unwrap().remove("robot");
+        let loaded: CompanionProfileConfig = serde_json::from_value(prior).unwrap();
+        assert!(loaded.robot.model.is_none());
+        assert!(loaded.robot.skills.enabled.is_empty());
+        assert!(loaded.robot.mcp_servers.is_empty());
+        assert_eq!(loaded.model, profile.model);
+
+        let robot_provider = nomifun_common::ProviderId::new().into_string();
+        profile.robot.model = Some(ProviderWithModel { provider_id: robot_provider.clone(), model: "fast".into(), use_model: None });
+        assert!(profile.provider_model_slots().iter().any(|(slot, model)| *slot == "robot" && model.model == "fast"));
+        assert_eq!(profile.detach_provider_model_references(&robot_provider, None), 1);
+        assert!(profile.robot.model.is_none(), "clearing an override returns to explicit inheritance");
+        assert_eq!(profile.model.unwrap().model, "desktop");
     }
 }

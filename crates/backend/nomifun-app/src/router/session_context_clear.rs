@@ -7,6 +7,9 @@ impl NomiCoreSessionOwner {
         &self, owner_id: &str, session_id: &AgentSessionId, idempotency_key: &str, reason: &str,
     ) -> Result<(), AppError> {
         let _operation_fence = self.session_operation_lock(session_id.as_ref()).write_owned().await;
+        if self.is_companion_associated_task(owner_id, session_id).await? {
+            return Err(AppError::Conflict("Associated task Sessions keep their exact execution context".into()));
+        }
         self.clear_session_context_locked(owner_id, session_id, idempotency_key, reason, None).await.map(|_| ())
     }
 

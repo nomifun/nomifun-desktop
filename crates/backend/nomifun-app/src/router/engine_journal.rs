@@ -1299,6 +1299,7 @@ async fn test_fixture_from_pool(
                     archived: false,
                     pinned: false,
                     reasoning_effort: None,
+                    companion: None,
                 },
                 agent_binding: binding.clone(),
                 remote_binding_provenance: None,

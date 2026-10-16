@@ -12,15 +12,37 @@ to your desktop over the LAN instead of using the default `xiaozhi.me` service.
 
 ## What You Need
 
-Once paired, a robot continues its companion's existing desktop conversation with the same persona, voice and long-term memory. Reconnecting does not create another conversation. The optional official **Robot companion** (`companion.robot`) preset can be explicitly selected for that same companion and session; it does not create another character.
+Once paired, a physical device uses a separate **Robot** role and device session
+under the same companion, sharing its persona, voice and long-term memory. The
+desktop continues using the **Companion** role. Both roles remain available
+together; you do not switch the desktop session to a Robot Agent. Reconnecting
+reuses that device's input session, and viewing another conversation does not
+redirect device input.
 
-Ordinary Agent conversations can explicitly select a robot in the resource picker before launch. In a companion's Cohabit view, use **Connections → Conversation robot** in the right sidebar, select a device paired with that companion, then click **Apply robot**. Select **No robot control** and apply to remove the conversation's device control resource. Wait until the current reply finishes; active and paused turns block changes. Pairing a single device does not automatically select it or grant control authority.
+The Cohabit sidebar has separate **Companion** and **Robot** settings. Physical
+control defaults to Robot. When viewing a Robot session,
+**Connections → Conversation robot** shows its device-resource settings.
+Pairing does not grant arbitrary tools: a call still requires the selected Agent's
+Action, the exact device resource and device permission. Apply configuration
+after the reply and operation settlement; active or paused turns block changes.
 
-The picker calls `PUT /api/product-agent-bindings/companion/{companion_id}` with the current Agent `selection`, the existing `conversation_id`, and the complete `resource_selections`, including the `robot` and all other resources to retain. This uses the formal session binding transition and preserves session identity, the current model, other resources, and message history. Integrations should use this same endpoint; the companion's Agent dropdown does not select a robot resource.
+Integrations should use the Robot role's formal product-binding endpoint,
+`PUT /api/product-agent-bindings/robot/{companion_id}`, with its `selection`,
+exact `conversation_id` and complete `resource_selections`. Users can also explicitly
+select Robot capabilities and real device resources for Companion through its own
+formal configuration endpoint; this does not redirect physical input. Applying a configuration to an existing session
+uses a formal binding transition and preserves its identity and history. Device
+identity comes from that Robot session's affiliation; a display name, page
+selection or message text cannot redirect it to another device.
 
 Device settings show the permissions supported by the connected firmware. Photos, movement and extension tools require their respective permissions. Continuous observation requires an additional permission and remains scoped to the current conversation turn. Revoking permissions, unpairing or disconnecting invalidates earlier device authority. Photos and observations are attached to the originating conversation message.
 
 This version uses a fresh robot data baseline and does not migrate old robot threads, Agent bindings or messages.
+
+See the [companion architecture and acceptance status](../architecture/companion.zh.md)
+(Chinese) for dual roles, multiple sessions, desktop delegation and shared
+context. This guide does not establish acceptance of real robot movement,
+speech latency or cross-device approvals.
 
 - The [NomiFun desktop app](https://github.com/nomifun/nomifun-desktop) running
   on a computer connected to the same LAN as the robot.
@@ -33,7 +55,7 @@ This version uses a fresh robot data baseline and does not migrate old robot thr
 The robot must be able to reach the computer directly. Guest Wi-Fi or AP
 isolation can prevent two devices on the same Wi-Fi network from communicating.
 
-## 1. Configure the Companion
+## 1. Configure the Companion and Robot Roles
 
 1. Open **Desktop companions** in NomiFun and select or create a companion.
 2. On **Overview**, configure its main chat model.
@@ -41,24 +63,31 @@ isolation can prevent two devices on the same Wi-Fi network from communicating.
    model (including a voice when the provider requires one).
 4. Test a normal text conversation with that companion first.
 
-For device-focused interaction, select **Robot companion** under the Cohabit
-sidebar's **Mind configuration → Agent**. Its default capabilities are limited
-to the companion, long-term memory and robot operations. Switch only after the
-current turn ends. The companion, session, model and complete stored history
-remain intact; the lean model context selects only necessary recent content.
-Then select and apply the device under **Connections → Conversation robot** and
-enable its required device permissions separately. Upgrades never silently
-replace existing companion or personal Agents or expand their permissions.
+In **Robot** settings, select the official **Robot** (`companion.robot`) Agent
+or a personal Agent that meets the role's requirements. The official setup keeps
+companion identity, long-term memory, device operations and narrow desktop
+delegation, reducing general tools and historical context. **Companion** settings
+continue to configure desktop work; the roles are not mutually exclusive.
+Upgrades do not silently replace saved companion or personal Agents or expand
+their permissions. To adopt an edited revision, explicitly **Apply latest setup**
+to the idle target session, then enable required device permissions separately.
+
+Robot can have an independent default chat model. With no override
+(`robot.model=null`), it inherits the Companion model. **Use Companion model
+for future conversations** only changes future defaults, preserving existing sessions.
+When viewing a Robot session, its role settings explicitly update that session
+and save future defaults; editing the other role's defaults leaves existing
+sessions unchanged.
 
 The chat model remains your choice. Existing explicit reasoning settings or
 the model default still apply; this preset does not replace the global model.
-Natural-language commands still include recognition, model decisions and device
-communication, so changing the preset alone does not guarantee millisecond response.
+Natural-language commands still include recognition, model decisions, device
+communication and speech synthesis. A lean configuration does not guarantee
+millisecond response; latency requires measurements on a real device.
 
-The robot uses the models assigned to the companion it is bound to. A provider
-existing in the model catalog is not enough by itself: the companion must have
-a usable main chat model, and voice conversation also needs usable ASR and TTS
-models.
+A provider existing in the catalog is not enough: Robot needs a usable independent
+or inherited chat model, and voice interaction also needs the companion's ASR,
+TTS and any required voice selection.
 
 ## 2. Get the NomiFun OTA Address
 
@@ -98,12 +127,11 @@ companion must be unbound there before it can be claimed again.
 
 ## 5. Verify the Connection
 
-Before testing device tools, confirm all three requirements: the companion's
-current Agent explicitly grants the corresponding Robot Actions, the current
-companion session explicitly selects this paired device as its `robot` resource,
-and device settings allow the requested operation. Pairing alone does not grant
-Agent tool authority. Ordinary voice conversations
-do not require camera permission or a robot resource selected in advance.
+Before testing device tools, confirm all three requirements: the Robot role's
+current Agent explicitly grants the corresponding Robot Actions, that device's
+Robot session binds the correct `robot` resource, and device settings allow the
+operation. Pairing alone does not grant Agent tool authority. Ordinary voice
+conversation does not require camera or movement permission.
 
 | Robot Action | Device tools |
 | --- | --- |
@@ -112,23 +140,21 @@ do not require camera permission or a robot resource selected in advance.
 | `robot/motion` | Head, gimbal and servo tools, including `self.head.get_status` and the combined expression/motion tool `self.head.express`. |
 | `robot/device` | Other device extension tools provided by the firmware. |
 
-The latest recommended official Companion Agent includes all four Actions.
-Available tools still depend on the selected robot, its firmware and device
-permissions. Upgrading does not automatically expand saved official Agent
-configurations or existing sessions. To add the recommended capabilities, choose
-**Edit Agent** under the companion's **Agent setup**, select **Complete recommended
-capabilities**, review the additions, and select **Complete and save**. Return to
-the companion and, after the current reply finishes, select **Apply latest setup**
-to explicitly apply the saved configuration to its current session. This keeps
-the session identity, current model and message history. Then select the device
-under **Connections → Conversation robot** in the Cohabit view, click **Apply robot**, and allow the required operations in
-device settings. Personal Agents also need explicit grants for the Robot Actions
-you want to use.
+The official **Robot** Agent includes all four Actions. The official **Companion**
+Agent handles desktop work and no longer includes physical control by default.
+Available tools still depend on the exact device, firmware and permissions.
+Upgrades do not automatically expand saved Agent configurations or existing
+sessions. To add recommendations, choose **Edit Agent → Complete recommended
+capabilities** in **Robot** settings, review the additions, then **Complete and
+save**. Return to the corresponding Robot session and **Apply latest setup** after
+its reply finishes. Use **Apply robot** when its device-resource revision needs
+refreshing, and enable the required device permissions. Personal Agents also need
+explicit grants for the Robot Actions you want to use.
 
 Start with these checks:
 
-1. Speak to the robot and confirm that recognized text appears in the NomiFun
-   companion session.
+1. Speak to the robot, open its **Robot** session in the session selector, and
+   confirm that recognized text appears in the correct device's history.
 2. Confirm that the reply is played by the robot and that speaking or pressing
    the device's interaction button can interrupt playback as supported by the
    firmware.
@@ -161,15 +187,15 @@ board names, tool names, or a fixed number of servos.
 - Create named actions such as “Greeting” from an existing tool and fixed
   arguments. Multiple named actions may reuse one device tool and retain its
   permission and effect-receipt path. Saving or refreshing does not execute them.
-- Personality remains owned by the original companion. Select the lean **Robot
-  companion** preset or edit timing and gesture frequency in the existing Agent
-  instructions. Adding general workspace or Office capabilities makes it an
+- Personality remains owned by the original companion. Edit timing and gesture
+  frequency in the **Robot** role's **Agent setup**. Adding general workspace or Office capabilities makes it an
   extended Agent and opts it out of automatic lean-context treatment. Tool
   descriptions explain capabilities and grant no authority.
 
 Saving creates a new device capability revision without changing Agent Actions
-or device permissions. In the Cohabit view, **Apply robot** while the conversation
-is idle to bind the new revision to the same session, preserving its identity,
+or device permissions. In Cohabit, open that device's Robot session and
+**Apply robot** under **Conversation robot** while idle. This binds the new
+revision to that session, preserving its identity,
 model, history and other resources. Old tool invokers cannot dispatch after the
 configuration changes. When firmware publishes new tools, **Refresh device
 capabilities**, then reapply the robot to the conversation.
@@ -185,14 +211,35 @@ Speech playback consumes the current turn's final valid public answer, excluding
 reasoning, pre-tool narration and withdrawn steps. The firmware defines what an
 `accepted` receipt means; a spoken reply does not prove physical completion.
 
+## 7. Desktop Tasks and Multiple Sessions
+
+For computer work, Robot can direct a task to the same companion's desktop role.
+The task runs in a separate linked session using Companion's own model, tools
+and resources. It does not inject work into the chat you are viewing or transfer
+computer authority to Robot. Acceptance means the task was received; completion
+and artifacts require the corresponding task receipt. See the
+[companion architecture](../architecture/companion.zh.md) for the current status
+of automatic follow-up orchestration and spoken result delivery.
+
+The session selector lets you inspect separate histories. A new Companion session
+retains the shared persona and long-term memory. **Continue in desktop window**
+explicitly changes only the desktop quick-window target, preserving robot and
+channel input destinations. Stopping playback and cancelling desktop work are
+separate operations; cancel the exact task when you want work to stop. Questions
+and approvals still use that task's formal interaction. Agreement in another
+conversation, historical memory or stopping audio does not establish approval,
+successful cancellation or completed work.
+
 ## How Data Flows
 
 ```text
-Microphone -> XiaoZhi firmware -> NomiFun ASR -> companion chat model
+Microphone -> XiaoZhi firmware -> NomiFun ASR -> Robot-role model
                                                      |
 Speaker <- Opus audio <- XiaoZhi firmware <- NomiFun TTS
                                                      |
                          device MCP tools <----------+
+                                                     |
+                         linked desktop task <-- directed delegation --> Companion-role model
 ```
 
 Voice data and conversation content are processed according to the providers
@@ -208,14 +255,15 @@ coordination; it does not make a cloud ASR, TTS, or chat provider local.
 - **The activation code is missing or rejected:** Confirm that the OTA address
   ends in `/robot/ota`, restart the robot, and use the newest six-digit code.
 - **`Nomi conversation has no provider/model configured`:** Configure the bound
-  companion's main chat model on **Overview**. A global provider alone is not
-  sufficient.
+  companion's Robot default model or its inherited Companion model on **Overview**.
+  Existing sessions also require explicitly applying a usable model. A global
+  provider alone is not sufficient.
 - **Speech is not recognized:** Configure an ASR model for the companion and
   verify the provider credentials and quota.
 - **No audio reply is played:** Configure the companion's TTS model and voice,
   then verify speaker wiring and volume.
-- **Head commands do nothing:** Confirm the companion's current Agent grants
-  `robot/motion`, its current session selects the correct robot resource, device
+- **Head commands do nothing:** Confirm the Robot role's current Agent grants
+  `robot/motion`, the corresponding Robot session binds the correct resource, device
   settings allow motion, and the firmware exposes `self.head.*`. For physical
   movement, also calibrate the device and enable motion as described by the board
   documentation. `self.head.get_status` belongs to `robot/motion` too and requires

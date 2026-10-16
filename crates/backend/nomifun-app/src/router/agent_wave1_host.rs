@@ -162,9 +162,10 @@ impl Wave1ApplicationHost {
         search: Option<Arc<dyn nomifun_ai_agent::web_search::SearchProvider>>,
         service: Arc<nomifun_companion::CompanionService>,
         receipt_pool: SqlitePool,
+        effect_store: nomifun_agent_session::AgentSessionStore,
     ) -> Self {
         Self {
-            companion_memory: Some(Wave1CompanionMemoryHost::new(service, receipt_pool)),
+            companion_memory: Some(Wave1CompanionMemoryHost::new(service, receipt_pool, effect_store)),
             ..Self::new(knowledge, search)
         }
     }
@@ -1099,6 +1100,7 @@ pub(crate) fn wave1_registrations_for_nomi_core(
     search_provider: Option<Arc<dyn nomifun_ai_agent::web_search::SearchProvider>>,
     companion_service: Arc<nomifun_companion::CompanionService>,
     receipt_pool: SqlitePool,
+    effect_store: nomifun_agent_session::AgentSessionStore,
 ) -> anyhow::Result<Vec<nomifun_agent_kernel::PluginRegistration>> {
     nomifun_agent_domain_wave1::registrations_with_host_port(Arc::new(
         Wave1ApplicationHost::with_companion_memory(
@@ -1106,6 +1108,7 @@ pub(crate) fn wave1_registrations_for_nomi_core(
             search_provider,
             companion_service,
             receipt_pool,
+            effect_store,
         ),
     ))
     .map_err(anyhow::Error::msg)

@@ -4,19 +4,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Input, Message, Switch } from '@arco-design/web-react';
+import { Button, Input, Message, Switch } from '@arco-design/web-react';
+import { Link } from 'react-router-dom';
 import type { ICompanionMemory } from '@/common/adapter/ipcBridge';
 import { NomiSettingList, NomiSettingRow } from '@/renderer/components/base/NomiSettingLayout';
 import { MEMORY_KIND_DOT, formatMemoryTime } from './constants';
+import { isMemoryRevisionConflict, memoryMutationErrorKey } from './memoryMutationError';
 
 interface MemoryDetailPaneProps {
   memory: ICompanionMemory;
-  onSave: (content: string) => Promise<void>;
-  onTogglePin: (pinned: boolean) => Promise<void>;
-  onToggleArchive: (archived: boolean) => Promise<void>;
+  onSave: (content: string, observed: ICompanionMemory) => Promise<ICompanionMemory>;
+  onTogglePin: (pinned: boolean) => Promise<ICompanionMemory>;
+  onToggleArchive: (archived: boolean) => Promise<ICompanionMemory>;
   onDelete: () => void;
+  onRefresh: () => Promise<void>;
 }
 
 const META_LABEL_CLASS = 'text-12px leading-18px text-t-tertiary';
@@ -34,45 +37,78 @@ const MemoryDetailPane: React.FC<MemoryDetailPaneProps> = ({
   onTogglePin,
   onToggleArchive,
   onDelete,
+  onRefresh,
 }) => {
   const { t } = useTranslation();
-  const [draft, setDraft] = useState(memory.content);
+  const [editor, setEditor] = useState({ base: memory, draft: memory.content });
   const [saving, setSaving] = useState(false);
+  const pending = useRef(false);
+  const [conflict, setConflict] = useState(false);
+  const { base, draft } = editor;
 
   // Follow the selected row; a live update from nomi replaces the draft only
   // when the user is looking at a different memory.
   useEffect(() => {
-    setDraft(memory.content);
-  }, [memory.memory_id, memory.content]);
+    setEditor(current => {
+      if (current.base.memory_id !== memory.memory_id) return { base: memory, draft: memory.content };
+      if (memory.revision <= current.base.revision || current.draft.trim() !== current.base.content) return current;
+      return { base: memory, draft: memory.content };
+    });
+  }, [memory]);
 
   const archived = memory.status === 'archived';
-  const dirty = draft.trim().length > 0 && draft.trim() !== memory.content;
+  const dirty = draft.trim().length > 0 && draft.trim() !== base.content;
+  const stale = memory.revision > base.revision;
   // No ownership read-out here on purpose: every memory belongs to the companion
   // whose workspace this is, so "who else is affected" is not a question any more.
 
   const save = async () => {
-    if (!dirty || saving) return;
+    if (!dirty || pending.current || stale || conflict) return;
+    pending.current = true;
     setSaving(true);
     try {
-      await onSave(draft.trim());
+      const updated = await onSave(draft.trim(), base);
+      setEditor({ base: updated, draft: updated.content });
+      setConflict(false);
       Message.success(t('nomi.memories.saved', { defaultValue: '记忆已保存' }));
     } catch (e) {
-      Message.error(String(e));
+      setConflict(isMemoryRevisionConflict(e));
+      Message.error(t(memoryMutationErrorKey(e)));
     } finally {
       setSaving(false);
+      pending.current = false;
     }
   };
 
-  const guard = (run: () => Promise<void>) => () => {
-    void run().catch((e) => Message.error(String(e)));
+  const guard = (run: () => Promise<ICompanionMemory>) => async () => {
+    if (pending.current || stale || conflict) return;
+    pending.current = true;
+    setSaving(true);
+    try {
+      const updated = await run();
+      setEditor(current => updated.content === current.base.content && updated.revision > current.base.revision
+        ? { ...current, base: updated } : current);
+    }
+    catch (error) { setConflict(isMemoryRevisionConflict(error)); Message.error(t(memoryMutationErrorKey(error))); }
+    finally { pending.current = false; setSaving(false); }
   };
 
   return (
     <div className='flex flex-col gap-16px'>
       <div className='flex flex-col gap-8px'>
+        {(stale || conflict) && <div role='alert' className='flex flex-col gap-6px text-12px text-t-secondary'>
+          <span>{t('nomi.memory.conflictDraftKept')}</span>
+          {stale && <blockquote className='m-0 whitespace-pre-wrap'>{memory.content}</blockquote>}
+          <Button size='mini' onClick={() => {
+            if (stale || !dirty) { setEditor({ base: memory, draft: memory.content }); setConflict(false); }
+            void onRefresh();
+          }}>{t('nomi.memory.loadLatest')}</Button>
+        </div>}
         <Input.TextArea
+          aria-label={t('nomi.memory.content')}
           value={draft}
-          onChange={setDraft}
+          disabled={saving}
+          onChange={value => setEditor(current => ({ ...current, draft: value }))}
           autoSize={{ minRows: 6, maxRows: 16 }}
           className='!rd-8px text-13px leading-20px'
         />
@@ -82,26 +118,14 @@ const MemoryDetailPane: React.FC<MemoryDetailPaneProps> = ({
               defaultValue: '编辑只影响新对话与实时检索；已经打开的对话仍沿用开聊时的记忆快照。',
             })}
           </span>
-          <div
-            role='button'
-            tabIndex={dirty ? 0 : -1}
-            aria-disabled={!dirty || saving}
+          <Button
+            type='primary'
+            size='small'
+            disabled={!dirty || saving || stale || conflict}
             onClick={() => void save()}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' || event.key === ' ') {
-                event.preventDefault();
-                void save();
-              }
-            }}
-            className={[
-              'inline-flex shrink-0 select-none items-center rd-full px-18px py-9px text-13px font-700 leading-none transition-colors',
-              dirty && !saving
-                ? 'cursor-pointer bg-[rgba(var(--primary-6),0.12)] text-[var(--color-text-1)] shadow-[0_6px_18px_rgba(var(--primary-6),0.14)] hover:bg-[rgba(var(--primary-6),0.18)]'
-                : 'cursor-not-allowed bg-fill-2 text-t-tertiary',
-            ].join(' ')}
           >
             {t('nomi.memory.save', { defaultValue: '保存' })}
-          </div>
+          </Button>
         </div>
       </div>
 
@@ -113,6 +137,7 @@ const MemoryDetailPane: React.FC<MemoryDetailPaneProps> = ({
             <Switch
               className='compact-dark-switch'
               checked={memory.pinned}
+              disabled={saving || stale || conflict}
               onChange={(checked) => guard(() => onTogglePin(checked))()}
             />
           }
@@ -126,6 +151,7 @@ const MemoryDetailPane: React.FC<MemoryDetailPaneProps> = ({
             <Switch
               className='compact-dark-switch'
               checked={archived}
+              disabled={saving || stale || conflict}
               onChange={(checked) => guard(() => onToggleArchive(checked))()}
             />
           }
@@ -137,11 +163,12 @@ const MemoryDetailPane: React.FC<MemoryDetailPaneProps> = ({
             <div
               role='button'
               tabIndex={0}
-              onClick={onDelete}
+              aria-disabled={saving || stale || conflict}
+              onClick={() => { if (!saving && !stale && !conflict) onDelete(); }}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' || event.key === ' ') {
                   event.preventDefault();
-                  onDelete();
+                  if (!saving && !stale && !conflict) onDelete();
                 }
               }}
               className='inline-flex cursor-pointer select-none items-center rd-8px px-10px py-5px text-13px text-danger-6 transition-colors hover:bg-[rgba(var(--danger-6),0.1)]'
@@ -153,6 +180,10 @@ const MemoryDetailPane: React.FC<MemoryDetailPaneProps> = ({
       </NomiSettingList>
 
       <div className='flex flex-col gap-6px'>
+        <span className={META_VALUE_CLASS}>{t('nomi.memory.revision', { revision: memory.revision })}</span>
+        {memory.source_session_id && memory.companion_id && <Link to={`/nomi?companion=${encodeURIComponent(memory.companion_id)}&session=${encodeURIComponent(memory.source_session_id)}&mode=cohabit`}>
+          {t('nomi.memory.sourceConversation')}
+        </Link>}
         <div className='flex items-center justify-between gap-10px'>
           <span className={META_LABEL_CLASS}>{t('nomi.memory.metaKind', { defaultValue: '分类' })}</span>
           <span className='flex items-center gap-6px text-12px leading-18px text-t-secondary'>

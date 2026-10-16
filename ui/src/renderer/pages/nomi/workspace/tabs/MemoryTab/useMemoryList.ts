@@ -15,6 +15,7 @@ import type {
 } from '@/common/adapter/ipcBridge';
 import type { CompanionId, CompanionMemoryId } from '@/common/types/ids';
 import type { MemoryStatusFilter } from './constants';
+import { isMemoryRevisionConflict } from './memoryMutationError';
 
 /**
  * The memory list of ONE companion. Every request carries
@@ -34,13 +35,19 @@ export const useMemoryList = (companionId: CompanionId) => {
   const [items, setItems] = useState<ICompanionMemory[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [selected, setSelected] = useState<CompanionMemoryId[]>([]);
+  const [selectedMemories, setSelectedMemories] = useState<ICompanionMemory[]>([]);
+  const selected = selectedMemories.map(memory => memory.memory_id);
+  const [conflict, setConflict] = useState(false);
 
   // Out-of-order guard: rapid typing fires overlapping requests and a slow stale
   // response must never clobber a newer one.
   const seqRef = useRef(0);
+  const scope = JSON.stringify([companionId, kind, q, status, sort, page, pageSize]);
+  const currentScope = useRef(scope);
+  currentScope.current = scope;
 
   const refresh = useCallback(async () => {
+    if (currentScope.current !== scope) return;
     const seq = ++seqRef.current;
     setLoading(true);
     try {
@@ -53,7 +60,7 @@ export const useMemoryList = (companionId: CompanionId) => {
         limit: pageSize,
         offset: (page - 1) * pageSize,
       });
-      if (seq !== seqRef.current) return;
+      if (seq !== seqRef.current || currentScope.current !== scope) return;
       setTotal(result.total);
       const maxPage = Math.max(1, Math.ceil(result.total / pageSize));
       // A deletion can leave the current page past the end. Keep the visible
@@ -64,11 +71,11 @@ export const useMemoryList = (companionId: CompanionId) => {
       }
       setItems(result.items);
     } catch (e) {
-      if (seq === seqRef.current) Message.error(String(e));
+      if (seq === seqRef.current && currentScope.current === scope) Message.error(String(e));
     } finally {
-      if (seq === seqRef.current) setLoading(false);
+      if (seq === seqRef.current && currentScope.current === scope) setLoading(false);
     }
-  }, [companionId, kind, q, status, sort, page, pageSize]);
+  }, [companionId, kind, q, status, sort, page, pageSize, scope]);
 
   // Debounced so typing in the search field does not queue a request per keystroke.
   useEffect(() => {
@@ -84,7 +91,8 @@ export const useMemoryList = (companionId: CompanionId) => {
 
   // Selection belongs to one result set.
   useEffect(() => {
-    setSelected([]);
+    setSelectedMemories([]);
+    setConflict(false);
   }, [companionId, kind, q, status, sort, page, pageSize]);
 
   // `refresh` changes identity on every keystroke; the live subscriptions must
@@ -107,13 +115,16 @@ export const useMemoryList = (companionId: CompanionId) => {
   }, []);
 
   const toggleSelected = useCallback((id: CompanionMemoryId) => {
-    setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-  }, []);
+    const observed = items.find(memory => memory.memory_id === id);
+    if (!observed) return;
+    setSelectedMemories(prev => prev.some(memory => memory.memory_id === id)
+      ? prev.filter(memory => memory.memory_id !== id) : [...prev, observed]);
+  }, [items]);
 
-  const clearSelection = useCallback(() => setSelected([]), []);
+  const clearSelection = useCallback(() => { setSelectedMemories([]); setConflict(false); }, []);
 
   const selectAllOnPage = useCallback(() => {
-    setSelected(items.map((m) => m.memory_id));
+    setSelectedMemories([...items]);
   }, [items]);
 
   const handlePageChange = useCallback(
@@ -130,6 +141,16 @@ export const useMemoryList = (companionId: CompanionId) => {
   // it, never a new owner: ownership is fixed at write time and the store rejects
   // a row belonging to anybody else. This tab can therefore only ever change the
   // memories it is displaying.
+  const mutate = useCallback(async <T,>(command: () => Promise<T>): Promise<T> => {
+    try {
+      const result = await command();
+      if (currentScope.current === scope) { setConflict(false); void refresh(); }
+      return result;
+    } catch (error) {
+      if (currentScope.current === scope && isMemoryRevisionConflict(error)) { setConflict(true); void refresh(); }
+      throw error;
+    }
+  }, [refresh, scope]);
 
   const addMemory = useCallback(
     async (nextKind: ICompanionMemoryKind, content: string) => {
@@ -144,47 +165,39 @@ export const useMemoryList = (companionId: CompanionId) => {
   );
 
   const saveContent = useCallback(
-    async (memoryId: CompanionMemoryId, content: string) => {
-      await ipcBridge.companion.updateMemory.invoke({
-        memory_id: memoryId,
+    async (memory: ICompanionMemory, content: string) => mutate(() => ipcBridge.companion.updateMemory.invoke({
+        memory_id: memory.memory_id,
+        expected_revision: memory.revision,
         content: content.trim(),
         companion_id: companionId,
-      });
-      void refresh();
-    },
-    [companionId, refresh]
+      })),
+    [companionId, mutate]
   );
 
   const setPinned = useCallback(
-    async (memory: ICompanionMemory, pinned: boolean) => {
-      await ipcBridge.companion.updateMemory.invoke({
+    async (memory: ICompanionMemory, pinned: boolean) => mutate(() => ipcBridge.companion.updateMemory.invoke({
         memory_id: memory.memory_id,
+        expected_revision: memory.revision,
         pinned,
         companion_id: companionId,
-      });
-      void refresh();
-    },
-    [companionId, refresh]
+      })),
+    [companionId, mutate]
   );
 
   const setArchived = useCallback(
-    async (memory: ICompanionMemory, archived: boolean) => {
-      await ipcBridge.companion.updateMemory.invoke({
+    async (memory: ICompanionMemory, archived: boolean) => mutate(() => ipcBridge.companion.updateMemory.invoke({
         memory_id: memory.memory_id,
+        expected_revision: memory.revision,
         status: archived ? 'archived' : 'active',
         companion_id: companionId,
-      });
-      void refresh();
-    },
-    [companionId, refresh]
+      })),
+    [companionId, mutate]
   );
 
   const removeMemory = useCallback(
-    async (memoryId: CompanionMemoryId) => {
-      await ipcBridge.companion.deleteMemory.invoke({ memory_id: memoryId, companion_id: companionId });
-      void refresh();
-    },
-    [companionId, refresh]
+    async (memory: ICompanionMemory) => mutate(() => ipcBridge.companion.deleteMemory.invoke({
+      memory_id: memory.memory_id, expected_revision: memory.revision, companion_id: companionId })),
+    [companionId, mutate]
   );
 
   /**
@@ -193,20 +206,21 @@ export const useMemoryList = (companionId: CompanionId) => {
    * was sent, so the caller must not report success.
    */
   const runBatch = useCallback(
-    async (action: ICompanionMemoryBatchAction, batchKind?: ICompanionMemoryKind): Promise<number> => {
-      if (selected.length === 0) return 0;
-      const count = selected.length;
-      await ipcBridge.companion.batchMemories.invoke({
-        ids: selected,
+    async (action: ICompanionMemoryBatchAction, batchKind?: ICompanionMemoryKind, targets = selectedMemories): Promise<number> => {
+      if (targets.length === 0) return 0;
+      const count = targets.length;
+      await mutate(() => ipcBridge.companion.batchMemories.invoke({
+        ids: targets.map(memory => memory.memory_id),
+        expected_revisions: Object.fromEntries(targets.map(memory => [memory.memory_id, memory.revision])),
         action,
         kind: batchKind,
         companion_id: companionId,
-      });
-      setSelected([]);
-      void refresh();
+      }));
+      setSelectedMemories(current => current.length === targets.length && current.every((memory, index) =>
+        memory.memory_id === targets[index].memory_id && memory.revision === targets[index].revision) ? [] : current);
       return count;
     },
-    [companionId, selected, refresh]
+    [companionId, selectedMemories, mutate]
   );
 
   return {
@@ -229,6 +243,8 @@ export const useMemoryList = (companionId: CompanionId) => {
     refresh,
     // selection
     selected,
+    selectedMemories,
+    conflict,
     toggleSelected,
     clearSelection,
     selectAllOnPage,

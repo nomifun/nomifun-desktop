@@ -4746,7 +4746,9 @@ async fn companion_options_survive_a_first_launch_selection_default_save_failure
     assert_eq!(status, StatusCode::OK, "{after}");
     assert_eq!(after["data"]["session"]["agent_binding"], before["data"]["session"]["agent_binding"],
         "listing recovery options must preserve the frozen Agent and Session history");
-    let (status, repaired) = call(router.clone(), "PUT", &path, json!({ "selection": selection, "model": model })).await;
+    let (status, repaired) = call(router.clone(), "PUT", &path, json!({
+        "selection": selection, "model": model, "conversation_id":session_id, "update_default":true,
+    })).await;
     assert_eq!(status, StatusCode::OK, "explicitly choosing the personal Agent must repair its future default: {repaired}");
     assert_eq!(repaired["data"]["conversation"]["conversation_id"], session_id);
     let (status, repaired_session) = call(router.clone(), "GET", &format!("/api/agent-sessions/{session_id}"), json!({})).await;
@@ -4765,15 +4767,22 @@ async fn companion_options_survive_a_first_launch_selection_default_save_failure
             .find(|message| message["message_id"] == retained["message_id"]), Some(retained),
             "explicit recovery must preserve each existing canonical history item alongside its new transition notice");
     }
-    let (status, options) = call(router.clone(), "GET", &path, json!({})).await;
+    // Current options validate the exact frozen Session; the path without a
+    // conversation_id reads the independently saved future authoring default.
+    let active_options_path = format!("{path}?conversation_id={session_id}");
+    let (status, options) = call(router.clone(), "GET", &active_options_path, json!({})).await;
     assert_eq!(status, StatusCode::OK, "{options}");
     assert_eq!(options["data"]["selection"], selection);
     let snapshot_id = repaired_session["data"]["session"]["agent_binding"]["resolved_snapshot_ref"]["snapshot_id"].as_str().unwrap();
-    sqlx::query("UPDATE agent_runtime_snapshots SET envelope_json = '{}' WHERE snapshot_id = ?")
+    let damaged_row = sqlx::query("UPDATE agent_runtime_snapshots SET envelope_json = '{}' WHERE snapshot_id = ?")
         .bind(snapshot_id).execute(services.database.pool()).await.unwrap();
-    let (status, damaged) = call(router.clone(), "GET", &path, json!({})).await;
+    assert_eq!(damaged_row.rows_affected(), 1, "damage the exact current frozen Snapshot, not an unused role cache");
+    let (status, damaged) = call(router.clone(), "GET", &active_options_path, json!({})).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "supported storage damage must not become a nullable authoring origin: {damaged}");
     assert_eq!(damaged["code"], "PRESET_REVISION_SAVE_FAILED");
+    let (status, future_default) = call(router.clone(), "GET", &path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "future authoring intent does not read or authorize the damaged current Session: {future_default}");
+    assert_eq!(future_default["data"]["selection"], selection);
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
 }
@@ -4855,7 +4864,7 @@ async fn started_companion_fixture() -> StartedCompanion {
     );
     assert_eq!(status, StatusCode::OK, "{thread}");
     assert_eq!(other_status, StatusCode::OK, "{other_thread}");
-    assert_eq!(thread["data"]["conversation_id"], other_thread["data"]["conversation_id"], "concurrent home/sidebar/device opens must share the first conversation");
+    assert_eq!(thread["data"]["conversation_id"], other_thread["data"]["conversation_id"], "concurrent desktop receive ensures share the same receive Session");
     let conversation_id = thread["data"]["conversation_id"].as_str().unwrap();
     let (status, projected) = call(
         router.clone(),
@@ -4871,14 +4880,13 @@ async fn started_companion_fixture() -> StartedCompanion {
         .map(|capability| capability.as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
     assert_eq!(enabled, std::collections::BTreeSet::from([
         "agent.tool-discovery", "automation.schedule", "channel.messaging", "companion",
-        "companion.memory", "knowledge", "robot",
+        "companion.memory", "knowledge",
     ]));
     for (module, expected) in [
         ("companion", &["companion/evolve", "companion/learn"][..]),
         ("companion.memory", &["companion.memory/recall", "companion.memory/write"][..]),
         ("knowledge", &["knowledge/read", "knowledge/search"][..]),
         ("channel.messaging", &["channel.messaging/reply"][..]),
-        ("robot", &["robot/vision"][..]),
         ("automation.schedule", &["automation.schedule/create", "automation.schedule/delete", "automation.schedule/list", "automation.schedule/update"][..]),
         ("agent.tool-discovery", &["tool.discovery.rank"][..]),
     ] {
@@ -5004,7 +5012,7 @@ async fn started_companion_fixture() -> StartedCompanion {
     assert_eq!(conversation_count, 0, "canonical Companion must not write the retired Conversation Store");
     let session_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_sessions WHERE state = 'live'")
         .fetch_one(services.database.pool()).await.unwrap();
-    assert_eq!(session_count, 1, "concurrent ensure must create one canonical AgentSession");
+    assert_eq!(session_count, 1, "concurrent desktop receive ensures create one canonical Session");
     let (status, options) = call(router.clone(), "GET",
         &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{options}");
@@ -5070,22 +5078,19 @@ async fn started_companion_fixture() -> StartedCompanion {
 }
 
 #[tokio::test]
-async fn robot_companion_is_an_explicit_profile_of_the_existing_companion_session() {
+async fn robot_and_desktop_roles_coexist_with_independent_canonical_sessions() {
     let call = companion_agent_test_request;
     let fixture = started_companion_fixture().await;
     let router = fixture.router;
     let services = fixture.services;
     let companion_id = fixture.companion_id.as_str();
-    let session_id = fixture.conversation_id.as_str();
+    let desktop_id = fixture.conversation_id.as_str();
     let model = json!({"provider_id":fixture.provider_id,"model":"step-3.7-flash"});
-    let product_path = format!("/api/product-agent-bindings/companion/{companion_id}");
-    let projection_path = format!("/api/agent-sessions/{session_id}/projection");
-    let normal_editor_path = format!("/api/agent-presets/{}/editor", fixture.preset_id);
-    let (status, normal_editor) = call(router.clone(), "GET", &normal_editor_path, json!({})).await;
-    assert_eq!(status, StatusCode::OK, "{normal_editor}");
+    let desktop_path = format!("/api/product-agent-bindings/companion/{companion_id}");
+    let robot_path = format!("/api/product-agent-bindings/robot/{companion_id}");
+    let desktop_projection = format!("/api/agent-sessions/{desktop_id}/projection");
     let memory = services.companion_service.add_memory("preference", "ROBOT_PROFILE_MEMORY_PRESERVED", &[], Some(companion_id))
         .await.unwrap();
-
     let (status, robot_editor) = call(router.clone(), "POST", "/api/agent-presets/from-template/companion.robot", json!({
         "display_name":"companion.robot", "reuse_existing":true, "model":model,
     })).await;
@@ -5093,109 +5098,191 @@ async fn robot_companion_is_an_explicit_profile_of_the_existing_companion_sessio
     assert_eq!(robot_editor["data"]["draft"]["source_template_key"], "companion.robot");
     let capabilities = robot_editor["data"]["draft"]["document"]["enabled_capabilities"].as_array().unwrap();
     assert_eq!(capabilities.iter().map(|capability| capability["capability"]["id"].as_str().unwrap())
-        .collect::<std::collections::BTreeSet<_>>(), std::collections::BTreeSet::from(["companion", "companion.memory", "robot"]));
-
-    // Merely publishing/previewing the new choice cannot replace the current
-    // Agent, override an authored normal preset, or manufacture device access.
-    let (status, before_apply) = call(router.clone(), "GET", &projection_path, json!({})).await;
-    assert_eq!(status, StatusCode::OK, "{before_apply}");
-    assert_eq!(before_apply["data"]["agent_snapshot"]["canonical_binding"], fixture.unchanged["data"]["agent_snapshot"]["canonical_binding"]);
-    let (status, normal_after) = call(router.clone(), "GET", &normal_editor_path, json!({})).await;
-    assert_eq!(status, StatusCode::OK, "{normal_after}");
-    assert_eq!(normal_after["data"]["draft"], normal_editor["data"]["draft"]);
-    let robot_id = robot_editor["data"]["preset"]["preset_id"].as_str().unwrap();
+        .collect::<std::collections::BTreeSet<_>>(), std::collections::BTreeSet::from([
+            "agent.collaboration", "companion", "companion.memory", "robot", "session.management"]));
+    let robot_preset = robot_editor["data"]["preset"]["preset_id"].as_str().unwrap();
     let mut detached = robot_editor["data"]["draft"].clone();
     detached["document"]["enabled_capabilities"].as_array_mut().unwrap()
         .retain(|capability| capability["capability"]["id"] != "companion.memory");
-    let (status, rejected) = call(router.clone(), "POST", &format!("/api/agent-presets/{robot_id}/revisions"), json!({
+    let (status, rejected) = call(router.clone(), "POST", &format!("/api/agent-presets/{robot_preset}/revisions"), json!({
         "expected_current_revision":robot_editor["data"]["revision"]["reference"], "draft":detached,
     })).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
     assert_eq!(rejected["code"], "PRESET_REVISION_SAVE_FAILED");
-
     let selection = json!({"kind":"template", "template_key":"companion.robot"});
-    let (status, applied) = call(router.clone(), "PUT", &product_path, json!({
-        "selection":selection,"model":model,"conversation_id":session_id,"resource_selections":[],
+    let (status, saved_robot) = call(router.clone(), "PUT", &robot_path, json!({
+        "selection":selection,"model":model,"resource_selections":[],
     })).await;
-    assert_eq!(status, StatusCode::OK, "{applied}");
-    let (status, current) = call(router.clone(), "GET", &projection_path, json!({})).await;
-    assert_eq!(status, StatusCode::OK, "{current}");
-    assert_eq!(current["data"]["conversation_id"], session_id);
-    assert_eq!(current["data"]["extra"]["companion_id"], companion_id);
-    assert_eq!(current["data"]["extra"]["official_template_key"], "companion.robot");
-    assert_eq!(current["data"]["agent_snapshot"]["resolved_model"], fixture.snapshot["resolved_model"]);
-    let binding = &current["data"]["agent_snapshot"]["canonical_binding"];
-    assert_eq!(binding["binding_version"].as_u64(), Some(before_apply["data"]["agent_snapshot"]["canonical_binding"]["binding_version"].as_u64().unwrap() + 1));
-    let resources = binding["typed_resource_bindings"].as_array().unwrap();
-    assert!(!resources.iter().any(|resource| resource["resource_kind"] == "robot"),
-        "a profile selection without a selected device grants no Robot resource");
-    assert!(resources.iter().all(|resource| matches!(resource["resource_kind"].as_str(), Some("companion" | "companion_memory"))
-        || (resource["resource_kind"] == "workspace" && resource["operations"].as_array().is_some_and(|operations| operations.is_empty()))),
-        "the existing canonical cwd namespace may remain, with no workspace operations: {resources:?}");
+    assert_eq!(status, StatusCode::OK, "{saved_robot}");
+    let registry = &services.robot.as_ref().unwrap().registry;
+    let (device, _) = registry.upsert_on_report(nomifun_robot::registry::RobotReport {
+        robot_id:"coexisting-device".into(), client_id:"coexisting-client".into(),
+        board:"fixture-board".into(), firmware_version:"test".into(),
+    }, 1).await.unwrap();
+    registry.claim(device.activation_code.as_deref().unwrap(), companion_id).await.unwrap();
+    // A real host connection fence with an intentionally empty advertised
+    // catalog proves the selected device grants no invented hardware tools.
+    let (device_tx, _device_rx) = tokio::sync::mpsc::channel(4);
+    registry.connect(&device.robot_id, companion_id, "coexisting-connection").await.unwrap();
+    services.robot.as_ref().unwrap().tools.attach(&device.robot_id, std::sync::Arc::new(
+        nomifun_robot::mcp_bridge::RobotMcpClient::new(device_tx, "coexisting-connection".into())), Vec::new()).await;
+    let robot = services.companion_service.ensure_session_for_role(
+        companion_id, nomifun_companion::CompanionRole::Robot, Some(&device.robot_id)).await.unwrap();
+    let robot_id = robot.conversation_id.as_str();
+    assert_ne!(robot_id, desktop_id, "physical inputs have a separate canonical execution lane");
+    let (status, projected) = call(router.clone(), "GET",
+        &format!("/api/agent-sessions/{robot_id}/projection"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{projected}");
+    assert_eq!(projected["data"]["extra"]["companion_role"], "robot");
+    assert_eq!(projected["data"]["extra"]["robot_id"], device.robot_id);
+    assert_eq!(projected["data"]["extra"]["official_template_key"], "companion.robot");
+    let resources = projected["data"]["agent_snapshot"]["canonical_binding"]["typed_resource_bindings"].as_array().unwrap();
+    assert!(resources.iter().any(|resource| resource["resource_kind"] == "robot" && resource["resource_id"] == device.robot_id));
     for kind in ["companion", "companion_memory"] {
         assert!(resources.iter().any(|resource| resource["resource_kind"] == kind && resource["resource_id"] == companion_id));
     }
-    assert!(services.companion_service.build_bound_system_prompt(companion_id, None).await.unwrap()
-        .contains("ROBOT_PROFILE_MEMORY_PRESERVED"));
-    assert_eq!(memory.companion_id.as_deref(), Some(companion_id));
-    let history_path = format!("/api/agent-sessions/{session_id}/message-history?page_size=50");
-    let (status, history) = call(router.clone(), "GET", &history_path, json!({})).await;
+    let (status, desktop_unchanged) = call(router.clone(), "GET", &desktop_projection, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{desktop_unchanged}");
+    assert_eq!(desktop_unchanged["data"]["agent_snapshot"]["canonical_binding"],
+        fixture.unchanged["data"]["agent_snapshot"]["canonical_binding"], "Robot defaults cannot alter the existing desktop Agent");
+    let (status, history) = call(router.clone(), "GET",
+        &format!("/api/agent-sessions/{desktop_id}/message-history?page_size=50"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{history}");
     for item in fixture.history["data"]["items"].as_array().unwrap() {
-        assert!(history["data"]["items"].as_array().unwrap().contains(item), "profile changes preserve all canonical history items");
+        assert!(history["data"]["items"].as_array().unwrap().contains(item), "role separation preserves all desktop history");
     }
-    assert_eq!(fixture.upstream.received_requests().await.unwrap().len(), 1, "selection and identity checks must not call a model");
-
-    // The no-device profile can still converse as the very same persona and
-    // memory owner, while its model request contains no hardware tool surface.
-    let (status, turn) = call(router.clone(), "POST", &format!("/api/agent-sessions/{session_id}/turns"), json!({
+    assert_eq!(memory.companion_id.as_deref(), Some(companion_id));
+    assert_eq!(fixture.upstream.received_requests().await.unwrap().len(), 1, "role configuration performs no model call");
+    let (status, turn) = call(router.clone(), "POST", &format!("/api/agent-sessions/{robot_id}/turns"), json!({
         "idempotency_key":uuid::Uuid::now_v7().to_string(),"input":{"content":"Say hello as this companion"},
     })).await;
     assert_eq!(status, StatusCode::OK, "{turn}");
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
-            let completed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id = ? AND kind = 'turn/completed'")
-                .bind(session_id).fetch_one(services.database.pool()).await.unwrap();
-            if completed == 2 { break; }
+            let completed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='turn/completed'")
+                .bind(robot_id).fetch_one(services.database.pool()).await.unwrap();
+            if completed == 1 { break; }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-    }).await.expect("the robot profile without hardware must complete its ordinary conversation");
+    }).await.expect("the device role must complete its own ordinary conversation");
     let requests = fixture.upstream.received_requests().await.unwrap();
     assert_eq!(requests.len(), 2);
     let actual = requests[1].body_json::<Value>().unwrap();
     let system = actual["messages"].as_array().unwrap().iter().filter(|message| message["role"] == "system")
         .map(|message| message["content"].to_string()).collect::<Vec<_>>().join("\n");
-    assert!(system.contains("Agent-bound companion"), "profile changes retain the selected Companion persona");
-    assert!(system.contains("ROBOT_PROFILE_MEMORY_PRESERVED"), "profile changes retain the selected Companion's durable memories");
+    assert!(system.contains("Agent-bound companion"), "the Robot role shares the exact Companion persona");
+    assert!(system.contains("当前物理机器人"), "the actual BeforeTurn Context resolves the canonical Robot role");
+    let desktop_request = requests[0].body_json::<Value>().unwrap();
+    let desktop_system = desktop_request["messages"].as_array().unwrap().iter()
+        .filter(|message| message["role"] == "system").map(|message| message["content"].to_string())
+        .collect::<Vec<_>>().join("\n");
+    for desktop_guidance in ["住在主人电脑", "知识沉淀技巧", "终端或应用", "Skill 与 MCP"] {
+        assert!(!system.contains(desktop_guidance), "Robot BeforeTurn must exclude desktop boilerplate: {desktop_guidance}");
+        assert!(desktop_system.contains(desktop_guidance), "the same host preserves desktop guidance for the desktop role: {desktop_guidance}");
+    }
+    assert!(system.contains("ROBOT_PROFILE_MEMORY_PRESERVED"), "the Robot role reads the same owner's durable memory");
     assert!(system.contains("Current frozen physical Robot tool mapping (data, not additional authority): []"),
-        "the real compiled robot preset must use the lean interaction projection, including an explicit empty mapping when no device is selected");
-    assert!(!system.contains("Current admitted workspace data"),
-        "robot interaction must not inject unrelated workspace orientation context");
-    let tool_names = actual["tools"].as_array().into_iter().flatten().filter_map(|tool|
+        "the empty device catalog uses the lean profile with no callable physical tools");
+    assert!(!system.contains("Current admitted workspace data"), "Robot context does not inject desktop orientation");
+    let names = actual["tools"].as_array().into_iter().flatten().filter_map(|tool|
         tool["function"]["name"].as_str()).collect::<Vec<_>>();
-    assert!(tool_names.iter().all(|name| !matches!(*name,
+    assert!(names.iter().all(|name| !matches!(*name,
         "read_file" | "write_file" | "apply_patch" | "list_directory" | "exec_command" | "write_stdin")
         && !name.starts_with("terminal_") && !name.starts_with("workspace_")),
-        "the robot preset must not inherit workspace or process tools: {tool_names:?}");
-    assert!(actual["tools"].as_array().into_iter().flatten().all(|tool|
-        !tool["function"]["name"].as_str().unwrap_or_default().starts_with("robot_")), "a preset alone cannot grant hardware control");
-    let (status, normal_again) = call(router.clone(), "PUT", &product_path, json!({
-        "selection":{"kind":"template","template_key":"companion.default"}, "model":model,"conversation_id":session_id,
-        "resource_selections":[{"resource_kind":"scheduler","resource_id":"installation-scheduler"}],
+        "Robot does not inherit local desktop execution tools: {names:?}");
+    assert!(names.iter().all(|name| !name.starts_with("robot_")), "the empty physical device catalog has no callable tool surface");
+    let (status, authorized) = call(router.clone(), "PUT", &desktop_path, json!({
+        "selection":selection, "model":model, "conversation_id":desktop_id, "update_default":false,
+        "resource_selections":[{"resource_kind":"robot", "resource_id":device.robot_id}],
     })).await;
-    assert_eq!(status, StatusCode::OK, "{normal_again}");
-    let (status, restored) = call(router.clone(), "GET", &projection_path, json!({})).await;
-    assert_eq!(status, StatusCode::OK, "{restored}");
-    assert_eq!(restored["data"]["conversation_id"], session_id);
-    assert_eq!(restored["data"]["extra"]["official_template_key"], "companion.default");
-    assert_eq!(restored["data"]["agent_snapshot"]["enabled_capabilities"], fixture.snapshot["enabled_capabilities"]);
-    let (status, reopened) = call(router.clone(), "POST", &format!("/api/companion/companions/{companion_id}/companion/threads"), json!({})).await;
-    assert_eq!(status, StatusCode::OK, "{reopened}");
-    assert_eq!(reopened["data"]["conversation_id"], session_id);
-    let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_sessions WHERE state = 'live'")
+    assert_eq!(status, StatusCode::OK, "{authorized}");
+    let (status, desktop_authorized) = call(router.clone(), "GET", &desktop_projection, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{desktop_authorized}");
+    assert_eq!(desktop_authorized["data"]["extra"]["companion_role"], "companion",
+        "explicit Robot authorization does not retarget the desktop input lane");
+    assert!(desktop_authorized["data"]["agent_snapshot"]["enabled_capabilities"].as_array().unwrap().contains(&json!("robot")),
+        "the explicitly selected Agent retains its Robot capability");
+    let resources = desktop_authorized["data"]["agent_snapshot"]["canonical_binding"]["typed_resource_bindings"].as_array().unwrap();
+    assert!(resources.iter().any(|resource| resource["resource_kind"] == "robot" && resource["resource_id"] == device.robot_id
+        && resource["owner_id"] == services.authoritative_user_id.as_ref()),
+        "desktop hardware access still requires the selected real owned device");
+    let (status, defaults) = call(router.clone(), "GET", &desktop_path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{defaults}");
+    assert_eq!(defaults["data"]["selection"], json!({"kind":"template", "template_key":"companion.default"}),
+        "applying an explicit Agent to this Session preserves future desktop defaults");
+    assert_eq!(fixture.upstream.received_requests().await.unwrap().len(), 2, "authorizing capabilities performs no model call");
+    let thread_path = format!("/api/companion/companions/{companion_id}/companion/threads");
+    let (status, extra) = call(router.clone(), "POST", &thread_path, json!({
+        "new_session":true, "creation_key":uuid::Uuid::now_v7().to_string(), "title":"Separate desktop topic",
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{extra}");
+    assert_ne!(extra["data"]["conversation_id"], desktop_id);
+    assert_ne!(extra["data"]["conversation_id"], robot_id);
+    let (status, receive) = call(router.clone(), "POST", &thread_path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{receive}");
+    assert_eq!(receive["data"]["conversation_id"], desktop_id, "new viewed topics do not retarget the desktop receive lane");
+    let reopened_robot = services.companion_service.ensure_session_for_role(
+        companion_id, nomifun_companion::CompanionRole::Robot, Some(&device.robot_id)).await.unwrap();
+    assert_eq!(reopened_robot.conversation_id, robot_id, "desktop topic selection cannot retarget a device");
+    let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_sessions WHERE state='live'")
         .fetch_one(services.database.pool()).await.unwrap();
-    assert_eq!(sessions, 1, "switching interaction profiles must not fork the Companion fact chain");
-    services.shutdown_browser_platform().await.expect("browser cleanup");
+    assert_eq!(sessions, 3, "multiple desktop topics and the device Session coexist");
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
+async fn directed_companion_creation_is_read_only_before_its_execution_link() {
+    let call = companion_agent_test_request;
+    let fixture = started_companion_fixture().await;
+    let router = fixture.router;
+    let services = fixture.services;
+    let owner = nomifun_agent_contracts::PrincipalRef {
+        principal_kind:"user".into(), principal_id:services.authoritative_user_id.to_string(),
+    };
+    let binding: nomifun_agent_contracts::AgentBindingValue = serde_json::from_value(
+        fixture.snapshot["canonical_binding"].clone()).unwrap();
+    let active = fixture.snapshot["enabled_capabilities"].as_array().unwrap().iter()
+        .map(|capability| capability.as_str().unwrap().to_owned()).collect();
+    let canonical = nomifun_conversation::CanonicalAgentSessionOwner::from_pool(
+        services.database.pool().clone()).await.unwrap();
+    // This is the committed opening produced before the Attempt-link write.
+    // It models restart in that gap without authoring UI metadata or a second ledger.
+    let opened = canonical.open_with_companion_scope(owner, binding, Some("Unlinked directed task".into()), active,
+        nomifun_agent_contracts::CompanionSessionOrigin {
+            companion_id:fixture.companion_id.clone(), role:nomifun_agent_contracts::CompanionSessionRole::Companion,
+            robot_id:None,
+        }, &format!("companion-directed:fixture:{}", uuid::Uuid::now_v7()), nomifun_common::now_ms()).await.unwrap();
+    let id = opened.session.agent_session_id.as_ref();
+    let (status, projection) = call(router.clone(), "GET",
+        &format!("/api/agent-sessions/{id}/projection"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{projection}");
+    assert_eq!(projection["data"]["extra"]["companion_associated_task"], true);
+    assert!(projection["data"]["execution_attempt_id"].is_null(), "the fixture must precede its actual Attempt link");
+    let threads = services.companion_service.list_companion_threads(&fixture.companion_id).await.unwrap();
+    assert!(!threads.iter().any(|thread| thread.conversation_id == id), "a partially created task is not a desktop receive topic");
+    let model = json!({"provider_id":fixture.provider_id,"model":"step-3.7-flash"});
+    let (status, agent) = call(router.clone(), "PUT",
+        &format!("/api/product-agent-bindings/companion/{}", fixture.companion_id), json!({
+            "selection":{"kind":"template","template_key":"companion.default"}, "conversation_id":id,
+        })).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{agent}");
+    assert_eq!(agent["code"], "AGENT_EXECUTION_ATTEMPT_READ_ONLY");
+    let (status, switched_model) = call(router.clone(), "PUT",
+        &format!("/api/agent-sessions/{id}/model"), model).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{switched_model}");
+    assert_eq!(switched_model["code"], "AGENT_EXECUTION_ATTEMPT_READ_ONLY");
+    let (status, input) = call(router.clone(), "POST",
+        &format!("/api/agent-sessions/{id}/turns"), json!({
+            "idempotency_key":uuid::Uuid::now_v7().to_string(), "input":{"content":"Do not start an unrelated task Turn"},
+        })).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{input}");
+    assert_eq!(input["code"], "AGENT_EXECUTION_ATTEMPT_READ_ONLY");
+    let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_turns WHERE session_id=?")
+        .bind(id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(turns, 0, "rejected configuration and input probes never create a Turn");
+    assert_eq!(fixture.upstream.received_requests().await.unwrap().len(), 1, "only the fixture's original desktop Turn reached the model");
+    services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
 }
 
@@ -5273,26 +5360,28 @@ async fn companion_agent_settings_switch_in_place_and_preserve_persona_history_a
     let product_path = format!("/api/product-agent-bindings/companion/{companion_id}");
     sqlx::query("CREATE TRIGGER fixture_companion_default_failure BEFORE INSERT ON product_agent_selections WHEN NEW.target_kind = 'companion' BEGIN SELECT RAISE(FAIL, 'fixture default write failure'); END")
         .execute(services.database.pool()).await.unwrap();
-    let (status, applied) = call(router.clone(), "PUT", &product_path, json!({
+    let (status, applied) = call(router.clone(), "PUT", &product_path, json!({"conversation_id":conversation_id, "update_default":true,
         "selection": custom_selection, "model": future_model,
     })).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{applied}");
     assert_eq!(applied["code"], "COMPANION_AGENT_DEFAULT_SAVE_FAILED");
     assert_eq!(applied["details"]["active_agent_applied"], true);
-    let (status, authoritative) = call(router.clone(), "GET", &product_path, json!({})).await;
+    let (status, authoritative) = call(router.clone(), "GET", &format!("{product_path}?conversation_id={conversation_id}"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{authoritative}");
     assert_eq!(authoritative["data"]["selection"], custom_selection,
         "an active model variant must retain the original authorial selection, including after default persistence failure");
-    let (status, repeated_failure) = call(router.clone(), "PUT", &product_path, json!({"selection":custom_selection})).await;
+    let (status, repeated_failure) = call(router.clone(), "PUT", &product_path, json!({"conversation_id":conversation_id, "update_default":true, "selection":custom_selection})).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{repeated_failure}");
     assert_eq!(repeated_failure["code"], "COMPANION_AGENT_DEFAULT_SAVE_FAILED");
     sqlx::query("DROP TRIGGER fixture_companion_default_failure").execute(services.database.pool()).await.unwrap();
-    let (status, retry) = call(router.clone(), "PUT", &product_path, json!({"selection":custom_selection,"model":future_model})).await;
+    let (status, retry) = call(router.clone(), "PUT", &product_path, json!({"conversation_id":conversation_id, "update_default":true, "selection":custom_selection,"model":future_model})).await;
     assert_eq!(status, StatusCode::OK, "explicit retry must reconcile defaults without switching again: {retry}");
     let (status, current) = call(router.clone(), "GET",
         &format!("/api/agent-sessions/{conversation_id}/projection"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{current}");
     assert_ne!(current["data"]["preset_id"], custom_id, "a different authored Chat route must produce an immutable Session-only variant");
+    assert!(current["data"]["agent_snapshot"]["instructions"].as_str().unwrap().contains("COMPANION_CUSTOM_INSTRUCTION_V1"),
+        "the exact immutable model variant must preserve the selected author's instructions");
     assert_eq!(current["data"]["extra"]["companion_session"], true);
     assert_eq!(current["data"]["extra"]["companion_id"], companion_id);
     assert_eq!(current["data"]["agent_snapshot"]["resolved_model"]["provider_id"], provider_id,
@@ -5337,7 +5426,7 @@ async fn companion_agent_settings_switch_in_place_and_preserve_persona_history_a
         &format!("/api/agent-sessions/{conversation_id}/projection"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{frozen}");
     assert_eq!(frozen["data"]["agent_snapshot"]["canonical_binding"]["preset_revision_ref"], current["data"]["agent_snapshot"]["canonical_binding"]["preset_revision_ref"]);
-    let (status, reapplied) = call(router.clone(), "PUT", &product_path, json!({
+    let (status, reapplied) = call(router.clone(), "PUT", &product_path, json!({"update_default":true,
         "selection": custom_selection, "conversation_id": conversation_id,
     })).await;
     assert_eq!(status, StatusCode::OK, "model-free reapply must preserve the active model: {reapplied}");
@@ -5348,7 +5437,7 @@ async fn companion_agent_settings_switch_in_place_and_preserve_persona_history_a
     let transition_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id = ? AND kind = 'session/agent-binding-changed'")
         .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
     assert_eq!(transition_count, 2);
-    let (status, noop) = call(router.clone(), "PUT", &product_path, json!({"selection":custom_selection})).await;
+    let (status, noop) = call(router.clone(), "PUT", &product_path, json!({"conversation_id":conversation_id, "update_default":true, "selection":custom_selection})).await;
     assert_eq!(status, StatusCode::OK, "exact reapply must be a successful no-op: {noop}");
     let after_noop: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id = ? AND kind = 'session/agent-binding-changed'")
         .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
@@ -5387,15 +5476,15 @@ async fn companion_agent_settings_switch_in_place_and_preserve_persona_history_a
     assert_eq!(status, StatusCode::OK, "{alias}");
     let alias_id = alias["data"]["preset"]["preset_id"].as_str().unwrap();
     let alias_selection = json!({"kind":"preset","preset_id":alias_id});
-    let (status, selected_alias) = call(router.clone(), "PUT", &product_path, json!({"selection":alias_selection})).await;
+    let (status, selected_alias) = call(router.clone(), "PUT", &product_path, json!({"conversation_id":conversation_id, "update_default":true, "selection":alias_selection})).await;
     assert_eq!(status, StatusCode::OK, "{selected_alias}");
-    let (status, alias_options) = call(router.clone(), "GET", &product_path, json!({})).await;
+    let (status, alias_options) = call(router.clone(), "GET", &format!("{product_path}?conversation_id={conversation_id}"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{alias_options}");
     assert_eq!(alias_options["data"]["selection"], alias_selection);
     let alias_transitions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id = ? AND kind = 'session/agent-binding-changed'")
         .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
     assert_eq!(alias_transitions, 3, "a distinct authored selection needs an exact immutable target transition");
-    let (status, alias_noop) = call(router.clone(), "PUT", &product_path, json!({"selection":alias_selection})).await;
+    let (status, alias_noop) = call(router.clone(), "PUT", &product_path, json!({"conversation_id":conversation_id, "update_default":true, "selection":alias_selection})).await;
     assert_eq!(status, StatusCode::OK, "{alias_noop}");
     let alias_noop_transitions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id = ? AND kind = 'session/agent-binding-changed'")
         .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
@@ -5406,7 +5495,7 @@ async fn companion_agent_settings_switch_in_place_and_preserve_persona_history_a
         "expected_current_revision":alias_draft["current_revision"],"draft":alias_draft,
     })).await;
     assert_eq!(status, StatusCode::OK, "{saved_alias}");
-    let (status, alias_reapplied) = call(router.clone(), "PUT", &product_path, json!({"selection":alias_selection})).await;
+    let (status, alias_reapplied) = call(router.clone(), "PUT", &product_path, json!({"conversation_id":conversation_id, "update_default":true, "selection":alias_selection})).await;
     assert_eq!(status, StatusCode::OK, "{alias_reapplied}");
     let (status, turn) = call(router.clone(), "POST", &format!("/api/agent-sessions/{conversation_id}/turns"), json!({
         "idempotency_key":uuid::Uuid::now_v7().to_string(),"input":{"content":"use the selected authored Agent"},
@@ -5440,7 +5529,7 @@ async fn companion_agent_settings_switch_in_place_and_preserve_persona_history_a
         &format!("/api/agent-sessions/{generic_id}/projection"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{generic_projection}");
     assert!(generic_projection["data"]["extra"]["companion_session"].is_null(),
-        "a resource grant alone must not turn a personal Agent launch into the product's unique Companion Session");
+        "a resource grant alone must not turn a personal Agent launch into a Companion product Session");
 
     let (status, future_default) = call(router.clone(), "PUT",
         &format!("/api/product-agent-bindings/companion/{other_id}"), json!({
@@ -5469,7 +5558,7 @@ async fn companion_agent_settings_switch_in_place_and_preserve_persona_history_a
         nomifun_agent_contracts::StrictJsonValue(json!({"content":"active settings fence"}))).await.unwrap();
     let before_default = sqlx::query_scalar::<_,String>("SELECT selection_json FROM product_agent_selections WHERE target_kind = 'companion' AND target_id = ?")
         .bind(companion_id).fetch_one(services.database.pool()).await.unwrap();
-    let (status, busy) = call(router.clone(), "PUT", &product_path, json!({
+    let (status, busy) = call(router.clone(), "PUT", &product_path, json!({"conversation_id":conversation_id, "update_default":true,
         "selection":{"kind":"template","template_key":"companion.default"}, "model":future_model,
     })).await;
     assert_eq!(status, StatusCode::CONFLICT, "{busy}");
@@ -5591,6 +5680,8 @@ async fn companion_official_agent_edits_require_an_exact_preview_and_preserve_hi
     assert_eq!(applied["data"]["conversation"]["conversation_id"], conversation_id);
     assert_eq!(applied["data"]["effective_from"], "next_turn");
     let refreshed = &applied["data"]["conversation"]["agent_snapshot"];
+    assert!(refreshed["instructions"].as_str().unwrap().contains(ADDED_RULE),
+        "the applied immutable Snapshot must preserve the edited official instructions before Runtime assembly");
     let new_binding = &refreshed["canonical_binding"];
     assert_eq!(new_binding["binding_version"].as_u64(),
         Some(old_binding["binding_version"].as_u64().unwrap() + 1));

@@ -21,6 +21,18 @@
   display: flex;
 }
 
+.sessionToolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border-2);
+}
+.sessionSelect { flex: 1; min-width: 140px; max-width: 340px; }
+.sessionRole { color: var(--color-text-3); font-size: 12px; }
+.sessionError { width: 100%; color: rgb(var(--danger-6)); font-size: 12px; }
+
 .chatBody :global([data-conversation-layout]) {
   --conversation-inline-padding: 4px;
 }

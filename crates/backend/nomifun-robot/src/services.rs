@@ -59,12 +59,16 @@ pub struct RobotTurnRequest {
     pub connection_id: String,
     pub request_id: String,
     pub text: String,
+    /// The exact question already presented when this physical utterance
+    /// began. Preserved through ASR and queuing; never inferred at admission.
+    /// This is internal host context, not an addition to the device wire.
+    pub presented_question_id: Option<String>,
 }
 
 #[async_trait::async_trait]
 pub trait CompanionTurnDispatcher: Send + Sync {
-    /// The Companion owns the only Conversation, regardless of endpoint.
-    async fn ensure_companion_session(&self, companion_id: &str) -> anyhow::Result<String>;
+    /// Resolve the stable Robot-role Session for this exact paired device.
+    async fn ensure_companion_session(&self, companion_id: &str, robot_id: &str) -> anyhow::Result<String>;
     /// Enqueue one utterance without blocking the physical connection loop.
     async fn dispatch(&self, request: RobotTurnRequest) -> anyhow::Result<tokio::sync::mpsc::Receiver<TurnEvent>>;
     /// Cancel this exact utterance, never an unrelated turn of its Conversation.
@@ -197,6 +201,7 @@ pub mod mock {
         threads: Mutex<std::collections::BTreeMap<String, String>>,
         scripted: Mutex<std::collections::VecDeque<Vec<TurnEvent>>>,
         dispatched: Mutex<Vec<String>>,
+        requests: Mutex<Vec<RobotTurnRequest>>,
         cancelled: Mutex<Vec<String>>,
         tuning: Mutex<Option<VadTuning>>,
         engine: Mutex<Option<String>>,
@@ -226,6 +231,10 @@ pub mod mock {
             self.dispatched.lock().unwrap().clone()
         }
 
+        pub fn dispatched_requests(&self) -> Vec<RobotTurnRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+
         pub fn cancelled(&self) -> Vec<String> {
             self.cancelled.lock().unwrap().clone()
         }
@@ -237,8 +246,9 @@ pub mod mock {
         async fn ensure_companion_session(
             &self,
             companion_id: &str,
+            robot_id: &str,
         ) -> anyhow::Result<String> {
-            let key = companion_id.to_owned();
+            let key = format!("{companion_id}:{robot_id}");
             let mut threads = self.threads.lock().unwrap();
             let next = threads.len() + 1;
             let id = threads
@@ -252,6 +262,7 @@ pub mod mock {
             &self,
             request: RobotTurnRequest,
         ) -> anyhow::Result<tokio::sync::mpsc::Receiver<TurnEvent>> {
+            self.requests.lock().unwrap().push(request.clone());
             self.dispatched.lock().unwrap().push(request.text);
             let events = self
                 .scripted
@@ -303,7 +314,7 @@ mod tests {
         RobotTurnRequest {
             robot_id: "aa:bb".into(), companion_id: "c1".into(),
             conversation_id: conversation.into(), connection_id: "socket-1".into(),
-            request_id: "utterance-1".into(), text: text.into(),
+            request_id: "utterance-1".into(), text: text.into(), presented_question_id:None,
         }
     }
 
@@ -352,10 +363,10 @@ mod tests {
             TurnEvent::Done,
         ]);
 
-        let conversation = dispatcher.ensure_companion_session("c1").await.unwrap();
+        let conversation = dispatcher.ensure_companion_session("c1", "r1").await.unwrap();
         assert!(!conversation.is_empty());
         assert_eq!(
-            dispatcher.ensure_companion_session("c1").await.unwrap(),
+            dispatcher.ensure_companion_session("c1", "r1").await.unwrap(),
             conversation,
             "same thread reused"
         );

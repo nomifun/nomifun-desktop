@@ -60,6 +60,7 @@ pub(crate) async fn build(
         wave1_search,
         Arc::clone(&services.companion_service),
         services.database.pool().clone(),
+        effect_store.clone(),
     )?;
     replace_package_registrations(&mut registrations, wave1);
     let wave1_tools = [

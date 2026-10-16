@@ -28,13 +28,21 @@ type Props = {
 /** Pairing identifies a companion; only an explicit Session transition selects control resources. */
 const CompanionRobotResourceSettings: React.FC<Props> = ({ companionId, conversation, disabled = false, onChanged, onSavingChange }) => {
   const { t } = useTranslation();
+  const role = conversation?.extra.companion_role;
+  const hasRobotCapability = conversation?.agent_snapshot?.enabled_capabilities.includes('robot') === true;
+  const hasRobotResource = conversation?.agent_snapshot?.canonical_binding?.typed_resource_bindings
+    .some((resource) => resource.resource_kind === 'robot') === true;
+  // Desktop Agents may explicitly select device tools; keep existing device
+  // resources editable even after those tools have been removed.
+  const eligibleConversation = conversation?.extra.companion_id === companionId
+    && (role === 'robot' || (role === 'companion' && (hasRobotCapability || hasRobotResource)));
   const [draft, setDraft] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
   const [retryDefault, setRetryDefault] = useState(false);
   const savingRef = useRef(false);
   const mounted = useRef(true);
-  const requestKey = `${companionId}/${conversation?.id ?? ''}`;
+  const requestKey = `${companionId}/${conversation?.id ?? ''}/${role ?? ''}`;
   const activeRequest = useRef(requestKey);
   activeRequest.current = requestKey;
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -43,13 +51,13 @@ const CompanionRobotResourceSettings: React.FC<Props> = ({ companionId, conversa
   const load = async () => {
     const [observation, options, robots] = await Promise.all([
       ipcBridge.agentPlatform.sessions.get.invoke({ agent_session_id: conversation!.id }),
-      ipcBridge.agentPlatform.productBindingOptions.invoke({ target_kind: 'companion', target_id: companionId,
+      ipcBridge.agentPlatform.productBindingOptions.invoke({ target_kind: role!, target_id: companionId, conversation_id: conversation!.id,
         model: { provider_id: conversation!.model.id, model: conversation!.model.use_model } }),
       ipcBridge.robot.list.invoke(),
     ]);
     return { binding: observation.session.agent_binding, options, robots: robots.filter((robot) => robot.companion_id === companionId) };
   };
-  const { data, error, isLoading, mutate } = useSWR(conversation
+  const { data, error, isLoading, mutate } = useSWR(eligibleConversation && conversation
     ? ['companion-robot-resources', requestKey, conversation.agent_snapshot?.canonical_binding?.binding_version ?? 0,
       conversation.model.id, conversation.model.use_model] : null, load, { shouldRetryOnError: false });
   useEffect(() => ipcBridge.robot.onStatus.on(() => { void mutate().catch(() => {}); }), [mutate]);
@@ -66,7 +74,7 @@ const CompanionRobotResourceSettings: React.FC<Props> = ({ companionId, conversa
   const changed = capabilitiesChanged || (draft !== null && (selected !== committed || selectedIds.length > 1));
 
   const apply = async () => {
-    if (!conversation || !data?.options.selection || controlsDisabled || savingRef.current || !available || (!changed && !retryDefault)) return;
+    if (!eligibleConversation || !conversation || !role || !data?.options.selection || controlsDisabled || savingRef.current || !available || (!changed && !retryDefault)) return;
     savingRef.current = true;
     setSaving(true);
     setSaveError('');
@@ -98,7 +106,7 @@ const CompanionRobotResourceSettings: React.FC<Props> = ({ companionId, conversa
           resource_id: resource_kind === 'workspace' || resource_kind === 'project_memory'
             ? resolveAgentResourceSelections([resource_kind], {}).selections[0].resource_id : resource_id }));
       if (selected) resourceSelections.push({ resource_kind: 'robot', resource_id: selected });
-      await ipcBridge.agentPlatform.selectProductBinding.invoke({ target_kind: 'companion', target_id: companionId,
+      await ipcBridge.agentPlatform.selectProductBinding.invoke({ target_kind: role, target_id: companionId,
         request: { selection: latest.options.selection, conversation_id: conversation.id,
           model: { provider_id: conversation.model.id, model: conversation.model.use_model }, resource_selections: resourceSelections } });
       onChanged?.();
@@ -123,7 +131,7 @@ const CompanionRobotResourceSettings: React.FC<Props> = ({ companionId, conversa
     }
   };
 
-  if (!conversation) return null;
+  if (!eligibleConversation || !conversation) return null;
   return <div className={styles.settings}>
     <label className={styles.label} htmlFor={`companion-robot-${companionId}`}>{t('nomi.cohabit.robotResource.label')}</label>
     {isLoading && !data ? <Spin size={14} /> : <NomiSelect id={`companion-robot-${companionId}`} size='mini' className='w-full'
@@ -134,8 +142,6 @@ const CompanionRobotResourceSettings: React.FC<Props> = ({ companionId, conversa
       {data?.robots.map((robot) => <NomiSelect.Option key={robot.robot_id} value={robot.robot_id}>{robot.name || robot.board || robot.robot_id}</NomiSelect.Option>)}
     </NomiSelect>}
     <p className={styles.hint}>{t('nomi.cohabit.robotResource.hint')}</p>
-    {committed && data?.options.selection?.kind === 'template' && data.options.selection.template_key !== 'companion.robot'
-      && <p className={styles.hint}>{t('nomi.cohabit.robotResource.robotAgentHint')}</p>}
     {capabilitiesChanged && <p role='status' className={styles.hint}>{t('nomi.cohabit.robotResource.capabilitiesChanged')}</p>}
     {blocked && <p role='status' className={styles.hint}>{t('agentSettings.productBinding.busy')}</p>}
     {data && !data.options.selection && <p role='status' className={styles.hint}>{t('agentSettings.productBinding.selectionNeededHint')}</p>}

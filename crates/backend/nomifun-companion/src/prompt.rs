@@ -18,6 +18,19 @@ pub struct LearnedMemory {
     pub tags: Vec<String>,
     #[serde(default = "default_importance")]
     pub importance: f64,
+    /// Exact collected domain event references supplied in this learning pass.
+    /// These are not canonical Agent Event IDs or an alternate Agent transcript.
+    #[serde(default)]
+    pub source_event_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearnedReinforcement {
+    pub memory_id: String,
+    /// Exact events in this pass which newly confirm the existing fact.
+    #[serde(default)]
+    pub source_event_ids: Vec<String>,
 }
 
 fn default_importance() -> f64 {
@@ -30,7 +43,7 @@ pub struct LearnOutput {
     #[serde(default)]
     pub memories: Vec<LearnedMemory>,
     #[serde(default)]
-    pub reinforce_memory_ids: Vec<String>,
+    pub reinforce_memories: Vec<LearnedReinforcement>,
     #[serde(default)]
     pub supersede_memory_ids: Vec<String>,
     #[serde(default)]
@@ -51,16 +64,17 @@ pub const LEARN_SYSTEM: &str = r#"你是主人的电子伙伴，正在整理只�
 
 规则：
 1. 只提炼有信息量的内容，宁缺毋滥；每条记忆一句话、自包含、用中文。
-2. 若新事件印证了"已有记忆"列表中的某条，把它的 memory_id 放进 reinforce_memory_ids，不要重复生成。
+2. 若新事件印证了"已有记忆"列表中的某条，在 reinforce_memories 中给出它的 memory_id 和实际支持该事实的新事件 source_event_ids，不要重复生成记忆。
 3. 若新事件与某条已有记忆矛盾，生成新记忆并把旧 memory_id 放进 supersede_memory_ids。
 4. mood 从 happy/content/sleepy/worried/excited 中选一个，代表你读完这些事件后的心情。
 5. diary 是你的第一人称一句话日记（中文、简短、温暖），如"今天主人修了一下午 bug，我记住了他喜欢先看报错"。
 6. 事件 data 中 origin 为 companion/cron/autowork/idmm、或 created_by 为 agent 的内容，是 agent 的自动行为而非主人发言：绝不能据此蒸馏出"主人想要/主人计划/主人提出"类记忆。
 7. 事件名 companion.user_message 是主人对伙伴说的话，高价值：偏好、意图、情感都值得提炼。记录里没有伙伴自己的回复，所以别去推测伙伴当时答了什么，也不要把主人的话当成对某句回复的回应来解读。
 8. 若事件表明某个任务/需求已完成或不再需要，把"已有记忆"中对应的 task 记忆 memory_id 放进 supersede_memory_ids，不要为已完成的事保留或新建 task 记忆。
+9. 每条新记忆和每条强化记录必须带 source_event_ids，逐字引用实际支持该条事实的新事件 event_id；只能使用本次列表中的 ID，不能猜测、引用别的事件或把一个无关批次全列作来源。
 
 只输出一个 JSON 对象，不要任何其他文字、不要 markdown 代码围栏：
-{"memories":[{"kind":"...","content":"...","tags":["..."],"importance":0.0~1.0}],"reinforce_memory_ids":[],"supersede_memory_ids":[],"mood":"content","diary":"..."}"#;
+{"memories":[{"kind":"...","content":"...","tags":["..."],"importance":0.0~1.0,"source_event_ids":["本次事件的event_id"]}],"reinforce_memories":[{"memory_id":"已有记忆的memory_id","source_event_ids":["本次事件的event_id"]}],"supersede_memory_ids":[],"mood":"content","diary":"..."}"#;
 
 /// Build the learn user prompt from existing memories and new events.
 pub fn build_learn_prompt(
@@ -93,14 +107,32 @@ pub fn parse_learn_output(raw: &str) -> Result<LearnOutput, String> {
     let cleaned = extract_json_object(raw).ok_or_else(|| "no JSON object found in model output".to_owned())?;
     let mut output: LearnOutput = serde_json::from_str(cleaned).map_err(|e| format!("invalid learn JSON: {e}"))?;
     for memory_id in output
-        .reinforce_memory_ids
+        .reinforce_memories
         .iter()
+        .map(|reinforcement| &reinforcement.memory_id)
         .chain(output.supersede_memory_ids.iter())
     {
         nomifun_common::CompanionMemoryId::try_from(memory_id.as_str())
             .map_err(|error| format!("invalid memory_id in learn output: {error}"))?;
     }
     output.memories.retain(|m| MEMORY_KINDS.contains(&m.kind.as_str()) && !m.content.trim().is_empty());
+    let mut reinforced = std::collections::HashSet::new();
+    for reinforcement in &output.reinforce_memories {
+        if !reinforced.insert(&reinforcement.memory_id) {
+            return Err("duplicate learned memory reinforcement".into());
+        }
+    }
+    for sources in output.memories.iter().map(|memory| &memory.source_event_ids)
+        .chain(output.reinforce_memories.iter().map(|reinforcement| &reinforcement.source_event_ids))
+    {
+        if sources.len() > 64 {
+            return Err("too many source events for one learned memory".into());
+        }
+        for source in sources {
+            nomifun_common::CompanionEventId::try_from(source.as_str())
+                .map_err(|error| format!("invalid learned memory source event id: {error}"))?;
+        }
+    }
     if let Some(mood) = &output.mood {
         if !MOODS.contains(&mood.as_str()) {
             output.mood = None;
@@ -242,8 +274,30 @@ mod tests {
         assert!(parse_learn_output(legacy).is_err());
 
         let malformed =
-            r#"{"memories":[],"reinforce_memory_ids":["legacy-id"],"supersede_memory_ids":[]}"#;
+            r#"{"memories":[],"reinforce_memories":[{"memory_id":"legacy-id","source_event_ids":[]}],"supersede_memory_ids":[]}"#;
         assert!(parse_learn_output(malformed).is_err());
+        let retired = format!(r#"{{"reinforce_memory_ids":["{}"]}}"#, nomifun_common::CompanionMemoryId::new().into_string());
+        assert!(parse_learn_output(&retired).is_err(), "id-only reinforcement has no support provenance");
+    }
+
+    #[test]
+    fn parse_reinforcement_requires_typed_ids_and_rejects_model_canonical_refs() {
+        let memory_id = nomifun_common::CompanionMemoryId::new().into_string();
+        let event_id = nomifun_common::CompanionEventId::new().into_string();
+        let valid = serde_json::json!({"reinforce_memories": [{"memory_id": memory_id, "source_event_ids": [event_id]}]});
+        let output = parse_learn_output(&valid.to_string()).unwrap();
+        assert_eq!(output.reinforce_memories[0].memory_id, memory_id);
+        assert_eq!(output.reinforce_memories[0].source_event_ids, vec![event_id]);
+        let mut invalid = valid.clone();
+        invalid["reinforce_memories"][0]["source_event_ids"] = serde_json::json!(["legacy-id"]);
+        assert!(parse_learn_output(&invalid.to_string()).is_err());
+        invalid = valid.clone();
+        invalid["reinforce_memories"][0]["source_message_refs"] = serde_json::json!([]);
+        assert!(parse_learn_output(&invalid.to_string()).is_err(), "only the host maps canonical provenance");
+        invalid = valid;
+        let duplicate = invalid["reinforce_memories"][0].clone();
+        invalid["reinforce_memories"].as_array_mut().unwrap().push(duplicate);
+        assert!(parse_learn_output(&invalid.to_string()).is_err());
     }
 
     #[test]
@@ -262,6 +316,11 @@ mod tests {
             updated_at: 0,
             last_reinforced_at: 0,
             companion_id: None,
+            revision: 1,
+            source_session_id: None,
+            source_operation_id: None,
+            source_event_ids: vec![],
+            source_message_refs: vec![],
         };
         let memory_id = memory.memory_id.clone();
         let prompt = build_learn_prompt(&[memory], &["{\"x\":1}".into()], false);

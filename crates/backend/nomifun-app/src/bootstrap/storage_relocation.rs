@@ -380,7 +380,7 @@ mod tests {
         let created = store.create_session(CreateSessionRequest::new(AgentSessionLiveRecord {
             agent_session_id: SESSION.into(), owner_ref: owner.clone(),
             metadata: AgentSessionMetadata { purpose: Default::default(), app_project_id: None, title: None,
-                pinned: false, archived: false, reasoning_effort: None },
+                pinned: false, archived: false, reasoning_effort: None, companion: None },
             agent_binding: binding.clone(), remote_binding_provenance: None,
             parent_session_id: None, fork_base_payload_id: None, next_seq: 1,
         }, 1_788_000_000_000, "storage-cache-create", "session-api".into(),

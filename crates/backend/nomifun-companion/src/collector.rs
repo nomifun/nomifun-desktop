@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{Duration as ChronoDuration, Local, NaiveDate};
+use nomifun_agent_contracts::AgentInputSource;
 use nomifun_api_types::WebSocketMessage;
 use nomifun_common::{AppError, CompanionEventId, CompanionId, now_ms, validate_uuidv7};
 use serde::{Deserialize, Serialize};
@@ -127,12 +128,21 @@ fn param_shape(args: &serde_json::Value) -> Vec<String> {
 /// The non-empty `origin` marker of a broadcast payload, if any. The
 /// conversation domain stamps `"companion"` / `"cron"` / `"autowork"` / `"idmm"`
 /// onto messages that were NOT typed by the human owner; absent/empty means
-/// a real person spoke.
+/// a real person spoke. An authenticated robot user's input also has an origin,
+/// and needs the separate host-authored canonical source checked below.
 fn payload_origin(data: &serde_json::Value) -> Option<&str> {
     data.get("origin")
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())
+}
+
+/// Preserve only a host-issued canonical input reference. Readers must still
+/// resolve this ID against the exact Session event before treating it as proof.
+fn canonical_input_message_id(data: &serde_json::Value) -> Option<&str> {
+    let id = data.get("msg_id")?.as_str()?;
+    validate_uuidv7(id).ok()?;
+    Some(id)
 }
 
 fn events_dir(companion_dir: &Path) -> PathBuf {
@@ -523,6 +533,34 @@ impl Collector {
         self.config.read().await.default_companion_id.clone()
     }
 
+    /// Only the authenticated physical-device entry point can author this
+    /// source in a canonical accepted input. The ordinary message API rejects
+    /// it; an origin/channel string or a display marker is never evidence.
+    /// Match the persisted thread owner without the display/default fallback.
+    async fn authenticated_robot_user_source(&self, data: &serde_json::Value) -> Option<AgentInputSource> {
+        if payload_origin(data) != Some("robot") {
+            return None;
+        }
+        let conversation_id = data.get("conversation_id")?.as_str()?;
+        nomifun_common::ConversationId::try_from(conversation_id).ok()?;
+        canonical_input_message_id(data)?;
+        let source: AgentInputSource = serde_json::from_value(data.get("input_source")?.clone()).ok()?;
+        match &source {
+            AgentInputSource::AuthenticatedRobot { companion_id, robot_id, connection_id, .. } => {
+                CompanionId::try_from(companion_id.as_str()).ok()?;
+                if robot_id.trim().is_empty() || connection_id.trim().is_empty() {
+                    return None;
+                }
+                let owner = self.store.thread_companion_id(conversation_id).await.ok()??;
+                if owner != *companion_id {
+                    return None;
+                }
+            }
+            AgentInputSource::DirectedDelegationResult { .. } => return None,
+        }
+        Some(source)
+    }
+
     /// Spawn the bus-tap loop. The collector observes both instance-public and
     /// owner-scoped events, but never changes either event's delivery audience.
     /// Lagged receivers skip ahead; closing either half of the shared bus ends
@@ -609,25 +647,38 @@ impl Collector {
                 if msg.data.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false) {
                     return;
                 }
-                // A non-empty `origin` (companion/cron/autowork/idmm) marks a
-                // message injected by an agent, not typed by the owner.
-                // Treating those as owner speech is exactly the self-
-                // reinforcing loop that made companions re-execute old requests —
-                // skip them for every collection source.
-                if payload_origin(&msg.data).is_some() {
-                    return;
-                }
-                if self.is_companion_event(&msg.data).await {
+                // Agent-injected origins remain excluded. Physical-device user
+                // speech is the sole exception, proven by the host-authored
+                // canonical source and its exact persisted Companion owner.
+                let robot_source = if payload_origin(&msg.data).is_some() {
+                    let Some(source) = self.authenticated_robot_user_source(&msg.data).await else {
+                        return;
+                    };
+                    Some(source)
+                } else {
+                    None
+                };
+                if robot_source.is_some() || self.is_companion_event(&msg.data).await {
                     // Companion threads: the owner talking TO a companion. Collect
                     // as a dedicated high-value source (default ON); never as
                     // a generic work-chat message.
                     if collect.companion_dialogues {
-                        let companion_id = self.resolve_companion_id(&msg.data).await;
-                        let data = serde_json::json!({
+                        let companion_id = match &robot_source {
+                            Some(AgentInputSource::AuthenticatedRobot { companion_id, .. }) => Some(companion_id.clone()),
+                            Some(AgentInputSource::DirectedDelegationResult { .. }) => return,
+                            None => self.resolve_companion_id(&msg.data).await,
+                        };
+                        let mut data = serde_json::json!({
                             "conversation_id": msg.data.get("conversation_id"),
                             "companion_id": companion_id,
                             "content": truncate_chars(msg.data.get("content").and_then(|c| c.as_str()).unwrap_or(""), MAX_FIELD_CHARS),
                         });
+                        if let Some(message_id) = canonical_input_message_id(&msg.data) {
+                            data["msg_id"] = serde_json::json!(message_id);
+                        }
+                        if let Some(source) = robot_source {
+                            data["input_source"] = serde_json::json!(source);
+                        }
                         self.append("companion_dialogues", "companion.user_message", data).await;
                     }
                     return;
@@ -635,10 +686,13 @@ impl Collector {
                 if !collect.chat_user_messages {
                     return;
                 }
-                let data = serde_json::json!({
+                let mut data = serde_json::json!({
                     "conversation_id": msg.data.get("conversation_id"),
                     "content": truncate_chars(msg.data.get("content").and_then(|c| c.as_str()).unwrap_or(""), MAX_FIELD_CHARS),
                 });
+                if let Some(message_id) = canonical_input_message_id(&msg.data) {
+                    data["msg_id"] = serde_json::json!(message_id);
+                }
                 self.append("chat_user_messages", &msg.name, data).await;
             }
             // Tool calls are the only thing collected off the stream, and the arm
@@ -1287,12 +1341,13 @@ mod tests {
             Arc::new(RwLock::new(config)),
             store.clone(),
         );
+        let message_id = CompanionEventId::new().into_string();
 
         // Owner speaking to the companion → companion.user_message.
         collector
             .handle(&WebSocketMessage::new(
                 "message.userCreated",
-                serde_json::json!({"conversation_id": companion_conversation, "content": "记得我喜欢深色主题"}),
+                serde_json::json!({"conversation_id": companion_conversation, "msg_id": message_id, "content": "记得我喜欢深色主题"}),
             ))
             .await;
         // The companion's own reply is NOT a collection source: the learner was
@@ -1317,6 +1372,7 @@ mod tests {
         assert_eq!(events[0].name, "companion.user_message");
         assert_eq!(events[0].data["companion_id"], companion);
         assert_eq!(events[0].data["content"], "记得我喜欢深色主题");
+        assert_eq!(events[0].data["msg_id"], message_id);
         // +2 turn XP preserved — XP never depended on collecting the reply.
         assert_eq!(store.get_companion_state_i64(&companion, "xp").await.unwrap(), 2);
 
@@ -1329,6 +1385,17 @@ mod tests {
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
         assert_eq!(events.len(), 1, "a work-session message must add nothing");
+    }
+
+    #[test]
+    fn canonical_input_reference_rejects_missing_or_fabricated_message_ids() {
+        let message_id = CompanionEventId::new().into_string();
+        let valid = serde_json::json!({"msg_id": message_id});
+        assert_eq!(canonical_input_message_id(&valid), Some(message_id.as_str()));
+        for invalid in [serde_json::json!({}), serde_json::json!({"msg_id": "m1"}),
+            serde_json::json!({"msg_id": 1}), serde_json::json!({"msg_id": null})] {
+            assert!(canonical_input_message_id(&invalid).is_none());
+        }
     }
 
     #[tokio::test]
@@ -1414,6 +1481,14 @@ mod tests {
                 serde_json::json!({"conversation_id": companion_conversation, "content": "定时唤醒", "origin": "cron"}),
             ))
             .await;
+        // Automatically admitted channel guests are external participants,
+        // not the owner speaking. Both collection sources are enabled here.
+        collector
+            .handle(&WebSocketMessage::new(
+                "message.userCreated",
+                serde_json::json!({"conversation_id": work_conversation, "content": "群成员说的偏好", "origin": "channel_guest"}),
+            ))
+            .await;
         let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
         assert!(events.is_empty(), "origin-marked messages must never be collected");
 
@@ -1427,6 +1502,123 @@ mod tests {
         let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data["content"], "我自己说的");
+    }
+
+    #[tokio::test]
+    async fn authenticated_robot_user_words_are_collected_with_their_canonical_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::CompanionStore::open_memory().await.unwrap();
+        let conversation = conversation_fixture(5);
+        let companion = companion_fixture(5);
+        let other_companion = companion_fixture(6);
+        store.insert_companion_thread(&conversation, &companion, "机器人").await.unwrap();
+        let mut config = SharedCompanionConfig::default();
+        config.collect.tool_calls = true;
+        let mut collector = Collector::new(
+            dir.path().to_path_buf(), Arc::new(RwLock::new(config)), store.clone(),
+        );
+        let message_id = CompanionEventId::new().into_string();
+        let source = serde_json::json!({
+            "kind": "authenticated_robot", "companion_id": companion,
+            "robot_id": "aa:bb:cc:dd:ee:ff", "connection_id": "socket-5",
+        });
+        collector.handle(&WebSocketMessage::new("message.userCreated", serde_json::json!({
+            "conversation_id": conversation, "msg_id": message_id,
+            "content": "明天改成九点出发", "origin": "robot", "channel_platform": "robot",
+            "input_source": source,
+            // Display attribution cannot redirect an authenticated input's owner.
+            "companion": true, "companion_id": other_companion,
+        }))).await;
+
+        // The source proves the user's input, not the robot Agent's subsequent
+        // tool choices or turn completion. Those retain their origin guard.
+        collector.handle(&WebSocketMessage::new("message.stream", serde_json::json!({
+            "conversation_id": conversation, "origin": "robot", "input_source": source,
+            "type": "tool_call", "data": {
+                "name": "robot_action", "status": "completed", "call_id": "call-5", "args": {},
+            },
+        }))).await;
+        collector.handle(&WebSocketMessage::new("turn.completed", serde_json::json!({
+            "conversation_id": conversation, "origin": "robot", "input_source": source,
+        }))).await;
+
+        let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].source, "companion_dialogues");
+        assert_eq!(events[0].name, "companion.user_message");
+        assert_eq!(events[0].data["companion_id"], companion);
+        assert_eq!(events[0].data["content"], "明天改成九点出发");
+        assert_eq!(events[0].data["msg_id"], message_id);
+        assert_eq!(events[0].data["input_source"], source);
+        assert_eq!(store.get_companion_state_i64(&companion, "xp").await.unwrap(), 0);
+
+        {
+            let mut config = collector.config.write().await;
+            config.collect.companion_dialogues = false;
+            config.collect.chat_user_messages = true;
+        }
+        collector.handle(&WebSocketMessage::new("message.userCreated", serde_json::json!({
+            "conversation_id": conversation, "msg_id": CompanionEventId::new().into_string(),
+            "content": "关闭伙伴采集后也不能转入普通聊天采集", "origin": "robot", "input_source": source,
+        }))).await;
+        let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
+        assert_eq!(events.len(), 1, "robot speech must respect companion_dialogues opt-in");
+    }
+
+    #[tokio::test]
+    async fn robot_origin_requires_a_valid_source_and_the_exact_thread_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::CompanionStore::open_memory().await.unwrap();
+        let conversation = conversation_fixture(7);
+        let companion = companion_fixture(7);
+        store.insert_companion_thread(&conversation, &companion, "机器人").await.unwrap();
+        let mut config = SharedCompanionConfig::default();
+        config.collect.chat_user_messages = true;
+        config.default_companion_id = Some(companion.clone());
+        let mut collector = Collector::new(
+            dir.path().to_path_buf(), Arc::new(RwLock::new(config)), store,
+        );
+        let accepted = serde_json::json!({
+            "conversation_id": conversation, "msg_id": CompanionEventId::new().into_string(),
+            "content": "不能从未经证明的来源学习", "origin": "robot", "channel_platform": "robot",
+            "input_source": {
+                "kind": "authenticated_robot", "companion_id": companion,
+                "robot_id": "aa:bb:cc:dd:ee:ff", "connection_id": "socket-7",
+            },
+        });
+        let mutations = [
+            ("input_source", serde_json::Value::Null),
+            ("msg_id", serde_json::json!("not-a-canonical-event")),
+            ("conversation_id", serde_json::json!(conversation_fixture(8))),
+            ("hidden", serde_json::json!(true)),
+            ("origin", serde_json::json!("companion")),
+            ("origin", serde_json::json!("cron")),
+            ("origin", serde_json::json!("autowork")),
+            ("origin", serde_json::json!("idmm")),
+            ("origin", serde_json::json!("channel_guest")),
+            ("origin", serde_json::json!("unknown")),
+        ];
+        for (field, value) in mutations {
+            let mut rejected = accepted.clone();
+            rejected[field] = value;
+            collector.handle(&WebSocketMessage::new("message.userCreated", rejected)).await;
+        }
+        for (field, value) in [
+            ("kind", serde_json::json!("robot")),
+            ("companion_id", serde_json::json!(companion_fixture(8))),
+            ("companion_id", serde_json::json!("invalid-companion")),
+            ("robot_id", serde_json::json!(" ")),
+            ("connection_id", serde_json::json!("")),
+        ] {
+            let mut rejected = accepted.clone();
+            rejected["input_source"][field] = value;
+            collector.handle(&WebSocketMessage::new("message.userCreated", rejected)).await;
+        }
+        let mut unexpected_source_field = accepted;
+        unexpected_source_field["input_source"]["authenticated"] = serde_json::json!(true);
+        collector.handle(&WebSocketMessage::new("message.userCreated", unexpected_source_field)).await;
+        let (events, _) = read_events_since(dir.path(), 0, 100).unwrap();
+        assert!(events.is_empty(), "markers and default attribution cannot authenticate robot speech");
     }
 
     #[tokio::test]

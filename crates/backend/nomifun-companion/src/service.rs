@@ -22,7 +22,7 @@ use crate::learner::{CompanionCompleter, CompanionLearnResult, Learner};
 use crate::memory_search::{MemorySearchQuery, MemoryStatusFilter};
 use crate::profile::{CompanionProfileConfig, SharedCompanionConfig};
 use crate::registry::{CompanionRegistry, json_merge_patch};
-use crate::session_port::CompanionHostPorts;
+use crate::session_port::{CompanionHostPorts, CompanionRole};
 use crate::store::{
     CompanionThread, MemoryActor, MemoryBatchAction, MemoryFilter, MemoryListSort, MemoryPage,
     CompanionMemory, CompanionSkill, CompanionStore,
@@ -30,6 +30,33 @@ use crate::store::{
 };
 use nomifun_skill_library::skill_service::{self, SkillPaths, SkillScope};
 use nomifun_skill_library::constants::SKILL_MANIFEST_FILE;
+
+fn managed_workspace_deletion_targets(root: &std::path::Path, managed: &[String])
+    -> Result<std::collections::BTreeSet<PathBuf>, AppError> {
+    use nomifun_common::paths::{WorkspaceDirectoryCheck, canonical_existing_workspace_directory, simplified};
+    let root = canonical_existing_workspace_directory(root, WorkspaceDirectoryCheck::Runtime)?;
+    let mut targets = std::collections::BTreeSet::new();
+    for path in managed {
+        // Host guards return real paths. Normalize both spellings before the
+        // lexical check, then resolve each existing directory again before
+        // the final domain deletion fence permits removing it.
+        let target = simplified(std::path::Path::new(path));
+        if !target.is_absolute() || target == root || !target.starts_with(&root) {
+            return Err(AppError::Conflict("host returned a workspace outside the managed Companion root".into()));
+        }
+        match std::fs::symlink_metadata(&target) {
+            Ok(_) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(AppError::Internal(format!("inspect settled Companion workspace: {error}"))),
+        }
+        let target = canonical_existing_workspace_directory(&target, WorkspaceDirectoryCheck::Runtime)?;
+        if target == root || !target.starts_with(&root) {
+            return Err(AppError::Conflict("host returned a workspace outside the managed Companion root".into()));
+        }
+        targets.insert(target);
+    }
+    Ok(targets)
+}
 
 /// Map the stored owner to the extension skill scope. `None` is only the
 /// vestigial legacy row the boot re-homing has not claimed, whose body still
@@ -132,6 +159,12 @@ pub struct MemoryListItem {
 pub struct MemoryListPage {
     pub items: Vec<MemoryListItem>,
     pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CompanionFactRecallPage {
+    pub hits: Vec<crate::AgentMemorySearchHit>,
+    pub has_more: bool,
 }
 
 /// Cluster active memories into suspected-duplicate groups (same kind + same
@@ -350,6 +383,9 @@ impl CompanionService {
         };
         let store = CompanionStore::open(&shared_dir, row_owner.as_deref()).await?;
         store.validate_companion_references(&live_companion_ids).await?;
+        for profile in registry.list().await {
+            store.seed_companion_state(&profile.companion_id, "memory_owner_epoch", &profile.created_at.to_string()).await?;
+        }
         // Boot migration, part 2 of 2: the runtime state that became per-companion
         // with the settings — above all the two event cursors. A companion left at
         // the absent-row default of 0 would re-distill the whole retained history
@@ -580,6 +616,7 @@ impl CompanionService {
     /// default companion (shared config saved + broadcast).
     pub async fn create_companion(&self, name: &str, character: &str) -> Result<CompanionProfileConfig, AppError> {
         let profile = self.registry.create(name, character).await?;
+        self.store.seed_companion_state(&profile.companion_id, "memory_owner_epoch", &profile.created_at.to_string()).await?;
         // A brand-new companion starts reading the shared event spool from NOW.
         // Left at the absent-row default of 0 it would distill the entire retained
         // history on its first run — weeks of the owner's events re-summarised into
@@ -617,7 +654,7 @@ impl CompanionService {
             self.emitter.emit_shared_config_updated(&cfg);
         }
         self.emitter.emit_companion_created(&profile);
-        // Auto-create the companion's single companion session, but only when its
+        // Ensure the default desktop receive Session, but only when its
         // model is already configured (a session can't be minted without one)
         // and the companion manager is wired (it isn't in tests). Best-effort:
         // a failure here must never fail companion creation — the session is lazily
@@ -639,10 +676,45 @@ impl CompanionService {
             .ok_or_else(|| AppError::NotFound(format!("companion '{id}' not found")))
     }
 
+    pub fn companion_workspaces_root(&self) -> PathBuf {
+        self.registry.workspaces_dir()
+    }
+
+    pub async fn companion_workspace_path(&self, id: &str) -> Result<PathBuf, AppError> {
+        let profile = self.get_companion(id).await?;
+        match self.companion_workspace_component(id).await? {
+            Some(component) => Ok(self.registry.workspaces_dir().join(component)),
+            None => Ok(crate::companion::compute_desired_workspace_dir(&self.registry.workspaces_dir(), &profile)),
+        }
+    }
+
+    pub async fn companion_workspace_component(&self, id: &str) -> Result<Option<String>, AppError> {
+        self.get_companion(id).await?;
+        let component = self.store.get_companion_state(id, crate::companion::WORKSPACE_COMPONENT_KEY).await?;
+        if let Some(value) = component.as_deref() {
+            crate::companion::validate_workspace_component(value)
+                .map_err(|error| AppError::Conflict(format!("invalid registered Companion workspace: {error}")))?;
+        }
+        Ok(component)
+    }
+
+    /// Server-only adoption after the host verifies canonical creation
+    /// provenance. No HTTP or model Action can register a directory. CAS-if-absent
+    /// returns the winner and never rewrites an existing location on rename.
+    pub async fn register_companion_workspace_component(&self, id: &str, component: &str) -> Result<String, AppError> {
+        self.get_companion(id).await?;
+        crate::companion::validate_workspace_component(component)?;
+        self.store.seed_companion_state(id, crate::companion::WORKSPACE_COMPONENT_KEY, component).await?;
+        self.companion_workspace_component(id).await?
+            .ok_or_else(|| AppError::Conflict("Companion workspace registration disappeared".into()))
+    }
+
     /// RFC 7396 partial update of one companion's profile. Profile model changes
     /// apply to future AgentSessions and remote-channel reconstruction; an
     /// existing local AgentSession retains its frozen model.
     pub async fn patch_companion(&self, id: &str, patch: serde_json::Value) -> Result<CompanionProfileConfig, AppError> {
+        let manager = self.companion().ok();
+        let _lifecycle = match manager { Some(manager) => Some(manager.ensure_lock.lock().await), None => None };
         // Snapshot the pre-patch model so we can tell whether this patch
         // actually changed it (RFC 7396 patches need not mention `model`).
         let prev = self.registry.get(id).await;
@@ -692,23 +764,48 @@ impl CompanionService {
     /// per-companion store rows, remove the profile, and re-point the default companion
     /// if it was this one.
     pub async fn delete_companion(&self, id: &str) -> Result<(), AppError> {
-        // Existence gate first so a bad id 404s before any side effect.
+        let manager = self.companion().ok();
+        // Same domain lifecycle fence as ensure/new/delete. The host owns the
+        // required canonical affiliation and producer/effect settlement fence.
+        let _lifecycle = match manager { Some(manager) => Some(manager.ensure_lock.lock().await), None => None };
         self.get_companion(id).await?;
-        // Cascade the companion's companion threads through the full delete path
-        // (kills running agents + removes the real conversations). When the
-        // companion manager isn't wired (tests), the thread rows still go
-        // away below via delete_companion_rows. Any failure aborts the delete:
-        // proceeding would drop the companion (and its thread registry rows) while
-        // the conversations live on as orphans — the user can simply retry.
-        let threads = self.store.list_companion_threads(Some(id)).await?;
-        if let Ok(companion) = self.companion() {
-            for t in &threads {
-                companion.delete(id, &t.conversation_id).await.map_err(|e| {
-                    AppError::Internal(format!(
-                        "cascade-delete companion thread '{}' failed, companion kept: {e}",
-                        t.conversation_id
-                    ))
-                })?;
+        let workspace = self.companion_workspace_path(id).await?;
+        // Resolve the target once, before acquiring the host directory fence.
+        // An originally absent directory must not be removed if it appears later.
+        let existing_workspace = match std::fs::symlink_metadata(&workspace) {
+            Ok(_) => {
+                let root = nomifun_common::paths::canonical_existing_workspace_directory(
+                    &self.registry.workspaces_dir(), nomifun_common::paths::WorkspaceDirectoryCheck::Runtime)?;
+                let target = nomifun_common::paths::canonical_existing_workspace_directory(
+                    &workspace, nomifun_common::paths::WorkspaceDirectoryCheck::Runtime)?;
+                if target == root || !target.starts_with(&root) {
+                    return Err(AppError::Conflict("Companion workspace escapes its owner directory".into()));
+                }
+                Some(target)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(AppError::Internal(format!("inspect Companion workspace: {error}"))),
+        };
+        let workspace_argument = existing_workspace.as_ref().map(|path| path.to_string_lossy().into_owned());
+        let deletion_guard = match manager {
+            Some(manager) => Some(manager.sessions.delete_companion_sessions(self.authoritative_user_id.as_ref(), id,
+                workspace_argument.as_deref()).await?),
+            None if existing_workspace.is_some() || !self.store.list_companion_threads(Some(id)).await?.is_empty() => {
+                return Err(AppError::Internal("canonical Companion Session cleanup is not configured".into()));
+            }
+            None => None,
+        };
+        // Only canonical provenance verified by the host grants directory
+        // ownership. Its returned Guard also covers older frozen roots created
+        // before stable workspace naming and keeps every directory fence alive.
+        let managed = deletion_guard.as_ref().map(|guard| guard.managed_workspaces()).unwrap_or_default();
+        if !managed.is_empty() {
+            for target in managed_workspace_deletion_targets(&self.registry.workspaces_dir(), managed)? {
+                match std::fs::remove_dir_all(&target) {
+                    Ok(()) => {},
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                    Err(error) => return Err(AppError::Internal(format!("remove settled Companion workspace: {error}"))),
+                }
             }
         }
         // T3.3 knowledge binding cleanup lives in the cleanup hooks below
@@ -717,6 +814,7 @@ impl CompanionService {
         self.remove_companion_skill_trees(id)?;
         self.store.delete_companion_rows(id).await?;
         self.registry.remove(id).await?;
+        drop(deletion_guard);
         // Post-removal cascade hooks. The companion is already gone, so a failing
         // hook must never fail the delete — implementations warn internally.
         if let Some(hooks) = self.cleanup_hooks.get() {
@@ -953,9 +1051,9 @@ impl CompanionService {
         crate::figures::remove(&self.figures_dir, figure_id)
     }
 
-    // ----- companion session (per companion, single session) -----
+    // ----- companion Sessions and independent receive routes -----
 
-    /// Idempotent ensure of the companion's single companion session.
+    /// Idempotent ensure of the desktop receive Session.
     pub async fn create_companion_thread(
         &self,
         companion_id: &str,
@@ -966,6 +1064,49 @@ impl CompanionService {
 
     pub async fn companion_active_thread(&self, companion_id: &str) -> Result<Option<String>, AppError> {
         self.companion()?.active_thread_id(companion_id).await
+    }
+
+    pub async fn ensure_session_for_role(
+        &self, companion_id: &str, role: CompanionRole, robot_id: Option<&str>,
+    ) -> Result<CompanionThread, AppError> {
+        self.companion()?.ensure_for_role(companion_id, role, robot_id, None).await
+    }
+
+    pub async fn desktop_role_launch_configuration(
+        &self, companion_id: &str,
+    ) -> Result<crate::CompanionRoleLaunchConfiguration, AppError> {
+        self.companion()?.desktop_role_launch_configuration(companion_id).await
+    }
+
+    pub async fn create_session_for_role(
+        &self, companion_id: &str, role: CompanionRole, robot_id: Option<&str>, idempotency_key: &str,
+    ) -> Result<CompanionThread, AppError> {
+        self.companion()?.create_for_role(companion_id, role, robot_id, idempotency_key, None).await
+    }
+
+    pub async fn new_companion_thread(
+        &self, companion_id: &str, creation_key: &str, title: Option<String>,
+    ) -> Result<CompanionThread, AppError> {
+        self.companion()?.create_for_role(companion_id, CompanionRole::Companion, None, creation_key, title).await
+    }
+
+    pub async fn list_companion_threads(&self, companion_id: &str) -> Result<Vec<CompanionThread>, AppError> {
+        self.get_companion(companion_id).await?;
+        self.companion()?.list(companion_id).await
+    }
+
+    pub async fn set_companion_active_thread(&self, companion_id: &str, session_id: &str) -> Result<(), AppError> {
+        self.companion()?.set_active(companion_id, session_id).await?;
+        let profile = self.get_companion(companion_id).await?;
+        self.emitter.emit_companion_updated(companion_id, &profile);
+        Ok(())
+    }
+
+    pub async fn delete_companion_thread(&self, companion_id: &str, session_id: &str) -> Result<(), AppError> {
+        self.companion()?.delete(companion_id, session_id).await?;
+        let profile = self.get_companion(companion_id).await?;
+        self.emitter.emit_companion_updated(companion_id, &profile);
+        Ok(())
     }
 
     // ----- shared config -----
@@ -1201,20 +1342,33 @@ impl CompanionService {
 
     // ----- memories -----
 
+    pub async fn current_memory_context(
+        &self, companion_id: &str, max_bytes: usize,
+    ) -> Result<crate::CompanionMemoryContext, AppError> {
+        self.get_companion(companion_id).await?;
+        self.store.current_memory_context(companion_id, max_bytes).await
+    }
+
+    pub async fn memory_message_is_retracted(
+        &self, companion_id: &str, session_id: &str, message_id: &str,
+    ) -> Result<bool, AppError> {
+        self.get_companion(companion_id).await?;
+        self.store.memory_message_is_retracted(companion_id, session_id, message_id).await
+    }
+
     pub async fn list_memories(&self, filter: &MemoryFilter) -> Result<Vec<CompanionMemory>, AppError> {
         self.store.list_memories(filter).await
     }
 
     /// Return the bounded, durable memory projection used by an explicitly
-    /// bound Agent capability. This deliberately reuses the same ranking and
-    /// budget owner as companion prompt injection so a second recall policy
-    /// cannot drift into the Agent platform.
+    /// bound Agent capability. Durable source filters and ranking run before
+    /// the model-only projection, whose encoded size owns this result budget.
     pub async fn recall_memories_for_agent(
         &self,
         companion_id: &str,
         per_kind: i64,
         char_budget: usize,
-    ) -> Result<Vec<CompanionMemory>, AppError> {
+    ) -> Result<Vec<crate::AgentMemoryProjection>, AppError> {
         self.get_companion(companion_id).await?;
         if !(1..=20).contains(&per_kind) {
             return Err(AppError::BadRequest(
@@ -1226,9 +1380,117 @@ impl CompanionService {
                 "agent memory recall char_budget must be between 1 and 65536".into(),
             ));
         }
-        self.store
+        let memories = self.store
             .memories_for_injection(companion_id, per_kind, char_budget)
-            .await
+            .await?;
+        let mut used = 0_usize;
+        let mut bounded = Vec::new();
+        for memory in memories.into_iter().map(crate::AgentMemoryProjection::from) {
+            let size = serde_json::to_vec(&memory)
+                .map_err(|error| AppError::Internal(error.to_string()))?.len();
+            if used.saturating_add(size) <= char_budget {
+                used += size;
+                bounded.push(memory);
+            }
+        }
+        Ok(bounded)
+    }
+
+    pub async fn recall_memory_search_for_agent(
+        &self, companion_id: &str, mut query: MemorySearchQuery, char_budget: usize,
+    ) -> Result<CompanionFactRecallPage, AppError> {
+        self.get_companion(companion_id).await?;
+        if !(1..=64 * 1024).contains(&char_budget) || !(1..=50).contains(&query.limit)
+            || query.queries.len() != 1 || query.queries[0].trim().is_empty() || query.queries[0].chars().count() > 1024
+        {
+            return Err(AppError::BadRequest("memory recall query exceeds its bounded schema".into()));
+        }
+        // The selected resource is authoritative. Callers cannot widen scope by
+        // constructing an unscoped administrative MemorySearchQuery.
+        query.companion_id = Some(CompanionId::try_from(companion_id)
+            .map_err(|error| AppError::BadRequest(error.to_string()))?);
+        query.status = MemoryStatusFilter::Active;
+        let query_limit = query.limit;
+        query.limit = query_limit + 1;
+        let hits = self.store.search_memories(query).await?;
+        let found = hits.len();
+        let mut used = 0_usize;
+        let mut bounded = Vec::new();
+        // Source/session filters have already examined the full durable
+        // lineage. Only the bounded presentation is charged to model context.
+        for hit in hits.into_iter().take(query_limit).map(crate::AgentMemorySearchHit::from) {
+            let size = serde_json::to_vec(&hit).map_err(|error| AppError::Internal(error.to_string()))?.len();
+            if used.saturating_add(size) <= char_budget {
+                used += size;
+                bounded.push(hit);
+            }
+        }
+        Ok(CompanionFactRecallPage { has_more: bounded.len() < found, hits: bounded })
+    }
+
+    pub async fn recall_companion_history_for_agent(
+        &self, companion_id: &str, query: crate::CompanionHistoryRecallQuery,
+    ) -> Result<crate::CompanionHistoryRecallPage, AppError> {
+        self.get_companion(companion_id).await?;
+        if query.query.trim().is_empty() || query.query.chars().count() > 1024
+            || !(1..=50).contains(&query.limit) || !(256..=64 * 1024).contains(&query.byte_budget)
+            || query.since_ts.is_some_and(|ts| ts < 0) || query.until_ts.is_some_and(|ts| ts < 0)
+            || matches!((query.since_ts, query.until_ts), (Some(start), Some(end)) if start > end)
+        {
+            return Err(AppError::BadRequest("history recall query exceeds its bounded schema".into()));
+        }
+        if let Some(session_id) = query.source_session_id.as_deref() {
+            nomifun_common::ConversationId::try_from(session_id)
+                .map_err(|error| AppError::BadRequest(format!("invalid source_session_id: {error}")))?;
+        }
+        if let Some(cursor) = query.before.as_ref() {
+            if cursor.recorded_at < 0 || cursor.source_seq == 0 {
+                return Err(AppError::BadRequest("invalid history recall cursor position".into()));
+            }
+            nomifun_common::ConversationId::try_from(cursor.session_id.as_str())
+                .map_err(|error| AppError::BadRequest(format!("invalid cursor Session id: {error}")))?;
+        }
+        self.companion()?.sessions.recall_companion_history(self.authoritative_user_id.as_ref(), companion_id, query).await
+    }
+
+    pub async fn add_memory_for_agent_with_sources(
+        &self, companion_id: &str, kind: &str, content: &str, tags: &[String],
+        source_session_id: &str, source_operation_id: &str,
+        sources: &[crate::store::CompanionMemoryMessageSource],
+    ) -> Result<CompanionMemory, AppError> {
+        if sources.is_empty() {
+            return Err(AppError::BadRequest("Agent memory writes require verified canonical human input sources".into()));
+        }
+        self.get_companion(companion_id).await?;
+        if !crate::store::MEMORY_KINDS.contains(&kind) || content.trim().is_empty() {
+            return Err(AppError::BadRequest("invalid memory kind or empty content".into()));
+        }
+        let memory = self.store.add_agent_memory_with_sources(kind, content.trim(), tags, companion_id,
+            source_session_id, source_operation_id, sources).await?;
+        if memory.source_session_id.as_deref() == Some(source_session_id)
+            && memory.source_operation_id.as_deref() == Some(source_operation_id)
+        { self.emitter.emit_memory_created(&memory); }
+        else { self.emitter.emit_memory_updated(&memory); }
+        Ok(memory)
+    }
+
+    pub async fn update_memory_for_agent_cas_with_sources(
+        &self, companion_id: &str, memory_id: &str, expected_revision: i64, kind: &str, content: &str,
+        sources: &[crate::store::CompanionMemoryMessageSource],
+    ) -> Result<CompanionMemory, AppError> {
+        if sources.is_empty() {
+            return Err(AppError::BadRequest("Agent memory corrections require verified canonical human input sources".into()));
+        }
+        self.get_companion(companion_id).await?;
+        self.require_exact_companion_memory(companion_id, memory_id).await?;
+        let old = self.store.get_memory(memory_id).await?.ok_or_else(|| AppError::NotFound("memory not found".into()))?;
+        if old.kind != kind {
+            return Err(AppError::BadRequest("a memory correction cannot change its kind".into()));
+        }
+        let updated = self.store.update_memory_cas_with_sources(memory_id, expected_revision, Some(content), None, None,
+            &MemoryActor::Companion(companion_id.to_owned()), sources).await?;
+        self.emitter.emit_memory_updated(&updated);
+        Ok(updated)
     }
 
     /// Non-FTS list with an explicit sort (the REST `sort` param without `q`).
@@ -1263,6 +1525,7 @@ impl CompanionService {
             status,
             companion_id,
             limit: 500,
+            ..Default::default()
         };
         let mut hits = self.store.search_memories(query).await?;
         match sort {
@@ -1315,6 +1578,20 @@ impl CompanionService {
         Ok(())
     }
 
+    pub async fn batch_memories_cas(
+        &self, ids: &[String], action: &MemoryBatchAction, actor: &MemoryActor,
+        expected_revisions: &std::collections::BTreeMap<String, i64>,
+    ) -> Result<(), AppError> {
+        self.store.batch_update_memories_cas(ids, action, actor, expected_revisions).await?;
+        for id in ids {
+            match self.store.get_memory(id).await? {
+                Some(memory) => self.emitter.emit_memory_updated(&memory),
+                None => self.emitter.emit_memory_deleted(id),
+            }
+        }
+        Ok(())
+    }
+
     /// Merge-assistant dry run for ONE companion: suspected-duplicate groups over
     /// the active layer it can see (per kind + scope, normalized-similarity
     /// clustering).
@@ -1349,6 +1626,18 @@ impl CompanionService {
         Ok(merged)
     }
 
+    pub async fn merge_memories_cas(
+        &self, group: &[String], merged_content: &str, kind: &str, actor: &MemoryActor,
+        expected_revisions: &std::collections::BTreeMap<String, i64>,
+    ) -> Result<CompanionMemory, AppError> {
+        let merged = self.store.merge_memories_cas(group, merged_content, kind, actor, expected_revisions).await?;
+        self.emitter.emit_memory_created(&merged);
+        for id in group {
+            if let Some(memory) = self.store.get_memory(id).await? { self.emitter.emit_memory_updated(&memory); }
+        }
+        Ok(merged)
+    }
+
     /// Agent-facing merge over one explicitly bound companion. Unlike the
     /// administrative merge surface, this refuses vestigial unowned rows as
     /// well as rows owned by another companion before entering the atomic
@@ -1377,7 +1666,7 @@ impl CompanionService {
     // ----- session-window day digests (伙伴会话归档回看) -----
 
     /// The complete day index of this companion's history: every LOCAL calendar
-    /// day its conversation holds visible messages on, plus every day that has an
+    /// day its Sessions hold visible messages on, plus every day that has an
     /// archived digest, newest first.
     ///
     /// Strictly read-only. The conversation is RESOLVED from the stored pointer,
@@ -1387,31 +1676,35 @@ impl CompanionService {
     /// out-of-band, leaving a dangling pointer — yields an empty index rather
     /// than an error.
     pub async fn history_day_index(&self, companion_id: &str) -> Result<Vec<CompanionHistoryDay>, AppError> {
+        self.history_day_index_for_session(companion_id, None).await
+    }
+
+    pub async fn history_day_index_for_session(
+        &self, companion_id: &str, conversation_id: Option<&str>,
+    ) -> Result<Vec<CompanionHistoryDay>, AppError> {
         // Existence gate: an unknown companion must 404, not read as "no history".
         self.get_companion(companion_id).await?;
-        let digest_days: std::collections::HashSet<String> = self
-            .store
-            .archived_digest_days(companion_id)
-            .await?
+        if let Some(session_id) = conversation_id {
+            self.companion()?.assert_owned(companion_id, session_id).await?;
+        }
+        let digest_days: std::collections::HashSet<String> = match conversation_id {
+            Some(session_id) => self.store.archived_digest_days_for_session(companion_id, session_id).await?,
+            None => self.store.archived_digest_days(companion_id).await?,
+        }
             .into_iter()
             .collect();
-        let counts = match crate::companion::active_thread_ptr(&self.store, companion_id).await? {
-            Some(conversation_id) => {
-                match self
-                    .companion()?
-                    .sessions
-                    .message_local_day_index(self.authoritative_user_id.as_ref(), &conversation_id)
-                    .await
-                {
-                    Ok(buckets) => buckets,
-                    // Dangling pointer to a conversation deleted out-of-band: the
-                    // digests this companion already produced are still real history.
-                    Err(AppError::NotFound(_)) => Vec::new(),
-                    Err(error) => return Err(error),
-                }
+        let mut counts = Vec::new();
+        let registered = self.store.list_companion_threads(Some(companion_id)).await?;
+        let threads = if registered.is_empty() { Vec::new() } else { self.list_companion_threads(companion_id).await? };
+        for thread in threads.into_iter().filter(|thread| conversation_id.is_none_or(|id| id == thread.conversation_id)) {
+            match self.companion()?.sessions.message_local_day_index(
+                self.authoritative_user_id.as_ref(), &thread.conversation_id,
+            ).await {
+                Ok(buckets) => counts.extend(buckets),
+                Err(AppError::NotFound(_)) => {},
+                Err(error) => return Err(error),
             }
-            None => Vec::new(),
-        };
+        }
         // A day carrying only a digest (its messages were cleared) must still be
         // reachable, so the index is the union of both sources.
         let mut days: std::collections::BTreeMap<String, i64> = digest_days
@@ -1419,7 +1712,7 @@ impl CompanionService {
             .map(|day| (day.clone(), 0))
             .collect();
         for bucket in counts {
-            days.insert(bucket.day, bucket.message_count);
+            *days.entry(bucket.day).or_default() += bucket.message_count;
         }
         Ok(days
             .into_iter()
@@ -1449,6 +1742,13 @@ impl CompanionService {
         }
     }
 
+    pub async fn list_day_digests_for_session(
+        &self, companion_id: &str, conversation_id: &str, since: &str, until: &str, limit: i64,
+    ) -> Result<Vec<crate::store::SessionWindow>, AppError> {
+        self.companion()?.assert_owned(companion_id, conversation_id).await?;
+        self.store.digests_for_session(companion_id, conversation_id, since, until, limit).await
+    }
+
     /// "去年今日" — archived digests whose day-of-year (`MMDD`) matches, excluding
     /// today. `mmdd` is a 4-char `MMDD`.
     pub async fn digests_on_this_day(
@@ -1459,6 +1759,13 @@ impl CompanionService {
         limit: i64,
     ) -> Result<Vec<crate::store::SessionWindow>, AppError> {
         self.store.digests_on_day_of_year(companion_id, mmdd, exclude_day, limit).await
+    }
+
+    pub async fn digests_on_this_day_for_session(
+        &self, companion_id: &str, conversation_id: &str, mmdd: &str, exclude_day: &str, limit: i64,
+    ) -> Result<Vec<crate::store::SessionWindow>, AppError> {
+        self.companion()?.assert_owned(companion_id, conversation_id).await?;
+        self.store.digests_on_day_of_year_for_session(companion_id, conversation_id, mmdd, exclude_day, limit).await
     }
     /// The single owner every ownerless memory write lands on: the explicit
     /// default companion, else the oldest companion, else `None` on an empty
@@ -1543,6 +1850,18 @@ impl CompanionService {
         Ok(())
     }
 
+    pub async fn update_memory_cas(
+        &self, memory_id: &str, expected_revision: i64, content: Option<&str>, pinned: Option<bool>,
+        status: Option<&str>, actor: &MemoryActor,
+    ) -> Result<CompanionMemory, AppError> {
+        if status.is_some_and(|status| !matches!(status, "active" | "archived")) {
+            return Err(AppError::BadRequest("invalid memory status".into()));
+        }
+        let updated = self.store.update_memory_cas(memory_id, expected_revision, content, pinned, status, actor).await?;
+        self.emitter.emit_memory_updated(&updated);
+        Ok(updated)
+    }
+
     /// Evolve one durable memory in place for the explicitly bound companion.
     /// The store preserves identity, kind, lifecycle, pin and ownership while
     /// atomically replacing/redacting content and refreshing its FTS row.
@@ -1582,6 +1901,12 @@ impl CompanionService {
 
     pub async fn delete_memory(&self, memory_id: &str, actor: &MemoryActor) -> Result<(), AppError> {
         self.store.delete_memory(memory_id, actor).await?;
+        self.emitter.emit_memory_deleted(memory_id);
+        Ok(())
+    }
+
+    pub async fn delete_memory_cas(&self, memory_id: &str, expected_revision: i64, actor: &MemoryActor) -> Result<(), AppError> {
+        self.store.delete_memory_cas(memory_id, expected_revision, actor).await?;
         self.emitter.emit_memory_deleted(memory_id);
         Ok(())
     }
@@ -1874,6 +2199,13 @@ impl CompanionService {
         .await)
     }
 
+    pub(crate) async fn context_role(
+        &self, companion_id:&str, session_id:&str,
+        expected_snapshot:&nomifun_agent_contracts::ResolvedSnapshotRef,
+    )->Result<Option<crate::CompanionRole>,AppError>{
+        self.companion()?.sessions.context_role(self.authoritative_user_id.as_ref(),companion_id,session_id,expected_snapshot).await
+    }
+
     // ----- events -----
 
     pub async fn event_stats(&self) -> Result<Vec<SourceStats>, AppError> {
@@ -1985,6 +2317,52 @@ mod tests {
     use super::*;
     use nomifun_realtime::BroadcastEventBus;
 
+    #[test]
+    fn companion_workspace_cleanup_normalizes_real_paths_and_rejects_outside_roots() {
+        let temporary = tempfile::tempdir().unwrap();
+        let owner = temporary.path().join("managed-owner");
+        let leaf = owner.join("owned-leaf");
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(leaf.join("owned.txt"), "owned").unwrap();
+        std::fs::write(outside.join("private.txt"), "preserve").unwrap();
+        let owner_verbatim = std::fs::canonicalize(&owner).unwrap();
+        let leaf_verbatim = std::fs::canonicalize(&leaf).unwrap();
+        let owner_simple = nomifun_common::paths::canonicalize_simplified(&owner).unwrap();
+        let leaf_simple = nomifun_common::paths::canonicalize_simplified(&leaf).unwrap();
+        // Real host Guards contain paths resolved while the directory exists.
+        // Simulate a directory disappearing after that proof, rather than an
+        // unproven missing path built from TEMP's possible Windows 8.3 alias.
+        let removed = owner.join("already-removed");
+        std::fs::create_dir(&removed).unwrap();
+        let removed_verbatim = std::fs::canonicalize(&removed).unwrap();
+        let removed_simple = nomifun_common::paths::canonicalize_simplified(&removed).unwrap();
+        std::fs::remove_dir(&removed).unwrap();
+        let outside_missing = nomifun_common::paths::canonicalize_simplified(&outside).unwrap().join("never-owned");
+        #[cfg(windows)]
+        assert_ne!(leaf_verbatim, leaf_simple, "the real filesystem fixture must exercise Windows verbatim and simplified spellings");
+        let managed = vec![leaf_verbatim.to_string_lossy().into_owned(), leaf_simple.to_string_lossy().into_owned()];
+        for root in [&owner_verbatim, &owner_simple] {
+            let targets = managed_workspace_deletion_targets(root, &managed).unwrap();
+            assert_eq!(targets, std::collections::BTreeSet::from([leaf_simple.clone()]));
+            for rejected in [
+                root.to_string_lossy().into_owned(),
+                outside.to_string_lossy().into_owned(),
+                "relative-leaf".into(),
+                leaf.join("..").join("..").join("outside").to_string_lossy().into_owned(),
+                outside_missing.to_string_lossy().into_owned(),
+            ] {
+                assert!(managed_workspace_deletion_targets(root, &[rejected.clone()]).is_err(), "reject outside or non-absolute target {rejected}");
+            }
+            assert!(managed_workspace_deletion_targets(root, &[
+                removed_verbatim.to_string_lossy().into_owned(), removed_simple.to_string_lossy().into_owned(),
+            ]).unwrap().is_empty(), "a proven owned leaf removed after Guard acquisition remains an idempotent no-op");
+        }
+        assert!(leaf.join("owned.txt").is_file(), "preflight itself never deletes files");
+        assert_eq!(std::fs::read_to_string(outside.join("private.txt")).unwrap(), "preserve");
+    }
+
     fn companion_fixture(sequence: u64) -> String {
         let raw = format!("0190f5fe-7c00-7a00-8abc-{sequence:012}");
         nomifun_common::CompanionId::try_from(raw.as_str()).unwrap().into_string()
@@ -2022,6 +2400,22 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    fn attach_canonical_test_host(svc: &Arc<CompanionService>) -> Arc<dyn crate::CompanionSessionPort> {
+        struct UnusedArchive;
+        #[async_trait::async_trait]
+        impl crate::archiver::ArchiveConversationPort for UnusedArchive {
+            async fn window_messages(&self, _: &str, _: i64, _: &str) -> Result<crate::archiver::ArchiveWindow, AppError> {
+                Err(AppError::Internal("archive is outside this lifecycle fixture".into()))
+            }
+            async fn reset_context(&self, _: &str, _: &str, _: &nomifun_agent_session::ContextClearBoundary) -> Result<(), AppError> {
+                Err(AppError::Internal("archive is outside this lifecycle fixture".into()))
+            }
+        }
+        let sessions = crate::companion::thread_management_tests::canonical_host();
+        svc.attach_companion(CompanionHostPorts { sessions: sessions.clone(), archive: Arc::new(UnusedArchive), transcript: Arc::new(NoopTranscriptSource) });
+        sessions
     }
 
     #[tokio::test]
@@ -2066,6 +2460,49 @@ mod tests {
         assert!(context.system_prompt.contains("当前提供委派工具时"));
         assert!(!context.system_prompt.contains("nomi_"));
         assert!(!context.system_prompt.contains("完整的工具能力"));
+    }
+
+    #[tokio::test]
+    async fn agent_recall_keeps_short_facts_with_large_durable_lineage() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path()).await;
+        let companion = svc.create_companion("Lineage", "ink").await.unwrap();
+        let memory = svc.add_memory("preference", "Use lineageproof coffee.", &[],
+            Some(&companion.companion_id)).await.unwrap();
+        let source_session = nomifun_common::ConversationId::new().into_string();
+        let sources = (0..1024).map(|_| crate::store::CompanionMemoryMessageSource {
+            session_id: source_session.clone(), message_id: nomifun_common::generate_id(),
+        }).collect::<Vec<_>>();
+        let events = (0..1024).map(|_| nomifun_common::generate_id()).collect::<Vec<_>>();
+        sqlx::query("UPDATE companion_memories SET source_event_ids = ?, source_message_refs = ? WHERE memory_id = ?")
+            .bind(serde_json::to_string(&events).unwrap())
+            .bind(serde_json::to_string(&sources).unwrap())
+            .bind(&memory.memory_id).execute(svc.store.pool()).await.unwrap();
+        let filter = MemoryFilter { companion_id: Some(companion.companion_id.clone()), ..Default::default() };
+        let full_before = svc.list_memories(&filter).await.unwrap();
+        assert_eq!(full_before.len(), 1);
+        assert!(serde_json::to_vec(&full_before[0]).unwrap().len() > 64 * 1024);
+
+        let default = svc.recall_memories_for_agent(&companion.companion_id, 8, 1200).await.unwrap();
+        assert_eq!(default.len(), 1);
+        assert_eq!(default[0].memory_id, memory.memory_id);
+        assert!(serde_json::to_vec(&default).unwrap().len() <= 1200);
+        let query = svc.recall_memory_search_for_agent(&companion.companion_id, MemorySearchQuery {
+            queries: vec!["lineageproof".into()], source_session_id: Some(source_session),
+            ..Default::default()
+        }, 1200).await.unwrap();
+        assert_eq!(query.hits.len(), 1, "durable source filtering must precede model projection");
+        assert_eq!(query.hits[0].memory.memory_id, memory.memory_id);
+        assert!(!query.has_more);
+        assert!(serde_json::to_vec(&query).unwrap().len() <= 1200);
+        for value in [serde_json::to_value(&default[0]).unwrap(), serde_json::to_value(&query.hits[0].memory).unwrap()] {
+            assert!(value.get("source_event_ids").is_none());
+            assert!(value.get("source_message_refs").is_none());
+            assert_eq!(value["revision"], memory.revision);
+            assert_eq!(value["content"], memory.content);
+        }
+        assert_eq!(svc.list_memories(&filter).await.unwrap(), full_before,
+            "Agent presentation must retain all lineage for REST, export and retraction");
     }
 
     #[tokio::test]
@@ -3259,11 +3696,23 @@ mod tests {
         let svc = service(dir.path()).await;
         let a = svc.create_companion("甲", "ink").await.unwrap();
         let b = svc.create_companion("乙", "boo").await.unwrap();
+        let sessions = attach_canonical_test_host(&svc);
+        let mut canonical_ids = Vec::new();
+        for (companion_id, key) in [(&a.companion_id, "a-chat"), (&a.companion_id, "a-associated"), (&b.companion_id, "b-chat")] {
+            let request = serde_json::from_value::<nomifun_api_types::CreateConversationRequest>(serde_json::json!({
+                "type": "nomi", "name": key, "extra": {},
+            })).unwrap();
+            let created = sessions.create(svc.authoritative_user_id.as_ref(), request, vec![], crate::CompanionSessionCreateContext {
+                companion_id: companion_id.clone(), role: CompanionRole::Companion, robot_id: None,
+                idempotency_key: key.into(), mcp_server_ids: None,
+            }).await.unwrap();
+            canonical_ids.push(created.conversation_id);
+        }
         assert_eq!(svc.get_config().await.default_companion_id.as_deref(), Some(a.companion_id.as_str()));
 
         // Give A per-companion rows that must vanish with it.
         svc.store.add_companion_xp(&a.companion_id, 42).await.unwrap();
-        let conversation = conversation_fixture(1);
+        let conversation = canonical_ids[0].clone();
         svc.store.insert_companion_thread(&conversation, &a.companion_id, "甲聊").await.unwrap();
         svc.store.add_companion_xp(&b.companion_id, 7).await.unwrap();
 
@@ -3272,6 +3721,10 @@ mod tests {
         assert!(matches!(svc.get_companion(&a.companion_id).await, Err(AppError::NotFound(_))));
         assert_eq!(svc.store.get_companion_state_i64(&a.companion_id, "xp").await.unwrap(), 0);
         assert!(!svc.store.is_companion_thread(&conversation).await.unwrap());
+        for id in &canonical_ids[..2] {
+            assert!(matches!(sessions.get(svc.authoritative_user_id.as_ref(), id).await, Err(AppError::NotFound(_))));
+        }
+        assert!(sessions.get(svc.authoritative_user_id.as_ref(), &canonical_ids[2]).await.is_ok(), "another Companion's canonical Session survives");
         // Default re-pointed to the survivor; survivor untouched.
         assert_eq!(svc.get_config().await.default_companion_id.as_deref(), Some(b.companion_id.as_str()));
         assert_eq!(svc.store.get_companion_state_i64(&b.companion_id, "xp").await.unwrap(), 7);
@@ -3282,6 +3735,55 @@ mod tests {
         assert_eq!(svc.default_companion_id().await, None);
 
         assert!(matches!(svc.delete_companion(&a.companion_id).await, Err(AppError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn rename_then_new_session_keeps_stable_identity_and_delete_cleans_old_frozen_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path()).await;
+        let profile = svc.create_companion("名字A", "ink").await.unwrap();
+        let sessions = attach_canonical_test_host(&svc);
+        let legacy_root = svc.companion_workspaces_root().join(format!("{}_名字A", profile.seq));
+        std::fs::create_dir_all(&legacy_root).unwrap();
+        std::fs::write(legacy_root.join("old.txt"), "existing current-generation work").unwrap();
+        let legacy = sessions.create(svc.authoritative_user_id.as_ref(), serde_json::from_value(serde_json::json!({
+            "type": "nomi", "name": "旧的正式伙伴会话", "extra": { "workspace": legacy_root.to_string_lossy() },
+        })).unwrap(), vec![], crate::CompanionSessionCreateContext {
+            companion_id: profile.companion_id.clone(), role: CompanionRole::Companion, robot_id: None,
+            idempotency_key: "before-stable-directory-identity".into(), mcp_server_ids: None,
+        }).await.unwrap();
+        svc.store.insert_companion_thread(&legacy.conversation_id, &profile.companion_id, &legacy.name).await.unwrap();
+        let component = legacy_root.file_name().unwrap().to_str().unwrap();
+        assert_eq!(svc.register_companion_workspace_component(&profile.companion_id, component).await.unwrap(), component);
+        assert_eq!(svc.register_companion_workspace_component(&profile.companion_id, "another-proposed-location").await.unwrap(), component,
+            "registration is CAS-if-absent, never a path rewrite");
+        assert!(svc.register_companion_workspace_component(&profile.companion_id, "../escape").await.is_err());
+
+        let older_second_root = svc.companion_workspaces_root().join(format!("{}_名字B", profile.seq));
+        std::fs::create_dir_all(&older_second_root).unwrap();
+        std::fs::write(older_second_root.join("other-old.txt"), "another frozen current-generation root").unwrap();
+        sessions.create(svc.authoritative_user_id.as_ref(), serde_json::from_value(serde_json::json!({
+            "type": "nomi", "name": "另一旧会话", "extra": { "workspace": older_second_root.to_string_lossy() },
+        })).unwrap(), vec![], crate::CompanionSessionCreateContext {
+            companion_id: profile.companion_id.clone(), role: CompanionRole::Companion, robot_id: None,
+            idempotency_key: "second-current-generation-frozen-root".into(), mcp_server_ids: None,
+        }).await.unwrap();
+
+        let stable = svc.companion_workspace_path(&profile.companion_id).await.unwrap();
+        let provider = nomifun_common::ProviderId::new().into_string();
+        svc.patch_companion(&profile.companion_id, serde_json::json!({
+            "name": "名字B", "model": {"provider_id": provider, "model": "fixture"},
+        })).await.unwrap();
+        assert_eq!(svc.companion_workspace_path(&profile.companion_id).await.unwrap(), stable);
+        std::fs::create_dir_all(&svc.skill_paths.builtin_skills_dir).unwrap();
+        let new_thread = svc.new_companion_thread(&profile.companion_id, "after-rename", None).await.unwrap();
+        assert_eq!(sessions.get(svc.authoritative_user_id.as_ref(), &new_thread.conversation_id).await.unwrap().extra["workspace"], stable.to_string_lossy().as_ref());
+        assert_eq!(sessions.get(svc.authoritative_user_id.as_ref(), &legacy.conversation_id).await.unwrap().extra["workspace"], legacy_root.to_string_lossy().as_ref(), "an existing frozen Session is not moved");
+        std::fs::write(stable.join("new.txt"), "new shared work").unwrap();
+        svc.delete_companion(&profile.companion_id).await.unwrap();
+        assert!(!legacy_root.exists(), "canonical provenance includes the older named root");
+        assert!(!older_second_root.exists(), "all authenticated frozen roots are settled and cleaned");
+        assert!(svc.store.get_companion_state(&profile.companion_id, crate::companion::WORKSPACE_COMPONENT_KEY).await.unwrap().is_none());
     }
 
     #[tokio::test]

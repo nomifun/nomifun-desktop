@@ -47,6 +47,9 @@ pub(crate) type AttemptStarted = Box<
 pub(crate) enum AttemptSessionTarget {
     /// Ordinary collaboration owns a separate immutable audit transcript.
     ChildAttempt,
+    /// Product-authored child keeps explicit canonical Companion affiliation;
+    /// merely carrying a companion resource never grants that affiliation.
+    DirectedChildAttempt { source: crate::DirectedDelegationSource },
     /// AutoWork drives the exact AgentSession selected by the user. The
     /// Session is not created, renamed, or later cleaned up as an Attempt.
     AutomationLead { conversation_id: String },
@@ -67,7 +70,7 @@ fn attempt_turn_input(
     } else {
         step_spec.to_owned()
     };
-    Ok((content, "agent_execution", false))
+    Ok((content, "agent_execution", matches!(session_target,AttemptSessionTarget::DirectedChildAttempt { .. })))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,6 +186,17 @@ pub trait AgentExecutionSessionPort: Send + Sync {
         creation_key: &str,
     ) -> Result<ConversationResponse, AppError>;
 
+    async fn create_directed_from_agent_snapshot_idempotent(
+        &self,
+        _owner_id: &str,
+        _request: CreateConversationRequest,
+        _snapshot: AgentResolvedSnapshot,
+        _source: &crate::DirectedDelegationSource,
+        _creation_key: &str,
+    ) -> Result<ConversationResponse, AppError> {
+        Err(AppError::Conflict("canonical directed-child creator is unavailable".into()))
+    }
+
     async fn discard_unlinked_creation(
         &self,
         owner_id: &str,
@@ -264,6 +278,24 @@ pub trait AgentExecutionSessionPort: Send + Sync {
         content: &str,
         origin: &str,
     ) -> Result<String, AppError>;
+
+    /// Directed reports must preserve the exact task/source references. A Host
+    /// without that canonical writer must not silently degrade to plain text.
+    async fn project_directed_execution_report_idempotent(
+        &self,
+        _owner_id: &str,
+        _conversation_id: &str,
+        _operation_id: &str,
+        _content: &str,
+        _report: &crate::DirectedDelegationReport,
+    ) -> Result<String, AppError> {
+        Err(AppError::Conflict("canonical directed-report writer is unavailable".into()))
+    }
+
+    async fn notify_directed_input_required_idempotent(&self, _owner_id: &str,
+        _input: &crate::DirectedDelegationInput) -> Result<(),AppError> {
+        Err(AppError::Conflict("canonical directed-input notice writer is unavailable".into()))
+    }
 }
 
 /// Production adapter.  All runtime/turn work goes through the typed session
@@ -451,7 +483,8 @@ impl AttemptRunner for AgentSessionAttemptRunner {
             let constraints = nomifun_api_types::ExecutionConstraints {
                 version: 1,
                 tool_scope: tool_policy,
-                exclude_delegation: delegation_depth >= MAX_AGENT_DELEGATION_DEPTH,
+                exclude_delegation: delegation_policy == DelegationPolicy::Disabled
+                    || delegation_depth >= MAX_AGENT_DELEGATION_DEPTH,
                 managed_process_only,
             };
             let mut extra = json!({ nomifun_api_types::EXECUTION_CONSTRAINTS_KEY: constraints });
@@ -467,7 +500,8 @@ impl AttemptRunner for AgentSessionAttemptRunner {
             &participant.disabled_builtin_skills,
             tool_policy,
             managed_process_only,
-            delegation_depth >= MAX_AGENT_DELEGATION_DEPTH,
+            delegation_policy == DelegationPolicy::Disabled
+                || delegation_depth >= MAX_AGENT_DELEGATION_DEPTH,
         ) };
         if let Some(snapshot) = participant.agent_snapshot.as_ref() {
             extra["preset_id"] = Value::String(snapshot.preset_id.clone());
@@ -476,9 +510,10 @@ impl AttemptRunner for AgentSessionAttemptRunner {
                 .map_err(|error| AppError::Internal(format!("encode preset snapshot: {error}")))?;
         }
 
-        let creates_child = matches!(&session_target, AttemptSessionTarget::ChildAttempt);
+        let creates_child = matches!(&session_target, AttemptSessionTarget::ChildAttempt
+            | AttemptSessionTarget::DirectedChildAttempt { .. });
         let conversation = match &session_target {
-            AttemptSessionTarget::ChildAttempt => {
+            AttemptSessionTarget::ChildAttempt | AttemptSessionTarget::DirectedChildAttempt { .. } => {
                 let request = CreateConversationRequest {
                     r#type: AgentType::Nomi,
                     name: Some(format!("协作 · {}", step_title.trim())),
@@ -498,7 +533,13 @@ impl AttemptRunner for AgentSessionAttemptRunner {
                     execution_template_id: None,
                     extra,
                 };
-                let created = if let Some(snapshot) = participant.agent_snapshot.clone() {
+                let created = if let AttemptSessionTarget::DirectedChildAttempt { source } = &session_target {
+                    let snapshot = participant.agent_snapshot.clone().ok_or_else(||
+                        AppError::Conflict("directed child has no frozen Agent snapshot".into()))?;
+                    self.session.create_directed_from_agent_snapshot_idempotent(
+                        owner_id, request, snapshot, source, attempt_creation_key,
+                    ).await
+                } else if let Some(snapshot) = participant.agent_snapshot.clone() {
                     self.session
                         .create_from_agent_snapshot_idempotent(
                             owner_id,
@@ -834,6 +875,8 @@ mod tests {
     struct RecordingSessionPort {
         conversation: ConversationResponse,
         create_calls: AtomicUsize,
+        created_request: Mutex<Option<CreateConversationRequest>>,
+        directed_source: Mutex<Option<crate::DirectedDelegationSource>>,
         delivered: Mutex<Option<(String, SendMessageRequest)>>,
         receipt: Option<AgentExecutionDelivery>,
     }
@@ -853,12 +896,22 @@ mod tests {
         async fn create_from_agent_snapshot_idempotent(
             &self,
             _owner_id: &str,
-            _request: CreateConversationRequest,
+            request: CreateConversationRequest,
             _snapshot: AgentResolvedSnapshot,
             _creation_key: &str,
         ) -> Result<ConversationResponse, AppError> {
             self.create_calls.fetch_add(1, Ordering::SeqCst);
+            *self.created_request.lock().unwrap() = Some(request);
             Err(AppError::Conflict("unexpected child Session creation".to_owned()))
+        }
+
+        async fn create_directed_from_agent_snapshot_idempotent(
+            &self, owner_id: &str, request: CreateConversationRequest,
+            snapshot: AgentResolvedSnapshot, source: &crate::DirectedDelegationSource,
+            creation_key: &str,
+        ) -> Result<ConversationResponse, AppError> {
+            *self.directed_source.lock().unwrap() = Some(source.clone());
+            self.create_from_agent_snapshot_idempotent(owner_id, request, snapshot, creation_key).await
         }
 
         async fn discard_unlinked_creation(
@@ -980,6 +1033,10 @@ mod tests {
         assert!(content.contains("task_brief"));
         assert_eq!(origin, "agent_execution");
         assert!(!hidden);
+        let directed=AttemptSessionTarget::DirectedChildAttempt{source:crate::DirectedDelegationSource{
+            agent_session_id:CONVERSATION_ID.into(),turn_operation_id:"source".into(),tool_operation_id:"tool".into(),effect_id:"effect".into()}};
+        let (_,origin,hidden)=attempt_turn_input(&directed,true,"host context","requested desktop task").unwrap();
+        assert_eq!(origin,"agent_execution");assert!(hidden,"a directed host task is not a second human utterance");
     }
 
     fn recording_session(receipt: Option<AgentExecutionDelivery>) -> Arc<RecordingSessionPort> {
@@ -1013,6 +1070,8 @@ mod tests {
         };
         Arc::new(RecordingSessionPort {
             conversation,
+            created_request: Mutex::new(None),
+            directed_source: Mutex::new(None),
             create_calls: AtomicUsize::new(0),
             delivered: Mutex::new(None),
             receipt,
@@ -1130,6 +1189,47 @@ mod tests {
         assert!(extra.get("step_id").is_none());
         assert!(extra.get("attempt_id").is_none());
         assert!(extra.get("delegation_depth").is_none());
+    }
+
+    #[tokio::test]
+    async fn directed_child_uses_its_saved_snapshot_and_cannot_delegate_at_depth_zero() {
+        let session = recording_session(None);
+        let runner = AgentSessionAttemptRunner::new(session.clone());
+        let preset = generate_id();
+        let provider = generate_id();
+        let snapshot: AgentResolvedSnapshot = serde_json::from_value(json!({
+            "preset_id":preset,"preset_revision":3,"preset_name":"Desktop",
+            "canonical_binding":{
+                "preset_revision_ref":{"preset_id":preset,"revision":3,"revision_digest":"a".repeat(64)},
+                "resolved_snapshot_ref":{"snapshot_id":generate_id(),"snapshot_digest":"b".repeat(64)},
+                "typed_resource_bindings":[],"binding_version":1
+            },
+            "resolved_model":{"provider_id":provider,"model":"desktop-model"},
+            "enabled_capabilities":["computer"],"instructions":"desktop rules"
+        })).unwrap();
+        let participant = ExecutionParticipant {
+            participant_id:generate_id(), execution_id:generate_id(), source_agent_id:generate_id(),
+            preset_id:Some(preset),preset_revision:Some(3),agent_snapshot:Some(snapshot.clone()),
+            provider_id:Some(provider),model:Some("desktop-model".into()),role:None,capability:None,
+            constraints:None,description:None,system_prompt:None,enabled_skills:vec![],
+            disabled_builtin_skills:vec![],sort_order:0,introduced_in_revision:0,
+            retired_in_revision:None,created_at:1,
+        };
+        let source = crate::DirectedDelegationSource { agent_session_id:CONVERSATION_ID.into(),
+            turn_operation_id:"source-turn".into(),tool_operation_id:"source-tool".into(),effect_id:"source-effect".into() };
+        let result = runner.execute("owner",AttemptSessionTarget::DirectedChildAttempt { source:source.clone() },&participant,&[],None,
+            "Desktop task",AgentToolPolicy::Full,false,DelegationPolicy::Disabled,0,
+            DecisionPolicy::AskUser,&generate_id(),"task context","do the requested work",
+            Duration::from_secs(1),Box::new(|_|Box::pin(async { panic!("creation is deliberately intercepted") })),
+        ).await;
+        assert!(result.is_err());
+        let request = session.created_request.lock().unwrap().take().unwrap();
+        assert_eq!(request.delegation_policy,DelegationPolicy::Disabled);
+        assert_eq!(request.extra[nomifun_api_types::EXECUTION_CONSTRAINTS_KEY]["exclude_delegation"],true);
+        assert_eq!(request.extra["agent_snapshot"],serde_json::to_value(snapshot).unwrap());
+        assert_eq!(session.create_calls.load(Ordering::SeqCst),1);
+        assert_eq!(session.directed_source.lock().unwrap().as_ref(),Some(&source));
+        assert!(session.delivered.lock().unwrap().is_none());
     }
 
     #[test]

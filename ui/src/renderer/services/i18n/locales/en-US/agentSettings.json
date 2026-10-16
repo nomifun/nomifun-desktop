@@ -157,8 +157,8 @@
         "description": "A personal companion with memory and everyday tools for research, files, Office, media, browsers, apps, knowledge, schedules, messaging, and collaboration."
         },
         "robot": {
-          "name": "Robot companion",
-          "description": "The same companion identity and memory, with focused tools and concise replies for responsive interaction with a selected robot. Your current model and movement permissions are preserved."
+          "name": "Robot",
+          "description": "Works alongside Companion with an independent model and focused device tools. Computer tasks can be delegated to Companion while identity and long-term memory are shared."
       }
     },
     "customerService": {

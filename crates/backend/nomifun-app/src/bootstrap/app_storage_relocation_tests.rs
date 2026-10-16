@@ -71,7 +71,7 @@ async fn session(store: &AgentSessionStore, owner: &PrincipalRef, root: &Path) -
     let created = store.create_session(CreateSessionRequest::new(AgentSessionLiveRecord {
         agent_session_id: id.as_str().into(), owner_ref: owner.clone(), metadata: AgentSessionMetadata {
             purpose: Default::default(), app_project_id: Some(root.file_name().unwrap().to_str().unwrap().into()), title: Some("Existing project history".into()), pinned: false,
-            archived: false, reasoning_effort: None }, agent_binding: binding.clone(),
+            archived: false, reasoning_effort: None, companion: None }, agent_binding: binding.clone(),
         remote_binding_provenance: None, parent_session_id: None, fork_base_payload_id: None, next_seq: 1,
     }, 1_788_000_000_000, format!("fixture-open-{id}"), "session_api".into(),
         format!("fixture-open-{id}").into(), format!("fixture-open-{id}").into())).await.unwrap();

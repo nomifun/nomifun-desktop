@@ -19,8 +19,21 @@ pub(super) use app_project_fences::{AppProjectWorkspaceFence, AppProjectDeletion
 mod session_contract_evolution;
 #[path = "session_context_clear.rs"]
 mod session_context_clear;
+#[path = "channel_guest_sessions.rs"]
+mod channel_guest_sessions;
 #[path = "native_execution_control.rs"]
 pub(super) mod native_execution_control;
+
+#[path = "companion_sessions.rs"]
+mod companion_sessions;
+pub(super) use companion_sessions::canonical_companion_origin;
+#[path = "companion_directed_reports.rs"]
+mod companion_directed_reports;
+#[path = "companion_report_delivery.rs"]
+mod companion_report_delivery;
+pub(crate) use companion_report_delivery::DirectedReportDeliveryPort;
+#[path = "companion_decision_delivery.rs"]
+mod companion_decision_delivery;
 
 #[path = "turn_files_api.rs"]
 mod turn_files_api;
@@ -156,6 +169,9 @@ pub(crate) struct NomiCoreSessionOwner {
     product_agent_resolver:
         std::sync::OnceLock<std::sync::Weak<NomiCoreProductAgentResolver>>,
     idmm: std::sync::OnceLock<std::sync::Weak<nomifun_idmm::IdmmService>>,
+    companion_service: std::sync::OnceLock<std::sync::Weak<nomifun_companion::CompanionService>>,
+    directed_report_delivery: std::sync::OnceLock<std::sync::Weak<dyn DirectedReportDeliveryPort>>,
+    directed_voice_work: std::sync::OnceLock<std::sync::Weak<super::voice_work_host::AppVoiceWorkHost>>,
     canonical: CanonicalAgentSessionOwner,
     runtime_sessions: Arc<dyn AgentRuntimeSessions>,
     user_events: Arc<dyn UserEventSink>,
@@ -168,6 +184,7 @@ pub(crate) struct NomiCoreSessionOwner {
     creation_service: Arc<nomifun_creation::CreationService>,
     session_operation_locks:
         Arc<DashMap<String, Arc<tokio::sync::RwLock<()>>>>,
+    companion_lifecycle_locks: Arc<DashMap<String, Arc<tokio::sync::RwLock<()>>>>,
 }
 
 /// Presentation context captured from the host-admitted binding. Error
@@ -374,7 +391,7 @@ fn product_agent_resource_selections(
             } else { resource.resource_id.clone() },
         }).collect());
     let exact_identity_kinds: &[&str] = match target.target_kind.as_str() {
-        "companion" => &["companion", "companion_memory"],
+        "companion" | "robot" => &["companion", "companion_memory"],
         "creative_studio_canvas" => &["canvas"],
         "customer" => &["customer"],
         _ => &[],
@@ -446,7 +463,7 @@ impl NomiCoreProductAgentResolver {
         Ok(())
     }
 
-    async fn materialize(&self, owner: &UserId, selection: &ProductAgentSelection, model: Option<&AgentChatModelSelectionDto>) -> Result<AgentBindingValueDto, AppError> {
+    async fn materialize(&self, owner: &UserId, selection: &ProductAgentSelection, model: Option<&AgentChatModelSelectionDto>, robot_role: bool) -> Result<AgentBindingValueDto, AppError> {
         self.control_plane.validate_product_selection(owner, selection.template_id(), selection.preset_id(), model).await.map_err(control_plane_error_to_app)?;
         let preset_id = match selection {
             ProductAgentSelection::Preset { preset_id } => preset_id.clone(),
@@ -456,7 +473,12 @@ impl NomiCoreProductAgentResolver {
                     model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new(),
                 }).await.map_err(control_plane_error_to_app)?.preset.preset_id,
         };
-        self.control_plane.resolve_agent_session_binding_with_model(owner, &preset_id, model).await.map_err(control_plane_error_to_app)
+        if robot_role {
+            self.control_plane.resolve_companion_robot_session_binding_with_model(owner, &preset_id, model)
+                .await.map_err(control_plane_error_to_app)
+        } else {
+            self.control_plane.resolve_agent_session_binding_with_model(owner, &preset_id, model).await.map_err(control_plane_error_to_app)
+        }
     }
 }
 
@@ -480,7 +502,7 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
             .await
             .map_err(control_plane_error_to_app)?;
         let mut selection = self.selection(&owner, &target.target_kind, &target.target_id).await?;
-        if target.target_kind == "companion" {
+        if matches!(target.target_kind.as_str(), "companion" | "robot") {
             if let Some(selection) = selection.as_ref() {
                 require_companion_agent_selection(&self.control_plane, &owner, selection).await
                     .map_err(|error| AppError::UnprocessableEntity(error.message.clone()))?;
@@ -496,7 +518,7 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
         }
         let binding = if let Some(selection) = selection {
             let model = requested_model.map(|model| AgentChatModelSelectionDto { provider_id: model.provider_id.clone(), model: model.model.clone() });
-            let mut binding = self.materialize(&owner, &selection, model.as_ref()).await?;
+            let mut binding = self.materialize(&owner, &selection, model.as_ref(), target.target_kind == "robot").await?;
             let (_, _, next_snapshot) = self.control_plane
                 .saved_binding_artifacts(&owner, &binding)
                 .await
@@ -534,18 +556,20 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
             }
         } else if let Some(existing) = existing {
             if let Some(model) = requested_model {
-                self
+                let model = AgentChatModelSelectionDto { provider_id: model.provider_id.clone(), model: model.model.clone() };
+                if target.target_kind == "robot" {
+                    self.control_plane.resolve_companion_robot_session_binding_with_model(
+                        &owner, &existing.agent_binding.preset_revision_ref.preset_id, Some(&model))
+                        .await.map_err(control_plane_error_to_app)?
+                } else { self
                     .control_plane
                     .resolve_agent_session_binding_with_model(
                         &owner,
                         &existing.agent_binding.preset_revision_ref.preset_id,
-                        Some(&AgentChatModelSelectionDto {
-                            provider_id: model.provider_id.clone(),
-                            model: model.model.clone(),
-                        }),
+                        Some(&model),
                     )
                     .await
-                    .map_err(control_plane_error_to_app)?
+                    .map_err(control_plane_error_to_app)? }
             } else {
                 existing.agent_binding
             }
@@ -569,11 +593,14 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
                 )
                 .await
                 .map_err(control_plane_error_to_app)?;
-            let binding = self
+            let binding = if target.target_kind == "robot" {
+                self.control_plane.resolve_companion_robot_session_binding_with_model(&owner, &editor.preset.preset_id, None)
+                    .await.map_err(control_plane_error_to_app)?
+            } else { self
                 .control_plane
                 .resolve_agent_session_binding(&owner, &editor.preset.preset_id)
                 .await
-                .map_err(control_plane_error_to_app)?;
+                .map_err(control_plane_error_to_app)? };
             let (_, _, unbound_snapshot) = self
                 .control_plane
                 .saved_binding_artifacts(&owner, &binding)
@@ -713,6 +740,9 @@ impl NomiCoreSessionOwner {
             native_engines: std::sync::OnceLock::new(),
             product_agent_resolver: std::sync::OnceLock::new(),
             idmm: std::sync::OnceLock::new(),
+            companion_service: std::sync::OnceLock::new(),
+            directed_report_delivery: std::sync::OnceLock::new(),
+            directed_voice_work: std::sync::OnceLock::new(),
             runtime_sessions,
             user_events,
             background_tasks,
@@ -720,11 +750,17 @@ impl NomiCoreSessionOwner {
             pool,
             creation_service,
             session_operation_locks: Arc::new(DashMap::new()),
+            companion_lifecycle_locks: Arc::new(DashMap::new()),
         }
     }
 
     pub(crate) fn canonical(&self) -> &CanonicalAgentSessionOwner {
         &self.canonical
+    }
+
+    pub(crate) fn install_companion_service(&self, service: &Arc<nomifun_companion::CompanionService>) -> Result<(), AppError> {
+        self.companion_service.set(Arc::downgrade(service))
+            .map_err(|_| AppError::Conflict("Companion Session service is already installed".into()))
     }
 
     #[cfg(feature = "browser-use")]
@@ -785,6 +821,7 @@ impl NomiCoreSessionOwner {
         if projection.conversation_id != session_id.as_ref() {
             return Err(AppError::Conflict("Runtime projection belongs to another Session".into()));
         }
+        self.validate_registered_channel_guest_runtime(owner_id, session_id).await?;
         if projection.extra.get("workspace").and_then(Value::as_str)
             .is_none_or(|workspace| workspace.trim().is_empty())
         {
@@ -941,15 +978,40 @@ impl NomiCoreSessionOwner {
     pub(crate) async fn create_session_idempotent(
         &self,
         owner_id: &str,
-        mut request: CreateConversationRequest,
+        request: CreateConversationRequest,
         snapshot: Option<AgentResolvedSnapshot>,
         creation_key: &str,
     ) -> Result<ConversationResponse, AppError> {
+        self.create_session_idempotent_scoped(owner_id, request, snapshot, creation_key, None, None).await
+    }
+
+    async fn create_session_idempotent_scoped(
+        &self,
+        owner_id: &str,
+        mut request: CreateConversationRequest,
+        snapshot: Option<AgentResolvedSnapshot>,
+        creation_key: &str,
+        companion_scope: Option<nomifun_agent_contracts::CompanionSessionOrigin>,
+        source_session: Option<&AgentSessionId>,
+    ) -> Result<ConversationResponse, AppError> {
+        if creation_key.starts_with("companion-directed:") && source_session.is_none() {
+            return Err(AppError::Forbidden("Directed Companion creation identity is reserved for admitted delegation".into()));
+        }
+        let _companion_lifecycle = if let Some(scope) = companion_scope.as_ref() {
+            Some(self.companion_lifecycle_lock(&scope.companion_id).read_owned().await)
+        } else { None };
+        if let Some(source) = source_session {
+            let observation = self.canonical.get(&PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() }, source).await?;
+            if canonical_companion_origin(owner_id, &observation)?.as_ref().map(|scope| scope.companion_id.as_str())
+                != companion_scope.as_ref().map(|scope| scope.companion_id.as_str()) {
+                return Err(AppError::Forbidden("Directed source disappeared or changed before child creation".into()));
+            }
+        }
         nomifun_common::UserId::parse(owner_id.to_owned()).map_err(|error| {
             AppError::Forbidden(format!("Invalid canonical Agent owner: {error}"))
         })?;
         let mut snapshot = snapshot;
-        if let Some(target) = product_agent_target_from_request(&request.extra) {
+        if companion_scope.is_none() && let Some(target) = product_agent_target_from_request(&request.extra) {
             let owner = UserId::from(owner_id.to_owned());
             let control_plane = self
                 .runtime_control_plane
@@ -1239,21 +1301,21 @@ impl NomiCoreSessionOwner {
             .collect();
         self.validate_idmm_state(&idmm_config).await?;
         let _project_directory_fence = self.guard_binding_workspace_read(owner_id, &saved_binding)?;
-        let opened = self
-            .canonical
-            .open_with_provenance(
-                PrincipalRef {
-                    principal_kind: "user".to_owned(),
-                    principal_id: owner_id.to_owned(),
-                },
+        let principal = PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() };
+        let title = request.name.or_else(|| Some(projected.projection.snapshot.preset_name));
+        let opened = if let Some(scope) = companion_scope {
+            self.canonical.open_with_companion_scope(principal, saved_binding, title,
+                active_capabilities, scope, creation_key, now_ms()).await?
+        } else { self.canonical.open_with_provenance(
+                principal,
                 saved_binding,
-                request.name.or_else(|| Some(projected.projection.snapshot.preset_name)),
+                title,
                 active_capabilities,
                 metadata.remote,
                 creation_key,
                 now_ms(),
             )
-            .await?;
+            .await? };
         self.materialize_workspace_for_binding(
             owner_id,
             &opened.session.agent_session_id,
@@ -1319,6 +1381,7 @@ impl NomiCoreSessionOwner {
                     template_key: "chat.minimal".to_owned(),
                 },
                 Some(&selected_model),
+                false,
             )
             .await?;
         let control_plane = self
@@ -1477,7 +1540,7 @@ impl NomiCoreSessionOwner {
             .map_err(|error| AppError::Internal(error.to_string()))?;
             // Refresh only the selected Chat model/configuration at an idle
             // turn boundary; all non-model Agent/resource contracts stay exact.
-            if !attempt && let Some(route) = revision.payload.chat_route_records
+            if !attempt && !self.is_companion_associated_task(owner_id, session_id).await? && let Some(route) = revision.payload.chat_route_records
                 .get(nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT)
             {
                 let owner = UserId::from(owner_id.to_owned());
@@ -1527,6 +1590,7 @@ impl NomiCoreSessionOwner {
                 }
             }
         }
+        self.validate_registered_channel_guest_runtime(owner_id, session_id).await?;
         self.materialize_workspace_for_binding(owner_id, session_id, &saved_binding)
             .await?;
         let route_identity = snapshot.content.chat_route_identity.clone().ok_or_else(|| {
@@ -2119,11 +2183,14 @@ impl NomiCoreSessionOwner {
             .session_operation_lock(session_id.as_ref())
             .write_owned()
             .await;
-        self.dispatch_canonical_turn_locked(owner_id,session_id,idempotency_key,request,initial_only,None,None,None,false,idmm_decision).await
+        self.dispatch_canonical_turn_locked(owner_id,session_id,idempotency_key,request,initial_only,None,None,None,false,idmm_decision,None).await
     }
 
     async fn dispatch_canonical_turn_locked(&self,owner_id:&str,session_id:&AgentSessionId,idempotency_key:&str,request:SendMessageRequest,
-        initial_only:bool,voice_binding:Option<u64>,voice_context_floor:Option<u64>,voice_shutdown:Option<&tokio_util::sync::CancellationToken>,voice_supersede:bool,idmm_decision:Option<IdmmDecisionExplanation>)->Result<IdempotentMessageDelivery,AppError> {
+        initial_only:bool,voice_binding:Option<u64>,voice_context_floor:Option<u64>,voice_shutdown:Option<&tokio_util::sync::CancellationToken>,voice_supersede:bool,idmm_decision:Option<IdmmDecisionExplanation>,input_source:Option<nomifun_agent_contracts::AgentInputSource>)->Result<IdempotentMessageDelivery,AppError> {
+        if idmm_decision.is_some() || request.origin.as_deref() == Some("idmm") {
+            self.ensure_channel_guest_idmm_allowed(session_id).await?;
+        }
         let exact = self.canonical.get(&PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() }, session_id).await?;
         let _project_directory_fence = self.guard_binding_workspace_read(owner_id, &exact.session.agent_binding)?;
         let mut input = if let Some(version)=voice_binding {
@@ -2143,6 +2210,9 @@ impl NomiCoreSessionOwner {
             }
             input["idmm_decision"] = serde_json::to_value(decision)
                 .map_err(|error| AppError::Internal(error.to_string()))?;
+        }
+        if let Some(source) = input_source {
+            input["input_source"] = serde_json::to_value(source).map_err(|error| AppError::Internal(error.to_string()))?;
         }
         let principal = PrincipalRef {
             principal_kind: "user".to_owned(),
@@ -2609,11 +2679,10 @@ impl NomiCoreSessionOwner {
             .saved_binding_presentation(&owner, &binding_dto)
             .await
             .map_err(control_plane_error_to_app)?;
-        let companion_id = companion_id_from_binding(&binding)?.filter(|companion_id| {
-            let key = format!("user:{owner_id}:open:companion-session:{companion_id}");
-            observed.events.iter().any(|event| event.kind.0 == "session/opening"
-                && event.producer_id.as_ref() == "session_api" && event.idempotency_key.as_ref() == key)
-        });
+        let companion_origin = canonical_companion_origin(owner_id, &observed)?;
+        let companion_associated_task: bool = if companion_origin.is_some() {
+            self.is_companion_associated_task(owner_id, session_id).await?
+        } else { false };
         let common_owner = nomifun_common::UserId::parse(owner_id.to_owned()).map_err(|error| {
             AppError::Forbidden(format!("invalid canonical AgentSession owner: {error}"))
         })?;
@@ -2674,7 +2743,8 @@ impl NomiCoreSessionOwner {
             workspace,
             created_at,
             execution_link,
-            companion_id,
+            companion_origin,
+            companion_associated_task,
         )?))
     }
 
@@ -2688,6 +2758,9 @@ impl NomiCoreSessionOwner {
         request: SendMessageRequest,
     ) -> Result<IdempotentMessageDelivery, AppError> {
         Self::validate_ordinary_message_origin(&request)?;
+        if self.is_companion_associated_task(owner_id, &AgentSessionId::from(session_id.to_owned())).await? {
+            return Err(AppError::Conflict("AGENT_EXECUTION_ATTEMPT_READ_ONLY: associated task inputs require their execution authority".into()));
+        }
         self.dispatch_canonical_turn(
             owner_id,
             &AgentSessionId::from(session_id.to_owned()),
@@ -2700,8 +2773,8 @@ impl NomiCoreSessionOwner {
     }
 
     fn validate_ordinary_message_origin(request: &SendMessageRequest) -> Result<(), AppError> {
-        if request.origin.as_deref() == Some("idmm") {
-            return Err(AppError::BadRequest("IDMM origin is reserved for the supervisor".into()));
+        if matches!(request.origin.as_deref(), Some("idmm" | "robot" | "directed_delegation_result" | "channel_guest")) {
+            return Err(AppError::BadRequest("This input origin is reserved for its authenticated host entry".into()));
         }
         Ok(())
     }
@@ -2765,9 +2838,12 @@ impl NomiCoreSessionOwner {
         if let Some(decision) = &decision {
             decision.validate().map_err(|error| AppError::Conflict(error.into()))?;
         }
+        let input_source: Option<nomifun_agent_contracts::AgentInputSource> = input.get("input_source")
+            .filter(|value| !value.is_null()).cloned().map(serde_json::from_value).transpose()
+            .map_err(|error| AppError::Conflict(format!("accepted input source is invalid: {error}")))?;
         Ok(WebSocketMessage::new("message.userCreated", json!({
             "conversation_id":session_id,"msg_id":event.event_id,
-            "content":content,"idmm_decision":decision,
+            "content":content,"idmm_decision":decision,"input_source":input_source,
             "position":"right","status":"finish","hidden":input["hidden"],
             "origin":input["origin"],"channel_platform":input["channel_platform"],
             "created_at":created_at.saturating_add(i64::try_from(event.seq).unwrap_or(i64::MAX)),
@@ -2783,6 +2859,8 @@ impl NomiCoreSessionOwner {
         notice: IdmmDecisionNotice,
     ) -> Result<(), AppError> {
         let session_id = AgentSessionId::from(session_id.to_owned());
+        let _operation = self.session_operation_lock(session_id.as_ref()).write_owned().await;
+        self.ensure_channel_guest_idmm_allowed(&session_id).await?;
         let principal = PrincipalRef { principal_kind:"user".into(),principal_id:owner_id.into() };
         let result = self.canonical.store().append_idmm_notice(&principal, &session_id, idempotency_key, notice)
             .await.map_err(agent_session_store_error)?;
@@ -2821,6 +2899,7 @@ impl NomiCoreSessionOwner {
         let lock=self.session_operation_lock(session.as_ref());
         let _guard=tokio::select! {biased;_ = stop.cancelled()=>return Ok(None),guard=lock.write_owned()=>guard};
         let observation=self.canonical.get(&PrincipalRef {principal_kind:"user".into(),principal_id:owner.into()},session).await?;
+        if self.is_companion_associated_task(owner, session).await? { return Err(AppError::Conflict("Associated task voice input requires its exact execution decision".into())); }
         if observation.session.agent_binding.binding_version!=version{return Err(AppError::Conflict("voice input binding changed before admission".into()));}
         if observation.head.status!="ready"||observation.head.active_turn_id.is_some(){return Ok(None);}
         let idle=self.runtime_sessions.active_turn_generation(session.as_ref()).is_none()&&match self.runtime_sessions.get_runtime(session.as_ref()) {
@@ -2831,7 +2910,7 @@ impl NomiCoreSessionOwner {
         };
         if !idle||self.canonical.store().has_unsettled_effects(session).await.map_err(agent_session_store_error)? {return Ok(None);}
         if stop.is_cancelled(){return Ok(None);}
-        self.dispatch_canonical_turn_locked(owner,session,key,request,false,Some(version),Some(context_floor),Some(stop),supersede,None).await.map(Some)
+        self.dispatch_canonical_turn_locked(owner,session,key,request,false,Some(version),Some(context_floor),Some(stop),supersede,None,None).await.map(Some)
     }
 
     /// A management send may replay only its own exact, fully compared input.
@@ -2881,7 +2960,7 @@ impl NomiCoreSessionOwner {
             // Its duplicate branch returns the original receipt without
             // opening, superseding or dispatching any Runtime work.
             return self.dispatch_canonical_turn_locked(owner, session, key, request, false,
-                Some(expected_binding_version), Some(expected_context_floor), None, false, None).await.map(Some);
+                Some(expected_binding_version), Some(expected_context_floor), None, false, None, None).await.map(Some);
         }
         if observation.session.agent_binding.binding_version != expected_binding_version {
             return Err(AppError::Conflict("Session management input binding changed before admission".into()));
@@ -2899,7 +2978,7 @@ impl NomiCoreSessionOwner {
             return Ok(None);
         }
         self.dispatch_canonical_turn_locked(owner, session, key, request, false,
-            Some(expected_binding_version), Some(expected_context_floor), None, false, None).await.map(Some)
+            Some(expected_binding_version), Some(expected_context_floor), None, false, None, None).await.map(Some)
     }
 
     pub(crate) async fn voice_operation_receipt(&self,owner:&str,session:&AgentSessionId,key:&str)->Result<nomifun_agent_session::TurnReceipt,AppError> {
@@ -2937,6 +3016,8 @@ impl NomiCoreSessionOwner {
         session_id: &str,
     ) -> Result<(), AppError> {
         let session_id = AgentSessionId::from(session_id.to_owned());
+        let _operation = self.session_operation_lock(session_id.as_ref()).write_owned().await;
+        self.ensure_channel_guest_idmm_allowed(&session_id).await?;
         if self
             .canonical
             .store()
@@ -3268,6 +3349,7 @@ fn product_agent_target_from_request(extra: &Value) -> Option<ProductAgentTarget
     ) {
         let default_template_key = match target_kind {
             "companion" => "companion.default",
+            "robot" => "companion.robot",
             "customer" => "customer-service.default",
             "creative_studio_canvas" => "creative-studio.default",
             _ => return None,
@@ -3587,7 +3669,7 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
         }
         let delivery = self.dispatch_canonical_turn_locked(
             &owner_id, &agent_session_id, &idempotency_key,
-            message, false, None, None, None, false, None,
+            message, false, None, None, None, false, None, None,
         ).await?;
         Ok(nomifun_cron::CronPreparedTurnDelivery {
             delivery: cron_delivery_from_conversation(delivery),
@@ -3802,6 +3884,20 @@ impl nomifun_channel::ChannelSessionPort for NomiCoreSessionOwner {
     ) -> Result<ConversationResponse, AppError> {
         self.create_session_idempotent(owner_id, request, None, creation_key).await
     }
+
+    async fn create_group_guest_idempotent(&self, owner_id: &str, request: CreateConversationRequest,
+        creation_key: &str) -> Result<ConversationResponse, AppError> {
+        self.create_channel_group_guest(owner_id, request, creation_key).await
+    }
+
+    async fn find_created_session(&self, owner_id: &str, creation_key: &str) -> Result<Option<String>, AppError> {
+        self.channel_session_opening(owner_id,creation_key).await.map(|session|session.map(|id|id.as_ref().to_owned()))
+    }
+
+    async fn send_group_guest_turn(&self, owner_id: &str, session_id: &str, idempotency_key: &str,
+        request: SendMessageRequest, creation_key: &str) -> Result<nomifun_channel::ChannelTurnDelivery, AppError> {
+        self.send_channel_group_guest(owner_id, session_id, idempotency_key, request, creation_key).await
+    }
 }
 
 #[async_trait]
@@ -3989,6 +4085,39 @@ impl nomifun_requirement::AutoWorkSessionConfigPort for NomiCoreSessionOwner {
 
 #[async_trait]
 impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
+    async fn context_role(
+        &self,
+        owner_id: &str,
+        companion_id: &str,
+        session_id: &str,
+        expected_snapshot: &nomifun_agent_contracts::ResolvedSnapshotRef,
+    ) -> Result<Option<nomifun_companion::CompanionRole>, AppError> {
+        let principal = PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() };
+        let observation = self.canonical.get(&principal, &AgentSessionId::from(session_id.to_owned())).await?;
+        if &observation.session.agent_binding.resolved_snapshot_ref != expected_snapshot {
+            return Err(AppError::Conflict("Companion context Snapshot changed before role resolution".into()));
+        }
+        let Some(origin) = canonical_companion_origin(owner_id, &observation)? else { return Ok(None); };
+        if origin.companion_id != companion_id {
+            return Err(AppError::Forbidden("Companion context belongs to another profile".into()));
+        }
+        Ok(Some(match origin.role {
+            nomifun_agent_contracts::CompanionSessionRole::Companion => nomifun_companion::CompanionRole::Companion,
+            nomifun_agent_contracts::CompanionSessionRole::Robot => nomifun_companion::CompanionRole::Robot,
+        }))
+    }
+
+    async fn prepare_companion_workspace(&self, owner_id: &str, companion_id: &str) -> Result<(), AppError> {
+        let companions = self.companion_service.get().and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| AppError::Conflict("Companion workspace owner is unavailable".into()))?;
+        companions.get_companion(companion_id).await?;
+        let resolver = self.product_agent_resolver.get().and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| AppError::Conflict("Companion Agent resolver is unavailable".into()))?;
+        if resolver.owner_id.as_ref() != owner_id { return Err(AppError::Forbidden("Companion workspace preparation requires the installation owner".into())); }
+        self.adopt_companion_workspace(companion_id).await?;
+        Ok(())
+    }
+
     async fn get(
         &self,
         owner_id: &str,
@@ -4002,18 +4131,26 @@ impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
         owner_id: &str,
         mut request: CreateConversationRequest,
         skill_names: Vec<String>,
+        context: nomifun_companion::CompanionSessionCreateContext,
     ) -> Result<ConversationResponse, AppError> {
-        let companion_id = request
-            .extra
-            .get("companion_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| AppError::BadRequest(
-                "Companion Session requires companion_id".to_owned(),
-            ))?
-            .to_owned();
+        let companion_id = context.companion_id.clone();
+        let role = match context.role {
+            nomifun_companion::CompanionRole::Companion => nomifun_agent_contracts::CompanionSessionRole::Companion,
+            nomifun_companion::CompanionRole::Robot => nomifun_agent_contracts::CompanionSessionRole::Robot,
+        };
+        let target_kind = companion_sessions::role_target_kind(role);
+        let scope = nomifun_agent_contracts::CompanionSessionOrigin {
+            companion_id: companion_id.clone(), role, robot_id: context.robot_id.clone(),
+        };
         let resolver = self.product_agent_resolver.get().and_then(std::sync::Weak::upgrade)
             .ok_or_else(|| AppError::Conflict("Companion Agent resolver is unavailable".into()))?;
-        let target = ProductAgentTarget { target_kind: "companion".into(), target_id: companion_id.clone(), default_template_key: "companion.default".into() };
+        if role == nomifun_agent_contracts::CompanionSessionRole::Robot {
+            let robot_id = context.robot_id.as_deref().ok_or_else(|| AppError::BadRequest("Robot role requires an exact device".into()))?;
+            resolver.resource_bindings.validate_robot_companion_identity(owner_id, &companion_id, robot_id)
+                .await.map_err(|error| AppError::Conflict(format!("{}: {}", error.code(), error.message())))?;
+        }
+        let target = ProductAgentTarget { target_kind: target_kind.into(), target_id: companion_id.clone(),
+            default_template_key: product_default_template(target_kind).unwrap().into() };
         let resolution = resolver.resolve(owner_id, &target, request.model.as_ref()).await?;
         merge_product_agent_resolution(&mut request.extra, &target, &resolution)?;
         let owner = UserId::from(owner_id.to_owned());
@@ -4021,18 +4158,53 @@ impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
             .ok_or_else(|| AppError::Conflict("Companion Agent has no canonical binding".into()))?;
         let (_, _, snapshot) = resolver.control_plane.saved_binding_artifacts(&owner, current).await.map_err(control_plane_error_to_app)?;
         let mut selection = session_capability_selection::selection(&snapshot);
-        selection.skill_names = skill_names;
-        let mut binding = resolver.control_plane.resolve_agent_session_capabilities_binding(&owner, current, Some(&selection)).await.map_err(control_plane_error_to_app)?;
+        if role == nomifun_agent_contracts::CompanionSessionRole::Robot {
+            selection.skill_names.extend(skill_names);
+            selection.skill_names.sort();
+            selection.skill_names.dedup();
+            if let Some(mcp_server_ids) = context.mcp_server_ids {
+                selection.mcp_server_ids.extend(mcp_server_ids);
+                selection.mcp_server_ids.sort();
+                selection.mcp_server_ids.dedup();
+            }
+        } else {
+            selection.skill_names = skill_names;
+            if let Some(mcp_server_ids) = context.mcp_server_ids { selection.mcp_server_ids = mcp_server_ids; }
+        }
+        let mut binding = if role == nomifun_agent_contracts::CompanionSessionRole::Robot {
+            resolver.control_plane.resolve_agent_session_capabilities_binding_selected_skills(
+                &owner, current, &selection).await.map_err(control_plane_error_to_app)?
+        } else {
+            resolver.control_plane.resolve_agent_session_capabilities_binding(&owner, current, Some(&selection))
+                .await.map_err(control_plane_error_to_app)?
+        };
+        let (_, _, role_snapshot) = resolver.control_plane.saved_binding_artifacts(&owner, &binding).await.map_err(control_plane_error_to_app)?;
+        let required_kinds = role_snapshot.content.required_resource_kinds.iter()
+            .map(|kind| kind.as_ref().to_owned()).collect::<BTreeSet<_>>();
+        let mut selections = product_agent_resource_selections(&target, &required_kinds,
+            &current.typed_resource_bindings, None);
+        if role == nomifun_agent_contracts::CompanionSessionRole::Robot {
+            let robot_id = context.robot_id.as_ref().ok_or_else(|| AppError::BadRequest("Robot role requires an exact device".into()))?;
+            selections.retain(|resource| resource.resource_kind != "robot");
+            if required_kinds.contains("robot") {
+                selections.push(AgentResourceSelectionDto { resource_kind: "robot".into(), resource_id: robot_id.clone() });
+            }
+        }
+        binding = resolver.resource_bindings.resolve_for_agent_switch(&resolver.control_plane, &owner, binding, &selections)
+            .await.map_err(|error| AppError::Conflict(format!("{}: {}", error.code(), error.message())))?;
         let mcp = resolver.resource_bindings.resolve_mcp_for_saved_binding(&resolver.control_plane, &owner, &binding).await
             .map_err(|error| AppError::Conflict(format!("{}: {}", error.code(), error.message())))?;
-        binding.typed_resource_bindings = current.typed_resource_bindings.iter().filter(|resource| resource.resource_kind != "mcp_server").cloned().chain(mcp).collect();
+        binding.typed_resource_bindings.retain(|resource| resource.resource_kind != "mcp_server");
+        binding.typed_resource_bindings.extend(mcp);
         let binding: AgentBindingValue = serde_json::to_value(binding).and_then(serde_json::from_value).map_err(|error| AppError::Conflict(error.to_string()))?;
         attach_session_metadata(&mut request.extra, &binding, None).map_err(|error| AppError::Conflict(error.message))?;
-        self.create_session_idempotent(
+        self.create_session_idempotent_scoped(
             owner_id,
             request,
             None,
-            &format!("companion-session:{companion_id}"),
+            &context.idempotency_key,
+            Some(scope),
+            None,
         )
         .await
     }
@@ -4044,6 +4216,9 @@ impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
             principal_id: owner_id.to_owned(),
         };
         let _operation_fence = self.session_operation_lock(session_id.as_ref()).write_owned().await;
+        if self.companion_execution_delivery_pending(owner_id, session_id.as_ref()).await? {
+            return Err(AppError::Conflict("Companion task reports or input notices are still being settled; preserve this source Session until its execution owner completes delivery".into()));
+        }
         match self.canonical.get(&principal, &session_id).await {
             Ok(_) => self.runtime_sessions.terminate_and_wait_result(session_id.as_ref(), Some(nomifun_common::AgentKillReason::ConfigurationChanged)).await?,
             Err(AppError::NotFound(_)) => {},
@@ -4088,6 +4263,66 @@ impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
         self.canonical.complete_fenced_delete(&command, now_ms()).await?;
         self.remove_idmm_state(session_id.as_ref()).await?;
         Ok(())
+    }
+
+    async fn list_companion_sessions(&self, owner_id: &str, companion_id: &str) -> Result<Vec<ConversationResponse>, AppError> {
+        let _gate = self.companion_lifecycle_lock(companion_id).read_owned().await;
+        let ids = self.canonical_companion_session_ids(owner_id, companion_id, false).await?;
+        let mut sessions = Vec::with_capacity(ids.len());
+        for id in ids { sessions.push(self.get_session(owner_id, &id).await?); }
+        Ok(sessions)
+    }
+
+    async fn delete_companion_sessions(&self, owner_id: &str, companion_id: &str,
+        workspace: Option<&str>) -> Result<nomifun_companion::CompanionDeletionGuard, AppError> {
+        let gate = self.companion_lifecycle_lock(companion_id).write_owned().await;
+        let ids = self.canonical_companion_session_ids(owner_id, companion_id, true).await?;
+        let roots = self.companion_owned_workspaces(owner_id, companion_id, &ids, workspace).await?;
+        let mut directories = Vec::with_capacity(roots.len());
+        for root in &roots {
+            let guard = app_project_fences::directory_lock(self, owner_id, &root).try_write_owned()
+                .map_err(|_| AppError::Conflict("Companion workspace is being used by another operation".into()))?;
+            let root = root.to_str().ok_or_else(|| AppError::Conflict("Companion workspace is not UTF-8".into()))?;
+            let principal = PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() };
+            let mut cursor = None;
+            loop {
+                let page = self.canonical.store().list_live_sessions_for_workspace(&principal, cursor.as_deref(), 1000, root)
+                    .await.map_err(agent_session_store_error)?;
+                if page.items.iter().any(|item| !ids.iter().any(|id| id == item.session.agent_session_id.as_ref())) {
+                    return Err(AppError::Conflict("A separate Session still owns this Companion workspace; its files were preserved".into()));
+                }
+                if !page.has_more { break; }
+                let next = page.next_cursor.ok_or_else(|| AppError::Conflict("Workspace Session cursor is missing".into()))?;
+                if cursor.as_ref() == Some(&next) { return Err(AppError::Conflict("Workspace Session cursor did not advance".into())); }
+                cursor = Some(next);
+            }
+            if self.canonical.store().list_deleting_sessions().await.map_err(agent_session_store_error)?.iter().any(|session|
+                session.owner_ref == principal && !ids.iter().any(|id| id == session.agent_session_id.as_ref())
+                    && session.agent_binding.typed_resource_bindings.iter().any(|resource| resource.resource_kind.as_ref() == "workspace"
+                        && resource.owner_id == owner_id && resource.typed_parameters.get("workspace_root").is_some_and(|path| path == root))) {
+                return Err(AppError::Conflict("A separate Session has unfinished cleanup in the Companion workspace".into()));
+            }
+            directories.push(guard);
+        }
+        for id in &ids {
+            let active: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversation_execution_links link JOIN agent_executions execution ON execution.execution_id=link.execution_id WHERE link.conversation_id=? AND execution.user_id=? AND execution.deleted_at IS NULL AND execution.status NOT IN ('completed','completed_with_failures','failed','cancelled'))")
+                .bind(id).bind(owner_id).fetch_one(&self.pool).await.map_err(|error| AppError::Internal(error.to_string()))?;
+            if active != 0 { return Err(AppError::Conflict("Finish or cancel the Companion's active delegated work before deleting it".into())); }
+            if self.companion_execution_delivery_pending(owner_id, id).await? {
+                return Err(AppError::Conflict("Companion task reports or input notices are still being settled; let their execution owner finish or recover delivery before deleting".into()));
+            }
+        }
+        for id in ids { nomifun_companion::CompanionSessionPort::delete(self, owner_id, &id).await?; }
+        let workspaces = roots.iter().map(|root| root.to_string_lossy().into_owned()).collect();
+        Ok(nomifun_companion::CompanionDeletionGuard::with_workspaces((gate, directories), workspaces))
+    }
+
+    async fn recall_companion_history(&self, owner_id: &str, companion_id: &str,
+        query: nomifun_companion::CompanionHistoryRecallQuery,
+    ) -> Result<nomifun_companion::CompanionHistoryRecallPage, AppError> {
+        self.native_engines.get().and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| AppError::Conflict("Companion canonical history reader is unavailable".into()))?
+            .recall_companion_history(owner_id, companion_id, query).await
     }
 
     async fn message_local_day_index(
@@ -4207,18 +4442,47 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         self.create_session_idempotent(owner_id, request, Some(snapshot), creation_key).await
     }
 
+    async fn create_directed_from_agent_snapshot_idempotent(&self, owner_id: &str,
+        request: CreateConversationRequest, snapshot: AgentResolvedSnapshot,
+        source: &nomifun_agent_execution::DirectedDelegationSource, creation_key: &str,
+    ) -> Result<ConversationResponse, AppError> {
+        let source_session = AgentSessionId::from(source.agent_session_id.clone());
+        let observation = self.canonical.get(&PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() }, &source_session).await?;
+        let origin = canonical_companion_origin(owner_id, &observation)?
+            .filter(|scope| scope.role == nomifun_agent_contracts::CompanionSessionRole::Robot)
+            .ok_or_else(|| AppError::Forbidden("Directed desktop work requires its canonical Robot source".into()))?;
+        let exact_effect: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_effects WHERE effect_id=? AND session_id=? AND turn_id=? AND operation_id=? AND capability_module='agent.collaboration' AND action_id='agent/delegate' AND state IN ('pending','returned'))")
+            .bind(&source.effect_id).bind(&source.agent_session_id).bind(&source.turn_operation_id).bind(&source.tool_operation_id)
+            .fetch_one(&self.pool).await.map_err(|error| AppError::Internal(error.to_string()))?;
+        if exact_effect == 0 { return Err(AppError::Forbidden("Directed child has no exact admitted delegation effect".into())); }
+        let binding = snapshot.canonical_binding.as_ref().ok_or_else(|| AppError::Conflict("Directed desktop target has no frozen binding".into()))?;
+        let binding: AgentBindingValue = serde_json::to_value(binding).and_then(serde_json::from_value).map_err(|error| AppError::Internal(error.to_string()))?;
+        if companion_id_from_binding(&binding)?.as_deref() != Some(origin.companion_id.as_str())
+            || snapshot.enabled_capabilities.iter().any(|capability| capability == "robot") {
+            return Err(AppError::Forbidden("Directed target differs from its Companion desktop role".into()));
+        }
+        let scope = nomifun_agent_contracts::CompanionSessionOrigin { companion_id: origin.companion_id,
+            role: nomifun_agent_contracts::CompanionSessionRole::Companion, robot_id: None };
+        companion_sessions::validate_role_resources(&scope, snapshot.canonical_binding.as_ref().unwrap())?;
+        let directed_key = format!("companion-directed:{creation_key}");
+        self.create_session_idempotent_scoped(owner_id, request, Some(snapshot), &directed_key, Some(scope), Some(&source_session)).await
+    }
+
     async fn discard_unlinked_creation(
         &self,
         owner_id: &str,
         creation_key: &str,
     ) -> Result<(), AppError> {
         let scoped = format!("user:{owner_id}:open:{creation_key}");
+        let directed = format!("user:{owner_id}:open:companion-directed:{creation_key}");
         let session_id: Option<String> = sqlx::query_scalar(
             "SELECT session_id FROM agent_events \
-             WHERE producer_id = 'session_api' AND idempotency_key = ? \
-               AND kind = 'session/opening' LIMIT 1",
+             WHERE producer_id = 'session_api' AND idempotency_key IN (?, ?) \
+               AND kind = 'session/opening' ORDER BY CASE WHEN idempotency_key = ? THEN 0 ELSE 1 END LIMIT 1",
         )
         .bind(scoped)
+        .bind(&directed)
+        .bind(&directed)
         .fetch_optional(&self.pool)
         .await
         .map_err(|error| AppError::Internal(error.to_string()))?;
@@ -4290,12 +4554,9 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
             &authority,
         )
         .await?;
-        self.send_session_message_idempotent(
-            owner_id,
-            conversation_id,
-            operation_id,
-            request,
-        )
+        Self::validate_ordinary_message_origin(&request)?;
+        self.dispatch_canonical_turn(owner_id, &AgentSessionId::from(conversation_id.to_owned()),
+            operation_id, request, false, None)
         .await
         .map(agent_execution_delivery_from_conversation)
     }
@@ -4574,6 +4835,21 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
             ),
         );
         Ok(message_id)
+    }
+
+    async fn project_directed_execution_report_idempotent(&self, owner_id: &str,
+        conversation_id: &str, operation_id: &str, content: &str,
+        report: &nomifun_agent_execution::DirectedDelegationReport,
+    ) -> Result<String, AppError> {
+        let message_id = companion_directed_reports::project_directed_report(self, owner_id, conversation_id,
+            operation_id, content, report).await?;
+        self.deliver_committed_directed_report(owner_id, conversation_id, operation_id, &message_id).await?;
+        Ok(message_id)
+    }
+
+    async fn notify_directed_input_required_idempotent(&self, owner_id: &str,
+        input: &nomifun_agent_execution::DirectedDelegationInput) -> Result<(), AppError> {
+        self.notify_directed_input_required(owner_id, input).await
     }
 }
 
@@ -5301,9 +5577,15 @@ fn canonical_conversation_response(
     workspace: Option<String>,
     created_at: i64,
     execution_link: Option<ConversationExecutionLinkProjection>,
-    companion_id: Option<String>,
+    companion_origin: Option<nomifun_agent_contracts::CompanionSessionOrigin>,
+    companion_associated_task: bool,
 ) -> Result<ConversationResponse, AppError> {
     let active_turn = canonical_active_turn_runtime(&observed.head, &observed.events)?;
+    let creation_prefix = format!("user:{}:open:", observed.session.owner_ref.principal_id);
+    let companion_creation_key = companion_origin.as_ref().and_then(|_| observed.events.iter()
+        .find(|event| event.seq == 1 && event.kind.0 == "session/opening"
+            && event.producer_id.as_ref() == "session_api")
+        .and_then(|event| event.idempotency_key.as_ref().strip_prefix(&creation_prefix)).map(str::to_owned));
     let SessionObservation { session, head, events, .. } = observed;
     let super::agent_binding_projection::SavedAgentBindingProjection {
         binding,
@@ -5317,6 +5599,9 @@ fn canonical_conversation_response(
             "canonical Agent projection extra must be a JSON object".to_owned(),
         )
     })?;
+    // Host-derived presentation only. Authorship extras cannot supply the
+    // canonical archive state or turn it into execution authority.
+    extra.insert("canonical_archived".to_owned(), Value::Bool(session.metadata.archived));
     let (custom_workspace, is_temporary_workspace) =
         workspace_projection_flags(&binding, workspace.is_some());
     extra.insert(
@@ -5342,15 +5627,22 @@ fn canonical_conversation_response(
     if let Some(workspace) = workspace {
         extra.insert("workspace".to_owned(), Value::String(workspace));
     }
-    if let Some(companion_id) = companion_id {
+    if let Some(origin) = companion_origin {
+        let target_kind = companion_sessions::role_target_kind(origin.role);
+        let companion_id = origin.companion_id;
         extra.insert("companion_session".to_owned(), Value::Bool(true));
+        extra.insert("companion_associated_task".to_owned(), Value::Bool(companion_associated_task));
+        if let Some(key) = companion_creation_key { extra.insert("companion_creation_key".into(), Value::String(key)); }
+        extra.insert("companion_role".to_owned(), serde_json::to_value(origin.role)
+            .map_err(|error| AppError::Internal(error.to_string()))?);
+        if let Some(robot_id) = origin.robot_id { extra.insert("robot_id".to_owned(), Value::String(robot_id)); }
         extra.insert(
             "companion_id".to_owned(),
             Value::String(companion_id.clone()),
         );
         extra.insert(
             "product_agent_target_kind".to_owned(),
-            Value::String("companion".to_owned()),
+            Value::String(target_kind.to_owned()),
         );
         extra.insert(
             "product_agent_target_id".to_owned(),
@@ -8538,12 +8830,15 @@ struct SelectProductAgentBindingRequest {
     resource_selections: Option<Vec<AgentResourceSelectionDto>>,
     #[serde(default)]
     conversation_id: Option<String>,
+    #[serde(default)]
+    update_default: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct ProductAgentOptionsQuery {
     provider_id: Option<String>,
     model: Option<String>,
+    conversation_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -8596,7 +8891,7 @@ async fn product_agent_options(
     Query(query): Query<ProductAgentOptionsQuery>,
 ) -> Result<Json<ApiResponse<ProductAgentOptions>>, NomiCoreApiError> {
     let default = require_product_target(&state, &owner, &kind, &id)?;
-    if kind == "companion" {
+    if matches!(kind.as_str(), "companion" | "robot") {
         state.wave4_owners.companion.service().get_companion(&id).await?;
     }
     let model = match (query.provider_id, query.model) {
@@ -8619,17 +8914,17 @@ async fn product_agent_options(
             candidates.push((selection.clone(), String::new()));
         }
     }
-    let active_companion_selection = if kind == "companion" {
-        if let Some(session_id) = companion_product_session(&state, &owner, &id).await? {
+    let active_companion_selection = if matches!(kind.as_str(), "companion" | "robot") {
+        if let Some(session_id) = query.conversation_id {
             let _operation_fence = state.session_owner.session_operation_lock(&session_id).read_owned().await;
-            let session = state.session_owner.canonical().session_record(&authenticated_principal(&owner), &parse_agent_session_id(&session_id)?).await?;
+            let observation = require_companion_product_session(&state, &owner, &kind, &id, &session_id).await?;
+            let session = observation.session;
             let binding = agent_binding_dto(&session.agent_binding)?;
             let (_, template) = state.control_plane.saved_binding_presentation(&owner, &binding).await?;
             // The outer Some means an active Session was validated. Its
             // absent authoring origin must remain absent; it cannot fall
             // through to a template or an internal Preset cache identity.
             Some(companion_agent_transition_selection(&state, &session_id, &candidates).await?
-                .or_else(|| saved_selection.clone())
                 .or_else(|| template.map(|template| ProductAgentSelection::Template {
                     template_key: template.as_str().to_owned(),
                 })))
@@ -8666,7 +8961,7 @@ async fn product_agent_options(
     }
     let mut options = Vec::new();
     for (selection, display_name) in candidates {
-        if kind == "companion" {
+        if matches!(kind.as_str(), "companion" | "robot") {
             if let Err(error) = require_companion_agent_selection(&state.control_plane, &owner, &selection).await {
                 let reason = if error.code == "COMPANION_AGENT_REQUIRED" { "companion" }
                     else if error.code == "AGENT_PRESET_NOT_FOUND" { "removed" } else { "capability" };
@@ -8753,21 +9048,31 @@ async fn require_companion_agent_selection(
     Ok(())
 }
 
-async fn companion_product_session(
+async fn require_companion_product_session(
     state: &NomiCoreAgentApiState,
     owner: &AuthenticatedOwner,
+    target_kind: &str,
     companion_id: &str,
-) -> Result<Option<String>, NomiCoreApiError> {
-    // Reuse the owner-scoped canonical opening authority, not a second binding ledger.
-    let key = format!("user:{}:open:companion-session:{companion_id}", owner.as_ref());
-    sqlx::query_scalar("SELECT event.session_id FROM agent_events event JOIN agent_sessions session ON session.agent_session_id = event.session_id WHERE event.kind = 'session/opening' AND event.producer_id = 'session_api' AND event.idempotency_key = ? AND session.state = 'live'")
-        .bind(key).fetch_optional(&state.session_owner.pool).await
-        .map_err(|error| AppError::Internal(format!("read canonical Companion Session: {error}")).into())
+    session_id: &str,
+) -> Result<SessionObservation, NomiCoreApiError> {
+    let observation = state.session_owner.canonical().get(&authenticated_principal(owner), &parse_agent_session_id(session_id)?).await?;
+    if state.session_owner.is_companion_associated_task(owner.as_ref(), &parse_agent_session_id(session_id)?).await? {
+        return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "AGENT_EXECUTION_ATTEMPT_READ_ONLY",
+            "Associated task Sessions keep their execution's frozen configuration"));
+    }
+    let scope = canonical_companion_origin(owner.as_ref(), &observation)?;
+    if !scope.is_some_and(|scope| scope.companion_id == companion_id
+        && companion_sessions::role_target_kind(scope.role) == target_kind) {
+        return Err(NomiCoreApiError::new(StatusCode::FORBIDDEN, "RESOURCE_OWNER_MISMATCH",
+            "Session belongs to another Companion role"));
+    }
+    Ok(observation)
 }
 
 fn product_default_template(target_kind: &str) -> Option<&'static str> {
     match target_kind {
         "companion" => Some("companion.default"),
+        "robot" => Some("companion.robot"),
         "customer" => Some("customer-service.default"),
         "creative_studio_canvas" => Some("creative-studio.default"),
         _ => None,
@@ -8786,27 +9091,28 @@ async fn select_product_agent_binding(
         (None, Some(preset_id)) => ProductAgentSelection::Preset { preset_id },
         _ => return Err(NomiCoreApiError::new(StatusCode::BAD_REQUEST, "AGENT_PRESET_NOT_FOUND", "select exactly one Agent")),
     };
-    if target_kind == "companion" {
+    let is_companion_role = matches!(target_kind.as_str(), "companion" | "robot");
+    if is_companion_role {
         state.wave4_owners.companion.service().get_companion(&target_id).await?;
         require_companion_agent_selection(&state.control_plane, &owner, &selection).await?;
     }
     let _guard = state.product_agent_resolver.default_binding_lock.lock().await;
     let model = request.model;
     let resource_selections = request.resource_selections;
-    if target_kind == "companion" && resource_selections.as_ref().is_some_and(|selections| selections.iter().any(|resource| {
+    let update_default = request.update_default.unwrap_or(request.conversation_id.is_none());
+    if is_companion_role && resource_selections.as_ref().is_some_and(|selections| selections.iter().any(|resource| {
         matches!(resource.resource_kind.as_str(), "companion" | "companion_memory") && resource.resource_id != target_id
     })) {
         return Err(NomiCoreApiError::new(StatusCode::FORBIDDEN,
             "RESOURCE_OWNER_MISMATCH", "Companion resources must identify this exact Companion"));
     }
-    let companion_session = if target_kind == "companion" {
-        let session = companion_product_session(&state, &owner, &target_id).await?;
-        if request.conversation_id.as_ref().is_some_and(|requested| session.as_ref() != Some(requested)) {
-            return Err(NomiCoreApiError::new(StatusCode::FORBIDDEN, "RESOURCE_OWNER_MISMATCH", "conversation belongs to another Companion target"));
+    let companion_session = if is_companion_role {
+        if let Some(session) = request.conversation_id.as_ref() {
+            require_companion_product_session(&state, &owner, &target_kind, &target_id, session).await?;
         }
-        session
+        request.conversation_id.clone()
     } else { None };
-    if target_kind != "companion" && let Some(id) = request.conversation_id.as_deref() {
+    if !is_companion_role && let Some(id) = request.conversation_id.as_deref() {
         let current = state.session_owner.get_session(owner.as_ref(), id).await?;
         let session_id = parse_agent_session_id(id)?;
         let canonical = state
@@ -8848,8 +9154,8 @@ async fn select_product_agent_binding(
     }
     let mut response = json!({ "selection": selection, "needs_model": model.is_none() });
     let mut prepared_product_binding = None;
-    if model.is_some() {
-        let mut binding = state.product_agent_resolver.materialize(&owner, &selection, model.as_ref()).await?;
+    if model.is_some() && update_default {
+        let mut binding = state.product_agent_resolver.materialize(&owner, &selection, model.as_ref(), target_kind == "robot").await?;
         let existing = state.control_plane
             .get_agent_binding(&owner, target_kind.clone(), target_id.clone())
             .await?;
@@ -8874,7 +9180,7 @@ async fn select_product_agent_binding(
                 &state.control_plane, &owner, binding, &selections,
             ).await?
         };
-        if target_kind == "companion" && resource_selections.is_none()
+        if is_companion_role && resource_selections.is_none()
             && let Some(previous) = existing.as_ref() {
             if let Some(workspace) = previous_resources.iter()
                 .find(|resource| resource.resource_kind == "workspace")
@@ -8911,6 +9217,7 @@ async fn select_product_agent_binding(
             Err(error) => return Err(error),
         }
     }
+    if !update_default { return Ok(Json(ApiResponse::ok(response))); }
     if let Some((previous, binding)) = prepared_product_binding {
         let stored = state.control_plane.put_agent_binding(&owner, target_kind.clone(), target_id.clone(),
             PutAgentBindingRequest { expected_binding_version: previous, agent_binding: binding }).await
@@ -12097,7 +12404,7 @@ async fn update_nomi_core_agent_session_knowledge(
     .fetch_one(&state.session_owner.pool)
     .await
     .map_err(|error| AppError::Internal(error.to_string()))?;
-    if attempt_transcript != 0 {
+    if attempt_transcript != 0 || state.session_owner.is_companion_associated_task(owner.as_ref(), &session_id).await? {
         return Err(NomiCoreApiError::new(
             StatusCode::CONFLICT,
             "AGENT_EXECUTION_ATTEMPT_READ_ONLY",
@@ -13206,6 +13513,10 @@ async fn agent_switch_blockers(
             details: Some(json!({ "execution_id": execution_id })),
         });
     }
+    if state.session_owner.is_companion_associated_task(owner.as_ref(), session_id).await? {
+        blockers.push(AgentSwitchBlockerDto { code: "AGENT_EXECUTION_ATTEMPT_READ_ONLY".into(),
+            message: "Associated task Sessions keep their execution's frozen Agent".into(), details: None });
+    }
     let active_execution: Option<(String, String)> = sqlx::query_as(
         "SELECT execution.execution_id, execution.status \
          FROM conversation_execution_links link \
@@ -13394,7 +13705,12 @@ async fn prepare_agent_session_switch(
     let available_mcp_servers = catalog.mcp_tools.iter()
         .map(|tool| tool.server_id.as_str()).collect::<BTreeSet<_>>();
     preserved_extensions.mcp_server_ids.retain(|id| available_mcp_servers.contains(id.as_str()));
-    let mut raw_target = state.control_plane.resolve_agent_session_capabilities_binding(&owner.0, &raw_target, Some(&preserved_extensions)).await?;
+    let companion_origin = canonical_companion_origin(owner.as_ref(), &observation)?;
+    let mut raw_target = if companion_origin.as_ref().is_some_and(|scope| scope.role == nomifun_agent_contracts::CompanionSessionRole::Robot) {
+        state.control_plane.resolve_agent_session_capabilities_binding_selected_skills(&owner.0, &raw_target, &preserved_extensions).await?
+    } else {
+        state.control_plane.resolve_agent_session_capabilities_binding(&owner.0, &raw_target, Some(&preserved_extensions)).await?
+    };
     let same_execution_contract = companion_target.is_some() && !distinct_authorial_selection
         && state.control_plane.same_agent_session_execution_contract(&owner.0, &current_dto, &raw_target).await?;
     if same_execution_contract && explicit_resources.is_none() {
@@ -13591,6 +13907,9 @@ async fn prepare_agent_session_switch(
                 })),
             });
         }
+    }
+    if let Some(scope) = companion_origin.as_ref() {
+        companion_sessions::validate_role_resources(scope, &replacement_dto)?;
     }
     if same_execution_contract && replacement_dto.typed_resource_bindings == current_dto.typed_resource_bindings {
         return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "AGENT_SESSION_AGENT_UNCHANGED",
@@ -14082,11 +14401,15 @@ async fn apply_agent_session_switch(
     }
     let distinct_authorial_selection = if let Some(target) = companion_target.as_deref() {
         let selection: ProductAgentSelection = serde_json::to_value(&request.selection).and_then(serde_json::from_value)?;
-        let saved = state.product_agent_resolver.selection(&owner, "companion", target).await?;
+        let scope = canonical_companion_origin(owner.as_ref(), &current)?
+            .ok_or_else(|| AppError::Forbidden("Agent switch requires a canonical Companion origin".into()))?;
+        let kind = companion_sessions::role_target_kind(scope.role);
+        require_companion_agent_selection(&state.control_plane, &owner, &selection).await?;
+        let saved = state.product_agent_resolver.selection(&owner, kind, target).await?;
         let mut candidates = vec![(selection.clone(), String::new())];
         if let Some(saved) = saved.as_ref() { candidates.push((saved.clone(), String::new())); }
         let active = companion_agent_transition_selection(&state, session_id.as_ref(), &candidates).await?
-            .or(saved).unwrap_or_else(|| ProductAgentSelection::Template { template_key: "companion.default".to_owned() });
+            .or(saved).unwrap_or_else(|| ProductAgentSelection::Template { template_key: product_default_template(kind).unwrap().to_owned() });
         active != selection
     } else { false };
     let prepared = prepare_agent_session_switch(
@@ -14409,7 +14732,7 @@ async fn switch_nomi_core_agent_session_model(
     .fetch_one(&state.session_owner.pool)
     .await
     .map_err(|error| AppError::Internal(error.to_string()))?;
-    if attempt_transcript != 0 {
+    if attempt_transcript != 0 || state.session_owner.is_companion_associated_task(owner.as_ref(), &session_id).await? {
         return Err(NomiCoreApiError::new(
             StatusCode::CONFLICT,
             "AGENT_EXECUTION_ATTEMPT_READ_ONLY",
@@ -14596,7 +14919,7 @@ async fn update_nomi_core_agent_session_reasoning(
     .fetch_one(&state.session_owner.pool)
     .await
     .map_err(|error| AppError::Internal(error.to_string()))?;
-    if attempt_transcript != 0 {
+    if attempt_transcript != 0 || state.session_owner.is_companion_associated_task(owner.as_ref(), &session_id).await? {
         return Err(NomiCoreApiError::new(
             StatusCode::CONFLICT,
             "AGENT_EXECUTION_ATTEMPT_READ_ONLY",
@@ -15805,7 +16128,12 @@ async fn start_owned_session_turn(
     initial_only: bool,
 ) -> Result<CreateAgentSessionTurnResponseDto, NomiCoreApiError> {
     let session_id = parse_agent_session_id(agent_session_id)?;
+    if session_owner.is_companion_associated_task(owner.as_ref(), &session_id).await? {
+        return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "AGENT_EXECUTION_ATTEMPT_READ_ONLY",
+            "Associated task inputs require the execution's exact authority"));
+    }
     let input = bounded_turn_input(request.input)?;
+    NomiCoreSessionOwner::validate_ordinary_message_origin(&input)?;
     let idempotency_key = canonical_nonempty(&request.idempotency_key, "idempotency_key")?;
     let delivery = session_owner
         .dispatch_canonical_turn(
@@ -15918,6 +16246,13 @@ async fn fork_nomi_core_agent_session(
         .await?;
     let _app_project_fence = parent.session.metadata.app_project_id.as_deref().map(|app_id|
         state.session_owner.guard_app_project_scope_read(owner.as_ref(), app_id)).transpose()?;
+    let _companion_lifecycle = if let Some(scope) = canonical_companion_origin(owner.as_ref(), &parent)? {
+        if state.session_owner.is_companion_associated_task(owner.as_ref(), &session_id).await? {
+            return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "AGENT_EXECUTION_ATTEMPT_READ_ONLY",
+                "Associated task Sessions remain task history; create a separate Companion conversation"));
+        }
+        Some(state.session_owner.companion_lifecycle_lock(&scope.companion_id).read_owned().await)
+    } else { None };
     let target_binding: AgentBindingValue = serde_json::from_value(
         serde_json::to_value(&request.target_agent_binding)?,
     )?;
@@ -16120,6 +16455,14 @@ async fn execute_nomi_core_agent_session_delete(
         .await.map_err(agent_session_store_error)?.is_some() {
         return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "APP_PROJECT_SESSION_MANAGED_BY_APP",
             "This Session belongs to an application project; delete the application to remove its project Sessions"));
+    }
+    if state.session_owner.is_companion_associated_task(owner.as_ref(), &session_id).await? {
+        return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "AGENT_EXECUTION_ATTEMPT_READ_ONLY",
+            "Associated task Sessions are removed through their execution or Companion lifecycle"));
+    }
+    if state.session_owner.companion_execution_delivery_pending(owner.as_ref(), session_id.as_ref()).await? {
+        return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "AGENT_EXECUTION_DELIVERY_PENDING",
+            "Task reports or input notices are still being settled; preserve this source Session until its execution owner completes delivery"));
     }
     execute_nomi_core_agent_session_delete_held(state, owner, session_id, key).await
 }
@@ -17530,9 +17873,9 @@ pub(super) fn bounded_turn_input(value: Value) -> Result<SendMessageRequest, Nom
         )
     })?;
     if ["idmm_decision", "idmm_notice", "input_source"].iter().any(|key| object.contains_key(*key))
-        || object.get("origin").and_then(Value::as_str) == Some("idmm") {
+        || matches!(object.get("origin").and_then(Value::as_str), Some("idmm" | "robot" | "directed_delegation_result")) {
         return Err(NomiCoreApiError::new(StatusCode::BAD_REQUEST,
-            "NOMI_CORE_INVALID_REQUEST", "IDMM source metadata is owned by the supervisor"));
+            "NOMI_CORE_INVALID_REQUEST", "Input source metadata is reserved for its authenticated host"));
     }
     let content = object
         .get("content")

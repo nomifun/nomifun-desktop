@@ -42,12 +42,18 @@ mod idmm_tests;
 mod storage_relocation_tests;
 #[path = "app_project_tests.rs"]
 mod app_project_tests;
+#[path = "companion_scope_tests.rs"]
+mod companion_scope_tests;
 #[path = "knowledge_writeback_tests.rs"]
 mod knowledge_writeback_tests;
 #[path = "turn_outcome_history_tests.rs"]
 mod turn_outcome_history_tests;
 #[path = "message_timeline_history_tests.rs"]
 mod message_timeline_history_tests;
+#[path = "turn_accepted_input_tests.rs"]
+mod turn_accepted_input_tests;
+#[path = "committed_tool_causation_tests.rs"]
+mod committed_tool_causation_tests;
 #[path = "context_clear_tests.rs"]
 mod context_clear_tests;
 #[path = "shared_content_tests.rs"]
@@ -175,6 +181,7 @@ fn live_session(id: AgentSessionId) -> AgentSessionLiveRecord {
         metadata: AgentSessionMetadata {
             purpose: Default::default(),
             app_project_id: None,
+            companion: None,
             title: Some("Session fixture".to_owned()),
             archived: false,
             pinned: false,
@@ -3625,6 +3632,7 @@ async fn fork_is_self_contained_and_parent_deletion_leaves_child_live() {
         child_metadata: AgentSessionMetadata {
             purpose: Default::default(),
             app_project_id: None,
+            companion: None,
             title: Some("Fork child".to_owned()),
             archived: false,
             pinned: false,
@@ -3654,6 +3662,14 @@ async fn fork_is_self_contained_and_parent_deletion_leaves_child_live() {
     other_app.child_metadata.app_project_id = Some(Uuid::now_v7().to_string());
     assert!(matches!(store.fork_session(&parent.agent_session_id, other_app.clone()).await,
         Err(SessionStoreError::Conflict(_))), "a fork cannot invent application affiliation");
+    let mut other_companion = request.clone();
+    other_companion.child_metadata.companion = Some(nomifun_agent_contracts::CompanionSessionOrigin {
+        companion_id: Uuid::now_v7().to_string(),
+        role: nomifun_agent_contracts::CompanionSessionRole::Companion,
+        robot_id: None,
+    });
+    assert!(matches!(store.fork_session(&parent.agent_session_id, other_companion.clone()).await,
+        Err(SessionStoreError::Conflict(_))), "a fork cannot invent companion affiliation");
     let forked = store
         .fork_session(&parent.agent_session_id, request.clone())
         .await
@@ -3678,6 +3694,8 @@ async fn fork_is_self_contained_and_parent_deletion_leaves_child_live() {
         Err(SessionStoreError::IdempotencyConflict(_))), "a replay cannot change the fork's purpose");
     assert!(matches!(store.fork_session(&parent.agent_session_id, other_app).await,
         Err(SessionStoreError::IdempotencyConflict(_))), "a replay cannot change the fork's app affiliation");
+    assert!(matches!(store.fork_session(&parent.agent_session_id, other_companion).await,
+        Err(SessionStoreError::IdempotencyConflict(_))), "a replay cannot change the fork's companion affiliation");
     // Current-generation fork openings originally omitted metadata entirely.
     // Its exact parent/base/title facts still identify a default Conversation.
     sqlx::query("UPDATE agent_events SET inline_json=json_remove(inline_json,'$.metadata') WHERE session_id=? AND seq=1")
