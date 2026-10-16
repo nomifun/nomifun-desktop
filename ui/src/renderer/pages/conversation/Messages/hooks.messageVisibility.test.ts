@@ -4,18 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
-import type { TMessage } from '@/common/chat/chatLib';
+import { act, cleanup, render } from '@testing-library/react';
+import { createElement } from 'react';
+import type { IMessageText, TMessage } from '@/common/chat/chatLib';
 import { parseConversationId, parseMessageId, type ConversationId } from '@/common/types/ids';
 import {
   composeMessageForTest,
   drainPendingMessageUpdates,
   mergeFetchedMessagesForConversation,
   normalizeDbMessage,
+  MessageListProvider,
+  useAddOrUpdateMessage,
+  useMessageList,
 } from './hooks';
-
-const source = readFileSync(new URL('./hooks.ts', import.meta.url), 'utf8');
 
 const conversationA = parseConversationId('0190f5fe-7c00-7a00-8000-000000000004');
 const conversationB = parseConversationId('0190f5fe-7c00-7a00-8000-000000000005');
@@ -25,7 +27,7 @@ const textMessage = (
   suffix: string,
   content: string,
   createdAt: number
-): TMessage => {
+): IMessageText => {
   const msgId = parseMessageId(`0190f5fe-7c00-7a00-8000-0000000000${suffix}`);
   return {
     id: msgId,
@@ -188,20 +190,40 @@ describe('message visibility across batching and conversation switches', () => {
     expect(merged).toEqual([requestedConversationMessage]);
   });
 
-  test('cleanup cancels the timer before synchronously draining without re-arming it', () => {
-    const hookStart = source.indexOf('export const useAddOrUpdateMessage');
-    const hookEnd = source.indexOf('export const useRemoveMessageByMsgId', hookStart);
-    const hookSource = source.slice(hookStart, hookEnd);
-    const cleanupStart = hookSource.indexOf('useEffect(() =>');
-    const cleanupEnd = hookSource.indexOf('return useCallback(', cleanupStart);
-    const cleanupSource = hookSource.slice(cleanupStart, cleanupEnd);
-
-    expect(cleanupSource.indexOf('clearTimeout(rafRef.current)')).toBeGreaterThanOrEqual(0);
-    expect(cleanupSource.indexOf('rafRef.current = null')).toBeGreaterThan(
-      cleanupSource.indexOf('clearTimeout(rafRef.current)')
-    );
-    expect(cleanupSource.indexOf('flush();')).toBeGreaterThan(cleanupSource.indexOf('rafRef.current = null'));
-    expect(hookSource.match(/rafRef\.current = setTimeout\(flush\)/g)).toHaveLength(1);
+  test('cleanup cancels the ingress timer and drains accepted messages exactly once', () => {
+    const oldRequest = globalThis.setTimeout;
+    const oldCancel = globalThis.clearTimeout;
+    const timers = new Map<number, () => void>();
+    let nextId = 0;
+    globalThis.setTimeout = ((callback: TimerHandler) => {
+      if (typeof callback !== 'function') throw new Error('Expected a function timer');
+      timers.set(++nextId, callback as () => void);
+      return nextId;
+    }) as typeof setTimeout;
+    globalThis.clearTimeout = ((id: ReturnType<typeof setTimeout>) => { timers.delete(Number(id)); }) as typeof clearTimeout;
+    let add: ReturnType<typeof useAddOrUpdateMessage>;
+    const Sender = () => { add = useAddOrUpdateMessage(); return null; };
+    const Receiver = () => createElement('output', null, useMessageList().map(message =>
+      message.type === 'text' ? message.content.content : '').join('|'));
+    const view = (sending: boolean) => createElement(MessageListProvider, null,
+      sending ? createElement(Sender) : null, createElement(Receiver));
+    try {
+      const page = render(view(true));
+      const delta = { ...textMessage(conversationA, '09', 'accepted', 1), position: 'left' as const };
+      act(() => { add!(delta); add!({ ...delta, content: { content: ' twice' } }); });
+      expect(page.container.textContent).toBe('');
+      expect(timers.size).toBe(1);
+      const canceled = [...timers.values()][0];
+      page.rerender(view(false));
+      expect(page.container.textContent).toBe('accepted twice');
+      expect(timers.size).toBe(0);
+      act(() => canceled());
+      expect(page.container.textContent).toBe('accepted twice');
+    } finally {
+      cleanup();
+      globalThis.setTimeout = oldRequest;
+      globalThis.clearTimeout = oldCancel;
+    }
   });
 
 });

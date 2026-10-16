@@ -28,6 +28,7 @@ import { isLocalImageSource } from '@/common/utils/localPath';
 import CodeBlock from './CodeBlock';
 import { getMarkdownInternalRoute } from './markdownLinkPolicy';
 import ShadowView from './ShadowView';
+import { createStreamingMarkdown } from './streamingMarkdown';
 
 const REMARK_PLUGINS = [remarkGfm, remarkMath, remarkBreaks];
 
@@ -64,6 +65,9 @@ type MarkdownViewProps = {
   allowHtml?: boolean;
   /** Model/tool Markdown is not a verified artifact-delivery receipt. */
   allowUnverifiedImages?: boolean;
+  /** Opt-in UTF-16 cursor into the full source. Parsing follows source revisions,
+   * not reveal frames. Keep a full-length cursor when the stream settles. */
+  revealOffset?: number;
 };
 
 const MarkdownView: React.FC<MarkdownViewProps> = React.memo(
@@ -78,6 +82,7 @@ const MarkdownView: React.FC<MarkdownViewProps> = React.memo(
     variant = 'article',
     allowHtml,
     allowUnverifiedImages = true,
+    revealOffset,
     children: childrenProp,
   }) => {
     const { t } = useTranslation();
@@ -186,6 +191,13 @@ const MarkdownView: React.FC<MarkdownViewProps> = React.memo(
     );
 
     const rehypePlugins = useMemo(() => (allowHtml ? [rehypeRaw, rehypeKatex] : [rehypeKatex]), [allowHtml]);
+    const revealing = revealOffset !== undefined;
+    const streamingMarkdown = useMemo(() => revealing ? createStreamingMarkdown(childrenProp, normalizedChildren, {
+      remarkPlugins: REMARK_PLUGINS,
+      rehypePlugins,
+      components,
+      urlTransform: markdownUrlTransform,
+    }) : undefined, [revealing, childrenProp, normalizedChildren, rehypePlugins, components]);
 
     return (
       <div className={classNames('relative w-full', className)}>
@@ -199,14 +211,14 @@ const MarkdownView: React.FC<MarkdownViewProps> = React.memo(
               'markdown-article--bubble': variant === 'bubble',
             })}
           >
-            <ReactMarkdown
+            {streamingMarkdown ? streamingMarkdown.render(revealOffset!) : <ReactMarkdown
               remarkPlugins={REMARK_PLUGINS}
               rehypePlugins={rehypePlugins}
               components={components}
               urlTransform={markdownUrlTransform}
             >
               {normalizedChildren}
-            </ReactMarkdown>
+            </ReactMarkdown>}
           </div>
         </ShadowView>
       </div>

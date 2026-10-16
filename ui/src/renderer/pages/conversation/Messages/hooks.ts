@@ -37,14 +37,26 @@ import {
   normalizeTextContinuation,
   normalizeAgentUserInputRequest,
 } from '@/common/chat/chatLib';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PropsWithChildren } from 'react';
 import { createContext } from '@renderer/utils/ui/createContext';
 import { addEventListener } from '@/renderer/utils/emitter';
 import { isAuthoritativeCompletionRuntimeIdle } from '../platforms/authoritativeTurnLifecyclePolicy';
 import { normalizeAgentTurnOutcome } from '@/common/chat/turnOutcome';
 import { applyCanonicalTimeline, normalizeMessageTimeline, preferMessageTimeline, type TimelineNotification } from '@/common/chat/messageTimeline';
+import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
+import { StreamingProseProvider, useStreamingProseIngress } from './streamingProse';
+import { proseSourceIdentity } from './proseSource';
 
-const [useMessageList, MessageListProvider, useUpdateMessageList] = createContext<TMessage[]>(() => []);
+const [useMessageList, MessageListStateProvider, useUpdateMessageList] = createContext<TMessage[]>(() => []);
+const MessageListProvider = ({ initialValue, conversation, children }: PropsWithChildren<{
+  initialValue?: TMessage[];
+  conversation?: { id: ConversationId };
+}>) => {
+  const context = useConversationContextSafe();
+  const scope = conversation?.id ?? context?.conversation_id ?? initialValue?.[0]?.conversation_id;
+  return createElement(MessageListStateProvider, { initialValue },
+    createElement(StreamingProseProvider, { scope, children }));
+};
 const [useMessageListLoading, MessageListLoadingProvider, useUpdateMessageListLoading] = createContext(() => false);
 
 // 消息索引缓存类型定义
@@ -388,21 +400,29 @@ export function drainPendingMessageUpdates(
 
 export const useAddOrUpdateMessage = () => {
   const update = useUpdateMessageList();
+  const proseIngress = useStreamingProseIngress();
   const pendingRef = useRef<PendingMessageUpdate[]>([]);
-  const rafRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const flush = useCallback(() => {
-    rafRef.current = null;
-    drainPendingMessageUpdates(pendingRef, update);
-  }, [update]);
+    if (flushTimerRef.current !== null) clearTimeout(flushTimerRef.current);
+    flushTimerRef.current = null;
+    const generation = proseIngress.generation();
+    drainPendingMessageUpdates(pendingRef, updater => update(current => {
+      const next = updater(current);
+      // Weak snapshot provenance is presentation-only. Replayed/discarded
+      // React evaluations cannot grant live eligibility to a history read.
+      proseIngress.noteSnapshot(next, generation);
+      return next;
+    }));
+  }, [update, proseIngress]);
 
   useEffect(() => {
+    const flushHidden = () => { if (document.visibilityState === 'hidden') flush(); };
+    document.addEventListener('visibilitychange', flushHidden);
     return () => {
-      if (rafRef.current !== null) {
-        clearTimeout(rafRef.current);
-        rafRef.current = null;
-      }
-      // Navigation can race the zero-delay batch timer. Drain synchronously so
+      document.removeEventListener('visibilitychange', flushHidden);
+      // Navigation can race a pending batch. Drain synchronously so
       // cleanup never discards the final user/stream message in that task.
       flush();
     };
@@ -413,12 +433,29 @@ export const useAddOrUpdateMessage = () => {
       if (!message) {
         return;
       }
+      if (message.type === 'text') {
+        const identity = proseSourceIdentity(message);
+        if (identity) {
+          if (message.hidden || message.content.replace || message.content.agentMessage
+            || message.content.standalone_projection) proseIngress.revoke(identity);
+          else if (message.content.content.length) proseIngress.markLive(identity);
+        }
+      }
       pendingRef.current.push({ message, add });
-      if (rafRef.current === null) {
-        rafRef.current = setTimeout(flush);
+      const withdrawn = message.type === 'canonical_timeline' && Array.isArray(message.updates)
+        && message.updates.some((item: unknown) => item !== null && typeof item === 'object'
+          && normalizeMessageTimeline((item as { timeline?: unknown }).timeline)?.segments.length === 0);
+      // Data ingestion retains its original zero-delay batching. Source
+      // corrections, user echoes and background work drain immediately;
+      // animation frames belong only to the downstream prose presentation.
+      if (withdrawn || document.visibilityState === 'hidden' || (message.type !== 'canonical_timeline'
+        && (message.hidden || (message.type === 'text' && (message.position === 'right' || message.content.replace))))) {
+        flush();
+      } else if (flushTimerRef.current === null) {
+        flushTimerRef.current = setTimeout(flush);
       }
     },
-    [flush]
+    [flush, proseIngress]
   );
 };
 

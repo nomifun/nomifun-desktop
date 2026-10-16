@@ -87,6 +87,9 @@ import DelegationProgress from './components/DelegationProgress';
 import { conversationPauseErrorMessage } from '../utils/conversationPauseError';
 import { collectSystemPermissionNotices, shouldCompactPermissionBlockedSummary, type SystemPermissionNotice as PermissionNotice } from './systemPermissionNoticeModel';
 import SystemPermissionNotice from './components/SystemPermissionNotice';
+import { ConversationProseContext } from './components/ConversationProse';
+import { proseSourceIdentity } from './proseSource';
+import { useStreamingProseIngress } from './streamingProse';
 
 type SourceMessageId = MessageId;
 
@@ -589,6 +592,7 @@ const MessageList: React.FC<{
   followTurnCompletion?: boolean;
 }> = ({ emptySlot, pendingMessage, onPendingMessageReady, onLoadOlder, hasMoreOlder, loadingOlder, followTurnCompletion = false }) => {
   const list = useMessageList();
+  const proseIngress = useStreamingProseIngress();
   const isMessageListLoading = useMessageListLoading();
   const conversationContext = useConversationContextSafe();
   const pauseError = useMemo(() => {
@@ -825,6 +829,26 @@ const MessageList: React.FC<{
     toolLanguage,
     workspaceRoots,
   ]);
+
+  const prosePresentation = useMemo(() => {
+    const sources = new Map<string, string>();
+    const suppressed: string[] = [];
+    for (const message of list) {
+      if (message.type !== 'text') continue;
+      const identity = proseSourceIdentity(message);
+      if (!identity) continue;
+      if (message.hidden || message.content.timeline?.segments.length === 0) suppressed.push(identity);
+      else sources.set(identity, message.content.content);
+    }
+    return { sources, suppressed, turns: turnPresentation.turnGates, pausedTurnId: pausedFileTurnId,
+      liveGeneration: proseIngress.generationFor(list) };
+  }, [list, turnPresentation.turnGates, pausedFileTurnId, proseIngress]);
+  useLayoutEffect(() => {
+    // Advance collapsed live sources as well. Reopening an old process
+    // cannot replay a backlog that arrived while its body was unmounted.
+    for (const identity of prosePresentation.suppressed) proseIngress.revoke(identity);
+    proseIngress.commitSources(prosePresentation.sources, prosePresentation.liveGeneration);
+  }, [proseIngress, prosePresentation]);
 
   const closedTurnIds = useMemo(() => [...turnPresentation.fileTurnGates]
     .filter(([, gate]) => !gate.running)
@@ -1435,6 +1459,7 @@ const MessageList: React.FC<{
   }
 
   return (
+    <ConversationProseContext.Provider value={prosePresentation}>
     <div className='relative flex-1 h-full'>
       <ConversationQuestionLocator conversation_id={conversationContext?.conversation_id} />
 
@@ -1486,6 +1511,7 @@ const MessageList: React.FC<{
 
       <SelectionReplyButton messages={list} />
     </div>
+    </ConversationProseContext.Provider>
   );
 };
 
