@@ -456,7 +456,7 @@ fn all_recommended_lifecycle_urls_match_the_locked_official_matrix() {
         (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
     });
     assert_eq!(
-        hash, 15_772_525_078_110_188_208,
+        hash, 16_446_406_255_142_718_755,
         "recommendation URL snapshot changed:\n{snapshot}"
     );
 }
@@ -471,6 +471,40 @@ fn compatible_media_routes_use_the_documented_vendor_path() {
         let descriptor = view.protocols.iter().find(|descriptor| descriptor.protocol_id == protocol).unwrap();
         assert_eq!(descriptor.endpoints.iter().find(|endpoint| endpoint.task == task && endpoint.field == "endpoint").unwrap().default_value,path);
     }
+}
+
+#[test]
+fn qianwen_uses_its_own_connection_and_exact_documented_tasks() {
+    let root = "https://maas.qianwenaiapi.com/compatible-mode/v1";
+    let chat = protocol_manifest_for_model_connection("Qianwen", None, Some("qwen3.7-plus"), ModelTask::Chat);
+    assert_eq!(chat.platform, "qianwen");
+    assert_eq!(chat.default_auth_scheme.as_deref(), Some("bearer"));
+    let recommendation = chat.recommendation.unwrap();
+    assert_eq!(recommendation.protocol_id, "openai.chat_text");
+    assert_eq!(recommendation.default_base_url.as_deref(), Some(root));
+    assert!(chat.protocols.iter().any(|protocol| protocol.protocol_id == "openai.responses"));
+    let defaults = chat.model_defaults.unwrap();
+    assert_eq!(defaults.context_limit, None, "do not inherit DashScope limits");
+    assert_eq!(defaults.output_limit, None);
+
+    for model in ["text-embedding-v4", "text-embedding-v3"] {
+        let embedding = protocol_manifest_for_model_connection("Qianwen", None, Some(model), ModelTask::Embedding);
+        let recommendation = embedding.recommendation.unwrap();
+        assert_eq!(recommendation.protocol_id, "openai.embeddings");
+        assert_eq!(recommendation.default_base_url.as_deref(), Some(root));
+        assert!(!recommendation.base_url_override_required);
+    }
+    for (model, task) in [
+        ("future-embedding-model", ModelTask::Embedding),
+        ("qwen-image-3.0-pro", ModelTask::ImageGeneration),
+        ("qwen3-rerank", ModelTask::Rerank),
+    ] {
+        assert!(protocol_manifest_for_model_connection("Qianwen", None, Some(model), task).recommendation.is_none());
+    }
+    let relay = "https://relay.example/v1";
+    let custom = protocol_manifest_for_model_connection("Qianwen", Some(relay), Some("custom-chat-model"), ModelTask::Chat);
+    assert_eq!(custom.recommendation.unwrap().default_base_url.as_deref(), Some(relay));
+    assert!(custom.model_defaults.is_none());
 }
 
 #[test]

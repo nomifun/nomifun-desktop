@@ -266,6 +266,9 @@ pub(crate) fn is_public_catalog(platform: &str, base_url: &str) -> bool {
 }
 
 fn catalog_needs_credentials(platform: &str, base_url: &str) -> bool {
+    if platform == "qianwen" && fetchers::is_official_qianwen_catalog_root(base_url) {
+        return false;
+    }
     !is_public_catalog(platform, base_url) && !matches!(
         fetchers::catalog_platform(platform, base_url),
         "mimo-token-plan-cn" | "mimo-token-plan-sgp" | "mimo-token-plan-ams"
@@ -364,6 +367,22 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const TEST_KEY: [u8; 32] = [0x42; 32];
+
+    #[test]
+    fn qianwen_documentation_preview_does_not_skip_custom_gateway_auth() {
+        for (base_url, allowed) in [
+            ("https://maas.qianwenaiapi.com/compatible-mode/v1", true),
+            ("https://relay.example/compatible-mode/v1", false),
+            ("https://maas.qianwenaiapi.com.evil.example/compatible-mode/v1", false),
+        ] {
+            let request = FetchModelsAnonymousRequest {
+                platform: "qianwen".into(), base_url: base_url.into(), auth_scheme: "bearer".into(),
+                credentials: serde_json::json!({}), bedrock_config: None, try_fix: false,
+            };
+            assert_eq!(validate_anonymous_request(&request).is_ok(), allowed, "{base_url}");
+        }
+        assert!(validate_provider_auth("qianwen", "bearer", &serde_json::json!({}), None).is_err());
+    }
 
     #[test]
     fn public_catalog_preview_is_exact_and_independent_of_save_credentials() {

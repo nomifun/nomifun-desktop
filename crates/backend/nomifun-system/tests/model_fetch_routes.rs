@@ -372,6 +372,28 @@ async fn fetch_models_anonymous_stepfun_plan_does_not_request_a_standard_catalog
 }
 
 #[tokio::test]
+async fn qianwen_official_catalog_previews_documented_models_without_credentials() {
+    let (router, _) = setup().await;
+    let request = post_request("/api/providers/fetch-models", json!({
+        "platform": "qianwen",
+        "base_url": "https://maas.qianwenaiapi.com/compatible-mode/v1",
+        "auth_scheme": "bearer",
+        "credentials": {},
+        "try_fix": true
+    }));
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["data"]["catalog_source"], "official_documentation");
+    assert!(json["data"].get("fixed_base_url").is_none());
+    let models = json["data"]["models"].as_array().unwrap();
+    assert_eq!(models.iter().map(|model| model["id"].as_str().unwrap()).collect::<Vec<_>>(),
+        ["qwen3.7-plus", "qwen3.8-max", "qwen3.8-flash"]);
+    assert!(models.iter().all(|model| model["tasks"] == json!(["chat"])
+        && model["tasks_source"] == "official_documentation"));
+}
+
+#[tokio::test]
 async fn fetch_models_glm_coding_plan_returns_current_documented_suggestions() {
     let (router, db) = setup().await;
     let id = create_provider(&db, "glm-coding-plan", "https://unused", "fake-key").await;

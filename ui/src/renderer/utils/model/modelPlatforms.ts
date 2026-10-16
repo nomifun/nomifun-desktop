@@ -34,6 +34,7 @@ type PlatformType =
   | 'minimax-coding-plan'
   | 'dashscope'
   | 'dashscope-coding'
+  | 'qianwen'
   | 'siliconflow'
   | 'zhipu'
   | 'glm-coding-plan'
@@ -151,6 +152,13 @@ export const MODEL_PLATFORMS: PlatformConfig[] = [
     value: 'Dashscope-Coding',
     logo: buildLogoAssetUrl('ai-china/qwen.svg'),
     platform: 'dashscope-coding',
+  },
+  {
+    name: 'Qianwen AI',
+    value: 'Qianwen',
+    logo: buildLogoAssetUrl('ai-china/qwen.svg'),
+    platform: 'qianwen',
+    i18nKey: 'settings.platformQianwen',
   },
   {
     name: 'SiliconFlow-CN',

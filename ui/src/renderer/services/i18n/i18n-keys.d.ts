@@ -6962,6 +6962,7 @@ export type I18nKey =
   | 'settings.platformCustom'
   | 'settings.platformName'
   | 'settings.platformNewApi'
+  | 'settings.platformQianwen'
   | 'settings.platformSwitched'
   | 'settings.pleaseEnterApiKey'
   | 'settings.pleaseEnterBaseUrl'

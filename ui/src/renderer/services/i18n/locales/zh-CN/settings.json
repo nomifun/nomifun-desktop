@@ -636,6 +636,7 @@
   "customOpenAI": "自定义(兼容OpenAI)",
   "platformCustom": "自定义",
   "platformNewApi": "New API",
+  "platformQianwen": "千问 AI",
   "modelProtocol": "请求协议",
   "modelProtocolTip": "选择该模型的 API 请求格式。new-api 网关将使用所选协议路由到上游服务。",
   "platformBedrock": "AWS Bedrock",

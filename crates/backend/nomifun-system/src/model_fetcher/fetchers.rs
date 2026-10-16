@@ -102,6 +102,11 @@ pub(crate) async fn fetch_for_platform(
         "dashscope" => fetch_dashscope(client, &config.base_url, &config.auth)
             .await
             .map(FetchedCatalog::remote),
+        // Qianwen's official OpenAI-compatible root does not expose `GET /models`.
+        // Custom gateways can provide their own catalog and retain remote discovery.
+        "qianwen" if is_official_qianwen_catalog_root(&config.base_url) => {
+            Ok(FetchedCatalog::documentation(documented_chat_models("qianwen")))
+        }
         // Zhipu OpenAPI does not expose an OpenAI-compatible `GET /models`.
         "zhipu" => Ok(FetchedCatalog::documentation(zhipu_models())),
         "ark-coding-plan" => Ok(FetchedCatalog::documentation(ark_coding_plan_models())),
@@ -157,6 +162,10 @@ fn exact_official_catalog_root(base_url: &str, hosts: &[&str], paths: &[&str]) -
         && url.fragment().is_none()
         && url.username().is_empty()
         && url.password().is_none()
+}
+
+pub(super) fn is_official_qianwen_catalog_root(base_url: &str) -> bool {
+    exact_official_catalog_root(base_url, &["maas.qianwenaiapi.com"], &["/compatible-mode/v1"])
 }
 
 fn is_official_stepfun_plan_base_url(base_url: &str) -> bool {
@@ -1984,6 +1993,77 @@ mod tests {
         }).await.unwrap();
         assert_eq!(catalog.source, ModelCatalogSource::Remote);
         assert_eq!(catalog.models[0].id, "custom-qwen");
+    }
+
+    #[test]
+    fn qianwen_documented_catalog_uses_only_the_exact_official_root() {
+        for base in [
+            "https://maas.qianwenaiapi.com/compatible-mode/v1",
+            "https://maas.qianwenaiapi.com/compatible-mode/v1/",
+            "https://maas.qianwenaiapi.com:443/compatible-mode/v1",
+        ] {
+            assert!(is_official_qianwen_catalog_root(base), "{base}");
+        }
+        for base in [
+            "http://maas.qianwenaiapi.com/compatible-mode/v1",
+            "https://maas.qianwenaiapi.com.evil.example/compatible-mode/v1",
+            "https://maas.qianwenaiapi.com:8443/compatible-mode/v1",
+            "https://proxy.example/compatible-mode/v1",
+            "https://maas.qianwenaiapi.com/compatible-mode/v1/models",
+            "https://maas.qianwenaiapi.com/custom/compatible-mode/v1",
+            "https://maas.qianwenaiapi.com/compatible-mode/v1?route=custom",
+            "https://maas.qianwenaiapi.com/compatible-mode/v1#custom",
+            "https://user@maas.qianwenaiapi.com/compatible-mode/v1",
+        ] {
+            assert!(!is_official_qianwen_catalog_root(base), "{base}");
+        }
+    }
+
+    #[tokio::test]
+    async fn qianwen_official_catalog_requires_no_network_or_api_key() {
+        let server = MockServer::start().await;
+        // Catch every accidental request locally, including HTTPS CONNECT.
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .proxy(reqwest::Proxy::all(server.uri()).unwrap())
+            .build()
+            .unwrap();
+        let catalog = fetch_for_platform(&client, &FetchConfig {
+            platform: "qianwen".into(),
+            base_url: "https://maas.qianwenaiapi.com/compatible-mode/v1".into(),
+            auth: AuthMaterial { scheme: AuthScheme::Bearer, credentials: serde_json::json!({}) },
+            bedrock_config: None,
+        }).await.unwrap();
+        assert_eq!(catalog.source, ModelCatalogSource::OfficialDocumentation);
+        let ids = catalog.models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>();
+        for id in ["qwen3.7-plus", "qwen3.8-max", "qwen3.8-flash"] {
+            assert!(ids.contains(&id), "{id}");
+        }
+        assert!(catalog.models.iter().all(|model| {
+            model.tasks == vec![ModelTask::Chat]
+                && model.tasks_source == Some(ModelTaskSource::OfficialDocumentation)
+        }));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn qianwen_custom_gateway_keeps_remote_catalog_path_and_auth() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/custom/compatible-mode/v1/models"))
+            .and(header("x-catalog-key", "catalog-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [{"id": "custom-qianwen"}]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let catalog = fetch_for_platform(&no_proxy_client(), &FetchConfig {
+            platform: "qianwen".into(), base_url: format!("{}/custom/compatible-mode/v1", server.uri()),
+            auth: AuthMaterial { scheme: AuthScheme::HeaderKey("x-catalog-key".into()), credentials: serde_json::json!({"api_keys": ["catalog-key"]}) },
+            bedrock_config: None,
+        }).await.unwrap();
+        assert_eq!(catalog.source, ModelCatalogSource::Remote);
+        assert_eq!(catalog.models.len(), 1);
+        assert_eq!(catalog.models[0].id, "custom-qianwen");
     }
 
     #[tokio::test]

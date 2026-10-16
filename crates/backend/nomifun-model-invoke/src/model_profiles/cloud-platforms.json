@@ -1,6 +1,31 @@
 [
   {
     "platforms": [
+      "qianwen"
+    ],
+    "chat_protocol": "openai.chat_text",
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://www.qianwenai.com/models",
+      "https://platform.qianwenai.com/docs/developer-guides/getting-started/model-selection",
+      "https://platform.qianwenai.com/docs/api-reference/chat/openai-chat",
+      "https://platform.qianwenai.com/docs/api-reference/chat/openai-responses",
+      "https://platform.qianwenai.com/docs/developer-guides/clients-and-developer-tools/deepseek-harness"
+    ],
+    "notes": "千问 AI 按量平台使用 maas.qianwenaiapi.com/compatible-mode/v1，与 DashScope 和 Token Plan 的地址及凭据分别配置。默认采用 Chat Completions，保留 Responses 供协议检查和手选。官方明确不提供 GET /models，官方地址返回此处精确型号的文档建议，仍允许手动填写其他模型；未在本次核实的上下文、输出和思考档位保持未知，不继承百炼或原厂同名型号的限制。",
+    "models": [
+      {
+        "ids": [
+          "qwen3.7-plus",
+          "qwen3.8-max",
+          "qwen3.8-flash"
+        ],
+        "provider_params": {}
+      }
+    ]
+  },
+  {
+    "platforms": [
       "dashscope",
       "alibaba"
     ],

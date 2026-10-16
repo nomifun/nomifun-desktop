@@ -27,6 +27,15 @@ describe('model platform display presets', () => {
     expect(preset('Agnes').platform).toBe('agnes');
   });
 
+  test('keeps Qianwen AI separate from Alibaba Dashscope products', () => {
+    expect(preset('Qianwen').platform).toBe('qianwen');
+    expect(preset('Qianwen').name).toBe('Qianwen AI');
+    expect(preset('Qianwen').i18nKey).toBe('settings.platformQianwen');
+    expect(preset('Qianwen').logo).toBe(preset('Dashscope').logo);
+    expect(preset('Dashscope').platform).toBe('dashscope');
+    expect(preset('Dashscope-Coding').platform).toBe('dashscope-coding');
+  });
+
   test('contains display metadata only', () => {
     const allowedKeys = ['i18nKey', 'logo', 'name', 'platform', 'value'];
     for (const item of MODEL_PLATFORMS) {

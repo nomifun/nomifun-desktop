@@ -1,6 +1,109 @@
 [
   {
     "platforms": [
+      "qianwen"
+    ],
+    "checked_at": "2026-10-16",
+    "sources": [
+      "https://platform.qianwenai.com/docs/developer-guides/getting-started/model-selection",
+      "https://platform.qianwenai.com/docs/api-reference/chat/openai-chat",
+      "https://platform.qianwenai.com/docs/api-reference/chat/openai-responses",
+      "https://platform.qianwenai.com/docs/api-reference/text-embedding/openai-embedding",
+      "https://platform.qianwenai.com/docs/api-reference/rerank/openai-rerank",
+      "https://platform.qianwenai.com/docs/developer-guides/clients-and-developer-tools/deepseek-harness"
+    ],
+    "notes": "千问 AI 按量平台独立配置，不继承 DashScope、Token Plan 或三方上游的能力。已核实 OpenAI Chat、Responses 及文本向量；官方兼容端点不提供 GET /models。其他模态需逐一核实当前平台报文及现有 codec，模型市场的展示不自动授予接口。",
+    "tasks": [
+      {
+        "task": "chat",
+        "status": "supported",
+        "protocols": [
+          "openai.responses",
+          "openai.chat_text"
+        ],
+        "model_ids": [
+          "qwen3.7-plus",
+          "qwen3.8-max",
+          "qwen3.8-flash"
+        ],
+        "provider_params": {
+          "include": null
+        },
+        "notes": "两种协议共用 /compatible-mode/v1，默认 Chat Completions；实际流式工具往返检查确认账号可用性。Responses 文档未证实 reasoning.encrypted_content，省略该附加请求。"
+      },
+      {
+        "task": "realtime_conversation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "平台列出实时语音与全模态模型，本次未核实其会话协议与现有实时 codec 的一致性，不推荐其他供应商的实时协议。"
+      },
+      {
+        "task": "image_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "平台列出图像生成模型，本次未核实精确模型的同步或异步报文与现有 codec 的一致性，不继承百炼生图接口。"
+      },
+      {
+        "task": "image_edit",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "平台列出图像编辑能力，本次未核实其消息式图片输入或任务生命周期，不默认提供 OpenAI multipart 编辑接口。"
+      },
+      {
+        "task": "video_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "平台列出视频模型，本次未核实其提交、轮询与下载报文，不按上游同名模型推断已有视频 adapter 可用。"
+      },
+      {
+        "task": "music_generation",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "当前文档列出原生音乐生成接口，本次未核实其报文与现有音乐 codec 的一致性。"
+      },
+      {
+        "task": "speech_synthesis",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "平台列出语音合成模型，本次未核实其请求及音频响应形状，不默认使用 OpenAI Speech 或上游厂商接口。"
+      },
+      {
+        "task": "speech_recognition",
+        "status": "unverified",
+        "protocols": [],
+        "notes": "平台列出实时与非实时语音识别，本次未核实其 URL、文件或 WebSocket 输入与现有 codec 的一致性。"
+      },
+      {
+        "task": "embedding",
+        "status": "supported",
+        "protocols": [
+          "openai.embeddings"
+        ],
+        "model_ids": [
+          "text-embedding-v4",
+          "text-embedding-v3"
+        ],
+        "sources": [
+          "https://platform.qianwenai.com/docs/api-reference/text-embedding/openai-embedding"
+        ],
+        "notes": "官方 /compatible-mode/v1/embeddings 接收 model/input，返回 data[].embedding/index，符合现有 OpenAI dense 向量 codec；仅对明确列出的文本模型推荐，不推断多模态或稀疏向量能力。"
+      },
+      {
+        "task": "rerank",
+        "status": "not_implemented",
+        "protocols": [],
+        "model_ids": [
+          "qwen3-rerank"
+        ],
+        "sources": [
+          "https://platform.qianwenai.com/docs/api-reference/rerank/openai-rerank"
+        ],
+        "notes": "官方兼容接口使用 /compatible-api/v1/reranks，与对话的 /compatible-mode/v1 不同；当前 generic.rerank 默认 /rerank，未实现该平台的根路径切换政策前不推荐。"
+      }
+    ]
+  },
+  {
+    "platforms": [
       "stepfun"
     ],
     "checked_at": "2026-10-16",

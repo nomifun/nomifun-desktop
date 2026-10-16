@@ -300,6 +300,7 @@ const PRESETS: &[PresetSpec] = &[
     preset("OpenRouter", "openrouter", "https://openrouter.ai/api/v1"),
     preset("Dashscope", "dashscope", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
     preset("Dashscope-Coding", "dashscope-coding", "https://coding.dashscope.aliyuncs.com/v1"),
+    preset("Qianwen", "qianwen", "https://maas.qianwenaiapi.com/compatible-mode/v1"),
     preset("SiliconFlow-CN", "siliconflow", "https://api.siliconflow.cn/v1"),
     preset("SiliconFlow", "siliconflow", "https://api.siliconflow.com/v1"),
     preset("Zhipu", "zhipu", "https://open.bigmodel.cn/api/paas/v4"),
@@ -495,7 +496,7 @@ pub fn protocol_requires_output_ceiling(protocol_id: &str) -> bool {
 const OPENAI_CHAT_PLATFORMS: &[&str] = &[
     "openai", "agnes", "deepseek", "mimo", "mimo-token-plan-cn", "mimo-token-plan-sgp",
     "mimo-token-plan-ams", "minimax", "minimax-code", "minimax-coding-plan", "novita",
-    "openrouter", "dashscope", "dashscope-coding", "siliconflow", "zhipu", "glm-coding-plan",
+    "openrouter", "dashscope", "dashscope-coding", "qianwen", "siliconflow", "zhipu", "glm-coding-plan",
     "moonshot-cn", "moonshot-global", "xai", "ark", "ark-coding-plan", "ark-agent-plan",
     "qianfan", "qianfan-coding-plan", "hunyuan", "hunyuan-global", "lingyi", "poe", "ppio",
     "modelscope", "infiniai", "ctyun", "stepfun", "stepfun-plan", "nomifun-model-gateway",
