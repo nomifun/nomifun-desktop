@@ -391,7 +391,6 @@ pub struct Wave1KnowledgeWriteRequest {
     pub base: Option<String>,
     pub rel_path: Option<String>,
     pub content: String,
-    pub title: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1082,7 +1081,6 @@ pub fn operation_from_action(
                 base: optional("base"),
                 rel_path: optional("rel_path"),
                 content: required("content")?,
-                title: optional("title"),
             })
         }
         KNOWLEDGE_AUTOGEN_ACTION_ID => {
@@ -1522,8 +1520,7 @@ pub fn action_input_schema(action_id: &str) -> Result<Value, String> {
                 "handle": {"type": "string", "minLength": 1, "maxLength": 512},
                 "base": {"type": "string", "minLength": 1, "maxLength": 256},
                 "rel_path": {"type": "string", "minLength": 1, "maxLength": 1024},
-                "content": {"type": "string", "minLength": 1, "maxLength": 65536},
-                "title": {"type": "string", "minLength": 1, "maxLength": 512}
+                "content": {"type": "string", "minLength": 1, "maxLength": 65536}
             },
             "required": ["content"]
         }),
@@ -1633,7 +1630,7 @@ fn validate_action_input(action_id: &str, input: &Value) -> Result<(), KernelErr
         WEB_RESEARCH_SEARCH_ACTION_ID | KNOWLEDGE_SEARCH_ACTION_ID => &["query", "limit"][..],
         WEB_RESEARCH_FETCH_ACTION_ID => &["url"][..],
         KNOWLEDGE_READ_ACTION_ID => &["handle"][..],
-        KNOWLEDGE_WRITE_ACTION_ID => &["handle", "base", "rel_path", "content", "title"][..],
+        KNOWLEDGE_WRITE_ACTION_ID => &["handle", "base", "rel_path", "content"][..],
         KNOWLEDGE_AUTOGEN_ACTION_ID => &["base", "overwrite_readme"][..],
         PROJECT_MEMORY_READ_ACTION_ID => &["limit"][..],
         PROJECT_MEMORY_WRITE_ACTION_ID => &["content", "title", "items"][..],
@@ -1677,7 +1674,6 @@ fn validate_action_input(action_id: &str, input: &Value) -> Result<(), KernelErr
             validate_optional_string(object, action_id, "handle", 512)?;
             validate_optional_string(object, action_id, "base", 256)?;
             validate_optional_string(object, action_id, "rel_path", 1024)?;
-            validate_optional_string(object, action_id, "title", 512)?;
         }
         KNOWLEDGE_AUTOGEN_ACTION_ID => {
             validate_optional_string(object, action_id, "base", 256)?;
@@ -1892,6 +1888,15 @@ mod tests {
                 overwrite_readme: true,
             })
         );
+        let write = json!({"base": "base-id", "rel_path": "guide.md", "content": "Knowledge body"});
+        assert!(operation_from_action(
+            &ActionId::from(KNOWLEDGE_WRITE_ACTION_ID), StrictJsonValue(write.clone()),
+        ).is_ok());
+        let mut retired_title = write;
+        retired_title["title"] = json!("Ignored display-only title");
+        assert!(operation_from_action(
+            &ActionId::from(KNOWLEDGE_WRITE_ACTION_ID), StrictJsonValue(retired_title),
+        ).is_err());
     }
 
     #[test]

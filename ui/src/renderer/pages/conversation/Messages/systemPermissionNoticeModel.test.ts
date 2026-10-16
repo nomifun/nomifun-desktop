@@ -66,13 +66,13 @@ test('normalization preserves host refusal and rejects malformed structured meta
 test('only a later canonical successful action with matching prerequisites resolves a refusal', () => {
   const failure: IMessageToolCall = { ...call, content: { ...call.content, result_seq: 10 } };
   const success: IMessageToolCall = { ...call, id: 'success', content: { call_id: 'new-call', name: 'computer_input',
-    action_id: 'computer/input', args: { action: 'left_click' }, status: 'completed', result_seq: 11 } };
+    action_id: 'computer/input', operation: 'left_click', status: 'completed', result_seq: 11 } };
   expect(collectSystemPermissionNotices([root, failure, success])).toEqual([]);
   expect(collectSystemPermissionNotices([root, failure, { ...success, content: { ...success.content, result_seq: 9 } }])).toHaveLength(1);
   expect(collectSystemPermissionNotices([root, failure, { ...success, content: { ...success.content, result_seq: undefined } }])).toHaveLength(1);
   expect(collectSystemPermissionNotices([root, failure, { ...success, content: { ...success.content, action_id: 'computer/observe' } }])).toHaveLength(1);
   expect(collectSystemPermissionNotices([root, failure, { ...success, content: { ...success.content, action_id: 'workspace.files/read' } }])).toHaveLength(1);
-  expect(collectSystemPermissionNotices([root, failure, { ...success, content: { ...success.content, args: undefined } }])).toHaveLength(1);
+  expect(collectSystemPermissionNotices([root, failure, { ...success, content: { ...success.content, operation: undefined } }])).toHaveLength(1);
   expect(collectSystemPermissionNotices([root, failure, { ...success, turn_id: nextTurn }])).toHaveLength(1);
   expect(collectSystemPermissionNotices([root, success, failure])).toEqual([]);
 });
@@ -82,13 +82,13 @@ test('a successful permission-free observe operation does not resolve a screensh
     action_id: 'computer/observe', permission_required: { ...request, action_id: 'computer/observe',
       operation: 'screenshot', permissions: ['screen_recording'] } } };
   const success: IMessageToolCall = { ...call, id: 'success', content: { call_id: 'new-call', name: 'computer_observe',
-    action_id: 'computer/observe', args: { action: 'wait' }, status: 'completed', result_seq: 11 } };
+    action_id: 'computer/observe', operation: 'wait', status: 'completed', result_seq: 11 } };
   for (const action of ['wait', 'cursor_position', 'list_windows']) {
     expect(collectSystemPermissionNotices([root, screenshot, { ...success,
-      content: { ...success.content, args: { action } } }])).toHaveLength(1);
+      content: { ...success.content, operation: action } }])).toHaveLength(1);
   }
   expect(collectSystemPermissionNotices([root, screenshot, { ...success,
-    content: { ...success.content, args: { action: 'screenshot' } } }])).toEqual([]);
+    content: { ...success.content, operation: 'screenshot' } }])).toEqual([]);
 });
 
 test('new refusal identities retain a stable dismissal scope', () => {

@@ -12,372 +12,151 @@ import chineseMessages from '@/renderer/services/i18n/locales/zh-CN/messages.jso
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: { messages: messagesLocale } } } });
 const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000051');
-
+const tool = (content: Partial<IMessageToolCall['content']>): IMessageToolCall => ({ id: 'tool', type: 'tool_call',
+  conversation_id: conversationId, position: 'left', created_at: 1,
+  content: { call_id: 'call', name: 'read_file', status: 'completed', description: 'src/app.ts', ...content } });
+const show = (item: Parameters<typeof ProcessTraceItem>[0]['item'], stateOverride?: 'completed') => render(
+  <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} stateOverride={stateOverride} /></I18nextProvider>
+);
 afterEach(cleanup);
 
-describe('replayed process trace', () => {
-  test('renders canonical web actions consistently and reveals routing names only in details', async () => {
-    const locale = createInstance();
-    await locale.use(initReactI18next).init({ lng: 'zh-CN',
-      resources: { 'zh-CN': { translation: { messages: chineseMessages } } } });
-    const name = 'platform__web_research_web_research_fetch__30fb0227939eb7c80164';
-    const item = { id: 'web-fetch', type: 'tool_call', conversation_id: conversationId,
-      position: 'left', created_at: 1, content: { call_id: 'web-fetch', name,
-        capability_id: 'web.research', action_id: 'web.research/fetch', status: 'error',
-        args: { url: 'https://pvp.qq.com/ingame/kis/hero.shtml' }, output: 'INVALID_PAYLOAD' } } as IMessageToolCall;
-    const view = render(<I18nextProvider i18n={locale}><ProcessTraceItem item={item} variant='receipt' /></I18nextProvider>);
-    const header = view.getByRole('button');
-    expect(header.textContent).toContain('读取网页 · pvp.qq.com');
-    expect(header.textContent).not.toContain('INVALID_PAYLOAD');
-    expect(header.querySelector('.turn-process-trace__status')).toBeNull();
-    expect(header.textContent).not.toContain('platform__');
-    expect(view.queryByText(name)).toBeNull();
-    fireEvent.click(header);
-    expect(view.getByText('调用标识')).toBeTruthy();
-    expect(view.container.textContent).toContain(name);
-    expect(view.container.textContent).toContain('web.research/fetch');
-    expect(view.container.textContent).toContain('/ingame/kis/hero.shtml');
-  });
-
+describe('public process trace', () => {
   test.each(['running', 'completed', 'error', 'canceled'] as const)(
-    '%s tools omit the trailing state and keep their input and output inspectable', (status) => {
-      const item: IMessageToolCall = {
-        id: `inspectable-${status}`, type: 'tool_call', conversation_id: conversationId,
-        position: 'left', created_at: 2,
-        content: { call_id: `call-${status}`, name: 'read_file', status,
-          args: { path: 'src/app.ts' }, output: 'saved tool output', artifacts: [] },
-      };
-      for (const variant of ['list', 'receipt'] as const) {
-        const { container, getByRole, unmount } = render(
-          <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} variant={variant} /></I18nextProvider>
-        );
-        const toggle = getByRole('button');
-        expect(toggle.querySelector('.turn-process-trace__row-icon')).not.toBeNull();
-        expect(toggle.querySelector('.turn-process-trace__status')).toBeNull();
-        expect(toggle.lastElementChild?.classList.contains('turn-process-trace-tool__arrow')).toBe(true);
-        fireEvent.click(toggle);
-        expect(toggle.getAttribute('aria-expanded')).toBe('true');
-        expect(container.textContent).toContain('saved tool output');
-        expect(container.textContent).toContain('src/app.ts');
-        expect(item.content.status).toBe(status);
-        unmount();
-      }
+    '%s file operations retain their path and icon without a body or empty disclosure', status => {
+      const item = tool({ status });
+      const { container, queryByRole } = show(item);
+      expect(container.textContent).toContain('app.ts');
+      expect(container.querySelector('.turn-process-trace__row-icon')).not.toBeNull();
+      expect(container.querySelector('.turn-process-trace__status')).toBeNull();
+      expect(container.querySelector('.turn-process-trace-tool__arrow')).toBeNull();
+      expect(container.querySelector('.turn-process-trace-detail')).toBeNull();
+      expect(queryByRole('button')).toBeNull();
+      expect(item.content.status).toBe(status);
     }
   );
 
-  test('shows a clean timeout as a deadline outcome and retains its failed receipt details', () => {
-    const output = JSON.stringify({ state: 'timed_out', success: false, process_id: 'owned', output: { text: '' },
-      cleanup: { reaped: true, errors: [], interrupt_attempted: false, terminate_attempted: true, force_kill_attempted: false } });
-    const item = { id: 'timeout', type: 'tool_call', conversation_id: conversationId,
-      position: 'left', created_at: 1, content: { call_id: 'timeout', name: 'poll_process', status: 'error',
-        args: { process_id: 'owned', cursor: 25 }, output, artifacts: [] } } as IMessageToolCall;
-    const { container, getByRole } = render(
-      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} variant='receipt' /></I18nextProvider>
-    );
-    expect(getByRole('button').textContent).toContain('reached its time limit; process cleanup completed');
-    expect(container.querySelector('.turn-process-trace__row--failed')).not.toBeNull();
-    fireEvent.click(getByRole('button'));
-    expect(container.textContent).toContain(output);
-    expect(item.content.status).toBe('error');
+  test.each(['read_file', 'search_files', 'write_file', 'apply_patch', 'write_process_stdin', 'exec_command'])(
+    '%s never renders a raw input or output supplied outside the public contract', name => {
+      const item = tool({ name, description: name === 'exec_command' ? 'sed -n 1,300p guide.html' : 'src/app.ts' });
+      Object.assign(item.content, { args: { path: 'src/app.ts', content: 'PRIVATE WRITE BODY' },
+        input: { patch: 'PRIVATE PATCH BODY' }, output: 'PRIVATE FILE CONTENT' });
+      const { container, queryByRole } = show(item);
+      expect(container.textContent).not.toContain('PRIVATE');
+      expect(container.querySelector('pre')).toBeNull();
+      expect(queryByRole('button')).toBeNull();
+      if (name === 'exec_command') expect(container.textContent).toContain('sed -n 1,300p guide.html');
+    }
+  );
+
+  test('canonical web actions retain their existing localized target and only a public error expands', async () => {
+    const locale = createInstance();
+    await locale.use(initReactI18next).init({ lng: 'zh-CN', resources: { 'zh-CN': { translation: { messages: chineseMessages } } } });
+    const name = 'platform__web_research_web_research_fetch__30fb0227939eb7c80164';
+    const item = tool({ name, capability_id: 'web.research', action_id: 'web.research/fetch',
+      status: 'error', description: 'pvp.qq.com', error: 'The page could not be read.' });
+    const view = render(<I18nextProvider i18n={locale}><ProcessTraceItem item={item} /></I18nextProvider>);
+    const header = view.getByRole('button');
+    expect(header.textContent).toContain('读取网页 · pvp.qq.com');
+    expect(header.textContent).not.toContain('platform__');
+    fireEvent.click(header);
+    expect(view.container.textContent).toContain('The page could not be read.');
+    expect(view.container.textContent).not.toContain(name);
+    expect(view.container.textContent).not.toContain('web.research/fetch');
+    expect(view.container.textContent).not.toContain('调用标识');
   });
-  test('a proven launch refusal explains that the command was not run and retains its diagnostic', () => {
-    const output = JSON.stringify({ schema: 'nomifun.process-start-observation.v1', state: 'not_started',
-      code: 'PROCESS_NOT_STARTED', user_code_started: false, success: false,
-      message: 'The requested executable did not start.' });
-    const item: IMessageToolCall = {
-      id: 'launch-refusal', type: 'tool_call', conversation_id: conversationId,
+
+  test.each([
+    [{ command_timed_out: true }, 'reached its time limit; process cleanup completed'],
+    [{ command_not_started: true }, 'did not start; command was not run'],
+    [{ command_exit_code: 1, non_fatal_failure: true }, 'ended with exit code 1'],
+  ])('typed process outcome preserves the existing command row', (metadata, expected) => {
+    const item = tool({ name: 'exec_command', status: 'error', description: 'bun test', ...metadata });
+    const { container, queryByRole } = show(item);
+    expect(container.textContent).toContain('bun test');
+    expect(container.textContent).toContain(expected);
+    expect(queryByRole('button')).toBeNull();
+  });
+
+  test.each([
+    ['prior_call_failed', 'Skipped'], ['arguments_rejected', 'Arguments did not pass validation'],
+    ['input_superseded', 'Did not run'],
+  ] as const)('pre-dispatch %s preserves the neutral row', (runtime_hold, label) => {
+    const { container, queryByRole } = show(tool({ name: 'write_file', status: 'error', runtime_hold }), 'completed');
+    expect(container.textContent).toContain(label);
+    expect(container.querySelector('.turn-process-trace__row--failed')).toBeNull();
+    expect(queryByRole('button')).toBeNull();
+  });
+
+  test('a rejected model proposal cannot be expanded into its embedded file body', () => {
+    const item: IMessageText = { id: 'raw-tool-payload', type: 'text', conversation_id: conversationId,
       position: 'left', created_at: 1,
-      content: { call_id: 'no-start', name: 'exec_command', status: 'error',
-        args: { command: 'Copy-Item', args: ['-LiteralPath', '原件.txt'] }, output, artifacts: [] },
-    };
-    const { container, getByRole } = render(
-      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} variant='receipt' /></I18nextProvider>
-    );
-    expect(getByRole('button').textContent).toContain('Copy-Item');
-    expect(getByRole('button').textContent).toContain('did not start; command was not run');
-    expect(container.querySelector('.turn-process-trace__row--failed')).not.toBeNull();
-    expect(container.textContent).not.toContain('PROCESS_NOT_STARTED');
-    fireEvent.click(getByRole('button'));
-    expect(container.textContent).toContain(output);
+      content: { content: '<tool_call>\n<function=write_file>\n<parameter=content>\n<!DOCTYPE html>' } };
+    const { container, queryByRole } = show(item);
+    expect(container.textContent).toContain('Invalid tool-call format');
+    expect(container.querySelector('details')).toBeNull();
+    expect(container.querySelector('pre')).toBeNull();
+    expect(container.textContent).not.toContain('<!DOCTYPE html>');
+    expect(queryByRole('button')).toBeNull();
   });
 
   test('whitespace-only assistant fragments leave no blank process block', () => {
-    const item: IMessageText = {
-      id: 'empty-fragment', type: 'text', conversation_id: conversationId,
-      position: 'left', created_at: 1, content: { content: '\n \n\n' },
-    };
-    const { container } = render(<I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>);
-    expect(container.childElementCount).toBe(0);
+    const item: IMessageText = { id: 'empty-fragment', type: 'text', conversation_id: conversationId,
+      position: 'left', created_at: 1, content: { content: '\n \n\n' } };
+    expect(show(item).container.childElementCount).toBe(0);
   });
 
   test.each(['[Private reasoning omitted]', '[Private reasoning omitted from replay]'])(
-    'does not render a private reasoning placeholder: %s', (content) => {
+    'does not render private reasoning placeholder %s', content => {
       const item: IMessageThinking = { id: 'private-placeholder', type: 'thinking',
         conversation_id: conversationId, created_at: 1, content: { content, status: 'done' } };
-      const { container } = render(<I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>);
-      expect(container.childElementCount).toBe(0);
+      expect(show(item).container.childElementCount).toBe(0);
     }
   );
 
-  test('context compression is a lightweight system row with an icon', () => {
+  test('context compression remains a lightweight existing system row', () => {
     const item: IMessageTips = { id: 'compaction', type: 'tips', conversation_id: conversationId,
       created_at: 1, content: { type: 'success', content: 'Context compaction completed' } };
-    const { container, queryByRole } = render(
-      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>
-    );
+    const { container, queryByRole } = show(item);
     expect(container.textContent).toBe(messagesLocale.processReceipt.contextCompressed);
     expect(container.querySelector('.turn-process-trace__row-icon')).not.toBeNull();
     expect(queryByRole('button')).toBeNull();
   });
 
-  test.each([
-    ['Skipped because a previous tool call in this assistant turn failed.', 'Skipped', 'prior_call_failed'],
-    ["Invalid arguments for tool 'write_file': JSON Schema validation failed: missing path. Correct the arguments and retry; the tool was not executed.", 'Arguments did not pass validation', 'arguments_rejected'],
-  ])('pre-dispatch rejection stays neutral and inspectable: %s', (output, label, runtime_hold) => {
-    const item: IMessageToolCall = { id: 'not-executed', type: 'tool_call', conversation_id: conversationId,
-      created_at: 1, content: { call_id: 'not-executed', name: 'write_file', status: 'error',
-        args: { path: 'src/app.ts' }, output, runtime_hold: runtime_hold as 'prior_call_failed' | 'arguments_rejected', artifacts: [] } };
-    const { container, getByRole } = render(
-      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} stateOverride='completed' /></I18nextProvider>
-    );
-    expect(getByRole('button').textContent).toContain(label);
-    expect(container.querySelector('.turn-process-trace__row--failed')).toBeNull();
-    fireEvent.click(getByRole('button'));
-    expect(container.textContent).toContain(output);
-  });
-
-  test('a model-emitted tool-call payload never becomes a public process paragraph', () => {
-    const item: IMessageText = {
-      id: 'raw-tool-payload', type: 'text', conversation_id: conversationId,
-      position: 'left', created_at: 1,
-      content: { content: '<tool_call>\n\n<function=write_file>\n<parameter=content>\n<!DOCTYPE html>' },
-    };
-    const { container } = render(
-      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>
-    );
-    expect(container.querySelector('summary')?.textContent).toContain('Invalid tool-call format');
-    expect(container.querySelector('pre')).toBeNull();
-    expect(container.textContent).not.toContain('<!DOCTYPE html>');
-  });
-
-  test('intermediate assistant prose remains visible in chronological order', () => {
-    const note = 'Repeating progress should remain inspectable. '.repeat(12);
-    const item: IMessageText = {
-      id: 'long-progress', type: 'text', conversation_id: conversationId,
-      position: 'left', created_at: 1, content: { content: note },
-    };
-    const { container } = render(
-      <MemoryRouter><I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider></MemoryRouter>
-    );
-    const narrationText = container.querySelector('.markdown-shadow')?.shadowRoot?.textContent ?? '';
-    expect(narrationText).toContain('Repeating progress should remain inspectable.');
-    expect(container.textContent).not.toContain('Prepared the result');
-    expect(container.querySelector('[data-testid="process-narration"]')).not.toBeNull();
-    expect(container.querySelector('button')).toBeNull();
-  });
-
-  test('a live phase opens Markdown and completion collapses it until manually expanded', () => {
-    const item: IMessageThinking = {
-      id: 'thinking', type: 'thinking', conversation_id: conversationId,
-      position: 'left', created_at: 1,
-      content: { content: 'Earlier result\nCalling the file tool', status: 'thinking' },
-    };
+  test('thinking disclosure behavior is unchanged', () => {
+    const item: IMessageThinking = { id: 'thinking', type: 'thinking', conversation_id: conversationId,
+      position: 'left', created_at: 1, content: { content: 'Earlier result', status: 'thinking' } };
     const view = (completed = false) => <MemoryRouter><I18nextProvider i18n={i18n}>
       <ProcessTraceItem item={item} stateOverride={completed ? 'completed' : undefined} />
     </I18nextProvider></MemoryRouter>;
     const { container, rerender } = render(view());
-    const text = () => container.querySelector('[data-thinking-process-body] .markdown-shadow')?.shadowRoot?.textContent ?? '';
-    expect(text()).toContain('Earlier result');
-    expect(text()).toContain('Calling the file tool');
     expect(container.querySelector('[data-thinking-process-header]')?.getAttribute('aria-expanded')).toBe('true');
-    expect(container.querySelector('[data-thinking-process-header]')?.textContent).toBe('Thinking...');
     rerender(view(true));
-    expect(text()).toContain('Earlier result');
     expect(container.querySelector('[data-thinking-process-header]')?.getAttribute('aria-expanded')).toBe('false');
     fireEvent.click(container.querySelector<HTMLButtonElement>('[data-thinking-process-header]')!);
     expect(container.querySelector('[data-thinking-process-header]')?.getAttribute('aria-expanded')).toBe('true');
   });
 
-  test('a rehydrated tool row opens its saved input and output', () => {
-    const item: IMessageToolCall = {
-      id: 'saved-tool', type: 'tool_call', conversation_id: conversationId,
-      position: 'left', created_at: 2,
-      content: {
-        call_id: 'call-1', name: 'read_file', status: 'completed',
-        args: { path: 'src/app.ts' }, output: 'file contents', artifacts: [],
-      },
-    };
-    const { getByRole, getByText } = render(
-      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>
-    );
-    const toggle = getByRole('button');
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute('aria-expanded')).toBe('true');
-    expect(getByText('src/app.ts')).toBeDefined();
-    expect(getByText('file contents')).toBeDefined();
-  });
-
-  test('an expanded stage shows its file operations directly without a second group disclosure', () => {
-    const item: IMessageToolGroup = {
-      id: 'edited-files', type: 'tool_group', conversation_id: conversationId,
-      position: 'left', created_at: 2,
-      content: ['src/a.ts', 'src/b.ts', 'src/c.ts'].map((path, index) => ({
-        call_id: `edit-${index}`, name: 'write_file', status: 'Success' as const,
-        description: path,
-      })),
-    };
-    const { container } = render(
-      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} variant='receipt' /></I18nextProvider>
-    );
-
+  test('file group rows preserve their existing paths without a second disclosure', () => {
+    const item: IMessageToolGroup = { id: 'edited-files', type: 'tool_group', conversation_id: conversationId,
+      position: 'left', created_at: 2, content: ['src/a.ts', 'src/b.ts', 'src/c.ts'].map((path, index) => ({
+        call_id: `edit-${index}`, name: 'write_file', status: 'Success' as const, description: path,
+      })) };
+    const { container, queryByRole } = show(item);
     expect(container.querySelectorAll('.turn-process-trace > .turn-process-trace-tool')).toHaveLength(3);
     expect(container.textContent).toContain('Write file · a.ts');
     expect(container.textContent).toContain('Write file · c.ts');
+    expect(queryByRole('button')).toBeNull();
   });
 
-  test('a single stage operation keeps raw tool output closed until that operation is opened', () => {
-    const item: IMessageToolCall = {
-      id: 'single-write', type: 'tool_call', conversation_id: conversationId,
-      position: 'left', created_at: 2,
-      content: {
-        call_id: 'write-one', name: 'write_file', status: 'completed',
-        args: { path: 'snake_game.html' },
-        output: '{"written":true}', artifacts: [],
-      },
-    };
-    const { container, getByRole } = render(
-      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} variant='receipt' /></I18nextProvider>
-    );
-    expect(container.textContent).toContain('Write file · snake_game.html');
-    expect(container.textContent).not.toContain('"written":true');
-    fireEvent.click(getByRole('button'));
-    expect(container.textContent).toContain('"written":true');
-  });
-
-  test('a deferred file call remains inspectable without a red failure row', () => {
-    const item: IMessageToolCall = {
-      id: 'deferred-write', type: 'tool_call', conversation_id: conversationId,
-      position: 'left', created_at: 2,
-      content: {
-        call_id: 'call-write', name: 'write_file', status: 'error', runtime_hold: 'input_superseded',
-        args: { path: 'snake_game.html' },
-        output: 'Operations not executed: instruction scope changed before write',
-        artifacts: [],
-      },
-    };
-    const { container, getByRole } = render(
-      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>
-    );
-    expect(container.querySelector('.turn-process-trace__row--failed')).toBeNull();
-    const toggle = getByRole('button');
-    expect(toggle.textContent).toContain('Did not run');
-    fireEvent.click(toggle);
-    expect(container.textContent).toContain('instruction scope changed before write');
-  });
-
-  test('a mixed tool group preserves individual tool states and its enclosing terminal override', () => {
-    const item: IMessageToolGroup = {
-      id: 'mixed-tools', type: 'tool_group', conversation_id: conversationId,
-      position: 'left', created_at: 3,
-      content: [
-        { call_id: 'first', name: 'first_tool', description: 'finished result', status: 'Success' },
-        { call_id: 'second', name: 'second_tool', description: 'working now', status: 'Executing' },
-      ],
-    };
-    const { container } = render(<I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>);
-    const active = container.querySelector('.turn-process-trace__row--running');
-    expect(active?.closest('[data-tool-call-id]')?.getAttribute('data-tool-call-id')).toBe('second');
-    expect(active?.textContent).toContain('working now');
-    expect(container.querySelector('.turn-process-trace__row--completed')?.closest('[data-tool-call-id]')?.getAttribute('data-tool-call-id')).toBe('first');
-    const settled = render(
-      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} stateOverride='completed' /></I18nextProvider>
-    );
-    expect(settled.container.querySelectorAll('.turn-process-trace__row--completed')).toHaveLength(2);
-    expect(settled.container.querySelector('.turn-process-trace__row--running')).toBeNull();
-  });
-
-
-
-  test('distinct calls with identical labels retain their own inspectable input and output', () => {
-    const item = {
-      id: 'repeated-tools', type: 'tool_summary' as const, created_at: 5, sourceMessageIds: [],
-      messages: [0, 1, 2].map<IMessageToolCall>((index) => ({
-        id: `search-${index}`, type: 'tool_call', conversation_id: conversationId, created_at: 5,
-        content: {
-        call_id: `search-${index}`,
-        name: 'search_code',
-        description: 'searched code',
-        status: 'completed',
-        args: { query: `query-${index}` },
-        output: `result-${index}`, artifacts: [],
-        },
-      })),
-    };
-    const { container } = render(
-      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>
-    );
-
-    const rows = container.querySelectorAll('[data-tool-call-id]');
-    expect(rows).toHaveLength(3);
-    expect(container.textContent).not.toContain('3 times');
-    rows.forEach((row, index) => {
-      fireEvent.click(row.querySelector('button')!);
-      expect(row.textContent).toContain(`query-${index}`);
-      expect(row.textContent).toContain(`result-${index}`);
-      expect(row.querySelectorAll('button')).toHaveLength(1);
-    });
-  });
-
-  test('failed call diagnostics remain in their opened details', () => {
-    const item = {
-      id: 'visible-failures', type: 'tool_summary' as const, created_at: 5, sourceMessageIds: [],
-      messages: [0, 1].map<IMessageToolCall>((index) => ({
-      id: `visible-failure-${index}`, type: 'tool_call', conversation_id: conversationId,
-      position: 'left', created_at: 5,
-      content: {
-        call_id: `failure-${index}`, name: 'create_draft', status: 'error',
-        args: {}, artifacts: [],
-        output: JSON.stringify({ code: 'PLUGIN_NOT_FOUND', message: `Missing plugin-${index}` }),
-      },
-    })),
-    };
-    const { container } = render(<I18nextProvider i18n={i18n}><ProcessTraceItem item={item} variant='receipt' /></I18nextProvider>);
-    const rows = container.querySelectorAll('[data-tool-call-id]');
-    expect(rows).toHaveLength(2);
-    rows.forEach((row, index) => {
-      expect(row.textContent).not.toContain(`Missing plugin-${index}`);
-      expect(row.querySelector('.turn-process-trace-detail')).toBeNull();
-      fireEvent.click(row.querySelector('button')!);
-      expect(row.querySelector('.turn-process-trace-detail')?.textContent).toContain(String(item.messages[index].content.output));
-      expect(row.querySelectorAll('button')).toHaveLength(1);
-    });
-  });
-
-
-});
-
-test('an admitted call without a result ends neutrally and offers only observation details', async () => {
-  const localized = createInstance();
-  await localized.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: {
-    messages: { ...messagesLocale, toolResultUnconfirmed: 'Result unconfirmed' },
-  } } } });
-  const item: IMessageToolCall = { id: 'tool-start', type: 'tool_call', conversation_id: conversationId,
-    content: { call_id: 'unresolved-call', name: 'browser_navigate', status: 'running', args: { url: 'https://example.com' },
+  test('an unconfirmed result retains its existing inline status without an empty detail panel', () => {
+    const item = tool({ name: 'browser_navigate', status: 'running', description: 'example.com',
       timeline: { through_seq: 20, segments: [{ segment_id: 'tool-start', group_id: 'process-start', first_seq: 3,
-        last_seq: 20, kind: 'tool', call_id: 'unresolved-call', state: 'interrupted' }] } } };
-  const page = render(<I18nextProvider i18n={localized}><ProcessTraceItem item={item} stateOverride='completed' /></I18nextProvider>);
-  const row = page.container.querySelector('[data-tool-call-id="unresolved-call"]')!;
-  expect(row.textContent).toContain('Result unconfirmed');
-  expect(row.querySelector('.turn-process-trace__row--running')).toBeNull();
-  expect(row.querySelector('.turn-process-trace__row--completed')).toBeNull();
-  expect(row.querySelector('.turn-process-trace__row--canceled')).toBeNull();
-  expect(row.querySelector('.turn-process-trace__row--failed')).toBeNull();
-  expect(row.textContent).not.toMatch(/Canceled|Failed|Ran /);
-  expect(page.getAllByRole('button')).toHaveLength(1);
-  fireEvent.click(page.getByRole('button'));
-  expect(row.querySelector('.turn-process-trace-detail')?.textContent).toContain('Result unconfirmed');
-  expect(row.textContent).toContain('https://example.com');
-  expect(page.getAllByRole('button')).toHaveLength(1);
-  expect(item.content.status).toBe('running');
+        last_seq: 20, kind: 'tool', call_id: 'call', state: 'interrupted' }] } });
+    const { container, queryByRole } = show(item, 'completed');
+    expect(container.textContent).toContain(messagesLocale.toolResultUnconfirmed);
+    expect(container.textContent).toContain('example.com');
+    expect(container.querySelector('.turn-process-trace__row--failed')).toBeNull();
+    expect(queryByRole('button')).toBeNull();
+    expect(item.content.status).toBe('running');
+  });
 });

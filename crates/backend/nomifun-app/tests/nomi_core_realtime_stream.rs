@@ -168,10 +168,7 @@ impl AgentRuntimeControl for SettlementErrorMockAgent {
             identity: Default::default(),
             call_id: call_id.clone(),
             name: "write_file".to_owned(),
-            args: json!({"path": "settlement.txt", "content": "x"}),
             status: ToolCallStatus::Running,
-            input: None,
-            output: None,
             description: None,
             artifacts: Vec::new(),
         }));
@@ -213,13 +210,14 @@ impl AgentRuntimeControl for SettlementErrorMockAgent {
             .ack
             .expect("tool result must be accepted");
         let _ = self.events.send(AgentStreamEvent::ToolCall(ToolCallEventData {
-            identity: Default::default(),
+            identity: nomifun_ai_agent::protocol::events::tool_call::ToolCallIdentity {
+                error_code: Some("CAPABILITY_UNAVAILABLE".into()),
+                display: nomifun_engine_core::ToolDisplayFacts { error: Some("The tool result could not be confirmed. Do not retry automatically.".into()), ..Default::default() },
+                ..Default::default()
+            },
             call_id: call_id.clone(),
             name: "write_file".to_owned(),
-            args: json!({"path": "settlement.txt", "content": "x"}),
             status: ToolCallStatus::Error,
-            input: None,
-            output: Some(SETTLEMENT_ERROR.to_owned()),
             description: None,
             artifacts: Vec::new(),
         }));
@@ -973,7 +971,7 @@ async fn settlement_error_streams_over_realtime_and_recovers_via_durable_cursor_
     assert_eq!(history_tools[0]["status"], "error");
     assert_eq!(history_tools[0]["content"]["status"], "error");
     assert!(
-        history_tools[0]["content"]["output"]
+        history_tools[0]["content"]["error"]
             .as_str()
             .unwrap()
             .contains("Do not retry")
@@ -1049,9 +1047,9 @@ async fn settlement_error_streams_over_realtime_and_recovers_via_durable_cursor_
                             seen_running = true;
                         } else if data["status"] == "error" {
                             assert_eq!(data["call_id"], "w155-call-2");
-                            let output = data["output"].as_str().unwrap_or_default();
-                            assert!(output.contains("CAPABILITY_UNAVAILABLE"), "{frame}");
-                            assert!(output.contains("Do not retry"), "{frame}");
+                            assert!(data.get("args").is_none() && data.get("input").is_none() && data.get("output").is_none(), "{frame}");
+                            assert_eq!(data["error_code"], "CAPABILITY_UNAVAILABLE");
+                            assert!(data["error"].as_str().unwrap().contains("Do not retry"), "{frame}");
                             assert_eq!(data["artifacts"], json!([]));
                             seen_error_frame = true;
                         } else {
@@ -1168,7 +1166,7 @@ async fn settlement_error_streams_over_realtime_and_recovers_via_durable_cursor_
     assert_eq!(history_tools.len(), 2, "{history}");
     for tool in &history_tools {
         assert_eq!(tool["status"], "error");
-        assert!(tool["content"]["output"].as_str().unwrap().contains("Do not retry"));
+        assert!(tool["content"]["error"].as_str().unwrap().contains("Do not retry"));
         if tool["content"]["call_id"] == "w155-call-2" {
             assert_eq!(tool["content"]["timeline"]["segments"], final_timeline["segments"],
                 "live terminal and cold history use the same canonical segment projection");

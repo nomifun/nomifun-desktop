@@ -106,9 +106,9 @@ impl AgentSessionStore {
             return Ok(ack);
         }
         let row = sqlx::query_as::<_, StoredEffectRow>(
-            "SELECT effect_id,session_id,turn_id,operation_id,owner_domain,capability_module,action_id,resource_binding_id,resource_key,input_digest,strategy,state,bounded_observation_json,started_event_id,terminal_event_id,created_at,settled_at FROM agent_effects WHERE session_id=? AND turn_id=? AND effect_id=?")
+            "SELECT effect_id,session_id,turn_id,operation_id,owner_domain,capability_module,action_id,resource_binding_id,resource_key,input_digest,strategy,state,started_event_id,terminal_event_id,created_at,settled_at FROM agent_effects WHERE session_id=? AND turn_id=? AND effect_id=?")
             .bind(session.as_ref()).bind(request.operation_id.as_ref()).bind(&request.effect_id).fetch_one(&mut *tx).await?;
-        let effect = effect_from_row(row)?;
+        let effect = effect_from_row(&mut tx, row).await?;
         if !matches!(effect.state,AgentEffectState::Unknown|AgentEffectState::Pending) || effect.input_digest != request.expected_input_digest {
             return Err(SessionStoreError::Conflict("effect is not the exact uncertain input being verified".into()));
         }

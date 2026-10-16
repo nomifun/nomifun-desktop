@@ -9,7 +9,7 @@ test('internal preflight reads are hidden and model-selected reads stay visible'
 });
 
 test('progress receipts hide only successful declarations and preserve real errors', () => {
-  const call = { type: 'tool_call', content: { call_id: 'p1', name: 'update_plan', args: {}, status: 'completed' } } as IMessageToolCall;
+  const call = { type: 'tool_call', content: { call_id: 'p1', name: 'update_plan', status: 'completed' } } as IMessageToolCall;
   expect(isTaskPlanControlReceipt(call)).toBe(true);
   expect(isTaskPlanControlReceipt({ ...call, content: { ...call.content, status: 'error' } })).toBe(false);
   expect(isTaskPlanControlReceipt({ ...call, content: { ...call.content, name: 'write_file' } })).toBe(false);

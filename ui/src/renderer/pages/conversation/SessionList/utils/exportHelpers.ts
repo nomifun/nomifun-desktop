@@ -7,7 +7,7 @@
 import type { TMessage } from '@/common/chat/chatLib';
 import type { IWorkspaceFlatFile } from '@/common/adapter/ipcBridge';
 import type { TChatConversation } from '@/common/config/storage';
-import { getMessageRoleKey, readMessageContent, sanitizeFileName } from '@/renderer/utils/chat/conversationExport';
+import { getMessageRoleKey, normalizeExportMessage, readMessageContent, sanitizeFileName } from '@/renderer/utils/chat/conversationExport';
 
 import type { ExportZipFile } from '../types';
 
@@ -78,7 +78,7 @@ export const buildConversationJson = (conversation: TChatConversation, messages:
       version: 1,
       exportedAt: new Date().toISOString(),
       conversation,
-      messages,
+      messages: messages.map(normalizeExportMessage),
     },
     null,
     2

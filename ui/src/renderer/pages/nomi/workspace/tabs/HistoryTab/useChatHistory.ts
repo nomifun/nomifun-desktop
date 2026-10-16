@@ -157,7 +157,6 @@ export const useDayMessages = (
           conversation_id: conversationId,
           day,
           page_size: DAY_PAGE_SIZE,
-          content_mode: 'compact',
         });
         if (runRef.current !== run) return;
         setEntries((page.items ?? []).map(toHistoryEntry).filter((entry): entry is HistoryEntry => entry !== null));

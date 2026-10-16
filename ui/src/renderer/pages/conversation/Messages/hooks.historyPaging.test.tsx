@@ -98,7 +98,7 @@ test('cold history continues until the newest tool-heavy request has its user bo
   const h = mountHistory();
   const tool = {
     ...message(30), type: 'tool_call' as const, position: 'left' as const,
-    content: { call_id: 'call-30', name: 'read_file', status: 'completed' as const, args: { path: 'src/app.ts' } },
+    content: { call_id: 'call-30', name: 'read_file', status: 'completed' as const, description: 'src/app.ts' },
   } as TMessage;
   await h.reply(0, [tool], true);
   expect(h.requests).toHaveLength(2);

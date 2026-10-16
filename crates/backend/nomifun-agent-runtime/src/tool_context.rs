@@ -102,14 +102,7 @@ fn excerpt(text: &str, allowance: usize) -> (String, usize, usize) {
     if text.len() <= allowance {
         return (text.into(), text.len(), 0);
     }
-    let mut head = allowance / 2;
-    while !text.is_char_boundary(head) {
-        head -= 1;
-    }
-    let mut tail = text.len().saturating_sub(allowance - allowance / 2);
-    while !text.is_char_boundary(tail) {
-        tail += 1;
-    }
+    let (head,tail)=nomifun_engine_core::tool_text_excerpt_ranges(text,allowance);
     (
         format!(
             "{}\n[Engine context excerpt: {} UTF-8 bytes omitted; not contiguous source]\n{}",

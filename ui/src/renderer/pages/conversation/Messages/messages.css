@@ -30,21 +30,6 @@
   line-height: 22px;
 }
 
-.message-protocol-note > summary { cursor: pointer; }
-.message-protocol-note__detail { color: var(--color-text-2); }
-.message-protocol-note__detail p { margin: 6px 0; }
-.message-protocol-note__detail pre {
-  max-height: 220px;
-  overflow: auto;
-  padding: 8px 12px;
-  border-radius: 6px;
-  background: var(--color-fill-2);
-  font-size: 12px;
-  line-height: 18px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
 /* Agent switches are session boundaries, not successful chat messages. */
 .agent-transition-boundary {
   box-sizing: border-box;

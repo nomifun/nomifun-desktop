@@ -60,7 +60,7 @@ pub(super) async fn attach_for_page(tx:&mut Transaction<'_,Sqlite>,session:&Agen
     if history.is_empty() {return Ok(());}
     let existing=history.iter().map(|row|row.projection_id.clone()).collect::<BTreeSet<_>>();
     let mut query=sqlx::QueryBuilder::<Sqlite>::new(
-        "SELECT session_id,turn_id,source_message_id,state,result_json,error_json,started_event_id,accepted_at,started_at,finished_at \
+        "SELECT session_id,turn_id,operation_id,source_message_id,state,terminal_event_id,started_event_id,accepted_at,started_at,finished_at \
          FROM agent_turns WHERE session_id=");
     query.push_bind(session.as_ref()).push(" AND source_message_id IS NOT NULL AND (");
     {
@@ -77,7 +77,7 @@ pub(super) async fn attach_for_page(tx:&mut Transaction<'_,Sqlite>,session:&Agen
     }
     query.push(")");
     for row in query.build_query_as::<StoredTurnHistoryRow>().fetch_all(&mut **tx).await? {
-        if let Some(summary)=turn_history_projection_from_row(row)? && !existing.contains(&summary.projection_id) {history.push(summary);}
+        if let Some(summary)=turn_history_projection_from_row(tx, row).await? && !existing.contains(&summary.projection_id) {history.push(summary);}
     }
     history.sort_by(|left,right|right.first_seq.cmp(&left.first_seq).then_with(||right.projection_id.cmp(&left.projection_id)));
     Ok(())

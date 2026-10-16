@@ -50,6 +50,10 @@ mod turn_outcome_history_tests;
 mod message_timeline_history_tests;
 #[path = "context_clear_tests.rs"]
 mod context_clear_tests;
+#[path = "shared_content_tests.rs"]
+mod shared_content_tests;
+#[path = "terminal_content_tests.rs"]
+mod terminal_content_tests;
 
 async fn clear_context(store: &AgentSessionStore, session: &AgentSessionId, key: &str) -> crate::SessionEventAppendResult {
     let request = crate::ClearSessionContext { idempotency_key: key.into(), reason: "user_requested".into() };

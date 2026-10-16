@@ -11,8 +11,10 @@ mod kernel;
 mod process;
 mod system_permission;
 mod tool;
+mod tool_display;
 mod tool_schema;
 pub use tool_schema::model_tool_schema;
+pub use tool_display::{ToolDisplayFacts, ToolBoundedResult, WrittenKnowledgeFile, tool_display_target, tool_result_target, tool_result_display, tool_display_operation, tool_denied_stop_target};
 
 pub use error::{EngineProcessError, EngineToolError};
 pub use system_permission::{SystemPermissionKind, SystemPermissionRequired, SYSTEM_PERMISSION_REQUIRED,
@@ -29,4 +31,5 @@ pub use process::{
 pub use tool::{
     EngineEffectClass, EngineToolBinding, EngineToolInvocation, EngineToolInvoker, EngineToolPlan,
     EngineToolResult, RuntimeToolHoldReason, input_schema_digest, parse_completed_arguments, validate_tool_argument_size,
+    tool_text_excerpt_ranges,
 };

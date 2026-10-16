@@ -53,6 +53,11 @@ pub const MAX_SINGLE_PAYLOAD_BYTES: usize = 1024 * 1024;
 pub const MAX_SESSION_PAYLOAD_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_EVENT_PAGE_SIZE: u32 = 500;
 
+#[path = "shared_content.rs"]
+mod shared_content;
+#[path = "terminal_content.rs"]
+mod terminal_content;
+
 #[path = "native_checkpoint.rs"]
 mod native_checkpoint;
 pub use native_checkpoint::{NativeCheckpoint, NativeCheckpointWrite, MAX_NATIVE_CHECKPOINT_BYTES};
@@ -185,8 +190,6 @@ const AGENT_STORE_COLUMNS: &[(&str, &[&str])] = &[
             "source_message_id",
             "admission_json",
             "state",
-            "result_json",
-            "error_json",
             "started_event_id",
             "terminal_event_id",
             "accepted_at",
@@ -221,7 +224,6 @@ const AGENT_STORE_COLUMNS: &[(&str, &[&str])] = &[
             "input_digest",
             "strategy",
             "state",
-            "bounded_observation_json",
             "started_event_id",
             "terminal_event_id",
             "created_at",
@@ -266,9 +268,7 @@ const AGENT_STORE_COLUMNS: &[(&str, &[&str])] = &[
             "media_type",
             "byte_len",
             "digest",
-            "storage_kind",
             "body",
-            "object_ref",
         ],
     ),
     (
@@ -370,6 +370,8 @@ impl AgentSessionStore {
             .connect_with(options)
             .await?;
         sqlx::raw_sql(AGENT_STORE_BASELINE_SQL).execute(&pool).await?;
+        sqlx::raw_sql(include_str!("../../nomifun-db/migrations/007_retire_terminal_content_mirrors.sql")).execute(&pool).await?;
+        sqlx::raw_sql(include_str!("../../nomifun-db/migrations/008_retire_payload_object_placeholder.sql")).execute(&pool).await?;
         seed_test_schema_metadata(&pool).await?;
         Self::from_pool(pool).await
     }
@@ -2327,6 +2329,46 @@ impl AgentSessionStore {
         Ok(page)
     }
 
+    /// Resolve exact canonical facts for an internal consumer in one snapshot. The events'
+    /// stored representation is not a second public tool-details interface.
+    pub async fn resolved_event_payloads(
+        &self,
+        session_id: &AgentSessionId,
+        event_ids: &[EventId],
+    ) -> Result<BTreeMap<String,Value>, SessionStoreError> {
+        if event_ids.len() as u64 > nomifun_agent_contracts::MAX_NATIVE_APPROVED_JOURNAL_RECORDS + 4000 {
+            return Err(SessionStoreError::InvalidPayload("resolved event batch exceeds its record budget".into()));
+        }
+        let mut tx = self.pool.begin().await?;
+        require_live_session_tx(&mut tx, session_id.as_ref()).await?;
+        let mut result=BTreeMap::new();
+        let mut expanded_bytes=0usize;
+        // Remain below SQLite's bind limit without opening another snapshot.
+        for ids in event_ids.chunks(500) {
+            let mut query=sqlx::QueryBuilder::<Sqlite>::new(
+                "SELECT session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,causation_event_id,inline_json,payload_id FROM agent_events WHERE session_id=");
+            query.push_bind(session_id.as_ref()).push(" AND event_id IN (");
+            let mut selected=query.separated(",");
+            for id in ids {selected.push_bind(id.as_ref());}
+            selected.push_unseparated(")");
+            for row in query.build_query_as::<StoredEventRow>().fetch_all(&mut *tx).await? {
+                if result.contains_key(&row.event_id) {continue;}
+                let event=event_from_row(row)?;
+                let payload=payload_value_for_event_tx(&mut tx,&event).await?;
+                expanded_bytes=expanded_bytes.saturating_add(canonical_json_bytes(&payload)?.len());
+                if expanded_bytes>nomifun_agent_contracts::MAX_NATIVE_HISTORY_WINDOW_BYTES {
+                    return Err(SessionStoreError::InvalidPayload("resolved event batch exceeds its expanded byte budget".into()));
+                }
+                result.insert(event.event_id.0,payload);
+            }
+            if ids.iter().any(|id|!result.contains_key(id.as_ref())) {
+                return Err(SessionStoreError::InvalidPayload("canonical event is missing or belongs to another Session".into()));
+            }
+        }
+        tx.commit().await?;
+        Ok(result)
+    }
+
     async fn read_event_page_tx(
         tx: &mut Transaction<'_, Sqlite>,
         session_id: &AgentSessionId,
@@ -2464,19 +2506,22 @@ impl AgentSessionStore {
         session_id: &AgentSessionId,
         effect_id: &str,
     ) -> Result<Option<AgentEffectRecord>, SessionStoreError> {
-        require_live_session(&self.pool, session_id.as_ref()).await?;
+        let mut tx = self.pool.begin().await?;
+        require_live_session_tx(&mut tx, session_id.as_ref()).await?;
         let row = sqlx::query_as::<_, StoredEffectRow>(
             "SELECT effect_id, session_id, turn_id, operation_id, owner_domain, \
                     capability_module, action_id, resource_binding_id, resource_key, \
-                    input_digest, strategy, state, bounded_observation_json, \
+                    input_digest, strategy, state, \
                     started_event_id, terminal_event_id, created_at, settled_at \
              FROM agent_effects WHERE session_id = ? AND effect_id = ?",
         )
         .bind(session_id.as_ref())
         .bind(effect_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
-        row.map(effect_from_row).transpose()
+        let result = match row { Some(row) => Some(effect_from_row(&mut tx, row).await?), None => None };
+        tx.commit().await?;
+        Ok(result)
     }
 
     pub async fn has_unsettled_effects(
@@ -2498,19 +2543,23 @@ impl AgentSessionStore {
         &self,
         session_id: &AgentSessionId,
     ) -> Result<Vec<AgentEffectRecord>, SessionStoreError> {
-        require_live_session(&self.pool, session_id.as_ref()).await?;
+        let mut tx = self.pool.begin().await?;
+        require_live_session_tx(&mut tx, session_id.as_ref()).await?;
         let rows = sqlx::query_as::<_, StoredEffectRow>(
             "SELECT effect_id, session_id, turn_id, operation_id, owner_domain, \
                     capability_module, action_id, resource_binding_id, resource_key, \
-                    input_digest, strategy, state, bounded_observation_json, \
+                    input_digest, strategy, state, \
                     started_event_id, terminal_event_id, created_at, settled_at \
              FROM agent_effects WHERE session_id = ? \
              ORDER BY created_at DESC, effect_id DESC",
         )
         .bind(session_id.as_ref())
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
-        rows.into_iter().map(effect_from_row).collect()
+        let mut effects = Vec::with_capacity(rows.len());
+        for row in rows { effects.push(effect_from_row(&mut tx, row).await?); }
+        tx.commit().await?;
+        Ok(effects)
     }
 
     pub async fn effect_causation_event_id(
@@ -2953,7 +3002,7 @@ impl AgentSessionStore {
             return Ok(Vec::new());
         }
         let mut query = sqlx::QueryBuilder::<Sqlite>::new(
-            "SELECT session_id, turn_id, source_message_id, state, result_json, error_json, \
+            "SELECT session_id, turn_id, operation_id, source_message_id, state, terminal_event_id, \
                     started_event_id, accepted_at, started_at, finished_at \
              FROM agent_turns WHERE session_id = ",
         );
@@ -2966,7 +3015,7 @@ impl AgentSessionStore {
         let rows = query.build_query_as::<StoredTurnHistoryRow>().fetch_all(&mut *tx).await?;
         let mut history = Vec::new();
         for row in rows {
-            if let Some(summary) = turn_history_projection_from_row(row)? {
+            if let Some(summary) = turn_history_projection_from_row(&mut tx, row).await? {
                 history.push(summary);
             }
         }
@@ -3091,7 +3140,7 @@ impl AgentSessionStore {
         .fetch_all(&mut *tx)
         .await?;
         let turn_rows = sqlx::query_as::<_, StoredTurnHistoryRow>(
-            "SELECT session_id, turn_id, source_message_id, state, result_json, error_json, \
+            "SELECT session_id, turn_id, operation_id, source_message_id, state, terminal_event_id, \
                     started_event_id, accepted_at, started_at, finished_at \
              FROM agent_turns \
              WHERE session_id = ? AND source_message_id IS NOT NULL \
@@ -3113,7 +3162,7 @@ impl AgentSessionStore {
         ).await?;
         history.extend(runtime_tools);
         for row in turn_rows {
-            if let Some(summary) = turn_history_projection_from_row(row)? {
+            if let Some(summary) = turn_history_projection_from_row(&mut tx, row).await? {
                 history.push(summary);
             }
         }
@@ -3672,7 +3721,7 @@ impl AgentSessionStore {
         let row = sqlx::query_as::<_, StoredEffectRow>(
             "SELECT effect_id, session_id, turn_id, operation_id, owner_domain, \
                     capability_module, action_id, resource_binding_id, resource_key, \
-                    input_digest, strategy, state, bounded_observation_json, \
+                    input_digest, strategy, state, \
                     started_event_id, terminal_event_id, created_at, settled_at \
              FROM agent_effects WHERE session_id = ? AND effect_id = ?",
         )
@@ -3681,7 +3730,7 @@ impl AgentSessionStore {
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| SessionStoreError::NotFound(effect_id.to_owned()))?;
-        let effect = effect_from_row(row)?;
+        let effect = effect_from_row(&mut tx, row).await?;
         if effect.state != AgentEffectState::Unknown {
             return Err(SessionStoreError::Conflict(
                 "only an unknown effect may be externally reconciled for delete".to_owned(),
@@ -3989,7 +4038,7 @@ impl AgentSessionStore {
         let rows = sqlx::query_as::<_, StoredEffectRow>(
             "SELECT effect_id, session_id, turn_id, operation_id, owner_domain, \
                     capability_module, action_id, resource_binding_id, resource_key, \
-                    input_digest, strategy, state, bounded_observation_json, \
+                    input_digest, strategy, state, \
                     started_event_id, terminal_event_id, created_at, settled_at \
              FROM agent_effects WHERE session_id = ? AND state = 'pending' \
              ORDER BY effect_id",
@@ -3999,7 +4048,7 @@ impl AgentSessionStore {
         .await?;
         let mut quarantined = 0_u64;
         for row in rows {
-            let effect = effect_from_row(row)?;
+            let effect = effect_from_row(&mut tx, row).await?;
             let started_event = event_by_event_id_tx(&mut tx, effect.started_event_id.as_ref())
                 .await?
                 .ok_or_else(|| {
@@ -4685,6 +4734,27 @@ impl AgentSessionStore {
         state_policy: AppendSessionStatePolicy,
     ) -> Result<SessionEventAppendResult, SessionStoreError> {
         validate_event_append(append)?;
+        let existing_payload = if payload.is_none()
+            && matches!(append.semantic_event.kind.0.as_str(), "runtime/progress-recorded" | "tool/result-recorded") {
+            if let SessionEventPayloadRef::Stored(id) = &append.semantic_event.payload {
+                payload_by_id_tx(tx, id.as_ref()).await?.map(payload_from_row).transpose()?
+            } else { None }
+        } else { None };
+        let payload = payload.or(existing_payload.as_ref());
+        if let Some(payload) = payload {
+            validate_supplied_payload(append, payload)?;
+            validate_payload_contents(payload)?;
+            if let Some(existing) = payload_by_id_tx(tx, payload.payload_id.as_ref()).await? {
+                if payload_from_row(existing)? != *payload {
+                    return Err(SessionStoreError::IdempotencyConflict("supplied payload identity already has different content".into()));
+                }
+            }
+        }
+        let semantic_append = append;
+        let semantic_payload = payload;
+        let prepared = shared_content::prepare(append, payload)?;
+        let append = &prepared.append;
+        let payload = prepared.envelope.as_ref();
         let registry_entry = self
             .registry
             .entry(
@@ -4814,6 +4884,12 @@ impl AgentSessionStore {
             });
         }
 
+        if let Some(existing) = shared_content::duplicate(tx, semantic_append, semantic_payload).await? {
+            let record = event_from_row(existing)?;
+            let ack = event_ack(&record);
+            return Ok(SessionEventAppendResult { cursor: ack.cursor.clone(), record: Some(record), ack: Some(ack), persisted: true, duplicate: true });
+        }
+        for content in &prepared.contents { insert_payload_tx(tx, content).await?; }
         if let Some(payload) = payload {
             validate_supplied_payload(append, payload)?;
             insert_payload_tx(tx, payload).await?;
@@ -4856,7 +4932,7 @@ impl AgentSessionStore {
         let record = record_from_append(append, as_u64(seq, "seq")?);
         insert_event_tx(tx, &record).await?;
 
-        let payload_value = payload_value(&record, stored_payload_value);
+        let payload_value = shared_content::hydrate(tx, &record, payload_value(&record, stored_payload_value)).await?;
         validate_semantic_event_tx(tx, &record, &payload_value).await?;
         project_turn_fact_tx(tx, &record, &payload_value).await?;
         project_effect_fact_tx(tx, &record, &payload_value).await?;
@@ -4989,9 +5065,9 @@ async fn project_turn_fact_tx(
             sqlx::query(
                 "INSERT INTO agent_turns (\
                     session_id, turn_id, operation_id, idempotency_key, source_message_id, \
-                    admission_json, state, result_json, error_json, started_event_id, \
+                    admission_json, state, started_event_id, \
                     terminal_event_id, accepted_at, started_at, finished_at, execution_lease_until\
-                 ) VALUES (?, ?, ?, ?, ?, ?, 'running', NULL, NULL, ?, NULL, ?, ?, NULL, ?)",
+                 ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, NULL, ?, ?, NULL, ?)",
             )
             .bind(event.agent_session_id.as_ref())
             .bind(operation_id)
@@ -5013,20 +5089,12 @@ async fn project_turn_fact_tx(
                 "turn/cancelled" => "cancelled",
                 _ => unreachable!(),
             };
-            let payload_json = serde_json::to_string(payload)?;
-            let (result_json, error_json) = if state == "completed" {
-                (Some(payload_json), None)
-            } else {
-                (None, Some(payload_json))
-            };
             let result = sqlx::query(
-                "UPDATE agent_turns SET state = ?, result_json = ?, error_json = ?, \
+                "UPDATE agent_turns SET state = ?, \
                     terminal_event_id = ?, finished_at = ?, native_pause_json = NULL, native_pause_requested_json = NULL \
                  WHERE session_id = ? AND operation_id = ? AND state = 'running'",
             )
             .bind(state)
-            .bind(result_json)
-            .bind(error_json)
             .bind(event.event_id.as_ref())
             .bind(as_i64(event.seq, "turn finished sequence")?)
             .bind(event.agent_session_id.as_ref())
@@ -5151,9 +5219,7 @@ struct StoredPayloadRow {
     media_type: String,
     byte_len: i64,
     digest: String,
-    storage_kind: String,
-    body: Option<Vec<u8>>,
-    object_ref: Option<String>,
+    body: Vec<u8>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -5169,10 +5235,10 @@ struct StoredTurnRow {
 struct StoredTurnHistoryRow {
     session_id: String,
     turn_id: String,
+    operation_id: String,
     source_message_id: String,
     state: String,
-    result_json: Option<String>,
-    error_json: Option<String>,
+    terminal_event_id: Option<String>,
     started_event_id: String,
     accepted_at: i64,
     started_at: Option<i64>,
@@ -5193,7 +5259,6 @@ struct StoredEffectRow {
     input_digest: String,
     strategy: String,
     state: String,
-    bounded_observation_json: Option<String>,
     started_event_id: String,
     terminal_event_id: Option<String>,
     created_at: i64,
@@ -5789,34 +5854,7 @@ async fn insert_payload_tx(
     tx: &mut Transaction<'_, Sqlite>,
     payload: &SessionPayloadRecord,
 ) -> Result<(), SessionStoreError> {
-    validate_uuidv7(
-        payload.agent_session_id.as_ref(),
-        "payload.agent_session_id",
-    )?;
-    if payload.media_type.trim().is_empty() || payload.media_type.trim() != payload.media_type {
-        return Err(SessionStoreError::InvalidPayload(
-            "payload media_type must be canonical and non-empty".to_owned(),
-        ));
-    }
-    let logical_bytes = logical_payload_bytes(&payload.body)?;
-    if logical_bytes.len() > MAX_SINGLE_PAYLOAD_BYTES {
-        return Err(SessionStoreError::InvalidPayload(format!(
-            "payload exceeds {MAX_SINGLE_PAYLOAD_BYTES} bytes"
-        )));
-    }
-    if payload.byte_len != logical_bytes.len() as u64 {
-        return Err(SessionStoreError::InvalidPayload(format!(
-            "payload byte_len {} does not match {} bytes",
-            payload.byte_len,
-            logical_bytes.len()
-        )));
-    }
-    let digest = digest_bytes(&logical_bytes);
-    if payload.digest != digest {
-        return Err(SessionStoreError::InvalidPayload(
-            "payload digest does not match canonical body bytes".to_owned(),
-        ));
-    }
+    validate_payload_contents(payload)?;
 
     if let Some(existing) = payload_by_id_tx(tx, payload.payload_id.as_ref()).await? {
         let existing = payload_from_row(existing)?;
@@ -5846,8 +5884,8 @@ async fn insert_payload_tx(
     let stored_body = serde_json::to_vec(&payload.body)?;
     sqlx::query(
         "INSERT INTO agent_payloads \
-            (payload_id, session_id, media_type, byte_len, digest, storage_kind, body, object_ref) \
-         VALUES (?, ?, ?, ?, ?, 'inline', ?, NULL)",
+            (payload_id, session_id, media_type, byte_len, digest, body) \
+         VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(payload.payload_id.as_ref())
     .bind(payload.agent_session_id.as_ref())
@@ -5857,6 +5895,39 @@ async fn insert_payload_tx(
     .bind(stored_body)
     .execute(&mut **tx)
     .await?;
+    Ok(())
+}
+
+fn validate_payload_contents(payload: &SessionPayloadRecord) -> Result<(), SessionStoreError> {
+    validate_uuidv7(
+        payload.agent_session_id.as_ref(),
+        "payload.agent_session_id",
+    )?;
+    if payload.media_type.trim().is_empty() || payload.media_type.trim() != payload.media_type {
+        return Err(SessionStoreError::InvalidPayload(
+            "payload media_type must be canonical and non-empty".to_owned(),
+        ));
+    }
+    let logical_bytes = logical_payload_bytes(&payload.body)?;
+    if logical_bytes.len() > MAX_SINGLE_PAYLOAD_BYTES {
+        return Err(SessionStoreError::InvalidPayload(format!(
+            "payload exceeds {MAX_SINGLE_PAYLOAD_BYTES} bytes"
+        )));
+    }
+    if payload.byte_len != logical_bytes.len() as u64 {
+        return Err(SessionStoreError::InvalidPayload(format!(
+            "payload byte_len {} does not match {} bytes",
+            payload.byte_len,
+            logical_bytes.len()
+        )));
+    }
+    let digest = digest_bytes(&logical_bytes);
+    if payload.digest != digest {
+        return Err(SessionStoreError::InvalidPayload(
+            "payload digest does not match canonical body bytes".to_owned(),
+        ));
+    }
+
     Ok(())
 }
 
@@ -6436,9 +6507,9 @@ async fn project_effect_fact_tx(
                 "INSERT INTO agent_effects (\
                     effect_id, session_id, turn_id, operation_id, owner_domain, \
                     capability_module, action_id, resource_binding_id, resource_key, \
-                    input_digest, strategy, state, bounded_observation_json, \
+                    input_digest, strategy, state, \
                     started_event_id, terminal_event_id, created_at, settled_at\
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL, ?, NULL)",
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, ?, NULL)",
             )
             .bind(effect_id)
             .bind(event.agent_session_id.as_ref())
@@ -6463,14 +6534,12 @@ async fn project_effect_fact_tx(
                 "effect/uncertain" => "unknown",
                 _ => unreachable!(),
             };
-            let observation = serde_json::to_string(payload)?;
             let result = sqlx::query(
-                "UPDATE agent_effects SET state = ?, bounded_observation_json = ?, \
+                "UPDATE agent_effects SET state = ?, \
                     terminal_event_id = ?, settled_at = ? \
                  WHERE effect_id = ? AND session_id = ? AND state = 'pending'",
             )
             .bind(state)
-            .bind(observation)
             .bind(event.event_id.as_ref())
             .bind(recorded_at)
             .bind(effect_id)
@@ -6494,14 +6563,12 @@ async fn project_effect_fact_tx(
                     )));
                 }
             };
-            let observation = serde_json::to_string(payload)?;
             let result = sqlx::query(
-                "UPDATE agent_effects SET state = ?, bounded_observation_json = ?, \
+                "UPDATE agent_effects SET state = ?, \
                     terminal_event_id = ?, settled_at = ? \
                  WHERE effect_id = ? AND session_id = ? AND state = 'unknown'",
             )
             .bind(state)
-            .bind(observation)
             .bind(event.event_id.as_ref())
             .bind(recorded_at)
             .bind(effect_id)
@@ -7185,7 +7252,7 @@ async fn payload_by_id_tx(
     payload_id: &str,
 ) -> Result<Option<StoredPayloadRow>, SessionStoreError> {
     Ok(sqlx::query_as::<_, StoredPayloadRow>(
-        "SELECT payload_id, session_id, media_type, byte_len, digest, storage_kind, body, object_ref \
+        "SELECT payload_id, session_id, media_type, byte_len, digest, body \
          FROM agent_payloads WHERE payload_id = ?",
     )
     .bind(payload_id)
@@ -7194,25 +7261,18 @@ async fn payload_by_id_tx(
 }
 
 fn payload_from_row(row: StoredPayloadRow) -> Result<SessionPayloadRecord, SessionStoreError> {
-    if row.storage_kind != "inline" || row.object_ref.is_some() {
-        return Err(SessionStoreError::InvalidPayload(
-            "object payload must be resolved by the content-addressed object port".to_owned(),
-        ));
-    }
-    let body = row.body.ok_or_else(|| {
-        SessionStoreError::InvalidPayload("inline payload body is missing".to_owned())
-    })?;
     Ok(SessionPayloadRecord {
         payload_id: ArtifactId(row.payload_id),
         agent_session_id: AgentSessionId(row.session_id),
         media_type: row.media_type,
         byte_len: as_u64(row.byte_len, "payload byte_len")?,
         digest: DigestHex(row.digest),
-        body: serde_json::from_slice(&body)?,
+        body: serde_json::from_slice(&row.body)?,
     })
 }
 
-fn effect_from_row(row: StoredEffectRow) -> Result<AgentEffectRecord, SessionStoreError> {
+async fn effect_from_row(tx: &mut Transaction<'_, Sqlite>, row: StoredEffectRow) -> Result<AgentEffectRecord, SessionStoreError> {
+    let bounded_observation = terminal_content::effect_observation(tx, &row).await?;
     let strategy = match row.strategy.as_str() {
         "managed_effect" => EffectStrategy::ManagedEffect,
         "external_uncertain_effect" => EffectStrategy::ExternalUncertainEffect,
@@ -7247,10 +7307,7 @@ fn effect_from_row(row: StoredEffectRow) -> Result<AgentEffectRecord, SessionSto
         input_digest: DigestHex::from(row.input_digest),
         strategy,
         state,
-        bounded_observation: row
-            .bounded_observation_json
-            .map(|value| serde_json::from_str(&value))
-            .transpose()?,
+        bounded_observation,
         started_event_id: EventId::from(row.started_event_id),
         terminal_event_id: row.terminal_event_id.map(EventId::from),
         created_at: row.created_at,
@@ -7416,7 +7473,7 @@ async fn payload_value_for_event_tx(
     tx: &mut Transaction<'_, Sqlite>,
     event: &SessionEventRecord,
 ) -> Result<Value, SessionStoreError> {
-    match &event.payload {
+    let value = match &event.payload {
         SessionEventPayloadRef::Empty => Ok(Value::Null),
         SessionEventPayloadRef::InlineJson(value) => Ok(value.0.clone()),
         SessionEventPayloadRef::Stored(payload_id) => {
@@ -7442,7 +7499,8 @@ async fn payload_value_for_event_tx(
             }
             payload_body_to_value(&payload.body)
         }
-    }
+    }?;
+    shared_content::hydrate(tx, event, value).await
 }
 
 fn event_belongs_to_turn(
@@ -7626,9 +7684,10 @@ fn projection_from_row(row: StoredProjectionRow) -> Result<MessageProjection, Se
     })
 }
 
-fn turn_history_projection_from_row(
-    row: StoredTurnHistoryRow,
+async fn turn_history_projection_from_row(
+    tx: &mut Transaction<'_, Sqlite>, row: StoredTurnHistoryRow,
 ) -> Result<Option<MessageProjection>, SessionStoreError> {
+    let terminal_payload = terminal_content::turn_payload(tx, &row).await?;
     let Ok(source_message_uuid) = Uuid::parse_str(&row.source_message_id) else {
         return Ok(None);
     };
@@ -7678,12 +7737,6 @@ fn turn_history_projection_from_row(
             )
         })?
     };
-    let terminal_payload = row
-        .error_json
-        .as_deref()
-        .or(row.result_json.as_deref())
-        .map(serde_json::from_str::<Value>)
-        .transpose()?;
     let finished_at_ms = terminal_payload
         .as_ref()
         .and_then(|payload| payload.get("finished_at_ms"))

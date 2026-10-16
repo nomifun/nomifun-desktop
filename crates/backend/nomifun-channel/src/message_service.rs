@@ -534,7 +534,6 @@ impl ChannelMessageService {
             page: Some(1),
             page_size: Some(50),
             order: Some("DESC".into()),
-            content_mode: None,
             cursor: None,
             day: None,
         };
@@ -1037,19 +1036,13 @@ impl ChannelMessageService {
                 {
                     return Some(StreamAction::ArtifactsProduced(data.artifacts.clone()));
                 }
-                // A completed tool call may carry produced Creative Studio asset
-                // ids in its output JSON (`result_asset_ids`).
-                // Surface those as MediaProduced so the relay can send the picture;
-                // otherwise keep the cosmetic {name,status} progress update.
-                if matches!(
-                    data.status,
-                    nomifun_ai_agent::protocol::events::ToolCallStatus::Completed
-                ) && let Some(output) = data.output.as_deref()
-                {
-                    let ids = crate::media_refs::asset_ids_from_tool_output(output);
-                    if !ids.is_empty() {
-                        return Some(StreamAction::MediaProduced(ids));
-                    }
+                // Product receipts carry only typed asset references. Source
+                // tool JSON remains private to the canonical model history.
+                if data.status == nomifun_ai_agent::protocol::events::ToolCallStatus::Completed {
+                    let ids = data.identity.display.result_asset_ids.iter()
+                        .filter(|id| nomifun_common::WorkshopAssetId::parse(id.as_str()).is_ok())
+                        .take(100).cloned().collect::<Vec<_>>();
+                    if !ids.is_empty() { return Some(StreamAction::MediaProduced(ids)); }
                 }
                 Some(StreamAction::ToolCall {
                     name: data.name.clone(),
@@ -1265,40 +1258,13 @@ fn apply_channel_agent_context(
     }
 }
 
-/// Detects a gateway-denied `nomi_stop_conversation` tool call and extracts
-/// its target conversation id.
-///
-/// On the Channel surface the gateway matrix denies Destructive capabilities,
-/// answering either `'…' is not permitted on the Channel surface` (dispatch
-/// deny) or `session_capability_denied` (visibility filter). Both shapes ride
-/// the tool-call OUTPUT of a terminal event; the target id comes from the
-/// model-provided arguments (`args`, falling back to the raw `input` JSON).
-fn stop_denied_target(
-    data: &nomifun_ai_agent::protocol::events::ToolCallEventData,
-) -> Option<String> {
+/// The host derives this target from the original structured Gateway denial;
+/// product consumers never parse arbitrary output or model arguments for it.
+fn stop_denied_target(data: &nomifun_ai_agent::protocol::events::ToolCallEventData) -> Option<String> {
     use nomifun_ai_agent::protocol::events::ToolCallStatus;
-    if !matches!(data.status, ToolCallStatus::Completed | ToolCallStatus::Error) {
-        return None;
-    }
-    if !data.name.ends_with("nomi_stop_conversation") {
-        return None;
-    }
-    let output = data.output.as_deref()?;
-    if !(output.contains("not permitted on the") || output.contains("session_capability_denied")) {
-        return None;
-    }
-    let from_args = data
-        .args
-        .get("conversation_id")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
-    from_args.or_else(|| {
-        data.input
-            .as_ref()
-            .and_then(|value| value.get("conversation_id"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-    })
+    if !matches!(data.status, ToolCallStatus::Completed | ToolCallStatus::Error) { return None; }
+    data.identity.display.denied_stop_conversation_id.as_deref()
+        .and_then(|id| nomifun_common::ConversationId::parse(id).ok()).map(|id| id.into_string())
 }
 
 /// Picks the newest visible user-authored text from a newest-first message
@@ -1713,11 +1679,8 @@ mod tests {
             identity: Default::default(),
             call_id: "c1".into(),
             name: "read_file".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Running,
             description: None,
-            input: None,
-            output: None,
             artifacts: Vec::new(),
         });
         let action = ChannelMessageService::process_stream_event(&event);
@@ -1753,17 +1716,11 @@ mod tests {
     #[test]
     fn completed_creative_studio_tool_call_produces_media() {
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
-            identity: Default::default(),
+            identity: nomifun_ai_agent::protocol::events::tool_call::ToolCallIdentity { display: nomifun_ai_agent::protocol::events::tool_call::ToolDisplayFacts { result_asset_ids: vec!["0190f5fe-7c00-7a00-8000-000000000086".into()], ..Default::default() }, ..Default::default() },
             call_id: "c1".into(),
             name: "nomi_creative_studio_get_task".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Completed,
             description: None,
-            input: None,
-            output: Some(
-                r#"{"status":"succeeded","result_asset_ids":["0190f5fe-7c00-7a00-8000-000000000086"]}"#
-                    .into(),
-            ),
             artifacts: Vec::new(),
         });
         match ChannelMessageService::process_stream_event(&event) {
@@ -1771,6 +1728,28 @@ mod tests {
                 assert_eq!(ids, vec!["0190f5fe-7c00-7a00-8000-000000000086"])
             }
             other => panic!("expected MediaProduced, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn actual_gateway_mcp_media_results_reach_the_existing_channel_delivery_path() {
+        let capability = format!("nomi.mcp.v1.{}", "a".repeat(64));
+        let action = format!("{capability}.invoke");
+        let id = "0190f5fe-7c00-7a00-8000-000000000081";
+        let gateway = serde_json::json!({"result":{"result_asset_ids":[id],"file_name":"file.png","delivered":true,"note":"PRIVATE_TOOL_BODY"}});
+        let get_task = serde_json::json!({"result":{"creation_task_id":id,"status":"succeeded","result_asset_ids":[id],"prompt":"PRIVATE_TOOL_BODY"}});
+        for payload in [gateway.clone(), serde_json::json!({"isError":false,"structuredContent":get_task}),
+            serde_json::json!({"isError":false,"content":[{"type":"text","text":gateway.to_string()}]})] {
+            let result = nomifun_engine_core::EngineToolResult::text("media".into(),payload.to_string(),false);
+            let display = nomifun_engine_core::tool_result_display(Some(&capability),Some(&action),&result);
+            let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+                identity: nomifun_ai_agent::protocol::events::tool_call::ToolCallIdentity {
+                    capability_id:Some(capability.clone()), action_id:Some(action.clone()), display, ..Default::default()
+                }, call_id:"media".into(), name:"mcp__nomi__get_task".into(), status:ToolCallStatus::Completed,
+                description:None, artifacts:Vec::new(),
+            });
+            assert!(!serde_json::to_string(&event).unwrap().contains("PRIVATE_TOOL_BODY"));
+            assert!(matches!(ChannelMessageService::process_stream_event(&event), Some(StreamAction::MediaProduced(ids)) if ids == vec![id]));
         }
     }
 
@@ -1789,11 +1768,8 @@ mod tests {
             identity: Default::default(),
             call_id: "c1".into(),
             name: "mcp__reports__export".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Completed,
             description: None,
-            input: None,
-            output: Some("done".into()),
             artifacts: vec![artifact.clone()],
         });
 
@@ -1811,11 +1787,8 @@ mod tests {
             identity: Default::default(),
             call_id: "c1".into(),
             name: "nomi_creative_studio_generate".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Running,
             description: None,
-            input: None,
-            output: None,
             artifacts: Vec::new(),
         });
         assert!(matches!(
@@ -1830,11 +1803,8 @@ mod tests {
             identity: Default::default(),
             call_id: "c1".into(),
             name: "Read".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Completed,
             description: None,
-            input: None,
-            output: Some("just some text output".into()),
             artifacts: Vec::new(),
         });
         assert!(matches!(
@@ -1846,89 +1816,22 @@ mod tests {
     // ── process_stream_event → channel stop confirmation ───────────────
 
     #[test]
-    fn denied_stop_tool_call_produces_stop_denied_with_target() {
+    fn structured_stop_denial_keeps_the_existing_confirmation_target() {
         let target = "0190f5fe-7c00-7a00-8abc-012345678901";
-        for output in [
-            "{\"error\":\"'nomi_stop_conversation' is not permitted on the Channel surface\"}",
-            "{\"error\":\"session_capability_denied\",\"tool\":\"nomi_stop_conversation\"}",
-        ] {
-            let event = AgentStreamEvent::ToolCall(ToolCallEventData {
-                identity: Default::default(),
-                call_id: "c1".into(),
-                name: "mcp__nomi__nomi_stop_conversation".into(),
-                args: serde_json::json!({ "conversation_id": target }),
-                status: ToolCallStatus::Completed,
-                description: None,
-                input: None,
-                output: Some(output.into()),
-                artifacts: Vec::new(),
-            });
-            match ChannelMessageService::process_stream_event(&event) {
-                Some(StreamAction::StopDenied { target_conversation_id }) => {
-                    assert_eq!(target_conversation_id, target);
-                }
-                other => panic!("expected StopDenied for output {output:?}, got {other:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn denied_stop_target_falls_back_to_raw_input_json() {
-        let target = "0190f5fe-7c00-7a00-8abc-012345678902";
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
-            identity: Default::default(),
-            call_id: "c1".into(),
-            name: "nomi_stop_conversation".into(),
-            args: serde_json::Value::Null,
-            status: ToolCallStatus::Error,
-            description: None,
-            input: Some(serde_json::json!({ "conversation_id": target })),
-            output: Some("'nomi_stop_conversation' is not permitted on the Channel surface".into()),
-            artifacts: Vec::new(),
+            identity: nomifun_ai_agent::protocol::events::tool_call::ToolCallIdentity {
+                display: nomifun_ai_agent::protocol::events::tool_call::ToolDisplayFacts {
+                    denied_stop_conversation_id: Some(target.into()), ..Default::default()
+                }, ..Default::default()
+            },
+            call_id: "stop".into(), name: "nomi_stop_conversation".into(),
+            status: ToolCallStatus::Error, description: None, artifacts: Vec::new(),
         });
-        match ChannelMessageService::process_stream_event(&event) {
-            Some(StreamAction::StopDenied { target_conversation_id }) => {
-                assert_eq!(target_conversation_id, target);
-            }
-            other => panic!("expected StopDenied, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn successful_or_unrelated_tool_calls_never_produce_stop_denied() {
-        // A SUCCESSFUL stop (allowed surface) keeps the plain tool-call action.
-        let event = AgentStreamEvent::ToolCall(ToolCallEventData {
-            identity: Default::default(),
-            call_id: "c1".into(),
-            name: "nomi_stop_conversation".into(),
-            args: serde_json::json!({ "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678903" }),
-            status: ToolCallStatus::Completed,
-            description: None,
-            input: None,
-            output: Some("{\"result\":{\"stopped\":true}}".into()),
-            artifacts: Vec::new(),
-        });
-        assert!(matches!(
-            ChannelMessageService::process_stream_event(&event),
-            Some(StreamAction::ToolCall { .. })
-        ));
-
-        // Another denied tool must not be misread as a stop confirmation.
-        let event = AgentStreamEvent::ToolCall(ToolCallEventData {
-            identity: Default::default(),
-            call_id: "c2".into(),
-            name: "nomi_delete_conversation".into(),
-            args: serde_json::json!({ "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678903" }),
-            status: ToolCallStatus::Completed,
-            description: None,
-            input: None,
-            output: Some("'nomi_delete_conversation' is not permitted on the Channel surface".into()),
-            artifacts: Vec::new(),
-        });
-        assert!(matches!(
-            ChannelMessageService::process_stream_event(&event),
-            Some(StreamAction::ToolCall { .. })
-        ));
+        assert!(matches!(ChannelMessageService::process_stream_event(&event),
+            Some(StreamAction::StopDenied { target_conversation_id }) if target_conversation_id == target));
+        let AgentStreamEvent::ToolCall(mut call) = event else { unreachable!() };
+        call.identity.display.denied_stop_conversation_id = None;
+        assert!(matches!(ChannelMessageService::process_stream_event(&AgentStreamEvent::ToolCall(call)), Some(StreamAction::ToolCall { .. })));
     }
 
     // ── build_thinking_message ─────────────────────────────────────────

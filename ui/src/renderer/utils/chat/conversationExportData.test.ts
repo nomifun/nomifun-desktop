@@ -32,9 +32,9 @@ test('reads more than 500 messages and crosses an empty filtered history window 
   expect(readMessageContent(result[0])).toBe('message-0');
   expect(readMessageContent(result.at(-1)!)).toBe('message-510');
   expect(read.mock.calls.map(([params]) => params)).toEqual([
-    { conversation_id: conversationId, cursor: '', page_size: 500, content_mode: 'full' },
-    { conversation_id: conversationId, cursor: `1011:${conversationId}`, page_size: 500, content_mode: 'full' },
-    { conversation_id: conversationId, cursor: `1009:${conversationId}`, page_size: 500, content_mode: 'full' },
+    { conversation_id: conversationId, cursor: '', page_size: 500 },
+    { conversation_id: conversationId, cursor: `1011:${conversationId}`, page_size: 500 },
+    { conversation_id: conversationId, cursor: `1009:${conversationId}`, page_size: 500 },
   ]);
 });
 
@@ -77,7 +77,7 @@ test('copy finds the latest reply beyond a newest user-only window without readi
   const reply = await fetchLatestConversationReply(conversationId, () => true);
   expect(reply.at(-1)?.content).toEqual({ content: 'message-2' });
   expect(read).toHaveBeenCalledTimes(2);
-  expect(read.mock.calls[0][0]).toMatchObject({ content_mode: 'full', page_size: 50 });
+  expect(read.mock.calls[0][0]).toMatchObject({ page_size: 50 });
 });
 
 test('copy stops after target invalidation and fails closed on unreadable or repeating pages', async () => {

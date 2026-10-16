@@ -1313,7 +1313,7 @@ async fn installed_host_input_handoff_reopens_as_normal_history_and_the_human_st
     assert_eq!(projection["data"]["runtime"]["can_send_message"], true);
     assert_eq!(projection["data"]["runtime"]["is_processing"], false);
     assert!(projection["data"]["runtime"]["active_turn_id"].is_null());
-    let history_path = format!("/api/agent-sessions/{}/message-history?content_mode=full", session.as_ref());
+    let history_path = format!("/api/agent-sessions/{}/message-history", session.as_ref());
     let (status, history) = file_api_get(&fixture._router, &history_path, true).await;
     assert_eq!(status, axum::http::StatusCode::OK);
     let note = history["data"]["items"].as_array().expect("history items").iter()

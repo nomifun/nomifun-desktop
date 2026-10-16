@@ -21,40 +21,17 @@ const row = (item: Partial<ToolReceiptDetailRow> & Pick<ToolReceiptDetailRow, 'a
 });
 
 describe('process trace display model', () => {
-  test('keeps a single file receipt collapsed but expandable for exact-path inspection', () => {
-    const writeRow = row({ action: 'edit_files', target: 'snake.html' });
-
-    expect(shouldShowToolRowDetail(writeRow)).toBe(true);
+  test('file paths, command labels and call identity do not create empty disclosures', () => {
+    for (const item of [
+      row({ action: 'edit_files', target: 'snake.html' }),
+      row({ action: 'read_files', target: 'MessageList.tsx' }),
+      row({ action: 'run_commands', target: 'bun run check' }),
+    ]) expect(shouldShowToolRowDetail(item)).toBe(false);
   });
 
-  test('keeps a completed single file row expandable even when output is terse', () => {
-    const writeRow = row({ action: 'edit_files', target: 'snake.html', output: 'snake.html' });
-
-    expect(shouldShowToolRowDetail(writeRow)).toBe(true);
-  });
-
-  test('keeps failed single file rows expandable so the error remains inspectable', () => {
-    const writeRow = row({
-      action: 'edit_files',
-      state: 'failed',
-      target: 'snake.html',
-      output: 'Permission denied',
-    });
-
-    expect(shouldShowToolRowDetail(writeRow)).toBe(true);
-  });
-
-  test('keeps multi-file receipts expandable so the file list remains inspectable', () => {
-    const rows = [
-      row({ key: 'read-1', action: 'read_files', target: 'MessageList.tsx' }),
-      row({ key: 'read-2', action: 'read_files', target: 'ProcessTraceItem.tsx' }),
-    ];
-
-    expect(shouldShowToolRowDetail(rows[0])).toBe(true);
-  });
-
-  test('keeps command rows expandable for command input and output', () => {
-    expect(shouldShowToolRowDetail(row({ action: 'run_commands', target: 'bun run check' }))).toBe(true);
+  test('only a public error keeps an existing row expandable', () => {
+    expect(shouldShowToolRowDetail(row({ action: 'edit_files', state: 'failed',
+      target: 'snake.html', error: 'Permission denied' }))).toBe(true);
   });
 
   test('hides completed private activity without losing public progress or tool order', () => {

@@ -94,7 +94,7 @@ pub(super) async fn question_is_current_tx(
         return Ok(false);
     }
     let turn = sqlx::query_as::<_, StoredTurnHistoryRow>(
-        "SELECT session_id,turn_id,source_message_id,state,result_json,error_json,started_event_id,accepted_at,started_at,finished_at \
+        "SELECT session_id,turn_id,operation_id,source_message_id,state,terminal_event_id,started_event_id,accepted_at,started_at,finished_at \
          FROM agent_turns WHERE session_id=? ORDER BY accepted_at DESC LIMIT 1")
         .bind(session_id.as_ref()).fetch_optional(&mut **tx).await?;
     let Some(turn)=turn else {return Ok(false);};
@@ -102,7 +102,7 @@ pub(super) async fn question_is_current_tx(
     let operation=OperationId::from(turn.turn_id.clone());
     if turn.started_event_id == question.message_id {
         let row=turn;
-        let Some(summary) = turn_history_projection_from_row(row)? else { return Ok(false); };
+        let Some(summary) = turn_history_projection_from_row(tx, row).await? else { return Ok(false); };
         let mut summaries = [summary];
         history_turn_outcome::hydrate(tx, session_id, &mut summaries).await?;
         knowledge_writeback::hydrate(tx, session_id, &mut summaries).await?;

@@ -41,7 +41,7 @@ export const fetchLatestConversationReply = async (conversation_id: Conversation
   for (;;) {
     if (!isCurrent()) return [];
     const page = await withTimeout(ipcBridge.database.getConversationMessages.invoke({
-      conversation_id, cursor, page_size: 50, content_mode: 'full',
+      conversation_id, cursor, page_size: 50,
     }), EXPORT_IO_TIMEOUT_MS, 'copy conversation reply');
     if (!isCurrent()) return [];
     const messages = page.items.toSorted(compareMessages);
@@ -71,7 +71,6 @@ export const fetchConversationExportMessages = async (
         conversation_id,
         cursor,
         page_size: 500,
-        content_mode: 'full',
       }),
       EXPORT_IO_TIMEOUT_MS,
       `getConversationMessages:${conversation_id}`

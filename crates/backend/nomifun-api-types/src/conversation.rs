@@ -181,7 +181,6 @@ pub struct ListMessagesQuery {
     pub page: Option<u32>,
     pub page_size: Option<u32>,
     pub order: Option<String>,
-    pub content_mode: Option<String>,
     /// Opaque keyset cursor `"<created_at_ms>:<id>"`. When present, returns the
     /// window of messages strictly OLDER than the cursor, newest-first, and
     /// `page`/`page_size` offset pagination is ignored. Used by the chat UI to
@@ -722,7 +721,6 @@ mod tests {
         assert!(q.page.is_none());
         assert!(q.page_size.is_none());
         assert!(q.order.is_none());
-        assert!(q.content_mode.is_none());
     }
 
     #[test]
@@ -732,14 +730,12 @@ mod tests {
             "page": 2,
             "page_size": 30,
             "order": "ASC",
-            "content_mode": "compact",
             "cursor": expected_cursor
         });
         let q: ListMessagesQuery = serde_json::from_value(raw).unwrap();
         assert_eq!(q.page, Some(2));
         assert_eq!(q.page_size, Some(30));
         assert_eq!(q.order.as_deref(), Some("ASC"));
-        assert_eq!(q.content_mode.as_deref(), Some("compact"));
         assert_eq!(q.cursor.as_deref(), Some(expected_cursor.as_str()));
     }
 

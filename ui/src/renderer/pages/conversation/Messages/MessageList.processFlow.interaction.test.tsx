@@ -65,7 +65,7 @@ test('permission recovery stays outside collapsed process, deduplicates retries,
     action_id: 'computer/input', operation: 'left_click', permissions: ['accessibility' as const], execution: 'not_executed' as const };
   const denied: IMessageToolCall = { id: 'permission-refusal', type: 'tool_call', conversation_id: conversationId,
     msg_id: messageId(604), turn_id: turnId, created_at: 2, content: { call_id: 'denied-call', name: 'computer_input',
-      action_id: 'computer/input', args: { action: 'left_click' }, status: 'error', error_code: 'SYSTEM_PERMISSION_REQUIRED',
+      action_id: 'computer/input', operation: 'left_click', status: 'error', error_code: 'SYSTEM_PERMISSION_REQUIRED',
       result_seq: 10, permission_required: permission } };
   const initial: TMessage[] = [
     { id: 'permission-user', type: 'text', position: 'right', conversation_id: conversationId,
@@ -77,8 +77,7 @@ test('permission recovery stays outside collapsed process, deduplicates retries,
         detail: 'Blocked criterion: Provide source artwork.',
         code: 'NOMIFUN_TASK_INCOMPLETE', taskIncompleteReason: 'blocked_work', retryable: false } } },
     { id: 'successful-blocked-criterion', type: 'tool_call', conversation_id: conversationId, turn_id: turnId, created_at: 3,
-      content: { call_id: 'report_completion', name: 'report_completion', status: 'completed',
-        args: { criteria: [{ id: 'source-artwork', status: 'blocked', reason: 'Need source artwork.' }] } } },
+      content: { call_id: 'report_completion', name: 'report_completion', status: 'completed' } },
     { id: 'permission-finished', type: 'agent_status', conversation_id: conversationId, turn_id: turnId,
       created_at: 4, content: { backend: 'nomi', status: 'prepared', turn_summary: true,
         turn_state: 'failed', started_at_ms: 1, finished_at_ms: 4 } },
@@ -368,7 +367,7 @@ test('a live journal tracks thinking lifecycle and preserves completed thought d
     { ...base, id: 'user', message_id: turnId, msg_id: turnId, type: 'text', created_at: 1, position: 'right', content: { content: 'Inspect the files' } },
     { ...base, id: 'thought-1', msg_id: messageId(2), type: 'thinking', created_at: 2, content: { content: 'First reasoning is complete.', status: 'done' } },
     { ...base, id: 'progress', msg_id: messageId(3), type: 'text', created_at: 3, content: { content: 'I will inspect the source now.' } },
-    { ...base, id: 'read-call', msg_id: messageId(4), type: 'tool_call', created_at: 4, content: { call_id: 'read-current', name: 'read_file', status: 'completed', args: { path: 'src/app.ts' }, output: 'Source contents', artifacts: [] } },
+    { ...base, id: 'read-call', msg_id: messageId(4), type: 'tool_call', created_at: 4, content: { call_id: 'read-current', name: 'read_file', status: 'completed', description: 'src/app.ts', artifacts: [] } },
     { ...base, id: 'thought-2', msg_id: messageId(5), type: 'thinking', created_at: 5, content: { content: 'Second reasoning is in progress.', status: 'thinking' } },
   ];
   const FinishCurrentThought = () => {
@@ -525,7 +524,7 @@ test('waiting for the first response and running a tool call do not add a duplic
     const updateMessages = useUpdateMessageList();
     return <button onClick={() => updateMessages(current => [...current,
       { ...base, id: 'thought', msg_id: messageId(2), type: 'thinking', created_at: 2, content: { content: 'The file to inspect is selected.', status: 'done' } },
-      { ...base, id: 'read-call', msg_id: messageId(3), type: 'tool_call', created_at: 3, content: { call_id: 'read-active', name: 'read_file', status: 'running', args: { path: 'src/app.ts' }, artifacts: [] } },
+      { ...base, id: 'read-call', msg_id: messageId(3), type: 'tool_call', created_at: 3, content: { call_id: 'read-active', name: 'read_file', status: 'running', description: 'src/app.ts', artifacts: [] } },
     ])}>Start tool call</button>;
   };
   const page = render(<MemoryRouter><I18nextProvider i18n={i18n}>
@@ -554,10 +553,10 @@ test('waiting for the first response and running a tool call do not add a duplic
 test('a completed journal defaults closed and expands its full reasoning and calls without hiding the final reply', () => {
   const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };
   const firstCall: IMessageToolCall = { ...base, id: 'first-call', message_id: messageId(3), msg_id: messageId(3), created_at: 3,
-    type: 'tool_call', content: { call_id: 'read-1', name: 'read_file', status: 'error', args: { path: 'src/first.ts' },
-      output: 'First attempt failed', artifacts: [] } };
+    type: 'tool_call', content: { call_id: 'read-1', name: 'read_file', status: 'error', description: 'src/first.ts',
+      error: 'First attempt failed', artifacts: [] } };
   const retry: IMessageToolCall = { ...firstCall, id: 'retry-call', message_id: messageId(6), msg_id: messageId(6), created_at: 6,
-    content: { ...firstCall.content, call_id: 'read-2', status: 'completed', output: 'Second attempt result' } };
+    content: { ...firstCall.content, call_id: 'read-2', status: 'completed', error: undefined } };
   const messages: TMessage[] = [
     { ...base, id: 'user', message_id: turnId, msg_id: turnId, type: 'text', created_at: 1, position: 'right', content: { content: 'Inspect the files' } },
     { ...base, id: 'thought-1', msg_id: messageId(2), type: 'thinking', created_at: 2, content: { content: '**First reasoning**\n\nInspect the source.', status: 'done' } },
@@ -595,9 +594,11 @@ test('a completed journal defaults closed and expands its full reasoning and cal
   expect(page.container.querySelectorAll('.turn-process-receipt')).toHaveLength(0);
   const calls = page.container.querySelectorAll('[data-tool-call-id]');
   expect(Array.from(calls, (call) => call.getAttribute('data-tool-call-id'))).toEqual(['read-1', 'read-2']);
-  calls.forEach((call) => fireEvent.click(call.querySelector('button')!));
+  fireEvent.click(calls[0].querySelector('button')!);
+  expect(calls[1].querySelector('button')).toBeNull();
   expect(calls[0].textContent).toContain('First attempt failed');
-  expect(calls[1].textContent).toContain('Second attempt result');
+  expect(calls[1].textContent).toContain('first.ts');
+  expect(calls[1].textContent).not.toContain('Second attempt result');
   expect(Array.from(page.container.querySelectorAll('.markdown-shadow'), (node) => node.shadowRoot?.textContent ?? '')
     .filter((text) => text.includes('The inspection is complete.'))).toHaveLength(1);
   expect(firstCall.content.status).toBe('error');
@@ -802,14 +803,14 @@ test('canonical group headings span model waits without changing tool outcomes o
   const groupId = 'canonical-model-wait';
   const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };
   const tool: IMessageToolCall = { ...base, id: 'wait-completed-tool', msg_id: messageId(811), type: 'tool_call', created_at: 10,
-    content: { call_id: 'wait-read', name: 'read_file', status: 'completed', args: { path: 'source.ts' }, output: 'Source available.',
+    content: { call_id: 'wait-read', name: 'read_file', status: 'completed', description: 'source.ts',
       timeline: { through_seq: 20, segments: [{ segment_id: 'wait-read-segment', group_id: groupId, first_seq: 10, last_seq: 20,
         kind: 'tool', state: 'completed', call_id: 'wait-read' }] } } };
   const narration: TMessage = { ...base, id: 'wait-narration', msg_id: messageId(813), type: 'text', created_at: 30,
     content: { content: 'The source is available.', timeline: { through_seq: 30, segments: [{ segment_id: 'wait-public-boundary',
       group_id: groupId, first_seq: 30, last_seq: 30, kind: 'narration', state: 'completed', start_utf16: 0, end_utf16: 24 }] } } };
   const staleTool: IMessageToolCall = { ...base, id: 'wait-stale-tool', msg_id: messageId(814), type: 'tool_call', created_at: 40,
-    content: { call_id: 'wait-stale-read', name: 'read_file', status: 'running', args: { path: 'next.ts' },
+    content: { call_id: 'wait-stale-read', name: 'read_file', status: 'running', description: 'next.ts',
       timeline: { through_seq: 40, segments: [{ segment_id: 'wait-stale-segment', group_id: 'canonical-stale-tail',
         first_seq: 40, last_seq: 40, kind: 'tool', state: 'running', call_id: 'wait-stale-read' }] } } };
   const initial: TMessage[] = [
@@ -822,7 +823,7 @@ test('canonical group headings span model waits without changing tool outcomes o
     const update = useUpdateMessageList();
     return <>
       <button onClick={() => update(current => current.map(message => message.id === tool.id
-        ? { ...tool, content: { ...tool.content, output: 'Source available. Stream receipt refreshed.' } } : message))}>Refresh completed tool</button>
+        ? { ...tool, content: { ...tool.content, description: 'source.ts' } } : message))}>Refresh completed tool</button>
       <button onClick={() => update(current => [...current, narration, staleTool])}>Deliver phase narration</button>
       <button onClick={() => update(current => [...current, { ...base, id: 'wait-terminal', msg_id: messageId(815),
         type: 'agent_status', created_at: 50, content: { backend: 'nomi', status: 'prepared', turn_summary: true,
@@ -881,7 +882,7 @@ test('canonical segment references keep active groups collapsed and preserve man
     { ...base, id: 'segment-thinking', msg_id: messageId(801), type: 'thinking', created_at: 2, content: { content: 'First.Second.', status: 'thinking', timeline: timeline([
       ref('reasoning-first', 'canonical-first', 2, 'reasoning', 0, 6), ref('reasoning-second', 'canonical-second', 8, 'reasoning', 6, 13, 'running'),
     ]) } } as TMessage,
-    { ...base, id: 'segment-tool', msg_id: messageId(802), type: 'tool_call', created_at: 3, content: { call_id: 'segment-read', name: 'read_file', status: 'completed', args: { path: 'source.ts' },
+    { ...base, id: 'segment-tool', msg_id: messageId(802), type: 'tool_call', created_at: 3, content: { call_id: 'segment-read', name: 'read_file', status: 'completed', description: 'source.ts',
       timeline: timeline([{ ...ref('tool-first', 'canonical-first', 4, 'tool'), call_id: 'segment-read' }]) } } as TMessage,
     { ...base, id: 'segment-progress', msg_id: messageId(803), type: 'text', created_at: 4, content: { content: 'The source is available.', timeline: timeline([
       ref('public-between', 'canonical-first', 6, 'narration', 0, 24),

@@ -704,10 +704,9 @@ async fn recovery_fixture(
         .bind(r#"{"model_steps":3,"finish_reason":"stop","finished_at_ms":10}"#)
         .execute(db.pool()).await.unwrap();
     nomifun_db::sqlx::query(
-        "INSERT INTO agent_turns (session_id,turn_id,operation_id,idempotency_key,state,result_json,terminal_event_id,accepted_at,started_at,finished_at) \
-         VALUES (?,?,?,?,'completed',?,?,1,1,1)"
+        "INSERT INTO agent_turns (session_id,turn_id,operation_id,idempotency_key,state,terminal_event_id,accepted_at,started_at,finished_at) \
+         VALUES (?,?,?,?,'completed',?,1,1,1)"
     ).bind(&conversation_id).bind(&operation_id).bind(&operation_id).bind(&operation_id)
-        .bind(r#"{"model_steps":3,"finish_reason":"stop","finished_at_ms":10}"#)
         .bind(&terminal_event_id).execute(db.pool()).await.unwrap();
     (created.execution_id, running, RecoveredAgentExecutionAttemptOutput {
         attempt_id: attempt.attempt_id, conversation_id, canonical_operation_id: operation_id,
@@ -799,8 +798,8 @@ async fn user_input_fixture(
     let terminal = serde_json::json!({"user_input_request":request}).to_string();
     nomifun_db::sqlx::query("UPDATE agent_events SET causation_event_id=?,inline_json=? WHERE event_id=?")
         .bind(&started).bind(&terminal).bind(&output.terminal_event_id).execute(db.pool()).await.unwrap();
-    nomifun_db::sqlx::query("UPDATE agent_turns SET started_event_id=?,result_json=? WHERE session_id=? AND operation_id=?")
-        .bind(started).bind(terminal).bind(&output.conversation_id).bind(&output.canonical_operation_id).execute(db.pool()).await.unwrap();
+    nomifun_db::sqlx::query("UPDATE agent_turns SET started_event_id=? WHERE session_id=? AND operation_id=?")
+        .bind(started).bind(&output.conversation_id).bind(&output.canonical_operation_id).execute(db.pool()).await.unwrap();
     nomifun_db::sqlx::query("INSERT INTO agent_session_heads(session_id,status,last_seq,active_set_generation,unread_count) VALUES(?,'ready',2,0,0)")
         .bind(&output.conversation_id).execute(db.pool()).await.unwrap();
     nomifun_db::sqlx::query("UPDATE agent_executions SET decision_policy=? WHERE execution_id=?")
@@ -968,8 +967,8 @@ async fn recovery_pause_uses_the_current_decision_turn_instead_of_the_closed_ini
     ).bind(&initial_output.conversation_id).bind(&terminal_event_id).bind(&terminal_event_id).bind(&operation_id)
         .execute(db.pool()).await.unwrap();
     nomifun_db::sqlx::query(
-        "INSERT INTO agent_turns (session_id,turn_id,operation_id,idempotency_key,state,result_json,terminal_event_id,accepted_at,started_at,finished_at) \
-         VALUES (?,?,?,?,'completed','{}',?,2,2,2)"
+        "INSERT INTO agent_turns (session_id,turn_id,operation_id,idempotency_key,state,terminal_event_id,accepted_at,started_at,finished_at) \
+         VALUES (?,?,?,?,'completed',?,2,2,2)"
     ).bind(&initial_output.conversation_id).bind(&operation_id).bind(&operation_id).bind(&operation_id)
         .bind(&terminal_event_id).execute(db.pool()).await.unwrap();
     let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();

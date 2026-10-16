@@ -341,6 +341,17 @@ pub fn input_schema_digest(schema: &StrictJsonValue) -> Result<DigestHex, Engine
         .map_err(|error| EngineToolError::InvalidContract(format!("tool schema digest: {error}")))
 }
 
+/// Byte boundaries for a balanced UTF-8 head/tail excerpt. Callers own the
+/// retention policy and omission notice; this helper interprets no tool state.
+pub fn tool_text_excerpt_ranges(text: &str, allowance: usize) -> (usize, usize) {
+    if text.len() <= allowance { return (text.len(),text.len()); }
+    let mut head=allowance/2;
+    while !text.is_char_boundary(head) {head-=1;}
+    let mut tail=text.len().saturating_sub(allowance-allowance/2);
+    while !text.is_char_boundary(tail) {tail+=1;}
+    (head,tail)
+}
+
 fn truncate_utf8(value: &mut String, max_bytes: usize) {
     if value.len() <= max_bytes {
         return;

@@ -107,7 +107,7 @@ const formatToolReceiptDetailLabel = (
 
   // Generic titles describe the action; errors keep a diagnostic preview.
   // Preserve the explicit preflight and process outcomes handled above.
-  if (row.commandExitCode === undefined && (row.action === 'generic' || row.diagnostics)) {
+  if (row.commandExitCode === undefined && (row.action === 'generic' || row.showActionTitle)) {
     return row.action === 'generic' ? row.target ?? row.title
       : [row.title, displayTarget && displayTarget !== row.title ? displayTarget : undefined].filter(Boolean).join(' · ');
   }
@@ -210,12 +210,8 @@ const ToolTraceRow: React.FC<{ row: ToolObservationRow; workspaceRoots: string[]
       {hasDetail && <Right theme='outline' size='12' className={classNames('turn-process-trace-tool__arrow', expanded && 'turn-process-trace-tool__arrow--open')} />}
     </Header>
     {expanded && hasDetail && <div id={detailId} className='turn-process-trace-detail'>
-      <DetailSection label={t('messages.toolDetailIdentity')} value={row.diagnostics} />
-      {row.action === 'read_files' || row.action === 'edit_files' ? <DetailSection label={row.title} value={row.target} /> : null}
-      <DetailSection label={t('messages.toolDetailInput')} value={row.input} />
       {row.observationUnconfirmed && <div className='turn-process-trace-detail__label'>{t('messages.toolResultUnconfirmed')}</div>}
-      <DetailSection label={t('messages.toolDetailOutput')} value={row.output} />
-      {row.truncated && <div className='turn-process-trace-detail__label'>{t('messages.toolDetailTruncated')}</div>}
+      <DetailSection label={t('messages.toolDetailError')} value={row.error} />
     </div>}
   </div>;
 };
@@ -250,7 +246,7 @@ const ProcessTraceItem: React.FC<{ item: ProcessTraceRenderableItem; variant?: '
     if (!content && !protocol) return null;
     return <div className='turn-process-trace__narration'>
       {content && <div className='turn-process-trace__paragraph' data-testid='process-narration'><ConversationProse message={item} text={content} variant='process' fontSize={MESSAGE_BODY_FONT_SIZE} lineHeight={MESSAGE_BODY_LINE_HEIGHT} /></div>}
-      {protocol && <AssistantProtocolNotice raw={toDisplayText(item.content.content)} />}
+      {protocol && <AssistantProtocolNotice />}
     </div>;
   }
   if (item.type === 'agent_status' && item.content.turn_summary) return null;

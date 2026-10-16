@@ -167,11 +167,16 @@ impl UnifiedAgentRuntime {
     }
 }
 
+struct PendingToolProjection {
+    public: ToolCallEventData,
+    arguments: serde_json::Value,
+}
+
 struct TurnProjection {
     host: Arc<dyn UnifiedRuntimeHost>,
     message: SendMessageData,
     output: EngineTurnOutput,
-    calls: Mutex<BTreeMap<String, ToolCallEventData>>,
+    calls: Mutex<BTreeMap<String, PendingToolProjection>>,
     terminal: Mutex<Option<AgentEngineEvent>>,
     last_model_step: std::sync::atomic::AtomicU16,
 }
@@ -263,16 +268,16 @@ impl TurnProjection {
             AgentEngineEvent::ToolCallCompleted { call, .. } => {
                 self.calls.lock().unwrap_or_else(|e| e.into_inner()).insert(
                     call.call_id.as_ref().to_owned(),
-                    ToolCallEventData {
-                        identity: Default::default(),
-                        call_id: call.call_id.as_ref().to_owned(),
-                        name: call.name,
-                        args: call.arguments.0,
-                        status: ToolCallStatus::Running,
-                        input: None,
-                        output: None,
-                        description: None,
-                        artifacts: Vec::new(),
+                    PendingToolProjection {
+                        public: ToolCallEventData {
+                            identity: Default::default(),
+                            call_id: call.call_id.as_ref().to_owned(),
+                            description: nomifun_engine_core::tool_display_target(None, None, &call.name, &call.arguments.0),
+                            name: call.name,
+                            status: ToolCallStatus::Running,
+                            artifacts: Vec::new(),
+                        },
+                        arguments: call.arguments.0,
                     },
                 );
                 None
@@ -287,15 +292,19 @@ impl TurnProjection {
             AgentEngineEvent::ToolStarted { call_id, capability_id, action_id, .. } => {
                 let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
                 calls.get_mut(call_id.as_ref())
-                    .filter(|call| !call.call_id.starts_with("agent-instructions:"))
-                    .map(|call| {
+                    .filter(|call| !call.public.call_id.starts_with("agent-instructions:"))
+                    .map(|pending| {
+                        let call = &mut pending.public;
                         call.identity.capability_id = Some(capability_id.as_ref().to_owned());
                         call.identity.action_id = Some(action_id.as_ref().to_owned());
+                        call.description = nomifun_engine_core::tool_display_target(
+                            Some(capability_id.as_ref()), Some(action_id.as_ref()), &call.name, &pending.arguments);
+                        call.identity.display.operation = nomifun_engine_core::tool_display_operation(Some(capability_id.as_ref()), &pending.arguments);
                         EngineProgress::ToolCall(call.clone())
                     })
             }
             AgentEngineEvent::ToolCompleted { result, runtime_hold, .. } => {
-                let mut call = self
+                let pending = self
                     .calls
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -305,6 +314,7 @@ impl TurnProjection {
                             "tool result has no admitted call".to_owned(),
                         )
                     })?;
+                let mut call = pending.public;
                 // These are engine-owned instruction preflight reads, not
                 // model-selected work. Keep their durable observations but do
                 // not flood the conversation with synthetic read/error rows.
@@ -324,13 +334,18 @@ impl TurnProjection {
                 );
                 call.identity.error_code = call.identity.permission_required.as_ref()
                     .map(|_| nomifun_engine_core::SYSTEM_PERMISSION_REQUIRED.to_owned());
-                let instruction_read = call.call_id.starts_with("agent-instructions:")
-                    || (call.name == "read_file" && call.args.get("path").and_then(|v| v.as_str())
-                        .is_some_and(|path| path.rsplit(['/', '\\']).next().is_some_and(|name|
-                            name.eq_ignore_ascii_case("AGENTS.md") || name.eq_ignore_ascii_case("AGENTS.override.md"))));
-                call.output = Some(if instruction_read {
-                    "Repository instruction body is turn-local and omitted from the stored tool display. Re-read the current file when needed.".into()
-                } else { result.output_text() });
+                let operation = call.identity.display.operation.take();
+                call.identity.display = nomifun_engine_core::tool_result_display(
+                    call.identity.capability_id.as_deref(), call.identity.action_id.as_deref(), &result);
+                call.identity.display.operation = operation;
+                if call.identity.runtime_hold.is_some() || call.identity.permission_required.is_some() { call.identity.display.error = None; }
+                if call.identity.display.cancelled { call.status = ToolCallStatus::Canceled; }
+                call.identity.display.denied_stop_conversation_id = nomifun_engine_core::tool_denied_stop_target(
+                    &call.name, &pending.arguments, &result);
+                if let Some(target) = nomifun_engine_core::tool_result_target(
+                    call.identity.capability_id.as_deref(), call.identity.action_id.as_deref(), &result) {
+                    call.description = Some(target);
+                }
                 Some(EngineProgress::ToolCall(call))
             }
             // Semantics are recorded above even when there is no UI projection.
@@ -1236,12 +1251,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_projection_retains_call_identity_arguments_and_error_outcome() {
+    async fn tool_projection_retains_call_identity_and_path_without_private_arguments_or_output() {
         use nomifun_agent_contracts::{ActionId, CapabilityId, StrictJsonValue};
         use nomifun_chat_model_broker::{ChatToolCall, ToolCallId};
 
         let host = Host::new();
-        let runtime = runtime(host.clone(), model(false, false));
         let state = AgentRuntimeState::new(SESSION, "projection-workspace", 32);
         let turn = state.reset_for_new_turn(ConversationStatus::Running);
         let projection = TurnProjection {
@@ -1283,7 +1297,8 @@ mod tests {
             panic!("expected tool start");
         };
         assert_eq!(started.status, ToolCallStatus::Running);
-        assert_eq!(started.args["path"], "README.md");
+        assert_eq!(started.description.as_deref(), Some("README.md"));
+        assert!(serde_json::to_value(&started).unwrap().get("args").is_none());
         assert_eq!(started.identity.capability_id.as_deref(), Some("workspace.files"));
         assert_eq!(started.identity.action_id.as_deref(), Some("workspace.files/read"));
         projection
@@ -1300,11 +1315,45 @@ mod tests {
         assert_eq!(completed.name, started.name);
         assert_eq!(completed.identity.capability_id, started.identity.capability_id);
         assert_eq!(completed.identity.action_id, started.identity.action_id);
-        assert_eq!(completed.args, started.args);
+        assert_eq!(completed.description, started.description);
         assert_eq!(completed.status, ToolCallStatus::Error);
-        assert_eq!(completed.output.as_deref(), Some("file unavailable"));
+        assert!(serde_json::to_value(&completed).unwrap().get("output").is_none());
         assert_eq!(host.events.lock().unwrap().len(), 3);
-        runtime.kill_and_wait(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn public_tool_frames_keep_file_targets_without_call_or_result_bodies() {
+        use nomifun_agent_contracts::{ActionId, CapabilityId, StrictJsonValue};
+        use nomifun_chat_model_broker::ChatToolCall;
+        let host = Host::new();
+        let state = AgentRuntimeState::new(SESSION, "product-file-projection", 32);
+        let turn = state.reset_for_new_turn(ConversationStatus::Running);
+        let projection = TurnProjection { host:host.clone(),message:message(),output:EngineTurnOutput::new(state.clone(),turn),
+            calls:Mutex::new(BTreeMap::new()),terminal:Mutex::new(None),last_model_step:std::sync::atomic::AtomicU16::new(0) };
+        let mut events = state.subscribe();
+        for (index, (name, action, arguments, target)) in [
+            ("write_file", "workspace.files/write", serde_json::json!({"path":"notes/a  b.md","content":"PRIVATE_TOOL_BODY"}), Some("notes/a  b.md")),
+            ("apply_patch", "workspace.files/patch", serde_json::json!({"files":[{"path":"src/app.rs","edits":[{"old_text":"before","new_text":"PRIVATE_TOOL_BODY"}]}]}), Some("src/app.rs")),
+        ].into_iter().enumerate() {
+            let call_id = format!("file-{index}");
+            projection.emit(AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {
+                call_id:call_id.clone().into(),name:name.into(),arguments:StrictJsonValue(arguments),provider_metadata:None }}).await.unwrap();
+            projection.emit(AgentEngineEvent::ToolStarted {step:1,call_id:call_id.clone().into(),
+                capability_id:CapabilityId::from("workspace.files"),action_id:ActionId::from(action) }).await.unwrap();
+            let AgentStreamEvent::ToolCall(started) = events.recv().await.unwrap() else { panic!("start") };
+            assert_eq!(started.description.as_deref(), target);
+            projection.emit(AgentEngineEvent::ToolCompleted {step:1,runtime_hold:None,
+                result:AgentToolResult::text(call_id.into(), "PRIVATE_TOOL_BODY", false) }).await.unwrap();
+            let AgentStreamEvent::ToolCall(completed) = events.recv().await.unwrap() else { panic!("result") };
+            assert_eq!(completed.description, started.description);
+            for call in [started, completed] {
+                let value = serde_json::to_value(call).unwrap();
+                assert!(!value.to_string().contains("PRIVATE_TOOL_BODY"));
+                for field in ["args","input","output"] { assert!(value.get(field).is_none()); }
+            }
+        }
+        assert!(serde_json::to_string(&*host.events.lock().unwrap()).unwrap().contains("PRIVATE_TOOL_BODY"),
+            "display projection must not modify canonical model observations");
     }
 
     #[tokio::test]

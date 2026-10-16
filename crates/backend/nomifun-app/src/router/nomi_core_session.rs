@@ -6215,7 +6215,7 @@ mod session_boundary_tests {
     }
 
     #[test]
-    fn history_projects_thinking_and_expandable_tool_content() {
+    fn history_projects_thinking_and_tool_targets_without_private_bodies() {
         let session_id = AgentSessionId::from(SESSION_ID);
         let root = "0190f5fe-7c00-7a00-8abc-012345678911";
         let thinking_id = "0190f5fe-7c00-7a00-8abc-012345678914";
@@ -6262,16 +6262,16 @@ mod session_boundary_tests {
             },
             Some(&HistoricalToolObservation {
                 turn_id: Some(root.to_owned()),
-                args: Some(json!({"path": "src/app.ts"})),
-                output: Some("file contents".to_owned()),
+                description: Some("src/app.ts".to_owned()),
                 is_error: Some(false),
                 ..Default::default()
             }),
         ).unwrap().unwrap();
         assert_eq!(tool.r#type, MessageType::ToolCall);
         assert_eq!(tool.status, Some(MessageStatus::Finish));
-        assert_eq!(tool.content["args"]["path"], "src/app.ts");
-        assert_eq!(tool.content["output"], "file contents");
+        assert_eq!(tool.content["description"], "src/app.ts");
+        assert!(tool.content.get("args").is_none());
+        assert!(tool.content.get("output").is_none());
         assert_eq!(tool.content["status"], "completed");
         assert_eq!(tool.content["turn_id"], root);
     }
@@ -6286,7 +6286,6 @@ mod session_boundary_tests {
             ("workspace.process", false, true, "error"),
             ("workspace.files", true, true, "error"),
         ] {
-            let output = json!({"state":"cancelled","cleanup":{"reaped":reaped},"output":{"text":"STARTED"}}).to_string();
             let message = canonical_message_response_with_observation(&session_id, 1000,
                 MessageProjection {
                     session_id:session_id.clone(), projection_id:format!("tool:{message_id}"),
@@ -6294,10 +6293,10 @@ mod session_boundary_tests {
                     projection:json!({"correlation_id":message_id,"state":"recorded",
                         "tool_summary":{"call_id":"call-1","name":"exec_command","capability_id":capability}}),
                     semantic_digest:"digest".into(),
-                }, Some(&HistoricalToolObservation { turn_id:None,args:None,output:Some(output.clone()),is_error:Some(is_error),..Default::default() })
+                }, Some(&HistoricalToolObservation { capability_id:Some(capability.into()), display:nomifun_engine_core::ToolDisplayFacts { cancelled:capability == "workspace.process" && reaped, ..Default::default() }, is_error:Some(is_error),..Default::default() })
             ).unwrap().unwrap();
             assert_eq!(message.content["status"], expected);
-            assert_eq!(message.content["output"], output);
+            assert!(message.content.get("output").is_none());
             assert_eq!(message.status, Some(if expected == "canceled" { MessageStatus::Finish } else { MessageStatus::Error }));
         }
     }
@@ -6327,7 +6326,7 @@ mod session_boundary_tests {
         let confirmed = canonical_message_response_with_observation(&session_id, 1000, projection(),
             Some(&HistoricalToolObservation {
                 capability_id: Some("computer".into()), action_id: Some("computer/observe".into()),
-                is_error: Some(true), output: Some(carrier), result_seq: Some(42),
+                is_error: Some(true), result_seq: Some(42),
                 permission_required: Some(permission), ..Default::default()
             })).unwrap().unwrap();
         assert_eq!(confirmed.content["status"], "error");
@@ -14847,65 +14846,44 @@ fn canonical_message_response_with_observation(
         "tool" => (
             MessageType::ToolCall,
             {
-                let mut summary = document
-                .get("tool_summary")
-                .cloned()
-                .unwrap_or_else(|| json!({
-                    "call_id": message_id,
-                    "name": "tool",
-                    "args": {},
-                }));
-                if let Some(summary) = summary.as_object_mut() {
-                    summary.remove("error_code");
-                    summary.remove("permission_required");
-                    summary.remove("result_seq");
-                    let recorded_error = summary.get("error").and_then(Value::as_str).map(str::to_owned);
-                    summary.entry("status".to_owned()).or_insert_with(|| json!(
-                        if recorded_error.is_some() { "error" }
-                        else if state == "recorded" { "completed" }
-                        else { "running" }
-                    ));
-                    if let Some(error) = recorded_error {
-                        summary.entry("output".to_owned()).or_insert_with(|| json!(error));
-                    }
-                    if let Some(observation) = observation {
-                        if let Some(runtime_hold) = &observation.runtime_hold {
-                            summary.insert("runtime_hold".to_owned(), json!(runtime_hold));
-                        }
-                        // Derived only from the matching canonical Runtime call
-                        // and result, never from a message projection or prose.
-                        if let Some(capability_id) = &observation.capability_id {
-                            summary.insert("capability_id".to_owned(), json!(capability_id));
-                        }
-                        if let Some(action_id) = &observation.action_id {
-                            summary.insert("action_id".to_owned(), json!(action_id));
-                        }
-                        if let Some(result_seq) = observation.result_seq {
-                            summary.insert("result_seq".to_owned(), json!(result_seq));
-                        }
-                        if let Some(permission_required) = &observation.permission_required {
-                            summary.insert("error_code".to_owned(), json!(nomifun_engine_core::SYSTEM_PERMISSION_REQUIRED));
-                            summary.insert("permission_required".to_owned(), json!(permission_required));
-                        }
-                        if let Some(turn_id) = &observation.turn_id {
-                            summary.insert("turn_id".to_owned(), json!(turn_id));
-                        }
-                        if let Some(args) = &observation.args {
-                            summary.insert("args".to_owned(), args.clone());
-                        }
-                        if let Some(output) = &observation.output {
-                            summary.insert("output".to_owned(), json!(output));
-                        }
-                        if let Some(is_error) = observation.is_error {
-                            let cancelled = summary.get("capability_id").and_then(Value::as_str) == Some("workspace.process")
-                                && observation.output.as_deref().and_then(|output| serde_json::from_str::<Value>(output).ok())
-                                    .is_some_and(|result| result.get("state").and_then(Value::as_str) == Some("cancelled")
-                                        && result.pointer("/cleanup/reaped").and_then(Value::as_bool) == Some(true));
-                            summary.insert("status".to_owned(), json!(
-                                if cancelled { "canceled" } else if is_error { "error" } else { "completed" }
-                            ));
-                        }
-                    }
+                use nomifun_ai_agent::protocol::events::{ToolCallEventData, ToolCallStatus};
+                use nomifun_ai_agent::protocol::events::tool_call::ToolCallIdentity;
+                let source = document.get("tool_summary");
+                let field = |key: &str| source.and_then(|source| source.get(key)).and_then(Value::as_str);
+                let recorded_error = field("error").is_some();
+                let mut identity = ToolCallIdentity::default();
+                identity.capability_id = observation.and_then(|item| item.capability_id.clone())
+                    .or_else(|| field("capability_id").map(str::to_owned));
+                identity.action_id = observation.and_then(|item| item.action_id.clone())
+                    .or_else(|| field("action_id").map(str::to_owned));
+                let status = if let Some(observation) = observation {
+                    identity.runtime_hold = observation.runtime_hold;
+                    identity.result_seq = observation.result_seq;
+                    identity.permission_required = observation.permission_required.clone();
+                    identity.error_code = identity.permission_required.as_ref()
+                        .map(|_| nomifun_engine_core::SYSTEM_PERMISSION_REQUIRED.to_owned());
+                    identity.display = observation.display.clone();
+                    if observation.display.cancelled { ToolCallStatus::Canceled }
+                    else if observation.is_error == Some(true) { ToolCallStatus::Error }
+                    else if observation.is_error == Some(false) || state == "recorded" { ToolCallStatus::Completed }
+                    else { ToolCallStatus::Running }
+                } else if recorded_error {
+                    identity.display.error = Some("The tool result could not be confirmed. Do not retry automatically; reconcile the original operation first.".into());
+                    ToolCallStatus::Error
+                }
+                else if state == "recorded" { ToolCallStatus::Completed }
+                else { ToolCallStatus::Running };
+                let public = ToolCallEventData {
+                    identity,
+                    call_id: field("call_id").unwrap_or(message_id).to_owned(),
+                    name: field("name").unwrap_or("tool").to_owned(),
+                    status,
+                    description: observation.and_then(|item| item.description.clone()),
+                    artifacts: Vec::new(),
+                };
+                let mut summary = serde_json::to_value(public)?;
+                if let Some(turn_id) = observation.and_then(|item| item.turn_id.as_ref()) {
+                    summary["turn_id"] = json!(turn_id);
                 }
                 summary
             },
@@ -15137,6 +15115,7 @@ async fn get_nomi_core_agent_session_message_history(
     });
     let observations = load_historical_tool_observations(
         &state.session_owner.pool,
+        state.session_owner.canonical().store(),
         &session_id,
         &projections,
     ).await?;
@@ -15199,7 +15178,7 @@ async fn get_nomi_core_agent_session_message(
         .ok_or_else(|| NomiCoreApiError::new(StatusCode::NOT_FOUND,
             "AGENT_SESSION_MESSAGE_NOT_FOUND", "message projection does not exist"))?;
     let observations = load_historical_tool_observations(
-        &state.session_owner.pool, &session_id, std::slice::from_ref(&projection),
+        &state.session_owner.pool, state.session_owner.canonical().store(), &session_id, std::slice::from_ref(&projection),
     ).await?;
     let continuations=history_text_continuation::load(&state.session_owner.pool,&session_id,std::slice::from_ref(&projection)).await?;
     let observation = observations.get(&projection.projection_id);

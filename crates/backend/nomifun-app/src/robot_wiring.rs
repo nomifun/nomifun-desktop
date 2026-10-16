@@ -1110,10 +1110,7 @@ mod tests {
             identity: Default::default(),
             call_id: "tool-1".to_owned(),
             name: "Browser".to_owned(),
-            args: serde_json::json!({"action": "observe"}),
             status: ToolCallStatus::Running,
-            input: None,
-            output: None,
             description: None,
             artifacts: Vec::new(),
         })

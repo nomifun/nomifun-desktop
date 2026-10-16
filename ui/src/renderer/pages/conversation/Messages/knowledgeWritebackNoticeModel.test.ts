@@ -14,8 +14,7 @@ const status = (state: string, event_seq?: number): IMessageAgentStatus => ({
 const tool = (state: 'completed' | 'error' | 'running'): IMessageToolCall => ({
   id: 'tool', conversation_id: conversation, type: 'tool_call', content: {
     call_id: 'call', name: 'knowledge_write', capability_id: 'knowledge', action_id: 'knowledge/write', status: state,
-    args: { base: kb, rel_path: 'notes/loops.md' },
-    output: JSON.stringify({ resource_id: kb, relative_path: 'notes/loops.md', created: true }),
+    written_knowledge_file: { kb_id: kb, rel_path: 'notes/loops.md' },
   },
 });
 
@@ -33,9 +32,7 @@ test('only the successful first-party owner result proves a tool write', () => {
   expect(knowledgeWritebackFromMessage(tool('running'))).toBeUndefined();
   const plugin = tool('completed'); plugin.content.capability_id = 'plugin.knowledge';
   expect(knowledgeWritebackFromMessage(plugin)).toBeUndefined();
-  const guessed = tool('completed'); guessed.content.output = '已写入知识库';
-  expect(knowledgeWritebackFromMessage(guessed)).toBeUndefined();
-  guessed.content.output = JSON.stringify({ resource_id: kb, relative_path: 'notes/loops.md' });
+  const guessed = tool('completed'); guessed.content.written_knowledge_file = undefined;
   expect(knowledgeWritebackFromMessage(guessed)).toBeUndefined();
 });
 test('the same tool and finalizer target appears once, while different libraries stay distinct', () => {

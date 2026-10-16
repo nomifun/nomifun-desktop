@@ -21,21 +21,21 @@ const tool = (item: Partial<NormalizedToolCall> & Pick<NormalizedToolCall, 'key'
 describe('buildToolReceiptSummaryParts', () => {
   test('keeps clean timeouts separate from unknown errors and preserves its receipt', () => {
     const timeout = tool({ key: 'timeout', name: 'poll_process', status: 'error', commandTimedOut: true,
-      output: 'exact timeout and cleanup receipt' });
-    const unknown = tool({ key: 'unknown', name: 'poll_process', status: 'error', output: 'cleanup unknown' });
+      error: 'exact timeout and cleanup receipt' });
+    const unknown = tool({ key: 'unknown', name: 'poll_process', status: 'error', error: 'cleanup unknown' });
     const parts = buildToolReceiptSummaryParts([timeout, unknown], 'failed');
     expect(parts.map(({ state, commandTimedOut }) => ({ state, commandTimedOut }))).toEqual([
       { state: 'failed', commandTimedOut: true }, { state: 'failed', commandTimedOut: undefined },
     ]);
     expect(buildToolReceiptDetailRows([timeout])[0]).toMatchObject({
-      state: 'failed', commandTimedOut: true, output: timeout.output,
+      state: 'failed', commandTimedOut: true, error: timeout.error,
     });
 
   });
   test('separates a proven launch refusal from other failures and preserves its receipt', () => {
     const first = tool({ key: 'not-started', name: 'exec_command', status: 'error',
-      commandNotStarted: true, output: 'original launch diagnostic' });
-    const other = tool({ key: 'system', name: 'exec_command', status: 'error', output: 'unknown failure' });
+      commandNotStarted: true, error: 'original launch diagnostic' });
+    const other = tool({ key: 'system', name: 'exec_command', status: 'error', error: 'unknown failure' });
     const parts = buildToolReceiptSummaryParts([first, other], 'failed');
     expect(parts.map(({ state, commandNotStarted }) => ({ state, commandNotStarted }))).toEqual([
       { state: 'failed', commandNotStarted: true },
@@ -43,16 +43,16 @@ describe('buildToolReceiptSummaryParts', () => {
     ]);
     const rows = buildToolReceiptDetailRows([first, other]);
     expect(rows[0]?.commandNotStarted).toBe(true);
-    expect(rows[0]?.output).toBe('original launch diagnostic');
+    expect(rows[0]?.error).toBe('original launch diagnostic');
 
   });
 
-  test('separates command exit codes from system failures and retains raw detail', () => {
+  test('separates command exit codes from system failures and retains public errors', () => {
     const tools = [
       tool({ key: 'pass', name: 'exec_command', commandExitCode: 0 }),
       tool({ key: 'diagnostic', name: 'exec_command', status: 'error', nonFatalFailure: true,
-        commandExitCode: 1, output: 'intentional test failure' }),
-      tool({ key: 'system', name: 'exec_command', status: 'error', output: 'launch failed' }),
+        commandExitCode: 1, error: 'intentional test failure' }),
+      tool({ key: 'system', name: 'exec_command', status: 'error', error: 'launch failed' }),
     ];
     const parts = buildToolReceiptSummaryParts(tools, 'failed');
     expect(parts.map(({ state, commandExitCode }) => ({ state, commandExitCode }))).toEqual([
@@ -62,7 +62,7 @@ describe('buildToolReceiptSummaryParts', () => {
     ]);
     const rows = buildToolReceiptDetailRows(tools);
     expect(rows[1]?.commandExitCode).toBe(1);
-    expect(rows[1]?.output).toBe('intentional test failure');
+    expect(rows[1]?.error).toBe('intentional test failure');
     expect(rows[2]?.state).toBe('failed');
   });
 
@@ -175,7 +175,7 @@ describe('buildToolReceiptSummaryParts', () => {
 
   test('keeps discovery distinct and preserves its query without claiming schema counts', () => {
     const parts = buildToolReceiptSummaryParts(
-      [tool({ key: 'tool-search', name: 'ToolSearch', status: 'completed', input: '{"query":"browser/navigate"}' })],
+      [tool({ key: 'tool-search', name: 'ToolSearch', status: 'completed', description: 'browser/navigate' })],
       'completed'
     );
 
@@ -222,9 +222,9 @@ describe('buildToolReceiptSummaryParts', () => {
     ]);
   });
 
-  test('uses the concrete command from input when a shell tool has no description', () => {
+  test('uses the host-projected command label', () => {
     const parts = buildToolReceiptSummaryParts(
-      [tool({ key: 'check', name: 'Bash', input: '{"command":"bun run check"}', status: 'running' })],
+      [tool({ key: 'check', name: 'Bash', description: 'bun run check', status: 'running' })],
       'running'
     );
 
@@ -233,9 +233,9 @@ describe('buildToolReceiptSummaryParts', () => {
     ]);
   });
 
-  test('uses the concrete file target from a running write input preview', () => {
+  test('uses the host-projected running write path', () => {
     const parts = buildToolReceiptSummaryParts(
-      [tool({ key: 'write', name: 'Write', input: '{"file_path":"/tmp/snake.html"}', status: 'running' })],
+      [tool({ key: 'write', name: 'Write', description: '/tmp/snake.html', status: 'running' })],
       'running'
     );
 
@@ -299,7 +299,7 @@ describe('buildToolReceiptSummaryParts', () => {
           name: 'Bash',
           status: 'canceled',
           skipped: true,
-          input: '{"command":"find /workspace -maxdepth 2 -type d"}',
+          description: 'find /workspace -maxdepth 2 -type d',
         }),
       ],
       'canceled'
@@ -409,7 +409,7 @@ describe('getToolReceiptIconFromSummaryParts', () => {
     ).toBe('tool');
     expect(
       getToolReceiptIconFromSummaryParts(
-        buildToolReceiptSummaryParts([tool({ key: 'write', name: 'Write', input: '{"file_path":"a.ts"}' })], 'completed')
+        buildToolReceiptSummaryParts([tool({ key: 'write', name: 'Write', description: 'a.ts' })], 'completed')
       )
     ).toBe('edit');
   });
@@ -464,15 +464,14 @@ describe('buildToolReceiptDetailRows', () => {
     ]);
   });
 
-  test('keeps command input and output available for expandable detail panels', () => {
+  test('keeps only the public error in existing expandable details', () => {
     const rows = buildToolReceiptDetailRows([
       tool({
         key: 'test',
         name: 'Bash',
         description: 'python snake.py',
-        input: 'python snake.py',
-        output: 'pygame 2.6.1\\nGame started',
-        truncated: true,
+        status: 'error',
+        error: 'The command could not complete.',
       }),
     ]);
 
@@ -480,12 +479,10 @@ describe('buildToolReceiptDetailRows', () => {
       {
         key: 'test',
         action: 'run_commands',
-        state: 'completed',
+        state: 'failed',
         title: 'Bash',
         target: 'python snake.py',
-        input: 'python snake.py',
-        output: 'pygame 2.6.1\\nGame started',
-        truncated: true,
+        error: 'The command could not complete.',
       },
     ]);
   });
@@ -498,7 +495,7 @@ describe('buildToolReceiptDetailRows', () => {
         description: 'grep -rn "missing" .',
         status: 'error',
         nonFatalFailure: true,
-        output: 'exit code 1',
+        error: 'exit code 1',
       }),
     ]);
 
@@ -509,7 +506,7 @@ describe('buildToolReceiptDetailRows', () => {
         state: 'completed',
         title: 'Bash',
         target: 'grep -rn "missing" .',
-        output: 'exit code 1',
+        error: 'exit code 1',
       },
     ]);
   });
@@ -521,7 +518,7 @@ describe('buildToolReceiptDetailRows', () => {
         name: 'Bash',
         status: 'canceled',
         skipped: true,
-        input: '{"command":"find /workspace -maxdepth 2 -type d"}',
+        description: 'find /workspace -maxdepth 2 -type d',
       }),
     ]);
 
@@ -532,14 +529,13 @@ describe('buildToolReceiptDetailRows', () => {
         state: 'canceled',
         title: 'Bash',
         target: 'find /workspace -maxdepth 2 -type d',
-        input: '{"command":"find /workspace -maxdepth 2 -type d"}',
         skipped: true,
       },
     ]);
   });
 
   test('keeps local validation diagnostics inspectable under a stable MCP title', () => {
-    const output =
+    const error =
       "Invalid arguments for tool 'mcp__nomifun-desktop__nomi_delegate__anxmvqfkcuzfi4mq': " +
       'JSON Schema validation failed. Correct the arguments and retry; the tool was not executed.';
     const rows = buildToolReceiptDetailRows([
@@ -548,7 +544,7 @@ describe('buildToolReceiptDetailRows', () => {
         name: 'mcp__nomifun-desktop__nomi_delegate__anxmvqfkcuzfi4mq',
         status: 'canceled',
         notExecutedReason: 'invalid_arguments',
-        output,
+        error,
       }),
     ]);
 
@@ -558,20 +554,19 @@ describe('buildToolReceiptDetailRows', () => {
         action: 'generic',
         state: 'completed',
         title: 'Nomi delegate',
-        diagnostics: 'MCP · nomifun-desktop\nmcp__nomifun-desktop__nomi_delegate__anxmvqfkcuzfi4mq',
         target: 'Nomi delegate',
-        output,
+        error,
         notExecutedReason: 'invalid_arguments',
       },
     ]);
   });
 
-  test('extracts read targets from structured input for expandable file lists', () => {
+  test('keeps the host-projected read path', () => {
     const rows = buildToolReceiptDetailRows([
       tool({
         key: 'read-input',
         name: 'Read',
-        input: '{"file_path":"ui/src/renderer/pages/conversation/Messages/MessageList.tsx"}',
+        description: 'ui/src/renderer/pages/conversation/Messages/MessageList.tsx',
       }),
     ]);
 
@@ -582,18 +577,17 @@ describe('buildToolReceiptDetailRows', () => {
         state: 'completed',
         title: 'Read',
         target: 'ui/src/renderer/pages/conversation/Messages/MessageList.tsx',
-        input: '{"file_path":"ui/src/renderer/pages/conversation/Messages/MessageList.tsx"}',
       },
     ]);
   });
 
-  test('extracts running write targets from structured input previews', () => {
+  test('keeps the host-projected running write path', () => {
     const rows = buildToolReceiptDetailRows([
       tool({
         key: 'write-input',
         name: 'Write',
         status: 'running',
-        input: '{"file_path":"/tmp/snake.html"}',
+        description: '/tmp/snake.html',
       }),
     ]);
 
@@ -604,7 +598,6 @@ describe('buildToolReceiptDetailRows', () => {
         state: 'running',
         title: 'Write',
         target: '/tmp/snake.html',
-        input: '{"file_path":"/tmp/snake.html"}',
       },
     ]);
   });

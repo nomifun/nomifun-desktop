@@ -1,4 +1,5 @@
-import type { TMessage } from '@/common/chat/chatLib';
+import { normalizeToolCallContent, normalizeToolGroupContent, type TMessage } from '@/common/chat/chatLib';
+import { projectAssistantText } from '@/renderer/pages/conversation/Messages/processTraceDisplayModel';
 import type { TChatConversation } from '@/common/config/storage';
 import type { ConversationId } from '@/common/types/ids';
 
@@ -36,8 +37,17 @@ const formatDefaultExportFileDate = (time = Date.now()): string => {
   return `${date.getFullYear()}-${padTimestampPart(date.getMonth() + 1)}-${padTimestampPart(date.getDate())}`;
 };
 
+/** Export the same public tool contract that is accepted by the renderer. */
+export const normalizeExportMessage = (message: TMessage): TMessage => {
+  if (message.type === 'tool_call') return { ...message, content: normalizeToolCallContent(message.content, message.status) };
+  if (message.type === 'tool_group') return { ...message, content: normalizeToolGroupContent(message.content) };
+  if (message.type === 'text' && message.position === 'left') return { ...message,
+    content: { ...message.content, content: projectAssistantText(message.content.content).text } };
+  return message;
+};
+
 export const readMessageContent = (message: TMessage): string => {
-  const content = message.content as Record<string, unknown> | string | undefined;
+  const content = normalizeExportMessage(message).content as Record<string, unknown> | string | undefined;
 
   if (typeof content === 'string') {
     return content;

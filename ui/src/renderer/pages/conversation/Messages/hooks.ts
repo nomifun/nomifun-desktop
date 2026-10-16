@@ -1037,7 +1037,7 @@ export const useMessageLstCache = (key: ConversationId) => {
       let pagesAfterTurnStartReceipt = 0;
       do {
         const result = await ipcBridge.database.getConversationMessages.invoke({
-          conversation_id: key, cursor, page_size: HISTORY_WINDOW_SIZE, content_mode: 'compact',
+          conversation_id: key, cursor, page_size: HISTORY_WINDOW_SIZE,
         });
         if (!isCurrent()) return;
         const messages = result.items.map(normalizeDbMessage).sort(compareTranscriptOrder);
@@ -1083,7 +1083,7 @@ export const useMessageLstCache = (key: ConversationId) => {
     try {
       const result = await ipcBridge.database.getConversationMessages.invoke({
         conversation_id: key, cursor: scope.cursor,
-        page_size: HISTORY_WINDOW_SIZE, content_mode: 'compact',
+        page_size: HISTORY_WINDOW_SIZE,
       });
       if (!isCurrent()) return false;
       const messages = result.items.map(normalizeDbMessage).sort(compareTranscriptOrder);

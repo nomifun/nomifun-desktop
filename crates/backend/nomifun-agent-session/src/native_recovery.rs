@@ -144,13 +144,13 @@ impl AgentSessionStore {
         let next_fence = expected_fence.checked_add(1).ok_or_else(|| SessionStoreError::Conflict("execution fence exhausted".into()))?;
         let rows = sqlx::query_as::<_, StoredEffectRow>(
             "SELECT effect_id,session_id,turn_id,operation_id,owner_domain,capability_module,action_id, \
-             resource_binding_id,resource_key,input_digest,strategy,state,bounded_observation_json, \
+             resource_binding_id,resource_key,input_digest,strategy,state, \
              started_event_id,terminal_event_id,created_at,settled_at FROM agent_effects \
              WHERE session_id=? AND turn_id=? AND state='pending' ORDER BY effect_id")
             .bind(session_id.as_ref()).bind(operation_id.as_ref()).fetch_all(&mut *tx).await?;
         let pending = rows.len();
         for row in rows {
-            let effect = effect_from_row(row)?;
+            let effect = effect_from_row(&mut tx, row).await?;
             let started = event_by_event_id_tx(&mut tx, effect.started_event_id.as_ref()).await?.ok_or_else(|| SessionStoreError::InvalidEvent("pending effect has no start receipt".into()))?;
             let request = EffectEventRequest {
                 agent_session_id: session_id.clone(), effect_id: effect.effect_id.clone(), turn_id: effect.turn_id,

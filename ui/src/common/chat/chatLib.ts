@@ -262,12 +262,6 @@ export type IMessageToolCall = IMessage<
     name: string;
     /** Read-only paths derived by the authenticated canonical Session projection. */
     managed_file_paths?: Record<string, string>;
-    /**
-     * Provider arguments when they were decoded as a JSON object. Local
-     * Pre-execution validation failures preserve the rejected object so users
-     * can inspect exactly what the model sent.
-     */
-    args?: Record<string, unknown> | null;
     /** Canonical identity projected by the host, separate from the model alias. */
     capability_id?: string;
     action_id?: string;
@@ -277,9 +271,17 @@ export type IMessageToolCall = IMessage<
     /** Exact canonical tool result event order, shared by live and history. */
     result_seq?: number;
     status?: 'running' | 'completed' | 'error' | 'canceled';
-    input?: Record<string, unknown>;
-    output?: string;
     description?: string;
+    result_asset_ids?: string[];
+    operation?: string;
+    written_knowledge_file?: { kb_id: string; rel_path: string };
+    /** Verified host outcomes, independent of private tool result bodies. */
+    command_exit_code?: number;
+    command_not_started?: boolean;
+    command_timed_out?: boolean;
+    process_reference_invalid?: boolean;
+    bounded_result?: 'search_context_withheld';
+    non_fatal_failure?: boolean;
     /** Runtime-authored pre-owner hold; never inferred from tool output text. */
     runtime_hold?: RuntimeToolHoldReason;
     /** Verified, durable outputs emitted by the backend. */
@@ -305,8 +307,16 @@ export const mergeToolCallContent = (
     timeline: preferMessageTimeline(existing.timeline, incoming.timeline),
     result_seq: evidence.result_seq ?? existing.result_seq,
     runtime_hold: evidence.runtime_hold ?? existing.runtime_hold,
-    ...(olderResult ? { output: existing.output, error_code: existing.error_code,
-      permission_required: existing.permission_required } : {}),
+    error: evidence.error,
+    error_code: evidence.error_code,
+    permission_required: evidence.permission_required,
+    command_exit_code: evidence.command_exit_code,
+    command_not_started: evidence.command_not_started,
+    command_timed_out: evidence.command_timed_out,
+    process_reference_invalid: evidence.process_reference_invalid,
+    bounded_result: evidence.bounded_result,
+    non_fatal_failure: evidence.non_fatal_failure,
+    written_knowledge_file: evidence.written_knowledge_file,
   };
 
   if (existing.status === 'error' || incoming.status === 'error') {
@@ -335,9 +345,8 @@ export type IMessageToolGroup = IMessage<
     description: string;
     name: string;
     status: 'Executing' | 'Success' | 'Error' | 'Canceled' | 'Pending';
+    operation?: string;
     action_id?: string;
-    args?: Record<string, unknown> | null;
-    input?: Record<string, unknown>;
     error_code?: string;
     permission_required?: SystemPermissionRequired;
     result_seq?: number;
@@ -787,9 +796,8 @@ export const normalizeToolGroupContent = (value: unknown): IMessageToolGroup['co
         name: toDisplayText(item.name, 'Tool'),
         status,
         ...(typeof item.action_id === 'string' ? { action_id: item.action_id } : {}),
+        ...(typeof item.operation === 'string' ? { operation: item.operation } : {}),
         ...(typeof item.result_seq === 'number' && Number.isSafeInteger(item.result_seq) && item.result_seq >= 0 ? { result_seq: item.result_seq } : {}),
-        ...(isObject(item.args) ? { args: item.args } : {}),
-        ...(isObject(item.input) ? { input: item.input } : {}),
         ...(typeof item.error_code === 'string' ? { error_code: item.error_code } : {}),
         ...(item.error_code === 'SYSTEM_PERMISSION_REQUIRED' && status === 'Error'
           ? { permission_required: normalizeSystemPermissionRequired(item.permission_required, item.action_id) } : {}),
@@ -893,7 +901,27 @@ export const normalizeToolCallContent = (
   }
 
   return {
-    ...data,
+    call_id: toDisplayText(data.call_id),
+    name: toDisplayText(data.name, 'Tool'),
+    ...(isObject(data.managed_file_paths) ? { managed_file_paths: data.managed_file_paths as Record<string, string> } : {}),
+    ...(typeof data.capability_id === 'string' ? { capability_id: data.capability_id } : {}),
+    ...(typeof data.action_id === 'string' ? { action_id: data.action_id } : {}),
+    ...(typeof data.description === 'string' ? { description: data.description } : {}),
+    ...(typeof data.operation === 'string' ? { operation: data.operation } : {}),
+    ...(terminalSuccess && isObject(data.written_knowledge_file)
+      && typeof data.written_knowledge_file.kb_id === 'string' && typeof data.written_knowledge_file.rel_path === 'string'
+      ? { written_knowledge_file: { kb_id: data.written_knowledge_file.kb_id, rel_path: data.written_knowledge_file.rel_path } } : {}),
+    ...(Array.isArray(data.result_asset_ids) && data.result_asset_ids.every(id => typeof id === 'string')
+      ? { result_asset_ids: data.result_asset_ids } : {}),
+    ...(status === 'error' && typeof data.error === 'string' ? { error: data.error } : {}),
+    ...(status === 'error' && typeof data.error_code === 'string' ? { error_code: data.error_code } : {}),
+    ...(Number.isSafeInteger(data.command_exit_code) && Number(data.command_exit_code) >= 0
+      ? { command_exit_code: Number(data.command_exit_code) } : {}),
+    ...(data.command_not_started === true ? { command_not_started: true } : {}),
+    ...(data.command_timed_out === true ? { command_timed_out: true } : {}),
+    ...(data.process_reference_invalid === true ? { process_reference_invalid: true } : {}),
+    ...(data.bounded_result === 'search_context_withheld' ? { bounded_result: data.bounded_result } : {}),
+    ...(data.non_fatal_failure === true ? { non_fatal_failure: true } : {}),
     ...(status ? { status } : {}),
     timeline: normalizeMessageTimeline(data.timeline),
     runtime_hold: ['tool_not_exposed', 'arguments_rejected', 'batch_rejected', 'phase_restricted', 'input_superseded', 'prior_call_failed', 'runtime_gate'].includes(String(data.runtime_hold))
@@ -902,6 +930,7 @@ export const normalizeToolCallContent = (
       ? normalizeSystemPermissionRequired(data.permission_required, data.action_id) : undefined,
     result_seq: typeof data.result_seq === 'number' && Number.isSafeInteger(data.result_seq) && data.result_seq >= 0 ? data.result_seq : undefined,
     artifacts: invalidTerminalClaim ? [] : artifacts,
+    ...(data.artifact_delivery_committed === true ? { artifact_delivery_committed: true } : {}),
   } as IMessageToolCall['content'];
 };
 

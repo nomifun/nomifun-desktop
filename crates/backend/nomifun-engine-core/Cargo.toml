@@ -19,6 +19,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 jsonschema.workspace = true

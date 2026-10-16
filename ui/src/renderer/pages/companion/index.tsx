@@ -1264,7 +1264,6 @@ const CompanionPage: React.FC = () => {
             conversation_id: delivery.conversation_id,
             page: 0,
             page_size: 1,
-            content_mode: 'compact',
           });
           if (
             transcript.items.length !== 0 ||
@@ -1356,7 +1355,6 @@ const CompanionPage: React.FC = () => {
         conversation_id: composerThreadId,
         cursor: '',
         page_size: 6,
-        content_mode: 'compact',
       })
       .then((page) => {
         if (cancelled) return;

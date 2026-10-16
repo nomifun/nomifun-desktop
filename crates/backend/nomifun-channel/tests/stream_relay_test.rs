@@ -347,11 +347,8 @@ async fn weixin_buffers_pending_text_through_tool_call_until_finish() {
             identity: Default::default(),
             call_id: "call-1".into(),
             name: "read_file".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Running,
             description: None,
-            input: None,
-            output: None,
             artifacts: Vec::new(),
         }))
         .unwrap();
@@ -402,11 +399,8 @@ async fn telegram_does_not_flush_text_before_tool_call() {
             identity: Default::default(),
             call_id: "call-1".into(),
             name: "read_file".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Running,
             description: None,
-            input: None,
-            output: None,
             artifacts: Vec::new(),
         }))
         .unwrap();
@@ -442,11 +436,8 @@ async fn weixin_skips_flush_when_buffer_is_empty() {
             identity: Default::default(),
             call_id: "call-1".into(),
             name: "read_file".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Running,
             description: None,
-            input: None,
-            output: None,
             artifacts: Vec::new(),
         }))
         .unwrap();
@@ -568,11 +559,8 @@ async fn telegram_tool_call_edit_stays_plain_text() {
             identity: Default::default(),
             call_id: "call-1".into(),
             name: "read_file".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Running,
             description: None,
-            input: None,
-            output: None,
             artifacts: Vec::new(),
         }))
         .unwrap();
@@ -783,11 +771,8 @@ async fn weixin_inline_think_merged_final_is_stripped() {
             identity: Default::default(),
             call_id: "call-1".into(),
             name: "read_file".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Running,
             description: None,
-            input: None,
-            output: None,
             artifacts: Vec::new(),
         }))
         .unwrap();
@@ -835,11 +820,8 @@ async fn weixin_all_think_buffer_skips_flush_then_recovers() {
             identity: Default::default(),
             call_id: "call-1".into(),
             name: "read_file".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Running,
             description: None,
-            input: None,
-            output: None,
             artifacts: Vec::new(),
         }))
         .unwrap();

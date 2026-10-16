@@ -307,7 +307,7 @@ const MessageText: React.FC<{
             )}
           </div>
         )}
-        {presentation.hasToolPayload && <AssistantProtocolNotice raw={toDisplayText(message.content.content)} />}
+        {presentation.hasToolPayload && <AssistantProtocolNotice />}
         {message.content.observations?.map((observation) => (
           <div key={observation.image.id} className='mt-8px flex max-w-full flex-col gap-6px rd-8px border border-solid border-arco-2 p-10px'>
             <span className='text-12px text-t-secondary'>{t('nomi.robot.visualObservation')}</span>

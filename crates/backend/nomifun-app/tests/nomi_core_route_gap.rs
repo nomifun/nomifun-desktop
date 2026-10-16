@@ -4398,7 +4398,10 @@ async fn creative_studio_entry_uses_its_official_agent() {
         let terminal = tokio::time::timeout(std::time::Duration::from_secs(15), async {
             loop {
                 let row: (String, Option<String>) = sqlx::query_as(
-                    "SELECT state, error_json FROM agent_turns WHERE session_id = ? AND operation_id = ?",
+                    "SELECT turn.state, COALESCE(terminal.inline_json,json_extract(CAST(payload.body AS TEXT),'$.value')) \
+                     FROM agent_turns turn LEFT JOIN agent_events terminal ON terminal.event_id=turn.terminal_event_id AND terminal.session_id=turn.session_id \
+                     LEFT JOIN agent_payloads payload ON payload.payload_id=terminal.payload_id AND payload.session_id=turn.session_id \
+                     WHERE turn.session_id = ? AND turn.operation_id = ?",
                 ).bind(conversation_id).bind(operation).fetch_one(services.database.pool()).await.unwrap();
                 if matches!(row.0.as_str(), "completed" | "failed" | "cancelled") { break row; }
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -4719,7 +4722,10 @@ async fn companion_options_survive_a_first_launch_selection_default_save_failure
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
     }).await.expect("the known pre-model Skill rejection must settle before explicit Agent recovery");
-    let failure_json: String = sqlx::query_scalar("SELECT error_json FROM agent_turns WHERE session_id = ? AND operation_id = ?")
+    let failure_json: String = sqlx::query_scalar("SELECT COALESCE(terminal.inline_json,json_extract(CAST(payload.body AS TEXT),'$.value')) \
+        FROM agent_turns turn JOIN agent_events terminal ON terminal.event_id=turn.terminal_event_id AND terminal.session_id=turn.session_id \
+        LEFT JOIN agent_payloads payload ON payload.payload_id=terminal.payload_id AND payload.session_id=turn.session_id \
+        WHERE turn.session_id = ? AND turn.operation_id = ?")
         .bind(session_id).bind(operation).fetch_one(services.database.pool()).await.unwrap();
     let failure: Value = serde_json::from_str(&failure_json).unwrap();
     assert_eq!(failure["model_steps"], 0, "the deliberate Skill rejection must precede any provider request");
@@ -4912,7 +4918,10 @@ async fn started_companion_fixture() -> StartedCompanion {
     let failed_error = tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
             let row = sqlx::query_as::<_, (String, Option<String>)>(
-                "SELECT state, error_json FROM agent_turns WHERE session_id = ? AND operation_id = ?",
+                "SELECT turn.state, COALESCE(terminal.inline_json,json_extract(CAST(payload.body AS TEXT),'$.value')) \
+                 FROM agent_turns turn LEFT JOIN agent_events terminal ON terminal.event_id=turn.terminal_event_id AND terminal.session_id=turn.session_id \
+                 LEFT JOIN agent_payloads payload ON payload.payload_id=terminal.payload_id AND payload.session_id=turn.session_id \
+                 WHERE turn.session_id = ? AND turn.operation_id = ?",
             )
             .bind(conversation_id)
             .bind(&failed_operation)

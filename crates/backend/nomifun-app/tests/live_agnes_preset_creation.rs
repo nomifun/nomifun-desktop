@@ -51,7 +51,10 @@ async fn wait_for_turn(pool: &nomifun_db::SqlitePool, operation_id: &str) {
     let deadline = Instant::now() + Duration::from_secs(180);
     loop {
         let state: Option<(String, Option<String>)> = nomifun_db::sqlx::query_as(
-            "SELECT state, error_json FROM agent_turns WHERE operation_id = ?",
+            "SELECT turn.state, COALESCE(terminal.inline_json,json_extract(CAST(payload.body AS TEXT),'$.value')) \
+             FROM agent_turns turn LEFT JOIN agent_events terminal ON terminal.event_id=turn.terminal_event_id AND terminal.session_id=turn.session_id \
+             LEFT JOIN agent_payloads payload ON payload.payload_id=terminal.payload_id AND payload.session_id=turn.session_id \
+             WHERE turn.operation_id = ?",
         )
         .bind(operation_id)
         .fetch_optional(pool)

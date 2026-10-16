@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render } from '@testing-library/react';
+import { cleanup, render } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
@@ -35,20 +35,14 @@ describe('MessageText internal tool payload display', () => {
     const { container } = renderMessage('The file is ready.', 'left');
     expect(container.querySelector('[data-testid="message-copy-action"]')).not.toBeNull();
   });
-  test('renders malformed assistant output as a closed diagnostic instead of a successful reply', async () => {
+  test('keeps a malformed proposal as a non-expandable notice without its file body', async () => {
     const raw = '<tool_call>\n<function=write_file>\n<parameter=content>\n<!DOCTYPE html>\n<style>body{color:red}</style>';
     const { container } = renderMessage(raw, 'left');
     expect(container.textContent).toContain('Invalid tool-call format');
     expect(container.textContent).not.toContain('<!DOCTYPE html>');
     expect(container.querySelector('pre')).toBeNull();
     expect(container.querySelector('[data-testid="message-copy-action"]')).toBeNull();
-    const details = container.querySelector('details')!;
-    await act(async () => {
-      details.open = true;
-      fireEvent(details, new Event('toggle'));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-    expect(container.querySelector('pre')?.textContent).toBe(raw);
+    expect(container.querySelector('details')).toBeNull();
   });
 
   test('never alters text supplied by the user', () => {

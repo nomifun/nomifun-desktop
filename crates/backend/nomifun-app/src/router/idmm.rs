@@ -210,9 +210,9 @@ impl IdmmSessionPort for CanonicalIdmmSessionPort {
             .head(&session_id_typed)
             .await
             .map_err(|error| AppError::Internal(format!("read IDMM Session head: {error}")))?;
-        let turn: Option<(String, String, Option<String>, Option<String>, Option<String>)> =
+        let turn: Option<(String, String, Option<String>, Option<String>)> =
             nomifun_db::sqlx::query_as(
-                "SELECT turn.operation_id, turn.state, turn.error_json, input.inline_json, turn.source_message_id \
+                "SELECT turn.operation_id, turn.state, input.inline_json, turn.source_message_id \
                  FROM agent_turns turn \
                  LEFT JOIN agent_events input ON input.event_id = turn.source_message_id \
                  WHERE turn.session_id = ? ORDER BY turn.accepted_at DESC LIMIT 1",
@@ -223,7 +223,7 @@ impl IdmmSessionPort for CanonicalIdmmSessionPort {
             .map_err(|error| AppError::Internal(format!("read IDMM latest turn: {error}")))?;
         // Reuse the canonical public-result projection; a typed question is
         // not assistant text and must not disappear at the empty-body filter.
-        let summary = if let Some((_, _, _, _, Some(source))) = &turn {
+        let summary = if let Some((_, _, _, Some(source))) = &turn {
             owner.canonical().store().turn_history_for_sources(&session_id_typed, std::slice::from_ref(source))
                 .await.map_err(|error| AppError::Internal(format!("read IDMM Turn outcome: {error}")))?
                 .into_iter().next()
@@ -231,7 +231,7 @@ impl IdmmSessionPort for CanonicalIdmmSessionPort {
         let turn_outcome = summary.as_ref().and_then(|summary| summary.projection.get("turn_outcome"))
             .cloned().map(serde_json::from_value::<nomifun_agent_contracts::AgentTurnOutcome>).transpose()
             .map_err(|error| AppError::Conflict(format!("invalid IDMM Turn outcome: {error}")))?;
-        let latest_turn = turn.and_then(|(operation_id, state, error_json, started_json, _)| {
+        let latest_turn = turn.and_then(|(operation_id, state, started_json, _)| {
             let state = match state.as_str() {
                 "accepted" | "running" => ObservedTurnState::Running,
                 "completed" => ObservedTurnState::Completed,
@@ -239,16 +239,10 @@ impl IdmmSessionPort for CanonicalIdmmSessionPort {
                 "cancelled" => ObservedTurnState::Cancelled,
                 _ => return None,
             };
-            let error = error_json
-                .as_deref()
-                .and_then(|value| serde_json::from_str::<Value>(value).ok())
-                .and_then(|value| {
-                    value
-                        .get("message")
-                        .or_else(|| value.get("error"))
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                });
+            let error = summary.as_ref()
+                .and_then(|summary| summary.projection.get("error"))
+                .and_then(|error| error.get("message").and_then(Value::as_str).or_else(|| error.as_str()))
+                .map(str::to_owned);
             let origin = started_json
                 .as_deref()
                 .and_then(|value| serde_json::from_str::<Value>(value).ok())

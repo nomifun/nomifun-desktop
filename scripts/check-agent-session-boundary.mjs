@@ -82,8 +82,51 @@ const metadataForwardMigration = 'crates/backend/nomifun-db/migrations/003_remov
 const hostingForwardMigration = 'crates/backend/nomifun-db/migrations/004_retire_plugin_hosting.sql';
 const policyForwardMigration = 'crates/backend/nomifun-db/migrations/005_retire_side_question_policy.sql';
 const uploadForwardMigration = 'crates/backend/nomifun-db/migrations/006_retire_upload_workspace_preference.sql';
-if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration, policyForwardMigration, uploadForwardMigration].includes(path))) {
-  failures.push('Agent clean cut requires its canonical baseline and only explicitly supported forward product migrations');
+const terminalForwardMigration = 'crates/backend/nomifun-db/migrations/007_retire_terminal_content_mirrors.sql';
+const payloadForwardMigration = 'crates/backend/nomifun-db/migrations/008_retire_payload_object_placeholder.sql';
+if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration, policyForwardMigration, uploadForwardMigration, terminalForwardMigration, payloadForwardMigration].includes(path))) {
+  failures.push('Agent clean cut requires its canonical baseline and only explicitly supported forward migrations');
+}
+const migrationStatements = (path) => readFileSync(resolve(ROOT, path), 'utf8')
+  .replace(/--[^\r\n]*/g, '').split(';').map((statement) => statement.replace(/\s+/g, ' ').trim()).filter(Boolean);
+if (migrations.includes(terminalForwardMigration)) {
+  const statements = migrationStatements(terminalForwardMigration);
+  const drops = [
+    'ALTER TABLE agent_turns DROP COLUMN result_json',
+    'ALTER TABLE agent_turns DROP COLUMN error_json',
+    'ALTER TABLE agent_effects DROP COLUMN bounded_observation_json',
+  ];
+  const checks = [statements[1], statements[2]];
+  if (statements.length !== 7
+    || statements[0] !== 'CREATE TEMP TABLE terminal_content_integrity ( valid INTEGER NOT NULL CHECK (valid = 1) )'
+    || JSON.stringify(statements.slice(3, 6)) !== JSON.stringify(drops)
+    || statements[6] !== 'DROP TABLE terminal_content_integrity'
+    || checks.some((statement) => !statement?.startsWith('INSERT INTO terminal_content_integrity SELECT CASE WHEN ')
+      || /\b(?:UPDATE|DELETE|ALTER|DROP|CREATE|REPLACE)\b/i.test(statement))
+    || !statements[1]?.endsWith("FROM agent_turns WHERE state IN ('completed', 'failed', 'cancelled', 'interrupted')")
+    || !statements[2]?.endsWith("FROM agent_effects WHERE state <> 'pending'")
+    || !statements[1]?.includes('event.session_id = agent_turns.session_id')
+    || !statements[1]?.includes('event.seq = agent_turns.finished_at')
+    || !statements[2]?.includes('event.session_id = agent_effects.session_id')
+    || !statements[2]?.includes("WHEN 'effect/reconciled' THEN CASE COALESCE(")) {
+    failures.push(`${terminalForwardMigration}: validate exact canonical terminal references before dropping only redundant copies; facts and lineage must remain unchanged`);
+  }
+}
+if (migrations.includes(payloadForwardMigration)) {
+  const expected = [
+    'CREATE TEMP TABLE payload_storage_integrity ( valid INTEGER NOT NULL CHECK (valid = 1) )',
+    "INSERT INTO payload_storage_integrity SELECT CASE WHEN storage_kind = 'inline' AND object_ref IS NULL AND body IS NOT NULL THEN 1 ELSE 0 END FROM agent_payloads",
+    'CREATE TABLE agent_payloads_next ( payload_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, media_type TEXT NOT NULL, byte_len INTEGER NOT NULL CHECK (byte_len >= 0), digest TEXT NOT NULL CHECK (length(digest) = 64), body BLOB NOT NULL, FOREIGN KEY (session_id) REFERENCES agent_sessions (agent_session_id) ON UPDATE RESTRICT ON DELETE CASCADE ) STRICT',
+    'INSERT INTO agent_payloads_next (payload_id, session_id, media_type, byte_len, digest, body) SELECT payload_id, session_id, media_type, byte_len, digest, body FROM agent_payloads',
+    'DROP TABLE agent_payloads',
+    'ALTER TABLE agent_payloads_next RENAME TO agent_payloads',
+    'CREATE INDEX idx_agent_payloads_session ON agent_payloads(session_id)',
+    'INSERT INTO payload_storage_integrity SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM pragma_foreign_key_check',
+    'DROP TABLE payload_storage_integrity',
+  ];
+  if (JSON.stringify(migrationStatements(payloadForwardMigration)) !== JSON.stringify(expected)) {
+    failures.push(`${payloadForwardMigration}: preserve every payload identity and body byte and validate references; unreadable object rows must fail closed`);
+  }
 }
 if (migrations.includes(uploadForwardMigration)) {
   const source = readFileSync(resolve(ROOT, uploadForwardMigration), 'utf8');

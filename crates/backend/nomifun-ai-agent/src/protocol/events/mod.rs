@@ -12,7 +12,6 @@ pub use session_updates::{
 };
 pub use tool_call::{
     ToolCallEventData, ToolCallStatus, ToolGroupEntry,
-    validate_artifact_receipt_integrity, validate_completed_artifact_contract,
 };
 
 /// Events emitted by an Agent during a message processing turn.
@@ -223,7 +222,6 @@ mod tests {
             "export type Value = {\nfield: string,\n}\n"
         );
     }
-    use serde_json::json;
 
     #[test]
     fn text_event_roundtrip() {
@@ -263,10 +261,7 @@ mod tests {
             },
             call_id: "call-1".into(),
             name: "read_file".into(),
-            args: json!({ "path": "/tmp/a.txt" }),
             status: ToolCallStatus::Running,
-            input: None,
-            output: None,
             description: None,
             artifacts: Vec::new(),
         });
@@ -288,17 +283,13 @@ mod tests {
             identity: Default::default(),
             call_id: "call-1".into(),
             name: "Glob".into(),
-            args: json!({}),
             status: ToolCallStatus::Completed,
-            input: Some(json!({ "pattern": "**/*.rs" })),
-            output: Some("src/main.rs\nsrc/lib.rs".into()),
             description: Some("Search for Rust files".into()),
             artifacts: Vec::new(),
         });
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "tool_call");
-        assert_eq!(json["data"]["input"]["pattern"], "**/*.rs");
-        assert_eq!(json["data"]["output"], "src/main.rs\nsrc/lib.rs");
+        for field in ["args", "input", "output"] { assert!(json["data"].get(field).is_none()); }
         assert_eq!(json["data"]["description"], "Search for Rust files");
     }
 
@@ -308,10 +299,7 @@ mod tests {
             identity: Default::default(),
             call_id: "call-1".into(),
             name: "Glob".into(),
-            args: json!({}),
             status: ToolCallStatus::Running,
-            input: None,
-            output: None,
             description: None,
             artifacts: Vec::new(),
         });

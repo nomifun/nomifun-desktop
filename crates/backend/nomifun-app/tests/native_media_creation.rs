@@ -428,7 +428,10 @@ impl Fixture {
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let receipt: (String, Option<String>, String) = nomifun_db::sqlx::query_as(
-                    "SELECT state,error_json,source_message_id FROM agent_turns WHERE session_id=? AND operation_id=?"
+                    "SELECT turn.state,COALESCE(terminal.inline_json,json_extract(CAST(payload.body AS TEXT),'$.value')),turn.source_message_id \
+                     FROM agent_turns turn LEFT JOIN agent_events terminal ON terminal.event_id=turn.terminal_event_id AND terminal.session_id=turn.session_id \
+                     LEFT JOIN agent_payloads payload ON payload.payload_id=terminal.payload_id AND payload.session_id=turn.session_id \
+                     WHERE turn.session_id=? AND turn.operation_id=?"
                 ).bind(session).bind(operation).fetch_one(self.services.database.pool()).await.unwrap();
                 match receipt.0.as_str() {
                     "completed" => break receipt.2,

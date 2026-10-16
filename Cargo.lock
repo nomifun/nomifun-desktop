@@ -5971,6 +5971,7 @@ dependencies = [
  "nomifun-api-types",
  "nomifun-common",
  "nomifun-db",
+ "nomifun-engine-core",
  "nomifun-realtime",
  "nomifun-runtime",
  "nostr",
@@ -6264,6 +6265,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
+ "url",
  "uuid",
 ]
 

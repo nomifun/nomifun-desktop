@@ -75,7 +75,7 @@ async fn main_database_reset_uses_the_same_agent_generation_without_touching_use
 }
 
 #[tokio::test]
-async fn main_database_agent_store_tables_match_the_clean_baseline() {
+async fn main_database_agent_store_tables_match_the_forward_migrated_baseline() {
     let options = SqliteConnectOptions::new()
         .filename(":memory:")
         .create_if_missing(true)
@@ -87,6 +87,12 @@ async fn main_database_agent_store_tables_match_the_clean_baseline() {
         .await
         .unwrap();
     baseline.execute(AGENT_STORE_BASELINE_SQL).await.unwrap();
+    for migration in [
+        include_str!("../migrations/007_retire_terminal_content_mirrors.sql"),
+        include_str!("../migrations/008_retire_payload_object_placeholder.sql"),
+    ] {
+        sqlx::raw_sql(migration).execute(&baseline).await.unwrap();
+    }
     let main = init_database_memory().await.unwrap();
 
     for table in agent_store_schema_manifest_payload()

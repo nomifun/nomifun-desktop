@@ -98,7 +98,6 @@ const defaultAuthorityDeps: InitialMessageAuthorityDeps = {
       conversation_id: conversationId,
       page: 0,
       page_size: 1,
-      content_mode: 'compact',
     }),
 };
 

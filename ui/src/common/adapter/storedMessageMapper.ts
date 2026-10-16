@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { TMessage } from '@/common/chat/chatLib';
+import { normalizeToolCallContent, normalizeToolGroupContent, type TMessage } from '@/common/chat/chatLib';
 import {
   parseConversationId,
   parseMessageId,
@@ -144,7 +144,8 @@ export const createStoredMessageMapper = (
       conversation_id: parseConversationId(message.conversation_id),
       msg_id: message.msg_id == null ? undefined : parseMessageId(message.msg_id),
       type,
-      content,
+      content: type === 'tool_call' ? normalizeToolCallContent(content, status)
+        : type === 'tool_group' ? normalizeToolGroupContent(content) : content,
       ...(position == null ? {} : { position }),
       ...(status == null ? {} : { status }),
       hidden: message.hidden,

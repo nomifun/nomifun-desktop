@@ -7,7 +7,7 @@
 import type { ToolReceiptDetailRow } from './components/toolGroupSummaryModel';
 
 export const shouldShowToolRowDetail = (row: ToolReceiptDetailRow): boolean =>
-  Boolean(row.target || row.input || row.output || row.truncated || row.diagnostics);
+  Boolean(row.error);
 
 /**
  * Routine model lifecycle updates keep at most their current live activity.

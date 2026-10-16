@@ -1,12 +1,11 @@
-//! Owner-scoped read projection for historical tool details. The canonical
-//! message projection remains a compact digest; already committed, bounded
-//! Runtime observations supply the expandable display when history is read.
+//! Owner-scoped product facts for historical tool rows. Canonical contents are
+//! read only to derive the existing target/status; bodies never enter this DTO.
 
 use std::collections::{BTreeSet, HashMap};
 
-use nomifun_agent_contracts::{AgentSessionId, SessionPayloadBody};
+use nomifun_agent_contracts::{AgentSessionId, EventId};
 use nomifun_agent_runtime::{AgentEngineEvent, AgentToolResult};
-use nomifun_agent_session::MessageProjection;
+use nomifun_agent_session::{AgentSessionStore, MessageProjection};
 use nomifun_common::AppError;
 use nomifun_db::SqlitePool;
 use serde_json::Value;
@@ -15,8 +14,10 @@ use serde_json::Value;
 pub(super) struct HistoricalToolObservation {
     pub runtime_hold: Option<nomifun_agent_contracts::RuntimeToolHoldReason>,
     pub turn_id: Option<String>,
-    pub args: Option<Value>,
-    pub output: Option<String>,
+    pub description: Option<String>,
+    pub display: nomifun_engine_core::ToolDisplayFacts,
+    pub name: Option<String>,
+    pub requested_stop_target: Option<String>,
     pub is_error: Option<bool>,
     pub capability_id: Option<String>,
     pub action_id: Option<String>,
@@ -24,74 +25,92 @@ pub(super) struct HistoricalToolObservation {
     pub permission_required: Option<nomifun_engine_core::SystemPermissionRequired>,
 }
 
+fn record_result(observation: &mut HistoricalToolObservation, result: &AgentToolResult, event_seq: u64) {
+    let operation = observation.display.operation.take().filter(|_| observation.capability_id.as_deref() == Some("computer"));
+    observation.display = nomifun_engine_core::tool_result_display(
+        observation.capability_id.as_deref(), observation.action_id.as_deref(), result);
+    observation.display.operation = operation;
+    if let (Some(name), Some(target)) = (&observation.name, &observation.requested_stop_target) {
+        observation.display.denied_stop_conversation_id = nomifun_engine_core::tool_denied_stop_target(
+            name, &serde_json::json!({"conversation_id":target}), result);
+    }
+    if let Some(target) = nomifun_engine_core::tool_result_target(
+        observation.capability_id.as_deref(), observation.action_id.as_deref(), result) {
+        observation.description = Some(target);
+    }
+    observation.is_error = Some(result.is_error);
+    observation.result_seq = Some(event_seq);
+    observation.permission_required = nomifun_engine_core::project_system_permission_required(
+        observation.capability_id.as_deref(), observation.action_id.as_deref(), result.is_error, &result.output_text());
+    if observation.runtime_hold.is_some() || observation.permission_required.is_some() { observation.display.error = None; }
+}
+
 fn observe_tool_event(event: &Value, event_seq: u64, observations: &mut HashMap<String, HistoricalToolObservation>) {
-    // Cancellation can stop the Runtime before ToolCompleted is emitted. The
-    // owner still commits its bounded settlement while cleanup is permitted.
-    if event.get("event").and_then(Value::as_str) == Some("host_tool_settled") {
-        if let Some(result) = event.get("result")
-            .and_then(|value| serde_json::from_value::<AgentToolResult>(value.clone()).ok())
-            .filter(|result| event.get("call_id").and_then(Value::as_str) == Some(result.call_id.as_ref()))
-        {
-            let observation = observations.entry(result.call_id.as_ref().to_owned()).or_default();
-            observation.output = Some(result.output_text());
-            observation.is_error = Some(result.is_error);
-            observation.result_seq = Some(event_seq);
-            observation.permission_required = nomifun_engine_core::project_system_permission_required(
-                observation.capability_id.as_deref(), observation.action_id.as_deref(),
-                result.is_error, &result.output_text(),
-            );
+    if event.get("event").and_then(Value::as_str) == Some("host_tool_dispatch") {
+        if let Some(dispatch) = event.get("dispatch") {
+            if let (Some(call), Some(capability), Some(action)) = (dispatch.get("call_id").and_then(Value::as_str),
+                dispatch.get("capability_id").and_then(Value::as_str), dispatch.get("action_id").and_then(Value::as_str)) {
+                let observation = observations.entry(call.to_owned()).or_default();
+                observation.capability_id = Some(capability.to_owned());
+                observation.action_id = Some(action.to_owned());
+                if capability != "computer" { observation.display.operation = None; }
+            }
         }
         return;
     }
-    let Ok(event) = serde_json::from_value::<AgentEngineEvent>(event.clone()) else {
+    // Cancellation can precede Runtime completion. Preserve the owner-backed
+    // outcome and exact sequence while omitting the original observation body.
+    if event.get("event").and_then(Value::as_str) == Some("host_tool_settled") {
+        if let Some(result) = event.get("result")
+            .and_then(|value| serde_json::from_value::<AgentToolResult>(value.clone()).ok())
+            .filter(|result| event.get("call_id").and_then(Value::as_str) == Some(result.call_id.as_ref())) {
+            record_result(observations.entry(result.call_id.as_ref().to_owned()).or_default(), &result, event_seq);
+        }
         return;
-    };
+    }
+    let Ok(event) = serde_json::from_value::<AgentEngineEvent>(event.clone()) else { return; };
     match event {
         AgentEngineEvent::ToolCallCompleted { call, .. } => {
-            observations
-                .entry(call.call_id.as_ref().to_owned())
-                .or_default()
-                .args = Some(call.arguments.0);
+            let observation = observations.entry(call.call_id.as_ref().to_owned()).or_default();
+            observation.description = nomifun_engine_core::tool_display_target(
+                observation.capability_id.as_deref(), observation.action_id.as_deref(), &call.name, &call.arguments.0);
+            observation.display.operation = nomifun_engine_core::tool_display_operation(observation.capability_id.as_deref(), &call.arguments.0);
+            observation.requested_stop_target = call.arguments.0.get("conversation_id").and_then(Value::as_str)
+                .filter(|id| uuid::Uuid::parse_str(id).is_ok_and(|id| id.get_version_num() == 7)).map(str::to_owned);
+            observation.name = Some(call.name);
         }
         AgentEngineEvent::ToolStarted { call_id, capability_id, action_id, .. } => {
             let observation = observations.entry(call_id.as_ref().to_owned()).or_default();
             observation.capability_id = Some(capability_id.as_ref().to_owned());
             observation.action_id = Some(action_id.as_ref().to_owned());
+            if capability_id.as_ref() != "computer" { observation.display.operation = None; }
         }
         AgentEngineEvent::ToolCompleted { result, runtime_hold, .. } => {
-            let observation = observations
-                .entry(result.call_id.as_ref().to_owned())
-                .or_default();
-            observation.output = Some(result.output_text());
+            let observation = observations.entry(result.call_id.as_ref().to_owned()).or_default();
             observation.runtime_hold = runtime_hold;
-            observation.is_error = Some(result.is_error);
-            observation.result_seq = Some(event_seq);
-            observation.permission_required = nomifun_engine_core::project_system_permission_required(
-                observation.capability_id.as_deref(), observation.action_id.as_deref(),
-                result.is_error, &result.output_text(),
-            );
+            record_result(observation, &result, event_seq);
         }
         _ => {}
     }
 }
 
-fn resolved_progress_payload(inline: Option<String>, body: Option<Vec<u8>>) -> Result<Option<Value>, AppError> {
-    if let Some(inline) = inline {
-        return serde_json::from_str(&inline)
-            .map(Some)
-            .map_err(|error| AppError::Internal(error.to_string()));
+fn observe_tool_window(events: &[(u64, &Value)]) -> HashMap<String, HistoricalToolObservation> {
+    let mut observations = HashMap::new();
+    // Admission identity can follow the proposal. Resolve it from the same
+    // exact window before choosing targets, so old model aliases never cause a
+    // fallback to raw arguments or erase a canonical path.
+    for (seq, event) in events {
+        if matches!(event.get("event").and_then(Value::as_str), Some("tool_started" | "host_tool_dispatch")) {
+            observe_tool_event(event, *seq, &mut observations);
+        }
     }
-    let Some(body) = body else { return Ok(None) };
-    let payload: SessionPayloadBody = serde_json::from_slice(&body)
-        .map_err(|error| AppError::Internal(error.to_string()))?;
-    match payload {
-        SessionPayloadBody::Json(value) => Ok(Some(value.0)),
-        _ => Ok(None),
-    }
+    for (seq, event) in events { observe_tool_event(event, *seq, &mut observations); }
+    observations
 }
 
 pub(super) async fn load_historical_tool_observations(
     pool: &SqlitePool,
+    store: &AgentSessionStore,
     session_id: &AgentSessionId,
     projections: &[MessageProjection],
 ) -> Result<HashMap<String, HistoricalToolObservation>, AppError> {
@@ -126,7 +145,8 @@ pub(super) async fn load_historical_tool_observations(
     .await
     .map_err(|error| AppError::Internal(error.to_string()))?;
 
-    let mut by_projection = HashMap::new();
+    let mut windows = Vec::new();
+    let mut event_ids = BTreeSet::new();
     for (turn_id, started_at, finished_at, source_message_id) in turns {
         let selected = tool_projections
             .iter()
@@ -147,7 +167,7 @@ pub(super) async fn load_historical_tool_observations(
                 .unwrap_or(projection.last_seq)
         }).min().unwrap_or_default();
         let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-            "SELECT event.seq, event.inline_json, payload.body FROM agent_events event \
+            "SELECT event.event_id, event.seq FROM agent_events event \
              LEFT JOIN agent_payloads payload ON payload.payload_id = event.payload_id \
              WHERE event.session_id = ",
         );
@@ -163,9 +183,11 @@ pub(super) async fn load_historical_tool_observations(
              json_extract(event.inline_json, '$.event.call.call_id'), \
              json_extract(event.inline_json, '$.event.result.call_id'), \
              json_extract(event.inline_json, '$.event.call_id'), \
+             json_extract(event.inline_json, '$.event.dispatch.call_id'), \
              json_extract(CAST(payload.body AS TEXT), '$.value.event.call.call_id'), \
              json_extract(CAST(payload.body AS TEXT), '$.value.event.result.call_id') \
              , json_extract(CAST(payload.body AS TEXT), '$.value.event.call_id') \
+             , json_extract(CAST(payload.body AS TEXT), '$.value.event.dispatch.call_id') \
              ) IN (",
         );
         {
@@ -175,23 +197,35 @@ pub(super) async fn load_historical_tool_observations(
             }
         }
         query.push(") ORDER BY event.seq");
-        let rows: Vec<(i64, Option<String>, Option<Vec<u8>>)> = query
+        let rows: Vec<(String, i64)> = query
             .build_query_as()
             .fetch_all(pool)
             .await
             .map_err(|error| AppError::Internal(error.to_string()))?;
 
-        let mut by_call = HashMap::new();
-        for (seq, inline, body) in rows {
-            let Some(payload) = resolved_progress_payload(inline, body)? else { continue };
+        event_ids.extend(rows.iter().map(|(event_id, _)| EventId::from(event_id.clone())));
+        let selected = selected.into_iter().map(|(projection, call_id)| (projection.projection_id.clone(), (*call_id).to_owned())).collect::<Vec<_>>();
+        windows.push((source_message_id, selected, rows));
+    }
+    // Canonical Store owns every physical payload representation and validates
+    // all selected observations together. The product reader never decodes a
+    // private storage envelope or constructs a second content reader.
+    let payloads = store.resolved_event_payloads(session_id, &event_ids.into_iter().collect::<Vec<_>>()).await
+        .map_err(|error| AppError::Internal(error.to_string()))?;
+    let mut by_projection = HashMap::new();
+    for (source_message_id, selected, rows) in windows {
+        let mut events = Vec::new();
+        for (event_id, seq) in rows {
+            let payload = payloads.get(&event_id).ok_or_else(|| AppError::Conflict("canonical tool observation is missing".into()))?;
             let Some(event) = payload.get("event") else { continue };
             let seq = u64::try_from(seq).map_err(|error| AppError::Internal(error.to_string()))?;
-            observe_tool_event(event, seq, &mut by_call);
+            events.push((seq, event));
         }
-        for (projection, call_id) in selected {
-            let mut observation = by_call.remove(*call_id).unwrap_or_default();
+        let mut by_call = observe_tool_window(&events);
+        for (projection_id, call_id) in selected {
+            let mut observation = by_call.remove(&call_id).unwrap_or_default();
             observation.turn_id = source_message_id.clone();
-            by_projection.insert(projection.projection_id.clone(), observation);
+            by_projection.insert(projection_id, observation);
         }
     }
     Ok(by_projection)
@@ -217,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_runtime_events_restore_the_same_expandable_tool_details() {
+    fn completed_runtime_events_restore_target_and_status_without_content() {
         let mut observations = HashMap::new();
         observe_tool_event(&json!({
             "event": "tool_call_completed", "step": 1,
@@ -228,9 +262,29 @@ mod tests {
             "result": {"call_id": "call-1", "output": [{"type": "text", "text": "file contents"}], "is_error": false}
         }), 7, &mut observations);
         let observation = observations.get("call-1").unwrap();
-        assert_eq!(observation.args.as_ref().unwrap()["path"], "src/app.ts");
+        assert_eq!(observation.description.as_deref(), Some("src/app.ts"));
         assert_eq!(observation.is_error, Some(false));
-        assert_eq!(observation.output.as_deref(), Some("file contents"));
+        assert!(!format!("{observation:?}").contains("file contents"));
+    }
+
+    #[test]
+    fn canonical_identity_keeps_paths_and_web_hosts_for_historical_model_aliases() {
+        for (capability, action, arguments, expected) in [
+            ("workspace.files", "workspace.files/read", json!({"path":"docs/目录  with spaces/file.md"}), "docs/目录  with spaces/file.md"),
+            ("web.research", "web.research/fetch", json!({"url":"https://pvp.qq.com/path?q=x"}), "pvp.qq.com"),
+        ] {
+            let values = [
+                json!({"event":"tool_call_completed","step":1,"call":{"call_id":"call","name":"platform__old_model_alias__0123456789abcdef0123","arguments":arguments}}),
+                json!({"event":"tool_started","step":1,"call_id":"call","capability_id":capability,"action_id":action}),
+                json!({"event":"tool_completed","step":1,"result":{"call_id":"call","output":[{"type":"text","text":"PRIVATE_FILE_BODY"}],"is_error":false}}),
+            ];
+            let events = values.iter().enumerate().map(|(index,value)|(index as u64+1,value)).collect::<Vec<_>>();
+            let observations = observe_tool_window(&events);
+            let observation = observations.get("call").unwrap();
+            assert_eq!(observation.description.as_deref(), Some(expected));
+            assert_eq!(observation.is_error, Some(false));
+            assert!(!format!("{observation:?}").contains("PRIVATE_FILE_BODY"));
+        }
     }
 
     #[tokio::test]
@@ -256,11 +310,12 @@ mod tests {
         }).to_string(), None, EngineJournalWrite::Settlement).await.unwrap();
         let (history, _, _) = store.message_history_before(&session_id, None, 50).await.unwrap();
         let tool = history.iter().find(|item| item.presentation_intent == "tool").unwrap();
-        let details = load_historical_tool_observations(&pool, &session_id, &history).await.unwrap();
+        let details = load_historical_tool_observations(&pool, &store, &session_id, &history).await.unwrap();
         let detail = details.get(&tool.projection_id).unwrap();
-        assert_eq!(detail.output.as_deref(), Some(output.as_str()));
+        assert!(detail.display.cancelled);
+        assert!(!format!("{detail:?}").contains("STARTED"));
         assert_eq!(detail.is_error, Some(true));
-        assert_eq!(detail.args.as_ref().unwrap()["command"], "bun");
+        assert_eq!(detail.description.as_deref(), Some("bun"));
     }
 
     #[tokio::test]
@@ -302,10 +357,9 @@ mod tests {
         assert_eq!(tool.projection["tool_summary"]["name"],"report_completion");
         assert!(history.iter().all(|item|item.projection["tool_summary"]["call_id"]!="unfinished"));
         assert!(history.iter().all(|item|item.projection["tool_summary"]["call_id"]!="wrong-step"));
-        let details = load_historical_tool_observations(&pool,&session_id,&history).await.unwrap();
+        let details = load_historical_tool_observations(&pool,&store,&session_id,&history).await.unwrap();
         let detail = details.get(&tool.projection_id).unwrap();
-        assert_eq!(detail.args.as_ref().unwrap()["criteria"],json!([]));
-        assert_eq!(detail.output.as_deref(),Some(output.as_str()));
+        assert!(!format!("{detail:?}").contains("missing criterion"));
         assert_eq!(detail.is_error,Some(true));
         assert!(detail.turn_id.is_some());
         let display_id = tool.projection["correlation_id"].as_str().unwrap();
@@ -377,7 +431,7 @@ mod tests {
         }
         let store = AgentSessionStore::from_pool(pool.clone()).await.unwrap();
         let (history, _, _) = store.message_history_before(&session_id, None, 50).await.unwrap();
-        let details = load_historical_tool_observations(&pool, &session_id, &history).await.unwrap();
+        let details = load_historical_tool_observations(&pool, &store, &session_id, &history).await.unwrap();
         for index in 0..4 {
             let call_id = format!("permission-{index}");
             let tools = history.iter().filter(|item| item.projection["tool_summary"]["call_id"] == call_id)
@@ -427,10 +481,10 @@ mod tests {
             .expect("tool projection survives navigation");
         assert_eq!(history.iter().filter(|projection|projection.presentation_intent=="tool").count(),1,
             "an owner-backed call must not be duplicated by the Runtime history projection");
-        let details = load_historical_tool_observations(&pool, &session_id, &history).await.unwrap();
+        let details = load_historical_tool_observations(&pool, &store, &session_id, &history).await.unwrap();
         let detail = details.get(&tool.projection_id).expect("tool detail is rehydrated");
-        assert_eq!(detail.args.as_ref().unwrap()["path"], "src/app.ts");
-        assert_eq!(detail.output.as_deref(), Some(large_output.as_str()));
+        assert_eq!(detail.description.as_deref(), Some("src/app.ts"));
+        assert!(!format!("{detail:?}").contains(&large_output));
         assert_eq!(detail.is_error, Some(false));
         assert!(detail.turn_id.is_some());
     }

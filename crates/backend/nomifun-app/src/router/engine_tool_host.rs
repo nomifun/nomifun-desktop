@@ -209,30 +209,43 @@ pub fn bounded_engine_tool_result(result: &EngineToolResult) -> EngineToolResult
     if serde_json::to_vec(&projected).is_ok_and(|bytes| bytes.len() <= 32 * 1024) {
         return projected;
     }
+    // Keep every operational JSON metadata value unchanged. Large process
+    // stdout is a string field, not a reason to turn exit/cleanup observations
+    // into an unparseable serialized-JSON excerpt. This grants no tool status;
+    // domain readers still validate the exact admitted Action and envelope.
+    if let [ChatToolResultPart::Text {text}] = projected.output.as_slice() {
+        if let Ok(mut value)=serde_json::from_str::<serde_json::Value>(text) {
+            if let Some(source)=value.pointer("/output/text").and_then(serde_json::Value::as_str).map(str::to_owned) {
+                let mut keep=8192usize.min(source.len()/2);
+                loop {
+                    *value.pointer_mut("/output/text").expect("selected output string retained")=
+                        serde_json::Value::String(durable_excerpt(&source,keep));
+                    let candidate=EngineToolResult {call_id:result.call_id.clone(),is_error:result.is_error,
+                        output:vec![ChatToolResultPart::Text {text:value.to_string()}]};
+                    if serde_json::to_vec(&candidate).is_ok_and(|bytes|bytes.len()<=32*1024) {return candidate;}
+                    // Metadata plus the mandatory omission notice cannot fit.
+                    if keep==0 {break;}
+                    keep/=2;
+                }
+            }
+        }
+    }
     let text = projected.output_text();
     let mut keep = 8192usize.min(text.len() / 2);
     loop {
-        let mut head = keep;
-        let mut tail = text.len().saturating_sub(keep);
-        while !text.is_char_boundary(head) {
-            head -= 1;
-        }
-        while !text.is_char_boundary(tail) {
-            tail += 1;
-        }
-        let output = format!(
-            "{}\n[Durable observation truncated: original {} bytes, sha256:{:x}; do not infer omitted content]\n{}",
-            &text[..head],
-            text.len(),
-            Sha256::digest(text.as_bytes()),
-            &text[tail..]
-        );
+        let output = durable_excerpt(&text,keep);
         projected = EngineToolResult::text(result.call_id.clone(), output, result.is_error);
         if keep == 0 || serde_json::to_vec(&projected).is_ok_and(|bytes| bytes.len() <= 32 * 1024) {
             return projected;
         }
         keep /= 2;
     }
+}
+
+fn durable_excerpt(text:&str,keep:usize)->String {
+    let(head,tail)=nomifun_engine_core::tool_text_excerpt_ranges(text,keep*2);
+    format!("{}\n[Durable observation truncated: original {} bytes, sha256:{:x}; do not infer omitted content]\n{}",
+        &text[..head],text.len(),Sha256::digest(text.as_bytes()),&text[tail..])
 }
 
 #[cfg(test)]

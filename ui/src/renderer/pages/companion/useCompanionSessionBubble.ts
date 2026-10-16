@@ -115,7 +115,7 @@ export function useCompanionSessionBubble(companionId: CompanionId | null, compa
           let cursor = '';
           while (isCurrent()) {
             const page = await ipcBridge.database.getConversationMessages.invoke({ conversation_id: conversationId,
-              cursor, page_size: 100, order: 'DESC', content_mode: 'full' });
+              cursor, page_size: 100, order: 'DESC' });
             if (!isCurrent()) return;
             messages.push(...page.items);
             // Walk only the current canonical Turn, stopping at its accepted root

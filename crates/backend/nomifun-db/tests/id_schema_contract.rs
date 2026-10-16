@@ -65,6 +65,8 @@ fn migration_directory_contains_the_canonical_forward_migration_chain() {
         "004_retire_plugin_hosting.sql",
         "005_retire_side_question_policy.sql",
         "006_retire_upload_workspace_preference.sql",
+        "007_retire_terminal_content_mirrors.sql",
+        "008_retire_payload_object_placeholder.sql",
     ]);
 }
 

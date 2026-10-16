@@ -273,11 +273,13 @@ mod tests {
     }
 
     #[test]
-    fn payload_schema_supports_only_inline_or_content_addressed_objects() {
+    fn current_payload_schema_requires_a_body_without_an_unimplemented_object_mode() {
         let database = Connection::open_in_memory().expect("in-memory SQLite");
         database
             .execute_batch(AGENT_STORE_BASELINE_SQL)
             .expect("Agent Store baseline");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/008_retire_payload_object_placeholder.sql"))
+            .expect("current payload schema");
         database
             .execute(
                 "INSERT INTO agent_sessions (agent_session_id, owner_ref_json, state, deleted_at) \
@@ -286,27 +288,63 @@ mod tests {
             )
             .unwrap();
         let digest = "a".repeat(64);
-        let object_ref = format!("objects/{digest}");
         database
             .execute(
                 "INSERT INTO agent_payloads (\
                     payload_id, session_id, media_type, byte_len, digest, \
-                    storage_kind, body, object_ref\
+                    body\
                  ) VALUES (?1, 'session-deleted', 'application/octet-stream', 3, ?2, \
-                    'object', NULL, ?3)",
-                rusqlite::params!["payload-object", digest, object_ref],
+                    ?3)",
+                rusqlite::params!["payload-body", digest, b"abc".as_slice()],
             )
             .unwrap();
         assert!(database
             .execute(
                 "INSERT INTO agent_payloads (\
                     payload_id, session_id, media_type, byte_len, digest, \
-                    storage_kind, body, object_ref\
+                    body\
                  ) VALUES ('payload-invalid', 'session-deleted', 'text/plain', 1, ?1, \
-                    'object', NULL, 'objects/wrong')",
+                    NULL)",
                 rusqlite::params!["b".repeat(64)],
             )
             .is_err());
+        let columns = database.prepare("PRAGMA table_info(agent_payloads)").unwrap()
+            .query_map([], |row| row.get::<_, String>(1)).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(columns, ["payload_id", "session_id", "media_type", "byte_len", "digest", "body"]);
+    }
+
+    #[test]
+    fn payload_storage_upgrade_preserves_references_and_rejects_unreadable_object_rows() {
+        for object in [false, true] {
+            let mut database = Connection::open_in_memory().unwrap();
+            database.execute_batch(AGENT_STORE_BASELINE_SQL).unwrap();
+            database.execute("INSERT INTO agent_sessions(agent_session_id,owner_ref_json,state,deleted_at) VALUES('session-deleted','{}','deleted',1)", []).unwrap();
+            let digest = "a".repeat(64);
+            let body = b"exact original payload bytes".as_slice();
+            database.execute("INSERT INTO agent_payloads(payload_id,session_id,media_type,byte_len,digest,storage_kind,body,object_ref) VALUES('payload','session-deleted','text/plain',?1,?2,?3,?4,?5)",
+                rusqlite::params![body.len(),digest,if object {"object"} else {"inline"},if object {None} else {Some(body)},if object {Some(format!("objects/{digest}"))} else {None}]).unwrap();
+            database.execute("INSERT INTO agent_events(session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,payload_id) VALUES('session-deleted',1,'event','fixture','key','runtime/progress-recorded',1,'turn','payload')", []).unwrap();
+            // Match the existing startup-owned replacement boundary. Foreign
+            // keys are restored even when the transaction rejects a row.
+            database.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+            let tx = database.transaction().unwrap();
+            let migrated = tx.execute_batch(include_str!("../../nomifun-db/migrations/008_retire_payload_object_placeholder.sql"));
+            if object {
+                assert!(migrated.is_err());
+                tx.rollback().unwrap();
+                let kind: String = database.query_row("SELECT storage_kind FROM agent_payloads WHERE payload_id='payload'", [], |row| row.get(0)).unwrap();
+                assert_eq!(kind, "object", "unreadable storage is rejected without changing the source");
+            } else {
+                migrated.unwrap();
+                tx.commit().unwrap();
+                let retained: Vec<u8> = database.query_row("SELECT p.body FROM agent_events e JOIN agent_payloads p ON p.payload_id=e.payload_id WHERE e.event_id='event'", [], |row| row.get(0)).unwrap();
+                assert_eq!(retained, body);
+            }
+            database.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+            let violations: i64 = database.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0)).unwrap();
+            assert_eq!(violations, 0);
+        }
     }
 
     #[test]

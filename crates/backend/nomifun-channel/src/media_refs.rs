@@ -1,8 +1,5 @@
-//! Pure helpers that extract Creative Studio asset UUIDv7 ids from the two
-//! machine-readable signals a channel turn carries: a completed
-//! `nomi_creative_studio_*` tool call's `output` JSON (`result_asset_ids`), and any
-//! `/api/creative-studio/files/{id}` URL the assistant wrote into its visible text
-//! (the same link the desktop renders). Both are deduped by the caller.
+//! Creative Studio asset references in public assistant text. Tool receipts
+//! carry typed result_asset_ids and never require parsing raw tool output.
 
 use regex::Regex;
 use std::sync::OnceLock;
@@ -19,45 +16,6 @@ fn files_url_re() -> &'static Regex {
     })
 }
 
-/// Extract asset ids from a completed tool call's `output` string by parsing it
-/// as JSON and collecting every `result_asset_ids` string array found anywhere
-/// in the tree. Non-JSON or absent key → empty.
-pub fn asset_ids_from_tool_output(output: &str) -> Vec<String> {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    collect_result_asset_ids(&value, &mut out);
-    out
-}
-
-fn collect_result_asset_ids(value: &serde_json::Value, out: &mut Vec<String>) {
-    match value {
-        serde_json::Value::Object(map) => {
-            for (k, v) in map {
-                if k == "result_asset_ids"
-                    && let Some(arr) = v.as_array()
-                {
-                    for item in arr {
-                        if let Some(s) = item.as_str() {
-                            if nomifun_common::WorkshopAssetId::parse(s).is_ok() {
-                                out.push(s.to_owned());
-                            }
-                        }
-                    }
-                }
-                collect_result_asset_ids(v, out);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for v in arr {
-                collect_result_asset_ids(v, out);
-            }
-        }
-        _ => {}
-    }
-}
-
 /// Extract asset ids from assistant text by matching Creative Studio file URLs.
 pub fn asset_ids_from_text(text: &str) -> Vec<String> {
     files_url_re()
@@ -69,33 +27,6 @@ pub fn asset_ids_from_text(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tool_output_top_level_ids() {
-        let out = r#"{"status":"succeeded","result_asset_ids":["0190f5fe-7c00-7a00-8000-000000000081","0190f5fe-7c00-7a00-8000-000000000082"]}"#;
-        assert_eq!(
-            asset_ids_from_tool_output(out),
-            vec![
-                "0190f5fe-7c00-7a00-8000-000000000081",
-                "0190f5fe-7c00-7a00-8000-000000000082"
-            ]
-        );
-    }
-
-    #[test]
-    fn tool_output_nested_ids() {
-        let out = r#"{"data":{"task":{"result_asset_ids":["0190f5fe-7c00-7a00-8000-000000000089"]}}}"#;
-        assert_eq!(
-            asset_ids_from_tool_output(out),
-            vec!["0190f5fe-7c00-7a00-8000-000000000089"]
-        );
-    }
-
-    #[test]
-    fn tool_output_non_json_or_missing_is_empty() {
-        assert!(asset_ids_from_tool_output("not json").is_empty());
-        assert!(asset_ids_from_tool_output(r#"{"status":"running"}"#).is_empty());
-    }
 
     #[test]
     fn text_extracts_capability_urls() {

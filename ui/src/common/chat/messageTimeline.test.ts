@@ -60,12 +60,13 @@ describe('canonical timeline notifications', () => {
 
   test('raw tool frames and older stream versions cannot erase canonical references or hold evidence', () => {
     const current = { call_id: 'call', name: 'read_file', timeline: timeline(20), status: 'error' as const,
-      runtime_hold: 'arguments_rejected' as const, result_seq: 20, output: 'canonical refusal' };
+      runtime_hold: 'arguments_rejected' as const, result_seq: 20, error: 'canonical refusal', command_not_started: true };
     const incoming = normalizeToolCallContent({ call_id: 'call', name: 'read_file', status: 'running' });
     const merged = mergeToolCallContent(current, incoming);
     expect(merged.timeline?.through_seq).toBe(20);
     expect(merged.runtime_hold).toBe('arguments_rejected');
-    expect(merged.output).toBe('canonical refusal');
+    expect(merged.error).toBe('canonical refusal');
+    expect(merged.command_not_started).toBe(true);
     expect(mergeToolCallContent(current, { ...incoming, timeline: timeline(19), result_seq: 19 }).timeline?.through_seq).toBe(20);
   });
 

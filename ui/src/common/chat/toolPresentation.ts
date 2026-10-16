@@ -5,7 +5,6 @@ export interface ToolPresentationInput {
   name: string;
   capabilityId?: string;
   actionId?: string;
-  input?: string;
   description?: string;
   origin?: { kind: 'mcp' | 'plugin'; name: string; toolName: string };
 }
@@ -34,25 +33,6 @@ const compact = (value: string): string => {
 const humanize = (value: string): string => {
   const words = value.replace(/[_./-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').trim();
   return words ? words[0].toUpperCase() + words.slice(1) : '';
-};
-
-const readTarget = (input: string | undefined, fields: string[], isUrl: boolean): string | undefined => {
-  if (!input || input.length > 256 * 1024) return undefined;
-  try {
-    const args: unknown = JSON.parse(input);
-    for (const path of fields) {
-      const value = path.split('.').reduce<unknown>((current, field) =>
-        current && typeof current === 'object' ? (current as Record<string, unknown>)[field] : undefined, args);
-      if (typeof value !== 'string' || !value.trim()) continue;
-      if (isUrl) {
-        try { return new URL(value).hostname || compact(value); } catch { return compact(value); }
-      }
-      return compact(value);
-    }
-  } catch {
-    // Free-text descriptions remain available on tools without JSON input.
-  }
-  return undefined;
 };
 
 /** A view of typed facts; never a router, permission check, or retry identity. */
@@ -86,10 +66,9 @@ export const resolveToolPresentation = (tool: ToolPresentationInput, language = 
   const rawDescription = toDisplayText(tool.description).trim();
   const description = rawDescription && ![tool.name, title].includes(rawDescription)
     ? compact(rawDescription) : undefined;
-  const target = entry ? readTarget(tool.input, entry.target_fields, 'target_kind' in entry && entry.target_kind === 'url') : undefined;
   return {
     title, name: tool.name,
-    ...(target || description ? { target: target || description } : {}),
+    ...(description ? { target: description } : {}),
     ...(source ? { source } : {}),
     ...(entry && 'receipt_action' in entry ? { receiptAction: entry.receipt_action } : {}),
     ...(tool.capabilityId ? { capabilityId: tool.capabilityId } : {}),
@@ -99,6 +78,3 @@ export const resolveToolPresentation = (tool: ToolPresentationInput, language = 
 
 export const formatToolPresentationLabel = (presentation: ToolPresentation): string =>
   [presentation.title, presentation.target].filter(Boolean).join(' · ');
-
-export const formatToolDiagnostics = (presentation: ToolPresentation): string =>
-  [presentation.source, presentation.name, presentation.capabilityId, presentation.actionId].filter(Boolean).join('\n');

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { normalizeToolCall } from './normalizeToolCall';
-import { formatToolDiagnostics, formatToolPresentationLabel, resolveToolPresentation } from './toolPresentation';
+import { formatToolPresentationLabel, resolveToolPresentation } from './toolPresentation';
 import type { IMessageToolCall } from './chatLib';
 import { parseConversationId } from '../types/ids';
 
@@ -10,7 +10,7 @@ describe('tool presentation', () => {
     const makeCall = (name: string) => normalizeToolCall({ id: 'web', type: 'tool_call',
       conversation_id: parseConversationId('0190f5fe-7c00-7a00-8000-000000000051'), content: {
       call_id: 'web', name, capability_id: 'web.research', action_id: 'web.research/search',
-      status: 'completed', args: { query: '王者荣耀英雄属性' },
+      status: 'completed', description: '王者荣耀英雄属性',
     } } satisfies IMessageToolCall)!;
     const historical = makeCall(historicalName);
     const live = makeCall('web_search');
@@ -19,16 +19,12 @@ describe('tool presentation', () => {
       .toBe('搜索网页 · 王者荣耀英雄属性');
     expect(formatToolPresentationLabel(resolveToolPresentation(live, 'zh-CN')))
       .toBe('搜索网页 · 王者荣耀英雄属性');
-    expect(formatToolDiagnostics(resolveToolPresentation(historical))).toContain(historicalName);
-    expect(formatToolDiagnostics(resolveToolPresentation(live))).toContain('web.research/search');
   });
 
-  test('uses the page domain as a compact target and keeps its full URL in input', () => {
-    const input = JSON.stringify({ url: 'https://pvp.qq.com/ingame/kis/hero.shtml?query=123' });
-    const presentation = resolveToolPresentation({ name: 'web_fetch', input }, 'zh-Hans');
+  test('uses the host-projected page domain without retaining URL arguments', () => {
+    const presentation = resolveToolPresentation({ name: 'web_fetch', description: 'pvp.qq.com' }, 'zh-Hans');
     expect(formatToolPresentationLabel(presentation)).toBe('读取网页 · pvp.qq.com');
-    expect(input).toContain('/ingame/kis/hero.shtml?query=123');
-    expect(resolveToolPresentation({ name: 'web_fetch', input }, 'en-US').title).toBe('Read a web page');
+    expect(resolveToolPresentation({ name: 'web_fetch', description: 'pvp.qq.com' }, 'en-US').title).toBe('Read a web page');
   });
 
   test('retains distinct origins when external tools share the same human title', () => {
@@ -38,7 +34,6 @@ describe('tool presentation', () => {
     expect(second.title).toBe(first.title);
     expect(first.source).toBe('MCP · alpha');
     expect(second.source).toBe('MCP · beta');
-    expect(formatToolDiagnostics(first)).not.toBe(formatToolDiagnostics(second));
   });
 
   test('does not reinterpret an explicit external identity as a native action', () => {
@@ -51,9 +46,9 @@ describe('tool presentation', () => {
   });
 
   test('bounds summaries without losing diagnostics or throwing on malformed inputs', () => {
-    const presentation = resolveToolPresentation({ name: 'web_search', input: JSON.stringify({ query: '搜'.repeat(200) }) });
+    const presentation = resolveToolPresentation({ name: 'web_search', description: '搜'.repeat(200) });
     expect(presentation.target).toBe('搜'.repeat(120) + '…');
-    expect(resolveToolPresentation({ name: 'web_search', input: 'bad json' }).target).toBeUndefined();
+    expect(resolveToolPresentation({ name: 'web_search', description: undefined }).target).toBeUndefined();
     expect(resolveToolPresentation({ name: 'platform__truncated_slug__0123456789abcdefabcd' }, 'zh-CN').title)
       .toBe('工具调用');
     expect(resolveToolPresentation({ name: 'plugin__calendar__create_event__0123456789abcdefabcd' }).title)

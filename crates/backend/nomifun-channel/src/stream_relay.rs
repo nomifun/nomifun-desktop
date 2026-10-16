@@ -87,7 +87,7 @@ impl TerminalToolCallGate {
         match event {
             AgentStreamEvent::ToolCall(data) => match data.status {
                 ToolCallStatus::Running => !self.tool_calls.contains(&data.call_id),
-                ToolCallStatus::Completed | ToolCallStatus::Error => {
+                ToolCallStatus::Completed | ToolCallStatus::Error | ToolCallStatus::Canceled => {
                     self.tool_calls.insert(data.call_id.clone())
                 }
             },
@@ -1339,17 +1339,11 @@ mod media_tests {
         // Two completed tool calls returning the SAME asset id → must dedupe to one send.
         for _ in 0..2 {
             tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
-                identity: Default::default(),
+                identity: nomifun_ai_agent::protocol::events::tool_call::ToolCallIdentity { display: nomifun_ai_agent::protocol::events::tool_call::ToolDisplayFacts { result_asset_ids: vec!["0190f5fe-7c00-7a00-8000-000000000081".into()], ..Default::default() }, ..Default::default() },
                 call_id: "t".into(),
                 name: "nomi_creative_studio_get_task".into(),
-                args: serde_json::Value::Null,
                 status: ToolCallStatus::Completed,
                 description: None,
-                input: None,
-                output: Some(
-                    r#"{"result_asset_ids":["0190f5fe-7c00-7a00-8000-000000000081"]}"#
-                        .into(),
-                ),
                 artifacts: Vec::new(),
             })).unwrap();
         }
@@ -1380,17 +1374,11 @@ mod media_tests {
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
-            identity: Default::default(),
+            identity: nomifun_ai_agent::protocol::events::tool_call::ToolCallIdentity { display: nomifun_ai_agent::protocol::events::tool_call::ToolDisplayFacts { result_asset_ids: vec!["0190f5fe-7c00-7a00-8000-000000000082".into()], ..Default::default() }, ..Default::default() },
             call_id: "missing-workshop-asset".into(),
             name: "nomi_creative_studio_get_task".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Completed,
             description: None,
-            input: None,
-            output: Some(
-                r#"{"result_asset_ids":["0190f5fe-7c00-7a00-8000-000000000082"]}"#
-                    .into(),
-            ),
             artifacts: Vec::new(),
         }))
         .unwrap();
@@ -1436,17 +1424,11 @@ mod media_tests {
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
-            identity: Default::default(),
+            identity: nomifun_ai_agent::protocol::events::tool_call::ToolCallIdentity { display: nomifun_ai_agent::protocol::events::tool_call::ToolDisplayFacts { result_asset_ids: vec!["0190f5fe-7c00-7a00-8000-000000000083".into()], ..Default::default() }, ..Default::default() },
             call_id: "workshop-upload-fallback-ok".into(),
             name: "nomi_creative_studio_get_task".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Completed,
             description: None,
-            input: None,
-            output: Some(
-                r#"{"result_asset_ids":["0190f5fe-7c00-7a00-8000-000000000083"]}"#
-                    .into(),
-            ),
             artifacts: Vec::new(),
         }))
         .unwrap();
@@ -1495,17 +1477,11 @@ mod media_tests {
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
-            identity: Default::default(),
+            identity: nomifun_ai_agent::protocol::events::tool_call::ToolCallIdentity { display: nomifun_ai_agent::protocol::events::tool_call::ToolDisplayFacts { result_asset_ids: vec!["0190f5fe-7c00-7a00-8000-000000000084".into()], ..Default::default() }, ..Default::default() },
             call_id: "workshop-delivery-failed".into(),
             name: "nomi_creative_studio_get_task".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Completed,
             description: None,
-            input: None,
-            output: Some(
-                r#"{"result_asset_ids":["0190f5fe-7c00-7a00-8000-000000000084"]}"#
-                    .into(),
-            ),
             artifacts: Vec::new(),
         }))
         .unwrap();
@@ -1546,17 +1522,11 @@ mod media_tests {
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
-            identity: Default::default(),
+            identity: nomifun_ai_agent::protocol::events::tool_call::ToolCallIdentity { display: nomifun_ai_agent::protocol::events::tool_call::ToolDisplayFacts { result_asset_ids: vec!["0190f5fe-7c00-7a00-8000-000000000085".into()], ..Default::default() }, ..Default::default() },
             call_id: "workshop-no-resolver".into(),
             name: "nomi_creative_studio_get_task".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Completed,
             description: None,
-            input: None,
-            output: Some(
-                r#"{"result_asset_ids":["0190f5fe-7c00-7a00-8000-000000000085"]}"#
-                    .into(),
-            ),
             artifacts: Vec::new(),
         }))
         .unwrap();
@@ -1621,10 +1591,7 @@ mod media_tests {
             identity: Default::default(),
             call_id: "tool-1".into(),
             name: "mcp__reports__export".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Completed,
-            input: None,
-            output: Some("done".into()),
             description: None,
             artifacts,
         }))
@@ -1678,10 +1645,7 @@ mod media_tests {
             identity: Default::default(),
             call_id: "artifact-fallback-ok".into(),
             name: "mcp__reports__export".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Completed,
-            input: None,
-            output: Some("done".into()),
             description: None,
             artifacts: vec![artifact.clone()],
         }))
@@ -1739,10 +1703,7 @@ mod media_tests {
             identity: Default::default(),
             call_id: "artifact-delivery-failed".into(),
             name: "mcp__reports__export".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Completed,
-            input: None,
-            output: Some("done".into()),
             description: None,
             artifacts: vec![artifact],
         }))
@@ -1796,10 +1757,7 @@ mod media_tests {
             identity: Default::default(),
             call_id: "tool-1".into(),
             name: "mcp__reports__export".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Completed,
-            input: None,
-            output: Some("done".into()),
             description: None,
             artifacts: vec![artifact.clone()],
         }))
@@ -1865,10 +1823,7 @@ mod media_tests {
             identity: Default::default(),
             call_id: "tool-failed".into(),
             name: "mcp__reports__export".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Error,
-            input: None,
-            output: Some("artifact batch failed".into()),
             description: None,
             artifacts: vec![artifact],
         }))
@@ -1918,10 +1873,7 @@ mod media_tests {
             identity: Default::default(),
             call_id: "tool-partial".into(),
             name: "mcp__reports__export".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Completed,
-            input: None,
-            output: Some("done".into()),
             description: None,
             artifacts: vec![artifact],
         }))
@@ -1964,10 +1916,7 @@ mod media_tests {
                 identity: Default::default(),
                 call_id: "same-call".into(),
                 name: "mcp__reports__export".into(),
-                args: serde_json::Value::Null,
                 status,
-                input: None,
-                output: None,
                 description: None,
                 artifacts,
             })
@@ -2015,10 +1964,7 @@ mod media_tests {
             identity: Default::default(),
             call_id: "orphan-call".into(),
             name: "mcp__reports__export".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Completed,
-            input: None,
-            output: None,
             description: None,
             artifacts: vec![PersistedArtifact {
                 id: PersistedArtifactId::new().into_string(),
@@ -2063,10 +2009,7 @@ mod media_tests {
             identity: Default::default(),
             call_id: "failed-after-text".into(),
             name: "ImageGeneration".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Running,
-            input: None,
-            output: None,
             description: None,
             artifacts: Vec::new(),
         }))
@@ -2174,17 +2117,11 @@ mod media_tests {
 
         let (tx, rx) = tokio::sync::broadcast::channel(16);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
-            identity: Default::default(),
+            identity: nomifun_ai_agent::protocol::events::tool_call::ToolCallIdentity { display: nomifun_ai_agent::protocol::events::tool_call::ToolDisplayFacts { result_asset_ids: vec!["0190f5fe-7c00-7a00-8000-000000000081".into()], ..Default::default() }, ..Default::default() },
             call_id: "t".into(),
             name: "nomi_creative_studio_get_task".into(),
-            args: serde_json::Value::Null,
             status: ToolCallStatus::Completed,
             description: None,
-            input: None,
-            output: Some(
-                r#"{"result_asset_ids":["0190f5fe-7c00-7a00-8000-000000000081"]}"#
-                    .into(),
-            ),
             artifacts: Vec::new(),
         })).unwrap();
         tx.send(AgentStreamEvent::Finish(FinishEventData { turn_outcome: None, session_id: None, stop_reason: None })).unwrap();

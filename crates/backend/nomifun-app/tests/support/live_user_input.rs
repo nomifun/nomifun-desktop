@@ -3,7 +3,7 @@ use super::*;
 
 async fn public_history(router: &Router, phase: &'static str, session: &str) -> Result<Vec<Value>, SmokeFailure> {
     let response = successful_json(router, phase, Method::GET,
-        format!("/api/agent-sessions/{session}/message-history?page_size=100&content_mode=full"),
+        format!("/api/agent-sessions/{session}/message-history?page_size=100"),
         None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
     envelope_data(phase, response)?.get("items").and_then(Value::as_array).cloned()
         .ok_or_else(|| SmokeFailure::new(phase, "INPUT_RENDERER_HISTORY_MISSING", 502))

@@ -12,19 +12,14 @@
   "missingReplyContinuation": "这条回复接续了尚未加载的前文。请加载更早的消息以阅读完整回复。",
   "loadEarlierReply": "加载更早的消息",
   "toolGroupViewSteps": "查看步骤",
-  "toolDetailInput": "输入",
-  "toolDetailOutput": "输出",
+  "toolDetailError": "错误",
   "toolResultUnconfirmed": "结果未确认",
-  "toolDetailIdentity": "调用标识",
   "delegation": {
     "title": "子智能体任务",
     "activity": "子智能体：{{status}}",
     "syncing": "正在同步子智能体状态",
     "openTask": "查看子任务：{{title}}"
   },
-  "toolDetailTruncated": "输出已截断，当前显示已保存的内容",
-  "toolDetailLoading": "加载中...",
-  "toolDetailLoadFailed": "加载完整输出失败",
   "toolSummary": {
     "commandTimedOut": "{{target}} 达到了运行时限，进程已结束并清理",
     "running": "正在运行 {{target}}",
@@ -96,8 +91,7 @@
   "turnDuration": "已工作 {{duration}}",
   "turnDurationUnknown": "已工作 --",
   "toolProtocolError": {
-    "title": "工具调用格式异常 · 未执行",
-    "detail": "模型把工具请求输出成了正文，这段内容没有被执行。原始记录仅用于诊断。"
+    "title": "工具调用格式异常 · 未执行"
   },
   "turnDurationUnits": {
     "hour": "小时",

@@ -17,6 +17,119 @@ fn owner(journal:&EngineTurnJournal) -> nomifun_agent_contracts::PrincipalRef {
     nomifun_agent_contracts::PrincipalRef { principal_kind:"user".into(),principal_id:journal.0.user.clone() }
 }
 
+#[tokio::test]
+async fn shared_tool_bodies_preserve_journal_accounting_model_pairing_and_native_checkpoint_recovery() {
+    use nomifun_agent_runtime::{AgentToolResult, AgentTurnRecovery, replay_closed_turn};
+    use nomifun_chat_model_broker::{ChatContentPart,ChatMessage,ChatRole,ChatToolCall};
+    let (journal,pool)=test_fixture().await;
+    let mut checkpoint=checkpoint(&journal,false);
+    checkpoint.model_steps=1;checkpoint.tool_call_count=1;checkpoint.segments=None;
+    let call=ChatToolCall {call_id:"shared-write".into(),name:"write_file".into(),
+        arguments:StrictJsonValue(json!({"path":"report.md","content":"Exact source😀".repeat(9000)})),provider_metadata:None};
+    let result=AgentToolResult::text(call.call_id.clone(),"Read result😀".repeat(800),false);
+    let native=vec![
+        AgentEngineEvent::TurnStarted {binding:checkpoint.binding.clone(),turn_operation_id:journal.0.operation.clone()},
+        AgentEngineEvent::ModelStepStarted {step:1,operation_id:"turn:model:1".into(),correction_source:None},
+        AgentEngineEvent::ToolCallCompleted {step:1,call:call.clone()},
+        AgentEngineEvent::ToolStarted {step:1,call_id:call.call_id.clone(),capability_id:"workspace.files".into(),action_id:"workspace.files/write".into()},
+    ];
+    let mut minimum_accounted=0usize;
+    for event in native {
+        let payload=serde_json::to_string(&event).unwrap();minimum_accounted+=payload.len()+256;
+        journal.append(payload,None,EngineJournalWrite::Progress).await.unwrap();
+    }
+    for event in [json!({"event":"host_tool_dispatch","dispatch":{"operation_id":"shared-owner","call_id":call.call_id,
+        "capability_id":"workspace.files","action_id":"workspace.files/write","model_name":"write_file"}}),
+        json!({"event":"host_tool_settled","operation_id":"shared-owner","call_id":call.call_id,"result":result,"error":null})] {
+        let payload=event.to_string();minimum_accounted+=payload.len()+256;
+        journal.append(payload,None,EngineJournalWrite::Progress).await.unwrap();
+    }
+    let completed=AgentEngineEvent::ToolCompleted {step:1,result:result.clone(),runtime_hold:None};
+    let payload=serde_json::to_string(&completed).unwrap();minimum_accounted+=payload.len()+256;
+    journal.append(payload,None,EngineJournalWrite::Progress).await.unwrap();
+    assert_eq!(journal.0.cursor.lock().await.total_bytes,minimum_accounted,
+        "content references must not shrink the original hydrated journal allowance");
+    let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_payloads WHERE session_id=? AND media_type='application/vnd.nomifun.tool-output+json'")
+        .bind(journal.0.session.as_ref()).fetch_one(&pool).await.unwrap();
+    assert_eq!(count,1,"owner settlement, tool result and Runtime observation share one output body");
+    let saved=journal.save_execution_checkpoint(checkpoint.clone(),owner(&journal)).await.unwrap().unwrap();
+    let facts=journal.0.store.native_recovery_facts(&journal.0.session,&journal.0.operation).await.unwrap();
+    let prefix=facts.events.iter().filter(|event|event.kind.0=="runtime/progress-recorded")
+        .filter_map(|event| {
+            let value=facts.event_payloads[event.event_id.as_ref()]["event"].clone();
+            if matches!(value.get("event").and_then(Value::as_str),Some("host_tool_dispatch"|"host_tool_settled")){None}
+            else{Some(serde_json::from_value::<AgentEngineEvent>(value).unwrap())}
+        }).collect::<Vec<_>>();
+    assert!(prefix.iter().any(|event|matches!(event,AgentEngineEvent::ToolCallCompleted {call:restored,..} if restored==&call)));
+    assert!(prefix.iter().any(|event|matches!(event,AgentEngineEvent::ToolCompleted {result:restored,..} if restored==&result)));
+    sqlx::query("UPDATE agent_turns SET execution_lease_until=0 WHERE session_id=?")
+        .bind(journal.0.session.as_ref()).execute(&pool).await.unwrap();
+    let lease=journal.0.store.claim_native_execution(nomifun_agent_session::NativeExecutionClaim {
+        owner:owner(&journal),agent_session_id:journal.0.session.clone(),operation_id:journal.0.operation.clone(),snapshot:journal.0.snapshot.clone(),
+        active_set_generation:0,holder:"recovered-shared-content".into(),expected_fence:journal.0.lease.fence(),
+        checkpoint:Some((saved.revision,saved.digest.clone(),saved.through_seq)),
+    }).await.unwrap();
+    AgentTurnRecovery::new(checkpoint,saved.revision,lease.fence(),prefix.clone(),vec![],vec![]).unwrap();
+    let mut closed=prefix;
+    closed.push(AgentEngineEvent::TurnFailed {model_steps:1,message:"Saved historical result".into(),failure:None});
+    let mut history=Vec::new();
+    replay_closed_turn(&mut history,ChatMessage {role:ChatRole::User,content:vec![ChatContentPart::Text {text:"Inspect the source".into()}],provider_round_id:None},&closed).unwrap();
+    assert!(history.iter().flat_map(|message|&message.content).any(|part|matches!(part,ChatContentPart::ToolCall {arguments,..} if arguments==&call.arguments)));
+    assert!(history.iter().flat_map(|message|&message.content).any(|part|matches!(part,ChatContentPart::ToolResult {output,..} if output==&result.output)));
+}
+
+#[tokio::test]
+async fn large_process_stdout_keeps_typed_exit_timeout_and_cleanup_after_durable_hydration() {
+    use nomifun_agent_runtime::AgentToolResult;
+    use super::super::engine_tool_host::bounded_engine_tool_result;
+    use sha2::{Digest,Sha256};
+    let (journal,_pool)=test_fixture().await;
+    let stdout="PRIVATE_STDOUT😀\\\"\n".repeat(6000);
+    let stdout_digest=format!("{:x}",Sha256::digest(stdout.as_bytes()));
+    for timed_out in [false,true] {
+        let call=if timed_out {"large-timeout"} else {"large-exit"};
+        let original=json!({"state":if timed_out {"timed_out"} else {"exited"},"process_id":"owned-process","success":false,
+            "exit_code":if timed_out {Value::Null} else {json!(7)},"signal":null,
+            "output":{"text":stdout,"truncated":false,"retained_bytes":stdout.len(),"dropped_bytes":0,"next_cursor":stdout.len()},
+            "cleanup":{"reaped":true,"errors":[],"interrupt_attempted":timed_out,"terminate_attempted":timed_out,"force_kill_attempted":false}});
+        let live=AgentToolResult::text(call.into(),original.to_string(),true);
+        let unchanged=live.clone();
+        let bounded=bounded_engine_tool_result(&live);
+        assert_eq!(live,unchanged,"durable projection must not mutate the live model result");
+        assert!(serde_json::to_vec(&bounded).unwrap().len()<=32*1024);
+        let mut persisted:Value=serde_json::from_str(&bounded.output_text()).unwrap();
+        let excerpt=persisted["output"]["text"].as_str().unwrap();
+        assert!(excerpt.contains("Durable observation truncated: original"));
+        assert!(excerpt.contains(&stdout_digest));
+        let mut metadata=original.clone();metadata["output"]["text"]=Value::Null;persisted["output"]["text"]=Value::Null;
+        assert_eq!(persisted,metadata,"all owner state/cursor/truncation/cleanup metadata must remain unchanged");
+        for event in [json!({"event":"host_tool_dispatch","dispatch":{"operation_id":call,"call_id":call,
+            "capability_id":"workspace.process","action_id":"workspace.process/exec","model_name":"exec_command"}}),
+            json!({"event":"host_tool_settled","operation_id":call,"call_id":call,"result":bounded,"error":null})] {
+            journal.append(event.to_string(),None,EngineJournalWrite::Progress).await.unwrap();
+        }
+        let mut buffer=super::super::runtime_event_buffer::AgentEventBuffer::default();
+        for event in buffer.project(&AgentEngineEvent::ToolCompleted {step:1,result:live,runtime_hold:None}) {
+            journal.append(serde_json::to_string(&event).unwrap(),None,EngineJournalWrite::Progress).await.unwrap();
+        }
+        let facts=journal.0.store.native_recovery_facts(&journal.0.session,&journal.0.operation).await.unwrap();
+        let result=facts.event_payloads.values().find_map(|payload| {
+            let event=payload.get("event")?;
+            if event.get("event").and_then(Value::as_str)!=Some("tool_completed") {return None;}
+            let result=event.get("result")?;
+            (result.get("call_id").and_then(Value::as_str)==Some(call)).then(||serde_json::from_value::<AgentToolResult>(result.clone()).unwrap())
+        }).unwrap();
+        assert_eq!(result,bounded,"host and Runtime persist the exact same bounded JSON bytes");
+        let display=nomifun_engine_core::tool_result_display(Some("workspace.process"),Some("workspace.process/exec"),&result);
+        if timed_out {assert_eq!(display.command_timed_out,Some(true));assert_eq!(display.command_exit_code,None);}
+        else {assert_eq!(display.command_exit_code,Some(7));assert_eq!(display.non_fatal_failure,Some(true));}
+        let public=serde_json::to_string(&display).unwrap();
+        assert!(!public.contains("PRIVATE_STDOUT")&&!public.contains("output"),"product facts do not republish the stdout excerpt");
+        assert_eq!(nomifun_engine_core::tool_result_display(Some("mcp.server"),Some("mcp.tool/call"),&result).command_exit_code,None,
+            "preserving JSON does not authorize another capability to impersonate process status");
+    }
+}
+
 fn rejected_arguments(step: u16) -> AgentEngineEvent {
     use nomifun_agent_runtime::{AgentModelResponseRejection, AgentRejectedToolProposal};
     use nomifun_chat_model_broker::{ToolArgumentDiagnostic, ToolArgumentDiagnosticCategory};

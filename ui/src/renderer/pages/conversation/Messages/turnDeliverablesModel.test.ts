@@ -138,7 +138,7 @@ describe('verified image receipt admission', () => {
 
   test('deduplicates by committed artifact ID, keeps distinct revisions, and never scans tool arguments', () => {
     const secondId = parsePersistedArtifactId('0190f5fe-7c00-7a00-8000-000000000032');
-    const candidates = [{ turnId: turn, toolMessages: [tool([imageReceipt(), imageReceipt(), imageReceipt({ id: secondId })], { name: 'write', args: { path: 'extra.png' } })] }];
+    const candidates = [{ turnId: turn, toolMessages: [tool([imageReceipt(), imageReceipt(), imageReceipt({ id: secondId })], { name: 'write', description: 'extra.png' })] }];
     const result = collectVerifiedTurnImages(candidates, gates()).get(turn);
     expect(result).toHaveLength(2);
     expect(result?.map(item => item.artifactId)).toEqual([artifactId, secondId]);

@@ -28,9 +28,8 @@ export interface NormalizedToolCall {
   /** The runtime rejected the call before dispatching it to the tool. */
   notExecutedReason?: NormalizedToolNotExecutedReason;
   description?: string;
-  input?: string;
-  output?: string;
-  truncated?: boolean;
+  /** Bounded public diagnostic supplied by the canonical host. */
+  error?: string;
   messageId?: MessageId;
   conversationId?: ConversationId;
 }
@@ -41,8 +40,8 @@ const canonicalMcpOriginHash = /^(?:[a-z2-7]{16}|[a-f0-9]{20})$/;
 
 /**
  * Turn provider-facing MCP routing aliases back into a stable receipt label.
- * The origin hash remains available in the raw diagnostic output, but it is
- * implementation metadata and must not become the user-facing tool title.
+ * The original name remains the exact routing identity; its origin hash must
+ * not become the user-facing tool title.
  */
 export const formatToolDisplayName = (value: unknown): string => {
   const fullName = toDisplayText(value).trim();
@@ -90,193 +89,33 @@ export function normalizeToolGroup(message: IMessageToolGroup): NormalizedToolCa
       name: toDisplayText(name, 'Tool'),
       status: toNormalizedToolGroupStatus(displayStatus),
       description: desc,
-      ...(description ? { input: description } : {}),
     };
   });
 }
 
-const shellCommandTitles = new Set(['bash', 'shell', 'terminal', 'command', 'cmd', 'powershell']);
-
-// ===== tool_call → NormalizedToolCall =====
-
+// Tool outcome metadata is authored by the host. Raw tool results never enter
+// this display model and cannot be interpreted as status or public diagnostics.
 function normalizeToolCallStatus(status?: unknown): NormalizedToolStatus {
-  switch (status) {
-    case 'completed':
-      return 'completed';
-    case 'error':
-      return 'error';
-    case 'canceled':
-      return 'canceled';
-    case 'running':
-      return 'running';
-    default:
-      return 'pending';
-  }
+  return status === 'completed' || status === 'error' || status === 'canceled' || status === 'running'
+    ? status : 'pending';
 }
 
-const isOrdinaryShellExit = (name: unknown, status: unknown, output: unknown): boolean => {
-  if (status !== 'error') return false;
-  if (!shellCommandTitles.has(toDisplayText(name).trim().toLowerCase())) return false;
-
-  const text = toDisplayText(output);
-  const match = /^Exit code:\s*(-?\d+)(?:\r?\n|$)/.exec(text);
-  if (!match) return false;
-
-  const exitCode = Number(match[1]);
-  return (
-    Number.isInteger(exitCode) &&
-    exitCode !== 0 &&
-    exitCode !== -1 &&
-    !/(?:^|\r?\n)Signal:/m.test(text) &&
-    !/(?:^|\r?\n)Cleanup diagnostics:/m.test(text)
-  );
-};
-
-const nativeProcessToolNames = new Set(['exec_command', 'start_process', 'poll_process']);
-
-const isNativeCommandNotStarted = (name: unknown, status: unknown, output: unknown): boolean => {
-  if (status !== 'error' || !['exec_command', 'start_process'].includes(toDisplayText(name).trim())) return false;
-  const text = toDisplayText(output).trim();
-  if (!text || text.length > 4096) return false;
-  try {
-    const receipt = JSON.parse(text);
-    return receipt?.schema === 'nomifun.process-start-observation.v1'
-      && receipt.state === 'not_started' && receipt.code === 'PROCESS_NOT_STARTED'
-      && receipt.user_code_started === false && receipt.success === false
-      && !Object.hasOwn(receipt, 'process_id') && !Object.hasOwn(receipt, 'exit_code')
-      && !Object.hasOwn(receipt, 'signal')
-      && typeof receipt.message === 'string' && receipt.message.trim().length > 0
-      && receipt.message.length <= 2048;
-  } catch {
-    return false;
-  }
-};
-
-const getNativeCommandExitCode = (name: unknown, status: unknown, output: unknown): number | undefined => {
-  if (!nativeProcessToolNames.has(toDisplayText(name).trim())) return undefined;
-  if (status !== 'completed' && status !== 'error') return undefined;
-  try {
-    const receipt = JSON.parse(toDisplayText(output).trim());
-    if (!receipt || receipt.state !== 'exited' || receipt.signal !== null
-      || !Number.isInteger(receipt.exit_code) || receipt.exit_code < 0
-      || typeof receipt.process_id !== 'string' || !receipt.process_id
-      || typeof receipt.output?.text !== 'string'
-      || receipt.success !== (receipt.exit_code === 0)
-      || receipt.cleanup?.reaped !== true
-      || receipt.cleanup.interrupt_attempted !== false
-      || receipt.cleanup.terminate_attempted !== false
-      || receipt.cleanup.force_kill_attempted !== false
-      || !Array.isArray(receipt.cleanup.errors) || receipt.cleanup.errors.length !== 0) return undefined;
-    return receipt.exit_code;
-  } catch {
-    return undefined;
-  }
-};
-
-const isCleanNativeTimeout = (name: unknown, status: unknown, output: unknown): boolean => {
-  if (status !== 'error' || !nativeProcessToolNames.has(toDisplayText(name).trim())) return false;
-  try {
-    const receipt = JSON.parse(toDisplayText(output).trim());
-    return receipt?.state === 'timed_out' && receipt.success === false
-      && receipt.exit_code == null && receipt.signal == null
-      && typeof receipt.process_id === 'string' && receipt.process_id.length > 0 && receipt.process_id.length <= 128
-      && typeof receipt.output?.text === 'string'
-      && receipt.cleanup?.reaped === true
-      && Array.isArray(receipt.cleanup.errors) && receipt.cleanup.errors.length === 0
-      && ['interrupt_attempted', 'terminate_attempted', 'force_kill_attempted']
-        .every((field) => typeof receipt.cleanup[field] === 'boolean');
-  } catch {
-    return false;
-  }
-};
-
-const directProbeToolTitles = new Set(['read', 'glob', 'grep', 'search', 'find']);
-
-const isExplicitProbeMiss = (name: unknown, output: unknown): boolean => {
-  const toolName = toDisplayText(name).trim().toLowerCase();
-  const text = toDisplayText(output).trim();
-  if (!text || text.startsWith('The turn ended before this tool completed:')) return false;
-
-  if (toolName === 'read') {
-    return (
-      /\(os error (?:2|3)\)/i.test(text) ||
-      /no such file or directory/i.test(text) ||
-      /(?:system )?cannot find the (?:file|path)/i.test(text)
-    );
-  }
-
-  if (toolName === 'glob') return /^No files matched the pattern\.?$/i.test(text);
-  return /^(?:No matches found|No files matched the pattern)\.?$/i.test(text);
-};
-
-const isOrdinaryDirectProbeFailure = (name: unknown, status: unknown, output: unknown): boolean => {
-  if (status !== 'error') return false;
-  if (!directProbeToolTitles.has(toDisplayText(name).trim().toLowerCase())) return false;
-  return isExplicitProbeMiss(name, output);
-};
-
-const isSearchContextWithheld = (name: unknown, status: unknown, output: unknown): boolean => {
-  if (name !== 'search_files' || status !== 'error') return false;
-  const text = toDisplayText(output).trim();
-  if (!text || text.length > 4096) return false;
-  try {
-    const value = JSON.parse(text) as Record<string, unknown>;
-    if (!value || Array.isArray(value) || typeof value !== 'object') return false;
-    if (Object.keys(value).sort().join(',') !== 'kind,notice,search_executed,snippets_withheld') return false;
-    return value.kind === 'search_context_withheld'
-      && value.search_executed === true
-      && value.snippets_withheld === true
-      && typeof value.notice === 'string'
-      && value.notice.length > 0
-      && value.notice.length <= 2048;
-  } catch {
-    return false;
-  }
-};
-
-const processControlOperations: Record<string, string> = {
-  poll_process: 'poll', write_process_stdin: 'stdin', close_process_stdin: 'close_stdin',
-  resize_process: 'resize', cancel_process: 'cancel',
-};
-
-const isProcessReferenceNotExecuted = (name: unknown, status: unknown, output: unknown): boolean => {
-  if (status !== 'error') return false;
-  const operation = processControlOperations[toDisplayText(name).trim()];
-  if (!operation) return false;
-  try {
-    const receipt = JSON.parse(toDisplayText(output));
-    return receipt?.schema === 'nomifun.process-control-observation.v1'
-      && receipt.state === 'not_executed' && receipt.code === 'PROCESS_REFERENCE_INVALID'
-      && receipt.operation === operation && receipt.control_applied === false && receipt.success === false
-      && !Object.hasOwn(receipt, 'process_id')
-      && typeof receipt.message === 'string' && receipt.message.length > 0 && receipt.message.length <= 2048;
-  } catch {
-    return false;
-  }
-};
-
 export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall | undefined {
-  const { call_id, name, capability_id, action_id, status, input, output, args, description, artifacts } = message.content;
+  const { call_id, name, capability_id, action_id, status, description, error } = message.content;
   if (!call_id) return undefined;
-  const displayInput = input
-    ? formatValue(input)
-    : args && Object.keys(args).length > 0
-      ? formatValue(args)
-      : undefined;
-  const rawHold = (message.content as { runtime_hold?: string }).runtime_hold;
+  const rawHold = message.content.runtime_hold;
   const hold = status === 'error' && rawHold && new Set(['tool_not_exposed', 'arguments_rejected', 'batch_rejected', 'phase_restricted', 'input_superseded', 'prior_call_failed', 'runtime_gate']).has(rawHold) ? rawHold : undefined;
   const skipped = hold === 'prior_call_failed';
   const invalidArgumentsNotExecuted = hold === 'arguments_rejected';
   const runtimePreflightNotExecuted = Boolean(hold) && !skipped && !invalidArgumentsNotExecuted;
-  const searchContextWithheld = isSearchContextWithheld(name, status, output);
-  const processReferenceNotExecuted = isProcessReferenceNotExecuted(name, status, output);
-  const commandExitCode = getNativeCommandExitCode(name, status, output);
-  const commandNotStarted = isNativeCommandNotStarted(name, status, output);
-  const commandTimedOut = isCleanNativeTimeout(name, status, output);
-  const nonFatalFailure = searchContextWithheld
-    || (status === 'error' && commandExitCode !== undefined && commandExitCode !== 0)
-    || isOrdinaryShellExit(name, status, output)
-    || isOrdinaryDirectProbeFailure(name, status, output);
+  const terminal = status === 'completed' || status === 'error';
+  const searchContextWithheld = status === 'error' && message.content.bounded_result === 'search_context_withheld';
+  const processReferenceNotExecuted = status === 'error' && message.content.process_reference_invalid === true;
+  const commandExitCode = terminal && Number.isSafeInteger(message.content.command_exit_code)
+    && message.content.command_exit_code! >= 0 ? message.content.command_exit_code : undefined;
+  const commandNotStarted = status === 'error' && message.content.command_not_started === true;
+  const commandTimedOut = status === 'error' && message.content.command_timed_out === true;
+  const nonFatalFailure = status === 'error' && message.content.non_fatal_failure === true;
 
   return {
     key: toDisplayText(call_id),
@@ -295,16 +134,7 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
     ...(commandNotStarted ? { commandNotStarted: true } : {}),
     ...(commandTimedOut ? { commandTimedOut: true } : {}),
     description: description ? formatValue(description) : undefined,
-    input: displayInput,
-    output:
-      output || (status === 'completed' && artifacts?.length)
-        ? [
-            output,
-            ...(status === 'completed' ? (artifacts ?? []).map((artifact) => `[${artifact.kind}] ${artifact.path}`) : []),
-          ]
-            .filter(Boolean)
-            .join('\n')
-        : undefined,
+    ...(status === 'error' && error ? { error: formatValue(error) } : {}),
   };
 }
 

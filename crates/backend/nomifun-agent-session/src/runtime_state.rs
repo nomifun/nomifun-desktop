@@ -39,8 +39,8 @@ impl AgentSessionStore {
                 && head.active_turn_id.as_deref() == Some(operation.as_str())
                 && head.status == "paused"
             { "paused".to_owned() } else { status });
-            let body: Option<String> = sqlx::query_scalar(
-                "WITH progress AS (SELECT e.seq, \
+            let event_id: Option<String> = sqlx::query_scalar(
+                "WITH progress AS (SELECT e.seq, e.event_id, \
                    COALESCE(json_extract(e.inline_json, '$.event'), \
                      json_extract(CAST(p.body AS TEXT), '$.value.event')) AS event \
                  FROM agent_events e \
@@ -48,12 +48,17 @@ impl AgentSessionStore {
                  WHERE e.session_id = ? AND e.correlation_id = ? AND e.seq > ? \
                    AND e.kind = 'runtime/progress-recorded' \
                    AND e.producer_id = 'runtime_supervisor') \
-                 SELECT event FROM progress WHERE json_extract(event, '$.event') = ? \
+                 SELECT event_id FROM progress WHERE json_extract(event, '$.event') = ? \
                  ORDER BY seq DESC LIMIT 1",
             ).bind(session.as_ref()).bind(operation).bind(started_seq).bind(event_name)
                 .fetch_optional(&mut *tx).await?;
-            if let Some(body) = body {
-                result.event = Some(serde_json::from_str(&body)?);
+            if let Some(event_id) = event_id {
+                let event = event_by_event_id_tx(&mut tx, &event_id).await?
+                    .map(event_from_row).transpose()?
+                    .ok_or_else(|| SessionStoreError::InvalidEvent("selected Runtime fact is missing".into()))?;
+                let payload = payload_value_for_event_tx(&mut tx, &event).await?;
+                result.event = Some(payload.get("event").cloned()
+                    .ok_or_else(|| SessionStoreError::InvalidEvent("selected Runtime fact has no event".into()))?);
             }
         }
         tx.commit().await?;

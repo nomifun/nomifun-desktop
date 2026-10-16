@@ -2374,7 +2374,6 @@ export const database = {
         page?: number;
         page_size?: number;
         order?: string;
-        content_mode?: 'compact' | 'full';
         // Backward canonical history cursor: '' = newest window. Use the
         // response's next_cursor for the next raw projection window, including
         // windows whose rows were filtered from the visible items.
@@ -2390,7 +2389,6 @@ export const database = {
       params.set('page', String(p.page ?? 1));
       params.set('page_size', String(p.page_size ?? 50));
       if (p.order) params.set('order', p.order);
-      if (p.content_mode) params.set('content_mode', p.content_mode);
       // Send even an empty cursor (the "newest window" request) — distinct from
       // omitting it, which selects offset pagination.
       if (p.cursor !== undefined) params.set('cursor', p.cursor);

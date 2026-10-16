@@ -272,7 +272,6 @@ async fn status(
                 page: Some(1),
                 page_size: Some(message_limit),
                 order: Some("desc".to_owned()),
-                content_mode: None,
                 cursor: None,
                 day: None,
             },

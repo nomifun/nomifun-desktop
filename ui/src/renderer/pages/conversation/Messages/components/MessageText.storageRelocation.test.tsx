@@ -82,11 +82,11 @@ describe('canonical managed file locations', () => {
     } finally { cleanup(); metadata.mockRestore(); image.mockRestore(); }
   });
 
-  test('canonical file preview opens the mapped current path while provider arguments remain historical', async () => {
+  test('canonical file preview opens the mapped current path while its displayed target remains historical', async () => {
     const original = 'C:/old/conversations/session/report.docx';
     const mapped = `${workspace}/report.docx`;
     const message: IMessageToolCall = { id: 'relocated-edit', type: 'tool_call', conversation_id: conversationId,
-      content: { call_id: 'edit', name: 'apply_patch', status: 'completed', args: { file_path: original, old_string: 'Old', new_string: 'New' },
+      content: { call_id: 'edit', name: 'apply_patch', status: 'completed', description: original,
         managed_file_paths: { [original]: mapped } } };
     const read = spyOn(ipcBridge.fs.readFile, 'invoke').mockResolvedValue('Current file');
     const metadata = spyOn(ipcBridge.fs.getFileMetadata, 'invoke').mockResolvedValue({ size: 8 } as Awaited<ReturnType<typeof ipcBridge.fs.getFileMetadata.invoke>>);
@@ -94,7 +94,7 @@ describe('canonical managed file locations', () => {
       const view = renderInSession(<><TurnDeliverablesCard workspace={workspace} items={[{ identity: original, relativePath: 'report.docx', fileName: 'report.docx', absolutePath: mapped, operation: 'modify', tier: 'change', sourceMessageIds: [] }]} /><PreviewPathProbe /></>);
       fireEvent.click(await view.findByText('Preview'));
       await waitFor(() => expect(view.getByTestId('mapped-preview-path').textContent).toBe(mapped));
-      expect(message.content.args?.file_path).toBe(original);
+      expect(message.content.description).toBe(original);
     } finally { cleanup(); read.mockRestore(); metadata.mockRestore(); }
   });
 
@@ -102,7 +102,7 @@ describe('canonical managed file locations', () => {
     const original = 'C:/old/conversations/session/output.png';
     const mapped = `${workspace}/output.png`;
     const message: IMessageToolCall = { id: 'relocated-artifact', type: 'tool_call', conversation_id: conversationId,
-      content: { call_id: 'write', name: 'write_file', status: 'completed', input: {},
+      content: { call_id: 'write', name: 'write_file', status: 'completed',
         managed_file_paths: { [original]: mapped }, artifacts: [{ id: parsePersistedArtifactId('0190f5fe-7c00-7a00-8000-000000000052'), kind: 'image', path: original,
           relative_path: 'output.png', mime_type: 'image/png', size_bytes: 8, sha256: 'a'.repeat(64) }] } };
     const image = spyOn(ipcBridge.fs.getImageBase64, 'invoke').mockResolvedValue('data:image/png;base64,AA==');

@@ -11,7 +11,7 @@ import {
 } from '@/common/chat/normalizeToolCall';
 import type { TurnDisclosureProcessState } from '../turnDisclosureModel';
 import { mergeProcessStates } from '../turnProcessState';
-import { formatToolDiagnostics, formatToolPresentationLabel, resolveToolPresentation } from '@/common/chat/toolPresentation';
+import { formatToolPresentationLabel, resolveToolPresentation } from '@/common/chat/toolPresentation';
 
 export type ToolReceiptAction =
   | 'read_files'
@@ -42,11 +42,10 @@ export interface ToolReceiptDetailRow {
   action: ToolReceiptAction;
   state: TurnDisclosureProcessState;
   title: string;
-  diagnostics?: string;
+  /** Preserve the existing named-action label without exposing routing details. */
+  showActionTitle?: boolean;
   target?: string;
-  input?: string;
-  output?: string;
-  truncated?: boolean;
+  error?: string;
   skipped?: boolean;
   notExecutedReason?: NormalizedToolNotExecutedReason;
   commandExitCode?: number;
@@ -87,95 +86,13 @@ const formatToolTarget = (tool: NormalizedToolCall, language = 'en-US'): string 
   return formatToolPresentationLabel(resolveToolPresentation(tool, language));
 };
 
-const commandFieldNames = ['command', 'cmd', 'script', 'shell', 'bash'];
-const fileFieldNames = ['file_path', 'filePath', 'path', 'file_name', 'fileName', 'relative_path', 'relativePath'];
-
-const pickCommandFromValue = (value: unknown): string | undefined => {
-  if (!value || typeof value !== 'object') return undefined;
-  const record = value as Record<string, unknown>;
-
-  for (const field of commandFieldNames) {
-    const fieldValue = record[field];
-    if (typeof fieldValue === 'string' && compactToolText(fieldValue)) return compactToolText(fieldValue);
-  }
-
-  for (const fieldValue of Object.values(record)) {
-    if (fieldValue && typeof fieldValue === 'object') {
-      const nested = pickCommandFromValue(fieldValue);
-      if (nested) return nested;
-    }
-  }
-
-  return undefined;
-};
-
-const extractCommandFromText = (value?: string): string | undefined => {
-  const compacted = compactToolText(value);
-  if (!compacted) return undefined;
-
-  try {
-    const parsed = JSON.parse(value ?? '');
-    const command = pickCommandFromValue(parsed);
-    if (command) return command;
-    if (typeof parsed === 'string') return compactToolText(parsed);
-    return undefined;
-  } catch {
-    // Plain shell strings are already the desired preview.
-  }
-
-  return compacted;
-};
-
-const pickFileTargetFromValue = (value: unknown): string | undefined => {
-  if (!value || typeof value !== 'object') return undefined;
-  const record = value as Record<string, unknown>;
-
-  for (const field of fileFieldNames) {
-    const fieldValue = record[field];
-    if (typeof fieldValue === 'string' && compactToolText(fieldValue)) return compactToolText(fieldValue);
-  }
-
-  for (const fieldValue of Object.values(record)) {
-    if (fieldValue && typeof fieldValue === 'object') {
-      const nested = pickFileTargetFromValue(fieldValue);
-      if (nested) return nested;
-    }
-  }
-
-  return undefined;
-};
-
-const extractFileTargetFromText = (value?: string): string | undefined => {
-  const compacted = compactToolText(value);
-  if (!compacted) return undefined;
-
-  try {
-    const parsed = JSON.parse(value ?? '');
-    const target = pickFileTargetFromValue(parsed);
-    if (target) return target;
-    if (typeof parsed === 'string') return compactToolText(parsed);
-    return undefined;
-  } catch {
-    // Plain read/edit descriptions are already useful file previews.
-  }
-
-  return compacted;
-};
-
-const getCommandTarget = (tool: NormalizedToolCall): string => {
-  const description = compactToolText(tool.description);
-  const rawName = compactToolText(tool.name);
-  const name = compactToolText(formatToolDisplayName(rawName));
-  if (description && description !== name && description !== rawName) return description;
-  return extractCommandFromText(tool.input) || description || name || tool.key;
-};
+const getCommandTarget = (tool: NormalizedToolCall): string =>
+  compactToolText(tool.description) || compactToolText(formatToolDisplayName(tool.name)) || tool.key;
 
 const getFileTarget = (tool: NormalizedToolCall): string | undefined => {
   const description = compactToolText(tool.description);
-  const rawName = compactToolText(tool.name);
-  const name = compactToolText(formatToolDisplayName(rawName));
-  if (description && description !== name && description !== rawName) return description;
-  return extractFileTargetFromText(tool.input);
+  const name = compactToolText(formatToolDisplayName(tool.name));
+  return description && description !== name && description !== tool.name ? description : undefined;
 };
 
 const normalizeToolSearchText = (value: string): string => value.replace(/[_-]+/g, ' ').toLowerCase();
@@ -412,12 +329,10 @@ export const buildToolReceiptDetailRows = (tools: NormalizedToolCall[], language
       action,
       state: getToolProcessState(tool),
       title,
-      ...(presentation.title !== tool.name || presentation.source || tool.capabilityId || tool.actionId
-        ? { diagnostics: formatToolDiagnostics(presentation) } : {}),
+      ...(action !== 'generic' && (presentation.title !== tool.name || presentation.source || tool.capabilityId || tool.actionId)
+        ? { showActionTitle: true } : {}),
       ...(target ? { target } : {}),
-      ...(tool.input ? { input: tool.input } : {}),
-      ...(tool.output ? { output: tool.output } : {}),
-      ...(tool.truncated ? { truncated: tool.truncated } : {}),
+      ...(tool.error ? { error: tool.error } : {}),
       ...(tool.skipped ? { skipped: true } : {}),
       ...(tool.notExecutedReason ? { notExecutedReason: tool.notExecutedReason } : {}),
       ...(tool.commandExitCode !== undefined ? { commandExitCode: tool.commandExitCode } : {}),

@@ -1,5 +1,4 @@
 import type { KnowledgeWritebackState, TMessage } from '@/common/chat/chatLib';
-import { normalizeToolCall } from '@/common/chat/normalizeToolCall';
 import { parseKnowledgeBaseId, type KnowledgeBaseId } from '@/common/types/ids';
 
 export type WrittenKnowledgeFile = { kb_id: KnowledgeBaseId; rel_path: string };
@@ -33,14 +32,9 @@ export function knowledgeWritebackFromMessage(message: TMessage): KnowledgeWrite
   }
   if (message.type !== 'tool_call' || message.content.capability_id !== 'knowledge' ||
     message.content.action_id !== 'knowledge/write') return;
-  const result = normalizeToolCall(message);
-  if (result?.status !== 'completed' || !result.output) return;
-  try {
-    const receipt: unknown = JSON.parse(result.output);
-    if (!receipt || typeof receipt !== 'object' || !('created' in receipt) || typeof receipt.created !== 'boolean') return;
-    const parsed = file(receipt);
-    return parsed ? { files: [parsed], status: 'written' } : undefined;
-  } catch { return; }
+  if (message.content.status !== 'completed') return;
+  const parsed = file(message.content.written_knowledge_file);
+  return parsed ? { files: [parsed], status: 'written' } : undefined;
 }
 
 export function mergeKnowledgeWritebackNotices(
