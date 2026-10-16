@@ -271,7 +271,7 @@ fn total_limit_error(limit: u64) -> InvokeError {
     )
 }
 
-fn parse_artifact_url(raw: &str) -> Result<reqwest::Url, InvokeError> {
+pub(crate) fn parse_artifact_url(raw: &str) -> Result<reqwest::Url, InvokeError> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err(InvokeError::parse("provider returned an empty artifact URL"));

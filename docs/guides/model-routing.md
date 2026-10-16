@@ -99,7 +99,15 @@ parameters does not establish that a particular model accepts every field.
 A connection probe checks the address, authentication and endpoint response only.
 Loading the model list or observing a reachable endpoint does not verify that a
 particular model can generate an answer or call tools. Run the model health check
-against the saved route.
+on the saved capability.
+
+Health observations are stored per task. Text chat requires a complete, visible
+response; media, embedding and rerank probes validate their typed results. Empty
+audio, damaged images, invalid vectors and failed jobs are unhealthy. A present
+empty transcription remains valid for silence. Accepted async jobs, remote output
+URLs and realtime session/configuration acknowledgements remain **not fully
+verified**, rather than reporting success or failure. Probes do not poll jobs,
+download remote outputs or start an audio conversation.
 
 Selecting a catalog model, or committing a complete ID with Enter or blur,
 automatically checks the current task. Connection, protocol and parameter changes

@@ -73,13 +73,20 @@ impl ProviderHealthCheckService {
                 self.invoke.probe(&model_ref, task).await
             };
             match probe {
-                Ok(report) if report.healthy => healthy_response(
+                Ok(report) if report.status == HealthStatus::Healthy => healthy_response(
                     provider_id,
                     platform,
                     model,
                     task,
                     Duration::from_millis(report.latency_ms),
                 ),
+                Ok(report) if report.status == HealthStatus::Unknown => {
+                    let mut response = healthy_response(provider_id, platform, model, task,
+                        Duration::from_millis(report.latency_ms));
+                    response.status = HealthStatus::Unknown;
+                    response.message = report.message;
+                    response
+                }
                 Ok(report) => {
                     let message = report
                         .message
@@ -88,7 +95,7 @@ impl ProviderHealthCheckService {
                     let timeout_stage = if lower_message.contains("realtime probe timeout")
                         || lower_message.contains("realtime websocket handshake timed out")
                     {
-                        Some("realtime_session_created".to_owned())
+                        Some("realtime_session_configuration".to_owned())
                     } else if lower_message.contains("modality probe timeout") {
                         Some("modality_probe".to_owned())
                     } else {
@@ -324,7 +331,13 @@ fn log_health_check_result(response: &ProviderHealthCheckResponse) {
             elapsed_ms = response.elapsed_ms,
             "Provider health check succeeded"
         ),
-        HealthStatus::Unhealthy | HealthStatus::Unknown => warn!(
+        HealthStatus::Unknown => info!(
+            provider_id = %response.provider_id,
+            model = %response.model,
+            task = ?response.task,
+            "Provider accepted the probe; generated output remains unverified"
+        ),
+        HealthStatus::Unhealthy => warn!(
             provider_id = %response.provider_id,
             platform = %response.platform,
             model = %response.model,
@@ -588,6 +601,12 @@ mod tests {
     async fn managed_chat_health_fixture(
         server: &MockServer, platform: &str, protocol: &str, auth_scheme: &str, endpoint_path: &str,
     ) -> (ProviderHealthCheckService, Arc<SqliteProviderModelCapabilityRepository>, tempfile::TempDir) {
+        managed_task_health_fixture(server, platform, protocol, auth_scheme, endpoint_path, ModelTask::Chat).await
+    }
+
+    async fn managed_task_health_fixture(
+        server: &MockServer, platform: &str, protocol: &str, auth_scheme: &str, endpoint_path: &str, task: ModelTask,
+    ) -> (ProviderHealthCheckService, Arc<SqliteProviderModelCapabilityRepository>, tempfile::TempDir) {
         const KEY: [u8;32] = [0xA8;32];
         let db = init_database_memory().await.unwrap();
         let pool = db.pool().clone();
@@ -595,8 +614,9 @@ mod tests {
         let capability_repo = Arc::new(SqliteProviderModelCapabilityRepository::new(pool.clone()));
         let credentials = encrypt_string(&serde_json::json!({"api_keys":[CHAT_KEY]}).to_string(),&KEY).unwrap();
         let endpoint = format!("{}{endpoint_path}",server.uri());
+        let task_name = serde_json::to_value(task).unwrap();
         let capabilities = [NewProviderModelCapability {
-            task:"chat",traits:"[]",protocol,connection_role:"default",
+            task:task_name.as_str().unwrap(),traits:"[]",protocol,connection_role:"default",
             endpoint:Some(&endpoint),provider_params:"{}",context_limit:Some(64000),output_limit:Some(4096),
             ..Default::default()
         }];
@@ -812,6 +832,43 @@ mod tests {
     async fn gemini_health_requires_a_complete_visible_non_truncated_response() {
         assert_chat_health_scenarios("gemini","gemini.generate_text","header_key:x-goog-api-key",
             &format!("/v1beta/models/{CHAT_MODEL}:streamGenerateContent?alt=sse"),"x-goog-api-key",gemini_health_stream).await;
+    }
+
+    #[tokio::test]
+    async fn accepted_media_jobs_remain_unknown_without_failure_or_followup_requests() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/videos"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"accepted-job","status":"queued"})))
+            .expect(1).mount(&server).await;
+        let (service,capabilities,_dir) = managed_task_health_fixture(&server,"openai","openai.videos","bearer","/v1/videos",ModelTask::VideoGeneration).await;
+        let response = service.health_check(ProviderHealthCheckRequest {
+            provider_id:CHAT_PROVIDER_ID.into(),model:CHAT_MODEL.into(),task:ModelTask::VideoGeneration,
+        }).await.unwrap();
+        assert_eq!(response.status,HealthStatus::Unknown,"{response:?}");
+        assert!(response.message.is_some());
+        assert!(response.error_kind.is_none());
+        assert!(response.http_status.is_none());
+        let stored = capabilities.get(CHAT_PROVIDER_ID,CHAT_MODEL,"video_generation").await.unwrap().unwrap().health.unwrap();
+        let stored: CapabilityHealth = serde_json::from_str(&stored).unwrap();
+        assert_eq!(stored.status,HealthStatus::Unknown);
+        assert!(stored.error_kind.is_none());
+        assert_eq!(server.received_requests().await.unwrap().len(),1,"health must not poll or download accepted media");
+    }
+
+    #[tokio::test]
+    async fn empty_successful_audio_is_persisted_as_unhealthy() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/audio/speech"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(Vec::<u8>::new(),"audio/mpeg"))
+            .expect(1).mount(&server).await;
+        let (service,capabilities,_dir) = managed_task_health_fixture(&server,"openai","openai.audio_speech","bearer","/v1/audio/speech",ModelTask::SpeechSynthesis).await;
+        let response = service.health_check(ProviderHealthCheckRequest {
+            provider_id:CHAT_PROVIDER_ID.into(),model:CHAT_MODEL.into(),task:ModelTask::SpeechSynthesis,
+        }).await.unwrap();
+        assert_eq!(response.status,HealthStatus::Unhealthy,"{response:?}");
+        assert!(response.error_kind.is_some());
+        let stored = capabilities.get(CHAT_PROVIDER_ID,CHAT_MODEL,"speech_synthesis").await.unwrap().unwrap().health.unwrap();
+        assert_eq!(serde_json::from_str::<CapabilityHealth>(&stored).unwrap().status,HealthStatus::Unhealthy);
     }
 
     #[test]

@@ -33,12 +33,15 @@ use crate::call::ResolvedCall;
 use crate::error::{InvokeError, InvokeErrorKind};
 use crate::transport::{
     MAX_ARTIFACT_BYTES, error_from_response, post_json, post_multipart, read_body_capped,
+    read_json_capped, response_secret_redactor,
 };
 use crate::types::{ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult};
 
 use super::{json_request_body, scalar_request_fields};
+use super::audio_payload::validate_audio_payload;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_TRANSCRIPTION_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Voice sent when the request does not pick one (the OpenAI API requires the
 /// field; "alloy" is its conventional default).
@@ -96,11 +99,16 @@ impl ProtocolAdapter for OpenAiAudioTranscriptionsAdapter {
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        let body: Value = resp
-            .json()
-            .await
-            .map_err(|e| InvokeError::response_json("invalid transcription JSON", &e))?;
-        let text = body["text"].as_str().unwrap_or("").to_owned();
+        let redactor = response_secret_redactor(&resp);
+        let body: Value = read_json_capped(resp,MAX_TRANSCRIPTION_BYTES,"audio transcription").await
+            .map_err(|error| error.redacted(&redactor))?;
+        if body.get("error").is_some_and(|error| !error.is_null()) {
+            return Err(InvokeError::new(InvokeErrorKind::ProviderError,"audio transcription returned a provider error"));
+        }
+        // Silence may legitimately produce "", but absent/non-string text is
+        // a malformed response rather than a successful empty transcript.
+        let text = body.get("text").and_then(Value::as_str)
+            .ok_or_else(|| InvokeError::parse("audio transcription response requires a string text field"))?.to_owned();
 
         Ok(TaskOutcome::Done(TaskResult::Transcript {
             text,
@@ -155,17 +163,17 @@ impl ProtocolAdapter for OpenAiAudioSpeechAdapter {
         }
         // The effective format (typed, extra, or configured) pins the MIME.
         // Without one, trust audio/* Content-Type, then assume mp3.
+        let content_type = resp.headers().get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()).map(str::to_owned);
         let mime = match body.get("response_format").and_then(Value::as_str) {
             Some(format) => mime_for_speech_format(format).to_owned(),
-            None => resp
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
+            None => content_type.as_deref()
                 .map(|v| v.split(';').next().unwrap_or(v).trim().to_ascii_lowercase())
                 .filter(|v| v.starts_with("audio/"))
                 .unwrap_or_else(|| "audio/mpeg".to_owned()),
         };
         let bytes = read_body_capped(resp, MAX_ARTIFACT_BYTES).await?;
+        validate_audio_payload(&bytes,content_type.as_deref(),"openai.audio_speech")?;
 
         Ok(TaskOutcome::Done(TaskResult::Assets(vec![ProducedAsset {
             data: ProducedData::Bytes(bytes),
@@ -382,6 +390,26 @@ mod tests {
         assert_eq!(err.http_status, Some(401));
     }
 
+    #[tokio::test]
+    async fn transcriptions_require_string_text_but_accept_a_silent_transcript() {
+        for body in [json!({}),json!({"text":null}),json!({"text":7}),json!({"text":[]}),
+            json!({"error":{"message":"sk-test"},"text":"must not win"}),json!({"text":""})] {
+            let silent = body.get("text")==Some(&json!("")) && body.get("error").is_none();
+            let server = MockServer::start().await;
+            Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .expect(1).mount(&server).await;
+            let result = OpenAiAudioTranscriptionsAdapter.submit(&reqwest::Client::new(),
+                &asr_call(&server.uri(),"whisper-1",asr(None,None,json!({})))).await;
+            if silent {
+                assert!(matches!(result,Ok(TaskOutcome::Done(TaskResult::Transcript {text,..})) if text.is_empty()));
+            } else {
+                let error = result.unwrap_err();
+                assert!(matches!(error.kind,InvokeErrorKind::ParseError|InvokeErrorKind::ProviderError));
+                assert!(!error.message.contains("sk-test"));
+            }
+        }
+    }
+
     // -- openai.audio_speech --------------------------------------------------
 
     use wiremock::matchers::body_partial_json;
@@ -439,6 +467,36 @@ mod tests {
         let requests = server.received_requests().await.unwrap();
         let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert!(body.get("response_format").is_none(), "response_format must be omitted");
+    }
+
+    #[tokio::test]
+    async fn speech_rejects_empty_json_and_markup_even_when_labeled_as_audio() {
+        for response in [
+            ResponseTemplate::new(200).set_body_raw(Vec::<u8>::new(),"audio/mpeg"),
+            ResponseTemplate::new(200).set_body_json(json!({"error":{"message":"sk-test"}})),
+            ResponseTemplate::new(200).set_body_raw("{\"error\":\"sk-test\"}","audio/mpeg"),
+            ResponseTemplate::new(200).set_body_raw("<!doctype html><html>sk-test</html>","audio/wav"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST")).respond_with(response).expect(1).mount(&server).await;
+            let error = OpenAiAudioSpeechAdapter.submit(&reqwest::Client::new(),
+                &tts_call(&server.uri(),"tts-1",tts("hi",None,None))).await.unwrap_err();
+            assert_eq!(error.kind,InvokeErrorKind::ParseError);
+            assert!(!error.message.contains("sk-test"));
+        }
+    }
+
+    #[tokio::test]
+    async fn speech_accepts_nonempty_raw_pcm_without_a_container_signature() {
+        let server = MockServer::start().await;
+        let pcm = vec![0,1,0,2,0,0];
+        Mock::given(method("POST")).respond_with(ResponseTemplate::new(200)
+            .set_body_raw(pcm.clone(),"application/octet-stream")).expect(1).mount(&server).await;
+        let result = OpenAiAudioSpeechAdapter.submit(&reqwest::Client::new(),
+            &tts_call(&server.uri(),"tts-1",tts("hi",None,Some("pcm")))).await.unwrap();
+        let TaskOutcome::Done(TaskResult::Assets(assets)) = result else {panic!("expected PCM audio")};
+        assert_eq!(assets[0].mime.as_deref(),Some("audio/pcm"));
+        assert!(matches!(&assets[0].data,ProducedData::Bytes(bytes) if bytes==&pcm));
     }
 
     #[tokio::test]

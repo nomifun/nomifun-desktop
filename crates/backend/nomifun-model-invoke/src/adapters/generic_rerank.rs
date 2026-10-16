@@ -1,13 +1,14 @@
 //! `generic.rerank` — the common JSON `/rerank` protocol used by several
 //! OpenAI-compatible gateways even though OpenAI itself has no rerank API.
 
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 
 use async_trait::async_trait;
 use nomifun_api_types::ModelTask;
 use serde_json::{Map, Value, json};
 
 use super::provider_body_fields;
+use super::retrieval_results::{finite_f32, result_index};
 use crate::adapter::ProtocolAdapter;
 use crate::call::ResolvedCall;
 use crate::error::{InvokeError, InvokeErrorKind};
@@ -40,6 +41,8 @@ impl ProtocolAdapter for GenericRerankAdapter {
 
         let url = call.endpoint_url()?;
         let body = build_body(&call.model, &call.model_params, req);
+        let max_results = body.get("top_n").and_then(Value::as_u64)
+            .and_then(|limit| usize::try_from(limit).ok()).unwrap_or(req.documents.len()).min(req.documents.len());
         let resp = post_json(http, &url, REQUEST_TIMEOUT, &call.connection.auth, &body).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
@@ -48,7 +51,7 @@ impl ProtocolAdapter for GenericRerankAdapter {
             .json()
             .await
             .map_err(|e| InvokeError::response_json("invalid rerank JSON", &e))?;
-        Ok(TaskOutcome::Done(TaskResult::Reranked(parse_results(&value)?)))
+        Ok(TaskOutcome::Done(TaskResult::Reranked(parse_results(&value, req.documents.len(), max_results)?)))
     }
 }
 
@@ -61,6 +64,9 @@ fn validate_request(req: &RerankRequest) -> Result<(), InvokeError> {
             InvokeErrorKind::InvalidParams,
             "rerank requires at least one document",
         ));
+    }
+    if req.top_n == Some(0) {
+        return Err(InvokeError::new(InvokeErrorKind::InvalidParams, "rerank top_n must be positive"));
     }
     Ok(())
 }
@@ -96,7 +102,7 @@ fn build_body(model: &str, model_params: &Value, req: &RerankRequest) -> Value {
     Value::Object(body)
 }
 
-fn parse_results(value: &Value) -> Result<Vec<RerankResult>, InvokeError> {
+fn parse_results(value: &Value, document_count: usize, max_results: usize) -> Result<Vec<RerankResult>, InvokeError> {
     let raw = value
         .get("results")
         .and_then(Value::as_array)
@@ -104,28 +110,33 @@ fn parse_results(value: &Value) -> Result<Vec<RerankResult>, InvokeError> {
     if raw.is_empty() {
         return Err(InvokeError::parse("rerank response 'results' array is empty"));
     }
-
-    raw.iter()
-        .map(|item| {
-            let index = item
-                .get("index")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| InvokeError::parse("rerank result missing numeric 'index'"))?
-                as usize;
-            let relevance_score = item
-                .get("relevance_score")
-                .or_else(|| item.get("score"))
-                .and_then(Value::as_f64)
-                .ok_or_else(|| InvokeError::parse("rerank result missing numeric relevance score"))?
-                as f32;
-            let document = match item.get("document") {
-                Some(Value::String(text)) => Some(text.clone()),
-                Some(Value::Object(document)) => document.get("text").and_then(Value::as_str).map(str::to_owned),
-                _ => None,
-            };
-            Ok(RerankResult { index, relevance_score, document })
-        })
-        .collect()
+    if raw.len() > document_count || raw.len() > max_results {
+        return Err(InvokeError::parse("rerank result count exceeds the input documents or requested top_n"));
+    }
+    let mut seen = BTreeSet::new();
+    let mut results = Vec::with_capacity(raw.len());
+    for item in raw {
+        let index = result_index(item.get("index").ok_or_else(|| InvokeError::parse("rerank result is missing its input index"))?,
+            document_count, &mut seen, "rerank response")?;
+        let score = item.get("relevance_score").or_else(|| item.get("score"))
+            .ok_or_else(|| InvokeError::parse("rerank result is missing its relevance score"))?;
+        let relevance_score = finite_f32(score, "rerank relevance score")?;
+        if let (Some(canonical), Some(alias)) = (item.get("relevance_score"), item.get("score")) {
+            finite_f32(alias, "rerank score alias")?;
+            if canonical.as_f64() != alias.as_f64() {
+                return Err(InvokeError::parse("rerank result contains conflicting relevance scores"));
+            }
+        }
+        let document = match item.get("document") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(text)) => Some(text.clone()),
+            Some(Value::Object(document)) => Some(document.get("text").and_then(Value::as_str)
+                .ok_or_else(|| InvokeError::parse("rerank returned document requires string text"))?.to_owned()),
+            Some(_) => return Err(InvokeError::parse("rerank returned document has an unsupported shape")),
+        };
+        results.push(RerankResult { index, relevance_score, document });
+    }
+    Ok(results)
 }
 
 #[cfg(test)]
@@ -154,7 +165,7 @@ mod tests {
         let results = parse_results(&json!({"results": [
             {"index": 0, "relevance_score": 0.9, "document": {"text": "apple"}},
             {"index": 1, "score": 0.1, "document": "stone"}
-        ]}))
+        ]}), 2, 2)
         .unwrap();
         assert_eq!(results[0], RerankResult { index: 0, relevance_score: 0.9, document: Some("apple".into()) });
         assert_eq!(results[1], RerankResult { index: 1, relevance_score: 0.1, document: Some("stone".into()) });
@@ -163,8 +174,19 @@ mod tests {
     #[test]
     fn parser_rejects_malformed_responses() {
         for value in [json!({}), json!({"results": []}), json!({"results": [{}]})] {
-            assert_eq!(parse_results(&value).unwrap_err().kind, InvokeErrorKind::ParseError);
+            assert_eq!(parse_results(&value, 2, 2).unwrap_err().kind, InvokeErrorKind::ParseError);
         }
+    }
+
+    #[test]
+    fn parser_preserves_zero_negative_scores_and_legitimate_filtered_top_n_results() {
+        let value = json!({"results":[{"index":1,"relevance_score":0.0},{"index":0,"score":-7.5}]});
+        let results = parse_results(&value, 3, 3).unwrap();
+        assert_eq!(results.iter().map(|result| result.index).collect::<Vec<_>>(), vec![1,0]);
+        assert_eq!(results[0].relevance_score, 0.0);
+        assert_eq!(results[1].relevance_score, -7.5);
+        assert!(parse_results(&json!({"results":[{"index":2,"score":1.5}]}), 3, 2).is_ok(),
+            "top_n is an upper bound, not a promise to return exactly N results");
     }
 
     #[test]
@@ -266,5 +288,56 @@ mod tests {
         let call = call("http://127.0.0.1:9", "reranker", TaskRequest::Rerank(req));
         let err = GenericRerankAdapter.submit(&reqwest::Client::new(), &call).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::InvalidParams);
+    }
+
+    #[tokio::test]
+    async fn invalid_indices_scores_and_document_shapes_never_become_successful_rankings() {
+        let server = MockServer::start().await;
+        let mut replies: Vec<String> = [
+            json!({"results":[]}),
+            json!({"results":[{"index":0,"score":0.9},{"index":0,"score":0.8}]}),
+            json!({"results":[{"index":2,"score":0.9}]}),
+            json!({"results":[{"index":-1,"score":0.9}]}),
+            json!({"results":[{"index":0.5,"score":0.9}]}),
+            json!({"results":[{"index":"0","score":0.9}]}),
+            json!({"results":[{"index":0,"score":null}]}),
+            json!({"results":[{"index":0,"score":1e100}]}),
+            json!({"results":[{"index":0,"relevance_score":0.8,"score":0.9}]}),
+            json!({"results":[{"index":0,"score":0.9,"document":{}}]}),
+            json!({"results":[{"index":0,"score":0.9,"document":7}]}),
+        ].into_iter().map(|value| value.to_string()).collect();
+        replies.push(r#"{"results":[{"index":0,"score":NaN}]}"#.to_owned());
+        for reply in replies {
+            server.reset().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(reply, "application/json"))
+                .expect(1).mount(&server).await;
+            let call = call(&server.uri(), "reranker", TaskRequest::Rerank(RerankRequest {
+                query: "query".into(), documents: vec!["one".into(),"two".into()], top_n: None, extra:json!({}),
+            }));
+            let error = GenericRerankAdapter.submit(&reqwest::Client::new(), &call).await.unwrap_err();
+            assert_eq!(error.kind, InvokeErrorKind::ParseError);
+        }
+    }
+
+    #[tokio::test]
+    async fn response_count_obeys_top_n_without_truncating_excess_rows() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(body_partial_json(json!({"top_n":1})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results":[{"index":0,"score":0},{"index":1,"score":-1}]})))
+            .expect(1).mount(&server).await;
+        let error = GenericRerankAdapter.submit(&reqwest::Client::new(), &call(&server.uri(), "reranker", request())).await.unwrap_err();
+        assert_eq!(error.kind, InvokeErrorKind::ParseError);
+    }
+
+    #[tokio::test]
+    async fn zero_top_n_is_rejected_before_http() {
+        let server = MockServer::start().await;
+        let mut request = request();
+        let TaskRequest::Rerank(request_body) = &mut request else { unreachable!() };
+        request_body.top_n = Some(0);
+        let error = GenericRerankAdapter.submit(&reqwest::Client::new(), &call(&server.uri(), "reranker", request)).await.unwrap_err();
+        assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 }

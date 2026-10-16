@@ -60,12 +60,14 @@ impl ProtocolAdapter for ZhipuVideoJobsAdapter {
             .await
             .map_err(|e| InvokeError::response_json("invalid Zhipu video submit JSON", &e))?;
         if is_failed_status(&value) {
-            return Err(InvokeError::new(InvokeErrorKind::JobFailed, failure_message(&value)));
+            return Err(InvokeError::new(InvokeErrorKind::JobFailed, failure_message(&value)).redacted(&call.connection.auth.secret_redactor()));
         }
+        super::media_response::reject_provider_error(&value,"Zhipu video submit")?;
+        super::media_response::validate_submit_status(value.get("task_status"), &["processing"], &["success","succeeded"], &["fail","failed"], "Zhipu video submit")?;
         let id = value
             .get("id")
             .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
+            .map(str::trim).filter(|id| !id.is_empty())
             .ok_or_else(|| InvokeError::parse("Zhipu video submit response missing 'id'"))?;
         Ok(TaskOutcome::Pending(JobHandle {
             adapter_id: ADAPTER_ID.into(),
@@ -100,7 +102,7 @@ impl ProtocolAdapter for ZhipuVideoJobsAdapter {
                 remote_id: job.remote_id.clone(),
                 poll_state: json!({}),
             })),
-            VideoState::Failed(message) => Err(InvokeError::new(InvokeErrorKind::JobFailed, message)),
+            VideoState::Failed(message) => Err(InvokeError::new(InvokeErrorKind::JobFailed, message).redacted(&call.connection.auth.secret_redactor())),
             VideoState::Done(urls) => Ok(TaskOutcome::Done(TaskResult::Assets(
                 urls.into_iter()
                     .map(|url| ProducedAsset {
@@ -224,7 +226,9 @@ fn parse_status(value: &Value) -> Result<VideoState, InvokeError> {
         .get("task_status")
         .and_then(Value::as_str)
         .unwrap_or("")
+        .trim()
         .to_ascii_uppercase();
+    if !matches!(status.as_str(),"FAIL"|"FAILED") {super::media_response::reject_provider_error(value,"Zhipu video status")?;}
     match status.as_str() {
         "SUCCESS" | "SUCCEEDED" => {
             let results = value
@@ -233,10 +237,11 @@ fn parse_status(value: &Value) -> Result<VideoState, InvokeError> {
                 .ok_or_else(|| InvokeError::parse("Zhipu video succeeded but missing 'video_result'"))?;
             let urls = results
                 .iter()
-                .filter_map(|item| item.get("url").and_then(Value::as_str))
-                .filter(|url| !url.is_empty())
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
+                .map(|item| {
+                    let url = item.get("url").and_then(Value::as_str)
+                        .ok_or_else(|| InvokeError::parse("Zhipu video result is missing its URL"))?;
+                    super::media_response::media_url(url,"Zhipu video result")
+                }).collect::<Result<Vec<_>,_>>()?;
             if urls.is_empty() {
                 return Err(InvokeError::parse(
                     "Zhipu video succeeded but 'video_result' contains no URL",
@@ -245,8 +250,8 @@ fn parse_status(value: &Value) -> Result<VideoState, InvokeError> {
             Ok(VideoState::Done(urls))
         }
         "FAIL" | "FAILED" => Ok(VideoState::Failed(failure_message(value))),
-        // PROCESSING and unknown non-terminal states remain pollable.
-        _ => Ok(VideoState::Pending),
+        "PROCESSING" => Ok(VideoState::Pending),
+        _ => Err(InvokeError::parse("Zhipu video response has no recognized status")),
     }
 }
 

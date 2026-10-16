@@ -1157,6 +1157,9 @@
     "agentExecution": "协作任务"
   },
   "healthCheck": "健康检测",
+  "healthUnverified": "尚未完整验证",
+  "healthAcceptedUnverified": "请求已受理，尚未验证最终产物。",
+  "healthRealtimeUnverified": "会话已建立，尚未验证音频对话。",
   "latency": "延迟",
   "addCustomAgent": "添加",
   "configureCustomAgent": "配置",

@@ -190,6 +190,7 @@ fn parse_gemini_assets_with_budget(
     budget: &mut ImageResponseBudget,
     max_images_in_response: usize,
 ) -> Result<Vec<ProducedAsset>, InvokeError> {
+    super::media_response::reject_provider_error(value,"Gemini image response")?;
     let candidates = value
         .get("candidates")
         .and_then(|v| v.as_array())
@@ -227,6 +228,7 @@ fn parse_gemini_assets_with_budget(
                 .and_then(|v| v.as_str())
                 .expect("collected inline data string");
             let bytes = budget.decode_base64(data, &format!("gemini inlineData[{index}].data"))?;
+            if bytes.is_empty() {return Err(InvokeError::parse("Gemini image response decoded to an empty asset"));}
             let mime = inline
                 .get("mimeType")
                 .or_else(|| inline.get("mime_type"))

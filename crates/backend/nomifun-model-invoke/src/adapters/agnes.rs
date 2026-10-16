@@ -305,6 +305,10 @@ impl ProtocolAdapter for AgnesVideoJobsAdapter {
             "Agnes video submit",
         )
         .await?;
+        super::media_response::reject_provider_error(&value,"Agnes video submit")?;
+        super::media_response::validate_submit_status(value.get("status"),
+            &["queued","pending","in_progress","processing","running","generating"], &["completed","succeeded","success","done"],
+            &["failed","error","cancelled","canceled"], "Agnes video submit")?;
         let id = value
             .get("video_id")
             .and_then(Value::as_str)
@@ -353,7 +357,7 @@ impl ProtocolAdapter for AgnesVideoJobsAdapter {
                 poll_state: json!({}),
             })),
             AgnesVideoState::Failed(message) => {
-                Err(InvokeError::new(InvokeErrorKind::JobFailed, message))
+                Err(InvokeError::new(InvokeErrorKind::JobFailed, message).redacted(&call.connection.auth.secret_redactor()))
             }
             AgnesVideoState::Done(url) => Ok(TaskOutcome::Done(TaskResult::Assets(vec![
                 ProducedAsset {
@@ -426,6 +430,7 @@ fn parse_video_status(value: &Value) -> Result<AgnesVideoState, InvokeError> {
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase();
+    if !matches!(status.as_str(),"failed"|"error"|"cancelled"|"canceled") {super::media_response::reject_provider_error(value,"Agnes video status")?;}
     match status.as_str() {
         "completed" | "succeeded" | "success" | "done" => {
             let url = value
@@ -449,7 +454,7 @@ fn parse_video_status(value: &Value) -> Result<AgnesVideoState, InvokeError> {
                         "Agnes video completed but response missing a result URL",
                     )
                 })?;
-            Ok(AgnesVideoState::Done(url.to_owned()))
+            Ok(AgnesVideoState::Done(super::media_response::media_url(url,"Agnes video result")?))
         }
         "failed" | "error" | "cancelled" | "canceled" => {
             let message = value

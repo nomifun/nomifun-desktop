@@ -1157,6 +1157,9 @@
     "agentExecution": "Collaborative task"
   },
   "healthCheck": "Health Check",
+  "healthUnverified": "Not fully verified",
+  "healthAcceptedUnverified": "Request accepted; final output has not been verified.",
+  "healthRealtimeUnverified": "Session created; an audio conversation has not been verified.",
   "latency": "Latency",
   "addCustomAgent": "Add",
   "configureCustomAgent": "Configure",
