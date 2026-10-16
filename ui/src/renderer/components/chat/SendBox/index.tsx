@@ -970,6 +970,7 @@ const SendBox: React.FC<{
     if (commandController.dispatchInput()) return;
     if (disabled || submitDisabled) return;
     if (isUploading || isStopping) return;
+    if (isLoading) return;
     // Revision mode submits a new Turn through the owning conversation port.
     if (editingMsgId && onEditResubmit) {
       if (isLoading || !input.trim()) return;
@@ -1045,6 +1046,7 @@ const SendBox: React.FC<{
     if (commandController.dispatchInput()) return;
     if (disabled || submitDisabled) return;
     if (!onSteer || isUploading || isStopping) return;
+    if (isLoading) return;
     // The draft is cleared eagerly so an in-flight steer cannot overwrite text
     // the user types while it resolves. Recovery on failure is the handler's
     // job, not this layer's: the Nomi handler diverts a failed interjection into
@@ -1130,12 +1132,14 @@ const SendBox: React.FC<{
     {t('conversation.stop.endPausedTurn')}
   </Button>;
   const renderActionButtons = () => {
-    if (isStopping) return stopButton;
+    // A pending submission may retain its draft until acceptance. It is not
+    // a new draft to enqueue or steer into the running turn.
+    if (isStopping || isLoading) return stopButton;
     if (commandController.hasCommandInput) return <div className='flex items-center gap-2'>
       {paused ? pausedCancelButton : loading && onStop ? stopButton : null}{sendButton}
     </div>;
     if (paused) return pausedCancelButton;
-    if (allowSendWhileLoading && (isLoading || loading)) {
+    if (allowSendWhileLoading && loading) {
       // Stop is an independent safety action. A non-empty draft must never
       // replace or hide it: users may need to cancel the current turn even
       // while preparing a queued message.
@@ -1158,7 +1162,7 @@ const SendBox: React.FC<{
       );
     }
 
-    if (isLoading || loading) {
+    if (loading) {
       return stopButton;
     }
 

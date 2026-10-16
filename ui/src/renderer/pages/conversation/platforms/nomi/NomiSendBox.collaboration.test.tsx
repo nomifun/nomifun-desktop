@@ -97,13 +97,15 @@ function mount(options: { compact?: boolean; busy?: boolean; linkedBusy?: boolea
     spyOn(executionContext, 'useExecutionSafe').mockReturnValue({ conversationId: conversation.id, executionId,
       detail: { execution: { execution_id: executionId, status: 'running' } } } as never);
   }
-  const view = render(<MemoryRouter><I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), fallback: { providers: [] }, shouldRetryOnError: false }}>
+  const renderComposer = (busy = options.busy ?? false) => <MemoryRouter><I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), fallback: { providers: [] }, shouldRetryOnError: false }}>
     <PreviewProvider persistNamespace={browserStorageKey('collaboration-test', 'conversation', conversation.id)} subscribeGlobalOpen={false}>
       <MessageListProvider><NomiSendBox conversation_id={conversation.id} modelSelection={modelSelection}
-        turnActivity={{ ...activity, running: options.busy ?? false, pauseNotice: options.paused
+        turnActivity={{ ...activity, running: busy, pauseNotice: options.paused
           ? { turnId: pausedTurnId, reason: 'EXECUTION_TOTAL_MODEL_BUDGET', cleanupProven: true, pausedAt: 123 } : null }}
         creationEnabled={false} collaborationEnabled compactProductComposer={options.compact} /></MessageListProvider>
-    </PreviewProvider></SWRConfig></I18nextProvider></MemoryRouter>);
+    </PreviewProvider></SWRConfig></I18nextProvider></MemoryRouter>;
+  const view = render(renderComposer());
+  const setBusy = (busy: boolean) => view.rerender(renderComposer(busy));
   const input = view.getByTestId('sendbox-input') as HTMLTextAreaElement;
   const submit = async (text = 'Review this work') => {
     await waitFor(() => expect(input.disabled).toBe(false));
@@ -111,7 +113,7 @@ function mount(options: { compact?: boolean; busy?: boolean; linkedBusy?: boolea
     await waitFor(() => expect(input.value).toBe(text));
     await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }); });
   };
-  return { view, input, submit, conversation, send, create, fromTemplate, pausedTurnId };
+  return { view, input, submit, setBusy, conversation, send, create, fromTemplate, pausedTurnId };
 }
 
 test('an existing conversation keeps the shared icon and submits its chosen pool and policies through the original Execution API', async () => {
@@ -140,6 +142,80 @@ test('the single-model automatic default keeps ordinary chat admission', async (
   await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
   expect(composer.create).not.toHaveBeenCalled();
   expect(composer.send.mock.calls[0][0].inject_skills).toEqual(['selected-skill']);
+});
+
+test('a pending chat submission only shows stop until admission, then allows actions for a new draft', async () => {
+  draft.config = { execution_model_pool: { mode: 'single', model: main }, execution_template_id: null, delegation_policy: 'automatic', decision_policy: 'automatic' };
+  const composer = mount();
+  let accept!: (value: Awaited<ReturnType<typeof ipcBridge.conversation.sendMessage.invoke>>) => void;
+  composer.send.mockImplementation(() => new Promise(resolve => { accept = resolve; }));
+
+  await composer.submit('Hello');
+  await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
+  expect(composer.input.value).toBe('Hello');
+  expect(composer.view.getByTestId('sendbox-stop-btn')).toBeTruthy();
+  expect(composer.view.queryByTestId('sendbox-steer-btn') === null).toBe(true);
+  expect(composer.view.queryByTestId('sendbox-send-btn') === null).toBe(true);
+
+  act(() => composer.setBusy(true));
+  expect(composer.view.queryByTestId('sendbox-steer-btn') === null).toBe(true);
+  expect(composer.view.queryByTestId('sendbox-send-btn') === null).toBe(true);
+  await act(async () => accept({ msg_id: parseMessageId(uuidv7()), replayed: false, completed: false,
+    result_ok: true, result_text: null, result_error: null, result_error_code: null, result_error_retryable: null }));
+  await waitFor(() => expect(composer.input.value).toBe(''));
+  expect(composer.view.getByTestId('sendbox-stop-btn')).toBeTruthy();
+  expect(composer.view.queryByTestId('sendbox-steer-btn') === null).toBe(true);
+  expect(composer.view.queryByTestId('sendbox-send-btn') === null).toBe(true);
+
+  fireEvent.change(composer.input, { target: { value: 'A follow-up while the turn runs' } });
+  await waitFor(() => expect(composer.view.getByTestId('sendbox-steer-btn')).toBeTruthy());
+  expect(composer.view.getByTestId('sendbox-stop-btn')).toBeTruthy();
+  expect(composer.view.getByTestId('sendbox-send-btn')).toBeTruthy();
+  expect(composer.send).toHaveBeenCalledTimes(1);
+});
+
+test('a rejected chat submission restores send without exposing steer for its preserved draft', async () => {
+  draft.config = { execution_model_pool: { mode: 'single', model: main }, execution_template_id: null, delegation_policy: 'automatic', decision_policy: 'automatic' };
+  const composer = mount();
+  let reject!: (reason: Error) => void;
+  composer.send.mockImplementation(() => new Promise((_resolve, rejectSend) => { reject = rejectSend; }));
+
+  await composer.submit('Keep this draft');
+  await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
+  expect(composer.view.getByTestId('sendbox-stop-btn')).toBeTruthy();
+  expect(composer.view.queryByTestId('sendbox-steer-btn') === null).toBe(true);
+  expect(composer.view.queryByTestId('sendbox-send-btn') === null).toBe(true);
+
+  await act(async () => reject(new Error('Chat admission rejected')));
+  await waitFor(() => expect(composer.view.getByTestId('sendbox-send-btn')).toBeTruthy());
+  expect(composer.input.value).toBe('Keep this draft');
+  expect(composer.view.queryByTestId('sendbox-stop-btn') === null).toBe(true);
+  expect(composer.view.queryByTestId('sendbox-steer-btn') === null).toBe(true);
+  expect(composer.send).toHaveBeenCalledTimes(1);
+});
+
+test.each([false, true])('repeated submit and steer shortcuts cannot resend or queue a pending draft when runtime busy is %s', async busy => {
+  draft.config = { execution_model_pool: { mode: 'single', model: main }, execution_template_id: null, delegation_policy: 'automatic', decision_policy: 'automatic' };
+  const composer = mount();
+  let accept!: (value: Awaited<ReturnType<typeof ipcBridge.conversation.sendMessage.invoke>>) => void;
+  composer.send.mockImplementation(() => new Promise(resolve => { accept = resolve; }));
+  const steer = spyOn(ipcBridge.conversation.steer, 'invoke').mockResolvedValue(undefined as never);
+
+  await composer.submit('Send this once');
+  await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
+  act(() => composer.setBusy(busy));
+  await act(async () => {
+    fireEvent.keyDown(composer.input, { key: 'Enter' });
+    fireEvent.keyDown(composer.input, { key: 'Enter', metaKey: true });
+    fireEvent.keyDown(composer.input, { key: 'Enter', ctrlKey: true });
+  });
+  expect(composer.send).toHaveBeenCalledTimes(1);
+  expect(steer).not.toHaveBeenCalled();
+  expect(composer.input.value).toBe('Send this once');
+  expect(composer.view.container.querySelector('[data-command-queue-list]') === null).toBe(true);
+
+  await act(async () => accept({ msg_id: parseMessageId(uuidv7()), replayed: false, completed: false,
+    result_ok: true, result_text: null, result_error: null, result_error_code: null, result_error_retryable: null }));
 });
 
 test('the selected plan uses the same template creation route as the welcome composer', async () => {
