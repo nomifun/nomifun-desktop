@@ -360,7 +360,7 @@ test('a failed question history page stops automatic loading and a second click 
   } finally { history.mockRestore(); errors.mockRestore(); completed.mockRestore(); reconnect.mockRestore(); }
 });
 
-test('a live journal only animates its current thought and preserves completed thought disclosures', () => {
+test('a live journal tracks thinking lifecycle and preserves completed thought disclosures', () => {
   const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };
   const messages: TMessage[] = [
     { ...base, id: 'user', message_id: turnId, msg_id: turnId, type: 'text', created_at: 1, position: 'right', content: { content: 'Inspect the files' } },
@@ -475,7 +475,6 @@ test('compact thinking resumes in its stable row after narration and a delayed o
     expect(thinking().getAttribute('data-thinking-process-state')).toBe('running');
     expect(thinking().querySelector('[data-thinking-process-header]')?.textContent).toContain('Thinking...');
     expect(thinking().querySelector('.markdown-shadow')?.shadowRoot?.textContent).toContain('Inspect. Inspect.');
-    expect(page.container.querySelector('.turn-process-disclosure__item--thinking.turn-process-disclosure__item--current')).not.toBeNull();
     fireEvent.click(page.getByRole('button', { name: 'Deliver older event' }));
     await waitFor(() => expect(page.container.querySelectorAll('.turn-process-disclosure')).toHaveLength(2));
     expect(page.container.querySelector('.turn-process-disclosure--live')).not.toBeNull();
@@ -543,7 +542,7 @@ test('waiting for the first response and running a tool call do not add a duplic
   expect(thought?.querySelector('.arco-spin')).toBeNull();
   expect(thought?.querySelector('[data-thinking-process-header]')?.textContent).toContain('Thought complete');
   expect(page.container.querySelector('[data-tool-call-id="read-active"]')).not.toBeNull();
-  expect(page.container.querySelector('.turn-process-trace__row--current-activity')).not.toBeNull();
+  expect(page.container.querySelector('[data-tool-call-id="read-active"] .turn-process-trace__row--running')).not.toBeNull();
   expect(page.queryByTestId('conversation-current-activity')).toBeNull();
   fireEvent.click(page.getByRole('button', { name: messagesLocale.turnProcess.collapse }));
   expect(page.container.querySelector('.turn-process-disclosure__body')).toBeNull();
@@ -795,6 +794,72 @@ test('paused and resumed Turns hide file headings and image gallery until canoni
   expect(page.getByText('report.docx')).toBeTruthy();
   expect(page.getByTestId('turn-deliverables-images')).toBeTruthy();
   expect(query).toHaveBeenCalledWith({ conversation_id: conversationId, turn_ids: [turnId] });
+});
+
+test('canonical group headings span model waits without changing tool outcomes or crossing narration and terminal boundaries', () => {
+  const groupId = 'canonical-model-wait';
+  const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };
+  const tool: IMessageToolCall = { ...base, id: 'wait-completed-tool', msg_id: messageId(811), type: 'tool_call', created_at: 10,
+    content: { call_id: 'wait-read', name: 'read_file', status: 'completed', args: { path: 'source.ts' }, output: 'Source available.',
+      timeline: { through_seq: 20, segments: [{ segment_id: 'wait-read-segment', group_id: groupId, first_seq: 10, last_seq: 20,
+        kind: 'tool', state: 'completed', call_id: 'wait-read' }] } } };
+  const narration: TMessage = { ...base, id: 'wait-narration', msg_id: messageId(813), type: 'text', created_at: 30,
+    content: { content: 'The source is available.', timeline: { through_seq: 30, segments: [{ segment_id: 'wait-public-boundary',
+      group_id: groupId, first_seq: 30, last_seq: 30, kind: 'narration', state: 'completed', start_utf16: 0, end_utf16: 24 }] } } };
+  const staleTool: IMessageToolCall = { ...base, id: 'wait-stale-tool', msg_id: messageId(814), type: 'tool_call', created_at: 40,
+    content: { call_id: 'wait-stale-read', name: 'read_file', status: 'running', args: { path: 'next.ts' },
+      timeline: { through_seq: 40, segments: [{ segment_id: 'wait-stale-segment', group_id: 'canonical-stale-tail',
+        first_seq: 40, last_seq: 40, kind: 'tool', state: 'running', call_id: 'wait-stale-read' }] } } };
+  const initial: TMessage[] = [
+    { ...base, id: 'wait-user', msg_id: turnId, type: 'text', position: 'right', created_at: 1, content: { content: 'Inspect the source.' } },
+    tool,
+    { ...base, id: 'wait-model-preparing', msg_id: messageId(812), type: 'agent_status', created_at: 21,
+      content: { backend: 'nomi', status: 'preparing' } },
+  ];
+  const StreamControls = () => {
+    const update = useUpdateMessageList();
+    return <>
+      <button onClick={() => update(current => current.map(message => message.id === tool.id
+        ? { ...tool, content: { ...tool.content, output: 'Source available. Stream receipt refreshed.' } } : message))}>Refresh completed tool</button>
+      <button onClick={() => update(current => [...current, narration])}>Deliver phase narration</button>
+      <button onClick={() => update(current => [...current, staleTool, { ...base, id: 'wait-terminal', msg_id: messageId(815),
+        type: 'agent_status', created_at: 50, content: { backend: 'nomi', status: 'prepared', turn_summary: true,
+          turn_state: 'completed', started_at_ms: 1, finished_at_ms: 50 } }])}>Commit terminal receipt</button>
+    </>;
+  };
+  const page = render(<MemoryRouter><I18nextProvider i18n={i18n}>
+    <PreviewProvider persistNamespace='canonical-group-model-wait' subscribeGlobalOpen={false}>
+      <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', readOnly: true, isProcessing: true,
+        isTurnStateHydrated: true, activeTurnId: turnId, activeRequestMessageId: turnId }}>
+        <MessageListProvider initialValue={initial}><MessageList /><StreamControls /></MessageListProvider>
+      </ConversationProvider>
+    </PreviewProvider>
+  </I18nextProvider></MemoryRouter>);
+  const group = page.container.querySelector(`[data-process-group-id="${groupId}"]`)!;
+  const toggle = group.querySelector('button')!;
+  expect(group.classList.contains('turn-process-group--running')).toBe(true);
+  expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  fireEvent.click(toggle);
+  expect(group.querySelector('[data-tool-call-id="wait-read"] .turn-process-trace__row--completed')).not.toBeNull();
+  expect(group.querySelector('.turn-process-trace__row--running')).toBeNull();
+  fireEvent.click(toggle);
+  fireEvent.click(page.getByRole('button', { name: 'Refresh completed tool' }));
+  expect(page.container.querySelector(`[data-process-group-id="${groupId}"]`)).toBe(group);
+  expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  expect(group.classList.contains('turn-process-group--running')).toBe(true);
+  fireEvent.click(toggle);
+  expect(group.querySelector('[data-tool-call-id="wait-read"] .turn-process-trace__row--completed')).not.toBeNull();
+  expect(group.querySelector('.turn-process-trace__row--running')).toBeNull();
+  fireEvent.click(page.getByRole('button', { name: 'Deliver phase narration' }));
+  expect(group.classList.contains('turn-process-group--running')).toBe(false);
+  expect(page.container.querySelector('.turn-process-disclosure--live')).not.toBeNull();
+  expect(page.container.querySelector('[data-process-segment-id="wait-public-boundary"]')?.closest('.turn-process-group')).toBeNull();
+  fireEvent.click(page.getByRole('button', { name: 'Commit terminal receipt' }));
+  expect(page.container.querySelector('.turn-process-disclosure--live')).toBeNull();
+  fireEvent.click(page.getByRole('button', { name: messagesLocale.turnProcess.expand }));
+  expect(page.container.querySelector('[data-process-group-id="canonical-stale-tail"]')).not.toBeNull();
+  expect(page.container.querySelector('.turn-process-group--running')).toBeNull();
+  expect(staleTool.content.status).toBe('running');
 });
 
 test('canonical segment references restore narration between mixed reasoning and tool groups', () => {

@@ -276,7 +276,7 @@ describe('replayed process trace', () => {
     expect(container.textContent).toContain('instruction scope changed before write');
   });
 
-  test('a mixed tool group marks only its last running call as current activity', () => {
+  test('a mixed tool group preserves individual tool states and its enclosing terminal override', () => {
     const item: IMessageToolGroup = {
       id: 'mixed-tools', type: 'tool_group', conversation_id: conversationId,
       position: 'left', created_at: 3,
@@ -286,7 +286,7 @@ describe('replayed process trace', () => {
       ],
     };
     const { container } = render(<I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>);
-    const active = container.querySelector('.turn-process-trace__row--current-activity');
+    const active = container.querySelector('.turn-process-trace__row--running');
     expect(active?.closest('[data-tool-call-id]')?.getAttribute('data-tool-call-id')).toBe('second');
     expect(active?.textContent).toContain('working now');
     expect(container.querySelector('.turn-process-trace__row--completed')?.closest('[data-tool-call-id]')?.getAttribute('data-tool-call-id')).toBe('first');
@@ -294,7 +294,7 @@ describe('replayed process trace', () => {
       <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} stateOverride='completed' /></I18nextProvider>
     );
     expect(settled.container.querySelectorAll('.turn-process-trace__row--completed')).toHaveLength(2);
-    expect(settled.container.querySelector('.turn-process-trace__row--current-activity')).toBeNull();
+    expect(settled.container.querySelector('.turn-process-trace__row--running')).toBeNull();
   });
 
 

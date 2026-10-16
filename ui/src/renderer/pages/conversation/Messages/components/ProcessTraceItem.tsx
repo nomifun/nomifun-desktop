@@ -187,7 +187,7 @@ const DetailSection: React.FC<{ label: string; value?: string }> = ({ label, val
 
 type ToolObservationRow = ToolReceiptDetailRow & { observationUnconfirmed?: boolean };
 
-const ToolTraceRow: React.FC<{ row: ToolObservationRow; workspaceRoots: string[]; current?: boolean }> = ({ row, workspaceRoots, current }) => {
+const ToolTraceRow: React.FC<{ row: ToolObservationRow; workspaceRoots: string[] }> = ({ row, workspaceRoots }) => {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const detailId = useId();
@@ -199,8 +199,7 @@ const ToolTraceRow: React.FC<{ row: ToolObservationRow; workspaceRoots: string[]
   const Header = hasDetail ? 'button' : 'div';
   return <div className='turn-process-trace-tool' data-tool-call-id={row.key} data-tool-observation={row.observationUnconfirmed ? 'unconfirmed' : undefined}>
     <Header type={hasDetail ? 'button' : undefined}
-      className={classNames('turn-process-trace__row turn-process-trace-tool__toggle', `turn-process-trace__row--${visualState}`,
-        current && 'turn-process-trace__row--current-activity')}
+      className={classNames('turn-process-trace__row turn-process-trace-tool__toggle', `turn-process-trace__row--${visualState}`)}
       onClick={hasDetail ? () => setExpanded(value => !value) : undefined}
       aria-expanded={hasDetail ? expanded : undefined} aria-controls={hasDetail ? detailId : undefined}>
       <span className='turn-process-trace__row-icon' role={row.state === 'failed' || row.state === 'canceled' ? 'img' : undefined}
@@ -229,8 +228,7 @@ const ToolProcessTraceRows: React.FC<{ messages: ToolProcessMessage[]; workspace
     return observationUnconfirmed ? { ...row, state: 'completed', observationUnconfirmed: true }
       : stateOverride && row.state === 'running' ? { ...row, state: stateOverride } : row;
   }), [language, messages, stateOverride]);
-  const current = rows.findLast(row => row.state === 'running')?.key;
-  return <div className='turn-process-trace'>{rows.map(row => <ToolTraceRow key={row.key} row={row} workspaceRoots={workspaceRoots} current={row.key === current} />)}</div>;
+  return <div className='turn-process-trace'>{rows.map(row => <ToolTraceRow key={row.key} row={row} workspaceRoots={workspaceRoots} />)}</div>;
 };
 
 const ProcessTraceItem: React.FC<{ item: ProcessTraceRenderableItem; variant?: 'list' | 'receipt'; workspaceRoots?: string[];

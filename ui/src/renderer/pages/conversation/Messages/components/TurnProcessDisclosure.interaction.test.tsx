@@ -86,20 +86,6 @@ test('the interrupted reply notice is limited to a closed cancellation with part
   }
 });
 
-test('only the latest running process row is current; no row animates after the turn finishes', () => {
-  const { container, rerender } = render(view(true));
-  expect(container.querySelector('.turn-process-disclosure__body')).not.toBeNull();
-  const current = container.querySelector('.turn-process-disclosure__item--current');
-  expect(current?.textContent).toBe('tool-result');
-  expect(container.querySelector('.turn-process-disclosure__item--thinking.turn-process-disclosure__item--current')).toBeNull();
-
-  rerender(view(false));
-  expect(container.querySelector('.turn-process-disclosure__body')).toBeNull();
-  fireEvent.click(container.querySelector('.turn-process-disclosure__toggle')!);
-  expect(container.querySelector('.turn-process-disclosure--live')).toBeNull();
-  expect(container.querySelector('.turn-process-disclosure__item--current')).toBeNull();
-});
-
 test('completed history starts collapsed and preserves manual expansion on refresh', () => {
   const page = render(view(false));
   const toggle = page.getByRole('button', { name: 'Expand thinking process' });
@@ -177,4 +163,72 @@ test('canonical groups keep narration outside, current work open, and manual cho
   expect(page.container.querySelector('.turn-process-disclosure__body')).toBeNull();
   fireEvent.click(page.container.querySelector('.turn-process-disclosure__toggle')!);
   expect(page.container.querySelector('.turn-process-group--running')).toBeNull();
+});
+
+type PhaseEntry = {
+  id: string;
+  group?: string;
+  kind: 'thinking' | 'tool' | 'text' | 'status';
+  state: 'running' | 'completed';
+};
+const phaseView = (
+  entries: PhaseEntry[],
+  state: 'running' | 'completed' | 'failed' | 'canceled' = 'running'
+) => <I18nextProvider i18n={i18n}>
+  <TurnProcessDisclosure item={{ id: 'phase-turn', processItems: entries, startAt: 1, endAt: 10,
+    state, running: state === 'running', defaultCollapsed: false }}
+    renderProcessItem={entry => <span>{entry.id}</span>} getProcessItemKey={entry => entry.id}
+    getProcessItemState={entry => entry.state} getProcessItemLayoutKind={entry => entry.kind}
+    getProcessGroupId={entry => entry.group} getProcessGroupLabel={entries => entries[0].group!} />
+</I18nextProvider>;
+const pulsingGroups = (container: HTMLElement) => Array.from(container.querySelectorAll('.turn-process-group--running'))
+  .map(group => group.getAttribute('data-process-group-id'));
+
+test('a process title stays active between calls without reopening a manually closed group', () => {
+  const tool: PhaseEntry = { id: 'tool', group: 'phase', kind: 'tool', state: 'running' };
+  const page = render(phaseView([tool]));
+  const toggle = page.getByRole('button', { name: 'phase' });
+  expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  fireEvent.click(toggle);
+  const settled: PhaseEntry = { ...tool, state: 'completed' };
+  const preparing: PhaseEntry = { id: 'model-preparing', kind: 'status', state: 'running' };
+  page.rerender(phaseView([settled, preparing]));
+  expect(pulsingGroups(page.container)).toEqual(['phase']);
+  expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  expect(page.getByRole('button', { name: 'phase' })).toBe(toggle);
+  fireEvent.click(toggle);
+  expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  expect(pulsingGroups(page.container)).toEqual(['phase']);
+  expect(page.container.querySelector('.turn-process-disclosure__item--completed')?.textContent).toBe('tool');
+  expect(settled.state).toBe('completed');
+  page.rerender(phaseView([settled, { id: 'narration', kind: 'text', state: 'completed' }, preparing]));
+  expect(pulsingGroups(page.container)).toEqual([]);
+});
+
+test('phase continuation follows narration boundaries while parallel work keeps its own title active', () => {
+  const first: PhaseEntry = { id: 'first-tool', group: 'first', kind: 'tool', state: 'running' };
+  const narration: PhaseEntry = { id: 'narration', kind: 'text', state: 'completed' };
+  const second: PhaseEntry = { id: 'second-tool', group: 'second', kind: 'tool', state: 'completed' };
+  const entries = [first, narration, second];
+  const page = render(phaseView(entries));
+  expect(pulsingGroups(page.container)).toEqual(['first', 'second']);
+  page.rerender(phaseView([{ ...first, state: 'completed' }, narration, second]));
+  expect(pulsingGroups(page.container)).toEqual(['second']);
+  page.rerender(phaseView([{ ...first, state: 'completed' }, narration, second,
+    { id: 'second-narration', kind: 'text', state: 'completed' }]));
+  expect(pulsingGroups(page.container)).toEqual([]);
+});
+
+test.each(['completed', 'failed', 'canceled'] as const)('a %s Turn immediately stops every title, including stale running children', state => {
+  const entries: PhaseEntry[] = [
+    { id: 'parallel', group: 'earlier', kind: 'tool', state: 'running' },
+    { id: 'narration', kind: 'text', state: 'completed' },
+    { id: 'settled', group: 'trailing', kind: 'tool', state: 'completed' },
+  ];
+  const page = render(phaseView(entries));
+  expect(pulsingGroups(page.container)).toEqual(['earlier', 'trailing']);
+  page.rerender(phaseView(entries, state));
+  expect(page.container.querySelector('.turn-process-disclosure__body')).not.toBeNull();
+  expect(pulsingGroups(page.container)).toEqual([]);
+  expect(entries[0].state).toBe('running');
 });

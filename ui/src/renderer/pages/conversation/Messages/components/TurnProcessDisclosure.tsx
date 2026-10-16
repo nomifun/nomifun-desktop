@@ -193,15 +193,6 @@ function TurnProcessDisclosure<T>({
     if (highlighted && hasProcessItems) setExpanded(true);
   }, [hasProcessItems, highlighted]);
 
-  const currentItemKey = useMemo(() => {
-    if (!item?.running) return undefined;
-    const latestItem = item.processItems.findLast(processItem => {
-      const kind = getProcessItemLayoutKind?.(processItem);
-      return getProcessItemState(processItem) === 'running' && (kind === 'thinking' || kind === 'tool');
-    });
-    return latestItem ? getProcessItemKey(latestItem) : undefined;
-  }, [getProcessItemKey, getProcessItemLayoutKind, getProcessItemState, item?.processItems, item?.running]);
-
   const entries = useMemo(() => {
     const output: ProcessEntry<T>[] = [];
     const groups = new Map<string, Extract<ProcessEntry<T>, { kind: 'group' }>>();
@@ -217,13 +208,19 @@ function TurnProcessDisclosure<T>({
   const currentGroup = item?.running ? entries.findLast(entry => entry.kind === 'group' &&
     entry.items.some(processItem => getProcessItemState(processItem) === 'running')) : undefined;
   const currentGroupId = currentGroup?.kind === 'group' ? currentGroup.id : undefined;
+  // A trailing process phase also includes the model/argument wait between its
+  // tool calls. Narration closes that continuation; lifecycle status rows do
+  // not. This affects the title only, never a tool outcome or expansion choice.
+  const continuingPhase = running ? entries.findLast(entry => entry.kind === 'group'
+    || getProcessItemLayoutKind?.(entry.item) === 'text') : undefined;
+  const continuingGroupId = continuingPhase?.kind === 'group' ? continuingPhase.id : undefined;
   const renderEntryItem = (processItem: T) => {
     const itemKey = getProcessItemKey(processItem);
     const state = getProcessItemState(processItem);
     const layoutKind = getProcessItemLayoutKind?.(processItem) ?? 'other';
     return <div key={itemKey} data-process-segment-id={itemKey} data-process-source-message-id={getProcessItemSourceId?.(processItem)}
       className={classNames('turn-process-disclosure__item', `turn-process-disclosure__item--${layoutKind}`,
-        `turn-process-disclosure__item--${state}`, itemKey === currentItemKey && 'turn-process-disclosure__item--current')}>
+        `turn-process-disclosure__item--${state}`)}>
       {renderProcessItem(processItem)}
     </div>;
   };
@@ -291,7 +288,8 @@ function TurnProcessDisclosure<T>({
           {entries.map(entry => entry.kind === 'item' ? renderEntryItem(entry.item) :
             <ProcessGroup key={entry.id} id={entry.id} items={entry.items}
               label={getProcessGroupLabel?.(entry.items) ?? t('conversation.thinking.complete')}
-              running={running && entry.items.some(processItem => getProcessItemState(processItem) === 'running')}
+              running={running && (entry.id === continuingGroupId
+                || entry.items.some(processItem => getProcessItemState(processItem) === 'running'))}
               active={entry.id === currentGroupId} highlighted={entry.items.some(processItem => isProcessItemHighlighted?.(processItem))}>
               {entry.items.map(renderEntryItem)}
             </ProcessGroup>)}

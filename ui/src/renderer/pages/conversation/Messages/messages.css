@@ -527,22 +527,6 @@ button.conversation-delegation__row:focus-visible {
   margin-bottom: 0;
 }
 
-.turn-process-disclosure--live
-  .turn-process-disclosure__item--current
-  .turn-process-trace__row--current-activity .turn-process-trace__text {
-  animation: turn-process-current-fade 1.55s ease-in-out infinite;
-}
-
-@keyframes turn-process-current-fade {
-  0%,
-  100% {
-    opacity: 0.38;
-  }
-  50% {
-    opacity: 1;
-  }
-}
-
 .turn-process-group--running > .turn-process-group__toggle .turn-process-group__label {
   animation: turn-process-group-pulse 2.8s ease-in-out infinite;
 }
@@ -954,9 +938,6 @@ button.turn-process-trace__row:focus-visible {
     transition: none;
   }
 
-  .turn-process-disclosure--live
-    .turn-process-disclosure__item--current
-    .turn-process-trace__row--current-activity .turn-process-trace__text,
   .turn-process-group--running > .turn-process-group__toggle .turn-process-group__label {
     animation: none;
   }
