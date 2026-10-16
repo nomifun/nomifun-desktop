@@ -19,7 +19,7 @@ use crc32fast::Hasher;
 use futures_util::{Stream, StreamExt};
 use crate::auth::{AuthMaterial, AuthScheme};
 use crate::error::{InvokeError, ModelFailureDiagnostic, ModelFailureReason};
-use crate::transport::{error_from_response_with_timeout, net_err};
+use crate::transport::{apply_protocol_request_headers, error_from_response_with_timeout, net_err};
 use serde_json::Value;
 use std::time::SystemTime;
 
@@ -442,10 +442,11 @@ impl SingleAttemptHttpExecutor {
             .post(request.url.trim())
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.clone());
-        let mut response = self.authenticator
+        let builder = self.authenticator
             .apply(builder, request, material, &body).map_err(|error|
                 error.with_request_context(&request.url, &request.protocol, Some(material.scheme.diagnostic_id()))
-                    .redacted(&material.secret_redactor()))?
+                    .redacted(&material.secret_redactor()))?;
+        let mut response = apply_protocol_request_headers(builder, &request.protocol)
             .send()
             .await
             .map_err(|error| net_err(error).with_request_context(&request.url, &request.protocol,

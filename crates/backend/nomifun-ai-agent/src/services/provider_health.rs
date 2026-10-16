@@ -530,8 +530,289 @@ mod tests {
         SqliteProviderRepository, init_database_memory,
     };
     use nomifun_model_invoke::{AdapterRegistry, default_adapters};
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    const CHAT_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000072";
+    const CHAT_MODEL: &str = "strict-anthropic-health";
+    const CHAT_KEY: &str = "local-health-fixture-key";
+
+    fn anthropic_text_stream(text: &str, stop_reason: &str, complete: bool) -> String {
+        let mut events = vec![
+            serde_json::json!({"type":"message_start","message":{"id":"msg_health","type":"message","role":"assistant",
+                "content":[],"model":CHAT_MODEL,"usage":{"input_tokens":2,"output_tokens":0}}}),
+            serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}}),
+            serde_json::json!({"type":"content_block_stop","index":0}),
+            serde_json::json!({"type":"message_delta","delta":{"stop_reason":stop_reason},"usage":{"output_tokens":1}}),
+        ];
+        if complete { events.push(serde_json::json!({"type":"message_stop"})); }
+        anthropic_frames(events)
+    }
+
+    fn anthropic_frames(events: Vec<serde_json::Value>) -> String {
+        events.into_iter().map(|event| format!("event: {}\ndata: {event}\n\n",event["type"].as_str().unwrap())).collect()
+    }
+
+    fn anthropic_unexpected_tool_stream() -> String {
+        anthropic_frames(vec![
+            serde_json::json!({"type":"message_start","message":{"id":"msg_health","type":"message","role":"assistant",
+                "content":[],"model":CHAT_MODEL,"usage":{"input_tokens":2,"output_tokens":0}}}),
+            serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_health","name":"unexpected_tool","input":{}}}),
+            serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}),
+            serde_json::json!({"type":"content_block_stop","index":0}),
+            serde_json::json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}),
+            serde_json::json!({"type":"message_stop"}),
+        ])
+    }
+
+    #[derive(Clone)]
+    struct StrictAnthropicEndpoint { stream: String }
+    impl Respond for StrictAnthropicEndpoint {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            if request.headers.get("anthropic-version").and_then(|value| value.to_str().ok()) != Some("2023-06-01") {
+                return ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "error":{"type":"invalid_request_error","message":"anthropic-version header is required"}
+                }));
+            }
+            ResponseTemplate::new(200).set_body_raw(self.stream.clone(),"text/event-stream")
+        }
+    }
+
+    async fn anthropic_health_fixture(server: &MockServer) -> (
+        ProviderHealthCheckService, Arc<SqliteProviderModelCapabilityRepository>, tempfile::TempDir,
+    ) {
+        managed_chat_health_fixture(server,"anthropic","anthropic.messages","header_key:x-api-key","/v1/messages").await
+    }
+
+    async fn managed_chat_health_fixture(
+        server: &MockServer, platform: &str, protocol: &str, auth_scheme: &str, endpoint_path: &str,
+    ) -> (ProviderHealthCheckService, Arc<SqliteProviderModelCapabilityRepository>, tempfile::TempDir) {
+        const KEY: [u8;32] = [0xA8;32];
+        let db = init_database_memory().await.unwrap();
+        let pool = db.pool().clone();
+        let provider_repo = Arc::new(SqliteProviderRepository::new(pool.clone()));
+        let capability_repo = Arc::new(SqliteProviderModelCapabilityRepository::new(pool.clone()));
+        let credentials = encrypt_string(&serde_json::json!({"api_keys":[CHAT_KEY]}).to_string(),&KEY).unwrap();
+        let endpoint = format!("{}{endpoint_path}",server.uri());
+        let capabilities = [NewProviderModelCapability {
+            task:"chat",traits:"[]",protocol,connection_role:"default",
+            endpoint:Some(&endpoint),provider_params:"{}",context_limit:Some(64000),output_limit:Some(4096),
+            ..Default::default()
+        }];
+        provider_repo.create(CreateProviderParams {
+            provider_id:Some(CHAT_PROVIDER_ID),platform,name:"Strict local health fixture",
+            base_url:&server.uri(),auth_scheme,credentials_encrypted:&credentials,
+            enabled:true,bedrock_config:None,sort_order:None,
+        },&NewProviderModel {model:CHAT_MODEL,enabled:true,capabilities:&capabilities,..Default::default()},&[]).await.unwrap();
+        let invoke = Arc::new(ModelInvokeService::new(provider_repo,
+            Arc::new(SqliteProviderModelRepository::new(pool.clone())),capability_repo.clone(),
+            Arc::new(SqliteProviderConnectionRepository::new(pool)),KEY,reqwest::Client::new(),
+            AdapterRegistry::new(default_adapters())));
+        let dir = tempfile::tempdir().unwrap();
+        (ProviderHealthCheckService::new(dir.path().to_owned(),invoke),capability_repo,dir)
+    }
+
+    #[tokio::test]
+    async fn anthropic_health_uses_required_version_header_and_complete_visible_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/messages")).and(header("x-api-key",CHAT_KEY))
+            .respond_with(StrictAnthropicEndpoint {stream:anthropic_text_stream("OK","end_turn",true)})
+            .expect(2).mount(&server).await;
+        let missing_version = reqwest::Client::new().post(format!("{}/v1/messages",server.uri()))
+            .header("x-api-key",CHAT_KEY).json(&serde_json::json!({"model":CHAT_MODEL,"stream":true,
+                "max_tokens":4096,"messages":[{"role":"user","content":"Reply OK"}]}))
+            .send().await.unwrap();
+        assert_eq!(missing_version.status(),reqwest::StatusCode::BAD_REQUEST);
+        let (service,capabilities,_dir) = anthropic_health_fixture(&server).await;
+        let response = service.health_check(ProviderHealthCheckRequest {
+            provider_id:CHAT_PROVIDER_ID.into(),model:CHAT_MODEL.into(),task:ModelTask::Chat,
+        }).await.unwrap();
+        assert_eq!(response.status,HealthStatus::Healthy,"{response:?}");
+        assert_eq!(response.attempted_url.as_deref(),Some(format!("{}/v1/messages",server.uri()).as_str()));
+        let requests = server.received_requests().await.unwrap();
+        assert!(!requests[0].headers.contains_key("anthropic-version"));
+        assert_eq!(requests[1].headers["anthropic-version"],"2023-06-01");
+        let body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(body["model"],CHAT_MODEL);
+        assert_eq!(body["stream"],true);
+        assert!(body.get("tools").is_none());
+        let stored = capabilities.get(CHAT_PROVIDER_ID,CHAT_MODEL,"chat").await.unwrap().unwrap().health.unwrap();
+        let stored: CapabilityHealth = serde_json::from_str(&stored).unwrap();
+        assert_eq!(stored.status,HealthStatus::Healthy);
+    }
+
+    #[tokio::test]
+    async fn anthropic_health_rejects_incomplete_empty_and_truncated_http_200_streams() {
+        for (name,stream) in [
+            ("partial",anthropic_text_stream("OK","end_turn",false)),
+            ("usage_only",anthropic_text_stream("","end_turn",true)),
+            ("max_tokens",anthropic_text_stream("OK","max_tokens",true)),
+            ("unexpected_tool",anthropic_unexpected_tool_stream()),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST")).and(path("/v1/messages")).and(header("x-api-key",CHAT_KEY))
+                .respond_with(StrictAnthropicEndpoint {stream}).expect(1).mount(&server).await;
+            let (service,capabilities,_dir) = anthropic_health_fixture(&server).await;
+            let response = service.health_check(ProviderHealthCheckRequest {
+                provider_id:CHAT_PROVIDER_ID.into(),model:CHAT_MODEL.into(),task:ModelTask::Chat,
+            }).await.unwrap();
+            assert_eq!(response.status,HealthStatus::Unhealthy,"{name}: {response:?}");
+            assert!(response.message.as_deref().is_some_and(|message| !message.is_empty()));
+            assert!(!serde_json::to_string(&response).unwrap().contains(CHAT_KEY));
+            let stored = capabilities.get(CHAT_PROVIDER_ID,CHAT_MODEL,"chat").await.unwrap().unwrap().health.unwrap();
+            let stored: CapabilityHealth = serde_json::from_str(&stored).unwrap();
+            assert_eq!(stored.status,HealthStatus::Unhealthy,"{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn anthropic_health_rejects_version_errors_and_redacts_diagnostics() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/messages")).and(header("anthropic-version","2023-06-01"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "type":"error","error":{"type":"invalid_request_error",
+                    "message":format!("anthropic-version rejected for key {CHAT_KEY}")}
+            }))).expect(1).mount(&server).await;
+        let (service,capabilities,_dir) = anthropic_health_fixture(&server).await;
+        let response = service.health_check(ProviderHealthCheckRequest {
+            provider_id:CHAT_PROVIDER_ID.into(),model:CHAT_MODEL.into(),task:ModelTask::Chat,
+        }).await.unwrap();
+        assert_eq!(response.status,HealthStatus::Unhealthy,"{response:?}");
+        assert_eq!(response.http_status,Some(400));
+        let response_json = serde_json::to_string(&response).unwrap();
+        assert!(response_json.contains("anthropic-version"));
+        assert!(!response_json.contains(CHAT_KEY));
+        let stored = capabilities.get(CHAT_PROVIDER_ID,CHAT_MODEL,"chat").await.unwrap().unwrap().health.unwrap();
+        assert!(!stored.contains(CHAT_KEY));
+        assert_eq!(serde_json::from_str::<CapabilityHealth>(&stored).unwrap().status,HealthStatus::Unhealthy);
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ChatHealthScenario { Complete, Empty, Partial, Truncated, Error }
+
+    fn data_sse_frames(events: Vec<serde_json::Value>) -> String {
+        events.into_iter().map(|event| format!("data: {event}\n\n")).collect()
+    }
+
+    fn openai_chat_health_stream(scenario: ChatHealthScenario) -> String {
+        let mut events = vec![serde_json::json!({"choices":[{"index":0,
+            "delta":{"role":"assistant","content":if scenario==ChatHealthScenario::Empty {""} else {"OK"}},
+            "finish_reason":null}]})];
+        if scenario == ChatHealthScenario::Partial {return data_sse_frames(events);}
+        if scenario == ChatHealthScenario::Error {
+            events.push(serde_json::json!({"error":{"code":"invalid_request_error","message":format!("fixture stream failure {CHAT_KEY}")}}));
+        } else {
+            events.push(serde_json::json!({"choices":[{"index":0,"delta":{},
+                "finish_reason":if scenario==ChatHealthScenario::Truncated {"length"} else {"stop"}}],
+                "usage":{"prompt_tokens":2,"completion_tokens":1}}));
+        }
+        format!("{}data: [DONE]\n\n",data_sse_frames(events))
+    }
+
+    fn responses_health_stream(scenario: ChatHealthScenario) -> String {
+        let mut events = vec![serde_json::json!({"type":"response.created","response":{
+            "id":"resp_health","status":"in_progress","store":false,"output":[]}})];
+        if scenario != ChatHealthScenario::Empty {
+            events.extend([
+                serde_json::json!({"type":"response.output_item.added","output_index":0,
+                    "item":{"id":"msg_health","type":"message","role":"assistant","status":"in_progress","content":[]}}),
+                serde_json::json!({"type":"response.content_part.added","output_index":0,"item_id":"msg_health","content_index":0,
+                    "part":{"type":"output_text","text":"","annotations":[]}}),
+                serde_json::json!({"type":"response.output_text.delta","output_index":0,"item_id":"msg_health","content_index":0,"delta":"OK"}),
+            ]);
+        }
+        if scenario == ChatHealthScenario::Partial {return anthropic_frames(events);}
+        if scenario == ChatHealthScenario::Error {
+            events.push(serde_json::json!({"type":"error","code":"invalid_request_error","message":format!("fixture stream failure {CHAT_KEY}")}));
+        } else {
+            let status = if scenario==ChatHealthScenario::Truncated {"incomplete"} else {"completed"};
+            let output = if scenario==ChatHealthScenario::Empty {vec![]} else {vec![serde_json::json!({
+                "id":"msg_health","type":"message","role":"assistant","status":status,
+                "content":[{"type":"output_text","text":"OK","annotations":[]}]})]};
+            let mut response = serde_json::json!({"id":"resp_health","status":status,"store":false,
+                "output":output,"usage":{"input_tokens":2,"output_tokens":1}});
+            if scenario==ChatHealthScenario::Truncated {
+                response["incomplete_details"] = serde_json::json!({"reason":"max_output_tokens"});
+            }
+            events.push(serde_json::json!({"type":format!("response.{status}"),"response":response}));
+        }
+        anthropic_frames(events)
+    }
+
+    fn gemini_health_stream(scenario: ChatHealthScenario) -> String {
+        let mut events = vec![serde_json::json!({"candidates":[{"index":0,"content":{"role":"model",
+            "parts":[{"text":if scenario==ChatHealthScenario::Empty {""} else {"OK"}}]}}],
+            "usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":1}})];
+        if scenario == ChatHealthScenario::Partial {return data_sse_frames(events);}
+        if scenario == ChatHealthScenario::Error {
+            events.push(serde_json::json!({"error":{"code":400,"status":"INVALID_ARGUMENT","message":format!("fixture stream failure {CHAT_KEY}")}}));
+        } else {
+            events.push(serde_json::json!({"candidates":[{"index":0,
+                "finishReason":if scenario==ChatHealthScenario::Truncated {"MAX_TOKENS"} else {"STOP"}}],
+                "usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":1}}));
+        }
+        data_sse_frames(events)
+    }
+
+    async fn assert_chat_health_scenarios(
+        platform: &str, protocol: &str, auth_scheme: &str, endpoint_path: &str, auth_header: &str,
+        stream: fn(ChatHealthScenario) -> String,
+    ) {
+        for scenario in [ChatHealthScenario::Complete,ChatHealthScenario::Empty,ChatHealthScenario::Partial,
+            ChatHealthScenario::Truncated,ChatHealthScenario::Error] {
+            let server = MockServer::start().await;
+            let auth_value = if auth_header=="authorization" {format!("Bearer {CHAT_KEY}")} else {CHAT_KEY.to_owned()};
+            let request_path = endpoint_path.split('?').next().unwrap();
+            Mock::given(method("POST")).and(path(request_path)).and(header(auth_header,auth_value.as_str()))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(stream(scenario),"text/event-stream"))
+                .expect(1).mount(&server).await;
+            let (service,capabilities,_dir) = managed_chat_health_fixture(&server,platform,protocol,auth_scheme,endpoint_path).await;
+            let response = service.health_check(ProviderHealthCheckRequest {
+                provider_id:CHAT_PROVIDER_ID.into(),model:CHAT_MODEL.into(),task:ModelTask::Chat,
+            }).await.unwrap();
+            let expected = if scenario==ChatHealthScenario::Complete {HealthStatus::Healthy} else {HealthStatus::Unhealthy};
+            assert_eq!(response.status,expected,"{protocol} {scenario:?}: {response:?}");
+            if expected==HealthStatus::Unhealthy {
+                assert!(response.message.as_deref().is_some_and(|message| !message.is_empty()));
+            }
+            assert!(!serde_json::to_string(&response).unwrap().contains(CHAT_KEY));
+            let stored = capabilities.get(CHAT_PROVIDER_ID,CHAT_MODEL,"chat").await.unwrap().unwrap().health.unwrap();
+            assert!(!stored.contains(CHAT_KEY));
+            assert_eq!(serde_json::from_str::<CapabilityHealth>(&stored).unwrap().status,expected,"{protocol} {scenario:?}");
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(),1,"{protocol} {scenario:?}");
+            assert!(!requests[0].headers.contains_key("anthropic-version"));
+            let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+            match protocol {
+                "openai.chat_text" => {assert!(body["messages"].is_array());assert_eq!(body["model"],CHAT_MODEL);assert_eq!(body["stream"],true);}
+                "openai.responses" => {assert!(body["input"].is_array());assert_eq!(body["model"],CHAT_MODEL);assert_eq!(body["stream"],true);assert_eq!(body["store"],false);}
+                "gemini.generate_text" => {
+                    assert!(body["contents"].is_array());
+                    assert_eq!(requests[0].url.query_pairs().find(|(key,_)| key=="alt").map(|(_,value)| value.into_owned()).as_deref(),Some("sse"));
+                    assert!(!requests[0].headers.contains_key("authorization"));
+                }
+                _ => unreachable!(),
+            }
+            assert!(body.get("tools").is_none(),"health only verifies a tool-free text response");
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_chat_health_requires_a_complete_visible_non_truncated_response() {
+        assert_chat_health_scenarios("openai","openai.chat_text","bearer","/v1/chat/completions","authorization",openai_chat_health_stream).await;
+    }
+
+    #[tokio::test]
+    async fn responses_health_requires_a_complete_visible_non_truncated_response() {
+        assert_chat_health_scenarios("openai","openai.responses","bearer","/v1/responses","authorization",responses_health_stream).await;
+    }
+
+    #[tokio::test]
+    async fn gemini_health_requires_a_complete_visible_non_truncated_response() {
+        assert_chat_health_scenarios("gemini","gemini.generate_text","header_key:x-goog-api-key",
+            &format!("/v1beta/models/{CHAT_MODEL}:streamGenerateContent?alt=sse"),"x-goog-api-key",gemini_health_stream).await;
+    }
 
     #[test]
     fn classifies_invoke_errors_without_transport_fallbacks() {

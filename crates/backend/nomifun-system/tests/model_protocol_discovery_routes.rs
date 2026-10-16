@@ -75,7 +75,12 @@ fn gemini_round(tool: bool) -> String {
 #[derive(Clone)]
 struct ToolRounds {protocol: &'static str,count:Arc<AtomicUsize>,delay:Duration}
 impl Respond for ToolRounds {
-    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        if self.protocol == "anthropic" && request.headers.get("anthropic-version")
+            .and_then(|value| value.to_str().ok()) != Some("2023-06-01") {
+            return ResponseTemplate::new(400).set_body_json(json!({"type":"error","error":{
+                "type":"invalid_request_error","message":"anthropic-version must be 2023-06-01"}}));
+        }
         let tool = self.count.fetch_add(1,Ordering::SeqCst) % 2 == 0;
         let stream = match self.protocol {"responses" => responses_round(tool),"anthropic" => anthropic_round(tool),"gemini" => gemini_round(tool),_ => chat_round(tool)};
         ResponseTemplate::new(200).set_delay(self.delay).set_body_raw(stream,"text/event-stream")
@@ -108,6 +113,8 @@ async fn all_available_chat_protocols_are_verified_and_selection_respects_only_a
             assert_eq!(candidate["capability"]["protocol"],protocol);assert_eq!(candidate["capability"]["output_limit"],16000);
         }
         let received=server.received_requests().await.unwrap(); assert_eq!(received.len(),4);
+        assert!(received.iter().all(|request| !request.headers.contains_key("anthropic-version")),
+            "OpenAI requests must not inherit Anthropic protocol headers");
         let responses_replay: Value=serde_json::from_slice(&received[1].body).unwrap();
         assert_eq!(responses_replay["input"][1]["type"],"reasoning");
         assert_eq!(responses_replay["input"][1]["content"],json!([{"type":"reasoning_text","text":"original reasoning"}]));
@@ -335,10 +342,17 @@ async fn native_anthropic_uses_its_declared_header_and_real_tool_result_replay()
     let mut draft=anonymous(&server,"anthropic.messages");draft["platform"]=json!("anthropic");draft["auth_scheme"]=json!("header_key:x-api-key");draft["base_url"]=json!(server.uri());
     let (_,body)=post(&router,ROUTE,draft).await;
     assert_eq!(body["data"]["selected_protocol"],"anthropic.messages","{body}");assert_eq!(body["data"]["candidates"].as_array().unwrap().len(),1);
-    let requests=server.received_requests().await.unwrap();let replay:Value=serde_json::from_slice(&requests[1].body).unwrap();
+    let requests=server.received_requests().await.unwrap();
+    assert_eq!(requests.len(),2,"Anthropic discovery must verify both real tool rounds");
+    for request in &requests {
+        assert_eq!(request.headers.get("anthropic-version").unwrap(),"2023-06-01");
+        assert_eq!(request.headers.get_all("anthropic-version").iter().count(),1);
+        assert_eq!(request.headers.get("x-api-key").unwrap(),SECRET);
+        assert!(!request.headers.contains_key("authorization"));
+    }
+    let replay:Value=serde_json::from_slice(&requests[1].body).unwrap();
     assert_eq!(replay["messages"][1]["content"][0]["signature"],"original-anthropic-signature");
     assert_eq!(replay["messages"][1]["content"][1]["type"],"tool_use");assert_eq!(replay["messages"][2]["content"][0]["type"],"tool_result");
-    assert!(!requests[0].headers.contains_key("authorization"));
 }
 
 #[tokio::test]
@@ -349,7 +363,11 @@ async fn native_gemini_preserves_the_exact_tool_thought_signature_and_model_endp
     let mut draft=anonymous(&server,"gemini.generate_text");draft["platform"]=json!("gemini");draft["auth_scheme"]=json!("header_key:x-goog-api-key");draft["base_url"]=json!(server.uri());
     let (_,body)=post(&router,ROUTE,draft).await;
     assert_eq!(body["data"]["selected_protocol"],"gemini.generate_text","{body}");assert_eq!(body["data"]["candidates"].as_array().unwrap().len(),1);
-    let requests=server.received_requests().await.unwrap();let replay:Value=serde_json::from_slice(&requests[1].body).unwrap();
+    let requests=server.received_requests().await.unwrap();
+    assert_eq!(requests.len(),2);
+    assert!(requests.iter().all(|request| !request.headers.contains_key("anthropic-version")),
+        "Gemini requests must not inherit Anthropic protocol headers");
+    let replay:Value=serde_json::from_slice(&requests[1].body).unwrap();
     assert_eq!(replay["contents"][1]["parts"][0]["thoughtSignature"],"original-thought-signature");
     assert_eq!(replay["contents"][2]["parts"][0]["functionResponse"]["id"],"call_1");
     assert!(!requests[0].headers.contains_key("authorization"));

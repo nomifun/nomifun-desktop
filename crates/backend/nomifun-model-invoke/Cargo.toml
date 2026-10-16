@@ -31,4 +31,5 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+nomifun-chat-model-broker.workspace = true
 wiremock.workspace = true

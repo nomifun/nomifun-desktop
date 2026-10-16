@@ -29,6 +29,7 @@ import {
 import useModelProtocolManifests from './useModelProtocolManifests';
 import { useProviderConnections } from './useProviderConnections';
 import ModelCallConfigModalFooter from './ModelCallConfigModalFooter';
+import ModelConfigurationSaveFooter from './ModelConfigurationSaveFooter';
 import ProviderAutoConfigurationNotice from './ProviderAutoConfigurationNotice';
 import {
   applyProviderAutoConfiguration,
@@ -43,6 +44,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
     const [definition, setDefinition] = useState<ModelDefinitionDraft>(() => createModelDefinitionDraft(initialTask));
     const [saving, setSaving] = useState(false);
     const [protocolDetecting, setProtocolDetecting] = useState(false);
+    const [discoverySkipped, setDiscoverySkipped] = useState(false);
     const [focusedCallConfigTask, setFocusedCallConfigTask] = useState<ModelTask>();
     const modelEditorRef = useRef<ModelDefinitionEditorHandle>(null);
     const appliedAutoConfigurationRef = useRef('');
@@ -63,7 +65,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
     });
     const autoConfigurationEnabled = isAutoConfigurationPlatform(data?.platform ?? '');
     const autoConfiguration = useProviderAutoConfiguration({
-      enabled: modalProps.visible && autoConfigurationEnabled,
+      enabled: modalProps.visible && autoConfigurationEnabled && !discoverySkipped,
       platform: data?.platform ?? '',
       baseUrl: data?.base_url ?? '',
       authScheme: data?.auth_scheme ?? '',
@@ -123,6 +125,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
       if (modalProps.visible) {
         setDefinition(createModelDefinitionDraft(initialTask));
         setSaving(false);
+        setDiscoverySkipped(false);
         setFocusedCallConfigTask(undefined);
         appliedAutoConfigurationRef.current = '';
       }
@@ -130,25 +133,17 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
 
     useEffect(() => {
       const batch = autoConfiguration.data;
-      if (!batch || batch.detections.length === 0) return;
+      if (discoverySkipped || !batch || batch.detections.length === 0) return;
       const signature = JSON.stringify(batch);
       if (appliedAutoConfigurationRef.current === signature) return;
       appliedAutoConfigurationRef.current = signature;
       setDefinition((current) =>
         applyProviderAutoConfiguration(current, batch.detections)
       );
-    }, [autoConfiguration.data]);
+    }, [autoConfiguration.data, discoverySkipped]);
 
-    const handleConfirm = useCallback(async () => {
-      if (protocolDetecting) return;
-      if (autoConfiguration.isLoading) {
-        message.warning(
-          t('settings.providerAutoConfiguration.detecting', {
-            defaultValue: '正在探测协议、鉴权方式和可用 API 地址…',
-          })
-        );
-        return;
-      }
+    const handleConfirm = useCallback(async (force = false) => {
+      if (saving || (!force && (protocolDetecting || autoConfiguration.isLoading))) return;
       if (!data || !validation.valid) {
         // Name the blockers. A bare "finish configuring each task" left a
         // new-api provider — which requires an explicit protocol per model —
@@ -172,6 +167,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
         return;
       }
 
+      if (force) setDiscoverySkipped(true);
       setSaving(true);
       try {
         await ipcBridge.providerModel.save.invoke({
@@ -201,6 +197,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
       modalCtrl,
       onSubmit,
       protocolDetecting,
+      saving,
       t,
       validation.errors,
       validation.valid,
@@ -230,7 +227,16 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
                 onCancel={() => modelEditorRef.current?.cancelCallConfig()}
                 onApply={() => modelEditorRef.current?.applyCallConfig()}
               />
-            ) : undefined
+            ) : (
+              <ModelConfigurationSaveFooter
+                configuring={protocolDetecting || autoConfiguration.isLoading}
+                saving={saving}
+                disabled={!validation.valid}
+                onCancel={modalCtrl.close}
+                onSave={() => void handleConfirm()}
+                onForceSave={() => void handleConfirm(true)}
+              />
+            )
           }
           style={{
             width: focusedCallConfigTask ? 840 : 760,
@@ -244,7 +250,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
             overflow: 'auto',
             maxHeight: focusedCallConfigTask ? 'calc(96vh - 72px)' : undefined,
           }}
-          onOk={handleConfirm}
+          onOk={() => void handleConfirm()}
           confirmLoading={saving}
           okText={t('common.confirm')}
           cancelText={t('common.cancel')}
@@ -269,7 +275,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
               providerBaseUrl={data?.base_url ?? ''}
               providerAuthScheme={data?.auth_scheme ?? ''}
               providerLabel={data?.name ?? data?.platform ?? ''}
-              protocolDiscovery={data && modalProps.visible ? {
+              protocolDiscovery={data && modalProps.visible && !discoverySkipped ? {
                 providerId: data.id, platform: data.platform, baseUrl: data.base_url, authScheme: data.auth_scheme,
               } : undefined}
               onProtocolDiscoveryPendingChange={setProtocolDetecting}

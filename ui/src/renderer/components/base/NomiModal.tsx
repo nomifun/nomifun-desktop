@@ -288,24 +288,38 @@ const NomiModal: React.FC<NomiModalProps> = ({
     if (footer === undefined) {
       const cancelLabel = props.cancelText ?? t('common.cancel', { defaultValue: 'Cancel' });
       const okLabel = props.okText ?? t('common.confirm', { defaultValue: 'Confirm' });
+      const { okButtonProps, cancelButtonProps } = props;
+      const okLoading = Boolean(props.confirmLoading || okButtonProps?.loading);
       return {
         render: () => (
           <div className='flex justify-end gap-8px'>
             {/* 默认按钮提供统一圆角，文案可通过 cancelText/okText 覆盖 */}
             {/* Default buttons ship with rounded corners; text can be overridden via cancelText/okText */}
-            <Button onClick={onCancel} className='px-16px min-w-72px' style={{ borderRadius: 8 }}>
+            <Button
+              {...cancelButtonProps}
+              onClick={(e) => {
+                if (cancelButtonProps?.disabled || cancelButtonProps?.loading) return;
+                if (cancelButtonProps?.onClick) cancelButtonProps.onClick(e);
+                else onCancel?.();
+              }}
+              className={classNames('px-16px min-w-72px', cancelButtonProps?.className)}
+              style={{ borderRadius: 8, ...cancelButtonProps?.style }}
+            >
               {cancelLabel}
             </Button>
             <Button
               type='primary'
+              {...okButtonProps}
               // Button.onClick is (e: Event) => void; Modal.onOk is (e?: MouseEvent) => Promise|void.
               // Forward the original MouseEvent when present and discard the return value.
               onClick={(e) => {
-                props.onOk?.(e instanceof MouseEvent ? e : undefined);
+                if (okButtonProps?.disabled || okLoading) return;
+                if (okButtonProps?.onClick) okButtonProps.onClick(e);
+                else props.onOk?.(e instanceof MouseEvent ? e : undefined);
               }}
-              loading={props.confirmLoading}
-              className='px-16px min-w-72px'
-              style={{ borderRadius: 8 }}
+              loading={okLoading}
+              className={classNames('px-16px min-w-72px', okButtonProps?.className)}
+              style={{ borderRadius: 8, ...okButtonProps?.style }}
             >
               {okLabel}
             </Button>
@@ -321,7 +335,7 @@ const NomiModal: React.FC<NomiModalProps> = ({
       };
     }
     return footer as ModalFooterConfig;
-  }, [footer, onCancel, props.cancelText, props.okText, props.onOk, props.confirmLoading, t]);
+  }, [footer, onCancel, props.cancelText, props.okText, props.onOk, props.confirmLoading, props.okButtonProps, props.cancelButtonProps, t]);
 
   // 渲染 Header
   const renderHeader = () => {

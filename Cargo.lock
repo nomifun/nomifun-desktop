@@ -6450,6 +6450,7 @@ dependencies = [
  "futures-util",
  "httpdate",
  "nomifun-api-types",
+ "nomifun-chat-model-broker",
  "nomifun-common",
  "nomifun-db",
  "nomifun-net",

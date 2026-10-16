@@ -25,6 +25,7 @@ import {
 import useModelProtocolManifests from './useModelProtocolManifests';
 import { useProviderConnections } from './useProviderConnections';
 import ModelCallConfigModalFooter from './ModelCallConfigModalFooter';
+import ModelConfigurationSaveFooter from './ModelConfigurationSaveFooter';
 import { mergeTaskCapabilityEdit, resolveScopedModelTextEdit } from './modelTaskScopedEdit';
 
 export interface ModelAdvancedPatch {
@@ -75,6 +76,7 @@ const ModelAdvancedEditor: React.FC<ModelAdvancedEditorProps> = ({
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [protocolDetecting, setProtocolDetecting] = useState(false);
+  const [discoverySkipped, setDiscoverySkipped] = useState(false);
   const [scopeError, setScopeError] = useState<'unavailable' | 'changed' | 'metadata_changed'>();
   const [descriptionDraft, setDescriptionDraft] = useState(description ?? '');
   const [focusedCallConfigTask, setFocusedCallConfigTask] = useState<ModelTask>();
@@ -138,6 +140,8 @@ const ModelAdvancedEditor: React.FC<ModelAdvancedEditorProps> = ({
     setDescriptionDraft(description ?? '');
     setScopeError(undefined);
     setFocusedCallConfigTask(undefined);
+    setDiscoverySkipped(false);
+    setProtocolDetecting(false);
     setOpen(true);
   }, [capabilities, description, displayName, resetDraft, task]);
 
@@ -154,8 +158,8 @@ const ModelAdvancedEditor: React.FC<ModelAdvancedEditorProps> = ({
     onOpenRequestHandled?.(openRequest);
   }, [handleOpen, onOpenRequestHandled, openRequest]);
 
-  const handleSave = async () => {
-    if (!validation.valid || protocolDetecting) return;
+  const handleSave = async (force = false) => {
+    if (saving || scopeError || !validation.valid || (!force && protocolDetecting)) return;
     const scopedSave = task
       ? mergeTaskCapabilityEdit(definition, capabilities, task, taskBaselineRef.current)
       : undefined;
@@ -175,6 +179,7 @@ const ModelAdvancedEditor: React.FC<ModelAdvancedEditorProps> = ({
       setScopeError('metadata_changed');
       return;
     }
+    if (force) setDiscoverySkipped(true);
     setSaving(true);
     try {
       await onSave({
@@ -232,26 +237,15 @@ const ModelAdvancedEditor: React.FC<ModelAdvancedEditorProps> = ({
             onApply={() => modelEditorRef.current?.applyCallConfig()}
           />
         ) :
-          <div className='flex justify-end gap-10px mt-10px'>
-            <Button
-              disabled={saving}
-              className='px-20px min-w-80px'
-              style={{ borderRadius: 8 }}
-              onClick={handleClose}
-            >
-              {t('common.cancel')}
-            </Button>
-            <Button
-              type='primary'
-              loading={saving}
-              disabled={!validation.valid || Boolean(scopeError) || protocolDetecting}
-              className='px-20px min-w-80px'
-              style={{ borderRadius: 8 }}
-              onClick={() => void handleSave()}
-            >
-              {t('common.save')}
-            </Button>
-          </div>
+          <ModelConfigurationSaveFooter
+            configuring={protocolDetecting}
+            saving={saving}
+            disabled={!validation.valid || Boolean(scopeError)}
+            onCancel={handleClose}
+            onSave={() => void handleSave()}
+            onForceSave={() => void handleSave(true)}
+            confirmText={t('common.save')}
+          />
         }
       >
         <div className='pt-16px'>
@@ -277,7 +271,7 @@ const ModelAdvancedEditor: React.FC<ModelAdvancedEditorProps> = ({
             providerBaseUrl={providerBaseUrl}
             providerAuthScheme={providerAuthScheme}
             providerLabel={providerName}
-            protocolDiscovery={open ? { providerId, platform: preset, baseUrl: providerBaseUrl, authScheme: providerAuthScheme } : undefined}
+            protocolDiscovery={open && !discoverySkipped ? { providerId, platform: preset, baseUrl: providerBaseUrl, authScheme: providerAuthScheme } : undefined}
             onProtocolDiscoveryPendingChange={setProtocolDetecting}
             manifests={manifests.manifests}
             manifestLoadingTasks={manifests.loadingTasks}

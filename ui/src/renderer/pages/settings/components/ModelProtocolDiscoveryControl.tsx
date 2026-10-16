@@ -2,7 +2,8 @@ import { ipcBridge } from '@/common';
 import type { DiscoverModelProtocolsResponse } from '@/common/protocolBindings/DiscoverModelProtocolsResponse';
 import type { ModelProtocolCandidate } from '@/common/protocolBindings/ModelProtocolCandidate';
 import type { ProviderModelCapabilityInput } from '@/common/types/provider/providerModel';
-import { Button, Tag } from '@arco-design/web-react';
+import { Button, Spin, Tag } from '@arco-design/web-react';
+import { IconLoading } from '@arco-design/web-react/icon';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { modelProtocolDiscoveryContextSnapshot, modelProtocolDiscoverySnapshot, type ModelProtocolDiscoveryContext } from './modelProtocolDiscovery';
@@ -29,7 +30,7 @@ const keyFor = (snapshot: string, preferred: string | undefined, revision: numbe
 /** Only committed model IDs start discovery. Results and deduplication stay in this editor. */
 export default function ModelProtocolDiscoveryControl({ model, committed, applyRecommendedDefaults, capability, snapshot, context, preferredProtocol, onSelect, onPendingChange, onConfigureProtocol }: Props) {
   const { t } = useTranslation();
-  const [checking, setChecking] = useState(false);
+  const [checkingKey, setCheckingKey] = useState<string>();
   const [completed, setCompleted] = useState<Completed>();
   const [retry, setRetry] = useState(0);
   const cache = useRef(new Map<string, Completed>());
@@ -49,18 +50,19 @@ export default function ModelProtocolDiscoveryControl({ model, committed, applyR
   current.current = { key, onSelect, onPendingChange };
   const ready = Boolean(committed && model.trim() && capability &&
     (context.providerId || context.credentials !== undefined) && (context.providerId || context.baseUrl.trim() || context.bedrockConfig));
+  const checking = ready && checkingKey === key;
 
   useEffect(() => {
     setDisclosure({ identity: disclosureIdentity, settings: false, diagnostics: false });
   }, [disclosureIdentity]);
 
   useEffect(() => {
-    if (!ready || !capability) { setChecking(false); return; }
+    if (!ready || !capability) { setCheckingKey(undefined); return; }
     const cached = cache.current.get(key);
-    if (cached) { setCompleted(cached); setChecking(false); return; }
+    if (cached) { setCompleted(cached); setCheckingKey(undefined); return; }
     let active = true;
     const controller = new AbortController();
-    setChecking(true);
+    setCheckingKey(key);
     current.current.onPendingChange?.(true);
     const timer = setTimeout(() => {
       void (async () => {
@@ -104,7 +106,7 @@ export default function ModelProtocolDiscoveryControl({ model, committed, applyR
           const entry = { key, error: reason instanceof Error ? reason.message : String(reason) };
           cache.current.set(key, entry); setCompleted(entry);
         } finally {
-          if (active) { setChecking(false); current.current.onPendingChange?.(false); }
+          if (active) { setCheckingKey(undefined); current.current.onPendingChange?.(false); }
         }
       })();
     }, 300);
@@ -121,7 +123,8 @@ export default function ModelProtocolDiscoveryControl({ model, committed, applyR
   const needsReview = available.length === 0 && diagnostics.some(candidate => candidate.status === 'blocked' || candidate.status === 'incompatible');
   const status = !committed ? t('settings.modelProtocolDiscovery.awaitCommit')
     : !ready ? t('settings.modelProtocolDiscovery.needsConfiguration')
-    : checking || !displayed ? t('settings.modelProtocolDiscovery.checking')
+    : checking ? t('settings.modelProtocolDiscovery.checking')
+    : !displayed ? t('settings.modelProtocolDiscovery.waiting')
     : available.length > 0 ? t(selected?.evidence === 'verified_stream' ? 'settings.modelProtocolDiscovery.connected' : 'settings.modelProtocolDiscovery.configured')
     : needsReview ? t('settings.modelProtocolDiscovery.reviewConfiguration')
     : t('settings.modelProtocolDiscovery.unavailable');
@@ -144,9 +147,12 @@ export default function ModelProtocolDiscoveryControl({ model, committed, applyR
     cache.current.set(nextKey, entry); setCompleted(entry);
     current.current.onSelect(snapshot, candidate.capability, 'manual');
   };
-  return <div className='space-y-6px border-0 border-t border-solid border-[var(--color-border-2)] px-14px py-8px' data-model-protocol-discovery={capability?.task}>
+  return <div className='space-y-6px border-0 border-t border-solid border-[var(--color-border-2)] px-14px py-8px' data-model-protocol-discovery={capability?.task} aria-busy={checking}>
     <div className='flex items-center justify-between gap-8px text-11px leading-4 text-t-secondary'>
-      <span role='status' aria-live='polite'>{status}</span>
+      <span className='inline-flex min-w-0 items-center gap-6px' role='status' aria-live='polite' aria-atomic='true'>
+        {checking && <Spin size={14} aria-hidden='true' element={<IconLoading className='motion-reduce:!animate-none' style={{ fontSize: 14 }} />} />}
+        <span>{status}</span>
+      </span>
       <Button size='mini' type='text' aria-expanded={settingsOpen} onClick={() => {
         setDisclosure({ identity: disclosureIdentity, settings: !settingsOpen, diagnostics: false });
       }}>{t('settings.modelProtocolDiscovery.connectionSettings')}</Button>

@@ -25,6 +25,7 @@ use nomifun_model_invoke::{
     AuthMaterial, ResolvedConnection, preset_protocol_recommendation, protocol_task_descriptor,
     resolve_submit_url, root_candidates,
 };
+use nomifun_model_invoke::transport::apply_protocol_request_headers;
 use nomifun_net::api_response::{NON_API_DIAGNOSTIC, is_non_api_content_type, looks_like_markup};
 use nomifun_net::secret_redaction::redact_url_queries;
 use tracing::debug;
@@ -209,11 +210,7 @@ impl ModelFetchService {
             // An empty JSON object is enough to prove the path exists: a correct
             // endpoint answers 400, which costs no tokens and produces no content.
             .json(&serde_json::json!({}));
-        let request = if protocol == "anthropic.messages" {
-            request.header("anthropic-version", "2023-06-01")
-        } else {
-            request
-        };
+        let request = apply_protocol_request_headers(request, protocol);
         let request = auth
             .apply(request)
             .map_err(|error| AppError::BadRequest(error.to_string()))?;

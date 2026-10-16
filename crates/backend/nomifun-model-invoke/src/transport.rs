@@ -27,6 +27,23 @@ pub fn net_err(e: reqwest::Error) -> InvokeError {
     InvokeError::network(&e)
 }
 
+/// Attach mandatory, non-credential protocol headers at the HTTP boundary.
+/// These are selected by the persisted protocol, independently of provider
+/// name, endpoint, authentication scheme or user-authored JSON parameters.
+pub fn apply_protocol_request_headers(
+    builder: reqwest::RequestBuilder,
+    protocol_id: &str,
+) -> reqwest::RequestBuilder {
+    if protocol_id == "anthropic.messages" {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("anthropic-version", reqwest::header::HeaderValue::from_static("2023-06-01"));
+        // Replace any existing value instead of appending a second version.
+        builder.headers(headers)
+    } else {
+        builder
+    }
+}
+
 /// HTTP statuses that mean "this key was refused / throttled" — the rotation
 /// trigger set: 401/403 (auth) and 429 (rate limit).
 fn is_rotation_status(status: reqwest::StatusCode) -> bool {
@@ -672,6 +689,29 @@ mod tests {
 
     use super::*;
     use crate::auth::{AuthMaterial, AuthScheme};
+
+    #[test]
+    fn protocol_headers_replace_messages_version_without_changing_auth_or_other_headers() {
+        let request = apply_protocol_request_headers(reqwest::Client::new().post("https://example.invalid/messages")
+            .header("x-api-key", "fixture-key").header("content-type", "application/json")
+            .header("anthropic-version", "wrong-version").header("anthropic-version", "another-wrong-version"),
+            "anthropic.messages").build().unwrap();
+        assert_eq!(request.headers().get_all("anthropic-version").iter().count(), 1);
+        assert_eq!(request.headers()["anthropic-version"], "2023-06-01");
+        assert_eq!(request.headers()["x-api-key"], "fixture-key");
+        assert_eq!(request.headers()["content-type"], "application/json");
+    }
+
+    #[test]
+    fn protocol_headers_do_not_guess_anthropic_version_from_related_protocols() {
+        for protocol in ["openai.chat_text", "openai.responses", "gemini.generate_text",
+            "bedrock.anthropic_messages", "vertex.anthropic_messages", "custom-anthropic-relay"] {
+            let request = apply_protocol_request_headers(reqwest::Client::new().post("https://example.invalid/messages")
+                .header("authorization", "Bearer fixture-key"), protocol).build().unwrap();
+            assert!(!request.headers().contains_key("anthropic-version"), "{protocol}");
+            assert_eq!(request.headers()["authorization"], "Bearer fixture-key");
+        }
+    }
 
     #[test]
     fn technical_capability_downgrade_requires_explicit_machine_evidence() {
