@@ -5,6 +5,18 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.10 - 2026-10-16
+
+- Modernize model configuration with current OpenAI protocols, automatic
+  compatible-protocol detection and setup, restored Chat defaults, refreshed
+  provider presets, and a Qianwen AI preset.
+- Harden model health checks, validate multimodal results, and distinguish
+  unverified capabilities from successful checks.
+- Add editable robot capability profiles, companion bindings, a focused
+  companion preset, and responsive device input.
+- Apply robot selection from a frozen companion workspace and classify dog
+  actions as motion with clearer session bindings.
+
 ## v0.8.9 - 2026-10-15
 
 - Add scoped attachment drag and drop to conversations; unify commands and
