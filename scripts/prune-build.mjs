@@ -4,14 +4,15 @@
  *
  * Keeps build artifact directories bounded WITHOUT a scheduled/cron job.
  * "Cleanup cadence = build cadence": this runs once at the START of every build,
- * before cargo touches anything, so the previous session's cruft is reclaimed
- * exactly when the next session begins. The growth driver IS the build, so
+ * before this command's cargo starts. If any build tool is already running,
+ * process enumeration fails, or an incremental session is still marked
+ * working, automatic cleanup skips the entire pass. The growth driver IS the build, so
  * hooking cleanup to the build makes the two cadences match by construction.
  *
  * What it does (dev/test preflight, in order):
  *   1. GC the incremental cache PER UNIT: inside each incremental/<crate>-<hash>/
  *      dir, keep only the newest finalized session (the one rustc would load)
- *      and delete older/interrupted sessions + orphan locks. This preserves
+ *      and delete older finalized sessions + orphan locks. This preserves
  *      cross-session warmth (zero rebuild-speed regression) while removing the
  *      dead sessions that ballooned this to 82G/241k-files in 2 days.
  *   2. Remove leftover junk and stale debug WebUI resource staging.
@@ -34,6 +35,12 @@
  *
  * Design invariants:
  *   - NEVER fails the build chain (always exits 0).
+ *   - Process-name checks cover Cargo, rustc, rustdoc and native linkers across
+ *     checkouts. Explicit --release clean also requires a verified idle state;
+ *     only that explicit mode may reclaim leftover working sessions. Ordinary
+ *     finalized-session .lock files do not prevent cleanup.
+ *   - This is a conservative snapshot guard, not shared-lock mutual exclusion:
+ *     a compiler can still start after the check (the remaining TOCTOU window).
  *   - Cross-platform (macOS / Linux / Windows): all paths via node:path, all
  *     deletes and logical-byte measurements use the same node:fs implementation.
  *     `cargo sweep` is optional. Without it, per-unit LRU eviction retains the
@@ -75,6 +82,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { inspectBuildActivity } from './lib/build-cleanup-activity.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const BUILD_DIR = join(ROOT, 'build.noindex');
@@ -100,6 +108,8 @@ const capIdx = args.indexOf('--cap');
 const CAP_GB = capIdx >= 0 && args[capIdx + 1] ? Number(args[capIdx + 1]) : 36;
 
 const TAG = '[prune-build]';
+
+class WorkingSessionObserved extends Error {}
 
 function log(msg) {
   console.log(`${TAG} ${msg}`);
@@ -441,13 +451,14 @@ function rmGlob(dir, pattern, label) {
  * Per-unit incremental GC.
  *
  * Layout: incremental/<crate>-<hash>/s-<id>-<svh>/  (+ a 0-byte s-<id>.lock)
- * rustc loads only the newest *finalized* session per unit; older sessions and
- * leftover "-working" dirs from interrupted compiles are dead and never GC'd by
- * cargo during fast dev iteration. We keep the newest finalized session per unit
+ * rustc loads only the newest *finalized* session per unit. A "-working" dir can
+ * belong to a live compile, so the automatic entry guard skips the whole pass
+ * when one exists. Explicit --release clean can reclaim leftovers after the
+ * process check confirms idle. We keep the newest finalized session per unit
  * (warmth preserved) and delete the rest. NEVER groups across units — every
  * <crate>-<hash> dir (incl. each per-crate build_script_build-*) is independent.
  */
-function pruneIncrementalSessions(incrDir) {
+export function pruneIncrementalSessions(incrDir) {
   let units;
   try { units = readdirSync(incrDir); } catch { return; }
 
@@ -471,6 +482,9 @@ function pruneIncrementalSessions(incrDir) {
       } catch { /* skip */ }
     }
     if (sessions.length === 0) continue;
+    // If a working session appears after the entry snapshot, abort the rest of
+    // this pass too. Merely skipping this unit would let LRU/cap deletion follow.
+    if (sessions.some(session => session.working)) throw new WorkingSessionObserved();
 
     // Prefer the newest finalized session; fall back to newest overall.
     const finals = sessions.filter((s) => !s.working);
@@ -613,44 +627,93 @@ function boundedCleanup(initialSizes) {
   return { buildGB, targetGB };
 }
 
-// ── Main ─────────────────────────────────────────────────────────────────────
-try {
-  const beforeSizes = { buildGB: dirSizeGB(BUILD_DIR), targetGB: dirSizeGB(TARGET_DIR) };
-  const beforeGB = beforeSizes.buildGB + beforeSizes.targetGB;
-  const mode = isPre ? ' [pre]' : isPost ? ' [post]' : isRelease ? ' [release]' : '';
-  log(`start: ${fmtGB(beforeGB)} total (build.noindex + target)${mode}`);
-  let afterSizes;
-
-  // A repository move invalidates absolute build-script outputs even when
-  // Cargo's ordinary fingerprints still look fresh. Repair that cache before
-  // Tauri consumes its generated permission paths.
-  if (!isPost) {
-    retireRelocatedBuildProfiles(isPre ? ['release'] : isRelease ? ['debug', 'release'] : ['debug']);
+/** Only a real working directory is a marker; finalized sessions keep .locks. */
+function hasWorkingIncrementalSession() {
+  for (const incrDir of incrementalCacheDirs()) {
+    let units;
+    try { units = readdirSync(incrDir, { withFileTypes: true }); } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      throw error;
+    }
+    for (const unit of units) {
+      if (!unit.isDirectory()) continue;
+      const entries = readdirSync(join(incrDir, unit.name), { withFileTypes: true });
+      if (entries.some(entry => entry.isDirectory() && entry.name.endsWith('-working'))) return true;
+    }
   }
-
-  if (isPre) {
-    // Cheap pre-build step (tauri beforeBuildCommand): clean output + junk only,
-    // so the release compile starts immediately. Bounded cleanup runs via --post.
-    preReleaseClean();
-  } else if (isPost) {
-    // Preserve warm debug caches after release while still enforcing disk bounds.
-    afterSizes = boundedCleanup(beforeSizes);
-  } else if (isRelease) {
-    // Explicit destructive cleanup (`bun run clean`): outputs + debug profiles.
-    preReleaseClean();
-    reclaimDebugDeadWeight();
-  } else {
-    afterSizes = boundedCleanup(beforeSizes);
-  }
-
-  afterSizes ??= { buildGB: dirSizeGB(BUILD_DIR), targetGB: dirSizeGB(TARGET_DIR) };
-  const afterGB = afterSizes.buildGB + afterSizes.targetGB;
-  const freed = beforeGB - afterGB;
-  log(freed > 0.01 ? `done: freed ${fmtGB(freed)} (${fmtGB(beforeGB)} -> ${fmtGB(afterGB)})` : `done: ${fmtGB(afterGB)} total (already clean)`);
-  freeSpaceWarn();
-} catch (e) {
-  // NEVER fail the build chain.
-  log(`WARN: prune failed (${e.message}) — continuing build`);
+  return false;
 }
 
-process.exit(0);
+// ── Main ─────────────────────────────────────────────────────────────────────
+export function runPruneBuild({ inspectActivity = inspectBuildActivity } = {}) {
+  let activity;
+  try { activity = inspectActivity(); } catch { activity = { state: 'unknown' }; }
+  if (activity?.state !== 'idle') {
+    log(activity?.state === 'busy'
+      ? `skipped: active build tool (${activity.names.join(', ')}); retry when builds are idle`
+      : 'skipped: could not verify that build tools are idle; caches preserved');
+    return { skipped: true, reason: activity?.state === 'busy' ? 'active_build' : 'unknown_activity' };
+  }
+  // One marker skips every automatic deletion path, including LRU/cap cleanup.
+  // Explicit --release clean may reclaim abandoned working sessions, but only
+  // after the same process check. No filesystem mutations precede these guards.
+  if (!(isRelease && !isPre && !isPost)) {
+    try {
+      if (hasWorkingIncrementalSession()) {
+        log('skipped: incremental session still marked working; caches preserved, retry when builds are idle');
+        return { skipped: true, reason: 'working_session' };
+      }
+    } catch {
+      log('skipped: could not inspect incremental sessions; caches preserved');
+      return { skipped: true, reason: 'unknown_sessions' };
+    }
+  }
+  try {
+    const beforeSizes = { buildGB: dirSizeGB(BUILD_DIR), targetGB: dirSizeGB(TARGET_DIR) };
+    const beforeGB = beforeSizes.buildGB + beforeSizes.targetGB;
+    const mode = isPre ? ' [pre]' : isPost ? ' [post]' : isRelease ? ' [release]' : '';
+    log(`start: ${fmtGB(beforeGB)} total (build.noindex + target)${mode}`);
+    let afterSizes;
+
+    // A repository move invalidates absolute build-script outputs even when
+    // Cargo's ordinary fingerprints still look fresh. Repair that cache before
+    // Tauri consumes its generated permission paths.
+    if (!isPost) {
+      retireRelocatedBuildProfiles(isPre ? ['release'] : isRelease ? ['debug', 'release'] : ['debug']);
+    }
+
+    if (isPre) {
+      // Cheap pre-build step (tauri beforeBuildCommand): clean output + junk only,
+      // so the release compile starts immediately. Bounded cleanup runs via --post.
+      preReleaseClean();
+    } else if (isPost) {
+      // Preserve warm debug caches after release while still enforcing disk bounds.
+      afterSizes = boundedCleanup(beforeSizes);
+    } else if (isRelease) {
+      // Explicit destructive cleanup (`bun run clean`): outputs + debug profiles.
+      preReleaseClean();
+      reclaimDebugDeadWeight();
+    } else {
+      afterSizes = boundedCleanup(beforeSizes);
+    }
+
+    afterSizes ??= { buildGB: dirSizeGB(BUILD_DIR), targetGB: dirSizeGB(TARGET_DIR) };
+    const afterGB = afterSizes.buildGB + afterSizes.targetGB;
+    const freed = beforeGB - afterGB;
+    log(freed > 0.01 ? `done: freed ${fmtGB(freed)} (${fmtGB(beforeGB)} -> ${fmtGB(afterGB)})` : `done: ${fmtGB(afterGB)} total (already clean)`);
+    freeSpaceWarn();
+  } catch (e) {
+    if (e instanceof WorkingSessionObserved) {
+      log('stopped: incremental session became working; remaining cleanup deferred');
+      return { skipped: true, reason: 'working_session' };
+    }
+    // NEVER fail the build chain.
+    log(`WARN: prune failed (${e.message}) — continuing build`);
+  }
+  return { skipped: false };
+}
+
+if (import.meta.main) {
+  runPruneBuild();
+  process.exit(0);
+}
