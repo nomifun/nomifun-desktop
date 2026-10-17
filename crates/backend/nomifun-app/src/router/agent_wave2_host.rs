@@ -3075,6 +3075,12 @@ mod tests {
         if cfg!(windows) { "NATIVE_MUTATION_TARGET_UNSETTLED" } else { "CAPABILITY_UNAVAILABLE" }
     }
 
+    fn assert_explicit_file_unsettled(error: &Wave2HostPortError) {
+        assert_eq!(error.code,explicit_file_unsettled_code(),"{error:?}");
+        #[cfg(not(windows))]
+        assert!(error.message.contains("unsettled") || error.message.contains("admission failed"),"{error:?}");
+    }
+
     fn opaque_process_effect_context(root: &Path) -> Wave2HostContext {
         let mut value = context(root);
         value.capability_id = CapabilityId::from("workspace.process");
@@ -4020,8 +4026,7 @@ mod tests {
         let loser_effects = right_store.list_effects(&loser_context.agent_session_id).await.unwrap();
         match loser_effects.as_slice() {
             [] => {
-                assert_eq!(loser_error.code,explicit_file_unsettled_code());
-                assert!(loser_error.message.contains("unsettled") || loser_error.message.contains("admission failed"),"{loser_error:?}");
+                assert_explicit_file_unsettled(&loser_error);
             }
             [effect] => {
                 assert_eq!(loser_error.code,"CAPABILITY_UNAVAILABLE");
@@ -4089,8 +4094,7 @@ mod tests {
         let right_ok = right_result.is_ok();
         assert!(left_ok || right_ok,"both authorized writes failed: left={left_result:?}, right={right_result:?}");
         for error in [left_result.as_ref().err(),right_result.as_ref().err()].into_iter().flatten() {
-            assert_eq!(error.code,explicit_file_unsettled_code());
-            assert!(error.message.contains("unsettled") || error.message.contains("admission failed"),"{error:?}");
+            assert_explicit_file_unsettled(error);
         }
         let bytes = std::fs::read(workspace.join("shared.txt")).unwrap();
         assert_eq!(bytes.len(),1024 * 1024);
@@ -4159,8 +4163,7 @@ mod tests {
         let delete_ok = delete_result.is_ok();
         assert!(write_ok || delete_ok,"both authorized operations failed: write={write_result:?}, delete={delete_result:?}");
         for error in [write_result.as_ref().err(),delete_result.as_ref().err()].into_iter().flatten() {
-            assert_eq!(error.code,explicit_file_unsettled_code());
-            assert!(error.message.contains("unsettled") || error.message.contains("admission failed"),"{error:?}");
+            assert_explicit_file_unsettled(error);
         }
         match std::fs::read(workspace.join("shared.txt")) {
             Ok(bytes) => {
@@ -5245,8 +5248,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(blocked.code, explicit_file_unsettled_code());
-        assert!(blocked.message.contains("unsettled"));
+        assert_explicit_file_unsettled(&blocked);
     }
 
     #[cfg(windows)]
@@ -5418,8 +5420,7 @@ mod tests {
         let blocked = invoke(&restarted,second.clone(),"workspace.files/write",json!({
             "path":"second.txt","content":"must not run"
         })).await.unwrap_err();
-        assert_eq!(blocked.code,explicit_file_unsettled_code());
-        assert!(blocked.message.contains("unsettled"),"{blocked:?}");
+        assert_explicit_file_unsettled(&blocked);
         assert_ne!(first.agent_session_id,second.agent_session_id);
         assert_eq!(reopened_store.read_effect(&first.agent_session_id,&first_effect_id).await.unwrap().unwrap().state,
             nomifun_agent_session::AgentEffectState::Pending);
@@ -5473,8 +5474,7 @@ mod tests {
         let left_won = left_reservation.is_some();
         let reservation = left_reservation.or(right_reservation).unwrap();
         let loser_error = left_error.or(right_error).unwrap();
-        assert_eq!(loser_error.code,explicit_file_unsettled_code());
-        assert!(loser_error.message.contains("unsettled") || loser_error.message.contains("admission failed"),"{loser_error:?}");
+        assert_explicit_file_unsettled(&loser_error);
         let (winner_context,winner_host,winner_path,winner_bytes,loser_context,loser_path) = if left_won {
             (&left,&left_host,"left.txt",b"left".as_slice(),&right,"right.txt")
         } else {
@@ -5500,8 +5500,7 @@ mod tests {
         let blocked = invoke(&restarted,loser_context.clone(),"workspace.files/write",json!({
             "path":loser_path,"content":"must not run after reopen"
         })).await.unwrap_err();
-        assert_eq!(blocked.code,explicit_file_unsettled_code());
-        assert!(blocked.message.contains("unsettled"),"{blocked:?}");
+        assert_explicit_file_unsettled(&blocked);
         assert_eq!(reopened_store.read_effect(&winner_context.agent_session_id,&winner_effect_id).await.unwrap().unwrap().state,
             nomifun_agent_session::AgentEffectState::Pending);
         assert!(reopened_store.list_effects(&loser_context.agent_session_id).await.unwrap().is_empty());
@@ -5748,8 +5747,7 @@ mod tests {
         different.operation_id = OperationId::from("different-write-operation");
         let error = invoke(&restarted, different.clone(), "workspace.files/write",
             json!({"path": "result.txt", "content": "must-not-run"})).await.unwrap_err();
-        assert_eq!(error.code, explicit_file_unsettled_code());
-        assert!(error.message.contains("unsettled"), "{error:?}");
+        assert_explicit_file_unsettled(&error);
         assert_eq!(reopened_store.read_effect(&pending.agent_session_id, &pending_effect_id).await.unwrap().unwrap().state,
             nomifun_agent_session::AgentEffectState::Pending);
         assert!(reopened_store.read_effect(&different.agent_session_id, &wave2_effect_id(&different).unwrap()).await.unwrap().is_none());
@@ -5958,8 +5956,7 @@ mod tests {
         let different_key = invoke(&restarted,different.clone(),"workspace.files/write",json!({
             "path":"result.txt","content":"must not overwrite user edit"
         })).await.unwrap_err();
-        assert_eq!(different_key.code,explicit_file_unsettled_code());
-        assert!(different_key.message.contains("unsettled"),"{different_key:?}");
+        assert_explicit_file_unsettled(&different_key);
         assert_eq!(std::fs::read(workspace.join("result.txt")).unwrap(),b"user edit after terminal timeout");
         assert_eq!(reopened_store.read_effect(&pending.agent_session_id,&pending_effect_id).await.unwrap().unwrap().state,
             nomifun_agent_session::AgentEffectState::Pending);
@@ -6048,8 +6045,7 @@ mod tests {
         let different_key = invoke(&restarted,different.clone(),"workspace.files/write",json!({
             "path":"result.txt","content":"must not overwrite user edit"
         })).await.unwrap_err();
-        assert_eq!(different_key.code,explicit_file_unsettled_code());
-        assert!(different_key.message.contains("unsettled"),"{different_key:?}");
+        assert_explicit_file_unsettled(&different_key);
         assert_eq!(std::fs::read(workspace.join("result.txt")).unwrap(),b"user edit after terminal cancellation");
         assert_eq!(reopened_store.list_effects(&pending.agent_session_id).await.unwrap().len(),1);
         drop(restarted);
@@ -6118,8 +6114,7 @@ mod tests {
         let different_key = invoke(&restarted,different.clone(),"workspace.files/write",json!({
             "path":"result.txt","content":"must not overwrite user edit"
         })).await.unwrap_err();
-        assert_eq!(different_key.code,explicit_file_unsettled_code());
-        assert!(different_key.message.contains("unsettled"),"{different_key:?}");
+        assert_explicit_file_unsettled(&different_key);
         assert_eq!(std::fs::read(workspace.join("result.txt")).unwrap(),b"user edit after store close");
         assert_eq!(reopened_store.list_effects(&pending.agent_session_id).await.unwrap().len(),1);
         drop(restarted);
@@ -6332,8 +6327,7 @@ mod tests {
         let different_key = invoke(&restarted,different.clone(),"workspace.files/write",json!({
             "path":"result.txt","content":"must not overwrite user edit"
         })).await.unwrap_err();
-        assert_eq!(different_key.code,explicit_file_unsettled_code());
-        assert!(different_key.message.contains("unsettled"),"{different_key:?}");
+        assert_explicit_file_unsettled(&different_key);
         assert_eq!(std::fs::read(workspace.join("result.txt")).unwrap(),b"user edit after terminal store close");
         assert_eq!(reopened_store.list_effects(&pending.agent_session_id).await.unwrap().len(),1);
         drop(restarted);
@@ -6342,6 +6336,7 @@ mod tests {
     }
 
     #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    #[cfg(not(windows))]
     async fn failed_write_with_uncommitted_terminal_reports_the_settlement_failure() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = directory.path().join("workspace");
@@ -6741,6 +6736,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(not(windows))]
     async fn failed_write_with_committed_terminal_replays_the_owner_error() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = directory.path().join("workspace");
@@ -6766,6 +6762,34 @@ mod tests {
         assert_eq!(replay.message,first.message);
         assert_eq!(store.list_effects(&call.agent_session_id).await.unwrap().len(),1);
         assert_eq!(std::fs::read(&outside_target).unwrap(),b"keep");
+        assert_eq!(std::fs::read_dir(&workspace).unwrap().count(),0);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn invalid_native_write_preparation_reserves_no_effect_and_never_reaches_owner_settlement() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let outside = directory.path().join("outside.txt");
+        std::fs::write(&outside,b"keep").unwrap();
+        let store = test_effect_store().await;
+        let hook = EffectSettlementTestHook::new("workspace.files/write");
+        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone()).with_effect_settlement_hook(hook);
+        let call = context(&workspace);
+        let input = json!({"path":"bad\0path","content":"must not write an invalid path"});
+        let first = tokio::time::timeout(Duration::from_secs(3),
+            invoke(&host,call.clone(),"workspace.files/write",input.clone())).await
+            .expect("native preparation rejects before an owner or settlement hook can run").unwrap_err();
+        assert_eq!(first.code,"INVALID_PAYLOAD");
+        assert!(store.read_effect(&call.agent_session_id,&wave2_effect_id(&call).unwrap()).await.unwrap().is_none());
+        let repeated = tokio::time::timeout(Duration::from_secs(3),
+            invoke(&host,call.clone(),"workspace.files/write",input)).await
+            .expect("rejected preparation cannot manufacture a durable owner receipt").unwrap_err();
+        assert_eq!(repeated,first);
+        assert!(store.list_effects(&call.agent_session_id).await.unwrap().is_empty());
+        assert_eq!(std::fs::read(&outside).unwrap(),b"keep");
         assert_eq!(std::fs::read_dir(&workspace).unwrap().count(),0);
     }
 
@@ -8103,8 +8127,7 @@ mod tests {
             patch("first.txt","user first","must-not-run-first"),
             patch("second.txt","user second","must-not-run-second")
         ]})).await.unwrap_err();
-        assert_eq!(error.code,explicit_file_unsettled_code());
-        assert!(error.message.contains("unsettled"),"{error:?}");
+        assert_explicit_file_unsettled(&error);
         assert_eq!(reopened_store.read_effect(&pending.agent_session_id,&pending_effect_id).await.unwrap().unwrap().state,
             nomifun_agent_session::AgentEffectState::Pending);
         assert!(reopened_store.read_effect(&different.agent_session_id,&wave2_effect_id(&different).unwrap()).await.unwrap().is_none());
@@ -8161,8 +8184,7 @@ mod tests {
         let error = invoke(&restarted,different.clone(),"workspace.files/delete",json!({
             "path":"victim.txt"
         })).await.unwrap_err();
-        assert_eq!(error.code,explicit_file_unsettled_code());
-        assert!(error.message.contains("unsettled"),"{error:?}");
+        assert_explicit_file_unsettled(&error);
         assert_eq!(reopened_store.read_effect(&pending.agent_session_id,&pending_effect_id).await.unwrap().unwrap().state,
             nomifun_agent_session::AgentEffectState::Pending);
         assert!(reopened_store.read_effect(&different.agent_session_id,&wave2_effect_id(&different).unwrap()).await.unwrap().is_none());
@@ -8218,8 +8240,7 @@ mod tests {
         let error = invoke(&restarted,different.clone(),"workspace.files/delete",json!({
             "path":"tree"
         })).await.unwrap_err();
-        assert_eq!(error.code,explicit_file_unsettled_code());
-        assert!(error.message.contains("unsettled"),"{error:?}");
+        assert_explicit_file_unsettled(&error);
         assert_eq!(reopened_store.read_effect(&pending.agent_session_id,&pending_effect_id).await.unwrap().unwrap().state,
             nomifun_agent_session::AgentEffectState::Pending);
         assert!(reopened_store.read_effect(&different.agent_session_id,&wave2_effect_id(&different).unwrap()).await.unwrap().is_none());
@@ -8285,7 +8306,7 @@ mod tests {
         pending.idempotency_key = IdempotencyKey::from("new-delete-key");
         pending.operation_id = OperationId::from("new-delete-operation");
         let new_key = invoke(&restarted, pending.clone(), "workspace.files/delete", json!({"path":"tree"})).await.unwrap_err();
-        assert!(new_key.message.contains("unsettled"));
+        assert_explicit_file_unsettled(&new_key);
         assert!(store.read_effect(&pending.agent_session_id, &wave2_effect_id(&pending).unwrap()).await.unwrap().is_none());
         assert_eq!(std::fs::read(&denied).unwrap(), b"keep", "repairing ACLs must not enable blind replay");
         let read = invoke(&restarted, pending.clone(), "workspace.files/read", json!({"path":"tree/denied.txt"})).await.unwrap();
@@ -8293,7 +8314,7 @@ mod tests {
         pending.operation_id = OperationId::from("write-after-unknown-delete");
         pending.idempotency_key = IdempotencyKey::from("write-after-unknown-delete");
         let write = invoke(&restarted, pending, "workspace.files/write", json!({"path":"new.txt", "content":"must-not-run"})).await.unwrap_err();
-        assert!(write.message.contains("unsettled"));
+        assert_explicit_file_unsettled(&write);
         assert!(!root.path().join("new.txt").exists());
     }
 

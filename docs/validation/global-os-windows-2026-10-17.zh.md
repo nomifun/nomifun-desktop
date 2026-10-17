@@ -28,6 +28,10 @@
 
 整合 App 测试首次编译另发现 `caps_creative_studio.rs` 穷尽匹配漏掉新增 `AppError::SystemExecution`，在测试执行前101；已补该领域自己的明确系统执行失败显示，不将其误报 Canvas 不存在，原编译日志保留。源码首轮完整 `bun run check` 实际0；最终冻结与原生 App 的 UAC 取消/允许、跨项目围栏和安装证据仍以之后回执为准。
 
+修复保存并普通推送为 `61e20d3adb02a826ebae92295f70a2463835c492`（tree `f48f2d986bdb83346aea5fe9e1ae9dc6a94f5254`），同PR26已更新且保持draft。完整 desktop browser/computer 特性的 App 测试编译 actual0、8m58s；该测试程序 SHA-256 `9d39dfb3864ea7a8fe563cd5641a04f927f11dfd910b19f8a6f667993b1f1a0e`。修后同一真实外部文件/后来硬链接的跨项目 pending/reopen 反例通过，真实独立两进程 restart 通过；readonly投影7项、canonical冷API历史1项通过。
+
+进一步 Host98项首轮为82通过/15失败/1忽略、147.84s，原 `app-wave2-host-regressions.log` 保留。失败主要是已经得到正确 typed native conflict 后，旧夹具仍要求英文小写`unsettled`；另两项NUL输入已在native准备阶段拒绝，旧夹具却等待派发后的settlement hook。后续仅校准测试：Windows按精确机器码、Effect缺失及文件不变判断；NUL用明确的准备失败/无Effect/无owner派发回归，非Windows原路径保留。泛用owner错误结算测试保持，不改生产准入或自动重放。该轮曾过早生成“主动停止”元数据，但工具实际返回完整自然FAILED结果；`app-host-first-run-completion.json` 明确更正，原元数据与日志均保留。修后Host完整结果另记。
+
 ## 上一批交付结果：925 生产冻结
 
 当前完整实现与原生补验已完成，生产源码为 `925e775a1c070fbbef75d8c2db0bbb5c27ce97e3`、tree `55a42d1b26a70c28faf9b11e4709c1f7ea72f36f`，含普通合并main至2c6及真实UI准备owner修复。最终其余变化仅为等待验收器和本记录/交接，不借验证文档提交冒充另一次production build。完整提交与普通推送以 `codex/windows-global-os` 和 [PR26](https://github.com/nomifun/nomifun-desktop/pull/26) 的实际Git回执为准；没有改写main。
