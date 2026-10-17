@@ -326,6 +326,8 @@ const NomiSendBox: React.FC<{
 
   useEffect(() => {
     if (!conversation_id || isCreating) return;
+    // This owner prepares normal chat through canonical passive readiness. The
+    // shared composer must not add another POST when its input auto-focuses.
     let cancelled = false;
     const initialPresentationKey = initialMessageRef.current?.conversation_id === conversation_id
       ? initialMessageRef.current.idempotency_key : undefined;
@@ -1065,7 +1067,7 @@ const NomiSendBox: React.FC<{
         disabled={submissionDisabled || preparingSubmission || collaborationSubmitting || initialSubmissionPending}
         submitDisabled={Boolean(pauseNotice || waitingNotice && !waitingNotice.canSteer) || (isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing || !sessionCapabilities.state || sessionCapabilities.saving || sessionCapabilities.loading || composerCollaborationEnabled && !collaboration.ready)}
         preserveDraftUntilAccepted
-        skipChatWarmup={isCreating}
+        skipChatWarmup
         placeholder={
           compactProductComposer
             ? t('nomi.cohabit.composerPlaceholder', {

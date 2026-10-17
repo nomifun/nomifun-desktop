@@ -321,3 +321,15 @@ App21108 关闭后，七份已明确终态/恢复报告对应的14个 workspace/
 merge-tree与实际merge均仅三份生成合同冲突。保留双方相同的平台矩阵和fixture refs，使用合并后的正式Rust schema/Cargo.lock通过现役generator重新生成，而非盲选ours/theirs。`write`、`check`及定向diff-check实际0，原受限token的嵌套git EPERM和过早读取冲突manifest失败单独保留。`windows-current-main-contract-regeneration-receipt.json` SHA-256 `b19dfa371f14d131e288d68aa60d3636678b1b48045c9430eab330a8357d876d`；仅三冲突文件被再生。合并canonical schema摘要为 `b41dc3fb2d72933ea17deddd58d70c166395725821fce31078351d26b91fd577`，lock摘要 `b64ca7e6b7ff0b4d4e68ebd7504c1692c1a9acb9be8fa1a3c995d0c488d249a8`。
 
 自动合并独立源码审查未发现Windows typed NativeFileError、historical scope refresh/fatal owner、effect→read失效、terminal只读或late I/O的覆盖。新main的等待/取消、会话结果和renderer变化须补相应检查和native，不从源码审查推断成功；当前UI typecheck与2180源880×600边界已实际0。
+
+该普通merge已保存为 `b014415383db324dde21fbf9307f0ada4dd82f9a`、tree `d2aa2cc14e2b250fe99c83d2a023f7a57519d353`，parents为0590和2c6b1df36。该树完整 `bun run check` 实际退出0，日志 `windows-current-main-source-check.log`；后续真实修复另验，不追称整个补验批次已完成。
+
+新合并Rust lib首轮实际101：新main的 `turn_silent_completion_tests.rs` mock初始化 `AgentEngineError::CapabilityKernel` 漏填Windows实现已加入的可选details。仅cfg(test)夹具补 `details: None`，不修改生产typed native错误或未知效果判断，原 `windows-current-main-runtime-session-process-tests.log` 保留，修后全组另记。
+
+新main改动涉及的38份UI测试首轮476通过/1失败、2710断言，`windows-current-main-ui-tests.log` 保留。失败为初始消息慢准备期间不应预热却实际触发：独立单case复现1次、整文件3次，调用栈与参数均精确指向当前conversation的SendBox300ms focus timer。Nomi已有独占passive准备链但仍叠加focus链，前两项卸载后旧timer也未取消；不是仅并发负载或跨文件偶发。修复仅合并现役Nomi准备owner与共享timer生命周期，不删除真实断言或用sleep放宽验收；修后UI和新构建的真实产品结果分别记录。
+
+最小生产修复为Nomi只用既有passive准备owner，shared SendBox不再为它叠加focus POST；共享计时器在卸载、Session或skip状态变化时取消，其他产品当前Session的显式focus预热保留。新增三项有效回归，修前unmount/Session-change两项真实红，修后4文件29通过/319断言、typecheck与880×600边界0。正式回执 `windows-current-main-ui-focus-fix-receipt-v2.json` SHA-256 `2d4db475a25bf2dfd1ef2e8755958d46338d1fe4880b5e5da7642257b7c1f313`；更早null回执错误保留但不作为成功依据。同一38文件修后全批480通过/0失败、2739断言，`windows-current-main-ui-tests-fixed.log` 实际0。
+
+Rust修后当前组实际退出0：process lib147、Runtime470（另1保留忽略）、Session259，共876通过/0失败；`windows-current-main-runtime-session-process-tests-fixed.log` 保存完整结果。App相同browser-use,computer-use单次no-run编译实际0、14m02s含排队，同一固定exe精确执行14项全部通过/0忽略，含真实Windows pipe/ConPTY迟到控制、waiting/cancel/recovery/browser owner4项、read投影6和missing-default Effect key2。`windows-current-main-app-targeted-tests-receipt.json` SHA-256 `dbb9aa59b863068da37b108d111a5685e9874b7ec85560e4841f6e4872e9ad7e`；编译时存在已说明UI生产/测试与cfg(test)修复，不把其HEAD b014误称整树干净认证。
+
+新增可复现的 [Windows等待原生驱动](../../scripts/validation/global-os-windows-wait-native.mjs) 已按审查后完整bytes纳入源码，SHA-256 `580e4f457a39f37296319a509b2406fa041cba4cfcd79eba5cce7fab20037eba`。25项纯检查和Windows PowerShell实际Parser静态检查通过，独立审查回执 `current-main-wait-native-independent-review-580e4f.json` SHA-256 `7ee081995de6f2c4d71ac460940fb56c4790cbb7e5f32ced87f27a5446ccb6af`。计划普通/管理员各一次owner自然唤醒及普通Waiting精确取消：共用原App/owner/同默认General Session，外部唯一gate只为测试控制，不伪造人类回答/授权；核对同Turn Waiting、1.5秒零模型采样、原process_id/完整输出未被terminal消费、typed终态、completion事实及cleanup。当前仅完成驱动检查，真实App/UAC结果另记。

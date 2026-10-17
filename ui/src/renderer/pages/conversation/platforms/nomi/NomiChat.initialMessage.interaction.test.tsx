@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, renderHook, waitFor } from '@testing-library/react';
-import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
+import { afterEach, beforeEach, expect, jest, mock, spyOn, test } from 'bun:test';
 import { useLayoutEffect, type PropsWithChildren } from 'react';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
@@ -11,11 +11,14 @@ import { mcpService, type IResponseMessage, type ISendMessageResult } from '@/co
 import type { TChatConversation, TProviderWithModel } from '@/common/config/storage';
 import { configService } from '@/common/config/configService';
 import { ThemeProvider } from '@/renderer/hooks/context/ThemeContext';
+import { ConversationProvider } from '@/renderer/hooks/context/ConversationContext';
+import SendBox from '@/renderer/components/chat/SendBox';
 import { conversationTarget, parseEntityId, parseConversationId, parseMessageId, parseProviderId } from '@/common/types/ids';
 import type { IMessageTips, TMessage } from '@/common/chat/chatLib';
 import type { AgentSessionCapabilitySelectionState } from '@/common/types/agentPlatform';
 import { sessionStorageKey, setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 import { PreviewProvider } from '../../Preview';
+import { MessageListProvider } from '../../Messages/hooks';
 import { InitialMessageProvider, useInitialMessage } from '../../components/ConversationShell/InitialMessageContext';
 import { persistInitialMessageDelivery, releaseInitialMessageDelivery } from '../initialMessageDelivery';
 import conversationLocale from '@/renderer/services/i18n/locales/en-US/conversation.json';
@@ -92,6 +95,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  jest.useRealTimers();
   mock.restore();
   releaseInitialMessageDelivery(storageKey);
   sessionStorage.clear();
@@ -226,6 +230,7 @@ test('slow preparation and acceptance keep the real transcript mounted without a
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 320)); });
   expect(page.getByTestId('message-list-scroller')).toBe(scroller);
   expect(page.getByTestId('initial-message-preparing')).toBeTruthy();
+  expect(warmup).not.toHaveBeenCalled();
   await act(async () => { capabilities.resolve(capabilitySelection); });
   await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
   expect(send.mock.calls[0][0]).toMatchObject({ conversation_id: conversationId, input,
@@ -252,6 +257,58 @@ test('slow preparation and acceptance keep the real transcript mounted without a
   expect(page.getAllByTestId('message-text-content')).toHaveLength(1);
   expect(page.queryByTestId('message-list-skeleton')).toBeNull();
   expect(send).toHaveBeenCalledTimes(1);
+});
+
+test('a Pending initial delivery prepares once through its owner and focus cannot compete with the accepted send', async () => {
+  jest.useFakeTimers();
+  spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ ...conversation, status: 'pending',
+    runtime: { state: 'idle', is_processing: false, can_send_message: true },
+  });
+  const prepared = deferred<void>();
+  const warmup = spyOn(ipcBridge.conversation.warmup, 'invoke').mockReturnValue(prepared.promise);
+  const accepted = deferred<ISendMessageResult>();
+  const send = spyOn(ipcBridge.conversation.sendMessage, 'invoke').mockReturnValue(accepted.promise);
+  let page!: ReturnType<typeof mountConversation>;
+  await act(async () => { page = mountConversation(); });
+  expect(warmup).toHaveBeenCalledTimes(1);
+  expect(warmup.mock.calls[0][0]).toEqual({ conversation_id: conversationId });
+  expect(send).not.toHaveBeenCalled();
+  await act(async () => { prepared.resolve(); });
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(send.mock.calls[0][0]).toMatchObject({ conversation_id: conversationId, initial_only: true,
+    idempotency_key: page.delivery.idempotency_key });
+  await act(async () => { jest.advanceTimersByTime(300); });
+  expect(warmup).toHaveBeenCalledTimes(1);
+  expect(send).toHaveBeenCalledTimes(1);
+  await act(async () => { accepted.resolve({ msg_id: messageId, replayed: false, completed: false,
+    result_ok: null, result_text: null, result_error: null, result_error_code: null, result_error_retryable: null }); });
+});
+
+test.each(['unmount', 'conversation-change'] as const)('shared composer cancels the previous focus warmup on %s', async (transition) => {
+  jest.useFakeTimers();
+  const warmup = spyOn(ipcBridge.conversation.warmup, 'invoke').mockResolvedValue(undefined);
+  const view = (id: typeof conversationId) => <MemoryRouter><I18nextProvider i18n={i18n}><ThemeProvider>
+    <PreviewProvider persistNamespace='focus-warmup-lifecycle' subscribeGlobalOpen={false}>
+      <ConversationProvider value={{ conversation_id: id, type: 'nomi', workspace: '' }}>
+        <MessageListProvider><SendBox onSend={async () => {}} /></MessageListProvider>
+      </ConversationProvider>
+    </PreviewProvider>
+  </ThemeProvider></I18nextProvider></MemoryRouter>;
+  const page = render(view(conversationId));
+  fireEvent.focus(page.getByTestId('sendbox-input'));
+  act(() => { jest.advanceTimersByTime(299); });
+  expect(warmup).not.toHaveBeenCalled();
+  if (transition === 'unmount') page.unmount();
+  else page.rerender(view(otherId));
+  await act(async () => { jest.advanceTimersByTime(1); });
+  expect(warmup).not.toHaveBeenCalled();
+
+  // The current mounted composer still supports explicit focus preparation.
+  const current = transition === 'unmount' ? render(view(otherId)) : page;
+  fireEvent.focus(current.getByTestId('sendbox-input'));
+  await act(async () => { jest.advanceTimersByTime(300); });
+  expect(warmup).toHaveBeenCalledTimes(1);
+  expect(warmup.mock.calls[0][0]).toEqual({ conversation_id: otherId });
 });
 
 test('a rejected first send clears preparation and leaves the guarded delivery available for recovery', async () => {
