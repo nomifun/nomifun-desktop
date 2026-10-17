@@ -72,6 +72,7 @@ function resolvedProof({ events, operation, processId, waitingSeq }) {
   return { owner_observation_seq: observed.seq, wait_resolved_seq: resolved.seq, observation: observed.event.observation };
 }
 function uniqueLaunchProof({ events, operation, session, call, output }) {
+  assert(events.every(event => event.agent_session_id === session), 'Effect and Runtime evidence must belong to the exact Session');
   const rows = progress(events, operation);
   const started = one(rows.filter(row => row.event?.event === 'tool_started' && row.event.action_id === 'workspace.process/start'), 'dispatched process start');
   assert.equal(started.event.call_id, call.id);
@@ -80,14 +81,67 @@ function uniqueLaunchProof({ events, operation, session, call, output }) {
   const completed = one(rows.filter(row => row.event?.event === 'tool_completed' && row.event.result?.call_id === call.id), 'actual start tool result');
   assert.equal(completed.event.result.is_error, false); slot(completed.record, '/event/result/output', 'tool_output', [{ type: 'text', text: output }], session);
   const effect = one(events.filter(event => event.kind === 'effect/started' && event.payload?.value?.operation_id === `${operation}:tool:${call.id}`), 'original start Effect');
-  const effectId = effect.payload.value.effect_id;
+  const original = effect.payload.value, effectId = original.effect_id;
+  assert.equal(effect.correlation_id, effectId, 'Effect correlation follows its own immutable identity, not the Runtime operation');
+  assert.equal(original.turn_id, operation); assert.equal(original.owner_domain, 'workspace');
+  assert.equal(original.capability_module, 'workspace.process'); assert.equal(original.action_id, 'workspace.process/start');
+  assert.match(original.input_digest, /^[0-9a-f]{64}$/);
   const terminal = one(events.filter(event => event.payload?.value?.effect_id === effectId && event.kind !== 'effect/started'), 'start Effect settlement');
-  assert.equal(terminal.kind, 'effect/succeeded'); assert(terminal.seq > effect.seq && completed.seq > terminal.seq);
+  assert.equal(terminal.kind, 'effect/succeeded'); assert.equal(terminal.correlation_id, effectId);
+  assert.equal(terminal.causation_event_id, effect.event_id);
+  for (const key of ['strategy', 'effect_id', 'turn_id', 'operation_id', 'owner_domain', 'capability_module', 'action_id', 'input_digest', 'resource_binding_id', 'resource_key'])
+    assert.deepEqual(terminal.payload.value[key], original[key], 'Effect settlement must preserve its exact admitted input and resource identity');
+  assert.deepEqual(terminal.payload.value.result, toolValue(output), 'The start Effect result must match its actual canonical tool observation');
+  assert(proposed.seq < started.seq && started.seq < effect.seq && terminal.seq > effect.seq && completed.seq > terminal.seq);
   assert(!events.some(event => event.kind === 'effect/uncertain' || event.kind === 'effect/reconciled'), 'Unknown/reconciled effects cannot qualify for an automatic fixture retry');
   return { invocation_count: 1, call_id: call.id, proposal_seq: proposed.seq, tool_started_seq: started.seq,
     effect_id: effectId, effect_started_seq: effect.seq, effect_terminal_seq: terminal.seq, tool_completed_seq: completed.seq };
 }
-function terminalDispositionProof({ events, operation, session, accepted, plan, cancelled, completionMode, directAnswers = 0 }) {
+function cancelledOwnerCleanupProof({ events, operation, session, accepted, execution, cancellation }) {
+  assert(events.every(event => event.agent_session_id === session), 'Cancellation observations must belong to the exact Session');
+  if (!cancellation) return undefined;
+  assert.equal(cancellation.agent_session_id, session); assert.equal(cancellation.target_operation_id, operation);
+  assert.equal(cancellation.status, 'cancelled'); assert.equal(cancellation.duplicate, false);
+  assert.equal(cancellation.cursor?.agent_session_id, session);
+  assert.equal(execution.operation_id, operation); assert.equal(execution.state, 'cancelled');
+  assert.equal(execution.pending_effects, 0); assert.equal(execution.unknown_effects, 0);
+  assert.equal(execution.producer_lease_live, false); assert.equal(execution.checkpoint_retained, false);
+  assert.equal(execution.automatic_replay_authorized, false);
+  assert(Number.isSafeInteger(execution.execution_generation) && execution.execution_generation > 0);
+  const current = events.filter(event => event.correlation_id === operation), rows = progress(events, operation);
+  const started = one(current.filter(event => event.kind === 'turn/started'), 'cancelled Turn start');
+  assert.equal(started.payload?.value?.source_message_id, accepted.message_id);
+  const terminals = current.filter(event => ['turn/completed', 'turn/cancelled', 'turn/failed'].includes(event.kind));
+  if (!terminals.length) return undefined;
+  const cancelled = one(terminals, 'Session-owner cancellation');
+  assert.equal(cancelled.kind, 'turn/cancelled'); assert.equal(cancelled.producer_id, 'session_api');
+  assert.equal(cancelled.event_id, cancellation.message_id); assert.equal(cancelled.seq, cancellation.cursor.seq);
+  assert.equal(cancelled.payload?.value?.target_operation_id, operation); assert(cancelled.seq > started.seq);
+  const cleanups = rows.filter(row => row.event?.event === 'host_cleanup_proven');
+  const closed = rows.filter(row => row.event?.event === 'turn_cancelled');
+  assert(closed.length <= 1, 'The cancelled Runtime must have one exact final closure');
+  if (!cleanups.length) {
+    assert.equal(closed.length, 0, 'A Runtime cancellation closure without its cleanup witness is invalid');
+    return undefined;
+  }
+  const cleanup = one(cleanups, 'same-owner cancellation cleanup');
+  assert.equal(cleanup.record.producer_id, 'runtime_supervisor'); assert.equal(cleanup.event.operation, operation);
+  assert.equal(cleanup.event.epoch, execution.execution_generation);
+  const original = one(rows.filter(row => row.event?.event === 'turn_started'), 'original Runtime binding');
+  assert(original.seq < cancelled.seq); assert.equal(original.event.turn_operation_id, operation);
+  assert.match(original.event.binding?.build_digest, /^[0-9a-f]{64}$/);
+  assert.equal(cleanup.event.binding?.build_id, original.event.binding.build_id);
+  assert.equal(cleanup.event.binding?.build_digest, original.event.binding.build_digest);
+  assert(cleanup.seq > cancelled.seq, 'Owner cancellation commits before this original owner finishes native cleanup');
+  if (!closed.length) return undefined;
+  const runtime = closed[0]; assert.equal(runtime.record.producer_id, 'runtime_supervisor');
+  assert(runtime.seq > cleanup.seq, 'The Runtime closure must follow its actual cleanup witness');
+  assert.equal(runtime.event.model_steps, execution.model_progress?.used_model_steps);
+  return { cancellation_event_id: cancelled.event_id, cancellation_seq: cancelled.seq,
+    cleanup_seq: cleanup.seq, runtime_cancelled_seq: runtime.seq, execution_generation: execution.execution_generation,
+    original_build_id: original.event.binding.build_id, original_build_digest: original.event.binding.build_digest };
+}
+function terminalDispositionProof({ events, operation, session, accepted, plan, cancelled, completionMode, directAnswers = 0, execution, cancellation }) {
   assert(events.every(event => event.agent_session_id === session && event.correlation_id === operation),
     'Only the exact accepted operation window can supply terminal evidence');
   const started = one(events.filter(event => event.kind === 'turn/started'), 'canonical Turn start');
@@ -101,10 +155,14 @@ function terminalDispositionProof({ events, operation, session, accepted, plan, 
   assert.equal(terminal.kind, cancelled ? 'turn/cancelled' : 'turn/completed'); assert(terminal.seq > started.seq);
   const rows = progress(events, operation);
   const cleanup = one(rows.filter(row => row.event?.event === 'host_cleanup_proven'), 'canonical host cleanup proof');
-  assert(cleanup.seq > started.seq && cleanup.seq < terminal.seq);
+  assert(cleanup.seq > started.seq);
+  if (!cancelled) assert(cleanup.seq < terminal.seq);
   const proof = { started_seq: started.seq, terminal_seq: terminal.seq, cleanup_seq: cleanup.seq,
     exact_turn_id: accepted.message_id, exact_operation_id: operation, turn_outcome: plan.turn_outcome };
   if (cancelled) {
+    const closed = cancelledOwnerCleanupProof({ events, operation, session, accepted, execution, cancellation });
+    assert(closed, 'A logical cancellation alone does not prove the original native owner finished cleanup');
+    proof.cancelled_owner_cleanup = closed;
     assert(!rows.some(row => ['completion_reported', 'completion_delivered'].includes(row.event?.event)),
       'Exact owner cancellation must not be projected as task completion');
   } else if (completionMode === 'report_completion') {
@@ -222,6 +280,12 @@ async function run(options) {
         if (!['running'].includes(execution.state)) throw new Error('Original native result remains unsettled; do not replay or erase this fixture');
       }
       if (execution.state === expected && !facts.session.head.active_turn_id && execution.pending_effects === 0 && execution.unknown_effects === 0) {
+        if (expected === 'cancelled' && !cancelledOwnerCleanupProof({ events: facts.events, operation: active.accepted.operation_id,
+          session: sessionId, accepted: active.accepted, execution, cancellation: active.cancellation_receipt })) {
+          // The Session-owner receipt closes admission first. Keep observing
+          // its original native owner until cleanup and Runtime closure exist.
+          await delay(250); continue;
+        }
         assert(progress(facts.events, active.accepted.operation_id).some(row => row.event?.event === 'host_cleanup_proven'));
         return facts;
       }
@@ -400,7 +464,8 @@ async function run(options) {
         retained_observer_ready: active.retained_observer_ready, process_id: active.processId, pid: active.pid }); await checkpoint();
       if (active.cancel) {
         assert(await absent(active.gate));
-        caseReport.cancellation = await api('POST', `/api/agent-sessions/${sessionId}/turns/cancel`, { idempotency_key: randomUUID(), expected_turn_id: active.accepted.message_id });
+        active.cancellation_receipt = await api('POST', `/api/agent-sessions/${sessionId}/turns/cancel`, { idempotency_key: randomUUID(), expected_turn_id: active.accepted.message_id });
+        caseReport.cancellation = active.cancellation_receipt;
       } else {
         active.wakeAllowed = true;
         await writeFile(active.gate, active.nonce, { flag: 'wx' }); active.gate_written = true;
@@ -413,8 +478,11 @@ async function run(options) {
       const operationEvents = settled.events.filter(event => event.correlation_id === active.accepted.operation_id);
       const finalPlan = await api('GET', `/api/agent-sessions/${sessionId}/task-plan`);
       const disposition = terminalDispositionProof({ events: operationEvents, operation: active.accepted.operation_id, session: sessionId,
-        accepted: active.accepted, plan: finalPlan, cancelled: active.cancel, completionMode: active.completion_mode, directAnswers: active.direct_answers });
-      const launchProof = uniqueLaunchProof({ events: operationEvents, operation: active.accepted.operation_id, session: sessionId,
+        accepted: active.accepted, plan: finalPlan, cancelled: active.cancel, completionMode: active.completion_mode, directAnswers: active.direct_answers,
+        execution: settled.execution, cancellation: active.cancellation_receipt });
+      // Effects correlate to their own Effect ID. Runtime records correlate to
+      // this Turn operation; uniqueLaunchProof selects each by its typed owner.
+      const launchProof = uniqueLaunchProof({ events: settled.events, operation: active.accepted.operation_id, session: sessionId,
         call: active.actual_start_call, output: active.actual_start_call.raw });
       const sourceQuestion = one(progress(operationEvents, active.accepted.operation_id).filter(row => row.event?.event === 'tool_completed' && row.event.result?.call_id === active.question_id), 'formal input ACK');
       assert.equal(sourceQuestion.event.result.is_error, false); slot(sourceQuestion.record, '/event/result/output', 'tool_output', [{ type: 'text', text: ACK }], sessionId);
@@ -453,7 +521,8 @@ async function run(options) {
       try {
         const facts = await currentFacts(); report.failure_canonical_observation = facts;
         if (facts.session.head.active_turn_id === active.accepted.operation_id && facts.execution?.operation_id === active.accepted.operation_id) {
-          report.failure_exact_cancel = await api('POST', `/api/agent-sessions/${sessionId}/turns/cancel`, { idempotency_key: randomUUID(), expected_turn_id: active.accepted.message_id });
+          active.cancellation_receipt = await api('POST', `/api/agent-sessions/${sessionId}/turns/cancel`, { idempotency_key: randomUUID(), expected_turn_id: active.accepted.message_id });
+          report.failure_exact_cancel = active.cancellation_receipt;
           const heldFailure = providerFailure; providerFailure = undefined;
           try { report.failure_cleanup = await requireKnownSettlement('cancelled'); } finally { providerFailure = heldFailure; }
         }
@@ -514,11 +583,54 @@ function selfTest() {
   assert.throws(() => finalProof({ events: formal.filter(row => row.seq !== 11) }));
   assert.throws(() => finalProof({ events: formal.filter(row => row.seq !== 10) }));
   assert.throws(() => finalProof({ events: formal.map(row => ({ ...row, correlation_id: 'foreign-operation' })) }));
-  const cancelledEvents = [start, event(12, { event: 'host_cleanup_proven' }), { agent_session_id: session, correlation_id: operation, seq: 13, kind: 'turn/cancelled' }];
+  const originalBuild = { build_id: 'fixture-build', build_digest: 'b'.repeat(64) };
+  const owned = (seq, value) => ({ ...event(seq, value), producer_id: 'runtime_supervisor' });
+  const cancelledEvents = [start, owned(2, { event: 'turn_started', turn_operation_id: operation, binding: originalBuild }),
+    { agent_session_id: session, correlation_id: operation, seq: 10, event_id: 'cancel-receipt', producer_id: 'session_api',
+      kind: 'turn/cancelled', payload: { value: { target_operation_id: operation } } },
+    owned(11, { event: 'host_cleanup_proven', operation, epoch: 1, binding: { ...originalBuild } }), owned(12, { event: 'turn_cancelled', model_steps: 5 })];
   const cancelledPlan = { ...finalPlan, turn_status: 'cancelled', turn_outcome: { kind: 'cancelled', message_ids: [] } };
-  assert.equal(finalProof({ events: cancelledEvents, plan: cancelledPlan, cancelled: true }).turn_outcome.kind, 'cancelled');
-  assert.throws(() => finalProof({ events: cancelledEvents, plan: finalPlan, cancelled: true }));
-  console.log(JSON.stringify({ status: 'passed', scope: 'pure validation only; native App/UAC/API were not invoked', checks: 25 }));
+  const cancelledExecution = { operation_id: operation, state: 'cancelled', execution_generation: 1, pending_effects: 0, unknown_effects: 0,
+    producer_lease_live: false, checkpoint_retained: false, automatic_replay_authorized: false, model_progress: { used_model_steps: 5 } };
+  const cancelledReceipt = { agent_session_id: session, target_operation_id: operation, message_id: 'cancel-receipt', status: 'cancelled', duplicate: false,
+    cursor: { agent_session_id: session, seq: 10 } };
+  const cancelProof = extras => cancelledOwnerCleanupProof({ events: cancelledEvents, operation, session, accepted, execution: cancelledExecution,
+    cancellation: cancelledReceipt, ...extras });
+  assert.equal(finalProof({ events: cancelledEvents, plan: cancelledPlan, cancelled: true, execution: cancelledExecution, cancellation: cancelledReceipt }).turn_outcome.kind, 'cancelled');
+  assert.throws(() => finalProof({ events: cancelledEvents, plan: finalPlan, cancelled: true, execution: cancelledExecution, cancellation: cancelledReceipt }));
+  assert.equal(cancelProof({ cancellation: undefined }), undefined);
+  assert.equal(cancelProof({ events: cancelledEvents.filter(row => row.seq < 11) }), undefined, 'An admission stop is not a cleanup receipt');
+  assert.equal(cancelProof({ events: cancelledEvents.filter(row => row.seq !== 12) }), undefined, 'The cleanup witness still needs the original Runtime closure');
+  assert.throws(() => cancelProof({ events: cancelledEvents.filter(row => row.seq !== 11) }));
+  const changedCancellation = change => { const copy = structuredClone(cancelledEvents); change(copy); return copy; };
+  assert.throws(() => cancelProof({ events: changedCancellation(copy => { copy[3].payload.value.event.epoch = 2; }) }));
+  assert.throws(() => cancelProof({ events: changedCancellation(copy => { copy[3].payload.value.event.binding.build_digest = 'c'.repeat(64); }) }));
+  assert.throws(() => cancelProof({ cancellation: { ...cancelledReceipt, target_operation_id: 'another-operation' } }));
+  assert.throws(() => cancelProof({ cancellation: { ...cancelledReceipt, message_id: 'another-cancel-receipt' } }));
+  assert.throws(() => cancelProof({ execution: { ...cancelledExecution, execution_generation: 99 } }));
+  assert.throws(() => cancelProof({ events: changedCancellation(copy => { copy[4].seq = 9; }) }));
+  assert.throws(() => cancelProof({ execution: { ...cancelledExecution, unknown_effects: 1 } }));
+  assert.throws(() => cancelProof({ events: changedCancellation(copy => { copy[4].payload.value.event.model_steps = 6; }) }));
+  const call = { id: 'start-call', args: { command: 'fixture.exe' } }, startedValue = { state: 'running', process_id: 'owned', pid: 42 };
+  const effectId = 'effect-independent-correlation';
+  const effectInput = { strategy: 'managed_effect', effect_id: effectId, turn_id: operation, operation_id: `${operation}:tool:${call.id}`,
+    owner_domain: 'workspace', capability_module: 'workspace.process', action_id: 'workspace.process/start', input_digest: 'a'.repeat(64),
+    resource_binding_id: 'frozen-process-resource', resource_key: 'workspace:fixture' };
+  const launchEvents = [event(1, { event: 'tool_call_completed', call: { call_id: call.id, name: 'start_process', arguments: call.args } }),
+    event(2, { event: 'tool_started', call_id: call.id, action_id: 'workspace.process/start' }),
+    { agent_session_id: session, seq: 3, event_id: `${effectId}:started`, kind: 'effect/started', correlation_id: effectId, payload: { value: effectInput } },
+    { agent_session_id: session, seq: 4, kind: 'effect/succeeded', correlation_id: effectId, causation_event_id: `${effectId}:started`, payload: { value: { ...effectInput, result: startedValue } } },
+    event(5, { event: 'tool_completed', result: { call_id: call.id, is_error: false, output: [{ type: 'text', text: JSON.stringify(startedValue) }] } })];
+  const launchProof = values => uniqueLaunchProof({ events: values, operation, session, call, output: JSON.stringify(startedValue) });
+  assert.equal(launchProof(launchEvents).effect_terminal_seq, 4);
+  assert.throws(() => launchProof(launchEvents.filter(record => record.correlation_id === operation)));
+  const altered = change => { const copy = structuredClone(launchEvents); change(copy); return copy; };
+  assert.throws(() => launchProof(altered(copy => { copy[2].payload.value.operation_id = 'another-operation:tool:start-call'; })));
+  assert.throws(() => launchProof(altered(copy => { copy[3].payload.value.effect_id = 'another-effect'; })));
+  assert.throws(() => launchProof(altered(copy => { copy[3].payload.value.input_digest = 'b'.repeat(64); })));
+  assert.throws(() => launchProof(altered(copy => { copy[2].agent_session_id = 'foreign-session'; })));
+  assert.throws(() => launchProof(altered(copy => { copy[3].correlation_id = operation; })));
+  console.log(JSON.stringify({ status: 'passed', scope: 'pure validation only; native App/UAC/API were not invoked', checks: 44 }));
 }
 try { const options = parseOptions(process.argv.slice(2)); process.exitCode = options.selfTest ? (selfTest(), 0) : await run(options); }
 catch (error) { console.error(JSON.stringify({ status: 'failed_before_native_receipt', name: error.name, message: String(error.message).slice(0, 2048) })); process.exitCode = 1; }
