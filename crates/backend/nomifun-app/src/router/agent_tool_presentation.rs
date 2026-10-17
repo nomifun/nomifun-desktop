@@ -404,7 +404,7 @@ mod tests {
                         arguments: StrictJsonValue(json!({"query":name})), provider_metadata: None,
                     }}), Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls })]
                 } else {
-                    vec![Ok(ChatModelEvent::OutputTextDelta { text: "Ready.".into() }),
+                    vec![Ok(ChatModelEvent::OutputTextDelta { text: "Ready.".into(), source: None }),
                         Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed })]
                 };
                 *step += 1;

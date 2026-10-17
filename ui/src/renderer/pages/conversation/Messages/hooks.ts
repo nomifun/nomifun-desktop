@@ -192,8 +192,8 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
     return list.concat(message);
   }
 
-  // text message: merge only with the latest contiguous streaming chunk.
-  // text 消息: 只与最后一条连续的流式片段合并，保留被工具/思考打断后的消息边界。
+  // Append to the exact canonical source even when reasoning or tools have
+  // arrived since its previous delta. Its timeline owns reading boundaries.
   if (message.type === 'text' && message.msg_id) {
     const textKey = getMessageIndexKey(message)!;
     const existingIdx = index.msgIdIndex.get(textKey);
@@ -275,6 +275,7 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
             status: message.content.status,
             duration: message.content.duration,
             subject: message.content.subject || existingMsg.content.subject,
+            timeline: preferMessageTimeline(existingMsg.content.timeline, message.content.timeline),
           },
         };
         return newList;
@@ -1121,11 +1122,17 @@ export const useMessageLstCache = (key: ConversationId) => {
         void loadMessages();
       }
     });
+    const offPaused = ipcBridge.conversation.turnPaused.on((event) => {
+      if (event.conversation_id === key) void loadMessages();
+    });
     const offReconnect = ipcBridge.conversation.reconnected.on(() => { void loadMessages(); });
     const offSettled = addEventListener('conversation.turn.settled', (conversationId) => {
       if (conversationId === key) void loadMessages();
     });
-    return () => { offAgentChanged(); offCompleted(); offReconnect(); offSettled(); };
+    const offRefresh = addEventListener('conversation.history.refresh', (conversationId) => {
+      if (conversationId === key) void loadMessages();
+    });
+    return () => { offAgentChanged(); offCompleted(); offPaused(); offReconnect(); offSettled(); offRefresh(); };
   }, [key, loadMessages]);
 
   return {

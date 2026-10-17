@@ -755,8 +755,17 @@ impl EventSequence {
             ChatModelEvent::Completed { .. } => {
                 self.terminal_seen = true;
             }
-            ChatModelEvent::OutputTextDelta { text }
-            | ChatModelEvent::ReasoningDelta { text } => {
+            ChatModelEvent::OutputTextDelta { text, source } => {
+                if let Some(source) = source {
+                    source.validate().map_err(ChatModelError::protocol_violation)?;
+                }
+                if text.is_empty() {
+                    return Err(ChatModelError::protocol_violation(
+                        "provider emitted an empty semantic text delta",
+                    ));
+                }
+            }
+            ChatModelEvent::ReasoningDelta { text } => {
                 if text.is_empty() {
                     return Err(ChatModelError::protocol_violation(
                         "provider emitted an empty semantic text delta",

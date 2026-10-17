@@ -137,7 +137,7 @@ async fn broker_messages_and_tool_continuation_both_send_the_required_version_an
         .respond_with(ResponseTemplate::new(200).set_body_raw(sse(second_events), "text/event-stream"))
         .with_priority(1).expect(1).mount(&server).await;
     let events = decode(&adapter, send(&executor, "anthropic.messages", format!("{}{ENDPOINT}", server.uri()), second.body).await);
-    assert!(events.iter().any(|event| matches!(event, ChatModelEvent::OutputTextDelta { text } if text == "Lookup completed.")));
+    assert!(events.iter().any(|event| matches!(event, ChatModelEvent::OutputTextDelta { text, .. } if text == "Lookup completed.")));
     assert!(matches!(events.last(), Some(ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed })));
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 3);
@@ -163,7 +163,7 @@ async fn non_streaming_messages_also_apply_version_without_replacing_declared_be
         json!({"model":"claude-recorded","messages":[{"role":"user","content":"hello"}],"max_tokens":2048,"stream":false})).await;
     let adapter = AnthropicAdapter::new(Arc::new(EncodingOnlyTransport));
     let events = decode(&adapter, frames);
-    assert!(events.iter().any(|event| matches!(event, ChatModelEvent::OutputTextDelta { text } if text == "Complete JSON reply")));
+    assert!(events.iter().any(|event| matches!(event, ChatModelEvent::OutputTextDelta { text, .. } if text == "Complete JSON reply")));
     assert!(matches!(events.last(), Some(ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed })));
     let requests = server.received_requests().await.unwrap();
     assert!(!requests[0].headers.contains_key("x-api-key"));

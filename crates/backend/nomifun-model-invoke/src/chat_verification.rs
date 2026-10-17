@@ -575,7 +575,7 @@ impl RoundState {
     fn observe(&mut self, event: &ChatModelEvent) -> Result<(), ChatVerificationFailure> {
         match event {
             ChatModelEvent::ResponseStarted { .. } | ChatModelEvent::Usage { .. } => {}
-            ChatModelEvent::OutputTextDelta { text } => {
+            ChatModelEvent::OutputTextDelta { text, .. } => {
                 self.buffered_bytes += text.len();
                 self.append_text(text);
             }

@@ -77,7 +77,7 @@ fn closed_turn(binding: &EngineBinding, operation: &str, input: &str, reply: &st
         AgentEngineEvent::ModelStepStarted {
             step: 1, operation_id: OperationId::from(format!("{operation}:model:1")), correction_source: None,
         },
-        AgentEngineEvent::OutputTextDelta { step: 1, text: reply.into() },
+        AgentEngineEvent::OutputTextDelta { step: 1, text: reply.into(), source: None },
         AgentEngineEvent::TurnCompleted {
             model_steps: 1, finish_reason: ChatFinishReason::Completed,
         },
@@ -221,7 +221,7 @@ impl AgentModelPort for CaptureModel {
         -> Result<AgentModelStream, ChatModelError> {
         self.0.lock().unwrap().push(request);
         Ok(Box::pin(stream::iter(vec![
-            Ok(ChatModelEvent::OutputTextDelta { text: NEW_REPLY.into() }),
+            Ok(ChatModelEvent::OutputTextDelta { text: NEW_REPLY.into(), source: None }),
             Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed }),
         ])))
     }

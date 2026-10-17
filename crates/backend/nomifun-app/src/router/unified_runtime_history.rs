@@ -332,8 +332,7 @@ mod tests {
         }
         for status in ["failed", "completed"] {
             assert!(decode_turn_events(vec![record(AgentEngineEvent::OutputTextDelta {
-                step: 1, text: "unproven output".into(),
-            })], status, false).is_err(), "partial Runtime records require their own exact TurnStarted");
+                step: 1, text: "unproven output".into(), source: None })], status, false).is_err(), "partial Runtime records require their own exact TurnStarted");
         }
     }
 
@@ -426,7 +425,7 @@ mod tests {
             AgentEngineEvent::TurnStarted { binding, turn_operation_id: "previous-turn".into() },
             AgentEngineEvent::PlanUpdated { plan },
             AgentEngineEvent::ModelStepStarted { step: 1, operation_id: "previous-model-step".into(), correction_source: None },
-            AgentEngineEvent::OutputTextDelta { step: 1, text: "The draft still needs repair.".into() },
+            AgentEngineEvent::OutputTextDelta { step: 1, text: "The draft still needs repair.".into(), source: None },
             AgentEngineEvent::TurnFailed { model_steps: 1, message: "Verification failed".into(), failure: None },
         ]
     }

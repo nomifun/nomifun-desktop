@@ -194,3 +194,103 @@ async fn message_timeline_owner_only_settlement_uses_formal_output_and_error_fie
         assert_eq!(live.iter().find(|update|update.call_id.as_deref()==Some(name)).unwrap().timeline,timeline(&row));
     }
 }
+
+
+#[tokio::test]
+async fn message_timeline_reopens_existing_interleaved_facts_as_complete_bodies_in_live_cold_and_paged_views() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("interleaved-session.db");
+    let database = nomifun_db::init_database(&path).await.unwrap();
+    let store = AgentSessionStore::from_pool(database.pool().clone()).await.unwrap();
+    let f = timeline_fixture(&store,"timeline-reopen").await;
+    let mut expected = Vec::new();
+    for (step, prefix, suffix) in [(1,"我将","按照飞书官方文档的步骤安装。先安装 CLI："),
+        (2,"CL","I 和 SKILL 都已安装成功。现在执行第 2 步配置应用凭证：😀")] {
+        let answer = nomifun_agent_contracts::canonical_assistant_step_message_id(f.root.as_ref(),step).unwrap();
+        timeline_progress(&store,&f,&format!("reopen-output-{step}"),json!({"event":"output_text_delta","step":step,"text":prefix})).await;
+        timeline_part(&store,&f,&format!("reopen-first-{step}"),"message/content-part",&answer,prefix).await;
+        let initial = store.message_timeline_updates_for_turn(&f.session,f.root.as_ref()).await.unwrap();
+        let first = initial.iter().find(|update|update.source_message_id==answer && update.call_id.is_none()).unwrap().timeline.segments[0].clone();
+        timeline_progress(&store,&f,&format!("reopen-reasoning-{step}"),json!({"event":"reasoning_delta","step":step,"text":"核对安装步骤"})).await;
+        let thought = Uuid::now_v7().to_string();
+        timeline_part(&store,&f,&format!("reopen-thought-{step}"),"thinking/content-part",&thought,"核对安装步骤").await;
+        timeline_progress(&store,&f,&format!("reopen-continued-{step}"),json!({"event":"output_text_delta","step":step,"text":suffix})).await;
+        timeline_part(&store,&f,&format!("reopen-last-{step}"),"message/content-part",&answer,suffix).await;
+        let live = store.message_timeline_updates_for_turn(&f.session,f.root.as_ref()).await.unwrap();
+        let live_body = &live.iter().find(|update|update.source_message_id==answer && update.call_id.is_none()).unwrap().timeline;
+        assert_eq!(live_body.segments.len(),1);
+        assert_eq!(live_body.segments[0].segment_id,first.segment_id,"a streaming body retains its first event identity");
+        assert_eq!(live_body.segments[0].end_utf16,Some(format!("{prefix}{suffix}").encode_utf16().count() as u64));
+        store.append_event(&append(&f.session,&format!("reopen-seal-{step}"),"runtime_supervisor",&format!("reopen-seal-{step}"),
+            "message/completed",&answer,Some(EventId::from(format!("reopen-last-{step}"))),
+            json!({"part_count":2,"content_digest":digest_bytes(format!("{prefix}{suffix}").as_bytes())}))).await.unwrap();
+        let call = format!("install-{step}");
+        timeline_progress(&store,&f,&format!("reopen-call-{step}"),json!({"event":"tool_call_completed","step":step,
+            "call":{"call_id":call,"name":"run_command","arguments":{}}})).await;
+        timeline_progress(&store,&f,&format!("reopen-start-{step}"),json!({"event":"tool_started","step":step,
+            "call":{"call_id":call,"name":"run_command","arguments":{}}})).await;
+        timeline_progress(&store,&f,&format!("reopen-result-{step}"),json!({"event":"tool_completed","step":step,
+            "result":{"call_id":call,"is_error":false,"output":[]}})).await;
+        expected.push((answer,format!("{prefix}{suffix}"),first.segment_id));
+    }
+    store.append_event(&append(&f.session,"reopen-terminal","runtime_supervisor","reopen-terminal","turn/completed",
+        f.operation.as_ref(),Some(f.start.clone()),json!({"model_steps":2}))).await.unwrap();
+    let live = store.message_timeline_updates_for_turn(&f.session,f.root.as_ref()).await.unwrap();
+    let before = store.read_events(&f.session,None,500).await.unwrap();
+    database.pool().close().await;
+    drop(store);
+    let reopened = AgentSessionStore::connect_existing(&path).await.unwrap();
+    let cold = reopened.message_history_before(&f.session,None,100).await.unwrap().0;
+    for (answer,content,segment_id) in &expected {
+        let row = cold.iter().find(|row|row.projection["correlation_id"]==*answer).unwrap();
+        assert_eq!(row.projection["content"],*content);
+        let body = timeline(row);
+        assert_eq!(body.segments.len(),1);
+        assert_eq!(body.segments[0].segment_id,*segment_id);
+        assert_eq!(body.segments[0].state,TimelineSegmentState::Completed);
+        assert_eq!(&body,&live.iter().find(|update|update.source_message_id==*answer && update.call_id.is_none()).unwrap().timeline);
+    }
+    let mut cursor = None;
+    let mut seen = BTreeSet::new();
+    loop {
+        let (rows,more,_,next) = reopened.message_history_with_turns_before(&f.session,cursor,1).await.unwrap();
+        for row in rows {
+            if let Some((answer,content,_)) = expected.iter().find(|(answer,_,_)|row.projection["correlation_id"]==*answer) {
+                let full = cold.iter().find(|source|source.projection_id==row.projection_id).unwrap();
+                assert_eq!(row.projection["content"],*content);
+                assert_eq!(timeline(&row),timeline(full),"a page edge cannot become a body or process boundary");
+                seen.insert(answer.clone());
+            }
+        }
+        if !more {break;}
+        assert_ne!(cursor,next);cursor=next;
+    }
+    assert_eq!(seen.len(),2);
+    assert_eq!(reopened.read_events(&f.session,None,500).await.unwrap(),before,"reopening derives presentation without rewriting old facts");
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_messages WHERE json_type(projection_json,'$.timeline') IS NOT NULL")
+        .fetch_one(reopened.test_pool()).await.unwrap(),0);
+}
+
+
+#[tokio::test]
+async fn message_timeline_reads_typed_provider_body_identity_from_the_original_content_parts() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let f = timeline_fixture(&store,"timeline-body-source").await;
+    let answer = nomifun_agent_contracts::canonical_assistant_step_message_id(f.root.as_ref(),1).unwrap();
+    let part = |key: &str, index: u32, text: &str| append(&f.session,key,"runtime_supervisor",key,"message/content-part",
+        &answer,Some(f.start.clone()),json!({"turn_id":f.root,"content":text,
+            "source":{"item_id":"provider-message","output_index":0,"content_index":index}}));
+    store.append_event(&part("body-source-first",0,"CL")).await.unwrap();
+    timeline_progress(&store,&f,"body-source-reasoning",json!({"event":"reasoning_delta","step":1,"text":"inspect"})).await;
+    timeline_part(&store,&f,"body-source-thought","thinking/content-part",&Uuid::now_v7().to_string(),"inspect").await;
+    store.append_event(&part("body-source-last",0,"I😀")).await.unwrap();
+    store.append_event(&part("body-source-second",1,"new block")).await.unwrap();
+    let row = store.message_by_id(&f.session,&answer).await.unwrap().unwrap();
+    assert_eq!(row.projection["content"],"CLI😀new block");
+    let body = timeline(&row);
+    assert_eq!(body.segments.len(),2);
+    assert_eq!((body.segments[0].start_utf16,body.segments[0].end_utf16),(Some(0),Some(5)));
+    assert_eq!((body.segments[1].start_utf16,body.segments[1].end_utf16),(Some(5),Some(14)));
+    let live = store.message_timeline_updates_for_turn(&f.session,f.root.as_ref()).await.unwrap();
+    assert_eq!(body,live.iter().find(|update|update.source_message_id==answer && update.call_id.is_none()).unwrap().timeline);
+}

@@ -331,7 +331,7 @@ async fn drain(protocol: ChatProtocol, mut stream: nomifun_model_invoke::SingleA
             Ok(events) => events,
             Err(error) => return Err(observation.model_failure(Stage::Decode,error)),
         };
-        let received_text=events.iter().filter_map(|event|match event {ChatModelEvent::OutputTextDelta{text}=>Some(text.len()),_=>None})
+        let received_text=events.iter().filter_map(|event|match event {ChatModelEvent::OutputTextDelta{text, .. }=>Some(text.len()),_=>None})
             .fold(0usize,usize::saturating_add);
         observation.diagnostic.output_bytes=Some(output.len().saturating_add(received_text) as u64);
         if let Some(tokens)=decoder.reported_output_tokens() {
@@ -345,7 +345,7 @@ async fn drain(protocol: ChatProtocol, mut stream: nomifun_model_invoke::SingleA
         for event in events {
             let mut semantic_progress=false;
             match event {
-                ChatModelEvent::OutputTextDelta {text} => {
+                ChatModelEvent::OutputTextDelta {text, .. } => {
                     observation.semantic_bytes=observation.semantic_bytes.saturating_add(text.len());
                     if output.len().saturating_add(text.len()) > limits.output_max_utf8_bytes {
                         return Err(observation.failure(Stage::Stream,"OUTPUT_BYTE_BUDGET_EXCEEDED",None));

@@ -621,6 +621,7 @@ impl EngineTurnJournal {
         cursor: &mut Cursor,
         step: u16,
         text: &str,
+        source: Option<&nomifun_agent_contracts::ChatOutputTextSource>,
     ) -> Result<(), AppError> {
         if text.is_empty() {
             return Ok(());
@@ -656,6 +657,14 @@ impl EngineTurnJournal {
             journal.operation.as_ref(),
         );
         let event_id = EventId::from(identity.clone());
+        let mut content = json!({
+            "content": text,
+            "turn_id": journal.root.as_ref(),
+            "display_at_ms": now_ms(),
+        });
+        if let Some(source) = source {
+            content["source"] = serde_json::to_value(source).map_err(failure)?;
+        }
         let append = SessionEventAppend {
             agent_session_id: journal.session.clone(),
             event_id: event_id.clone(),
@@ -671,11 +680,7 @@ impl EngineTurnJournal {
                         .clone()
                         .unwrap_or_else(|| journal.root.clone()),
                 ),
-                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-                    "content": text,
-                    "turn_id": journal.root.as_ref(),
-                    "display_at_ms": now_ms(),
-                }))),
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(content)),
             },
         };
         journal.append_projection(&append).await.map_err(failure)?;
@@ -1166,8 +1171,11 @@ impl EngineTurnJournal {
                 // the next response cursor. Ordinary journal events are unchanged.
                 if cursor.assistant_step.as_ref().is_some_and(|current|current.step==*step){cursor.assistant_step=None;}
             }
-            if let Some(AgentEngineEvent::OutputTextDelta { step, text } | AgentEngineEvent::CompletionDelivered { step, text }) = &runtime_event {
-                Self::append_assistant_part(&journal, &mut cursor, *step, text).await?;
+            if let Some(AgentEngineEvent::OutputTextDelta { step, text, source }) = &runtime_event {
+                Self::append_assistant_part(&journal, &mut cursor, *step, text, source.as_ref()).await?;
+            }
+            if let Some(AgentEngineEvent::CompletionDelivered { step, text }) = &runtime_event {
+                Self::append_assistant_part(&journal, &mut cursor, *step, text, None).await?;
             }
             if let Some(AgentEngineEvent::ReasoningDelta { step, text }) = &runtime_event {
                 Self::append_thinking_part(&journal, &mut cursor, *step, text).await?;
@@ -1392,10 +1400,10 @@ mod history_display_tests {
     async fn voice_owned_journal_keeps_withdrawn_parts_as_audit_without_completing_the_obsolete_source() {
         let(journal,pool)=test_fixture().await;let task=tokio::spawn(async{});let task_id=task.id().to_string();task.await.unwrap();
         let operation=OperationId::from(format!("{}:model:1",journal.0.operation.as_ref()));
-        for event in [AgentEngineEvent::OutputTextDelta {step:1,text:"obsolete public draft".into()},
+        for event in [AgentEngineEvent::OutputTextDelta {step:1,text:"obsolete public draft".into(), source: None,},
             AgentEngineEvent::VoiceModelStepSuperseded {step:1,model_operation_id:operation.clone(),steering_receipt_ids:vec!["actual-voice-receipt".into()],discarded_tool_call_ids:vec![],
                 cleanup:nomifun_chat_model_broker::OwnedModelCleanupReceipt {operation_id:operation,task_id,stage:nomifun_chat_model_broker::OwnedModelCleanupStage::Producer,outcome:nomifun_chat_model_broker::OwnedModelCleanupOutcome::Joined}},
-            AgentEngineEvent::OutputTextDelta {step:2,text:"current public reply".into()}] {
+            AgentEngineEvent::OutputTextDelta {step:2,text:"current public reply".into(), source: None,}] {
             journal.append(serde_json::to_string(&event).unwrap(),None,EngineJournalWrite::Progress).await.unwrap();
         }
         journal.append(json!({"event":"host_cleanup_proven"}).to_string(),None,EngineJournalWrite::Cleanup).await.unwrap();
@@ -1441,7 +1449,7 @@ mod history_display_tests {
         for event in [
             serde_json::to_value(AgentEngineEvent::OutputTextDelta {
                 step: 1,
-                text: "I found the cause.".into(),
+                text: "I found the cause.".into(), source: None,
             }).unwrap(),
             json!({
                 "event": "host_tool_dispatch",
@@ -1461,7 +1469,7 @@ mod history_display_tests {
             }),
             serde_json::to_value(AgentEngineEvent::OutputTextDelta {
                 step: 2,
-                text: "The check passed.".into(),
+                text: "The check passed.".into(), source: None,
             }).unwrap(),
         ] {
             journal.append(event.to_string(), None, EngineJournalWrite::Progress)
@@ -1528,7 +1536,7 @@ mod history_display_tests {
     #[tokio::test]
     async fn a_public_tool_preface_followed_by_an_empty_final_step_is_not_a_delivered_answer() {
         let (journal,pool)=test_fixture().await;
-        for event in [AgentEngineEvent::OutputTextDelta {step:1,text:"I will start working.".into()},
+        for event in [AgentEngineEvent::OutputTextDelta {step:1,text:"I will start working.".into(), source: None,},
             AgentEngineEvent::ModelStepStarted {step:2,operation_id:format!("{}:model:2",journal.0.operation.as_ref()).into(),correction_source:None}] {
             journal.append(serde_json::to_string(&event).unwrap(),None,EngineJournalWrite::Progress).await.unwrap();
         }
@@ -1644,7 +1652,7 @@ mod history_display_tests {
     }
 
     #[tokio::test]
-    async fn narration_phase_anchors_survive_live_buffering_and_cold_history_rebuilds() {
+    async fn narration_source_anchors_survive_reasoning_live_buffering_and_cold_history_rebuilds() {
         use nomifun_agent_contracts::{TimelineSegmentKind, TimelineSegmentState};
 
         async fn record(journal: &EngineTurnJournal, buffer: &mut AgentEventBuffer, event: AgentEngineEvent) {
@@ -1660,31 +1668,27 @@ mod history_display_tests {
         record(&journal, &mut buffer, AgentEngineEvent::ModelStepStarted {
             step: 1, operation_id: format!("{}:model:1", journal.0.operation.as_ref()).into(), correction_source: None,
         }).await;
-        record(&journal, &mut buffer, AgentEngineEvent::OutputTextDelta { step: 1, text: "前😀".into() }).await;
+        record(&journal, &mut buffer, AgentEngineEvent::OutputTextDelta { step: 1, text: "前😀".into(), source: None, }).await;
         let first = store.message_timeline_updates_for_turn(&journal.0.session, journal.0.root.as_ref()).await.unwrap();
         let first = first.iter().find(|update| update.source_message_id == source).unwrap().timeline.segments[0].clone();
         assert_eq!(first.kind, TimelineSegmentKind::Narration);
         assert_eq!(first.state, TimelineSegmentState::Running);
         assert_eq!((first.start_utf16, first.end_utf16), (Some(0), Some(3)));
 
-        assert!(buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: "增量".into() }).is_empty());
+        assert!(buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: "增量".into(), source: None, }).is_empty());
         record(&journal, &mut buffer, AgentEngineEvent::ReasoningDelta { step: 1, text: "Check.".into() }).await;
-        record(&journal, &mut buffer, AgentEngineEvent::OutputTextDelta { step: 1, text: "后🧑‍💻".into() }).await;
+        record(&journal, &mut buffer, AgentEngineEvent::OutputTextDelta { step: 1, text: "后🧑‍💻".into(), source: None, }).await;
         let resumed = store.message_timeline_updates_for_turn(&journal.0.session, journal.0.root.as_ref()).await.unwrap();
         let resumed = &resumed.iter().find(|update| update.source_message_id == source).unwrap().timeline.segments;
-        assert_eq!(resumed.len(), 2);
+        assert_eq!(resumed.len(), 1);
         assert_eq!(resumed[0].segment_id, first.segment_id);
-        assert_eq!(resumed[0].state, TimelineSegmentState::Completed);
+        assert_eq!(resumed[0].state, TimelineSegmentState::Running);
         assert_eq!((resumed[0].start_utf16, resumed[0].end_utf16), (Some(0), Some(5)));
-        assert_ne!(resumed[1].segment_id, first.segment_id);
-        assert_eq!(resumed[1].state, TimelineSegmentState::Running);
-        assert_eq!((resumed[1].start_utf16, resumed[1].end_utf16), (Some(5), Some(11)));
-        let resumed_id = resumed[1].segment_id.clone();
-        assert!(buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: "尾".into() }).is_empty());
+        assert!(buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: "尾".into(), source: None, }).is_empty());
         let cold = store.message_history_before(&journal.0.session, None, 50).await.unwrap().0;
         let cold = cold.iter().find(|row| row.projection["correlation_id"] == source).unwrap();
-        assert_eq!(cold.projection["content"], "前😀增量后🧑‍💻", "uncommitted live tails do not enter cold history");
-        assert_eq!(cold.projection["timeline"]["segments"][1]["state"], "running");
+        assert_eq!(cold.projection["content"], "前😀增量", "uncommitted live tails do not enter cold history");
+        assert_eq!(cold.projection["timeline"]["segments"][0]["state"], "running");
 
         let mut tail = Vec::new();
         buffer.flush(&mut tail);
@@ -1699,11 +1703,46 @@ mod history_display_tests {
         let history = store.message_history_before(&journal.0.session, None, 50).await.unwrap().0;
         let answer = history.iter().find(|row| row.projection["correlation_id"] == source).unwrap();
         assert_eq!(answer.projection["content"], "前😀增量后🧑‍💻尾");
+        assert_eq!(answer.projection["timeline"]["segments"].as_array().unwrap().len(), 1);
         assert_eq!(answer.projection["timeline"]["segments"][0]["segment_id"], first.segment_id);
-        assert_eq!(answer.projection["timeline"]["segments"][1]["segment_id"], resumed_id);
-        assert_eq!(answer.projection["timeline"]["segments"][1]["start_utf16"], 5);
-        assert_eq!(answer.projection["timeline"]["segments"][1]["end_utf16"], 12);
-        assert_eq!(answer.projection["timeline"]["segments"][1]["state"], "completed");
+        assert_eq!(answer.projection["timeline"]["segments"][0]["start_utf16"], 0);
+        assert_eq!(answer.projection["timeline"]["segments"][0]["end_utf16"], 12);
+        assert_eq!(answer.projection["timeline"]["segments"][0]["state"], "completed");
+    }
+
+    #[tokio::test]
+    async fn provider_text_sources_survive_journal_buffering_and_history_rebuild() {
+        use nomifun_agent_contracts::ChatOutputTextSource;
+        let (journal, pool) = test_fixture().await;
+        let store = AgentSessionStore::from_pool(pool.clone()).await.unwrap();
+        let mut buffer = AgentEventBuffer::default();
+        let first = ChatOutputTextSource { item_id: "message-one".into(), output_index: Some(0), content_index: 0 };
+        let second = ChatOutputTextSource { item_id: "message-two".into(), output_index: Some(1), content_index: 0 };
+        for event in [
+            AgentEngineEvent::ModelStepStarted { step: 1, operation_id: format!("{}:model:1", journal.0.operation.as_ref()).into(), correction_source: None },
+            AgentEngineEvent::OutputTextDelta { step: 1, text: "CL".into(), source: Some(first.clone()) },
+            AgentEngineEvent::ReasoningDelta { step: 1, text: "Verify.".into() },
+            AgentEngineEvent::OutputTextDelta { step: 1, text: "I".into(), source: Some(first) },
+            AgentEngineEvent::OutputTextDelta { step: 1, text: "独立消息".into(), source: Some(second) },
+        ] {
+            for record in buffer.project(&event) {
+                journal.append(serde_json::to_string(&record).unwrap(), None, EngineJournalWrite::Progress).await.unwrap();
+            }
+        }
+        let source = canonical_assistant_step_message_id(journal.0.root.as_ref(), 1).unwrap();
+        let live = store.message_timeline_updates_for_turn(&journal.0.session, journal.0.root.as_ref()).await.unwrap();
+        let live = &live.iter().find(|update| update.source_message_id == source).unwrap().timeline;
+        assert_eq!(live.segments.len(), 2);
+        assert_eq!((live.segments[0].start_utf16, live.segments[0].end_utf16), (Some(0), Some(3)));
+        assert_eq!((live.segments[1].start_utf16, live.segments[1].end_utf16), (Some(3), Some(7)));
+        store.rebuild_projections(&journal.0.session).await.unwrap();
+        let history = store.message_history_before(&journal.0.session, None, 50).await.unwrap().0;
+        let body = history.iter().find(|row| row.projection["correlation_id"] == source).unwrap();
+        assert_eq!(body.projection["content"], "CLI独立消息");
+        assert_eq!(body.projection["timeline"], serde_json::to_value(live).unwrap());
+        let sources: Vec<String> = sqlx::query_scalar("SELECT json_extract(inline_json,'$.source.item_id') FROM agent_events WHERE session_id=? AND kind='message/content-part' ORDER BY seq")
+            .bind(journal.0.session.as_ref()).fetch_all(&pool).await.unwrap();
+        assert_eq!(sources, ["message-one", "message-one", "message-two"]);
     }
 
     #[tokio::test]

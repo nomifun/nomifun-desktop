@@ -44,7 +44,7 @@ fn completed_correction() -> Vec<AgentEngineEvent> {
 fn corrected_native_call_preserves_exact_rejection_feedback_without_fabricated_pair() {
     let mut events = completed_correction();
     events.pop();
-    events.extend([start(3, None), AgentEngineEvent::OutputTextDelta { step: 3, text: "final public answer".into() },
+    events.extend([start(3, None), AgentEngineEvent::OutputTextDelta { step: 3, text: "final public answer".into(), source: None },
         AgentEngineEvent::TurnCompleted { model_steps: 3, finish_reason: ChatFinishReason::Completed }]);
     let mut history = vec![];
     replay_closed_turn(&mut history, requirement(), &events).unwrap();
@@ -103,7 +103,7 @@ fn pending_canonical_tail_feedback_survives_recovery_without_retaining_carrier()
     let prefix = vec![AgentEngineEvent::TurnStarted { binding: binding(), turn_operation_id: "turn".into() },
         AgentEngineEvent::ExecutionCheckpointSaved { step: 0, revision: 1, digest: "c".repeat(64).into() }];
     let mut tail = rejection_prefix().into_iter().skip(1).collect::<Vec<_>>();
-    tail.insert(1, AgentEngineEvent::OutputTextDelta { step: 1, text: "ABANDONED_CARRIER".into() });
+    tail.insert(1, AgentEngineEvent::OutputTextDelta { step: 1, text: "ABANDONED_CARRIER".into(), source: None });
     tail.push(start(2, Some(1)));
     let recovery = AgentTurnRecovery::new(checkpoint.clone(), 1, 2, prefix.clone(), tail.clone(), vec![]).unwrap();
     let mut state = crate::protocol_recovery::ProtocolRecovery::default();

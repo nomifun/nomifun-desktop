@@ -7,14 +7,15 @@ const source = (type: 'thinking' | 'text', content: string, segments: unknown[])
 const segment = (id: string, seq: number, kind: 'reasoning' | 'narration', start: number, end: number, group = 'first') => ({
   segment_id: id, group_id: group, first_seq: seq, last_seq: seq, kind, state: 'completed', start_utf16: start, end_utf16: end,
 });
-test('canonical references restore same-source interleaving and UTF-16 ranges without new Message identities', () => {
-  const thought = source('thinking', '甲😀乙', [segment('r1', 2, 'reasoning', 0, 3), segment('r2', 6, 'reasoning', 3, 4, 'second')]);
-  const narration = source('text', 'AB', [segment('t1', 4, 'narration', 0, 1), segment('t2', 8, 'narration', 1, 2)]);
+test('canonical narration spans interleaved reasoning and preserves one complete Markdown body', () => {
+  const thought = source('thinking', '甲😀乙', [segment('r1', 4, 'reasoning', 0, 3), segment('r2', 6, 'reasoning', 3, 4)]);
+  const text = '我将安装 **CLI**。';
+  const narration = source('text', text, [{ ...segment('t1', 2, 'narration', 0, text.length), last_seq: 8 }]);
   const rows = orderProcessSegments(projectProcessSegments([thought, narration], new Set()));
-  expect(rows.map(row => row.id)).toEqual(['r1', 't1', 'r2', 't2']);
-  expect(rows.map(textOf)).toEqual(['甲😀', 'A', '乙', 'B']);
-  expect(rows.map(row => row.processGroupId)).toEqual(['first', undefined, 'second', undefined]);
-  expect(rows[0].msg_id).toBe(rows[2].msg_id);
+  expect(rows.map(row => row.id)).toEqual(['t1', 'r1', 'r2']);
+  expect(rows.map(textOf)).toEqual([text, '甲😀', '乙']);
+  expect(rows.map(row => row.processGroupId)).toEqual([undefined, 'first', 'first']);
+  expect(rows[1].msg_id).toBe(rows[2].msg_id);
   expect(textOf(thought)).toBe('甲😀乙');
 });
 test('partial pages retain backend group anchors and missing metadata stays unclassified', () => {
@@ -33,7 +34,32 @@ test('only a live final source segment may extend into transient body bytes', ()
   const message = source('thinking', 'ABCD', [{ ...segment('live', 2, 'reasoning', 1, 2), state: 'running' }]);
   expect(textOf(projectProcessSegments([message], new Set())[0])).toBe('BCD');
   const empty = source('thinking', 'AB', [{ ...segment('budget-phase', 2, 'reasoning', 2, 2), state: 'running' }]);
-  expect(projectProcessSegments([empty], new Set())[0].processSegmentState).toBe('running');
+  expect(projectProcessSegments([empty], new Set())).toEqual([]);
+});
+
+test.each(['', ' \n ', '[Private reasoning omitted]', '[Private reasoning omitted from replay]'])(
+  'unreadable reasoning %j cannot introduce an empty process group', text => {
+    const thought = source('thinking', text, [segment('r1', 3, 'reasoning', 0, text.length)]);
+    const narration = source('text', 'CLI', [segment('t1', 2, 'narration', 0, 3)]);
+    const rows = orderProcessSegments(projectProcessSegments([thought, narration], new Set()));
+    expect(rows.map(row => row.id)).toEqual(['t1']);
+    expect(rows.map(textOf)).toEqual(['CLI']);
+    expect(projectProcessSegments([{ ...thought, content: { content: text, status: 'done' } } as TMessage], new Set())).toEqual([]);
+  }
+);
+
+test('distinct canonical narration ranges preserve a true tool boundary within one source', () => {
+  const narration = source('text', 'Before.After.', [segment('before-tool', 2, 'narration', 0, 7),
+    segment('after-tool', 6, 'narration', 7, 13, 'after-tool')]);
+  const tool = { id: 'tool', type: 'tool_call', conversation_id: 'session', turn_id: 'turn', content: {
+    call_id: 'call', name: 'read_file', status: 'completed', timeline: { through_seq: 20, segments: [{
+      segment_id: 'tool-start', group_id: 'before-tool', first_seq: 4, last_seq: 5, kind: 'tool',
+      call_id: 'call', state: 'completed',
+    }] },
+  } } as unknown as TMessage;
+  const rows = orderProcessSegments(projectProcessSegments([narration, tool], new Set()));
+  expect(rows.map(row => row.id)).toEqual(['before-tool', 'tool-start', 'after-tool']);
+  expect(rows.filter(row => row.type === 'text').map(textOf)).toEqual(['Before.', 'After.']);
 });
 
 test('an interrupted tool observation stops display activity without inventing cancellation', () => {

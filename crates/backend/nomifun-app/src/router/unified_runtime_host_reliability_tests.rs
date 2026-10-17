@@ -722,6 +722,9 @@ async fn steering_replay_recovers_the_commit_to_runtime_queue_gap_once() {
     host.record_event(&message, &AgentEngineEvent::TurnStarted {
         binding:host.engine_binding.clone(),turn_operation_id:target.clone(),
     }).await.unwrap();
+    host.record_event(&message, &AgentEngineEvent::OutputTextDelta {
+        step: 1, text: "Before steering.".into(), source: None,
+    }).await.unwrap().expect("first text source commits before publication");
     let request = || nomifun_api_types::SendMessageRequest {
         content:"Original committed steering\n中文纠正必须保留".into(),files:vec![],inject_skills:vec![],hidden:false,
         origin:Some("agent_execution".into()),channel_platform:None,
@@ -742,6 +745,13 @@ async fn steering_replay_recovers_the_commit_to_runtime_queue_gap_once() {
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='turn/steer-accepted'")
         .bind(session.as_ref()).fetch_one(fixture.pool()).await.unwrap();
     assert_eq!(count, 1);
+    host.record_event(&message, &AgentEngineEvent::OutputTextDelta {
+        step: 1, text: "After steering.".into(), source: None,
+    }).await.unwrap().expect("the accepted owner boundary must invalidate the same-source live cache");
+    let source = super::super::engine_journal::canonical_assistant_step_message_id(message.source_message_id.as_deref().unwrap(), 1).unwrap();
+    let updates = fixture.owner.canonical().store().message_timeline_updates_for_turn(&session, message.source_message_id.as_deref().unwrap()).await.unwrap();
+    let segments = &updates.iter().find(|update| update.source_message_id == source).unwrap().timeline.segments;
+    assert_eq!(segments.len(), 2, "real user input retains an independent reading boundary");
     runtime.kill_and_wait(None).await.unwrap();
     fixture.finish().await;
 }
@@ -755,9 +765,9 @@ async fn system_permission_result_sequence_uses_the_real_host_ack_after_buffer_f
     let mut message = fixture.message.clone();
     message.msg_id = message.source_message_id.clone().unwrap();
     host.admit_preparation(&message, CancellationToken::new()).await.unwrap();
-    assert!(host.record_event(&message, &AgentEngineEvent::TurnStarted {
+    host.record_event(&message, &AgentEngineEvent::TurnStarted {
         binding: host.engine_binding.clone(), turn_operation_id: "cleanup-retry-turn".into(),
-    }).await.unwrap().is_none());
+    }).await.unwrap().expect("TurnStarted owns its exact canonical acknowledgement");
     for (index, is_error) in [true, false].into_iter().enumerate() {
         let call_id = format!("permission-sequence-{index}");
         host.record_event(&message, &AgentEngineEvent::ToolCallCompleted { step: 1, call: ChatToolCall {
@@ -768,8 +778,12 @@ async fn system_permission_result_sequence_uses_the_real_host_ack_after_buffer_f
             step: 1, call_id: call_id.clone().into(), capability_id: "workspace.files".into(),
             action_id: "workspace.files/read".into(),
         }).await.unwrap());
-        // Short text stays buffered until the result commits both records.
+        host.record_event(&message, &AgentEngineEvent::OutputTextDelta {
+            source: None, step: 1, text: "Source anchor. ".into(),
+        }).await.unwrap().expect("first source fragment commits before live publication");
+        // Later same-source text stays buffered until the result commits both records.
         assert!(host.record_event(&message, &AgentEngineEvent::OutputTextDelta {
+            source: None,
             step: 1, text: format!("buffered before {call_id}"),
         }).await.unwrap().is_none());
         let seq = host.record_event(&message, &AgentEngineEvent::ToolCompleted { runtime_hold: None, step: 1,
@@ -784,9 +798,9 @@ async fn system_permission_result_sequence_uses_the_real_host_ack_after_buffer_f
             AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='output_text_delta'")
             .bind(&host.options.conversation_id).fetch_one(fixture.pool()).await.unwrap();
         assert!(text_seq < persisted, "result identity must not borrow the flushed text acknowledgement");
-        assert!(host.record_event(&message, &AgentEngineEvent::ReasoningDelta {
+        host.record_event(&message, &AgentEngineEvent::ReasoningDelta {
             step: index as u16 + 2, text: "a later canonical observation".into(),
-        }).await.unwrap().is_none());
+        }).await.unwrap().expect("first reasoning activity fragment commits its own reference");
         let head = fixture.owner.canonical().store().head(&host.options.conversation_id.clone().into()).await.unwrap();
         assert!(head.last_seq > seq, "an unrelated later head is distinct from the result receipt");
     }
@@ -1176,11 +1190,15 @@ async fn steering_cleanup_scenario(fault: SteeringCleanupFault) {
     };
     assert!(fixture.host.queue_steer(delivery.clone()).await.unwrap());
     assert!(fixture.host.queue_steer(delivery.clone()).await.unwrap());
-    let tail = "Partial response before cancellation.\n中文尾部：只写一次";
+    let anchor = "Initial source anchor.\n";
     fixture.host.record_event(&fixture.message, &AgentEngineEvent::OutputTextDelta {
-        step: 1, text: tail.into(),
-    }).await.unwrap();
-    assert_eq!(fixture.host.active.lock().await.as_ref().unwrap().journal.sequence(), 2);
+        step: 1, text: anchor.into(), source: None,
+    }).await.unwrap().expect("first source fragment commits before live publication");
+    let before_tail = fixture.host.active.lock().await.as_ref().unwrap().journal.sequence();
+    let tail = "Partial response before cancellation.\n中文尾部：只写一次";
+    assert!(fixture.host.record_event(&fixture.message, &AgentEngineEvent::OutputTextDelta {
+        step: 1, text: tail.into(), source: None }).await.unwrap().is_none(), "same-source tail remains buffered");
+    assert_eq!(fixture.host.active.lock().await.as_ref().unwrap().journal.sequence(), before_tail);
     let predicate = match fault {
         SteeringCleanupFault::PrivateRecord => "NEW.kind='runtime/progress-recorded' AND json_extract(NEW.inline_json,'$.event.event')='output_text_delta'",
         SteeringCleanupFault::PublicProjection => "NEW.kind='message/content-part'",
@@ -1206,10 +1224,10 @@ async fn steering_cleanup_scenario(fault: SteeringCleanupFault) {
     }
     let public_parts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='message/content-part'")
         .bind(&fixture.host.options.conversation_id).fetch_one(fixture.pool()).await.unwrap();
-    assert_eq!(public_parts, i64::from(matches!(fault, SteeringCleanupFault::DeferredReceipt)));
+    assert_eq!(public_parts, 1 + i64::from(matches!(fault, SteeringCleanupFault::DeferredReceipt)));
     let private_parts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='output_text_delta'")
         .bind(&fixture.host.options.conversation_id).fetch_one(fixture.pool()).await.unwrap();
-    assert_eq!(private_parts, i64::from(!matches!(fault, SteeringCleanupFault::PrivateRecord)));
+    assert_eq!(private_parts, 1 + i64::from(!matches!(fault, SteeringCleanupFault::PrivateRecord)));
     sqlx::query("DROP TRIGGER reject_steering_tail").execute(fixture.pool()).await.unwrap();
     sqlx::query("DROP TRIGGER reject_steering_cleanup_pause").execute(fixture.pool()).await.unwrap();
     fixture.host.cleanup_turn(&fixture.message).await.unwrap();
@@ -1222,10 +1240,10 @@ async fn steering_cleanup_scenario(fault: SteeringCleanupFault) {
     }
     let parts: Vec<String> = sqlx::query_scalar("SELECT json_extract(inline_json,'$.content') FROM agent_events WHERE session_id=? AND kind='message/content-part' ORDER BY seq")
         .bind(&fixture.host.options.conversation_id).fetch_all(fixture.pool()).await.unwrap();
-    assert_eq!(parts, vec![tail]);
+    assert_eq!(parts, vec![anchor, tail]);
     let private: Vec<String> = sqlx::query_scalar("SELECT json_extract(inline_json,'$.event.text') FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='output_text_delta'")
         .bind(&fixture.host.options.conversation_id).fetch_all(fixture.pool()).await.unwrap();
-    assert_eq!(private, vec![tail]);
+    assert_eq!(private, vec![anchor, tail]);
     let deferred: Vec<String> = sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='steering_deferred'")
         .bind(&fixture.host.options.conversation_id).fetch_all(fixture.pool()).await.unwrap();
     assert_eq!(deferred.len(), 1);

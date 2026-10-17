@@ -1253,7 +1253,7 @@ mod tests {
             let mut reducer = SpokenReplyReducer::default();
             assert!(
                 reducer
-                    .push(AgentStreamEvent::Text(TextEventData { step: None, content: "unfinished draft".to_owned(),
+                    .push(AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "unfinished draft".to_owned(),
                     }))
                     .is_empty()
             );
@@ -1347,13 +1347,13 @@ mod tests {
             vec![]
         );
         assert_eq!(
-            reducer.push(AgentStreamEvent::Text(TextEventData { step: None, content: "在".to_owned(),
+            reducer.push(AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "在".to_owned(),
             })),
             vec![],
             "an unconfirmed text delta must not reach TTS"
         );
         assert_eq!(
-            reducer.push(AgentStreamEvent::Text(TextEventData { step: None, content: "呢".to_owned(),
+            reducer.push(AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "呢".to_owned(),
             })),
             vec![]
         );
@@ -1377,7 +1377,7 @@ mod tests {
         );
         assert!(
             reducer
-                .push(AgentStreamEvent::Text(TextEventData { step: None, content: "前缀".to_owned(),
+                .push(AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "前缀".to_owned(),
                 }))
                 .is_empty()
         );
@@ -1388,7 +1388,7 @@ mod tests {
         );
         assert!(
             reducer
-                .push(AgentStreamEvent::Text(TextEventData { step: None, content: "废弃草稿".to_owned(),
+                .push(AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "废弃草稿".to_owned(),
                 }))
                 .is_empty()
         );
@@ -1401,7 +1401,7 @@ mod tests {
         );
         assert!(
             reducer
-                .push(AgentStreamEvent::Text(TextEventData { step: None, content: "答案".to_owned(),
+                .push(AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "答案".to_owned(),
                 }))
                 .is_empty()
         );
@@ -1418,14 +1418,14 @@ mod tests {
         let mut reducer = SpokenReplyReducer::default();
         assert!(
             reducer
-                .push(AgentStreamEvent::Text(TextEventData { step: None, content: "我先搜索一下。".to_owned(),
+                .push(AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "我先搜索一下。".to_owned(),
                 }))
                 .is_empty()
         );
         assert!(reducer.push(running_tool_call()).is_empty());
         assert!(
             reducer
-                .push(AgentStreamEvent::Text(TextEventData { step: None, content: "已经为你打开视频。".to_owned(),
+                .push(AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "已经为你打开视频。".to_owned(),
                 }))
                 .is_empty()
         );
@@ -1446,7 +1446,7 @@ mod tests {
         let mut reducer = SpokenReplyReducer::default();
         assert!(
             reducer
-                .push(AgentStreamEvent::Text(TextEventData { step: None, content: "我正在处理。".to_owned(),
+                .push(AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "我正在处理。".to_owned(),
                 }))
                 .is_empty()
         );

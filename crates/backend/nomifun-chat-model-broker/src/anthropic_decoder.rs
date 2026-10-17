@@ -2,7 +2,7 @@
 //! A content-block index selects state; only tool_use.id is a tool call ID.
 use crate::adapter::{ProviderWireFrame, parse_usage};
 use crate::{
-    ChatFinishReason, ChatModelError, ChatModelErrorCode, ChatModelEvent, ChatProtocol,
+    ChatFinishReason, ChatModelError, ChatModelErrorCode, ChatModelEvent, ChatOutputTextSource, ChatProtocol,
     ChatRetryDirective, ProviderResponseId, ToolCallId,
 };
 use serde_json::{Map, Value};
@@ -18,6 +18,7 @@ const MAX_SIGNATURE: usize = MAX_THINKING_OPAQUE_BYTES;
 pub(crate) struct AnthropicDecoder {
     native: Option<bool>,
     started: bool,
+    message_id: Option<String>,
     terminal: bool,
     output_closed: bool,
     incomplete_block: bool,
@@ -56,7 +57,7 @@ impl Default for AnthropicDecoder {
 
 impl AnthropicDecoder {
     pub(crate) fn with_argument_parser(argument_parser: Arc<dyn ToolArgumentParser>) -> Self {
-        Self { native: None, started: false, terminal: false, output_closed: false,
+        Self { native: None, started: false, message_id: None, terminal: false, output_closed: false,
             incomplete_block: false, next_index: 0, active: None, call_ids: BTreeSet::new(),
             finish: None, usage: Map::new(), budget: crate::wire_budget::WireBudget::default(), argument_parser,
             last_frame_semantic_progress: false }
@@ -287,6 +288,7 @@ impl AnthropicDecoder {
                 return Err(invalid("Invalid initial Anthropic message"));
             }
             let id = identity(message, "id")?.to_owned();
+            self.message_id = Some(id.clone());
             // Token counters are observability, not semantics: a provider may
             // omit input_tokens/output_tokens at start (e.g. a refused Bedrock
             // request). Present counters must still be real integers, and
@@ -412,6 +414,10 @@ impl AnthropicDecoder {
                 if !text.is_empty() {
                     events.push(ChatModelEvent::OutputTextDelta {
                         text: text.to_owned(),
+                        source: Some(ChatOutputTextSource {
+                            item_id: self.message_id.clone().ok_or_else(|| invalid("Missing Anthropic message identity"))?,
+                            output_index: None, content_index: self.next_index as u32,
+                        }),
                     });
                 }
                 Block::Text
@@ -490,6 +496,10 @@ impl AnthropicDecoder {
                 if !text.is_empty() {
                     events.push(ChatModelEvent::OutputTextDelta {
                         text: text.to_owned(),
+                        source: Some(ChatOutputTextSource {
+                            item_id: self.message_id.clone().ok_or_else(|| invalid("Missing Anthropic message identity"))?,
+                            output_index: None, content_index: self.next_index as u32,
+                        }),
                     });
                 }
             }
@@ -667,6 +677,37 @@ mod tests {
     }
 
     #[test]
+    fn text_source_survives_frames_and_changes_only_at_native_block_boundaries() {
+        let mut decoder = AnthropicDecoder::default();
+        start(&mut decoder);
+        let mut output = Vec::new();
+        for (index, prefix, suffix) in [(0, "CL", "I"), (1, "next ", "message")] {
+            output.extend(native(&mut decoder, "content_block_start", serde_json::json!({
+                "type":"content_block_start", "index":index,
+                "content_block":{"type":"text", "text":prefix}
+            })).unwrap());
+            output.extend(native(&mut decoder, "content_block_delta", serde_json::json!({
+                "type":"content_block_delta", "index":index,
+                "delta":{"type":"text_delta", "text":suffix}
+            })).unwrap());
+            native(&mut decoder, "content_block_stop", serde_json::json!({
+                "type":"content_block_stop", "index":index
+            })).unwrap();
+        }
+        let sources: Vec<_> = output.iter().filter_map(|event| match event {
+            ChatModelEvent::OutputTextDelta { source, .. } => source.as_ref(), _ => None,
+        }).collect();
+        assert_eq!(sources.len(), 4);
+        assert_eq!(sources[0], sources[1]);
+        assert_eq!(sources[2], sources[3]);
+        assert_ne!(sources[0], sources[2]);
+        assert_eq!(sources[0].item_id, "msg_progress");
+        assert_eq!(sources[0].content_index, 0);
+        assert_eq!(sources[2].content_index, 1);
+        assert_eq!(sources[0].output_index, None);
+    }
+
+    #[test]
     fn deferred_thinking_progress_does_not_change_atomic_events_or_accept_empty_signature_frames() {
         let mut decoder = AnthropicDecoder::default(); start(&mut decoder);
         native(&mut decoder,"content_block_start",serde_json::json!({"type":"content_block_start","index":0,
@@ -736,7 +777,7 @@ mod tests {
         assert!(matches!(events.first(), Some(ChatModelEvent::ResponseStarted { .. })));
         assert!(events.iter().any(|event| matches!(
             event,
-            ChatModelEvent::OutputTextDelta { text } if text == "hello"
+            ChatModelEvent::OutputTextDelta { text, .. } if text == "hello"
         )));
         assert!(events.iter().any(|event| matches!(
             event,
@@ -847,7 +888,7 @@ mod tests {
             events.extend(native(&mut decoder, kind, data).unwrap());
         }
         assert!(events.iter().any(|event| matches!(event,
-            ChatModelEvent::OutputTextDelta { text } if text == "hello")));
+            ChatModelEvent::OutputTextDelta { text, .. } if text == "hello")));
         assert!(matches!(events.last(), Some(ChatModelEvent::Completed {
             finish_reason: ChatFinishReason::Completed })));
     }
@@ -891,7 +932,7 @@ mod tests {
                 block: ChatProviderReasoning::AnthropicThinking { text, signature, route_digest: None }
             } if text == "native thought" && signature == "sig")));
         assert!(events.iter().any(|event| matches!(event,
-            ChatModelEvent::OutputTextDelta { text } if text == "hi")));
+            ChatModelEvent::OutputTextDelta { text, .. } if text == "hi")));
         assert!(matches!(events.last(), Some(ChatModelEvent::Completed {
             finish_reason: ChatFinishReason::Completed })));
     }

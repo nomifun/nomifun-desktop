@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -1060,6 +1060,7 @@ pub(crate) async fn run_turn(
             }
         };
         let mut public_output = crate::public_output::PublicOutputGuard::default();
+        let mut public_output_source = None;
         let mut saw_terminal = false;
         let mut protocol_violation = false;
         let mut protocol_tool_hint = None;
@@ -1137,7 +1138,7 @@ pub(crate) async fn run_turn(
             semantic_output_seen |= event.is_semantic_output();
             match event {
                 ChatModelEvent::ResponseStarted { .. } => {}
-                ChatModelEvent::OutputTextDelta { text } => {
+                ChatModelEvent::OutputTextDelta { text, source } => {
                     // Some compatible providers spill a truncated internal
                     // tool representation into content before emitting length.
                     // Withhold it, but drain the bounded stream to distinguish
@@ -1151,13 +1152,31 @@ pub(crate) async fn run_turn(
                         .await;
                     }
                     if protocol_violation { continue; }
+                    if public_output_source != source {
+                        if public_output.has_pending_native_call() {
+                            protocol_violation = true;
+                            continue;
+                        }
+                        let remaining = public_output.finish();
+                        if !remaining.is_empty() {
+                            step.append_text(&remaining, public_output_source.clone());
+                            if !strict_publication {
+                                output_text.push_str(&remaining);
+                                event_sink.emit(AgentEngineEvent::OutputTextDelta {
+                                    step: model_steps, text: remaining, source: public_output_source.clone(),
+                                }).await?;
+                            }
+                        }
+                        public_output = crate::public_output::PublicOutputGuard::default();
+                        public_output_source = source.clone();
+                    }
                     let visible = public_output.push(&text);
                     if !visible.text.is_empty() {
-                        step.append_text(&visible.text);
+                        step.append_text(&visible.text, source.clone());
                         if !strict_publication {
                             output_text.push_str(&visible.text);
                             event_sink.emit(AgentEngineEvent::OutputTextDelta {
-                                step: model_steps, text: visible.text,
+                                step: model_steps, text: visible.text, source,
                             }).await?;
                         }
                     }
@@ -1294,11 +1313,11 @@ pub(crate) async fn run_turn(
                     }
                     let remaining = public_output.finish();
                     if !protocol_violation && !remaining.is_empty() {
-                        step.append_text(&remaining);
+                        step.append_text(&remaining, public_output_source.clone());
                         if !strict_publication {
                             output_text.push_str(&remaining);
                             event_sink.emit(AgentEngineEvent::OutputTextDelta {
-                                step: model_steps, text: remaining,
+                                step: model_steps, text: remaining, source: public_output_source.clone(),
                             }).await?;
                         }
                     }
@@ -2236,15 +2255,15 @@ pub(crate) async fn run_turn(
             }) {
                 if let Some(disclosure) = report.unverified_disclosure() {
                     output_text.push_str(&disclosure);
-                    event_sink.emit(AgentEngineEvent::OutputTextDelta { step: model_steps, text: disclosure }).await?;
+                    event_sink.emit(AgentEngineEvent::OutputTextDelta { step: model_steps, text: disclosure, source: None }).await?;
                 }
                 if let Some(disclosure) = report.tool_error_disclosure() {
                     output_text.push_str(&disclosure);
-                    event_sink.emit(AgentEngineEvent::OutputTextDelta { step: model_steps, text: disclosure }).await?;
+                    event_sink.emit(AgentEngineEvent::OutputTextDelta { step: model_steps, text: disclosure, source: None }).await?;
                 }
                 if let Some(disclosure) = report.command_failure_disclosure() {
                     output_text.push_str(&disclosure);
-                    event_sink.emit(AgentEngineEvent::OutputTextDelta { step: model_steps, text: disclosure }).await?;
+                    event_sink.emit(AgentEngineEvent::OutputTextDelta { step: model_steps, text: disclosure, source: None }).await?;
                 }
             }
         }
@@ -3760,14 +3779,7 @@ fn append_assistant_step(
     }
     request.input.messages.push(ChatMessage {
         role: ChatRole::Assistant,
-        content: step.assistant_content.iter().map(|part| match part {
-            // Unsigned thinking is display/diagnostic data, not a portable
-            // native continuation. Keep it out of both factual history and
-            // the context budget; signed/encrypted native state stays exact.
-            ChatContentPart::Reasoning { signature: None, encrypted_content: None, .. } =>
-                ChatContentPart::Text { text: "[Private reasoning omitted from replay]".into() },
-            _ => part.clone(),
-        }).collect(),
+        content: step.model_content(),
         provider_round_id: step.provider_round_id.clone(),
     });
     Ok(())
@@ -3776,6 +3788,8 @@ fn append_assistant_step(
 #[derive(Default)]
 struct StepState {
     assistant_content: Vec<ChatContentPart>,
+    text_sources: BTreeMap<usize, Option<nomifun_agent_contracts::ChatOutputTextSource>>,
+    text_boundaries: BTreeSet<usize>,
     calls: BTreeMap<ToolCallId, PendingToolCall>,
     call_order: Vec<ToolCallId>,
     rejected_proposals: BTreeMap<ToolCallId, AgentRejectedToolProposal>,
@@ -3785,14 +3799,51 @@ struct StepState {
 }
 
 impl StepState {
-    fn append_text(&mut self, text: &str) {
-        if let Some(ChatContentPart::Text { text: existing }) = self.assistant_content.last_mut()
+    fn append_text(&mut self, text: &str, source: Option<nomifun_agent_contracts::ChatOutputTextSource>) {
+        let last = self.assistant_content.len().checked_sub(1);
+        if !self.text_boundaries.contains(&self.assistant_content.len())
+            && last.is_some_and(|index| self.text_sources.get(&index) == Some(&source))
+            && let Some(ChatContentPart::Text { text: existing }) = self.assistant_content.last_mut()
         {
             existing.push_str(text);
         } else {
+            self.text_sources.insert(self.assistant_content.len(), source);
             self.assistant_content
                 .push(ChatContentPart::Text { text: text.to_owned() });
         }
+    }
+
+    fn model_content(&self) -> Vec<ChatContentPart> {
+        let mut content = Vec::new();
+        let mut open_text: Option<(usize, Option<nomifun_agent_contracts::ChatOutputTextSource>)> = None;
+        for (index, part) in self.assistant_content.iter().enumerate() {
+            if self.text_boundaries.contains(&index) { open_text = None; }
+            match part {
+                ChatContentPart::Text { text } => {
+                    let source = self.text_sources.get(&index).cloned().flatten();
+                    if let Some((target, previous_source)) = &open_text
+                        && previous_source == &source
+                        && let ChatContentPart::Text { text: existing } = &mut content[*target]
+                    {
+                        existing.push_str(text);
+                    } else {
+                        open_text = Some((content.len(), source));
+                        content.push(part.clone());
+                    }
+                }
+                // Only unsigned, portable-free thinking may be omitted across
+                // the same text source. Delay this assembly until signatures
+                // have arrived, so native signed/opaque order remains exact.
+                ChatContentPart::Reasoning { signature: None, encrypted_content: None, .. } => {
+                    content.push(ChatContentPart::Text { text: "[Private reasoning omitted from replay]".into() });
+                }
+                _ => {
+                    open_text = None;
+                    content.push(part.clone());
+                }
+            }
+        }
+        content
     }
 
     fn append_reasoning(&mut self, text: &str) {
@@ -3858,6 +3909,9 @@ impl StepState {
             return Err(AgentEngineError::InvalidModelEvent(
                 "tool call delta has an empty call id".to_owned(),
             ));
+        }
+        if !self.calls.contains_key(call_id) {
+            self.text_boundaries.insert(self.assistant_content.len());
         }
         let entry = self.calls.entry(call_id.clone()).or_insert_with(|| {
             self.call_order.push(call_id.clone());
@@ -3962,6 +4016,9 @@ impl StepState {
         if !self.calls.contains_key(call_id) && self.calls.len() >= MAX_CALLS_PER_STEP {
             return Err(AgentEngineError::InvalidModelEvent(
                 "model exceeded the per-step tool-call limit".into()));
+        }
+        if !self.calls.contains_key(call_id) {
+            self.text_boundaries.insert(self.assistant_content.len());
         }
         let entry = self.calls.entry(call_id.clone()).or_insert_with(|| {
             self.call_order.push(call_id.clone());
@@ -4582,7 +4639,7 @@ mod tests {
                         "historical_results":[{"origin":origin,"label":"原文件内容"}]}))
                 };
                 if self.required_mode {
-                    events.insert(0,Ok(ChatModelEvent::OutputTextDelta {text:"DRAFT_ONLY failed_commands=2; this prose is not an accepted report.".into()}));
+                    events.insert(0,Ok(ChatModelEvent::OutputTextDelta {text:"DRAFT_ONLY failed_commands=2; this prose is not an accepted report.".into(), source: None }));
                 }
                 Ok(Box::pin(stream::iter(events)))
             }
@@ -5314,7 +5371,7 @@ mod tests {
 
     fn text_step(text: &str) -> Vec<Result<ChatModelEvent, ChatModelError>> {
         vec![
-            Ok(ChatModelEvent::OutputTextDelta { text: text.into() }),
+            Ok(ChatModelEvent::OutputTextDelta { text: text.into(), source: None }),
             Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed }),
         ]
     }
@@ -6330,7 +6387,7 @@ mod tests {
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(vec![
                 vec![
-                    Ok(ChatModelEvent::OutputTextDelta { text: "partial summary".into() }),
+                    Ok(ChatModelEvent::OutputTextDelta { text: "partial summary".into(), source: None }),
                     Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::MaxOutputTokens }),
                 ],
                 text_step("Concise retained context."),
@@ -6461,7 +6518,7 @@ mod tests {
     #[tokio::test]
     async fn repeatedly_truncated_compaction_splits_source_without_losing_the_task() {
         let truncated = vec![
-            Ok(ChatModelEvent::OutputTextDelta { text: "partial".into() }),
+            Ok(ChatModelEvent::OutputTextDelta { text: "partial".into(), source: None }),
             Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::MaxOutputTokens }),
         ];
         let model = Arc::new(ObservingModel {
@@ -6500,7 +6557,7 @@ mod tests {
     #[tokio::test]
     async fn exhausted_compaction_output_marks_missing_history_and_keeps_accepted_input() {
         let truncated = vec![
-            Ok(ChatModelEvent::OutputTextDelta { text: "partial".into() }),
+            Ok(ChatModelEvent::OutputTextDelta { text: "partial".into(), source: None }),
             Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::MaxOutputTokens }),
         ];
         let model = Arc::new(ObservingModel {
@@ -6670,6 +6727,103 @@ mod tests {
             }] if text == "thinking" && signature == "signature"
         ));
         assert!(step.finalize().is_ok());
+    }
+
+    #[test]
+    fn model_text_assembly_uses_sources_and_preserves_signed_or_opaque_barriers() {
+        let source = |id: &str| Some(nomifun_agent_contracts::ChatOutputTextSource {
+            item_id: id.into(), output_index: Some(0), content_index: 0,
+        });
+        let mut step = StepState::default();
+        step.append_text("CL", source("message"));
+        step.append_reasoning("ordinary thought");
+        step.append_text("I", source("message"));
+        let merged = step.model_content();
+        assert_eq!(merged[0], ChatContentPart::Text { text: "CLI".into() });
+        assert_eq!(merged.len(), 2);
+
+        // Thinking signatures arrive after their text. Assemble only after
+        // signature classification, retaining protected native block order.
+        let mut signed = StepState::default();
+        signed.append_text("CL", source("message"));
+        signed.append_reasoning("native thought");
+        signed.set_reasoning_signature("signed".into()).unwrap();
+        signed.append_text("I", source("message"));
+        assert_eq!(signed.model_content(), signed.assistant_content);
+        if let ChatContentPart::Reasoning { signature, encrypted_content, .. } = &mut signed.assistant_content[1] {
+            *signature = None;
+            *encrypted_content = Some("opaque".into());
+        }
+        assert_eq!(signed.model_content(), signed.assistant_content);
+
+        let mut distinct = StepState::default();
+        distinct.append_text("first", source("message-a"));
+        distinct.append_text("second", source("message-b"));
+        assert_eq!(distinct.model_content(), distinct.assistant_content);
+        assert_eq!(distinct.model_content().len(), 2);
+
+        let mut tool_boundary = StepState::default();
+        tool_boundary.append_text("before", None);
+        tool_boundary.record_tool_delta(&"read".into(), "read_file", "").unwrap();
+        tool_boundary.append_text("after proposal", None);
+        assert_eq!(tool_boundary.model_content(), tool_boundary.assistant_content);
+        assert_eq!(tool_boundary.model_content().len(), 2);
+    }
+
+    #[test]
+    fn existing_text_events_without_source_keep_the_single_step_source() {
+        let event: AgentEngineEvent = serde_json::from_value(serde_json::json!({
+            "event":"output_text_delta", "step":1, "text":"我将"
+        })).unwrap();
+        assert!(matches!(event, AgentEngineEvent::OutputTextDelta { source: None, .. }));
+        let mut step = StepState::default();
+        step.append_text("我将", None);
+        step.append_reasoning("check");
+        step.append_text("按照文档安装。", None);
+        assert_eq!(step.model_content()[0], ChatContentPart::Text { text:"我将按照文档安装。".into() });
+    }
+
+    #[tokio::test]
+    async fn runtime_forwards_text_sources_across_reasoning_and_flushes_each_source_tail() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+        let first = nomifun_agent_contracts::ChatOutputTextSource {
+            item_id:"message-a".into(), output_index:Some(0), content_index:0,
+        };
+        let second = nomifun_agent_contracts::ChatOutputTextSource {
+            item_id:"message-b".into(), output_index:Some(1), content_index:0,
+        };
+        let model = Arc::new(ObservingModel {
+            requests:Default::default(), steps:std::sync::Mutex::new(vec![vec![
+                Ok(ChatModelEvent::OutputTextDelta {text:"CL".into(),source:Some(first.clone())}),
+                Ok(ChatModelEvent::ReasoningDelta {text:"check".into()}),
+                Ok(ChatModelEvent::OutputTextDelta {text:"I<".into(),source:Some(first.clone())}),
+                Ok(ChatModelEvent::OutputTextDelta {text:"next".into(),source:Some(second.clone())}),
+                Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::Completed}),
+            ]]),
+        });
+        let sink = Arc::new(Sink::default());
+        let engine = AgentEngine::new(AgentEngineBuild {
+            build_id:EngineBuildId::from("coding-dev"), build_digest:DigestHex::from("a".repeat(64)),
+        }).unwrap();
+        let session = engine.open_session(binding(), model, Arc::new(EchoTool), Some(sink.clone())).unwrap();
+        let result = session.run_turn(AgentTurnRequest::new(
+            request(), AgentToolPlan::default(), principal(), 0,
+        )).await.unwrap();
+        assert_eq!(result.output_text, "CLI<next");
+        let events = sink.0.lock().unwrap();
+        let text: Vec<_> = events.iter().filter_map(|event| match event {
+            AgentEngineEvent::OutputTextDelta {text,source,..} => Some((text.as_str(),source.as_ref())),
+            _ => None,
+        }).collect();
+        assert_eq!(text, vec![("CL",Some(&first)), ("I",Some(&first)), ("<",Some(&first)), ("next",Some(&second))]);
     }
 
     #[tokio::test]
@@ -7292,7 +7446,7 @@ mod tests {
     #[tokio::test]
     async fn empty_plain_chat_is_corrected_with_text_without_forcing_tools() {
         for empty in [vec![], vec![Ok(ChatModelEvent::ReasoningDelta {text:"private thinking".into()})],
-            vec![Ok(ChatModelEvent::OutputTextDelta {text:" \n".into()})]] {
+            vec![Ok(ChatModelEvent::OutputTextDelta {text:" \n".into(), source: None })]] {
             let mut initial=empty;
             initial.push(Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::Completed}));
             let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![initial,text_step("Here is the answer.")])});
@@ -9301,7 +9455,7 @@ mod tests {
                 }
                 let mut partial = control_step("abandoned-write", "write_file", json!({"path":"b","content":"NEVER_EXECUTE"}));
                 partial.pop();
-                partial.push(Ok(ChatModelEvent::OutputTextDelta { text: "ABANDONED_MODEL_OUTPUT".into() }));
+                partial.push(Ok(ChatModelEvent::OutputTextDelta { text: "ABANDONED_MODEL_OUTPUT".into(), source: None }));
                 let pending = self.pending.clone();
                 Ok(Box::pin(stream::iter(partial).chain(stream::once(async move {
                     pending.notify_one(); std::future::pending::<Result<ChatModelEvent, ChatModelError>>().await
@@ -9639,7 +9793,7 @@ mod tests {
         }
         let mut rejected = control_step("must-not-execute", "write_file", json!({"path":"a","content":"wrong"}));
         rejected.pop();
-        rejected.push(Ok(ChatModelEvent::OutputTextDelta { text: "<tool_call><function=write_file>SECRET_REJECTED_BODY".into() }));
+        rejected.push(Ok(ChatModelEvent::OutputTextDelta { text: "<tool_call><function=write_file>SECRET_REJECTED_BODY".into(), source: None }));
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(vec![rejected,
                 control_step("corrected", "write_file", json!({"path":"a","content":"right"})),
@@ -9680,7 +9834,7 @@ mod tests {
 
     #[tokio::test]
     async fn repeated_pseudo_tools_exhaust_correction_budget_without_invocation() {
-        let bad = || vec![Ok(ChatModelEvent::OutputTextDelta { text: "<tool_call><function=write_file>".into() })];
+        let bad = || vec![Ok(ChatModelEvent::OutputTextDelta { text: "<tool_call><function=write_file>".into(), source: None })];
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(vec![bad(), bad(), bad(), text_step("must not run")]),
             requests: std::sync::Mutex::new(Vec::new()),
@@ -9698,7 +9852,7 @@ mod tests {
     async fn failed_protocol_rejection_persistence_cannot_start_a_retry() {
         struct FailedSink;
         impl FailedSink { fn model() -> Arc<ObservingModel> { Arc::new(ObservingModel {
-            steps: std::sync::Mutex::new(vec![vec![Ok(ChatModelEvent::OutputTextDelta { text:"<tool_call><function=write_file>".into() })], text_step("must not run")]),
+            steps: std::sync::Mutex::new(vec![vec![Ok(ChatModelEvent::OutputTextDelta { text:"<tool_call><function=write_file>".into(), source: None })], text_step("must not run")]),
             requests: std::sync::Mutex::new(Vec::new()),
         }) } }
         #[async_trait]
@@ -9721,9 +9875,9 @@ mod tests {
     async fn malformed_tool_text_cannot_complete_a_turn_or_execute_a_tool() {
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(vec![vec![
-                Ok(ChatModelEvent::OutputTextDelta { text: "I will write the file. <tool_".into() }),
-                Ok(ChatModelEvent::OutputTextDelta { text: "call>\n<function=write_file>\n<parameter=content>".into() }),
-                Ok(ChatModelEvent::OutputTextDelta { text: "SHOULD_NEVER_REACH_THE_UI".into() }),
+                Ok(ChatModelEvent::OutputTextDelta { text: "I will write the file. <tool_".into(), source: None }),
+                Ok(ChatModelEvent::OutputTextDelta { text: "call>\n<function=write_file>\n<parameter=content>".into(), source: None }),
+                Ok(ChatModelEvent::OutputTextDelta { text: "SHOULD_NEVER_REACH_THE_UI".into(), source: None }),
                 Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed }),
             ]]),
             requests: std::sync::Mutex::new(Vec::new()),
@@ -9746,6 +9900,7 @@ mod tests {
             steps: std::sync::Mutex::new(vec![vec![
                 Ok(ChatModelEvent::OutputTextDelta {
                     text: "hello".to_owned(),
+                    source: None,
                 }),
                 Ok(ChatModelEvent::Completed {
                     finish_reason: ChatFinishReason::Completed,
@@ -9859,6 +10014,7 @@ mod tests {
             steps: std::sync::Mutex::new(vec![vec![
                 Ok(ChatModelEvent::OutputTextDelta {
                     text: "should not run".to_owned(),
+                    source: None,
                 }),
                 Ok(ChatModelEvent::Completed {
                     finish_reason: ChatFinishReason::Completed,
@@ -10003,6 +10159,7 @@ mod tests {
             steps: std::sync::Mutex::new(vec![vec![
                 Ok(ChatModelEvent::OutputTextDelta {
                     text: "should not run".to_owned(),
+                    source: None,
                 }),
                 Ok(ChatModelEvent::Completed {
                     finish_reason: ChatFinishReason::Completed,

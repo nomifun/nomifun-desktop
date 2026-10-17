@@ -35,7 +35,7 @@ async fn previous_turn_terminal_cannot_finish_the_next_turn() {
     assert!(
         !runtime.emit_for_turn(
             previous_turn,
-            AgentStreamEvent::Text(TextEventData { step: None, content: "late first-turn content".into(),
+            AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "late first-turn content".into(),
             }),
         ),
         "stale content/artifact projections must also be rejected"
