@@ -45,6 +45,23 @@ fn lock(path: &Path, sharing: u32) -> fs::File {
     fs::OpenOptions::new().read(true).share_mode(sharing).open(path).unwrap()
 }
 
+fn globalroot_alias(path: &Path) -> std::path::PathBuf {
+    use std::os::windows::ffi::OsStringExt as _;
+    #[link(name = "kernel32")]
+    unsafe extern "system" { fn QueryDosDeviceW(name: *const u16, target: *mut u16, length: u32) -> u32; }
+    let path = std::path::absolute(path).unwrap(); let root = path.ancestors().last().unwrap();
+    let letter = match root.components().next().unwrap() {
+        std::path::Component::Prefix(prefix) => match prefix.kind() { std::path::Prefix::Disk(letter) | std::path::Prefix::VerbatimDisk(letter) => letter, _ => panic!("local disk fixture") },
+        _ => panic!("local drive fixture"),
+    };
+    let name: Vec<u16> = format!("{}:", letter as char).encode_utf16().chain(Some(0)).collect();
+    let mut device = [0_u16; 512];
+    assert_ne!(unsafe { QueryDosDeviceW(name.as_ptr(), device.as_mut_ptr(), device.len() as u32) }, 0);
+    let length = device.iter().position(|unit| *unit == 0).unwrap();
+    let mut alias = std::path::PathBuf::from(format!(r"\\?\GLOBALROOT{}\", std::ffi::OsString::from_wide(&device[..length]).to_string_lossy()));
+    alias.push(path.strip_prefix(root).unwrap()); alias
+}
+
 fn creation(path: &str) -> AgentSessionFilePatch {
     AgentSessionFilePatch {
         path: path.into(), expected_source: AgentSessionPatchSource::Absent,
@@ -98,6 +115,16 @@ fn icacls(path: &Path, arguments: &[&std::ffi::OsStr]) {
         .output().expect("Windows ACL fixture requires icacls.exe");
     assert!(output.status.success(), "ACL fixture failed: {} {}",
         String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+}
+
+fn raw_deny(path: &Path, aces: &str) {
+    // icacls /deny also adds SYNCHRONIZE; use exact masks to test the actual
+    // add-file/add-directory/DELETE distinction without that extra denial.
+    let quoted = path.to_str().unwrap().replace('\'', "''");
+    let script = format!("$ErrorActionPreference='Stop';$p='{quoted}';$a=[IO.Directory]::GetAccessControl($p);$s=$a.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access);$s='D:{aces}'+$s.Substring($s.IndexOf('('));$a.SetSecurityDescriptorSddlForm($s,[Security.AccessControl.AccessControlSections]::Access);[IO.Directory]::SetAccessControl($p,$a)");
+    let executable = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let result = std::process::Command::new(executable).args(["-NoProfile", "-NonInteractive", "-Command", &script]).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
 }
 
 fn saved_dacl(path: &Path) -> Vec<u8> {
@@ -202,7 +229,7 @@ async fn metadata_and_nested_search_need_no_parent_listing_or_synchronize_access
     let forbidden_listing = fs::read_dir(&parent);
     let metadata = service.get_file_metadata_for_agent_session(&scope, "parent/KNOWN.txt").await;
     let instruction = service.instruction_scope_for_agent_session(&scope,
-        nomifun_file::AgentInstructionScopeRequest { path: "parent/Known.TXT".into(), recursive: false }).await;
+        nomifun_file::AgentInstructionScopeRequest { path: "parent/Known.TXT".into(), recursive: false, path_semantics: Default::default() }).await;
     let search = service.search_text_for_agent_session(&scope,
         nomifun_file::AgentTextSearchRequest { path: Some("parent/child".into()), query: "needle".into(), limit: None }).await;
     icacls(&target, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
@@ -237,7 +264,7 @@ async fn denied_metadata_does_not_become_missing_scope() {
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(&target);
     let metadata = service.get_file_metadata_for_agent_session(&scope, "parent/denied.txt").await;
     let instruction = service.instruction_scope_for_agent_session(&scope,
-        nomifun_file::AgentInstructionScopeRequest { path: "parent/denied.txt".into(), recursive: false }).await;
+        nomifun_file::AgentInstructionScopeRequest { path: "parent/denied.txt".into(), recursive: false, path_semantics: Default::default() }).await;
     icacls(&parent, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
     icacls(&target, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
     assert_eq!(native.err().expect("fixture must deny an independent native attribute open").raw_os_error(), Some(5));
@@ -816,38 +843,233 @@ fn rejects_all_win32_reserved_components() {
 }
 
 #[tokio::test]
-async fn rejects_existing_win32_aliases_without_reading_or_mutating_the_target() {
+async fn win32_aliases_use_the_real_target_and_canonical_project_receipts() {
     let root = tempfile::tempdir().unwrap();
     fs::create_dir(root.path().join("nested")).unwrap();
     let target = root.path().join("nested/report.txt");
     fs::write(&target, b"original").unwrap();
     let (service, scope, events) = owner(root.path());
-    for alias in ["nested./report.txt", "nested /report.txt", "nested/report.txt."] {
-        let result = service.read_bytes_for_agent_session(&scope, alias, 1024).await;
-        assert!(result.is_err(), "alias read must reject {alias:?}: {result:?}");
-        assert!(service.write_file_for_agent_session(&scope, alias, b"wrong").await.is_err());
-        assert!(service.remove_entry_for_agent_session(&scope, alias).await.is_err());
-        assert_eq!(fs::read(&target).unwrap(), b"original");
-        assert!(events.0.lock().unwrap().is_empty());
+    for alias in ["nested./report.txt", "nested/report.txt.", "nested/report.txt "] {
+        fs::write(&target, b"original").unwrap();
+        assert_eq!(service.read_bytes_for_agent_session(&scope, alias, 1024).await.unwrap().unwrap().0, b"original");
+        let written = service.write_file_with_observation_for_agent_session(&scope, alias, b"written").await.unwrap();
+        assert_eq!(written.native_path, fs::canonicalize(&target).unwrap().to_str().unwrap());
+        assert_eq!(written.workspace_path.unwrap().path, "nested/report.txt");
+        service.apply_patch_for_agent_session(&scope, replacement(alias, "written", "patched")).await.unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"patched");
+        let deleted = service.remove_entry_with_receipt_for_agent_session(&scope, alias).await.unwrap();
+        assert_eq!(deleted.workspace_path.unwrap().path, "nested/report.txt");
+        assert!(!target.exists());
     }
+    // Win32 does not strip a space on this intermediate component. Its real
+    // absence must stay absence rather than being silently redirected.
+    fs::write(&target, b"preserved").unwrap();
+    assert!(service.read_bytes_for_agent_session(&scope, "nested /report.txt", 1024).await.unwrap().is_none());
+    assert_eq!(fs::read(&target).unwrap(), b"preserved");
+    assert_eq!(events.0.lock().unwrap().len(), 9);
 }
 
 #[tokio::test]
-async fn rejects_existing_ads_without_exposing_stream_bytes() {
+async fn native_ads_reads_and_deletes_preserve_the_default_stream_and_project_identity() {
     let root = tempfile::tempdir().unwrap();
     let target = root.path().join("report.txt");
     let stream = root.path().join("report.txt:private");
     fs::write(&target, b"main file").unwrap();
     fs::write(&stream, b"stream bytes").unwrap();
     let (service, scope, events) = owner(root.path());
-    for path in ["report.txt:private", "report.txt::$DATA"] {
-        let result = service.read_bytes_for_agent_session(&scope, path, 1024).await;
-        assert!(result.is_err(), "ADS read must reject {path:?}: {result:?}");
-        assert!(service.write_file_for_agent_session(&scope, path, b"wrong").await.is_err());
-        assert!(service.remove_entry_for_agent_session(&scope, path).await.is_err());
-    }
+    let page = service.read_text_page_for_agent_session(&scope, serde_json::from_value(serde_json::json!({"path":"report.txt:private"})).unwrap()).await.unwrap().unwrap();
+    assert_eq!(page.content, "stream bytes");
+    assert_eq!(page.total_bytes, 12);
+    assert!(page.workspace_path.is_none(), "a stream is not a project directory entry");
+    assert_eq!(service.read_bytes_for_agent_session(&scope, "report.txt::$DATA", 1024).await.unwrap().unwrap().0, b"main file");
+    // Native stream rename cannot atomically overwrite populated data. The
+    // file tool retains that OS error instead of truncating or deleting it.
+    assert!(service.write_file_for_agent_session(&scope, "report.txt:private", b"wrong").await.is_err());
     assert_eq!(fs::read(&target).unwrap(), b"main file");
     assert_eq!(fs::read(&stream).unwrap(), b"stream bytes");
+    assert!(events.0.lock().unwrap().is_empty());
+    assert!(service.rename_entry_for_agent_session(&scope, "report.txt:private", "different-file.txt").await.is_err());
+    assert!(target.exists(), "a stream rename must never rename its base file");
+    assert!(!root.path().join("different-file.txt").exists());
+    service.rename_entry_for_agent_session(&scope, "report.txt:private", "report.txt:renamed").await.unwrap();
+    assert_eq!(fs::read(root.path().join("report.txt:renamed")).unwrap(), b"stream bytes");
+    assert!(!stream.exists());
+    let deleted = service.remove_entry_with_receipt_for_agent_session(&scope, "report.txt:renamed").await.unwrap();
+    assert!(deleted.native_path.ends_with("report.txt:renamed"));
+    assert!(deleted.workspace_path.is_none());
+    assert!(!stream.exists());
+    assert_eq!(fs::read(&target).unwrap(), b"main file");
+    assert!(events.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn atomic_new_and_empty_stream_publication_keeps_the_base_and_other_streams() {
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("report.txt");
+    fs::write(&target, b"main file").unwrap();
+    fs::write(root.path().join("report.txt:keep"), b"other stream").unwrap();
+    fs::write(root.path().join("report.txt:empty"), b"").unwrap();
+    let (service, scope, events) = owner(root.path());
+    for (name, created) in [("new", true), ("empty", false)] {
+        let path = format!("report.txt:{name}");
+        let result = service.write_file_with_observation_for_agent_session(&scope, &path, b"complete bytes").await.unwrap();
+        assert_eq!(result.created, created);
+        assert!(result.workspace_path.is_none());
+        assert_eq!(fs::read(root.path().join(&path)).unwrap(), b"complete bytes");
+        assert_eq!(fs::read(&target).unwrap(), b"main file");
+        assert_eq!(fs::read(root.path().join("report.txt:keep")).unwrap(), b"other stream");
+    }
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1, "stream staging must not create a sibling file");
+    assert!(events.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn one_character_stream_bases_and_explicit_data_type_keep_the_named_parent() {
+    let root = tempfile::tempdir().unwrap(); fs::write(root.path().join("a"), b"base").unwrap();
+    let (service, scope, events) = owner(root.path());
+    let receipt = service.write_file_with_observation_for_agent_session(&scope, "./a:new:$DATA", b"stream").await.unwrap();
+    assert!(receipt.native_path.ends_with("\\a:new"), "{}", receipt.native_path);
+    assert!(receipt.workspace_path.is_none());
+    assert_eq!(service.read_bytes_for_agent_session(&scope, "./a:new", 1024).await.unwrap().unwrap().0, b"stream");
+    assert_eq!(fs::read(root.path().join("a")).unwrap(), b"base");
+    service.remove_entry_for_agent_session(&scope, "./a:new").await.unwrap();
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    assert!(events.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn verbatim_literal_names_remain_distinct_from_win32_aliases_and_project_paths() {
+    let root = tempfile::tempdir().unwrap(); let canonical = fs::canonicalize(root.path()).unwrap();
+    let literal = nomi_native_files::windows::join_component(&canonical, "literal.txt.".as_ref()).unwrap();
+    let (service, scope, events) = owner(root.path());
+    let receipt = service.write_file_with_observation_for_agent_session(&scope, literal.to_str().unwrap(), b"literal bytes").await.unwrap();
+    assert!(receipt.created); assert!(receipt.workspace_path.is_none());
+    assert_eq!(fs::read(&literal).unwrap(), b"literal bytes");
+    assert!(!root.path().join("literal.txt").exists());
+    assert_eq!(service.read_bytes_for_agent_session(&scope, literal.to_str().unwrap(), 1024).await.unwrap().unwrap().0, b"literal bytes");
+    service.remove_entry_for_agent_session(&scope, literal.to_str().unwrap()).await.unwrap();
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0); assert!(events.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn filesystem_globalroot_aliases_use_the_same_native_owner_and_receipts() {
+    let root = tempfile::tempdir().unwrap(); let target = root.path().join("source.txt");
+    let alias = globalroot_alias(&target); let destination = globalroot_alias(&root.path().join("renamed.txt"));
+    let (service, scope, _) = owner(root.path());
+    let written = service.write_file_with_observation_for_agent_session(&scope, alias.to_str().unwrap(), b"before").await.unwrap();
+    assert_eq!(written.workspace_path.unwrap().path, "source.txt");
+    assert_eq!(service.read_bytes_for_agent_session(&scope, alias.to_str().unwrap(), 1024).await.unwrap().unwrap().0, b"before");
+    service.apply_patch_for_agent_session(&scope, replacement(alias.to_str().unwrap(), "before", "after")).await.unwrap();
+    service.rename_entry_for_agent_session(&scope, alias.to_str().unwrap(), destination.to_str().unwrap()).await.unwrap();
+    assert_eq!(fs::read(root.path().join("renamed.txt")).unwrap(), b"after");
+    service.remove_entry_for_agent_session(&scope, destination.to_str().unwrap()).await.unwrap();
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn native_rename_keeps_destination_and_moves_a_final_junction_itself() {
+    let root = tempfile::tempdir().unwrap(); let outside = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("source.txt"), b"source").unwrap();
+    fs::write(root.path().join("destination.txt"), b"destination").unwrap();
+    fs::write(outside.path().join("keep.txt"), b"outside").unwrap();
+    junction::create(outside.path(), root.path().join("link")).unwrap();
+    let (service, scope, _) = owner(root.path());
+    assert!(service.rename_entry_for_agent_session(&scope, "source.txt", "destination.txt.").await.is_err());
+    assert_eq!(fs::read(root.path().join("source.txt")).unwrap(), b"source");
+    assert_eq!(fs::read(root.path().join("destination.txt")).unwrap(), b"destination");
+    let renamed = service.rename_entry_with_observation_for_agent_session(&scope, "source.txt.", "renamed.txt").await.unwrap();
+    assert_eq!(renamed.source_workspace_path.unwrap().path, "source.txt");
+    assert_eq!(renamed.destination_workspace_path.unwrap().path, "renamed.txt");
+    assert_eq!(fs::read(root.path().join("renamed.txt")).unwrap(), b"source");
+    service.rename_entry_for_agent_session(&scope, "link", "moved-link").await.unwrap();
+    assert!(!root.path().join("link").exists());
+    assert!(junction::exists(root.path().join("moved-link")).unwrap());
+    assert_eq!(fs::read(outside.path().join("keep.txt")).unwrap(), b"outside");
+    service.remove_entry_for_agent_session(&scope, "moved-link").await.unwrap();
+    assert_eq!(fs::read(outside.path().join("keep.txt")).unwrap(), b"outside");
+}
+
+#[tokio::test]
+async fn directory_rename_needs_add_subdirectory_without_requiring_add_file() {
+    let root = tempfile::tempdir().unwrap(); let parent = root.path().join("destination");
+    let native = root.path().join("native-source"); let source = root.path().join("source");
+    fs::create_dir(&parent).unwrap(); fs::create_dir(&native).unwrap(); fs::create_dir(&source).unwrap();
+    fs::write(source.join("keep.txt"), b"retained directory bytes").unwrap();
+    raw_deny(&parent, "(D;;0x2;;;WD)");
+    let denied = fs::write(parent.join("must-not-create.txt"), b"x");
+    let native_result = fs::rename(&native, parent.join("native-renamed"));
+    let (service, scope, _) = owner(root.path());
+    let result = service.rename_entry_for_agent_session(&scope, "source", "destination/renamed").await;
+    icacls(&parent, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
+    assert_eq!(denied.unwrap_err().raw_os_error(), Some(5)); native_result.expect("native directory rename remains authorized");
+    result.unwrap();
+    assert!(!source.exists()); assert_eq!(fs::read(parent.join("renamed/keep.txt")).unwrap(), b"retained directory bytes");
+    assert_eq!(fs::read_dir(&parent).unwrap().count(), 2, "the directory guard must be unlinked on close");
+}
+
+#[tokio::test]
+async fn native_rename_does_not_require_delete_on_a_new_destination_child() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_GENERIC_WRITE, FILE_FLAG_DELETE_ON_CLOSE};
+    let root = tempfile::tempdir().unwrap(); let parent = root.path().join("destination");
+    let native = root.path().join("native-source"); let source = root.path().join("source");
+    fs::create_dir(&parent).unwrap(); fs::create_dir(&native).unwrap(); fs::create_dir(&source).unwrap();
+    raw_deny(&parent, "(D;;DC;;;WD)(D;OICIIO;SD;;;WD)");
+    let native_result = fs::rename(&native, parent.join("native-renamed"));
+    let guard = fs::OpenOptions::new().write(true).create_new(true).access_mode(FILE_GENERIC_WRITE | DELETE)
+        .share_mode(0).custom_flags(FILE_FLAG_DELETE_ON_CLOSE).open(parent.join("must-not-create.guard"));
+    let guard_error = guard.as_ref().err().and_then(std::io::Error::raw_os_error); drop(guard);
+    let (service, scope, _) = owner(root.path());
+    let result = service.rename_entry_for_agent_session(&scope, "source", "destination/renamed").await;
+    icacls(&parent, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
+    native_result.unwrap(); assert_eq!(guard_error, Some(5)); result.unwrap();
+    assert!(!source.exists()); assert!(parent.join("renamed").is_dir());
+    assert_eq!(fs::read_dir(&parent).unwrap().count(), 2, "rename creates no guard child");
+}
+
+#[tokio::test]
+async fn native_rename_does_not_create_a_missing_destination_parent() {
+    let root = tempfile::tempdir().unwrap(); fs::write(root.path().join("source.txt"), b"keep").unwrap();
+    let native = fs::rename(root.path().join("source.txt"), root.path().join("missing/target.txt")).unwrap_err();
+    assert_eq!(native.raw_os_error(), Some(3));
+    let (service, scope, events) = owner(root.path());
+    let error = service.rename_entry_for_agent_session(&scope, "source.txt", "missing/target.txt").await.unwrap_err();
+    // Canonical destination metadata validation runs before rename and its
+    // actual canonicalize(missing-parent) error is 2. Preserve both OS facts,
+    // rather than rewriting that real metadata error to impersonate rename.
+    assert!(error.to_string().contains("os error 2"), "{error}");
+    assert_eq!(fs::read(root.path().join("source.txt")).unwrap(), b"keep");
+    assert!(!root.path().join("missing").exists()); assert!(events.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires NOMIFUN_TEST_OTHER_VOLUME naming an explicit writable directory on another filesystem"]
+async fn native_cross_volume_rename_retains_the_os_error_without_copying() {
+    let directory = std::env::var_os("NOMIFUN_TEST_OTHER_VOLUME").expect("explicit native second-volume fixture directory");
+    let root = tempfile::tempdir().unwrap(); let outside = tempfile::tempdir_in(directory).unwrap();
+    let source = root.path().join("source.txt"); let destination = outside.path().join("destination.txt");
+    fs::write(&source, b"retained source").unwrap();
+    let native = fs::rename(&source, &destination).expect_err("the configured fixture must use a different filesystem");
+    assert_eq!(native.raw_os_error(), Some(17));
+    let (service, scope, events) = owner(root.path());
+    let failure = service.rename_entry_for_agent_session(&scope, "source.txt", destination.to_str().unwrap()).await.unwrap_err();
+    assert!(failure.to_string().contains("os error 17"), "{failure}");
+    assert_eq!(fs::read(&source).unwrap(), b"retained source"); assert!(!destination.exists());
+    assert!(events.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn device_namespaces_are_rejected_before_file_content_or_mutation() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("keep.txt"), b"preserved").unwrap();
+    let (service, scope, events) = owner(root.path());
+    for path in [r"\\.\NUL", r"\\?\GLOBALROOT\Device\Null", "NUL", "CON.txt", "COM1"] {
+        assert!(service.read_bytes_for_agent_session(&scope, path, 1024).await.is_err(), "{path}");
+        assert!(service.write_file_for_agent_session(&scope, path, b"wrong").await.is_err(), "{path}");
+        assert!(service.remove_entry_for_agent_session(&scope, path).await.is_err(), "{path}");
+    }
+    assert_eq!(fs::read(root.path().join("keep.txt")).unwrap(), b"preserved");
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
     assert!(events.0.lock().unwrap().is_empty());
 }
 

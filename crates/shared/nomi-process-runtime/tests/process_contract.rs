@@ -17,7 +17,6 @@ use nomi_process_runtime::{
     ProcessPolicy, NormalizedProcessRequest, OutputCursor, PollResult, ProcessSupervisor,
     SupervisorConfig, Transport,
 };
-#[cfg(target_os = "macos")]
 #[cfg(any(windows, target_os = "macos"))]
 use nomi_process_runtime::ShellKind;
 

@@ -9,10 +9,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
 import { lstat, mkdir, open, readFile, readdir, realpath, rmdir, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { basename, dirname, isAbsolute, join, relative, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { windowsProcessGone } from './global-os-windows-cases.mjs';
+import { nativeMissingDefaultOptions, beginWindowsMissingDefaultCase, verifyWindowsMissingDefaultCase } from './global-os-windows-missing-default.mjs';
 
 const option = key => { const i = process.argv.indexOf(key); return i < 0 ? undefined : process.argv[i + 1]; };
 const required = key => { const value = option(key); if (!value) throw new Error(`${key} is required`); return value; };
@@ -26,6 +28,67 @@ const toolValue = raw => {
 };
 const requireExited = value => { assert.equal(value.state, 'exited'); assert.equal(value.exit_code, 0); assert.equal(value.cleanup.reaped, true); };
 const executeReadOnly = promisify(execFile);
+const fixtureInstructionPathEqual=(actual,expected)=>actual===expected||(/^[A-Za-z]:\\/.test(expected)&&actual===`\\\\?\\${expected}`);
+function canonicalSlot(record,pointer,kind,expected,sessionId){
+  const envelope=record.payload?.value;const actual=pointer.slice(1).split('/').reduce((value,key)=>value?.[key],envelope);
+  if(actual!==null&&actual!==undefined){assert.deepEqual(actual,expected);return expected;}
+  assert.equal(record.agent_session_id,sessionId,'Shared content must belong to the actual current Session');
+  const shared=envelope?._canonical_shared_content;assert.equal(shared?.version,1);
+  const matches=shared.references.filter(ref=>ref.pointer===pointer);assert.equal(matches.length,1);const ref=matches[0];
+  assert.equal(ref.kind,kind);const bytes=Buffer.from(stableJson(expected));const digest=createHash('sha256').update(bytes).digest('hex');
+  assert.equal(ref.digest,digest,'The exact original provider proposal/body must match its canonical Payload digest');assert.equal(ref.byte_len,bytes.length);
+  assert.equal(ref.payload_id,`shared-tool:${sessionId}:${kind==='tool_arguments'?'arguments':'output'}:${digest}`);return expected;
+}
+function reconsideredArguments(args,aliases){
+  const result=structuredClone(args);
+  for(const key of ['path','destination','cwd'])if(typeof result[key]==='string'&&aliases.has(result[key]))result[key]=aliases.get(result[key]);
+  if(Array.isArray(result.files))for(const file of result.files)if(file&&typeof file==='object'&&typeof file.path==='string'&&aliases.has(file.path))file.path=aliases.get(file.path);
+  return result;
+}
+export function nativeCanonicalPathReconsideration({raw,callId,callArguments,events,operationId,sessionId}){
+  const match=/^\[tool error\]\r?\n(?:Requested calls deferred; earlier calls may already have run\. Repository instructions changed or a new directory scope was discovered\. Read the current scoped instructions, reconsider the calls, and submit new call identities\. )?Requested calls deferred; earlier calls may already have run\. Path ("(?:\\.|[^"\\\r\n])*") resolves to ("(?:\\.|[^"\\\r\n])*")\. Reconsider the operation using this canonical native path and its scoped instructions; arguments were not rewritten\.$/.exec(raw);
+  if(!match)return undefined;
+  const requested=JSON.parse(match[1]),canonical=JSON.parse(match[2]);assert.notEqual(requested,canonical);
+  const paths=[callArguments?.path,callArguments?.destination,callArguments?.cwd,...(Array.isArray(callArguments?.files)?callArguments.files.map(file=>file?.path):[])];
+  assert(paths.includes(requested),'The preflight redirect must identify an explicit path in this exact proposed call');
+  const records=events.filter(event=>event.correlation_id===operationId&&event.kind==='runtime/progress-recorded'&&event.payload?.storage==='inline_json').map(event=>({seq:event.seq,value:event.payload.value?.event,record:event}));
+  const proposal=records.find(record=>record.value?.event==='tool_call_completed'&&record.value.step>0&&record.value.call?.call_id===callId);
+  assert(proposal,'The exact new model proposal must exist in canonical history');canonicalSlot(proposal.record,'/event/call/arguments','tool_arguments',callArguments,sessionId);
+  const held=records.find(record=>record.value?.event==='tool_completed'&&record.value.result?.call_id===callId);
+  assert(held&&held.seq>proposal.seq&&held.value.runtime_hold==='runtime_gate'&&held.value.result.is_error===true,'Only the original pre-dispatch canonical runtime hold permits a fresh proposal');
+  canonicalSlot(held.record,'/event/result/output','tool_output',[{type:'text',text:raw.replace(/^\[tool error\]\r?\n/,'')}],sessionId);
+  assert(!records.some(record=>(record.value?.event==='tool_started'&&record.value.call_id===callId)||(['host_tool_dispatch','host_resource_dispatch'].includes(record.value?.event)&&record.value.dispatch?.call_id===callId)),'A dispatched or unknown operation cannot be proposed again');
+  return{requested,canonical,original_call_id:callId,proposal_seq:proposal.seq,hold_seq:held.seq,user_dispatch_count:0};
+}
+export function nativeComputerNoEffectAdmission({raw,callId,callArguments,events,operationId,sessionId}){
+  assert(raw.startsWith('[tool error]'),'The route admission probe must retain its actual error result');
+  assert.equal(callArguments?.action,'focus_window');assert(Number.isSafeInteger(callArguments.window_id)&&callArguments.window_id>0);assert(Number.isSafeInteger(callArguments.expected_generation)&&callArguments.expected_generation>0);
+  assert(events.every(event=>event.agent_session_id===sessionId),'Admission evidence cannot come from another Session');
+  const records=events.filter(event=>event.correlation_id===operationId&&event.kind==='runtime/progress-recorded'&&event.payload?.storage==='inline_json');
+  const proposal=records.find(event=>event.payload.value.event?.event==='tool_call_completed'&&event.payload.value.event.step>0&&event.payload.value.event.call?.call_id===callId);
+  assert(proposal&&proposal.payload.value.event.call.name==='computer_input');canonicalSlot(proposal,'/event/call/arguments','tool_arguments',callArguments,sessionId);
+  const completed=records.find(event=>event.payload.value.event?.event==='tool_completed'&&event.payload.value.event.result?.call_id===callId);assert(completed?.payload.value.event.result.is_error===true);canonicalSlot(completed,'/event/result/output','tool_output',[{type:'text',text:raw.replace(/^\[tool error\]\r?\n/,'')}],sessionId);
+  const started=events.find(event=>event.kind==='effect/started'&&event.payload?.value?.operation_id===`${operationId}:tool:${callId}`&&event.payload.value.owner_domain==='computer'&&event.payload.value.action_id==='computer/input');assert(started,'The exact native owner admission needs its original Effect identity');
+  const effectId=started.payload.value.effect_id,terminal=events.filter(event=>event.payload?.value?.effect_id===effectId&&event.kind!=='effect/started');assert.equal(terminal.length,1,'An uncertain or separately reconciled Effect cannot be accepted as a no-effect route admission');
+  assert.match(started.payload.value.input_digest,/^[a-f0-9]{64}$/);for(const key of ['operation_id','owner_domain','action_id','input_digest','resource_key'])assert.equal(terminal[0].payload.value[key],started.payload.value[key],'The native no-effect terminal must match its original Effect input/resource');
+  assert.equal(terminal[0].kind,'effect/failed');assert.equal(terminal[0].payload.value.error?.code,'ROLE_HOST_STALE_OBSERVATION_GENERATION','Provider failures, input-not-applied outcomes and unknown results require their own review');assert(terminal[0].seq>started.seq&&completed.seq>terminal[0].seq);
+  return{call_id:callId,effect_id:effectId,started_seq:started.seq,failed_seq:terminal[0].seq,completed_seq:completed.seq,code:'ROLE_HOST_STALE_OBSERVATION_GENERATION',native_input_not_applied:true,next_input_requires_fresh_observation:true};
+}
+export function nativeControlTerminalFailureObservation({raw,callId,callArguments,events,operationId,sessionId}){
+  assert(raw.startsWith('[tool error]'));assert(events.every(event=>event.agent_session_id===sessionId),'Control diagnostics require the exact Session facts');
+  const records=events.filter(event=>event.correlation_id===operationId&&event.kind==='runtime/progress-recorded'&&event.payload?.storage==='inline_json');
+  const proposal=records.find(event=>event.payload.value.event?.event==='tool_call_completed'&&event.payload.value.event.step>0&&event.payload.value.event.call?.call_id===callId);
+  assert(proposal&&proposal.payload.value.event.call.name==='exec_command');canonicalSlot(proposal,'/event/call/arguments','tool_arguments',callArguments,sessionId);
+  const started=records.find(event=>event.payload.value.event?.event==='tool_started'&&event.payload.value.event.call_id===callId);
+  const dispatched=records.find(event=>event.payload.value.event?.event==='host_tool_dispatch'&&event.payload.value.event.dispatch?.call_id===callId);
+  assert(started&&dispatched&&started.seq>proposal.seq&&dispatched.seq>started.seq);
+  assert.equal(dispatched.payload.value.event.dispatch.operation_id,`${operationId}:tool:${callId}`);assert.equal(dispatched.payload.value.event.dispatch.action_id,'workspace.process/exec');
+  const completed=records.find(event=>event.payload.value.event?.event==='tool_completed'&&event.payload.value.event.result?.call_id===callId);
+  assert(completed&&completed.seq>dispatched.seq&&completed.payload.value.event.result.is_error===true&&completed.payload.value.event.runtime_hold!=='runtime_gate');
+  const body=raw.replace(/^\[tool error\]\r?\n/,'');canonicalSlot(completed,'/event/result/output','tool_output',[{type:'text',text:body}],sessionId);
+  const receipt=JSON.parse(body);assert.equal(receipt.state,'exited');assert.equal(receipt.exit_code,1);assert.equal(receipt.cleanup?.reaped,true);assert.deepEqual(receipt.cleanup.errors??[],[]);assert.equal(receipt.output?.dropped_bytes,0);assert.equal(receipt.output?.decode_errors,0);
+  return{receipt,provenance:{session_id:sessionId,operation_id:operationId,call_id:callId,proposal_seq:proposal.seq,started_seq:started.seq,dispatched_seq:dispatched.seq,completed_seq:completed.seq,original_failure_preserved:true,failed_call_accepted_as_success:false}};
+}
 const observeProcessUid = async pid => {
   assert(Number.isSafeInteger(pid) && pid > 1, 'A real native process PID is required for read-only identity observation');
   try {
@@ -37,10 +100,12 @@ const observeProcessUid = async pid => {
   }
 };
 const processIsGone = pid => {
+  if(process.platform==='win32')return windowsProcessGone(pid);
   try { process.kill(pid, 0); return false; }
   catch (error) { if (error.code === 'ESRCH') return true; throw error; }
 };
 const readOwnedPublicFixtureFile = async path => {
+  if (process.platform === 'win32') return (await readNativeOwnedFixtureBytes(path, 4096)).toString('utf8');
   const before = await lstat(path);
   assert(before.isFile() && !before.isSymbolicLink() && before.nlink === 1 && before.uid === process.getuid() && before.size <= 4096,
     `Expected the owned, bounded public fixture metadata file: ${path}`);
@@ -57,6 +122,17 @@ const validateNativeDataset = async root => {
   assert(isAbsolute(root) && basename(root) === 'native-data', '--native-data-root must be the exact private fixture native-data directory');
   assert.equal(await realpath(root), root, 'Native fixture data root must be canonical without symlink aliases');
   const parent = dirname(root);
+  if (process.platform === 'win32') {
+    assert(/^nomifun-global-os-owner-[0-9a-f-]{36}$/.test(basename(parent)), 'Only the explicitly marked Windows acceptance dataset is allowed');
+    assert.equal(dirname(parent).toLowerCase(), (await realpath(tmpdir())).toLowerCase());
+    const { assertWindowsPrivatePath } = await import('./global-os-windows-cases.mjs');
+    for (const directory of [parent, root]) {
+      const info = await lstat(directory); assert(info.isDirectory() && !info.isSymbolicLink());
+      await assertWindowsPrivatePath(directory);
+    }
+    assert.equal(await readOwnedPublicFixtureFile(join(parent, '.nomifun-global-os-fixture')), 'nomifun-global-os-native-acceptance-fixture.v1\n');
+    return { root, parent, portPath: join(root, 'port.json') };
+  }
   assert(/^\/private\/tmp\/nomifun-global-os-owner-[A-Za-z0-9-]+$/.test(parent), 'Only the explicitly marked private OS acceptance dataset is allowed');
   for (const directory of [parent, root]) {
     const info = await lstat(directory);
@@ -66,8 +142,13 @@ const validateNativeDataset = async root => {
   assert.equal(await readOwnedPublicFixtureFile(join(parent, '.nomifun-global-os-fixture')), 'nomifun-global-os-native-acceptance-fixture.v1\n', 'The native test dataset marker is missing or invalid');
   return { root, parent, portPath: join(root, 'port.json') };
 };
+export async function nativeStableAnnouncementSnapshot(read){
+  for(let attempt=0;attempt<3;attempt++){
+    try{return await read();}catch(error){if(error.code!=='NATIVE_FIXTURE_METADATA_CHANGED'||attempt===2)throw error;await wait(25);}
+  }
+}
 const readNativeAnnouncement = async dataset => {
-  const value = JSON.parse(await readOwnedPublicFixtureFile(dataset.portPath));
+  const value = JSON.parse(await nativeStableAnnouncementSnapshot(()=>readOwnedPublicFixtureFile(dataset.portPath)));
   assert(['127.0.0.1', 'localhost', '::1'].includes(value.host), 'Native announcement must be loopback only');
   assert(Number.isInteger(value.port) && value.port > 0 && value.port <= 65535 && Number.isInteger(value.pid) && value.pid > 1, 'Native announcement must contain a valid port and actual App PID');
   return value;
@@ -128,6 +209,10 @@ export function nativeContinuationCliArguments(argv) {
 }
 
 export async function readNativeOwnedFixtureBytes(path, maximum = 1024 * 1024) {
+  if (process.platform === 'win32') {
+    const { readWindowsOwnedFixtureBytes } = await import('./global-os-windows-cases.mjs');
+    return readWindowsOwnedFixtureBytes(path, maximum);
+  }
   const before = await lstat(path);
   assert(before.isFile() && !before.isSymbolicLink() && before.nlink === 1 && before.uid === process.getuid()
     && (before.mode & 0o077) === 0 && before.size <= maximum, 'Expected a private, singly linked, owned and bounded fixture file');
@@ -155,6 +240,14 @@ export function nativeContinuationSettlement({ execution, head, operationId, ses
   assert(head.active_turn_id == null, 'An active/paused Turn cannot continue as new work');
   return { operation_id: operationId, state: execution.state, pending_effects: 0, unknown_effects: 0,
     producer_lease_live: false, checkpoint_retained: false, head_status: head.status, head_last_seq: head.last_seq };
+}
+export function nativeRetainedSessionPreservation({before,after,eventsBefore,eventsAfter}){
+  assert.equal(after.session.agent_session_id,before.session.agent_session_id,'Retained cleanup must use the exact original Session');
+  assert.deepEqual(after.session.owner_ref,before.session.owner_ref,'Retained cleanup cannot replace its owner');
+  assert.deepEqual(after.session.agent_binding.typed_resource_bindings,before.session.agent_binding.typed_resource_bindings,'Retained cleanup cannot add or replace resource bindings');
+  const original=eventsBefore.filter(event=>event.seq<=before.head.last_seq),current=eventsAfter.filter(event=>event.seq<=before.head.last_seq);
+  assert.equal(eventsBefore.length,original.length);assert(original.length>0);assert.equal(original.at(-1).seq,before.head.last_seq);assert(eventsBefore.every(event=>event.agent_session_id===before.session.agent_session_id)&&eventsAfter.every(event=>event.agent_session_id===before.session.agent_session_id));assert.equal(evidenceDigest(current),evidenceDigest(original),'Original canonical Events and Payload references changed across App restart');
+  return{session_id:before.session.agent_session_id,original_prefix_last_seq:before.head.last_seq,original_prefix_event_count:original.length,original_prefix_sha256:evidenceDigest(original),typed_resource_bindings_sha256:evidenceDigest(before.session.agent_binding.typed_resource_bindings),owner_unchanged:true,original_canonical_prefix_unchanged:true};
 }
 export function nativeContinuationCaller({ origin, announcement, caller, uidObservation, driverUid }) {
   const url = new URL(origin);
@@ -361,9 +454,8 @@ const restoreContinuationWorkspace = async workspace => {
   return { path: workspace, created_empty_after_proven_absence: created, dev: info.dev, ino: info.ino, uid: info.uid, mode: '700',
     evidence_kind: 'host_fixture_preparation_not_Agent_result', original_session_resource_binding_changed: false };
 };
-export function nativeCompletionContract({ desktopOnly, tools = [], toolChoice }) {
+export function nativeCompletionContract({ tools = [], toolChoice }) {
   if (tools.some(tool => tool.function?.name === 'report_completion')) return 'report_completion';
-  assert(desktopOnly, 'Non-desktop native fixtures require the actual advertised report_completion contract');
   assert(!tools.some(tool => tool.function?.name === 'update_plan'), 'An explicit plan-control gate cannot be bypassed with a direct answer');
   assert(toolChoice === undefined || toolChoice === 'auto' || toolChoice === 'none', 'An explicit required/specific tool choice cannot be bypassed with a direct answer');
   return 'direct_answer_non_ledger';
@@ -388,51 +480,91 @@ export function nativeCompletionArguments({ tool, observedCallIds, summary }) {
   for (const key of ['observed_tool_error_count', 'observed_command_failure_count']) if (properties[key]?.const !== undefined) result[key] = properties[key].const;
   return result;
 }
+export function nativeCompletionPlanControl({tools,events,operationId,sessionId}){
+  const recorded=events.findLast(event=>event.agent_session_id===sessionId&&event.correlation_id===operationId&&event.kind==='runtime/progress-recorded'&&event.payload?.value?.event?.event==='plan_updated');
+  const plan=recorded?.payload.value.event.plan;if(!plan?.needs_replan)return undefined;
+  assert(tools.some(tool=>tool.function?.name==='update_plan'),'The canonical current plan requires its exposed update_plan control before completion');
+  return{canonical_plan_event_id:recorded.event_id,canonical_plan_revision:plan.revision,arguments:{explanation:'现役canonical计划要求重新结算；本阶段所有实际业务与原生清理均已逐项核验。保留原失败和累计错误，只更新完成状态，不重放观察或效果；原accepted requirements保持不变。',plan:[{step:'本阶段已核验的业务步骤和原生清理均已完成',status:'completed'}]}};
+}
 
 // This proof uses current model system instructions and their existing
 // canonical digest projection. Durable instruction bodies are intentionally
 // omitted by the product; do not create another transcript to recover them.
 export function nativeAdministratorInstructionContext({ messages, path, marker }) {
+  // Product instruction headers quote native paths as JSON. Backslashes in a
+  // Windows path therefore appear escaped, including under its canonical
+  // extended DOS prefix. Keep the digest of the actual complete context.
+  const quotedPath=JSON.stringify(path).slice(1,-1);
   const contexts = messages.filter(message => ['system', 'developer'].includes(message.role))
     .map(message => typeof message.content === 'string' ? message.content : '')
-    .filter(content => content.includes(path) && content.includes(marker) && content.includes('observed as administrator'));
+    .filter(content => (content.includes(path)||content.includes(quotedPath)) && content.includes(marker) && content.includes('observed as administrator'));
   return { matching_system_context_count: contexts.length,
     sha256: contexts.length === 1 ? createHash('sha256').update(contexts[0]).digest('hex') : undefined,
     bytes: contexts.length === 1 ? Buffer.byteLength(contexts[0]) : undefined };
 }
-export function nativeAdministratorInstructionProof({ modelContext, events, operationId, root, path, marker, proposalCallId }) {
+export function nativeAdministratorInstructionProof({ modelContext, events, operationId, root, path, marker, proposalCallId, expectedProposalArguments,sessionId }) {
   assert.equal(modelContext?.matching_system_context_count, 1, 'The actual proposal request system context must contain the privileged fixture instruction layer exactly once');
   assert(/^[a-f0-9]{64}$/.test(modelContext.sha256) && Number.isSafeInteger(modelContext.bytes) && modelContext.bytes > 0, 'Invalid bounded model context observation');
   const digest = modelContext.sha256;
   const notice = `Repository instruction body omitted from durable history (${modelContext.bytes} UTF-8 bytes, sha256:${digest}). Re-read current rules through the authorized workspace tool; this digest grants no authority.`;
   const records = events.filter(event => event.correlation_id === operationId && event.kind === 'runtime/progress-recorded' && event.payload?.storage === 'inline_json')
-    .map(event => ({ seq: event.seq, event: event.payload.value?.event }));
+    .map(event => ({ seq: event.seq, event: event.payload.value?.event,record:event }));
   const updated = records.findLast(record => record.event?.event === 'instructions_updated' && record.event.context === notice);
   assert(updated, 'The actual model instruction context must match its canonical InstructionsUpdated digest');
   let proposal;
   if (proposalCallId !== undefined) {
     proposal = records.find(record => record.event?.event === 'tool_call_completed' && record.event.step > 0
-      && record.event.call?.call_id === proposalCallId && record.event.call.name === 'start_process'
-      && record.event.call.arguments?.execution_identity === 'administrator' && record.event.call.arguments.cwd === root);
+      && record.event.call?.call_id === proposalCallId && record.event.call.name === 'start_process');
     assert(proposal && proposal.seq > updated.seq, 'The privileged instructions must be published before this exact successful start proposal, never inferred from its later model request');
+    const args=expectedProposalArguments?canonicalSlot(proposal.record,'/event/call/arguments','tool_arguments',expectedProposalArguments,sessionId):proposal.event.call.arguments;
+    assert(args?.execution_identity==='administrator'&&fixtureInstructionPathEqual(args.cwd,root),'The exact canonical start proposal must carry this administrator cwd');
   }
   const observedRead = target => records.findLast(record => record.seq < updated.seq && record.event?.event === 'tool_call_completed' && record.event.step === 0
     && record.event.call?.name === 'read_file' && record.event.call.arguments?.execution_identity === 'administrator' && target(record.event.call.arguments)
     && records.some(done => done.seq > record.seq && done.seq < updated.seq && done.event?.event === 'tool_completed' && done.event.step === 0
       && done.event.result?.call_id === record.event.call.call_id && done.event.result.is_error === false));
-  const scope = observedRead(arguments_ => arguments_.format === 'instruction_scope' && arguments_.path === root);
-  const text = observedRead(arguments_ => arguments_.path === path && arguments_.missing_ok === true);
+  // The fixture is a canonical host-allocated DOS path without links or Win32
+  // alias components. Rust canonicalization adds this exact extended prefix;
+  // it does not create a different target or permission scope.
+  const scope = observedRead(arguments_ => arguments_.format === 'instruction_scope' && fixtureInstructionPathEqual(arguments_.path,root));
+  const text = observedRead(arguments_ => fixtureInstructionPathEqual(arguments_.path,path) && arguments_.missing_ok === true);
   assert(scope && text, 'The same canonical administrator read action must settle both root scope and required AGENTS text before context publication');
   return { instruction_path: path, marker, execution_identity: 'administrator', model_system_context_sha256: digest,
     model_system_context_bytes: modelContext.bytes, instructions_updated_seq: updated.seq, proposal_call_id: proposalCallId, proposal_seq: proposal?.seq,
     scope_call_id: scope.event.call.call_id, scope_seq: scope.seq, text_call_id: text.event.call.call_id, text_seq: text.seq };
 }
 
-export async function runNativeRegression({ baseUrl, token, tokenFile, reportDirectory, administrator = false, scenario = 'files-process', template = 'chat.minimal', administratorDirectory, retainServiceForAppExit = false, appPid, nativeDataRoot, signal, protectedUserDirectory = false, desktopBackgroundFocus = false, continueSession, continuationSourceReport, continuationRetryReport }) {
-  assert.equal(process.platform, 'darwin', 'This runner requires the actual macOS App host');
-  assert.notEqual(process.getuid(), 0, 'Run the driver as the real ordinary login user');
+export function nativeInstallerPhases({steps,phases}) {
+  assert(Array.isArray(phases)&&phases.length===2,'Installer acceptance requires separate installation and uninstallation Turns');
+  assert.deepEqual(phases.map(phase=>phase.role),['installer-install','installer-uninstall']);
+  for(const phase of phases){assert(typeof phase.prompt==='string'&&phase.prompt.length>0);assert(Array.isArray(phase.steps)&&phase.steps.length>0);}
+  const flattened=phases.flatMap(phase=>phase.steps);assert.deepEqual(flattened,steps,'Every installer step must belong to exactly its declared phase');
+  const ids=flattened.map(step=>step.id);assert(ids.every(id=>typeof id==='string'&&id.length>0));assert.equal(new Set(ids).size,ids.length,'Installer business step identities cannot be repeated across Turns');return phases;
+}
+export function nativeSmbControlOptions({scenario,preservedUncReport,nativeDataRoot,platform,administrator=false,protectedUserDirectory=false,desktopBackgroundFocus=false,retainServiceForAppExit=false,continueSession,installerReport,missingDefault=false}){
+  const enabled=scenario==='smb-disposition-control';assert(enabled?typeof preservedUncReport==='string'&&isAbsolute(preservedUncReport):preservedUncReport===undefined,'--preserved-unc-report is required only for the isolated SMB control scenario');if(!enabled)return;
+  assert.equal(platform,'win32');assert(typeof nativeDataRoot==='string'&&isAbsolute(nativeDataRoot),'SMB control requires the same marked private native data root');assert(!administrator&&!protectedUserDirectory&&!desktopBackgroundFocus&&!retainServiceForAppExit&&!continueSession&&installerReport===undefined&&!missingDefault,'SMB control cannot combine independent scenarios, administrator mode or source continuation');
+}
+export function nativeUncCwdControlOptions({scenario,nativeDataRoot,platform,administrator=false,protectedUserDirectory=false,desktopBackgroundFocus=false,retainServiceForAppExit=false,continueSession,installerReport,missingDefault=false}){
+  if(scenario!=='unc-cwd-spelling-control')return;
+  assert.equal(platform,'win32');assert(typeof nativeDataRoot==='string'&&isAbsolute(nativeDataRoot),'UNC cwd control requires the same marked private native data root');
+  assert(!administrator&&!protectedUserDirectory&&!desktopBackgroundFocus&&!retainServiceForAppExit&&!continueSession&&installerReport===undefined&&!missingDefault,'UNC cwd control cannot combine independent scenarios or source continuation');
+}
+export async function runNativeRegression({ baseUrl, token, tokenFile, reportDirectory, administrator = false, scenario = 'files-process', template = 'chat.minimal', administratorDirectory, retainServiceForAppExit = false, appPid, nativeDataRoot, signal, protectedUserDirectory = false, desktopBackgroundFocus = false, continueSession, continuationSourceReport, continuationRetryReport, installerReport, missingDefault = false,preservedUncReport }) {
+  assert(['darwin', 'win32'].includes(process.platform), 'This runner requires an actual supported native App host');
+  nativeMissingDefaultOptions({enabled:missingDefault,platform:process.platform,scenario,administrator,protectedUserDirectory,retainServiceForAppExit,desktopBackgroundFocus,continueSession,installerReport,nativeDataRoot});
+  nativeSmbControlOptions({scenario,preservedUncReport,nativeDataRoot,platform:process.platform,administrator,protectedUserDirectory,desktopBackgroundFocus,retainServiceForAppExit,continueSession,installerReport,missingDefault});
+  nativeUncCwdControlOptions({scenario,nativeDataRoot,platform:process.platform,administrator,protectedUserDirectory,desktopBackgroundFocus,retainServiceForAppExit,continueSession,installerReport,missingDefault});
+  const isolatedNativeControl=scenario==='smb-disposition-control'||scenario==='unc-cwd-spelling-control';
+  const windows = process.platform === 'win32';
+  const windowsCases = windows ? await import('./global-os-windows-cases.mjs') : undefined;
+  const loginIdentity = windows ? await windowsCases.windowsLoginIdentity() : undefined;
+  if (!windows) assert.notEqual(process.getuid(), 0, 'Run the driver as the real ordinary login user');
+  assert(!windows || !desktopBackgroundFocus, 'Windows background-focus requires its own exact App-window proof; use the full desktop case');
   assert.equal(administratorDirectory, undefined, 'Arbitrary administrator directories are forbidden; use administrator=true / --administrator');
-  assert(['files-process', 'system', 'desktop'].includes(scenario), 'Supported scenarios: files-process, system, desktop');
+  assert(['files-process', 'system', 'service', 'desktop', 'desktop-high', 'browser', 'unc','installer','smb-disposition-control','unc-cwd-spelling-control'].includes(scenario), 'Supported scenarios: files-process, system, service, desktop, desktop-high, browser, unc, installer, smb-disposition-control, unc-cwd-spelling-control');
+  assert(windows || !['desktop-high', 'service', 'browser', 'unc','installer','smb-disposition-control','unc-cwd-spelling-control'].includes(scenario), 'This fixture is Windows-specific');
+  assert(scenario==='installer'?typeof installerReport==='string'&&installerReport.length>0:installerReport===undefined,'--installer-report is required only for the independent Windows installer scenario');
   assert(!administrator || scenario === 'files-process', 'Administrator verification is an independent scenario');
   assert(!retainServiceForAppExit || (scenario === 'system' && !administrator), 'Retained service verification is a separate system scenario');
   assert.equal(typeof desktopBackgroundFocus, 'boolean', '--desktop-background-focus is a boolean test option');
@@ -441,7 +573,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
   assert(!protectedUserDirectory || (scenario === 'files-process' && !administrator && !retainServiceForAppExit), '--protected-user-directory applies only to ordinary files-process verification');
   assert(retainServiceForAppExit || appPid === undefined, '--app-pid applies only to retained-service verification');
   const continuationRequested = nativeContinuationOptions({ administrator, scenario, template, continueSession, continuationSourceReport, continuationRetryReport, nativeDataRoot, retainServiceForAppExit, desktopBackgroundFocus, protectedUserDirectory });
-  assert(retainServiceForAppExit || desktopBackgroundFocus || continuationRequested || nativeDataRoot === undefined, '--native-data-root applies only to retained-service, background-focus or pinned administrator continuation verification');
+  assert(retainServiceForAppExit || desktopBackgroundFocus || continuationRequested || scenario==='installer' || isolatedNativeControl || missingDefault || nativeDataRoot === undefined, '--native-data-root applies only to retained-service, background-focus, canonical installer, isolated SMB controls, missing-default or pinned administrator continuation verification');
   assert(['chat.minimal', 'assistant.general'].includes(template), 'Supported default templates: chat.minimal, assistant.general');
   const origin = new URL(baseUrl);
   assert(['127.0.0.1', 'localhost', '[::1]'].includes(origin.hostname), 'Only an explicitly supplied local native App is accepted');
@@ -464,8 +596,8 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
     }
     throw new Error('Canonical evidence exceeded bounded pagination');
   };
-  let nativeDataset, initialAnnouncement, desktopHostIdentity, authenticatedNativeCaller, continuation;
-  if (retainServiceForAppExit || desktopBackgroundFocus || continuationRequested) {
+  let nativeDataset, initialAnnouncement, desktopHostIdentity, authenticatedNativeCaller, continuation,preservedSmbEvidence;
+  if (retainServiceForAppExit || desktopBackgroundFocus || continuationRequested || scenario==='installer' || isolatedNativeControl || missingDefault) {
     assert(typeof nativeDataRoot === 'string', '--native-data-root is required for this native App identity check');
     nativeDataset = await validateNativeDataset(nativeDataRoot);
     initialAnnouncement = await readNativeAnnouncement(nativeDataset);
@@ -475,22 +607,31 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
       assert(Number.isInteger(appPid) && appPid > 1 && appPid !== process.pid, '--app-pid must identify the actual running native App');
       assert.equal(initialAnnouncement.pid, appPid, 'The actual initial App PID must match the private dataset announcement');
     }
-    if (continuationRequested) {
-      assert.equal(tokenFile, join(nativeDataset.parent, 'owner-jwt'), 'Continuation requires the same private dataset owner JWT file');
+    if (continuationRequested || retainServiceForAppExit || scenario==='installer' || isolatedNativeControl || missingDefault) {
+      assert.equal(tokenFile, join(nativeDataset.parent, 'owner-jwt'), 'Native persistence requires the same private dataset owner JWT file');
       const ownerToken = (await readNativeOwnedFixtureBytes(tokenFile, 4096)).toString('utf8').trim();
       assert(ownerToken === token, 'A substituted login token is not permitted');
       assert(!origin.username && !origin.password, 'The native API URL must not contain credentials');
     }
-    if (desktopBackgroundFocus || continuationRequested) {
+    if (desktopBackgroundFocus || continuationRequested || scenario==='installer' || isolatedNativeControl || missingDefault) {
       const response = await fetch(new URL('/api/system/permissions', origin), { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15000) });
       assert(response.ok, `Authenticated native caller identity request failed (HTTP ${response.status})`);
       const envelope = await response.json(), caller = envelope.data === undefined ? envelope : envelope.data;
       assert.notEqual(envelope.success, false, 'The native App rejected the authenticated caller identity request');
-      assert.equal(caller.platform, 'macos'); assert.equal(caller.process_id, initialAnnouncement.pid, 'The actual API caller PID differs from the marked data announcement');
-      assert.equal(caller.app_bundle_identifier, 'com.nomifun.desktop', 'Background focus requires the dedicated formally identified acceptance App');
-      desktopHostIdentity = { pid: caller.process_id, bundle_identifier: caller.app_bundle_identifier, native_data_root: nativeDataset.root };
+      assert.equal(caller.platform, windows?'windows':'macos'); assert.equal(caller.process_id, initialAnnouncement.pid, 'The actual API caller PID differs from the marked data announcement');
+      if(desktopBackgroundFocus || continuationRequested){
+        assert.equal(caller.app_bundle_identifier, 'com.nomifun.desktop', 'Background focus requires the dedicated formally identified acceptance App');
+        desktopHostIdentity = { pid: caller.process_id, bundle_identifier: caller.app_bundle_identifier, native_data_root: nativeDataset.root };
+      }
       authenticatedNativeCaller = caller;
     }
+  }
+  if(scenario==='smb-disposition-control'){
+    const bytes=await readFile(preservedUncReport),source=JSON.parse(bytes);assert.equal(source.schema,'nomifun.global-os-native-regression.v2');assert.equal(source.platform,'win32');assert.equal(source.scenario,'unc');assert.equal(source.status,'failed');assert.equal(source.host,origin.origin);assert(source.session_id&&source.accepted?.operation_id);
+    const canonical=await requestApi('GET',`/api/agent-sessions/${source.session_id}`),claims=JSON.parse(Buffer.from(token.split('.')[1],'base64url'));assert.deepEqual(canonical.session.owner_ref,{principal_kind:'user',principal_id:claims.user_id});
+    const events=await readEvents(source.session_id),effect=events.find(event=>event.kind==='effect/started'&&event.payload?.value?.action_id==='workspace.files/patch'&&event.payload.value.turn_id===source.accepted.operation_id);assert(effect,'The source must retain its original canonical patch Effect start');
+    const execution=await requestApi('GET',`/api/agent-sessions/${source.session_id}/execution`);assert.equal(execution.operation_id,source.accepted.operation_id);assert.equal(execution.state,'cancelled');assert.equal(execution.automatic_replay_authorized,false);
+    preservedSmbEvidence={source_report:resolve(preservedUncReport),source_report_sha256:createHash('sha256').update(bytes).digest('hex'),session_id:source.session_id,operation_id:source.accepted.operation_id,effect_started:effect,current_execution:execution,canonical_prefix:{last_seq:canonical.head.last_seq,event_count:events.length,sha256:evidenceDigest(events)},source_calls_dispatched:0,source_effect_reconciliation_submitted:false};
   }
   if (continuationRequested) {
     const pin = nativeAdministratorContinuationFixture;
@@ -586,14 +727,18 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
   await mkdir(reportDirectory, { recursive: true });
   // The host allocates the only writable test namespace. Never accept a caller's
   // daily root directory, and never reuse a fixture after a failed attempt.
-  const allocated = `/private/tmp/nomifun-global-os-product-${randomUUID()}`;
+  const allocated = windows ? join(await realpath(tmpdir()), `nomifun-global-os-product-${randomUUID()}`) : `/private/tmp/nomifun-global-os-product-${randomUUID()}`;
   await mkdir(allocated, { mode: 0o700 });
   const fixture = await realpath(allocated);
   assert.equal(fixture, allocated);
+  if(scenario==='smb-disposition-control')await windowsCases.initializeWindowsPrivateEmptyFixture(fixture,loginIdentity);
   const workspace = continuation ? continuation.source.workspace : join(fixture, 'workspace');
   let protectedParent;
   if (protectedUserDirectory) {
-    const requestedParent = join(homedir(), 'Documents');
+    const requestedParent = windows
+      ? await windowsCases.windowsObservation("[Environment]::GetFolderPath([Environment+SpecialFolder]::MyDocuments)|ConvertTo-Json -Compress")
+      : join(homedir(), 'Documents');
+    assert(typeof requestedParent === 'string' && isAbsolute(requestedParent), 'The actual native Documents known folder is unavailable; no replacement directory was prepared');
     try {
       const canonicalParent = await realpath(requestedParent);
       const info = await lstat(canonicalParent);
@@ -621,10 +766,11 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
   const initial = 'NomiFun global native before\n';
   const changed = 'NomiFun global native after 中文\n';
   const file = join(outside, 'sample.txt');
-  const checks = [], observations = new Map(), completedSteps = new Set(), callSteps = new Map(), attempts = new Map(), discoveryAttempts = new Map(), rawResults = new Map(), discoveries = new Map(), completions = new Map(), activeCompletionIds = new Set(), activeTurnCallIds = new Set();
+  const checks = [], observations = new Map(), completedSteps = new Set(), callSteps = new Map(), attempts = new Map(), discoveryAttempts = new Map(), rawResults = new Map(), discoveries = new Map(), completions = new Map(), planControls=new Map(), activeCompletionIds = new Set(), activeTurnCallIds = new Set();
   const runId = randomUUID();
-  let processId, nativePid, providerFailure, sessionId = continueSession, accepted, pendingAdmissionOperationId, cursor = 0, sequence = 0, completionAccepted = false, readinessText = '', activeTurnRole = 'main', completionAttempts = 0, currentCompletionMode = 'report_completion', directAnswerCount = 0;
+  let processId, nativePid, providerFailure, sessionId = continueSession, accepted, pendingAdmissionOperationId, cursor = 0, sequence = 0, completionAccepted = false, readinessText = '', activeTurnRole = 'main', completionAttempts = 0, currentCompletionMode = 'report_completion', directAnswerCount = 0, missingDefaultFrozen;
   const administratorStartProposalContexts = new Map();
+  const canonicalPathAliases=new Map(),canonicalPathDeferrals=new Map(),proposedArguments=new Map();
   let providerRequestSequence = 0;
   let administratorProcessId, administratorPid, administratorCursor = 0, administratorOutput = '', administratorExitVerified = false;
   const administratorProcessEvidence = { expected_uid: 0, expected_cwd: administratorRoot, expected_login_home: homedir(), identity_and_exit_observations: [] };
@@ -634,16 +780,62 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
     assert(observed.exit_code === 1 && observed.stdout.trim() === '' && observed.stderr.trim() === '', 'The exact administrator process PID must be absent after proven helper cleanup');
     administratorExitVerified = true;
   };
-  let systemScenario, desktopScenario;
+  let systemScenario, desktopScenario, windowsScenario;
   if (scenario === 'system') {
-    const { allocateLoopbackPort, createMacSystemScenario } = await import('./global-os-system-cases.mjs');
-    systemScenario = createMacSystemScenario({ fixture, workspace, uid: process.getuid(), loopbackPort: await allocateLoopbackPort(), preserveServiceForHostExit: retainServiceForAppExit });
+    if (windows) systemScenario = await windowsCases.createWindowsSystemScenario({ fixture, workspace, loginIdentity, preserveServiceForHostExit: retainServiceForAppExit });
+    else {
+      const { allocateLoopbackPort, createMacSystemScenario } = await import('./global-os-system-cases.mjs');
+      systemScenario = createMacSystemScenario({ fixture, workspace, uid: process.getuid(), loopbackPort: await allocateLoopbackPort(), preserveServiceForHostExit: retainServiceForAppExit });
+    }
   }
   if (scenario === 'desktop') {
-    const { createMacDesktopScenario } = await import('./global-os-desktop-cases.mjs');
-    desktopScenario = createMacDesktopScenario({ fixture, workspace, uid: process.getuid(), desktopBackgroundFocus, desktopHostIdentity });
+    if (windows) {
+      const { createWindowsDesktopScenario } = await import('./global-os-windows-desktop-cases.mjs');
+      desktopScenario = await createWindowsDesktopScenario({ fixture, workspace });
+    } else {
+      const { createMacDesktopScenario } = await import('./global-os-desktop-cases.mjs');
+      desktopScenario = createMacDesktopScenario({ fixture, workspace, uid: process.getuid(), desktopBackgroundFocus, desktopHostIdentity });
+    }
   }
-  const acceptanceScenario = systemScenario ?? desktopScenario;
+  if (scenario === 'desktop-high') {
+    const { createWindowsHighDesktopScenario } = await import('./global-os-windows-desktop-cases.mjs');
+    desktopScenario = await createWindowsHighDesktopScenario({ fixture, workspace, loginIdentity });
+  }
+  if (scenario === 'service') {
+    const { createWindowsServiceScenario } = await import('./global-os-windows-service-cases.mjs');
+    windowsScenario = await createWindowsServiceScenario({ fixture, workspace, loginIdentity });
+  }
+  if (scenario === 'browser') {
+    const { createWindowsBrowserScenario } = await import('./global-os-windows-browser-cases.mjs');
+    windowsScenario = await createWindowsBrowserScenario({ fixture, workspace, loginIdentity });
+  }
+  if (scenario === 'unc') {
+    const { createWindowsUncScenario } = await import('./global-os-windows-unc-cases.mjs');
+    windowsScenario = await createWindowsUncScenario({ fixture, workspace, loginIdentity });
+  }
+  if(scenario==='unc-cwd-spelling-control'){
+    const{createWindowsUncCwdControlScenario}=await import('./global-os-windows-unc-cwd-control-cases.mjs');
+    windowsScenario=await createWindowsUncCwdControlScenario({fixture,workspace,loginIdentity});
+  }
+  if(scenario==='smb-disposition-control'){
+    const {createWindowsSmbControlScenario}=await import('./global-os-windows-smb-control-cases.mjs');
+    windowsScenario=await createWindowsSmbControlScenario({fixture,workspace,loginIdentity,preservedUncReport});
+    windowsScenario.nativeEvidence.push({phase:'preserved_source_canonical_identity',...preservedSmbEvidence});
+  }
+  if (scenario === 'installer') {
+    const { createWindowsInstallerScenario } = await import('./global-os-windows-installer.mjs');
+    windowsScenario = await createWindowsInstallerScenario({ fixture, workspace, loginIdentity,installerReport,nativeDataRoot:nativeDataset });
+    nativeInstallerPhases(windowsScenario);
+  }
+  if (windows && scenario === 'files-process') {
+    await windowsCases.assertWindowsFixture(fixture, workspace);
+    windowsScenario = administrator
+      ? windowsCases.createWindowsAdministratorScenario({ fixture, root: administratorRoot, instructions: administratorInstructions,loginIdentity,
+        instructionContent: administratorInstructionContent, marker, markerValue, instructionEvidence: administratorInstructionEvidence,
+        verifyInstructions: callId => verifyAdministratorInstructions(administratorStartProposalContexts.get(callId), callId) })
+      : windowsCases.createWindowsFilesScenario({ fixture, workspace, outside, initial, changed });
+  }
+  const acceptanceScenario = systemScenario ?? desktopScenario ?? windowsScenario;
   const safeFailure = error => acceptanceScenario?.sanitizeFailure?.(error) ?? { name: error?.name ?? 'Error', message: error.message, stack: error.stack };
   const safeReport = value => acceptanceScenario?.sanitizeReport?.(value) ?? value;
   const steps = acceptanceScenario?.steps ?? (administrator ? [
@@ -722,6 +914,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
     return requestApi(method, path, body, targetOrigin);
   };
   const currentCompletionSummary = () => {
+    if (windows && acceptanceScenario?.completionSummary) return acceptanceScenario.completionSummary(activeTurnRole);
     const stepObservation = stepId => [...observations].findLast(([callId]) => callSteps.get(callId)?.id === stepId)?.[1];
     let systemSummary;
     if (systemScenario) {
@@ -750,7 +943,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
       providerRequestSequence++;
       for (const message of messages.filter(message => message.role === 'tool')) {
         const id = message.tool_call_id, raw = toolContent(message);
-        const disposition = nativeToolReceiptDisposition({ id, runId, known: callSteps.has(id) || discoveries.has(id) || completions.has(id), active: activeTurnCallIds.has(id) });
+        const disposition = nativeToolReceiptDisposition({ id, runId, known: callSteps.has(id) || discoveries.has(id) || completions.has(id)||planControls.has(id), active: activeTurnCallIds.has(id) });
         if (disposition === 'historical') continue;
         if (rawResults.has(id)) continue;
         rawResults.set(id, raw); // Preserve actual error text before parsing or asserting.
@@ -764,6 +957,16 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
         const step = callSteps.get(id);
         if (step) {
           try {
+          if(windows&&raw.startsWith('[tool error]')){
+            const redirect=nativeCanonicalPathReconsideration({raw,callId:id,callArguments:proposedArguments.get(id),events:await sessionEvents(),operationId:accepted.operation_id,sessionId});
+            if(redirect){
+              const plain=redirect.canonical.replace(/^\\\\\?\\UNC\\/i,'\\\\').replace(/^\\\\\?\\/,'');
+              const defaultCwd=redirect.canonical===''&&redirect.requested===workspace&&proposedArguments.get(id)?.cwd===workspace;
+              assert(defaultCwd||(win32.isAbsolute(plain)&&(contained(fixture,plain)||contained(outside,plain)||acceptanceScenario?.allowsCanonicalFixturePath?.(plain)===true)),'A fixture cannot adopt a redirected target outside its own allocated namespaces');
+              const count=(canonicalPathDeferrals.get(step.id)??0)+1;assert(count<=4,'Repeated canonical path changes require inspection');canonicalPathDeferrals.set(step.id,count);
+              canonicalPathAliases.set(redirect.requested,defaultCwd?'.':redirect.canonical);checks.push({id,step:step.id,status:'deferred_for_canonical_native_path',...redirect,default_cwd:defaultCwd||undefined});continue;
+            }
+          }
           if (administrator && step.allowInstructionRefresh === true && raw.startsWith('[tool error]')
               && raw.includes('Requested calls deferred; earlier calls may already have run. Repository instructions changed or a new directory scope was discovered. Read the current scoped instructions, reconsider the calls, and submit new call identities.')) {
             assert.equal(step.id, 'admin-process-start');
@@ -774,7 +977,15 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
             checks.push({ id, step: step.id, status: 'deferred_for_fresh_instruction_context', instructions_updated_seq: proof.instructions_updated_seq });
             continue; // Keep this real refusal; the next bounded attempt gets a new call identity.
           }
-          const value = toolValue(raw);
+          if(step.expectedComputerNoEffectAdmission===true){
+            const proof=nativeComputerNoEffectAdmission({raw,callId:id,callArguments:proposedArguments.get(id),events:await sessionEvents(),operationId:accepted.operation_id,sessionId});
+            await step.verifyNoEffect(proof);observations.set(id,{expected_no_effect_admission:proof});completedSteps.add(step.id);checks.push({id,step:step.id,status:'passed_expected_no_effect_admission',proof});continue;
+          }
+          if(raw.startsWith('[tool error]')&&typeof step.observeTerminalFailure==='function'){
+            assert.equal(scenario,'unc-cwd-spelling-control');assert.equal(step.id,'unc-cwd-two-spellings');
+            await step.observeTerminalFailure(nativeControlTerminalFailureObservation({raw,callId:id,callArguments:proposedArguments.get(id),events:await sessionEvents(),operationId:accepted.operation_id,sessionId}));
+          }
+          let value;try{value=toolValue(raw);}catch(error){error.safe_step=step.id;throw error;}
           // A read-only poll of an intentionally cancelled process reports
           // success=false (it did not exit normally). Its actual cancelled
           // terminal and reap receipt are the expected observation here.
@@ -782,7 +993,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
             assert(step.allowCancelledObservation === true && value.state === 'cancelled' && value.cleanup?.reaped === true,
               `${id}: ${raw}`);
           }
-          const complete = await step.verify(value, { messages, callId: id, toolMessage: message }); observations.set(id, value);
+          let complete;try{complete=await step.verify(value, { messages, callId: id, toolMessage: message });}catch(error){error.safe_step=step.id;throw error;}observations.set(id, value);
           assert(complete !== false || step.repeatable, `${step.id} has no bounded repeat contract`);
           if (complete !== false) completedSteps.add(step.id);
           checks.push({ id, step: step.id, status: complete === false ? 'waiting_for_remaining_output' : 'passed' });
@@ -794,6 +1005,8 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
           const found = toolValue(raw); assert(Array.isArray(found), `ToolSearch failed: ${raw}`);
           assert(found.some(item => item.name === discoveries.get(id)), `ToolSearch did not expose the requested default tool: ${raw}`);
           checks.push({ id, status: 'passed', discovered: discoveries.get(id) });
+        } else if(planControls.has(id)){
+          const value=toolValue(raw);assert(['updated','unchanged'].includes(value.status)&&value.needs_replan===false&&value.plan_revision>0);assert(value.plan.every(step=>step.status==='completed'));checks.push({id,status:'passed',kind:'canonical_plan_control',...planControls.get(id),result_plan_revision:value.plan_revision});
         } else if (completions.has(id)) {
           // A prior Turn's final completion receipt can first become visible
           // when this new Turn reads canonical history. It remains evidence of
@@ -821,9 +1034,9 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
         if (body.tools?.some(tool => tool.function?.name === next.name)) {
           name = next.name;
           const attempt = (attempts.get(next.id) ?? 0) + 1; attempts.set(next.id, attempt);
-          assert(attempt <= (next.maxAttempts ?? 1), `${next.id} did not establish its expected native result within the bounded attempts`);
-          id = nativeRunCallId(runId, `${activeTurnRole === 'main' ? '' : `${activeTurnRole}-`}${next.id}${next.repeatable ? `-${attempt}` : ''}`);
-          args = typeof next.args === 'function' ? next.args() : next.args; callSteps.set(id, next);
+          assert(attempt <= (next.maxAttempts ?? 1)+(canonicalPathDeferrals.get(next.id)??0), `${next.id} did not establish its expected native result within the bounded attempts`);
+          id = nativeRunCallId(runId, `${activeTurnRole === 'main' ? '' : `${activeTurnRole}-`}${next.id}${next.repeatable||attempt>1 ? `-${attempt}` : ''}`);
+          args = reconsideredArguments(typeof next.args === 'function' ? await next.args() : next.args,canonicalPathAliases); callSteps.set(id, next);proposedArguments.set(id,structuredClone(args));
           if (administrator && next.id === 'admin-process-start') {
             // Observe the request that proposes this exact call. Keep hashes
             // and counts only; a later response cannot supply missing context.
@@ -839,7 +1052,11 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
           name = 'ToolSearch'; id = nativeRunCallId(runId, `discover-${next.id}-${++sequence}`); args = { query: next.name }; discoveries.set(id, next.name);
         }
       } else if (!completionAccepted) {
-        currentCompletionMode = nativeCompletionContract({ desktopOnly: Boolean(desktopScenario), tools: body.tools, toolChoice: body.tool_choice });
+        const control=nativeCompletionPlanControl({tools:body.tools,events:await sessionEvents(),operationId:accepted.operation_id,sessionId});
+        if(control){
+          assert([...planControls.keys()].filter(key=>activeTurnCallIds.has(key)).length<2,'The canonical completion plan did not converge');name='update_plan';id=nativeRunCallId(runId,`completion-plan-${++sequence}`);args=control.arguments;planControls.set(id,{canonical_plan_event_id:control.canonical_plan_event_id,canonical_plan_revision:control.canonical_plan_revision});
+        }else{
+        currentCompletionMode = nativeCompletionContract({ tools: body.tools, toolChoice: body.tool_choice });
         if (currentCompletionMode === 'direct_answer_non_ledger') {
           assert(++directAnswerCount <= 2, 'The non-ledger direct answer did not reach its normal canonical terminal');
           directAnswer = currentCompletionSummary();
@@ -847,6 +1064,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
           const tool = body.tools.find(tool => tool.function?.name === 'report_completion');
           assert(++completionAttempts <= 4, 'Completion review did not converge within four accounts');
           name = 'report_completion'; id = nativeRunCallId(runId, `completion-${++sequence}`); args = completionArguments(tool); completions.set(id, null); activeCompletionIds.add(id);
+        }
         }
       }
       if (name) activeTurnCallIds.add(id);
@@ -860,9 +1078,10 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const providerUrl = `http://127.0.0.1:${server.address().port}/v1`;
-  const report = { schema: 'nomifun.global-os-native-regression.v2', run_id: runId, session_id: continueSession, started_at: new Date().toISOString(), host: origin.origin, fixture, workspace, outside, template, scenario: administrator ? 'administrator' : scenario,
-    evidence_scope: continuation ? 'Real native App / same originally selected Agent and Session / same private owner JWT / public model command and canonical contract transition / new isolated administrator fixture. No new Agent, grants or resources. Original failure remains failed. Local scripted provider is not live-model reasoning evidence.' : 'Real native App / unmodified default template / owner login JWT / local scripted provider / real native owners. App signing identity and GUI review require separate driver evidence. No live-model reasoning claim.', continuation: continuation?.report, administrator, administrator_fixture: administrator ? { path: administratorRoot, marker } : undefined, administrator_instructions: administrator ? administratorInstructionEvidence : undefined, administrator_process: administrator ? administratorProcessEvidence : undefined, protected_user_directory: protectedParent ? { ...protectedParent, allocated_test_directory: outside } : undefined, checks, status: 'running', system_resources: systemScenario?.resources, desktop_resources: desktopScenario?.resources, desktop_mode: desktopScenario ? (desktopBackgroundFocus ? 'background_focus' : 'full') : undefined, desktop_host_identity: desktopHostIdentity, pending_acceptance: acceptanceScenario?.pendingAcceptance, native_system_evidence: systemScenario?.nativeEvidence, retain_service_for_app_exit: retainServiceForAppExit, native_dataset: nativeDataset, initial_native_announcement: initialAnnouncement, phase_checkpoints: [] };
+  const report = { schema: 'nomifun.global-os-native-regression.v2', platform: process.platform, login_identity: loginIdentity, native_case_evidence: windowsScenario?.nativeEvidence, windows_administrator_process: windowsScenario?.administratorEvidence, run_id: runId, session_id: continueSession, started_at: new Date().toISOString(), host: origin.origin, fixture, workspace, outside, template, scenario: administrator ? 'administrator' : scenario,
+    evidence_scope: scenario==='unc-cwd-spelling-control' ? 'Diagnostic same-App Windows ProcessStartInfo UNC cwd spelling control with two natural child WinPS exits. ProviderPath observations do not certify the full product UNC case or settle any preserved Effect.' : scenario==='smb-disposition-control' ? 'Public default Agent / same original private App and owner JWT / distinct UUID SMB native primitive control. Raw primitive outcomes are diagnostic observations, not product success or resolution of the preserved source Effect. No preserved source path is read or modified by the control probe.' : continuation ? 'Real native App / same originally selected Agent and Session / same private owner JWT / public model command and canonical contract transition / new isolated administrator fixture. No new Agent, grants or resources. Original failure remains failed. Local scripted provider is not live-model reasoning evidence.' : 'Real native App / unmodified default template / owner login JWT / local scripted provider / real native owners. App signing identity and GUI review require separate driver evidence. No live-model reasoning claim.', continuation: continuation?.report, administrator, administrator_fixture: administrator ? { path: administratorRoot, marker } : undefined, administrator_instructions: administrator ? administratorInstructionEvidence : undefined, administrator_process: administrator ? (windows ? windowsScenario.administratorEvidence : administratorProcessEvidence) : undefined, protected_user_directory: protectedParent ? { ...protectedParent, allocated_test_directory: outside } : undefined, checks, status: 'running', system_resources: systemScenario?.resources, native_case_resources: windowsScenario?.resources, desktop_resources: desktopScenario?.resources, desktop_mode: desktopScenario ? (desktopBackgroundFocus ? 'background_focus' : scenario === 'desktop-high' ? 'high_integrity' : 'full') : undefined, desktop_host_identity: desktopHostIdentity, pending_acceptance: acceptanceScenario?.pendingAcceptance, native_system_evidence: systemScenario?.nativeEvidence, retain_service_for_app_exit: retainServiceForAppExit, native_dataset: nativeDataset, initial_native_announcement: initialAnnouncement, phase_checkpoints: [] };
   const reportPath = join(reportDirectory, `${administrator ? 'administrator' : scenario}${continuation ? '-continuation' : ''}-${template}-${Date.now()}-${randomUUID()}.json`);
+  if(missingDefault)report.missing_default={requested:true,status:'awaiting_frozen_session',workspace};
   const phaseCheckpoint = async (phase, extra = {}) => {
     const checkpointPath = reportPath.replace(/\.json$/, `.${phase}.json`);
     report.status = phase; Object.assign(report, extra);
@@ -897,7 +1116,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
     }
     return events;
   };
-  const verifyAdministratorInstructions = async (modelContext, proposalCallId) => nativeAdministratorInstructionProof({ modelContext, proposalCallId, events: await sessionEvents(),
+  const verifyAdministratorInstructions = async (modelContext, proposalCallId) => nativeAdministratorInstructionProof({ modelContext, proposalCallId,expectedProposalArguments:proposedArguments.get(proposalCallId),sessionId, events: await sessionEvents(),
     operationId: accepted.operation_id, root: administratorRoot, path: administratorInstructions, marker: administratorInstructionMarker });
   const canonicalEvidence = async () => {
     const current = (await sessionEvents()).filter(event => event.correlation_id === accepted.operation_id);
@@ -1003,7 +1222,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
       assert(settlement.completion_delivered, 'No canonical completion delivery exists');
       assert(settlement.completion_report.criteria.every(criterion => criterion.disposition === 'supported'), 'The accepted report has unresolved work');
     } else {
-      assert(desktopScenario && directAnswerCount > 0 && activeCompletionIds.size === 0, 'Direct completion must come from this actual non-ledger desktop request');
+      assert(currentCompletionMode==='direct_answer_non_ledger'&&directAnswerCount>0&&activeCompletionIds.size===0, 'Direct completion must come from this actual request without an advertised plan/completion gate');
     }
     // Raw /messages exposes event projections, while the public UI history
     // includes the store-derived exact Turn outcome. Use that formal consumer
@@ -1022,6 +1241,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
     assert.equal(originalSession.session.agent_session_id, sessionId);
     assert(!originalSession.head.active_turn_id, 'The retained-service main phase must have fully settled before App exit');
     const originalOwner = JSON.stringify(originalSession.session.owner_ref);
+    const originalEvents=await sessionEvents();
     const deadline = Date.now() + 10 * 60 * 1000;
     await phaseCheckpoint('awaiting_app_exit', {
       retained_service_phase: 'main Turn completed; only the explicitly requested unique service and its files are retained; App-exit survival is not yet verified',
@@ -1029,8 +1249,8 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
     });
     await waitForPhase('awaiting_app_exit', deadline, () => processIsGone(appPid));
     const survival = await systemScenario.observeAfterAppExit({ appPid });
-    const pending = systemScenario.pendingAcceptance.find(item => item.id === 'launchd-survives-native-App-exit');
-    if (pending) Object.assign(pending, { status: 'passed', reason: 'The actual old App PID disappeared; the same unique launchd service, observed PID and marker were independently verified after that exit.' });
+    const pending = systemScenario.pendingAcceptance.find(item => ['launchd-survives-native-App-exit', 'task-survives-app-exit'].includes(item.id));
+    if (pending) Object.assign(pending, { status: 'passed', reason: 'The actual old App PID disappeared; the same unique native persistent task/service, observed PID and marker were independently verified after that exit.' });
     await phaseCheckpoint('awaiting_app_restart', { app_exit_survival: { ...survival, observed_at: new Date().toISOString() } });
     const restarted = await waitForPhase('awaiting_app_restart', deadline, async () => {
       let announcement;
@@ -1056,14 +1276,25 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
     report.restart = { original_app_pid: appPid, new_app_pid: restarted.announcement.pid, old_origin: oldOrigin, new_origin: origin.origin, native_announcement: restarted.announcement, owner_jwt_reused: true, same_session_id: sessionId, observed_at: new Date().toISOString() };
     // Read the old exact Turn on the restarted App before admitting new work.
     report.restart_prior_turn_settlement = await awaitCleanup();
+    report.restart.canonical_preservation=nativeRetainedSessionPreservation({before:originalSession,after:restarted.session,eventsBefore:originalEvents,eventsAfter:await sessionEvents()});
     assert.equal(report.restart_prior_turn_settlement.execution.operation_id, report.accepted.operation_id, 'Unexpected work replaced the original settled Turn before cleanup');
     report.app_restart_service_survival = { ...await systemScenario.observeAfterAppExit({ appPid }), observed_after_new_app_pid: restarted.announcement.pid, observed_at: new Date().toISOString() };
     await phaseCheckpoint('restarted_app_authenticated', { restart: report.restart });
-    report.retained_service_cleanup = await driveTurn(`本次唯一 launchd 服务 ${systemScenario.resources.target} 是先前阶段明确要求保留的测试产物。宿主已独立确认原 App PID ${appPid} 正常退出后该服务仍存续，且以同一 owner 登录身份在同数据根的新 App 继续同一 Session。现在仅通过现役工具清理本次随机系统偏好（如已使用）、停止并卸载该唯一服务，读回原生状态并确认已观察进程退出，再删除 ${systemScenario.resources.root}。不重跑主验收、不操作其他服务或既有文件。`, systemScenario.cleanupSteps, 'retained-cleanup');
+    report.retained_service_cleanup = await driveTurn(systemScenario.retainedCleanupPrompt ?? `本次唯一 launchd 服务 ${systemScenario.resources.target} 是先前阶段明确要求保留的测试产物。宿主已独立确认原 App PID ${appPid} 正常退出后该服务仍存续，且以同一 owner 登录身份在同数据根的新 App 继续同一 Session。现在仅通过现役工具清理本次随机系统偏好（如已使用）、停止并卸载该唯一服务，读回原生状态并确认已观察进程退出，再删除 ${systemScenario.resources.root}。不重跑主验收、不操作其他服务或既有文件。`, systemScenario.cleanupSteps, 'retained-cleanup');
+    report.restart.canonical_preservation_after_cleanup=nativeRetainedSessionPreservation({before:originalSession,after:await api('GET',`/api/agent-sessions/${sessionId}`),eventsBefore:originalEvents,eventsAfter:await sessionEvents()});
     assert.equal(await present(systemScenario.resources.root), false, 'Retained-service files remain after product cleanup');
     report.retained_service_final_status = 'stopped_unregistered_and_fixture_deleted';
   };
   const driveSystemPhases = async () => {
+    if (systemScenario.phases) {
+      report.system_phases = [];
+      for (const phase of systemScenario.phases) {
+        const result = await driveTurn(phase.prompt, phase.steps, phase.role);
+        report.system_phases.push({ role: phase.role, step_ids: phase.steps.map(step => step.id), ...result });
+        Object.assign(report, result);
+      }
+      return;
+    }
     const serviceStart = steps.findIndex(step => step.id === 'system-preferences-write');
     const networkStart = steps.findIndex(step => step.id === 'system-network-start');
     const networkEnd = steps.findIndex(step => step.id === 'system-network-confirm-exit');
@@ -1153,13 +1384,24 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
       const session = await api('POST', '/api/agent-sessions', { preset_id: preset.preset.preset_id, model, workspace });
       sessionId = session.agent_session_id; report.session_id = sessionId;
     }
+    if(missingDefault){
+      missingDefaultFrozen=await beginWindowsMissingDefaultCase({fixture,workspace,loginIdentity,session:await api('GET',`/api/agent-sessions/${sessionId}`),projection:await api('GET',`/api/agent-sessions/${sessionId}/projection`),events:await sessionEvents(),nativeDataset,announcement:initialAnnouncement,caller:authenticatedNativeCaller,evidence:report.missing_default});
+    }
     const content = acceptanceScenario?.prompt ?? (administrator ?
       `Only operate on this host-allocated fixture ${fixture}. Through the native administrator execution path, create ${administratorRoot} as root:0700 and a benign root:0600 AGENTS.md inside it; independently prove an ordinary-user write is refused. Preserve the actual instruction preflight: if new rules defer a call, read the updated model instructions and submit a fresh call identity. Write the absent random marker ${marker}, then verify uid, contents and root:0600 metadata. Next use start_process with execution_identity=administrator and cwd=${administratorRoot} to run the bounded 60-second sh wait loop, printing real uid, pwd and login HOME (expected ${homedir()}). Make a distinct running poll and independently read exact PID UID through ps; use the same helper/XPC process cancellation and terminal poll, require cancelled plus cleanup.reaped, and independently prove the exact PID absent through ps. Only then remove this marker and the fixture AGENTS.md and rmdir this root fixture. No host signal, sudo, PTY, stdin expansion, additional authentication method or unrelated target.` :
       `请在当前工作区之外创建独立测试目录 ${outside}，用文件工具写入并修改一份文本，再在该目录启动一个本机等待进程，输出实际工作目录和文本内容；独立 poll 核对进程仍在运行及输出，随后停止并确认该进程已退出，最后删除本次创建的测试目录，报告实际结果。`);
-    if (systemScenario) await driveSystemPhases();
+    if (scenario==='installer') {
+      report.acceptance_phases=[];
+      for(const phase of nativeInstallerPhases(acceptanceScenario)){
+        const result=await driveTurn(phase.prompt,phase.steps,phase.role);
+        report.acceptance_phases.push({role:phase.role,step_ids:phase.steps.map(step=>step.id),...result});Object.assign(report,result);
+      }
+    }
+    else if (systemScenario) await driveSystemPhases();
     else Object.assign(report, await driveTurn(content, steps, 'main'));
     assert.equal(await present(administrator ? administratorRoot : outside), false);
     if (retainServiceForAppExit) await continueAfterRootControlledAppRestart();
+    if(missingDefaultFrozen)await verifyWindowsMissingDefaultCase({frozen:missingDefaultFrozen,session:await api('GET',`/api/agent-sessions/${sessionId}`),projection:await api('GET',`/api/agent-sessions/${sessionId}/projection`),events:await sessionEvents(),nativeDataset:await validateNativeDataset(nativeDataset.root),announcement:await readNativeAnnouncement(nativeDataset),evidence:report.missing_default});
     report.status = 'passed';
   } catch (error) {
     report.status = 'failed'; report.failure = safeFailure(error);
@@ -1173,13 +1415,13 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
         report.failure_admission = cleanup.accepted ?? { not_admitted: cleanup.not_admitted, head: cleanup.head };
       } catch (cleanupError) { report.failure_cleanup = safeFailure(cleanupError); }
     }
-    const scenarioCleanupNeeded = acceptanceScenario?.cleanupNeeded ? acceptanceScenario.cleanupNeeded() : systemScenario ? await present(systemScenario.resources.root) : false;
+    const scenarioCleanupNeeded = acceptanceScenario?.cleanupNeeded ? await acceptanceScenario.cleanupNeeded() : systemScenario ? await present(systemScenario.resources.root) : false;
     if (acceptanceScenario && report.failure_settlement && !interruption.signal.aborted && scenarioCleanupNeeded) {
       try {
         // This is a new explicitly scoped recovery Turn. The first failure and
         // its exact cancellation/cleanup proof remain separate in the report.
-        const cleanupPrompt = desktopScenario ? `原桌面验收失败，先前 Turn 已取消且临时资源与 pending/unknown 效果均已结算。只通过现役 Computer 工具取得新观察、聚焦并退出本次新启动的 Calculator PID ${desktopScenario.resources.pid}，确认该 PID 已退出。不重跑验收，不操作其他应用、用户文件或剪贴板。` : `原隔离验收失败，先前 Turn 已取消且临时进程清理、pending/unknown 效果均已结算。现在只清理本次随机偏好和唯一服务 ${systemScenario.resources.target}：通过系统原生状态确认，存在则 bootout；确认该服务及已观察 PID 退出后，再用文件工具删除 ${systemScenario.resources.root}。不重跑验收、不修改其他对象。`;
-        report.recovery_cleanup = await driveTurn(cleanupPrompt, acceptanceScenario.cleanupSteps, 'cleanup');
+        const cleanupPrompt = acceptanceScenario.cleanupPrompt ?? (desktopScenario ? `原桌面验收失败，先前 Turn 已取消且临时资源与 pending/unknown 效果均已结算。只通过现役 Computer 工具取得新观察、聚焦并退出本次新启动的 Calculator PID ${desktopScenario.resources.pid}，确认该 PID 已退出。不重跑验收，不操作其他应用、用户文件或剪贴板。` : `原隔离验收失败，先前 Turn 已取消且临时进程清理、pending/unknown 效果均已结算。现在只清理本次随机偏好和唯一服务 ${systemScenario.resources.target}：通过系统原生状态确认，存在则 bootout；确认该服务及已观察 PID 退出后，再用文件工具删除 ${systemScenario.resources.root}。不重跑验收、不修改其他对象。`);
+        report.recovery_cleanup = await driveTurn(acceptanceScenario.cleanupPrompt ?? cleanupPrompt, acceptanceScenario.cleanupSteps, 'cleanup');
       } catch (cleanupError) {
         report.recovery_cleanup_failure = { ...safeFailure(cleanupError), accepted };
         try {
@@ -1192,7 +1434,17 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
     if (acceptanceScenario?.sanitizeFailure) { const safe = safeFailure(error); const failure = new Error(safe.message); failure.name = safe.name; throw failure; }
     throw error;
   } finally {
-    let continuationIntegrityFailure;
+    let continuationIntegrityFailure, scenarioCloseFailure;
+    if(preservedSmbEvidence){
+      try{
+        const events=await readEvents(preservedSmbEvidence.session_id),prefix=events.filter(event=>event.seq<=preservedSmbEvidence.canonical_prefix.last_seq);assert.equal(prefix.length,preservedSmbEvidence.canonical_prefix.event_count);assert.equal(evidenceDigest(prefix),preservedSmbEvidence.canonical_prefix.sha256);assert.equal(createHash('sha256').update(await readFile(preservedUncReport)).digest('hex'),preservedSmbEvidence.source_report_sha256);
+        report.preserved_unc_after_control={source_report_sha256:preservedSmbEvidence.source_report_sha256,original_event_prefix_unchanged:true,current_execution:await requestApi('GET',`/api/agent-sessions/${preservedSmbEvidence.session_id}/execution`),source_calls_dispatched:0,source_effect_reconciliation_submitted:false};
+      }catch(error){report.status='failed';report.preserved_unc_integrity_failure=safeFailure(error);continuationIntegrityFailure=error;}
+    }
+    if(missingDefaultFrozen&&report.status!=='passed'){
+      try{await verifyWindowsMissingDefaultCase({frozen:missingDefaultFrozen,session:await api('GET',`/api/agent-sessions/${sessionId}`),projection:await api('GET',`/api/agent-sessions/${sessionId}/projection`),events:await sessionEvents(),nativeDataset:await validateNativeDataset(nativeDataset.root),announcement:await readNativeAnnouncement(nativeDataset),evidence:report.missing_default,scenarioCompleted:false});}
+      catch(error){report.missing_default.integrity_verification_failure=safeFailure(error);}
+    }
     if (continuation) {
       try {
         continuation.report.original_failure_preservation_after_new_turn = await verifyContinuationSourcePreserved();
@@ -1202,33 +1454,42 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
         continuationIntegrityFailure = error; report.status = 'failed'; report.continuation_integrity_failure = safeFailure(error);
       }
     }
+    if (acceptanceScenario?.close) {
+      try { await acceptanceScenario.close(); report.scenario_host_resources_closed = true; }
+      catch (error) { scenarioCloseFailure = error; report.status = 'failed'; report.scenario_host_resource_close_failure = safeFailure(error); }
+    }
     report.finished_at = new Date().toISOString(); report.observations = Object.fromEntries(observations); report.raw_tool_results = Object.fromEntries(rawResults); report.completion_receipts = Object.fromEntries(completions);
-    if (acceptanceScenario) report.cleanup_intent = { ...acceptanceScenario.cleanupIntent, temporary_process: acceptanceScenario.cleanupIntent.temporary_process() };
+    if (acceptanceScenario) report.cleanup_intent = { ...acceptanceScenario.cleanupIntent, temporary_process: typeof acceptanceScenario.cleanupIntent?.temporary_process === 'function' ? acceptanceScenario.cleanupIntent.temporary_process() : acceptanceScenario.cleanupIntent?.temporary_process };
     report.remaining_fixture = { outside: await present(outside).catch(error => ({ state: 'unknown', os_code: error.code, detail: safeFailure(error).message })), administrator_root: await present(administratorRoot), system_root: systemScenario ? await present(systemScenario.resources.root) : undefined };
-    // Only remove known empty user-owned fixture directories. Never recursively
-    // erase failure evidence or an administrator object with unknown effects.
-    for (const directory of [...(continuation ? [] : [workspace]), fixture]) try { await rmdir(directory); } catch (error) { if (!['ENOENT', 'ENOTEMPTY', 'EACCES', 'EPERM'].includes(error.code)) report.fixture_cleanup_error ??= error.message; }
+    // A failed run keeps its original default directory for a future scoped
+    // canonical cleanup Turn, including after the original App has exited.
+    // Successful runs remove only known empty fixture directories.
+    if(report.status==='passed')for (const directory of [...(continuation ? [] : [workspace]), fixture]) try { await rmdir(directory); } catch (error) { if (!['ENOENT', 'ENOTEMPTY', 'EACCES', 'EPERM'].includes(error.code)) report.fixture_cleanup_error ??= error.message; }
+    else report.fixture_directories_retained=true;
     await writeFile(reportPath, `${JSON.stringify(safeReport(report), null, 2)}\n`, { flag: 'wx', mode: 0o600 });
     process.removeListener('SIGINT', interrupted); process.removeListener('SIGTERM', interrupted); signal?.removeEventListener('abort', forwardedAbort);
     server.closeIdleConnections(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
     console.log(JSON.stringify({ status: report.status, report: reportPath, session_id: sessionId }));
     if (continuationIntegrityFailure) throw continuationIntegrityFailure;
+    if (scenarioCloseFailure) throw scenarioCloseFailure;
   }
   return safeReport(report);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  if (process.argv.includes('--help')) console.log('node scripts/validation/global-os-native.mjs --base-url http://127.0.0.1:PORT --token-file /ABS/ISOLATED-OWNER-LOGIN-JWT --report-dir /ABS/EVIDENCE [--template chat.minimal|assistant.general] [--scenario files-process|system|desktop] [--administrator [--continue-session PINNED_ID --continuation-source-report /ABS/PINNED_FAILED_REPORT [--continuation-retry-report /ABS/PINNED_ZERO_DISPATCH_FAILURE] --native-data-root /PRIVATE_MARKED_PARENT/native-data]] [--protected-user-directory] [--desktop-background-focus] [--retain-service-for-app-exit --app-pid ACTUAL_APP_PID --native-data-root /PRIVATE_MARKED_PARENT/native-data]. Run against an already running signed native App with its own isolated test dataset. Obtain the token by normal owner setup/login; the native browser trust secret is not an owner JWT. Run ordinary, system/network, desktop and administrator cases separately. --protected-user-directory is a boolean ordinary files-process option: the actual existing homedir/Documents parent is resolved read-only, only an absent nomifun-global-os-product-UUID name is allocated there, and all creation/patch/search/cwd/process-cancel/deletion effects use the Agent; the workspace stays in the private /tmp fixture. Missing or denied Documents metadata is recorded, never prepared by the host. --desktop-background-focus requires --scenario desktop and --native-data-root. The marked private data announcement and authenticated permission caller must identify the same live formal App; only that minimal identity is passed to the read-only window verifier. The Agent establishes background setup and performs all focus effects through Computer; no reviewer focus mutation is used. Desktop defaults to assistant.general with actual screenshot input capability on its local fixture model; all UI effects use the existing Agent Computer tools and reports omit private pixels/AX/global window text. Retained-service verification implies --scenario system: the driver emits an awaiting_app_exit checkpoint, waits at most ten minutes for the reviewer to quit and restart the App, independently observes service survival, authenticates the same owner JWT against the new private port announcement, then continues the same Session/provider with a new cleanup Turn. The driver never quits the App or kills a raw PID; SIGINT/SIGTERM cancel its wait and preserve any unproven service target. Administrator continuation is limited to the exact pinned private failed report, original Session, owner JWT and fourth dataset. It uses only the public model command to prepare current bundled contracts, preserves Agent intent/resources/workspace and original failure, allocates a fresh root fixture, and records source/event/schema digests. An optional retry accepts only the one pinned failed continuation whose canonical records prove no user effect dispatch, and requires that exact settled latest operation while retaining both old failures. It never creates a new Agent/Session or changes grants; prior-run receipts cannot satisfy new-run calls. Arbitrary administrator paths are forbidden. OS authentication stays in native UI. The local scripted provider is deterministic product-path evidence, not live-model or visual acceptance.');
+  if (process.argv.includes('--help')) console.log('node scripts/validation/global-os-native.mjs --base-url http://127.0.0.1:PORT --token-file /ABS/ISOLATED-OWNER-LOGIN-JWT --report-dir /ABS/EVIDENCE [--template chat.minimal|assistant.general] [--scenario files-process|system|service|desktop|desktop-high|browser|unc|installer|smb-disposition-control|unc-cwd-spelling-control] [--preserved-unc-report /ABS/PRESERVED_FAILED_UNC_REPORT] [--administrator [--continue-session PINNED_ID --continuation-source-report /ABS/PINNED_FAILED_REPORT [--continuation-retry-report /ABS/PINNED_ZERO_DISPATCH_FAILURE] --native-data-root /PRIVATE_MARKED_PARENT/native-data]] [--protected-user-directory] [--missing-default --native-data-root /PRIVATE_MARKED_PARENT/native-data] [--desktop-background-focus] [--retain-service-for-app-exit --app-pid ACTUAL_APP_PID --native-data-root /PRIVATE_MARKED_PARENT/native-data]. Run against an already running actual native App with its own isolated test dataset. Signing and notarization are separate acceptance evidence. Obtain the token by normal owner setup/login; the native browser trust secret is not an owner JWT. Run ordinary, system/network, SCM service, desktop, high-integrity desktop, Browser and administrator cases separately. SMB disposition control requires --preserved-unc-report and the marked original private --native-data-root; its distinct UUID namespace measures native primitive outcomes without replaying or settling the preserved source Effect. Windows service/desktop-high/browser are independent unique native fixtures; service uses SCM, while the system case uses Task Scheduler. The high-integrity fixture uses a real elevated WinForms window and existing Computer actions, preserving UAC and the Default desktop boundary. --protected-user-directory is a boolean ordinary files-process option: the actual existing homedir/Documents parent is resolved read-only, only an absent nomifun-global-os-product-UUID name is allocated there, and all creation/patch/search/cwd/process-cancel/deletion effects use the Agent; the workspace stays in the private /tmp fixture. Missing or denied Documents metadata is recorded, never prepared by the host. --missing-default is Windows ordinary files-process only: create and freeze the normal Session first, then rmdir only its known empty default directory before the first Turn; retain the same private data root, binding, resources and resolved snapshot throughout the external absolute-path cases. A busy directory is reported, never forced or recreated. --desktop-background-focus requires --scenario desktop and --native-data-root. The marked private data announcement and authenticated permission caller must identify the same live formal App; only that minimal identity is passed to the read-only window verifier. The Agent establishes background setup and performs all focus effects through Computer; no reviewer focus mutation is used. Desktop defaults to assistant.general with actual screenshot input capability on its local fixture model; all UI effects use the existing Agent Computer tools and reports omit private pixels/AX/global window text. Retained-service verification implies --scenario system: the driver emits an awaiting_app_exit checkpoint, waits at most ten minutes for the reviewer to quit and restart the App, independently observes service survival, authenticates the same owner JWT against the new private port announcement, then continues the same Session/provider with a new cleanup Turn. The driver never quits the App or kills a raw PID; SIGINT/SIGTERM cancel its wait and preserve any unproven service target. Administrator continuation is limited to the exact pinned private failed report, original Session, owner JWT and fourth dataset. It uses only the public model command to prepare current bundled contracts, preserves Agent intent/resources/workspace and original failure, allocates a fresh root fixture, and records source/event/schema digests. An optional retry accepts only the one pinned failed continuation whose canonical records prove no user effect dispatch, and requires that exact settled latest operation while retaining both old failures. It never creates a new Agent/Session or changes grants; prior-run receipts cannot satisfy new-run calls. Arbitrary administrator paths are forbidden. OS authentication stays in native UI. The local scripted provider is deterministic product-path evidence, not live-model or visual acceptance.');
   else {
     assert(!process.argv.includes('--administrator-directory'), '--administrator-directory is forbidden; use --administrator with a host-allocated fixture');
     const retained = process.argv.includes('--retain-service-for-app-exit');
     const background = process.argv.includes('--desktop-background-focus');
+    const missingDefault = process.argv.includes('--missing-default');
     const continued = nativeContinuationCliArguments(process.argv);
     assert(retained || !process.argv.includes('--app-pid'), '--app-pid requires --retain-service-for-app-exit');
-    assert(retained || background || continued || !process.argv.includes('--native-data-root'), '--native-data-root requires retained-service, background-focus or pinned administrator continuation verification');
     const selectedScenario = option('--scenario') ?? (retained ? 'system' : 'files-process');
-    const selectedTemplate = option('--template') ?? (selectedScenario === 'desktop' ? 'assistant.general' : 'chat.minimal');
-    const nativeDataRoot = retained || background || continued ? required('--native-data-root') : undefined;
+    const nativeControl=selectedScenario==='smb-disposition-control'||selectedScenario==='unc-cwd-spelling-control';
+    assert(retained || background || continued || selectedScenario==='installer' || nativeControl || missingDefault || !process.argv.includes('--native-data-root'), '--native-data-root requires retained-service, background-focus, canonical installer, isolated SMB controls, missing-default or pinned administrator continuation verification');
+    const selectedTemplate = option('--template') ?? (selectedScenario.startsWith('desktop') || selectedScenario === 'browser' ? 'assistant.general' : 'chat.minimal');
+    const nativeDataRoot = retained || background || continued || selectedScenario==='installer' || nativeControl || missingDefault ? required('--native-data-root') : undefined;
     const continueSession = option('--continue-session'), continuationSourceReport = option('--continuation-source-report'), continuationRetryReport = option('--continuation-retry-report');
     const administrator = process.argv.includes('--administrator');
     nativeContinuationOptions({ administrator, scenario: selectedScenario, template: selectedTemplate, continueSession, continuationSourceReport, continuationRetryReport, nativeDataRoot,
@@ -1238,6 +1499,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const token = (continued ? (await readNativeOwnedFixtureBytes(tokenFile, 4096)).toString('utf8') : await readFile(tokenFile, 'utf8')).trim();
     await runNativeRegression({ baseUrl: required('--base-url'), token, tokenFile, reportDirectory: required('--report-dir'), administrator, scenario: selectedScenario, template: selectedTemplate,
       retainServiceForAppExit: retained, appPid: retained ? Number(required('--app-pid')) : undefined, nativeDataRoot,
-      protectedUserDirectory: process.argv.includes('--protected-user-directory'), desktopBackgroundFocus: background, continueSession, continuationSourceReport, continuationRetryReport });
+      protectedUserDirectory: process.argv.includes('--protected-user-directory'), desktopBackgroundFocus: background, continueSession, continuationSourceReport, continuationRetryReport,installerReport:option('--installer-report'),missingDefault,preservedUncReport:option('--preserved-unc-report') });
   }
 }

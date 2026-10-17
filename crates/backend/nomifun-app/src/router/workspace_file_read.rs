@@ -53,6 +53,12 @@ async fn system_acquire(request: NativeReadRequest) -> Result<NativeReadAcquisit
 }
 
 fn system_read_error(error: nomi_system_execution::SystemExecutionError) -> AppError {
+    if let Some(native) = error.details.get("native_file_error") {
+        return match serde_json::from_value::<nomi_native_files::NativeFileFailure>(native.clone()) {
+            Ok(failure) if failure.code == error.code => nomifun_file::native_file_failure_error(failure),
+            _ => AppError::Internal("Native readonly owner returned an inconsistent typed failure".into()),
+        };
+    }
     let message = format!("{}: {}", error.code, error.message);
     match error.code.as_str() {
         "SYSTEM_ACCESS_DENIED" => AppError::NativeSystemAccessDenied {
@@ -175,6 +181,7 @@ where
                 let response = acquire(NativeReadRequest::InstructionScope {
                     path: absolute_read_path(scope, &request.path)?,
                     recursive: request.recursive,
+                    path_semantics: request.path_semantics,
                 })
                 .await?;
                 let NativeReadAcquisition::InstructionScope { scope: native } = response else {
@@ -437,6 +444,7 @@ mod tests {
         for mut input in [
             serde_json::json!({"path":text,"offset":0,"limit":8}),
             serde_json::json!({"path":external,"format":"instruction_scope"}),
+            serde_json::json!({"path":external,"format":"instruction_scope","path_semantics":"entry"}),
             serde_json::json!({"path":image_path,"format":"image"}),
         ] {
             let ordinary = read(&files, &scope, StrictJsonValue(input.clone()))
@@ -450,7 +458,7 @@ mod tests {
                 .unwrap();
             assert_eq!(ordinary.0, native.0);
         }
-        assert_eq!(invoked.load(std::sync::atomic::Ordering::Relaxed), 3);
+        assert_eq!(invoked.load(std::sync::atomic::Ordering::Relaxed), 4);
         let explicit = read_with_acquirer(
             &files,
             &scope,
@@ -463,6 +471,26 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(explicit.0["content"], "规则中文\r\nsecond line\n");
+    }
+
+    #[tokio::test]
+    async fn administrator_entry_scope_rejects_a_follow_receipt_without_downgrading_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let scope = workspace_binding(nomifun_common::generate_id(), "binding", "project", "owner",
+            [WORKSPACE_READ_OPERATION], root.path()).unwrap();
+        let files = FileService::new(Arc::new(Events), vec![root.path().to_owned()]);
+        let result = read_with_acquirer(&files, &scope, StrictJsonValue(serde_json::json!({
+            "path":".","format":"instruction_scope","execution_identity":"administrator","path_semantics":"entry"
+        })), &|request| async move {
+            let NativeReadRequest::InstructionScope { path, recursive, path_semantics } = request else {
+                panic!("entry metadata must retain its typed acquisition kind");
+            };
+            assert_eq!(path_semantics, nomi_native_files::NativePathSemantics::Entry);
+            nomi_native_files::acquire(NativeReadRequest::InstructionScope {
+                path, recursive, path_semantics: nomi_native_files::NativePathSemantics::Follow,
+            }).map_err(nomifun_file::native_file_acquisition_error)
+        }).await.unwrap_err();
+        assert!(matches!(result, AppError::Conflict(_)));
     }
 
     #[tokio::test]
@@ -530,5 +558,29 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(invalid, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn native_not_found_failure_is_never_an_absence_receipt_or_missing_scope() {
+        let root=tempfile::tempdir().unwrap();
+        let scope=workspace_binding(nomifun_common::generate_id(),"binding","project","owner",[WORKSPACE_READ_OPERATION],root.path()).unwrap();
+        let files=FileService::new(Arc::new(Events),vec![root.path().to_owned()]);
+        let failure=nomi_native_files::NativeFileFailure{code:"RESOURCE_NOT_FOUND".into(),message:"resolving native read root: unavailable namespace".into(),kind:Some("NotFound".into()),raw_os_error:Some(67)};
+        for input in [serde_json::json!({"path":"missing.md","missing_ok":true,"execution_identity":"administrator"}),serde_json::json!({"path":"missing.md","format":"instruction_scope","execution_identity":"administrator"})] {
+            let expected=serde_json::to_value(&failure).unwrap();let copy=failure.clone();
+            let result=read_with_acquirer(&files,&scope,StrictJsonValue(input),&move |_| {
+                let native=copy.clone();async move {Err(system_read_error(nomi_system_execution::SystemExecutionError{code:native.code.clone(),message:native.message.clone(),details:serde_json::json!({"native_file_error":native,"worker":{"state":"exited","exit_code":0,"cleanup":{"reaped":true}},"cleanup_proven":true})}))}
+            }).await.unwrap_err();
+            assert_eq!(result.error_code(),"RESOURCE_NOT_FOUND");assert_eq!(result.error_details().unwrap()["native_file_error"],expected);
+            assert!(matches!(result,AppError::NativeFileAcquisition{source:None,..}));
+        }
+        let ordinary=read_with_acquirer(&files,&scope,StrictJsonValue(serde_json::json!({"path":"missing.md","missing_ok":true})),&|_|async{panic!("ordinary reader must retain its own identity")}).await.unwrap().unwrap();
+        assert_eq!(ordinary.0,serde_json::json!({"kind":"workspace_file_absent","path":"missing.md"}));
+    }
+
+    #[test]
+    fn inconsistent_native_error_receipts_do_not_adopt_a_transport_code_or_invent_os_fields() {
+        let error=system_read_error(nomi_system_execution::SystemExecutionError{code:"SYSTEM_ACCESS_DENIED".into(),message:"transport text".into(),details:serde_json::json!({"native_file_error":{"code":"RESOURCE_NOT_FOUND","message":"native text","kind":"NotFound","raw_os_error":67}})});
+        assert!(matches!(error,AppError::Internal(_)));
     }
 }

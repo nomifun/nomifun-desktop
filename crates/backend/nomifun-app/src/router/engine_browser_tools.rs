@@ -1109,6 +1109,8 @@ fn browser_outcome_may_be_unknown(code: &str) -> bool {
             | "BROWSER_DIALOG_PENDING"
             | "BROWSER_UNSUPPORTED_ACTION"
             | "BROWSER_UPLOAD_PATH_DENIED"
+            | "BROWSER_UPLOAD_SOURCE_CHANGED"
+            | "BROWSER_UPLOAD_SOURCE_NAME_UNSUPPORTED"
             | "BROWSER_UPLOAD_LIMIT"
             | "BROWSER_DOWNLOAD_LIMIT"
             | "BROWSER_DOWNLOAD_DENIED"
@@ -1655,6 +1657,8 @@ mod tests {
         assert!(!browser_outcome_may_be_unknown("BROWSER_PROVIDER_UNAVAILABLE"));
         assert!(!browser_outcome_may_be_unknown("BROWSER_NATIVE_SURFACE_UNAVAILABLE"));
         assert!(!browser_outcome_may_be_unknown("BROWSER_STALE_OBSERVATION"));
+        assert!(!browser_outcome_may_be_unknown("BROWSER_UPLOAD_SOURCE_CHANGED"));
+        assert!(!browser_outcome_may_be_unknown("BROWSER_UPLOAD_SOURCE_NAME_UNSUPPORTED"));
         assert!(!browser_outcome_may_be_unknown("BROWSER_OPERATION_CANCELLED"));
     }
 

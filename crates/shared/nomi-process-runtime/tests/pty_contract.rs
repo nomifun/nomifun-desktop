@@ -14,8 +14,6 @@ use nomi_process_runtime::{
     ProcessPolicy, NormalizedProcessRequest, OutputCursor, OutputStream, PollResult,
     ProcessState, ProcessSupervisor, SupervisorConfig, Transport,
 };
-#[cfg(target_os = "macos")]
-
 const PTY_COLS: u16 = 80;
 const PTY_ROWS: u16 = 24;
 

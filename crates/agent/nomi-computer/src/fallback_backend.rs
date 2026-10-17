@@ -93,8 +93,8 @@ pub fn find_window(window_id: u32) -> Result<WindowInfo, String> {
 /// Bring a window to the foreground.
 ///
 /// On Windows this uses the real activation API (`SetForegroundWindow` on the
-/// exact target HWND, restoring it if minimized, with a foreground-lock
-/// workaround) so subsequent `type`/`key` input lands in the intended window.
+/// exact target HWND), preserving OS foreground policy and verifying native
+/// acknowledgement before subsequent `type`/`key` input.
 /// On macOS, match the window's current owner, title and bounds in the
 /// Accessibility tree and verify native focus. Linux uses click-to-raise.
 pub async fn focus_window(window_id: u32) -> Result<String, String> {
@@ -105,9 +105,10 @@ pub async fn focus_window(window_id: u32) -> Result<String, String> {
 
     #[cfg(target_os = "windows")]
     {
-        tokio::task::spawn_blocking(move || set_foreground_window(window_id))
+        tokio::task::spawn_blocking(move || nomi_a11y::focus_windows_window(window_id))
             .await
-            .map_err(|e| format!("Focus task failed: {e}"))??;
+            .map_err(|e| format!("Focus task failed: {e}"))?
+            .map_err(windows_focus_error_message)?;
         Ok(format!(
             "Activated window {window_id} ({:?} — {:?}) via the Windows foreground API. \
              Take a screenshot to verify.",
@@ -186,60 +187,17 @@ fn focus_window_macos(window_id: u32) -> Result<String, String> {
     Ok(format!("Activated window {window_id} via macOS Accessibility. {}", effect.message))
 }
 
-/// Windows: activate the exact target window (xcap window ids are HWNDs).
-/// Restores it if minimized, briefly attaches our input queue to the current
-/// foreground thread so the OS honors the activation (the foreground-stealing
-/// lock otherwise silently no-ops), and reports a clear error if Windows still
-/// refuses (e.g. an elevated/higher-integrity target).
 #[cfg(target_os = "windows")]
-fn set_foreground_window(window_id: u32) -> Result<(), String> {
-    use core::ffi::c_void;
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow, SW_RESTORE, SW_SHOW,
-        SetForegroundWindow, ShowWindow,
-    };
+pub(crate) const WINDOWS_FOCUS_NOT_APPLIED: &str = "COMPUTER_FOCUS_NOT_APPLIED: Windows denied SetForegroundWindow before any restore, show, UIA or synthetic input. The OS foreground lock requires a real activation condition, such as the user activating NomiFun. No native focus effect was applied; acquire a fresh observation before a new call.";
+#[cfg(windows)]
+pub(crate) const WINDOWS_FOCUS_TARGET_MISSING: &str = "COMPUTER_FOCUS_NOT_APPLIED: The native target window no longer exists. No activation, restore, show, UIA or synthetic input was requested; acquire a fresh observation before a new call.";
 
-    let hwnd = HWND(window_id as usize as *mut c_void);
-    // SAFETY: window-management calls on a possibly-stale handle. `IsWindow`
-    // guards validity first, and every call below fails (rather than UB) on an
-    // invalid HWND.
-    unsafe {
-        if !IsWindow(Some(hwnd)).as_bool() {
-            return Err(format!(
-                "Window {window_id} no longer exists. Use list_windows to get current ids."
-            ));
-        }
-        if IsIconic(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-        } else {
-            let _ = ShowWindow(hwnd, SW_SHOW);
-        }
-        // Windows only honors SetForegroundWindow from the thread owning the
-        // current foreground window, so briefly share its input state.
-        let cur = GetCurrentThreadId();
-        let fg = GetForegroundWindow();
-        let fg_tid = if fg.0.is_null() {
-            0
-        } else {
-            GetWindowThreadProcessId(fg, None)
-        };
-        let attached =
-            fg_tid != 0 && fg_tid != cur && AttachThreadInput(cur, fg_tid, true).as_bool();
-        let ok = SetForegroundWindow(hwnd).as_bool();
-        if attached {
-            let _ = AttachThreadInput(cur, fg_tid, false);
-        }
-        if ok {
-            Ok(())
-        } else {
-            Err(format!(
-                "Windows refused to bring window {window_id} to the foreground (foreground \
-                 activation is OS-restricted; the target may be elevated / higher-integrity than \
-                 this app, or another app holds the foreground lock). Try a pixel click instead."
-            ))
-        }
+#[cfg(windows)]
+pub(crate) fn windows_focus_error_message(error: nomi_a11y::WindowsFocusError) -> String {
+    match error {
+        nomi_a11y::WindowsFocusError::TargetMissing => WINDOWS_FOCUS_TARGET_MISSING.into(),
+        nomi_a11y::WindowsFocusError::NotApplied => WINDOWS_FOCUS_NOT_APPLIED.into(),
+        error => error.to_string(),
     }
 }
 

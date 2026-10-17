@@ -8,15 +8,21 @@ use nomi_process_runtime::{
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
-    ffi::{CStr, CString, c_char, c_void},
+    ffi::{CString, c_char, c_void},
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
+#[cfg(target_os = "macos")]
+use std::ffi::CStr;
 use uuid::Uuid;
 
 mod readonly;
 pub use readonly::SystemReadReceipt;
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::{helper_entry, install_windows_extension_handler, WindowsExecutionExtension};
 
 #[derive(Clone, Debug, thiserror::Error)]
 #[error("{code}: {message}")]
@@ -27,6 +33,7 @@ pub struct SystemExecutionError {
 }
 
 impl SystemExecutionError {
+    #[cfg(not(windows))]
     fn unavailable(message: impl Into<String>) -> Self {
         Self {
             code: "SYSTEM_EXECUTION_NOT_AVAILABLE".into(),
@@ -49,14 +56,16 @@ impl SystemExecutionError {
     }
 }
 
-/// One authenticated XPC connection owns one independent supervisor in the
-/// privileged service. Dropping the last client invalidates that connection;
-/// the helper shuts down and proves cleanup for every admitted temporary task.
+/// One authenticated native client owns one independent supervisor. Dropping
+/// the last reference requests shutdown; explicit lifecycle RPCs retain the
+/// cleanup receipts. Host death also tears down every admitted temporary task.
 #[derive(Debug)]
 pub struct SystemExecutionClient {
+    #[cfg(windows)]
+    native: Arc<windows::Client>,
     #[cfg(target_os = "macos")]
     native: Arc<NativeClient>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     admission: Arc<tokio::sync::RwLock<()>>,
 }
 
@@ -84,6 +93,15 @@ unsafe extern "C" {
 }
 
 impl SystemExecutionClient {
+    /// Transfer only this real foreground App's existing Windows permission
+    /// to its authenticated, retained runner. This never activates a window
+    /// and confers no guarantee that the subsequent native focus will succeed.
+    #[cfg(windows)]
+    pub async fn allow_windows_foreground_from_current_app(&self) -> bool {
+        let _admission = self.admission.read().await;
+        self.native.allow_foreground_from_current_app()
+    }
+
     pub fn connect() -> Result<Self, SystemExecutionError> {
         #[cfg(target_os = "macos")]
         {
@@ -109,7 +127,14 @@ impl SystemExecutionClient {
                 admission: Arc::new(tokio::sync::RwLock::new(())),
             })
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                native: Arc::new(windows::Client::connect()?),
+                admission: Arc::new(tokio::sync::RwLock::new(())),
+            })
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             Err(SystemExecutionError::unavailable(
                 "Native administrator execution awaits this platform's implementation and native validation",
@@ -181,7 +206,25 @@ impl SystemExecutionClient {
             })?;
             result
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        {
+            let native = self.native.clone();
+            enum Admission {
+                Start { _guard: tokio::sync::OwnedRwLockReadGuard<()> },
+                Fence { _guard: tokio::sync::OwnedRwLockWriteGuard<()> },
+                None,
+            }
+            let admission = match request["op"].as_str() {
+                Some("start" | "acquire_read" | "extension") => Admission::Start { _guard: self.admission.clone().read_owned().await },
+                Some("quiesce" | "shutdown") => Admission::Fence { _guard: self.admission.clone().write_owned().await },
+                _ => Admission::None,
+            };
+            tokio::task::spawn_blocking(move || {
+                let _admission = admission;
+                native.call(request)
+            }).await.map_err(|error| windows::unknown(format!("Native administrator RPC worker stopped: {error}")))?
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             let _ = request;
             Err(SystemExecutionError::unavailable(
@@ -205,7 +248,11 @@ impl SystemExecutionClient {
             unsafe { nomifun_system_client_free(error) };
             Err(SystemExecutionError::unavailable(message))
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        {
+            windows::unregister()
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             Err(SystemExecutionError::unavailable(
                 "Native administrator execution is not implemented on this platform",
@@ -217,6 +264,12 @@ impl SystemExecutionClient {
 struct Runner {
     runtime: tokio::runtime::Runtime,
     supervisor: Arc<ProcessSupervisor>,
+    #[cfg(windows)]
+    extension: Option<Arc<dyn windows::WindowsExecutionExtension>>,
+    #[cfg(windows)]
+    extension_admission: Arc<tokio::sync::RwLock<()>>,
+    #[cfg(windows)]
+    extension_closed: std::sync::atomic::AtomicBool,
 }
 
 fn field<'a>(request: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -287,6 +340,12 @@ impl Runner {
                 .build()
                 .expect("system execution runtime"),
             supervisor: ProcessSupervisor::new(SupervisorConfig::default()),
+            #[cfg(windows)]
+            extension: windows::new_extension(),
+            #[cfg(windows)]
+            extension_admission: Arc::new(tokio::sync::RwLock::new(())),
+            #[cfg(windows)]
+            extension_closed: std::sync::atomic::AtomicBool::new(false),
         }
     }
     async fn perform(&self, request: Value) -> Result<Value, (String, String, Value)> {
@@ -319,14 +378,42 @@ impl Runner {
             };
             (error.code().into(), error.to_string(), details)
         };
+        #[cfg(windows)]
+        if request["op"] == "shutdown" {
+            self.extension_closed.store(true, std::sync::atomic::Ordering::Release);
+        }
+        #[cfg(windows)]
+        let _extension_fence = if matches!(request["op"].as_str(),Some("quiesce" | "shutdown")) {
+            Some(self.extension_admission.clone().write_owned().await)
+        } else { None };
         match field(&request, "op").map_err(invalid)? {
+            #[cfg(windows)]
+            "extension" => {
+                let Some(extension) = self.extension.clone() else {
+                    return Err(("SYSTEM_EXECUTION_NOT_AVAILABLE".into(),"This native host has no extension handler".into(),json!({"user_code_not_started":true,"cleanup_proven":true})));
+                };
+                let admission = self.extension_admission.clone().read_owned().await;
+                if self.extension_closed.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err(("SYSTEM_EXECUTION_CONNECTION_CLOSED".into(),"Native extension admission is closed".into(),json!({"user_code_not_started":true,"cleanup_proven":true})));
+                }
+                let request = request["request"].clone();
+                tokio::task::spawn_blocking(move || {
+                    let _admission = admission;
+                    extension.call(request).map_err(|error|(error.code,error.message,error.details))
+                }).await.map_err(|error|("SYSTEM_EXECUTION_RESULT_UNKNOWN".into(),error.to_string(),json!({"cleanup_proven":false,"user_code_not_started":false})))?
+            }
             "acquire_read" => {
                 let request = serde_json::from_value(request["request"].clone()).map_err(|error|invalid(error.to_string()))?;
                 self.acquire_read(request).await
             }
-            "identity" => Ok(
-                json!({"effective_uid":effective_uid(),"protocol_version":1,"build_identity":option_env!("NOMIFUN_SYSTEM_EXECUTION_BUILD_ID").unwrap_or("platform-not-implemented")}),
-            ),
+            "identity" => {
+                let mut identity = json!({"protocol_version":1,"build_identity":option_env!("NOMIFUN_SYSTEM_EXECUTION_BUILD_ID").unwrap_or("platform-not-implemented")});
+                #[cfg(not(windows))]
+                { identity["effective_uid"] = json!(effective_uid()); }
+                #[cfg(windows)]
+                { identity["windows"] = windows::identity().map_err(invalid)?; }
+                Ok(identity)
+            },
             "start" => {
                 let command = match field(&request["command"], "kind").map_err(invalid)? {
                     "program" => CommandSpec::Program {
@@ -345,7 +432,12 @@ impl Runner {
                             .collect::<Result<_, _>>()?,
                     },
                     "shell" => CommandSpec::Shell {
-                        shell: ShellKind::Posix,
+                        shell: {
+                            #[cfg(windows)]
+                            { ShellKind::PowerShell }
+                            #[cfg(not(windows))]
+                            { ShellKind::Posix }
+                        },
                         script: field(&request["command"], "script")
                             .map_err(invalid)?
                             .into(),
@@ -409,14 +501,30 @@ impl Runner {
             }
             "quiesce" => {
                 let report = self.supervisor.quiesce().await;
+                #[allow(unused_mut)]
+                let mut exact = report.is_exact();
+                #[allow(unused_mut)]
+                let mut errors = report.errors.clone();
+                #[cfg(windows)]
+                if let Some(extension) = &self.extension {
+                    if let Err(error) = extension.shutdown() { exact=false; errors.push(error.to_string()); }
+                }
                 Ok(
-                    json!({"exact":report.is_exact(),"sessions":report.sessions.iter().map(|session|json!({"session_id":session.session_id.to_string(),"invocation_id":session.owner.invocation_id.to_string(),"call_id":session.owner.call_id.to_string(),"outcome":outcome(&session.outcome)})).collect::<Vec<_>>(),"startups":startup_reports(&report.startups),"startup_count":report.startups.len(),"errors":report.errors}),
+                    json!({"exact":exact,"sessions":report.sessions.iter().map(|session|json!({"session_id":session.session_id.to_string(),"invocation_id":session.owner.invocation_id.to_string(),"call_id":session.owner.call_id.to_string(),"outcome":outcome(&session.outcome)})).collect::<Vec<_>>(),"startups":startup_reports(&report.startups),"startup_count":report.startups.len(),"errors":errors}),
                 )
             }
             "shutdown" => {
                 let report = self.supervisor.shutdown().await;
+                #[allow(unused_mut)]
+                let mut exact = report.is_exact();
+                #[allow(unused_mut)]
+                let mut errors: Vec<String> = Vec::new();
+                #[cfg(windows)]
+                if let Some(extension) = &self.extension {
+                    if let Err(error) = extension.shutdown() { exact=false; errors.push(error.to_string()); }
+                }
                 Ok(
-                    json!({"exact":report.is_exact(),"sessions":report.sessions.iter().map(|session|json!({"session_id":session.session_id.to_string(),"invocation_id":session.owner.invocation_id.to_string(),"call_id":session.owner.call_id.to_string(),"outcome":outcome(&session.outcome)})).collect::<Vec<_>>(),"startups":startup_reports(&report.startups),"startup_count":report.startups.len()}),
+                    json!({"exact":exact,"sessions":report.sessions.iter().map(|session|json!({"session_id":session.session_id.to_string(),"invocation_id":session.owner.invocation_id.to_string(),"call_id":session.owner.call_id.to_string(),"outcome":outcome(&session.outcome)})).collect::<Vec<_>>(),"startups":startup_reports(&report.startups),"startup_count":report.startups.len(),"errors":errors}),
                 )
             }
             op => {
@@ -528,6 +636,7 @@ impl Runner {
     }
 }
 
+#[cfg(not(windows))]
 fn effective_uid() -> u32 {
     #[cfg(unix)]
     {
@@ -580,7 +689,7 @@ pub unsafe extern "C" fn nomifun_system_runner_drop(pointer: *mut c_void) {
         return;
     }
     let runner = unsafe { Box::from_raw(pointer.cast::<Runner>()) };
-    let _ = runner.runtime.block_on(runner.supervisor.shutdown());
+    let _ = runner.call(br#"{"op":"shutdown"}"#);
 }
 /// Safety: pointer must be an unfreed runner_call result.
 #[unsafe(no_mangle)]

@@ -52,6 +52,12 @@ pub fn is_proven_unsupported_input_rejection(result: &ToolResult) -> bool {
     result.is_error && result.images.is_empty() && result.content == UNSUPPORTED_VALUE_INPUT_REJECTION
 }
 
+#[cfg(windows)]
+pub fn is_proven_not_applied_focus_rejection(result: &ToolResult) -> bool {
+    result.is_error && result.images.is_empty()
+        && matches!(result.content.as_str(), crate::fallback_backend::WINDOWS_FOCUS_NOT_APPLIED | crate::fallback_backend::WINDOWS_FOCUS_TARGET_MISSING)
+}
+
 /// True only for the exact semantic-ref stale rejection produced before the
 /// Accessibility backend performs an action. The message also proves that the
 /// Computer layer did not use its pixel fallback, so a role owner may settle
@@ -123,6 +129,19 @@ impl ComputerTool {
     pub fn clear_cached_observation(&self) {
         *self.last_snapshot.lock().unwrap_or_else(|p| p.into_inner()) = None;
         *self.last_capture.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
+
+    /// Read-only routing hint for the Windows host. The selected native tool
+    /// still validates its own refs and geometry before performing input.
+    #[cfg(windows)]
+    pub fn windows_input_target_points(&self, input: &Value) -> Vec<(i32, i32)> {
+        if let Some(reference) = input.get("ref").and_then(Value::as_u64).and_then(|value| u32::try_from(value).ok()) {
+            return self.resolve_ref(reference).ok().and_then(|(_, entry)| entry.display.bounds.pixel_center()).into_iter().collect();
+        }
+        let pair = |x: &str, y: &str| require_xy(input, x, y).ok().map(|(x,y)| self.to_screen(x,y));
+        if input["action"] == "left_click_drag" {
+            [pair("start_x","start_y"), pair("end_x","end_y")].into_iter().flatten().collect()
+        } else { pair("x","y").into_iter().collect() }
     }
 
     /// Execute one native operation under an exact canonical `computer`
@@ -1779,6 +1798,20 @@ mod tests {
         let result = tool().execute_authorized(crate::capability::ComputerAction::Input.id(), json!({"action": "focus_window"})).await;
         assert!(result.is_error);
         assert!(result.content.contains("window_id"), "{}", result.content);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_the_exact_first_party_focus_rejection_proves_no_native_effect() {
+        let rejected = ToolResult::error(crate::fallback_backend::windows_focus_error_message(nomi_a11y::WindowsFocusError::NotApplied));
+        assert!(is_proven_not_applied_focus_rejection(&rejected));
+        for result in [
+            ToolResult::text(crate::fallback_backend::WINDOWS_FOCUS_NOT_APPLIED),
+            ToolResult::error(format!("native activation already accepted: {}", crate::fallback_backend::WINDOWS_FOCUS_NOT_APPLIED)),
+            ToolResult::error(crate::fallback_backend::windows_focus_error_message(nomi_a11y::WindowsFocusError::Uncertain("Windows accepted foreground activation but the native acknowledgement failed; the effect may have occurred".into()))),
+        ] {
+            assert!(!is_proven_not_applied_focus_rejection(&result));
+        }
     }
 
     #[tokio::test]

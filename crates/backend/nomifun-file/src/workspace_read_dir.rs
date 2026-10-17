@@ -31,7 +31,7 @@ pub(crate) fn metadata(path: &Path, authority: &PathAuthority) -> Result<Option<
 }
 
 fn metadata_with_hooks(path: &Path, authority: &PathAuthority, before_open: impl FnOnce(), after_open: impl FnOnce()) -> Result<Option<MetadataObservation>, AppError> {
-    let io_error = |error| AppError::BadRequest(format!("cannot inspect workspace entry: {error}"));
+    let io_error = |error| crate::native_acquisition::native_read_io_error("inspecting native directory entry", error);
     #[cfg(windows)]
     {
         let root = crate::windows_read::ReadRoot::for_target(path, authority)?;
@@ -77,7 +77,7 @@ fn metadata_with_hooks(path: &Path, authority: &PathAuthority, before_open: impl
         // Resolve spelling only after obtaining the metadata from the pinned
         // directory. A final symlink is observed as an entry, never followed.
         let canonical = if metadata.file_type().is_symlink() { path.to_path_buf() }
-            else { crate::path_safety::validate_path_authority(&path.to_string_lossy(), authority)? };
+            else { crate::path_safety::validate_native_read_path_authority(&path.to_string_lossy(), authority)? };
         let current = parent.symlink_metadata(&name).map_err(|_| unix_changed())?;
         use cap_std::fs::MetadataExt as _;
         if metadata.dev() != current.dev() || metadata.ino() != current.ino() {
@@ -94,7 +94,7 @@ fn metadata_with_hooks(path: &Path, authority: &PathAuthority, before_open: impl
         match std::fs::symlink_metadata(path) {
             Ok(metadata) => {
                 let canonical = if metadata.file_type().is_symlink() { path.to_path_buf() }
-                    else { crate::path_safety::validate_path_authority(&path.to_string_lossy(), authority)? };
+                    else { crate::path_safety::validate_native_read_path_authority(&path.to_string_lossy(), authority)? };
                 Ok(Some(MetadataObservation { metadata: cap_std::fs::Metadata::from_just_metadata(metadata), canonical }))
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -132,7 +132,7 @@ fn read_directory_with_hook(path: &Path, authority: &PathAuthority, after_open: 
 }
 
 fn read_directory_with_hooks(path: &Path, authority: &PathAuthority, before_open: impl FnOnce(), after_open: impl FnOnce()) -> Result<Entries, AppError> {
-    let io_error = |error| AppError::BadRequest(format!("cannot enumerate workspace directory: {error}"));
+    let io_error = |error| crate::native_acquisition::native_read_io_error("enumerating native directory", error);
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -257,7 +257,7 @@ impl UnixReadRoot {
             crate::path_safety::reject_workspace_owner_canonical_path(&path, target)?;
         }
         let directory = crate::unix_directory::open_search(None, &path)
-            .map_err(|error| crate::path_safety::native_io_error("opening native metadata directory", error))?;
+            .map_err(|error| crate::native_acquisition::native_read_io_error("opening native metadata directory", error))?;
         let root = Self { directory, path };
         root.verify()?;
         Ok(root)

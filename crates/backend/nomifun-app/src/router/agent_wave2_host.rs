@@ -455,19 +455,21 @@ fn wave2_effect_resource_key(
                     "workspace effect resource has no canonical workspace_root",
                 )
             })?;
-        let canonical_root = match std::fs::canonicalize(root) {
-            Ok(root) => root,
-            Err(error) if context.capability_id.as_ref() == "workspace.files"
-                && error.kind() == std::io::ErrorKind::NotFound
-                && Path::new(root).is_absolute()
-                && !Path::new(root).components().any(|part| matches!(part, std::path::Component::ParentDir)) => {
-                // File access uses native targets; a missing default is still
-                // the same frozen project identity, never a replacement root.
-                PathBuf::from(root)
-            }
-            Err(error) => return Err(Wave2HostPortError::invalid_payload(format!(
+        let canonical_root = if matches!(context.capability_id.as_ref(),
+            nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID
+            | nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID)
+        {
+            // Native targets do not depend on a surviving default directory.
+            // The shared proof retains its frozen canonical spelling (including
+            // Windows verbatim roots) without swallowing ACL or reparse errors.
+            nomifun_knowledge::resolve_unbound_workspace_anchor(Path::new(root))
+                .map_err(|error| Wave2HostPortError::invalid_payload(format!(
+                    "workspace effect root could not be resolved: {error}"
+                )))?
+        } else {
+            std::fs::canonicalize(root).map_err(|error| Wave2HostPortError::invalid_payload(format!(
                 "workspace effect root could not be resolved: {error}"
-            ))),
+            )))?
         };
         json!({
             "principal_kind": context.principal.principal_kind.as_str(),
@@ -2906,6 +2908,10 @@ fn workspace_typed_binding<'a>(
 }
 
 fn operation_error(capability_id: &str, error: AppError) -> Wave2HostPortError {
+    if matches!(&error, AppError::NativeFileAcquisition { .. }) {
+        return Wave2HostPortError::new(error.error_code(), error.to_string())
+            .with_details(error.error_details().expect("native file failure has typed details"));
+    }
     let code = match &error {
         error
             if nomifun_file::artifact_publication_outcome_unknown(error)
@@ -2950,6 +2956,15 @@ impl UserEventSink for NullUserEvents {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_read_owner_failure_carries_exact_details_without_turning_into_absence() {
+        let failure=nomi_native_files::NativeFileFailure{code:"RESOURCE_NOT_FOUND".into(),message:"resolving native read root: namespace unavailable".into(),kind:Some("NotFound".into()),raw_os_error:Some(67)};
+        let expected=serde_json::to_value(&failure).unwrap();
+        let host=operation_error("workspace.files",nomifun_file::native_file_failure_error(failure));
+        assert_eq!(host.code,"RESOURCE_NOT_FOUND");assert_eq!(host.details.unwrap()["native_file_error"],expected);
+        assert_eq!(host.message,expected["message"].as_str().unwrap());
+    }
     use std::collections::{BTreeMap, BTreeSet};
     use std::future::Future;
     use std::pin::Pin;
@@ -3400,22 +3415,121 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_default_directory_preserves_file_effect_identity_and_absolute_access() {
+    async fn missing_default_directory_preserves_file_and_process_effect_identity_and_absolute_access() {
         let fixture = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(fixture.path()).unwrap();
+        let base = nomifun_common::paths::simplified(&std::fs::canonicalize(fixture.path()).unwrap());
         let workspace = base.join("default");
         std::fs::create_dir(&workspace).unwrap();
-        let host = test_host(&workspace).await;
         let context = context(&workspace);
         let binding = workspace_typed_binding(&context).unwrap();
         let original_key = wave2_effect_resource_key(&context, binding).unwrap();
-        std::fs::remove_dir_all(&workspace).unwrap();
+        let canonical_root = std::fs::canonicalize(&workspace).unwrap();
+        let original_identity = json!({"principal_kind":"user", "owner_id":"owner-1",
+            "workspace_root":canonical_root.to_string_lossy()});
+        assert_eq!(original_key, format!("workspace:{}", digest_payload(&original_identity).unwrap().as_ref()));
+        let mut process = context.clone();
+        process.capability_id = CapabilityId::from("workspace.process");
+        process.action_id = ActionId::from("workspace.process/start");
+        process.resource_bindings[0].resource_kind = ResourceKind::from("process_session");
+        assert_eq!(wave2_effect_resource_key(&process, &process.resource_bindings[0]).unwrap(), original_key);
+        std::fs::remove_dir(&workspace).unwrap();
         assert_eq!(wave2_effect_resource_key(&context, binding).unwrap(), original_key);
+        assert_eq!(wave2_effect_resource_key(&process, &process.resource_bindings[0]).unwrap(), original_key);
+        for module in ["workspace.vcs", "workspace.artifacts"] {
+            let mut physical = context.clone(); physical.capability_id = CapabilityId::from(module);
+            assert!(wave2_effect_resource_key(&physical, binding).is_err());
+        }
+        let host = test_host(&workspace).await;
         let external = base.join("absolute.txt");
         let result = invoke(&host, context, "workspace.files/write", json!({"path":external,"content":"native"})).await.unwrap();
         assert_eq!(result.0["workspace_path"], Value::Null);
         assert_eq!(std::fs::read(&external).unwrap(), b"native");
         assert!(!workspace.exists());
+    }
+
+    #[test]
+    fn missing_default_effect_identity_rejects_invalid_anchors_and_foreign_owners() {
+        let fixture = tempfile::tempdir().unwrap();
+        let file = fixture.path().join("file"); std::fs::write(&file, b"preserved").unwrap();
+        for module in ["workspace.files", "workspace.process"] {
+            for root in [file.clone(), file.join("child"), fixture.path().join("missing/../other"), PathBuf::from("missing-relative-default")] {
+                let mut value = context(&root); value.capability_id = CapabilityId::from(module);
+                assert!(wave2_effect_resource_key(&value, &value.resource_bindings[0]).is_err(), "{module}: {}", root.display());
+            }
+            let mut foreign = context(&fixture.path().join("missing"));
+            foreign.capability_id = CapabilityId::from(module);
+            foreign.resource_bindings[0].owner_id = "other-owner".into();
+            assert!(wave2_effect_resource_key(&foreign, &foreign.resource_bindings[0]).unwrap_err().message.contains("owner differs"));
+        }
+        assert_eq!(std::fs::read(&file).unwrap(), b"preserved");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn missing_default_effect_identity_rejects_dangling_and_redirected_junctions() {
+        let fixture = tempfile::tempdir().unwrap();
+        let outside = fixture.path().join("outside"); let alias = fixture.path().join("alias");
+        std::fs::create_dir(&outside).unwrap(); junction::create(&outside, &alias).unwrap();
+        for module in ["workspace.files", "workspace.process"] {
+            let mut value = context(&alias.join("missing")); value.capability_id = CapabilityId::from(module);
+            assert!(wave2_effect_resource_key(&value, &value.resource_bindings[0]).is_err());
+        }
+        std::fs::remove_dir(&outside).unwrap();
+        for module in ["workspace.files", "workspace.process"] {
+            let mut value = context(&alias); value.capability_id = CapabilityId::from(module);
+            assert!(wave2_effect_resource_key(&value, &value.resource_bindings[0]).is_err());
+        }
+        junction::delete(&alias).unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_default_file_pending_and_vcs_unknown_fence_process_after_database_reopen() {
+        for external_unknown in [false, true] {
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("default"); std::fs::create_dir(&workspace).unwrap();
+        let database_path = fixture.path().join("agent.db");
+        let (database, store, host) = open_effect_host(&database_path, &workspace).await;
+        let mut first = context(&workspace);
+        if external_unknown {
+            first.capability_id = CapabilityId::from("workspace.vcs");
+            first.action_id = ActionId::from("workspace.vcs/push");
+        }
+        ensure_test_effect_context(&store, &first).await;
+        let binding = &first.resource_bindings[0];
+        let original_key = wave2_effect_resource_key(&first, binding).unwrap();
+        let input = StrictJsonValue(if external_unknown { json!({"remote":"origin", "refspec":"HEAD:refs/heads/main"}) }
+            else { json!({"path":fixture.path().join("external.txt"), "content":"must not replay"}) });
+        let strategy = if external_unknown { nomifun_agent_session::EffectStrategy::ExternalUncertainEffect }
+            else { nomifun_agent_session::EffectStrategy::ManagedEffect };
+        let Wave2EffectAdmission::Reserved(reservation) = begin_wave2_exclusive_effect(&store, &first, binding, &input,
+            strategy).await.unwrap() else { panic!("fresh effect must reserve") };
+        if external_unknown {
+            finish_wave2_effect(&reservation, Wave2EffectCompletion::Uncertain(&Wave2HostPortError::unavailable("native outcome unknown"))).await.unwrap();
+        }
+        drop(reservation); drop(host); drop(store); database.close().await;
+        std::fs::remove_dir(&workspace).unwrap();
+        let (reopened, store, host) = open_effect_host(&database_path, &workspace).await;
+        let same = begin_wave2_exclusive_effect(&store, &first, binding, &input, strategy).await.unwrap_err();
+        if external_unknown {
+            assert_eq!(same.code, "INVALID_PAYLOAD");
+            assert!(same.message.contains("workspace effect root could not be resolved"), "{same:?}");
+        } else { assert!(same.message.contains("durable pending"), "{same:?}"); }
+        let mut second = context(&workspace);
+        second.capability_id = CapabilityId::from("workspace.process");
+        second.action_id = ActionId::from("workspace.process/start");
+        second.resource_bindings[0].resource_kind = ResourceKind::from("process_session");
+        ensure_test_effect_context(&store, &second).await;
+        assert_ne!(first.agent_session_id, second.agent_session_id);
+        assert_eq!(wave2_effect_resource_key(&second, &second.resource_bindings[0]).unwrap(), original_key);
+        let blocked = begin_wave2_effect(&store, &second, &second.resource_bindings[0],
+            &StrictJsonValue(json!({"command":"never dispatched"}))).await.unwrap_err();
+        assert!(blocked.message.contains("unsettled"), "{blocked:?}");
+        assert!(store.list_effects(&second.agent_session_id).await.unwrap().is_empty());
+        assert_eq!(store.read_effect(&first.agent_session_id, &wave2_effect_id(&first).unwrap()).await.unwrap().unwrap().state,
+            if external_unknown { nomifun_agent_session::AgentEffectState::Unknown } else { nomifun_agent_session::AgentEffectState::Pending });
+        assert!(!workspace.exists()); assert!(!fixture.path().join("external.txt").exists());
+        drop(host); drop(store); reopened.close().await;
+        }
     }
 
     #[tokio::test]

@@ -3263,6 +3263,8 @@ fn reconcile_companion_windows(
 }
 
 fn main() -> std::process::ExitCode {
+    #[cfg(windows)]
+    if let Some(code) = nomifun_app::windows_system_execution_entry() { return code; }
     // Remove the native daemon registration from its own signed App identity
     // before uninstalling the bundle. Ordinary startup never unregisters it.
     #[cfg(target_os = "macos")]

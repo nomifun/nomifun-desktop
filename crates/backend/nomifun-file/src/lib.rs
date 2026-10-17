@@ -55,6 +55,8 @@ mod windows_cleanup;
 #[cfg(windows)]
 mod windows_create;
 #[cfg(windows)]
+mod windows_stream;
+#[cfg(windows)]
 mod windows_delete;
 #[cfg(all(test, windows))]
 mod windows_test_support;
@@ -84,4 +86,4 @@ pub use watch_service::FileWatchService;
 pub use workspace_listing::{MAX_DIR_DEPTH, list_workspace_level};
 pub use vcs_stage::{WorkspaceVcsStageOwner, vcs_stage_outcome_unknown};
 
-pub use native_acquisition::native_file_acquisition_error;
+pub use native_acquisition::{native_file_acquisition_error, native_file_failure_error};

@@ -7,18 +7,14 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::PathBuf;
-#[cfg(windows)]
-use std::path::Path;
-#[cfg(windows)]
-use nomi_process_runtime::ShellKind;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nomi_process_runtime::{
-    CleanupReport, CommandSpec, OutputCursor, OutputObserver, OutputStream,
-    ProcessHandle, ProcessOutcome, ProcessOwner, ProcessPolicy, ProcessRequest,
-    ProcessSupervisor, SupervisorConfig, Transport, normalize_request,
+    CleanupReport, CommandSpec, OutputCursor, OutputObserver, OutputStream, ProcessHandle,
+    ProcessOutcome, ProcessOwner, ProcessPolicy, ProcessRequest, ProcessSupervisor,
+    SupervisorConfig, Transport, normalize_request,
 };
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -102,8 +98,9 @@ impl PtyHandle {
         let scrollback = Arc::new(Mutex::new(Vec::<u8>::new()));
         let dirty = Arc::new(AtomicBool::new(false));
         let (out_tx, _) = broadcast::channel::<Vec<u8>>(OUTPUT_BROADCAST_CAP);
-        let output_callback =
-            Arc::new(Mutex::new(Box::new(on_output) as Box<dyn Fn(Vec<u8>) + Send>));
+        let output_callback = Arc::new(Mutex::new(
+            Box::new(on_output) as Box<dyn Fn(Vec<u8>) + Send>
+        ));
 
         let observer_scrollback = Arc::clone(&scrollback);
         let observer_dirty = Arc::clone(&dirty);
@@ -350,48 +347,10 @@ impl PtyHandle {
 }
 
 fn terminal_command(program: String, args: Vec<String>) -> CommandSpec {
-    #[cfg(windows)]
-    if Path::new(&program)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            ["cmd", "bat", "ps1"]
-                .iter()
-                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
-        })
-    {
-        // CreateProcessW cannot execute package-manager script shims directly.
-        // Invoke them through the runtime's trusted, encoded PowerShell path.
-        // Every token is a single-quoted PowerShell literal, so caller-supplied
-        // arguments cannot become script syntax.
-        return CommandSpec::Shell {
-            shell: ShellKind::PowerShell,
-            script: powershell_script_invocation(&program, &args),
-        };
-    }
-
     CommandSpec::Program {
         program: OsString::from(program),
         args: args.into_iter().map(OsString::from).collect(),
     }
-}
-
-#[cfg(any(windows, test))]
-fn powershell_script_invocation(program: &str, args: &[String]) -> String {
-    let mut script = String::from("& ");
-    push_powershell_single_quoted(&mut script, program);
-    for arg in args {
-        script.push(' ');
-        push_powershell_single_quoted(&mut script, arg);
-    }
-    script
-}
-
-#[cfg(any(windows, test))]
-fn push_powershell_single_quoted(output: &mut String, value: &str) {
-    output.push('\'');
-    output.push_str(&value.replace('\'', "''"));
-    output.push('\'');
 }
 
 fn cleanup_report(outcome: &ProcessOutcome) -> Option<&CleanupReport> {
@@ -455,9 +414,7 @@ fn exit_from_outcome(outcome: &ProcessOutcome) -> PtyExit {
 }
 
 fn append_scrollback(scrollback: &Arc<Mutex<Vec<u8>>>, chunk: &[u8]) {
-    let mut scrollback = scrollback
-        .lock()
-        .expect("PTY scrollback lock is poisoned");
+    let mut scrollback = scrollback.lock().expect("PTY scrollback lock is poisoned");
     scrollback.extend_from_slice(chunk);
     if scrollback.len() > SCROLLBACK_CAP {
         let overflow = scrollback.len() - SCROLLBACK_CAP;
@@ -495,15 +452,6 @@ mod tests {
         let data = scrollback.lock().unwrap();
         assert_eq!(data.len(), SCROLLBACK_CAP);
         assert_eq!(&data[data.len() - 4..], b"TAIL");
-    }
-
-    #[test]
-    fn powershell_script_shim_invocation_quotes_every_token_as_data() {
-        assert_eq!(
-            powershell_script_invocation(r"C:\Agent's Tools\runner.cmd",
-                &["a'b".to_owned(), String::new(), "$(Get-Item env:PATH)".to_owned()]),
-            r"& 'C:\Agent''s Tools\runner.cmd' 'a''b' '' '$(Get-Item env:PATH)'"
-        );
     }
 
     #[test]
@@ -805,7 +753,8 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let job_group = job_pid.map(|pid| unsafe { libc::getpgid(pid) });
-        let job_generation = job_pid.map(|pid| macos_test_process_generation(pid).expect("live job identity"));
+        let job_generation =
+            job_pid.map(|pid| macos_test_process_generation(pid).expect("live job identity"));
         let leader = handle.pid().expect("leader pid") as i32;
         let cleanup = handle.kill().await;
         let job_pid = job_pid.unwrap_or_else(|| {
@@ -846,7 +795,9 @@ mod tests {
         let mut info = [0u8; 56];
         let count = unsafe { libc::proc_pidinfo(pid, 17, 1, info.as_mut_ptr().cast(), 56) };
         if count != 56 {
-            return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EPROTO));
+            return Err(std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EPROTO));
         }
         Ok(u32::from_ne_bytes(info[32..36].try_into().unwrap()))
     }
@@ -854,13 +805,17 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn macos_test_kill_generation(pid: i32, generation: u32) {
         type Signal = unsafe extern "C" fn(*mut [u32; 8], i32) -> i32;
-        let pointer = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"proc_signal_with_audittoken".as_ptr()) };
+        let pointer =
+            unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"proc_signal_with_audittoken".as_ptr()) };
         assert!(!pointer.is_null(), "PTY creation already checked this API");
         let signal = unsafe { std::mem::transmute::<*mut libc::c_void, Signal>(pointer) };
         let mut token = [0u32; 8];
         token[5] = pid as u32;
         token[7] = generation;
         let result = unsafe { signal(&mut token, libc::SIGKILL) };
-        assert!(matches!(result, 0 | libc::ESRCH), "exact test cleanup failed: {result}");
+        assert!(
+            matches!(result, 0 | libc::ESRCH),
+            "exact test cleanup failed: {result}"
+        );
     }
 }

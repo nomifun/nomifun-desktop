@@ -351,7 +351,7 @@ fn codex_windows_hook_command(event: &str) -> String {
         .collect();
     let encoded = base64::engine::general_purpose::STANDARD.encode(utf16le);
     format!(
-        "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {encoded}"
+        "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}"
     )
 }
 
@@ -827,6 +827,7 @@ mod tests {
         assert!(joined.contains("hooks.SessionStart="));
         assert!(joined.contains("commandWindows="));
         assert!(joined.contains("EncodedCommand"));
+        assert!(!joined.contains("ExecutionPolicy"));
         assert!(!joined.contains("Notification"));
         // Each hook `-c` value contains `terminal-hook --event`
         assert!(joined.contains("terminal-hook --event turn_end"));

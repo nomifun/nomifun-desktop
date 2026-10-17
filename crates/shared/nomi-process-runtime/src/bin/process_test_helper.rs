@@ -22,6 +22,31 @@ fn main() {
     };
 
     match command {
+        "print-argv" | "record-argv" => {
+            let start = if command == "record-argv" {
+                if args.len() < 2 {
+                    fail("record-argv requires its report path");
+                }
+                2
+            } else {
+                1
+            };
+            let text = args[start..]
+                .iter()
+                .map(|argument| format!("{argument:?}\n"))
+                .collect::<String>();
+            if command == "record-argv" {
+                fs::write(Path::new(&args[1]), text.as_bytes())
+                    .unwrap_or_else(|error| fail_io("record argv", error));
+            }
+            let mut output = io::stdout().lock();
+            output
+                .write_all(text.as_bytes())
+                .unwrap_or_else(|error| fail_io("print argv", error));
+            output
+                .flush()
+                .unwrap_or_else(|error| fail_io("flush argv", error));
+        }
         "exit" => {
             require_len(&args, 2);
             process::exit(parse_i32(&args[1], "exit code"));
@@ -87,7 +112,10 @@ fn main() {
             }
             mode.c_lflag &= !libc::ISIG;
             if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &mode) } == -1 {
-                fail_io("disable terminal-generated signals", io::Error::last_os_error());
+                fail_io(
+                    "disable terminal-generated signals",
+                    io::Error::last_os_error(),
+                );
             }
             write_pid_atomically(Path::new(&args[1]), process::id())
                 .unwrap_or_else(|error| fail_io("write terminal-mode readiness", error));
@@ -97,7 +125,10 @@ fn main() {
         "pty-direct-setsid" => {
             require_len(&args, 2);
             if unsafe { libc::setsid() } == -1 {
-                fail_io("move direct payload to its own session", io::Error::last_os_error());
+                fail_io(
+                    "move direct payload to its own session",
+                    io::Error::last_os_error(),
+                );
             }
             write_pid_atomically(Path::new(&args[1]), process::id())
                 .unwrap_or_else(|error| fail_io("write direct payload readiness", error));
@@ -159,10 +190,7 @@ fn main() {
             require_len(&args, 3);
             write_pid_atomically(Path::new(&args[1]), process::id())
                 .unwrap_or_else(|error| fail_io("write PID marker", error));
-            thread::sleep(Duration::from_millis(parse_u64(
-                &args[2],
-                "sleep duration",
-            )));
+            thread::sleep(Duration::from_millis(parse_u64(&args[2], "sleep duration")));
         }
         "write-file" => {
             require_len(&args, 2);
@@ -173,10 +201,7 @@ fn main() {
             require_len(&args, 3);
             fs::write(Path::new(&args[1]), b"partial effect before timeout\n")
                 .unwrap_or_else(|error| fail_io("write partial-effect file", error));
-            thread::sleep(Duration::from_millis(parse_u64(
-                &args[2],
-                "sleep duration",
-            )));
+            thread::sleep(Duration::from_millis(parse_u64(&args[2], "sleep duration")));
         }
         "print-args-env-cwd" => {
             require_len(&args, 5);

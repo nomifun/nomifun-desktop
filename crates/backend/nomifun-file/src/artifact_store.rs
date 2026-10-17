@@ -425,7 +425,12 @@ fn remove_owned_publication_name(directory: &Dir, name: &str, expected: &SameFil
     if expected != &identity { return Err(AppError::Conflict("staging cleanup name belongs to another object".into())); }
     after_identity();
     #[cfg(windows)]
-    crate::windows_cleanup::remove_handle(&current).map_err(|error| AppError::Conflict(format!("cannot unlink owned staging handle: {error}")))?;
+    {
+        crate::windows_cleanup::mark_delete(&current, true).map_err(|error| AppError::Conflict(format!("cannot mark owned staging handle for deletion: {error}")))?;
+        drop(identity);
+        drop(current);
+        verify_removed_artifact_name(directory, name)?;
+    }
     #[cfg(not(windows))]
     directory.remove_file(name).map_err(|error| AppError::Conflict(format!("cannot unlink owned staging name: {error}")))?;
     sync_directory(directory)
@@ -600,14 +605,36 @@ fn rollback_confirmed_published_with_hook(
     }
     after_identity();
     #[cfg(windows)]
-    crate::windows_cleanup::remove_handle(&target_file).map_err(|error| {
-        AppError::Conflict(format!("cannot remove recorded artifact handle: {error}"))
-    })?;
+    {
+        crate::windows_cleanup::mark_delete(&target_file, true).map_err(|error| {
+            AppError::Conflict(format!("cannot mark recorded artifact handle for deletion: {error}"))
+        })?;
+        drop(target_identity);
+        drop(target_file);
+        verify_removed_artifact_name(directory, target)?;
+    }
     #[cfg(not(windows))]
     directory.remove_file(target).map_err(|error| {
         AppError::Conflict(format!("cannot remove unconfirmed artifact link: {error}"))
     })?;
     sync_directory(directory)
+}
+
+#[cfg(windows)]
+fn verify_removed_artifact_name(directory: &Dir, name: &str) -> Result<(), AppError> {
+    // External publication/cache identity pins are borrowed. Basic deletion
+    // may remain pending while those handles live; never consume their state
+    // or report successful cleanup based on the disposition mark alone.
+    match crate::windows_directory::open_metadata(Some(directory), Path::new(name)) {
+        Err(error) if error.raw_os_error() == Some(2) => Ok(()),
+        Err(error) => Err(AppError::Conflict(format!(
+            "{PUBLICATION_OUTCOME_UNKNOWN}: artifact deletion is unconfirmed; {}",
+            crate::windows_cleanup::error_summary(&error)
+        ))),
+        Ok(_) => Err(AppError::Conflict(format!(
+            "{PUBLICATION_OUTCOME_UNKNOWN}: marked artifact name is still present"
+        ))),
+    }
 }
 
 fn cleanup_stale_publications(directory: &Dir) -> Result<bool, AppError> {
@@ -1426,6 +1453,23 @@ mod tests {
             assert!(!stage_path.exists() && !witness_path.exists());
             assert_eq!(publication_temp_count(&workspace.join(ARTIFACT_RELATIVE_ROOT)), 0);
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn basic_staging_cleanup_retains_unknown_while_borrowed_identity_keeps_it_pending() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::write(temporary.path().join("source"), b"artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(temporary.path()).unwrap();
+        let namespace = open_artifact_namespace(&store.workspace, true).unwrap();
+        let mut staged = stage_source(&store.workspace, Path::new("source"), &namespace, &ArtifactIoCounters::default(), || {}).unwrap();
+        let path = temporary.path().join(ARTIFACT_RELATIVE_ROOT).join(&staged.name);
+        let error = crate::windows_cleanup::with_basic_disposition(|| remove_owned_staging_name(&staged, || {})).unwrap_err();
+        assert!(artifact_publication_outcome_unknown(&error), "{error}");
+        // This explicit test owns the staging state and can end its borrow.
+        // Production cleanup must not consume a caller/cache identity pin.
+        drop(staged.identity.take());
+        crate::windows_cleanup::verify_absent(&path).unwrap();
     }
 
     #[cfg(windows)]

@@ -15,8 +15,7 @@ pub const SHELL_SENTINEL: &str = "$SHELL";
 /// Every create path removes a caller-supplied value first, and every spawn
 /// path removes it again before constructing the PTY environment. Keeping the
 /// key private to this crate makes that invariant hard to bypass accidentally.
-pub(crate) const OWNER_CONVERSATION_ID_ENV_KEY: &str =
-    "__NOMIFUN_INTERNAL_OWNER_CONVERSATION_ID";
+pub(crate) const OWNER_CONVERSATION_ID_ENV_KEY: &str = "__NOMIFUN_INTERNAL_OWNER_CONVERSATION_ID";
 
 /// Parsed owner classification for one persisted terminal row.
 ///
@@ -94,14 +93,16 @@ pub fn resolve_command(command: &str, args: &[String]) -> (String, Vec<String>) 
     } else {
         command.to_owned()
     };
-    let mut resolved_args = args.to_vec();
+    let resolved_args = args.to_vec();
     #[cfg(unix)]
-    if login_shell && resolved_args.is_empty() {
+    let resolved_args = if login_shell && resolved_args.is_empty() {
         // The renderer's Shell preset intentionally persists `$SHELL` with an
         // empty argv. Expand that exact product shape to a login shell here;
         // explicit caller arguments remain byte-for-byte unchanged.
-        resolved_args.push("-l".to_owned());
-    }
+        vec!["-l".to_owned()]
+    } else {
+        resolved_args
+    };
     (resolve_program(&program), resolved_args)
 }
 
@@ -116,16 +117,25 @@ pub(crate) async fn resolve_command_for_spawn(
     let (program, args) = if command == SHELL_SENTINEL {
         #[cfg(unix)]
         nomifun_runtime::resolve_login_shell().map_err(|error| {
-            nomifun_common::AppError::BadRequest(format!("cannot resolve terminal login shell: {error}"))
+            nomifun_common::AppError::BadRequest(format!(
+                "cannot resolve terminal login shell: {error}"
+            ))
         })?;
         resolve_command(command, args)
     } else {
         (command.to_owned(), args.to_vec())
     };
     let current = std::env::current_dir()?;
-    let cwd = cwd.filter(|path| !path.as_os_str().is_empty()).unwrap_or(&current);
+    let cwd = cwd
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(&current);
     nomifun_runtime::prepare_process_launch(&program, &args, cwd, &env.cloned().unwrap_or_default())
-        .await.map_err(|error| crate::error::TerminalError::Spawn(format!("prepare terminal command {program}: {error}")))
+        .await
+        .map_err(|error| {
+            crate::error::TerminalError::Spawn(format!(
+                "prepare terminal command {program}: {error}"
+            ))
+        })
 }
 
 /// Resolve a bare command name to its absolute executable path so the PTY
@@ -135,7 +145,8 @@ pub(crate) async fn resolve_command_for_spawn(
 /// (e.g. `…\npm\claude`), which `CreateProcessW` rejects with "not a valid
 /// Win32 application" (os error 193). `resolve_command_path` honours `PATHEXT`
 /// plus the `.cmd / .ps1 / .bat` fallback, so `claude` resolves to
-/// `…\claude.cmd` — which ConPTY runs correctly.
+/// `…\claude.cmd`. The shared process supervisor adapts that script for both
+/// Pipe and ConPTY using the same literal-argument contract.
 ///
 /// Inputs that already contain a path separator (an absolute path, or the
 /// expanded login shell) or that don't resolve are returned unchanged.
@@ -175,10 +186,14 @@ pub fn default_login_shell() -> String {
             .map(|shell| shell.to_string_lossy().into_owned())
             // Synchronous metadata callers preserve an invalid explicit
             // setting; actual spawn above rejects it before any PTY effect.
-            .unwrap_or_else(|_| std::env::var("SHELL").unwrap_or_else(|_| SHELL_SENTINEL.to_owned()))
+            .unwrap_or_else(|_| {
+                std::env::var("SHELL").unwrap_or_else(|_| SHELL_SENTINEL.to_owned())
+            })
     }
     #[cfg(not(any(windows, unix)))]
-    { "/bin/sh".to_owned() }
+    {
+        "/bin/sh".to_owned()
+    }
 }
 
 /// Parse the JSON args array stored on a row, tolerating malformed values.
@@ -201,8 +216,9 @@ pub fn row_to_response(
     // `Path::starts_with` already covers the `cwd == work_dir` equality case.
     // Guard both sides against blanks: an empty `work_dir` would make every
     // path "start with" it, and an empty cwd carries no grouping signal.
-    let is_default_workpath =
-        !row.cwd.is_empty() && !work_dir.as_os_str().is_empty() && Path::new(&row.cwd).starts_with(work_dir);
+    let is_default_workpath = !row.cwd.is_empty()
+        && !work_dir.as_os_str().is_empty()
+        && Path::new(&row.cwd).starts_with(work_dir);
     let owner_conversation_id = match terminal_owner_scope(row.env.as_deref()) {
         TerminalOwnerScope::Conversation(owner) => Some(owner),
         TerminalOwnerScope::Standalone | TerminalOwnerScope::Invalid => None,
@@ -262,7 +278,9 @@ mod tests {
     async fn user_supplied_paths_are_not_download_requests() {
         let source = "/configured/private/runtime";
         let arguments = vec!["user-script.js".to_owned()];
-        let launch = resolve_command_for_spawn(source, &arguments, None, None).await.unwrap();
+        let launch = resolve_command_for_spawn(source, &arguments, None, None)
+            .await
+            .unwrap();
         assert_eq!(launch.program, source);
         assert_eq!(launch.args, arguments);
     }
@@ -282,11 +300,17 @@ mod tests {
             std::fs::set_permissions(&bun, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let env = HashMap::from([(
-            if cfg!(windows) { "PaTh" } else { "PATH" }.to_owned(), "../tools".to_owned(),
+            if cfg!(windows) { "PaTh" } else { "PATH" }.to_owned(),
+            "../tools".to_owned(),
         )]);
         let args = vec!["user-script.js".into()];
-        let launch = resolve_command_for_spawn("bun", &args, Some(&env), Some(&child)).await.unwrap();
-        assert_eq!(std::fs::canonicalize(launch.program).unwrap(), std::fs::canonicalize(bun).unwrap());
+        let launch = resolve_command_for_spawn("bun", &args, Some(&env), Some(&child))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::canonicalize(launch.program).unwrap(),
+            std::fs::canonicalize(bun).unwrap()
+        );
         assert_eq!(launch.args, args);
     }
 
@@ -337,7 +361,10 @@ mod tests {
         let bare = "sh";
 
         let (program, args) = resolve_command(bare, &["--flag".to_owned()]);
-        assert_ne!(program, bare, "bare name should resolve to an absolute path");
+        assert_ne!(
+            program, bare,
+            "bare name should resolve to an absolute path"
+        );
         assert!(
             std::path::Path::new(&program).is_absolute(),
             "resolved program should be absolute, got {program}"
@@ -375,7 +402,10 @@ mod tests {
 
     #[test]
     fn parse_args_handles_valid_and_invalid() {
-        assert_eq!(parse_args(r#"["a","b"]"#), vec!["a".to_owned(), "b".to_owned()]);
+        assert_eq!(
+            parse_args(r#"["a","b"]"#),
+            vec!["a".to_owned(), "b".to_owned()]
+        );
         assert!(parse_args("not json").is_empty());
         assert!(parse_args("[]").is_empty());
     }
@@ -386,17 +416,12 @@ mod tests {
         let authoritative = ConversationId::new();
         let mut caller_env = HashMap::from([
             ("VISIBLE".to_owned(), "yes".to_owned()),
-            (
-                OWNER_CONVERSATION_ID_ENV_KEY.to_owned(),
-                forged.to_string(),
-            ),
+            (OWNER_CONVERSATION_ID_ENV_KEY.to_owned(), forged.to_string()),
         ]);
 
-        let persisted = persisted_terminal_env(
-            Some(std::mem::take(&mut caller_env)),
-            Some(&authoritative),
-        )
-        .expect("owner metadata should be persisted");
+        let persisted =
+            persisted_terminal_env(Some(std::mem::take(&mut caller_env)), Some(&authoritative))
+                .expect("owner metadata should be persisted");
         assert_eq!(
             persisted.get(OWNER_CONVERSATION_ID_ENV_KEY),
             Some(&authoritative.to_string())

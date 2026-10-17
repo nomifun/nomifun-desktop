@@ -32,7 +32,6 @@ impl Drop for CancelChildOutputOnDrop {
     }
 }
 
-
 /// Exact completion proof for the platform process-tree authority attached to
 /// one [`ChildProcessBuilder`] spawn.
 ///
@@ -426,13 +425,14 @@ impl Drop for ManagedChildProcess {
 }
 
 fn hand_off_managed_child_cleanup(mut process: ManagedChildProcess) {
-    if std::thread::panicking()
-        && IN_MANAGED_CLEANUP_RELAY_THREAD.with(Cell::get)
-    {
+    if std::thread::panicking() && IN_MANAGED_CLEANUP_RELAY_THREAD.with(Cell::get) {
         if let Some(relay) = MANAGED_CLEANUP_RELAY.get() {
             relay.state.inline_fallbacks.fetch_add(1, Ordering::Relaxed);
             hand_off_managed_child_to_platform_reaper(process);
-            relay.state.platform_handoffs.fetch_add(1, Ordering::Relaxed);
+            relay
+                .state
+                .platform_handoffs
+                .fetch_add(1, Ordering::Relaxed);
             return;
         }
         hand_off_managed_child_to_platform_reaper(process);
@@ -450,13 +450,19 @@ fn hand_off_managed_child_cleanup(mut process: ManagedChildProcess) {
     let Some(sender) = relay.sender.as_ref() else {
         relay.state.inline_fallbacks.fetch_add(1, Ordering::Relaxed);
         hand_off_managed_child_to_platform_reaper(process);
-        relay.state.platform_handoffs.fetch_add(1, Ordering::Relaxed);
+        relay
+            .state
+            .platform_handoffs
+            .fetch_add(1, Ordering::Relaxed);
         return;
     };
     if !relay.admission.acquire() {
         relay.state.inline_fallbacks.fetch_add(1, Ordering::Relaxed);
         hand_off_managed_child_to_platform_reaper(process);
-        relay.state.platform_handoffs.fetch_add(1, Ordering::Relaxed);
+        relay
+            .state
+            .platform_handoffs
+            .fetch_add(1, Ordering::Relaxed);
         return;
     }
 
@@ -476,7 +482,10 @@ fn hand_off_managed_child_cleanup(mut process: ManagedChildProcess) {
             "managed child cleanup relay disconnected; transferring to platform reaper"
         );
         hand_off_managed_child_to_platform_reaper(error.0.process);
-        relay.state.platform_handoffs.fetch_add(1, Ordering::Relaxed);
+        relay
+            .state
+            .platform_handoffs
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -486,8 +495,7 @@ fn start_managed_cleanup_relay() -> ManagedCleanupRelay {
         MANAGED_CLEANUP_RELAY_CAPACITY,
         Arc::clone(&state),
     ));
-    let (incoming_sender, incoming_receiver) =
-        mpsc::sync_channel(MANAGED_CLEANUP_RELAY_CAPACITY);
+    let (incoming_sender, incoming_receiver) = mpsc::sync_channel(MANAGED_CLEANUP_RELAY_CAPACITY);
     let (result_sender, result_receiver) = mpsc::sync_channel(MANAGED_CLEANUP_RELAY_WORKERS);
     let mut workers = Vec::with_capacity(MANAGED_CLEANUP_RELAY_WORKERS);
 
@@ -500,12 +508,7 @@ fn start_managed_cleanup_relay() -> ManagedCleanupRelay {
             .stack_size(MANAGED_CLEANUP_THREAD_STACK_BYTES)
             .spawn(move || {
                 IN_MANAGED_CLEANUP_RELAY_THREAD.with(|inside| inside.set(true));
-                run_managed_cleanup_worker(
-                    worker_id,
-                    worker_receiver,
-                    result_sender,
-                    worker_state,
-                )
+                run_managed_cleanup_worker(worker_id, worker_receiver, result_sender, worker_state)
             });
         match spawn {
             Ok(_worker) => workers.push(ManagedCleanupWorker {
@@ -513,7 +516,9 @@ fn start_managed_cleanup_relay() -> ManagedCleanupRelay {
                 busy: false,
                 alive: true,
             }),
-            Err(error) => tracing::error!(worker_id, %error, "failed to start managed cleanup worker"),
+            Err(error) => {
+                tracing::error!(worker_id, %error, "failed to start managed cleanup worker")
+            }
         }
     }
     drop(result_sender);
@@ -668,7 +673,9 @@ fn run_managed_cleanup_dispatcher(
         if state.workers.load(Ordering::Acquire) == 0 {
             state.running.store(false, Ordering::Release);
             admission.available.notify_all();
-            tracing::error!("all managed cleanup workers stopped; retained cleanup cannot continue on relay");
+            tracing::error!(
+                "all managed cleanup workers stopped; retained cleanup cannot continue on relay"
+            );
             // This state is fail-closed: keep ownership in this thread rather
             // than dropping jobs into a disconnected channel.
             for job in ready.drain(..).chain(delayed.drain(..)) {
@@ -708,12 +715,10 @@ fn run_managed_cleanup_worker(
         if runtime.is_none() {
             runtime = build_managed_cleanup_runtime();
         }
-        let outcome = runtime
-            .as_ref()
-            .map_or_else(
-                || Err("Tokio cleanup runtime is unavailable".to_owned()),
-                |runtime| run_managed_cleanup_attempt(runtime, &mut job.process),
-            );
+        let outcome = runtime.as_ref().map_or_else(
+            || Err("Tokio cleanup runtime is unavailable".to_owned()),
+            |runtime| run_managed_cleanup_attempt(runtime, &mut job.process),
+        );
         let result = match outcome {
             Ok(()) => ManagedCleanupWorkerResult {
                 worker_id,
@@ -820,14 +825,20 @@ fn best_effort_synchronous_kill_and_reap(process: &mut ManagedChildProcess) -> b
     loop {
         match child.try_wait() {
             Ok(Some(_)) => {
-                tracing::warn!(pid, "managed child was synchronously killed and reaped; tree proof retained for retry");
+                tracing::warn!(
+                    pid,
+                    "managed child was synchronously killed and reaped; tree proof retained for retry"
+                );
                 return true;
             }
             Ok(None) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
             }
             Ok(None) => {
-                tracing::warn!(pid, "managed child synchronous reap grace expired; exact cleanup retained for retry");
+                tracing::warn!(
+                    pid,
+                    "managed child synchronous reap grace expired; exact cleanup retained for retry"
+                );
                 return false;
             }
             Err(error) => {
@@ -846,19 +857,39 @@ fn best_effort_synchronous_kill_and_reap(process: &mut ManagedChildProcess) -> b
 pub struct ChildProcessBuilder {
     inner: Command,
     hand_off: bool,
+    #[cfg(windows)]
+    script: Option<(OsString, Vec<OsString>)>,
+    #[cfg(windows)]
+    script_error: Option<io::Error>,
+    #[cfg(windows)]
+    inherit_environment: bool,
     #[cfg(unix)]
     extra_fds: Vec<(RawFd, OwnedFd)>,
 }
 
 impl ChildProcessBuilder {
     pub fn new<S: AsRef<OsStr>>(program: S) -> Self {
-        let mut inner = Command::new(resolve_program(program.as_ref()));
+        let program = resolve_program(program.as_ref());
+        #[cfg(windows)]
+        let (program, script, script_error) =
+            match crate::platform::windows::script_launcher(&program) {
+                Ok(Some(launcher)) => (launcher, Some((program, Vec::new())), None),
+                Ok(None) => (program, None, None),
+                Err(error) => (program, None, Some(error)),
+            };
+        let mut inner = Command::new(program);
         inner.kill_on_drop(true);
         configure_platform_spawn(&mut inner);
         strip_process_environment(&mut inner);
         Self {
             inner,
             hand_off: false,
+            #[cfg(windows)]
+            script,
+            #[cfg(windows)]
+            script_error,
+            #[cfg(windows)]
+            inherit_environment: true,
             #[cfg(unix)]
             extra_fds: Vec::new(),
         }
@@ -888,6 +919,11 @@ impl ChildProcessBuilder {
     }
 
     pub fn arg<S: AsRef<OsStr>>(&mut self, arg: S) -> &mut Self {
+        #[cfg(windows)]
+        if let Some((_, arguments)) = &mut self.script {
+            arguments.push(arg.as_ref().to_owned());
+            return self;
+        }
         self.inner.arg(arg);
         self
     }
@@ -897,7 +933,9 @@ impl ChildProcessBuilder {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.inner.args(args);
+        for arg in args {
+            self.arg(arg);
+        }
         self
     }
 
@@ -929,6 +967,8 @@ impl ChildProcessBuilder {
     /// supply every variable its child needs; process-tree ownership is unchanged.
     pub fn env_clear(&mut self) -> &mut Self {
         self.inner.env_clear();
+        #[cfg(windows)]
+        { self.inherit_environment = false; }
         self
     }
 
@@ -970,6 +1010,16 @@ impl ChildProcessBuilder {
     pub fn spawn_with_cleanup(self) -> io::Result<(Child, ChildProcessCleanup)> {
         #[allow(unused_mut)]
         let mut this = self;
+        #[cfg(windows)]
+        {
+            if let Some(error) = this.script_error.take() {
+                return Err(error);
+            }
+            if let Some((program, args)) = this.script.take() {
+                crate::platform::windows::configure_script_child(&mut this.inner, &program, &args)?;
+            }
+            crate::platform::windows::configure_powershell_child_environment(&mut this.inner, this.inherit_environment)?;
+        }
         #[cfg(unix)]
         if !this.extra_fds.is_empty() {
             install_fd_shuffle(&mut this.inner, &this.extra_fds);
@@ -1068,7 +1118,9 @@ pub fn resolve_command_path(command: &str) -> Option<PathBuf> {
     if command.is_empty() || command.contains('/') || command.contains('\\') {
         return None;
     }
-    which::which(command).ok().or_else(|| windows_shim_fallback(command))
+    which::which(command)
+        .ok()
+        .or_else(|| windows_shim_fallback(command))
 }
 
 /// Resolve a bare command inside one exact directory without walking `PATH`.
@@ -1141,10 +1193,7 @@ fn configure_platform_spawn(_command: &mut Command) {}
 
 #[cfg(unix)]
 fn install_fd_shuffle(command: &mut Command, extra_fds: &[(RawFd, OwnedFd)]) {
-    use std::os::{
-        fd::AsRawFd,
-        unix::process::CommandExt,
-    };
+    use std::os::{fd::AsRawFd, unix::process::CommandExt};
 
     let mappings = extra_fds
         .iter()
@@ -1205,9 +1254,7 @@ fn spawn_child_process(
     mut command: Command,
     _hand_off: bool,
 ) -> io::Result<(Child, ChildProcessCleanup)> {
-    command
-        .spawn()
-        .map(|child| (child, ChildProcessCleanup {}))
+    command.spawn().map(|child| (child, ChildProcessCleanup {}))
 }
 
 pub async fn kill_process_tree(child: &mut Child) -> io::Result<()> {
@@ -1288,7 +1335,9 @@ mod tests {
         let (started_sender, started_receiver) = mpsc::channel();
         let (acquired_sender, acquired_receiver) = mpsc::channel();
         let waiter = std::thread::spawn(move || {
-            started_sender.send(()).expect("start signal receiver exists");
+            started_sender
+                .send(())
+                .expect("start signal receiver exists");
             let acquired = blocked_admission.acquire();
             acquired_sender
                 .send(acquired)
@@ -1302,9 +1351,7 @@ mod tests {
             .expect("waiter started");
 
         let deadline = Instant::now() + Duration::from_secs(1);
-        while state.saturated_handoffs.load(Ordering::Acquire) == 0
-            && Instant::now() < deadline
-        {
+        while state.saturated_handoffs.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
             std::thread::yield_now();
         }
         assert_eq!(state.retained.load(Ordering::Acquire), 1);

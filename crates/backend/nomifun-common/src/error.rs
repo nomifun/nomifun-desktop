@@ -29,6 +29,20 @@ pub enum AppError {
         source: std::io::Error,
     },
 
+    /// A native readonly acquisition failed, rather than observing absence.
+    /// The optional original IO source is local-only and permits an owner
+    /// adapter to return the same error without reconstructing it from text.
+    #[error("{message}")]
+    NativeFileAcquisition {
+        code: &'static str,
+        message: String,
+        kind: Option<String>,
+        raw_os_error: Option<i32>,
+        operation: Option<String>,
+        #[source]
+        source: Option<std::io::Error>,
+    },
+
     #[error("Conflict: {0}")]
     Conflict(String),
 
@@ -124,6 +138,14 @@ impl AppError {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) | Self::NativeSystemAccessDenied { .. } => StatusCode::FORBIDDEN,
+            Self::NativeFileAcquisition { code, .. } => match *code {
+                "SYSTEM_ACCESS_DENIED" => StatusCode::FORBIDDEN,
+                "RESOURCE_NOT_FOUND" => StatusCode::NOT_FOUND,
+                "INVALID_PAYLOAD" => StatusCode::BAD_REQUEST,
+                "FILE_CHANGED_DURING_READ" => StatusCode::CONFLICT,
+                "NATIVE_FILE_ACQUIRE_UNAVAILABLE" => StatusCode::UNPROCESSABLE_ENTITY,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            },
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::SessionContractEvolutionRejected { .. } => StatusCode::CONFLICT,
             Self::ComponentUnavailable { .. } => StatusCode::UNPROCESSABLE_ENTITY,
@@ -153,6 +175,14 @@ impl AppError {
             Self::BadRequest(_) => "BAD_REQUEST",
             Self::Unauthorized(_) => "UNAUTHORIZED",
             Self::NativeSystemAccessDenied { .. } => "SYSTEM_ACCESS_DENIED",
+            Self::NativeFileAcquisition { code, .. } => match *code {
+                "SYSTEM_ACCESS_DENIED" => "SYSTEM_ACCESS_DENIED",
+                "RESOURCE_NOT_FOUND" => "RESOURCE_NOT_FOUND",
+                "INVALID_PAYLOAD" => "INVALID_PAYLOAD",
+                "FILE_CHANGED_DURING_READ" => "FILE_CHANGED_DURING_READ",
+                "NATIVE_FILE_ACQUIRE_UNAVAILABLE" => "NATIVE_FILE_ACQUIRE_UNAVAILABLE",
+                _ => "NATIVE_FILE_READ_FAILED",
+            },
             Self::Forbidden(message) => {
                 if message.contains("outside the allowed sandbox") {
                     "PATH_OUTSIDE_SANDBOX"
@@ -194,6 +224,9 @@ impl AppError {
     /// context in addition to the top-level error code.
     pub fn error_details(&self) -> Option<Value> {
         match self {
+            Self::NativeFileAcquisition { code, message, kind, raw_os_error, .. } => Some(json!({
+                "native_file_error": { "code": code, "message": message, "kind": kind, "raw_os_error": raw_os_error },
+            })),
             Self::NativeSystemAccessDenied { operation, source } => Some(json!({
                 "operation": operation,
                 "io_kind": format!("{:?}", source.kind()),
@@ -328,6 +361,22 @@ impl std::fmt::Display for ErrorChain<'_> {
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn native_file_acquisition_failures_keep_static_codes_and_exact_error_details() {
+        for (code,status) in [
+            ("SYSTEM_ACCESS_DENIED",StatusCode::FORBIDDEN),("RESOURCE_NOT_FOUND",StatusCode::NOT_FOUND),
+            ("INVALID_PAYLOAD",StatusCode::BAD_REQUEST),("FILE_CHANGED_DURING_READ",StatusCode::CONFLICT),
+            ("NATIVE_FILE_ACQUIRE_UNAVAILABLE",StatusCode::UNPROCESSABLE_ENTITY),("NATIVE_FILE_READ_FAILED",StatusCode::INTERNAL_SERVER_ERROR),
+        ] {
+            let failure=json!({"code":code,"message":"actual native failure","kind":"NotFound","raw_os_error":67});
+            let error=AppError::NativeFileAcquisition{code,message:"actual native failure".into(),kind:Some("NotFound".into()),raw_os_error:Some(67),operation:None,source:None};
+            assert_eq!(error.status_code(),status);assert_eq!(error.error_code(),code);assert_eq!(error.error_details(),Some(json!({"native_file_error":failure})));
+            let response=error.into_response();assert_eq!(response.status(),status);
+            let body=to_bytes(response.into_body(),4096).await.unwrap();let body:Value=serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["details"]["native_file_error"],failure);assert_eq!(body["code"],code);
+        }
+    }
 
     #[tokio::test]
     async fn session_contract_rejection_preserves_typed_code_and_details() {

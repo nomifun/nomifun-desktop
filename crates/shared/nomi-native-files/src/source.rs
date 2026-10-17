@@ -19,6 +19,10 @@ pub fn acquire_source_with_hooks(path: &Path, max_bytes: usize, before_open: imp
         Err(error) => return Err(NativeFileError::io("resolving native source", error)),
     };
     let open = || {
+        #[cfg(windows)]
+        { crate::windows::open_source(&canonical) }
+        #[cfg(not(windows))]
+        {
         let metadata = std::fs::symlink_metadata(&canonical).map_err(|error| NativeFileError::io("inspecting native source", error))?;
         if !metadata.is_file() || metadata.len() > max_bytes as u64 {
             return Err(NativeFileError::InvalidInput("source is not a bounded regular file".into()));
@@ -30,6 +34,7 @@ pub fn acquire_source_with_hooks(path: &Path, max_bytes: usize, before_open: imp
             options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
         }
         options.open(&canonical).map_err(|error| NativeFileError::io("opening native source", error))
+        }
     };
     before_open();
     let canonical_path = crate::path_string(&canonical)?;

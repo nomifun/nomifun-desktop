@@ -34,15 +34,13 @@ pub(crate) fn publish(
         published = true;
         file.sync_all().map_err(|error| AppError::Internal(format!("cannot sync published workspace file: {error}")))
     })();
-    let result = result.map_err(|error| PatchPublicationFailure {
-        error,
-        published,
-        publication_verified: published,
-        publication_identity: None,
-        temporary_cleanup_unconfirmed: !published && remove_handle(&file).is_err(),
-    });
+    if let Err(error) = result {
+        let temporary_cleanup_unconfirmed = if published { drop(file); false }
+            else { remove_handle(file, true).is_err() };
+        return Err(PatchPublicationFailure { error, published, publication_verified: published,
+            publication_identity: None, temporary_cleanup_unconfirmed });
+    }
     drop(file);
-    result?;
     after_publication().map_err(|error| PatchPublicationFailure {
         error, published: true, publication_verified: true, publication_identity: None, temporary_cleanup_unconfirmed: false,
     })

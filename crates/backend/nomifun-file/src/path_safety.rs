@@ -125,17 +125,43 @@ pub fn validate_path_for_write(path: &str, allowed_roots: &[&Path]) -> Result<Pa
 /// Resolve a directory entry without following the final link. Deletion and
 /// rename operate on this entry; content operations resolve the link target.
 pub(crate) fn canonical_entry(path: &Path) -> Result<PathBuf, AppError> {
+    #[cfg(windows)]
+    { return nomi_native_files::windows::canonical_entry(path).map_err(|error| native_io_error("resolving native directory entry", error)); }
+    #[cfg(not(windows))]
+    {
     let name = path.file_name().ok_or_else(|| AppError::BadRequest("operation requires a named file or directory entry".into()))?;
     let parent = path.parent().ok_or_else(|| AppError::BadRequest("entry has no parent".into()))?;
     let parent = std::fs::canonicalize(parent).map_err(|error| native_io_error("resolving entry parent", error))?;
     let entry = parent.join(name);
     std::fs::symlink_metadata(&entry).map_err(|error| native_io_error("inspecting directory entry", error))?;
     Ok(entry)
+    }
+}
+
+/// Read-only entry resolution keeps the native I/O observation intact. Other
+/// authorities retain their existing admission and identity checks.
+pub(crate) fn canonical_native_read_entry(path: &Path, authority: &PathAuthority) -> Result<PathBuf, AppError> {
+    if !matches!(authority, PathAuthority::Unrestricted) { return canonical_entry(path); }
+    #[cfg(windows)]
+    { return nomi_native_files::windows::canonical_entry(path)
+        .map_err(|error| crate::native_acquisition::native_read_io_error("resolving native directory entry", error)); }
+    #[cfg(not(windows))]
+    {
+        let name = path.file_name().ok_or_else(|| AppError::BadRequest("operation requires a named file or directory entry".into()))?;
+        let parent = path.parent().ok_or_else(|| AppError::BadRequest("entry has no parent".into()))?;
+        let parent = std::fs::canonicalize(parent)
+            .map_err(|error| crate::native_acquisition::native_read_io_error("resolving entry parent", error))?;
+        let entry = parent.join(name);
+        std::fs::symlink_metadata(&entry)
+            .map_err(|error| crate::native_acquisition::native_read_io_error("inspecting directory entry", error))?;
+        Ok(entry)
+    }
 }
 
 pub(crate) fn session_path_label(root: &Path, path: &Path) -> Result<String, AppError> {
-    let label = path.strip_prefix(root).unwrap_or(path);
-    label.to_str().map(str::to_owned).ok_or_else(|| AppError::BadRequest("path is not valid UTF-8".into()))
+    if path == root || std::fs::canonicalize(root).ok().as_deref() == Some(path) { return Ok(String::new()); }
+    if let Some(observation) = crate::WorkspacePathObservation::from_canonical(root, path) { return Ok(observation.path); }
+    path.to_str().map(str::to_owned).ok_or_else(|| AppError::BadRequest("path is not valid UTF-8".into()))
 }
 
 /// Compare actual native targets. Common ancestry is a comparison context,
@@ -353,9 +379,8 @@ fn windows_directory_case_sensitive(path: &Path, workspace_root: &Path) -> Resul
     Err(AppError::Conflict("patch parent disappeared during preparation".to_owned()))
 }
 
-/// Reject a file-name component that `Path::join` would not treat as a plain
-/// child of its parent. Shared by both [`PathAuthority`] arms: containment is
-/// what `Unrestricted` drops, and this is path *hygiene*, which it keeps.
+/// Portable project-entry validation for explicitly confined operations.
+/// Canonical Agent operations instead use native names and handle semantics.
 fn reject_unsafe_file_name(path: &str, file_name: &std::ffi::OsStr) -> Result<(), AppError> {
     let unsafe_name = file_name.to_str().is_none_or(is_unsafe_path_segment);
     if unsafe_name {
@@ -383,7 +408,7 @@ pub fn has_traversal(path: &str) -> bool {
 /// Native entry validation does not impose Windows spelling rules on Unix.
 pub(crate) fn is_invalid_native_name(name: &str) -> bool {
     #[cfg(windows)]
-    { is_unsafe_path_segment(name) }
+    { name.is_empty() || matches!(name, "." | "..") || name.contains(['/', '\\', '\0']) }
     #[cfg(not(windows))]
     { name.is_empty() || matches!(name, "." | "..") || name.contains(['/', '\0']) }
 }
@@ -541,6 +566,16 @@ pub fn validate_path_authority(path: &str, authority: &PathAuthority) -> Result<
     }
 }
 
+/// Canonical acquisition has a typed native read failure; write and mutation
+/// callers continue to use their existing error and publication contracts.
+pub(crate) fn validate_native_read_path_authority(path: &str, authority: &PathAuthority) -> Result<PathBuf, AppError> {
+    match authority {
+        PathAuthority::Unrestricted => std::fs::canonicalize(path)
+            .map_err(|error| crate::native_acquisition::native_read_io_error(format!("resolving native path '{path}'"), error)),
+        _ => validate_path_authority(path, authority),
+    }
+}
+
 /// Authority-aware variant of [`validate_path_for_write`]: the target need not
 /// exist yet (its parent directory must).
 ///
@@ -553,6 +588,11 @@ pub fn validate_path_for_write_authority(
 ) -> Result<PathBuf, AppError> {
     match authority {
         PathAuthority::Unrestricted => {
+            #[cfg(windows)]
+            let normalized = nomi_native_files::windows::normalize_path(Path::new(path))
+                .map_err(|error| native_io_error("resolving native Windows write path", error))?;
+            #[cfg(windows)]
+            let path = normalized.to_str().ok_or_else(|| AppError::BadRequest("native write path is not UTF-8".into()))?;
             let p = Path::new(path);
             let parent = p
                 .parent()
@@ -560,15 +600,19 @@ pub fn validate_path_for_write_authority(
             let file_name = p
                 .file_name()
                 .ok_or_else(|| AppError::BadRequest(format!("path '{}' has no file name component", path)))?;
-            // `Unrestricted` drops root containment, not path hygiene: a
-            // drive-relative name would still silently relocate the write off
-            // the parent the caller named.
+            // Native names may contain a stream colon or verbatim spelling.
+            // The Windows join below appends an actual component, so a name
+            // such as `a:stream` cannot be reinterpreted as a drive prefix.
             if file_name.to_str().is_none_or(is_invalid_native_name) {
                 return Err(AppError::BadRequest("native write target has an invalid file name".into()));
             }
             let canonical_parent = std::fs::canonicalize(parent)
                 .map_err(|error| native_io_error(format!("resolving parent of native write target '{path}'"), error))?;
-            Ok(canonical_parent.join(file_name))
+            #[cfg(windows)]
+            { nomi_native_files::windows::join_component(&canonical_parent, file_name)
+                .map_err(|error| native_io_error("joining native Windows write path", error)) }
+            #[cfg(not(windows))]
+            { Ok(canonical_parent.join(file_name)) }
         }
         PathAuthority::Confined(roots) => {
             let refs: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();

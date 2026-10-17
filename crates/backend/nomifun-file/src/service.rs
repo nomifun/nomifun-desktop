@@ -887,17 +887,8 @@ impl FileService {
     fn emit_content_observation(&self, owner_id: &str, canonical: &Path, content: Option<String>, workspace: &str) {
         self.invalidate_caches_for_path(canonical);
         let workspace_path = Path::new(workspace);
-        if !std::fs::canonicalize(workspace_path).is_ok_and(|root| canonical.starts_with(root)) {
-            return;
-        }
-        let relative_path = rel_to_api_string(
-            canonical
-                .strip_prefix(
-                    std::fs::canonicalize(workspace_path)
-                        .unwrap_or_else(|_| workspace_path.to_path_buf()),
-                )
-                .unwrap_or(canonical),
-        );
+        let Some(observation) = crate::WorkspacePathObservation::from_canonical(workspace_path, canonical) else { return; };
+        let relative_path = observation.path;
         let event = ContentUpdateEvent {
             file_path: canonical.to_string_lossy().into_owned(),
             content,
@@ -1193,14 +1184,8 @@ impl FileService {
         self.invalidate_caches_for_path(&canonical);
 
         let workspace_path = Path::new(workspace);
-        if !std::fs::canonicalize(workspace_path).is_ok_and(|root| canonical.starts_with(root)) {
-            return Ok(());
-        }
-        let relative_path = rel_to_api_string(
-            canonical
-                .strip_prefix(std::fs::canonicalize(workspace_path).unwrap_or_else(|_| workspace_path.to_path_buf()))
-                .unwrap_or(&canonical),
-        );
+        let Some(observation) = crate::WorkspacePathObservation::from_canonical(workspace_path, &canonical) else { return Ok(()); };
+        let relative_path = observation.path;
 
         let event = ContentUpdateEvent {
             file_path: canonical.to_string_lossy().into_owned(),
@@ -1899,6 +1884,10 @@ fn publish_patch_file_with_cleanup_hook(
     ) -> std::io::Result<crate::windows_cleanup::FileIdentity>,
 ) -> Result<Option<PublicationIdentity>, PatchPublicationFailure> {
     #[cfg(windows)]
+    if crate::windows_stream::is_named_stream(path) {
+        return crate::windows_stream::publish(path, data, source, after_staging, after_publication).map(|()| None);
+    }
+    #[cfg(windows)]
     if matches!(source, PublicationSource::Absent) {
         return crate::windows_create::publish(path, data, temporary, after_staging, after_publication).map(|()| None);
     }
@@ -2291,8 +2280,9 @@ fn replace_file_windows_native(
     // guard cannot remain open. Record the exact object at the native-call
     // boundary; compensation later requires this identity to still own the
     // target name and never acts on a post-dispatch concurrent replacement.
-    let source_identity = crate::windows_cleanup::OwnedFile::capture_named_regular(source)?
-        .identity();
+    let source_owner = crate::windows_cleanup::OwnedFile::capture_named_regular(source)?;
+    let source_identity = source_owner.identity()?;
+    drop(source_owner);
     replace_file_windows_native_untracked(source, target, backup)?;
     Ok(source_identity)
 }
@@ -2384,8 +2374,15 @@ fn replace_file_path_windows_verified(
             return Err(AppError::Conflict("patch target changed before publication; re-read before retry".into()));
         }
     }
-    let original_owner = crate::windows_cleanup::OwnedFile::capture(&access)
-        .map_err(|error| AppError::Internal(format!("cannot retain replacement target identity: {error}")))?;
+    // Compensation already retains this object through a shared publication
+    // identity. Reuse its pin so successful deletion can close every clone's
+    // metadata handle, rather than leaving a second pin to a delete-pending
+    // backup alive in the prepared patch.
+    let original_owner = match expected_identity {
+        Some(identity) => identity.clone(),
+        None => std::sync::Arc::new(crate::windows_cleanup::OwnedFile::capture(&access)
+            .map_err(|error| AppError::Internal(format!("cannot retain replacement target identity: {error}")))?),
+    };
     let mut staged_file = staged.owner.open_for_verification(source)
         .map_err(|_| AppError::Conflict("staged publication source changed identity or is unreadable".into()))?;
     if !publication_bytes_match(&mut staged_file, staged.bytes)
@@ -2454,8 +2451,9 @@ fn replace_file_path_windows_verified(
             original_owner.verify_named_identity(&backup).map_err(|error| unverified(&error.to_string()))?;
             progress.publication_verified = true;
             drop(access);
-            return cleanup(&backup, &original_owner).map_err(|_| AppError::Internal(format!(
-                "{FILE_WRITE_OUTCOME_UNKNOWN}; original backup cleanup is unconfirmed; re-read the target before retry"
+            return cleanup(&backup, &original_owner).map_err(|error| AppError::Internal(format!(
+                "{FILE_WRITE_OUTCOME_UNKNOWN}; cleanup {}; original backup cleanup is unconfirmed; re-read the target before retry",
+                crate::windows_cleanup::error_summary(&error)
             )));
         }
         Err(error) => error,
@@ -2555,7 +2553,7 @@ fn recover_unverified_replacement(
     // The target can change again after ReplaceFile returns. Only undo the
     // object observed at dispatch; a different current target belongs to the
     // concurrent writer and remains available for reconciliation.
-    if !replacement_owner.matches_identity(dispatched_identity) {
+    if !matches!(replacement_owner.matches_identity(dispatched_identity), Ok(true)) {
         return recovery;
     }
     if replacement_owner.move_no_replace(target, source).is_err() {
@@ -2736,14 +2734,31 @@ fn rename_path_sync(path: &Path, new_path: &Path) -> Result<PathBuf, AppError> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::ffi::OsStrExt as _;
-        let source = path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
-        let destination = new_path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
-        // No MOVEFILE_REPLACE_EXISTING: a concurrent destination is retained
-        // by the native atomic rename rather than overwritten after our check.
-        // SAFETY: both NUL-terminated UTF-16 buffers remain live for this call.
-        let moved = unsafe { windows_sys::Win32::Storage::FileSystem::MoveFileExW(source.as_ptr(), destination.as_ptr(), 0) };
-        if moved == 0 { return Err(crate::path_safety::native_io_error("renaming native entry", std::io::Error::last_os_error())); }
+        // A native DELETE handle retains the source itself, including a final
+        // reparse point. Its sharing contract pins its name and ancestors;
+        // destination preparation pins the actual parent before dispatch.
+        // Native RootDirectory-relative rename never copies volumes or
+        // creates extra guard children; only this entry's actual rights apply.
+        let source = crate::windows_directory::open_delete(None, path)
+            .map_err(|error| crate::path_safety::native_io_error("opening native rename source", error))?;
+        if crate::windows_read::final_path(&source)? != path {
+            return Err(AppError::Conflict("native rename source changed identity before open".into()));
+        }
+        let renamed = if crate::windows_stream::is_named_stream(path) || crate::windows_stream::is_named_stream(new_path) {
+            crate::windows_stream::rename_entry(&source, path, new_path)
+        } else {
+            use std::os::windows::fs::MetadataExt as _;
+            let source_is_directory = source.metadata().map_err(|error| crate::path_safety::native_io_error("inspecting native rename source", error))?
+                .file_attributes() & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY != 0;
+            let destination_parent = crate::workspace_write::prepare_global_rename_parent(new_path, source_is_directory)?;
+            crate::windows_cleanup::rename_relative_no_replace(&source, &destination_parent,
+                new_path.file_name().ok_or_else(|| AppError::BadRequest("rename requires a destination entry".into()))?)
+        };
+        renamed
+            .map_err(|error| crate::path_safety::native_io_error("renaming native entry", error))?;
+        if crate::windows_read::final_path(&source).ok().as_deref() != Some(new_path) {
+            return Err(AppError::Internal(format!("{FILE_RENAME_OUTCOME_UNKNOWN}; renamed entry identity could not be verified; inspect both paths before retry")));
+        }
     }
     #[cfg(all(not(unix), not(windows)))]
     return Err(AppError::Internal("atomic native rename is unavailable on this host".into()));
@@ -4062,6 +4077,27 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn basic_backup_cleanup_closes_the_shared_identity_used_by_compensation() {
+        let fixture = cleanup_race_fixture();
+        let target = fixture.path().join("target.txt");
+        let temporary = fixture.path().join("stage.tmp");
+        fs::write(&target, b"original").unwrap();
+        let published = crate::windows_cleanup::with_basic_disposition(|| {
+            publish_patch_file(&target, b"patched", &temporary, PublicationSource::Matching(b"original"))
+        }).unwrap().unwrap();
+        let clone = published.clone();
+        crate::windows_cleanup::with_basic_disposition(|| {
+            publish_patch_file(&target, b"original", &temporary,
+                PublicationSource::Restoring { bytes: b"patched", identity: &published })
+        }).unwrap();
+        assert!(published.identity().is_err());
+        assert!(clone.matches_handle(&std::fs::File::open(&target).unwrap()).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+        assert_eq!(fs::read_dir(fixture.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn replacement_cleanup_preserves_a_foreign_file_at_the_backup_name() {
         let fixture = cleanup_race_fixture();
         let target = fixture.path().join("target.txt");
@@ -4373,7 +4409,7 @@ mod tests {
             Some(b"original"),
             |source, target, backup| {
                 let dispatched = crate::windows_cleanup::OwnedFile::capture_named_regular(source)?
-                    .identity();
+                    .identity()?;
                 fs::rename(source, &retained)?;
                 fs::write(source, b"intended")?;
                 backup_path = Some(backup.to_owned());
@@ -4909,6 +4945,10 @@ mod tests {
             }).unwrap_err();
         assert!(published);
         assert!(file_write_outcome_unknown(&error));
+        let AppError::Internal(message) = &error else { panic!("cleanup uncertainty must retain its typed marker") };
+        let bounded = message.chars().take(128).collect::<String>();
+        assert!(bounded.contains("raw_os_error=Some(32)"), "{bounded}");
+        assert!(bounded.contains("kind="), "{bounded}");
         assert_eq!(fs::read(&target).unwrap(), b"new");
         assert!(!temporary.exists());
         drop(locker);
@@ -5993,8 +6033,9 @@ mod tests {
         fs::create_dir(&foreign).unwrap();
         fs::write(target.join("old.txt"), b"original").unwrap();
         fs::write(foreign.join("keep.txt"), b"foreign").unwrap();
+        let canonical = fs::canonicalize(&target).unwrap();
         let mut swapped = false;
-        let result = remove_entry_sync_with_hook(&target, || {
+        let result = remove_entry_sync_with_hook(&canonical, || {
             let rename = if posix {
                 crate::windows_test_support::rename_with_posix_semantics(&target, &retained, false)
             } else { fs::rename(&target, &retained) };
@@ -6032,8 +6073,9 @@ mod tests {
         let foreign = fixture.path().join("foreign.txt");
         fs::write(&target, b"delete me").unwrap();
         fs::write(&foreign, b"keep me").unwrap();
+        let canonical = fs::canonicalize(&target).unwrap();
         let mut swapped = false;
-        let result = remove_entry_sync_with_hook(&target, || {
+        let result = remove_entry_sync_with_hook(&canonical, || {
             let rename = if posix {
                 crate::windows_test_support::rename_with_posix_semantics(&target, &original, false)
             } else {

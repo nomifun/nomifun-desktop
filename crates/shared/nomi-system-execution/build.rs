@@ -2,7 +2,8 @@ use sha2::{Digest, Sha256};
 use std::{env, path::PathBuf, process::Command};
 
 fn main() {
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+    let platform = env::var("CARGO_CFG_TARGET_OS").unwrap();
+    if platform != "macos" && platform != "windows" {
         return;
     }
     let sources = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -57,12 +58,28 @@ fn main() {
     ] {
         hash_sources(&root, &root.join(relative), &mut identity);
     }
+    if platform == "windows" {
+        for relative in [
+            "apps/desktop/src/main.rs", "apps/web/src/main.rs",
+            "crates/backend/nomifun-app/src/main.rs", "crates/backend/nomifun-app/src/lib.rs",
+            "crates/backend/nomifun-app/src/windows_computer.rs",
+            "crates/backend/nomifun-app/src/router/agent_role_host.rs",
+            "crates/backend/nomifun-app/Cargo.toml",
+            "crates/agent/nomi-computer/Cargo.toml", "crates/agent/nomi-a11y/Cargo.toml",
+        ] {
+            hash_file(&root, &root.join(relative), &mut identity);
+        }
+        for relative in ["crates/agent/nomi-computer/src", "crates/agent/nomi-a11y/src"] {
+            hash_sources(&root, &root.join(relative), &mut identity);
+        }
+    }
     identity.update(env::var("TARGET").expect("build target"));
     identity.update(env!("CARGO_PKG_VERSION"));
     println!(
         "cargo:rustc-env=NOMIFUN_SYSTEM_EXECUTION_BUILD_ID={:x}",
         identity.finalize()
     );
+    if platform == "windows" { return; }
     let arch = match env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str() {
         "aarch64" => "arm64",
         "x86_64" => "x86_64",

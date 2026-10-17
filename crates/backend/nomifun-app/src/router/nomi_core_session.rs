@@ -801,11 +801,8 @@ impl NomiCoreSessionOwner {
         }
         workspace
             .map(|workspace| {
-                canonical_existing_workspace_directory(
-                    std::path::Path::new(&workspace),
-                    WorkspaceDirectoryCheck::Runtime,
-                )
-                .map(|path| path.to_string_lossy().into_owned())
+                nomifun_knowledge::resolve_unbound_workspace_anchor(std::path::Path::new(&workspace))
+                    .map(|path| nomifun_common::paths::simplified(&path).to_string_lossy().into_owned())
             })
             .transpose()
     }
