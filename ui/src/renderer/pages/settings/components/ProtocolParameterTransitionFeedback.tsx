@@ -38,7 +38,7 @@ export default function ProtocolParameterTransitionFeedback({ capability, onUpda
       {!!notice?.mappedKeys.length && <div>{t('settings.protocolTransition.mapped', { settings: labels(notice.mappedKeys) })}</div>}
       {!!notice?.suspendedKeys.length && <div>{t('settings.protocolTransition.suspended', { settings: labels(notice.suspendedKeys) })}</div>}
       {!!notice?.restoredKeys.length && <div>{t('settings.protocolTransition.restored', { settings: labels(notice.restoredKeys) })}</div>}
-      {!!notice?.issues.length && <div className='space-y-6px text-warning-6' role='alert' data-protocol-transition-conflicts>
+      {!!notice?.issues.length && <div className='space-y-6px text-t-primary border-l-2px border-l-solid border-warning-6 pl-8px' role='alert' data-protocol-transition-conflicts>
         <div>{t('settings.protocolTransition.needsChoice', { settings: labels(notice.issues.map(issue => issue.parameter)) })}</div>
         <div>{t('settings.protocolTransition.choiceImpact')}</div>
         <Button size='small' onClick={() => onUpdate(suspendCapabilityTransitionIssues)}>{t('settings.protocolTransition.useTarget')}</Button>
@@ -48,6 +48,6 @@ export default function ProtocolParameterTransitionFeedback({ capability, onUpda
         <Button size='small' onClick={() => onUpdate(restoreCapabilityProtocolParams)}>{t('settings.protocolTransition.restore')}</Button>
       </div>}
     </>}
-    <div className='text-t-tertiary'>{t('settings.protocolTransition.draftOnly')}</div>
+    <div className='text-t-secondary'>{t('settings.protocolTransition.draftOnly')}</div>
   </div>;
 }

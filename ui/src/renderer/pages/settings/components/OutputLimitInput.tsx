@@ -218,7 +218,7 @@ export const OutputLimitInput: React.FC<OutputLimitInputProps> = ({ value, onCha
       )}
 
       <div
-        className='text-11px leading-4 text-t-tertiary'
+        className='text-11px leading-4 text-t-secondary'
         aria-live='polite'
         data-output-limit-conversion
       >
@@ -232,7 +232,7 @@ export const OutputLimitInput: React.FC<OutputLimitInputProps> = ({ value, onCha
             })}
       </div>
       {!compact && (
-        <div className='text-11px leading-4 text-t-tertiary'>
+        <div className='text-11px leading-4 text-t-secondary'>
           {t('settings.outputLimitCustomHint', {
             defaultValue: 'Choose a common limit, or select Custom to enter a value and unit.',
           })}

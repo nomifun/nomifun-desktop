@@ -64,14 +64,14 @@
 
 .platform {
   flex-shrink: 0;
-  color: var(--color-text-3);
+  color: var(--text-secondary);
   font-size: 11px;
   line-height: 18px;
 }
 
 .modelCount {
   margin-left: auto;
-  color: var(--color-text-3);
+  color: var(--text-secondary);
   font-size: 11px;
   line-height: 18px;
   font-variant-numeric: tabular-nums;
@@ -94,7 +94,7 @@
 
 .modelRow .modelDescription {
   margin-top: 5px;
-  color: var(--color-text-3);
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 18px;
 }
@@ -114,16 +114,21 @@
   line-height: 18px;
 }
 
-.panel .capabilityTag,
-.panel .protocolTag {
+.panel .capabilityTag:global(.arco-tag.arco-tag-gray),
+.panel .protocolTag:global(.arco-tag.arco-tag-gray),
+.panel .statusTag:global(.arco-tag.arco-tag-gray) {
   border: 1px solid var(--color-border-2);
-  color: var(--color-text-2);
-  background: var(--bg-1);
+  color: var(--text-secondary) !important;
+  background: var(--bg-1) !important;
 }
 
-.panel .protocolTag {
-  color: var(--color-text-3);
-  background: transparent;
+.panel .protocolTag:global(.arco-tag.arco-tag-gray) {
+  background: var(--bg-base) !important;
+}
+
+.panel .statusTag:global(.arco-tag.arco-tag-red) {
+  color: color-mix(in srgb, var(--danger) 40%, var(--text-primary)) !important;
+  background: color-mix(in srgb, var(--danger) 12%, var(--bg-base)) !important;
 }
 
 .panel .editButton {

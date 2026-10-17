@@ -232,7 +232,7 @@ const ModelAdvancedEditor: React.FC<ModelAdvancedEditorProps> = ({
       >
         <div className='pt-16px'>
           {scopeError && (
-            <div role='alert' className='text-12px text-danger-6 mb-12px'>
+            <div role='alert' className='text-12px text-t-primary mb-12px'>
               {scopeError === 'metadata_changed'
                 ? t('settings.modelAdvanced.sharedFieldsChanged', {
                     defaultValue: '模型别名或描述已被更新，请关闭后重新打开再编辑。',
@@ -283,7 +283,7 @@ const ModelAdvancedEditor: React.FC<ModelAdvancedEditorProps> = ({
                 onChange={setDescriptionDraft}
                 disabled={saving}
               />
-              <div className='text-11px text-t-tertiary'>
+              <div className='text-11px text-t-secondary'>
                 {t('settings.modelAdvanced.descriptionSharedHint', {
                   defaultValue: '模型描述在各调用用途中共用。',
                 })}

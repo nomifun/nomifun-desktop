@@ -32,7 +32,7 @@ export default function ModelConfigurationReference({ defaults }: { defaults: Mo
     content={<section id={panelId} aria-label={t('settings.modelAdvanced.referenceTitle')} className='max-h-[calc(100vh-64px)] space-y-10px overflow-y-auto text-12px leading-18px'>
       <div>
         <div className='break-words font-600 text-t-primary'>{defaults.model}</div>
-        <div className='text-11px text-t-tertiary'>
+        <div className='text-11px text-t-secondary'>
           {t('settings.modelAdvanced.documentedDefaults', { date: defaults.checked_at })}
         </div>
       </div>
@@ -46,16 +46,16 @@ export default function ModelConfigurationReference({ defaults }: { defaults: Mo
       </div>
       {!!links.length && <div className='max-h-220px space-y-4px overflow-y-auto' aria-label={t('settings.modelAdvanced.referenceDocuments')}>
         {links.map(link => <a key={link.url} href={link.url} target='_blank' rel='noreferrer' title={link.url}
-          className='block rounded-4px px-6px py-5px text-primary-6 hover:bg-fill-2 focus-visible:outline-auto'
+          className='block rounded-4px px-6px py-5px text-t-primary underline underline-offset-2 hover:bg-fill-2 focus-visible:outline-auto'
           onClick={event => {
             event.preventDefault();
             void openExternalUrl(link.url).catch(error => console.error('Failed to open model documentation:', error));
           }}>
           <span className='block break-all'>{link.path || link.host}</span>
-          {link.path && <span className='block text-11px text-t-tertiary'>{link.host}</span>}
+          {link.path && <span className='block text-11px text-t-secondary'>{link.host}</span>}
         </a>)}
       </div>}
-      <div className='text-11px text-t-tertiary'>{t('settings.modelAdvanced.referenceHint')}</div>
+      <div className='text-11px text-t-secondary'>{t('settings.modelAdvanced.referenceHint')}</div>
     </section>}>
     <Button type='text' size='mini' aria-expanded={open} aria-controls={open ? panelId : undefined}>
       {t('settings.modelAdvanced.referenceTitle')}
