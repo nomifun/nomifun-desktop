@@ -155,9 +155,8 @@ test('Canvas never treats an unhydrated Session as idle and enables clear only a
 
 test('Canvas blocks clear for an authoritative pause even when its local controller is stopped, then follows fresh idle', async () => {
   const read = spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({
-    ...idleSnapshot(), status: 'running', extra: { workspace: '/canvas', execution_phase: 'paused',
-      execution_pause: { reason: 'EXECUTION_MODEL_PROVIDER_UNAVAILABLE', cleanup_proven: true, paused_at_ms: 123 } },
-    runtime: { state: 'idle', is_processing: false, can_send_message: false,
+    ...idleSnapshot(), status: 'running', extra: { workspace: '/canvas', execution_pause: { reason: 'EXECUTION_MODEL_PROVIDER_UNAVAILABLE', cleanup_proven: true, paused_at_ms: 123 } },
+    runtime: { state: 'paused', is_processing: false, can_send_message: false,
       active_turn_id: parseMessageId('0190f5fe-7c00-7a00-8000-000000000314') },
   } as TChatConversation);
   const f = fixture({ isRunning: false });

@@ -10,6 +10,24 @@ use tokio_util::sync::CancellationToken;
 
 fn error(message: impl std::fmt::Display) -> AppError { AppError::Conflict(format!("Native recovery: {message}")) }
 
+fn require_no_orphaned_live_wait<'a>(events: impl IntoIterator<Item=&'a AgentEngineEvent>) -> Result<(), AppError> {
+    let mut waiting = false;
+    for event in events {
+        match event {
+            AgentEngineEvent::TurnWaiting { .. } => waiting = true,
+            AgentEngineEvent::TurnWaitResolved { .. } => waiting = false,
+            _ => {},
+        }
+    }
+    if waiting {
+        // A checkpoint can preserve the question, but it cannot preserve the
+        // CLI/device owner that made an authorization link usable. Startup must
+        // quarantine this exact Turn instead of closing it as a fresh handoff.
+        return Err(error("the original live wait owner must be reconciled; its pending user action cannot be restored as an input handoff"));
+    }
+    Ok(())
+}
+
 impl EngineSessionHost {
     pub(super) async fn open_recovered_journal(&self, store: AgentSessionStore, receipt: &EngineTurnReceipt,
         cancellation: CancellationToken) -> Result<super::super::engine_journal::EngineTurnJournal, AppError> {
@@ -38,6 +56,7 @@ impl EngineSessionHost {
             return Err(error("checkpoint is not compatible with the exact admitted build and Snapshot"));
         }
         let (prefix, tail, _, _) = recovery_records(&store, &saved).await?;
+        require_no_orphaned_live_wait(prefix.iter().chain(&tail))?;
         let image_input = receipt.session().revision().payload.chat_route_records.values().any(|record|
             std::iter::once(&record.primary).chain(record.failovers.iter()).any(|model| model.features.contains(&ChatRouteFeature::ImageInput)));
         let selected_skills = if prefix.iter().any(|event| matches!(event,
@@ -85,6 +104,7 @@ impl EngineSessionHost {
         // fenced it; reread the now-stable native tail before choosing IDs.
         let result = async {
             let (prefix, tail, sequence, total_bytes) = recovery_records(&store, &saved).await?;
+            require_no_orphaned_live_wait(prefix.iter().chain(&tail))?;
             let recovery = AgentTurnRecovery::new(checkpoint, saved.revision, lease.fence(), prefix, tail, prepared).map_err(error)?;
             let journal = super::super::engine_journal::EngineTurnJournal::new_with_recovery(store.clone(), receipt, cancellation, lease.clone(), Some(recovery), sequence, total_bytes)?;
             journal.restore_public_projection().await?;
@@ -145,6 +165,25 @@ impl EngineSessionHost {
         prefix.push(metadata);
         let recovery = AgentTurnRecovery::new(checkpoint, saved.revision, lease.fence(), prefix, vec![], vec![]).map_err(error)?;
         super::super::engine_journal::EngineTurnJournal::new_with_recovery(store.clone(), receipt, cancellation, lease.clone(), Some(recovery), sequence, bytes)
+    }
+}
+
+#[cfg(test)]
+mod waiting_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn native_recovery_does_not_republish_a_dead_authorization_question() {
+        let question=AgentEngineEvent::UserInputRequested {step:1,request:nomifun_agent_contracts::AgentUserInputRequest {
+            request_id:"authorize-old-owner".into(),question:"Open the original authorization link".into(),remaining_work:"Verify login".into(),
+        }};
+        let waiting=AgentEngineEvent::TurnWaiting {model_steps:1,request_id:Some("authorize-old-owner".into()),
+            reason:nomifun_agent_contracts::AgentWaitReason::UserInput};
+        let unresolved=vec![question,waiting];
+        assert!(require_no_orphaned_live_wait(&unresolved).is_err());
+        let mut resolved=unresolved;
+        resolved.push(AgentEngineEvent::TurnWaitResolved {model_steps:1});
+        assert!(require_no_orphaned_live_wait(&resolved).is_ok());
     }
 }
 

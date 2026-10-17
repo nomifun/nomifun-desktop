@@ -57,7 +57,7 @@ test('real route remount restores compact active thinking before runtime hydrati
 
   const startAt = Date.now() - 12_000;
   const authority = { id: conversationId, type: 'nomi', extra: { workspace: '' }, status: 'running', runtime: {
-    state: 'running', can_send_message: false, has_runtime: true, is_processing: true,
+    state: 'running', can_send_message: false, is_processing: true,
     active_turn_id: rootId, processing_started_at: startAt,
   } } as TChatConversation;
   let deferRuntime = true;

@@ -73,7 +73,7 @@ describe('canonical pause error presentation', () => {
     expect(message.msg_id).toBeUndefined();
     expect(message.message_id).toBeUndefined();
     expect(message.status).toBeUndefined();
-    expect(message.content.type).toBe('error');
+    expect(message.content.type).toBe('warning');
     expect(message.content.finished_at_ms).toBeUndefined();
     expect(message.content.error).toMatchObject(pause.error!);
     expect(message.content.execution_pause).toEqual({ reason: pause.reason, cleanupProven: true });

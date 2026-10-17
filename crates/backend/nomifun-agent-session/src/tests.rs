@@ -1937,13 +1937,10 @@ async fn opening_remote_session_listing_is_exact_and_excludes_ready_or_local_ses
 #[tokio::test]
 async fn observations_keep_session_head_events_and_messages_in_one_committed_snapshot() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();
-    let (session, ready_event) = create_ready(&store, "observation-snapshot").await;
-    let turn = append(
-        &session.agent_session_id,
-        "observation-turn", "session-api", "observation-turn", "turn/started",
-        "observation-turn", Some(ready_event), json!({}),
-    );
-    store.append_event(&turn).await.unwrap();
+    let (session, _) = create_ready(&store, "observation-snapshot").await;
+    let (_, turn) = store.start_turn(&session.agent_session_id, "session-api".into(), "observation-turn".into(),
+        "observation-turn".into(), StrictJsonValue(json!({"content":"Observe this exact Turn"}))).await.unwrap();
+    let turn_event_id = turn.ack.unwrap().event_id;
 
     // One pool connection makes competing acquisitions interleave predictably.
     // An observation that reacquires between fields can combine old session
@@ -1954,7 +1951,7 @@ async fn observations_keep_session_head_events_and_messages_in_one_committed_sna
             let event = append(
                 &session.agent_session_id,
                 &id, "runtime-supervisor", &id, "message/content-part",
-                "observation-message", Some(turn.event_id.clone()),
+                "observation-message", Some(turn_event_id.clone()),
                 json!({"content": "part"}),
             );
             store.append_event(&event).await.unwrap();

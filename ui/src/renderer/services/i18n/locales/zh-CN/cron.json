@@ -47,6 +47,8 @@
     "enabled": "已开启",
     "paused": "已暂停",
     "runStatus": {
+      "cancelled": "已取消",
+      "input_required": "需要你操作",
       "ok": "成功",
       "error": "失败",
       "skipped": "已跳过",

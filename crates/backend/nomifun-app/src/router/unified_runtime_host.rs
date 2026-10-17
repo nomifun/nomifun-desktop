@@ -112,7 +112,9 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../Cargo.toml"),
                     include_str!("../../../nomifun-agent-runtime/src/lib.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/user_input.rs"),
+                    include_str!("../../../nomifun-agent-runtime/src/wait.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/user_input.rs"),
+                    include_str!("../../../nomifun-agent-contracts/src/turn_outcome.rs"),
                     include_str!("../../../nomifun-agent-execution/src/user_input.rs"),
                     include_str!("../../../nomifun-db/src/repository/agent_execution.rs"),
                     include_str!("../../../nomifun-db/src/repository/sqlite_agent_execution.rs"),
@@ -226,6 +228,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-engine-core/src/tool_schema.rs"),
                     include_str!("../../../nomifun-engine-core/src/kernel.rs"),
                     include_str!("../../../nomifun-engine-core/src/process.rs"),
+                    include_str!("../../../../shared/nomi-process-runtime/src/supervisor.rs"),
                     include_str!("../../../nomifun-chat-model-broker/src/engine_port.rs"),
                     include_str!("chat_broker_host.rs"),
                     include_str!("../../../nomifun-model-invoke/src/error.rs"),
@@ -1212,6 +1215,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             .with_prior_task(prior_task)
             .with_patch_recovery(patch_recovery)
             .with_input_port(self.input_port.clone())
+            .with_wait_port(self.input_port.clone())
             .with_user_input_request_port(Arc::new(UserInputRequestPort {
                 host:self.self_reference.clone(), enabled:!matches!(receipt.get("origin").and_then(Value::as_str), Some("cron" | "robot" | "channel_guest")),
             }));

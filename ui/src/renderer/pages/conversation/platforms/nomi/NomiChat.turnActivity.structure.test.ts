@@ -23,7 +23,7 @@ describe('NomiChat turn activity ownership', () => {
 
   test('uses the initial processing snapshot only until live turn state is hydrated', () => {
     expect(
-      /const resolvedIsProcessing = turnActivity\.hasHydratedRunningState\s+\? turnActivity\.running\s+: isProcessing === true \|\| turnActivity\.running;/.test(
+      /const resolvedIsProcessing = !turnActivity\.waitingNotice && \(turnActivity\.hasHydratedRunningState\s+\? turnActivity\.running\s+: isProcessing === true \|\| turnActivity\.running\);/.test(
         chatSource
       )
     ).toBe(true);

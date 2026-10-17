@@ -101,6 +101,9 @@ export function selectTurnPublicResultIds(items: TurnDisclosureInputItem[]): Rea
       case 'input_required':
         if (item.userInputRequestId === outcome.request_id) visible.add(item.id);
         break;
+      case 'waiting':
+        if (item.userInputRequestId === outcome.request_id || item.publicText) visible.add(item.id);
+        break;
       case 'unavailable':
         if (item.turnOutcome?.kind === 'unavailable') visible.add(item.id);
         break;

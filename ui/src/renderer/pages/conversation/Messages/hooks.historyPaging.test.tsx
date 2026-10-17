@@ -385,7 +385,7 @@ test('terminal events refresh only this conversation with an explicitly idle run
     conversation_id: a, status: 'finished', state: 'ai_waiting_input', detail: '',
     can_send_message: true, workspace: '', model: { platform: '', name: '', use_model: '' },
     last_message: { content: '', created_at: 20 },
-    runtime: { state: 'idle', can_send_message: true, has_runtime: true, is_processing: false },
+    runtime: { state: 'idle', can_send_message: true, is_processing: false },
   };
   h.complete({ ...event, conversation_id: b });
   h.complete({ ...event, runtime: { ...event.runtime, is_processing: true } });

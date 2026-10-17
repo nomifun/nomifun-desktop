@@ -24,6 +24,7 @@ use nomifun_common::{
     ProviderWithModel,
 };
 use nomifun_db::AgentExecutionTurnAuthority;
+pub(crate) use nomifun_db::AgentExecutionAttemptDisposition as AttemptDisposition;
 use serde_json::{Value, json};
 
 use crate::delivery::{AgentExecutionDelivery, AgentExecutionTurnOutput};
@@ -78,11 +79,11 @@ pub(crate) struct AttemptOutcome {
     pub conversation_id: String,
     pub user_input_request: Option<nomifun_agent_contracts::AgentUserInputRequest>,
     /// Exact source of a handoff, retained only for canonical settlement CAS.
-    pub user_input_turn: Option<(String, String)>,
+    pub canonical_terminal: Option<(String, String)>,
     pub text: Option<String>,
     /// Verified artifact paths observed in this attempt's current turn.
     pub output_files: Vec<String>,
-    pub ok: bool,
+    pub disposition: AttemptDisposition,
     pub tokens: Option<i64>,
     /// Structured terminal delivery result. When present, this is more
     /// authoritative than scraping the transcript for an error marker.
@@ -320,40 +321,36 @@ impl AgentSessionAttemptRunner {
         operation_id: &str,
         timeout: Duration,
     ) -> Result<Option<AgentExecutionDelivery>, AppError> {
-        let deadline = Instant::now() + timeout;
+        let mut deadline = Instant::now() + timeout;
+        let mut grace_deadline = deadline + DELIVERY_RECEIPT_GRACE;
+        let mut observed_at = Instant::now();
+        let mut was_waiting = false;
         loop {
-            if let Some(receipt) = self
+            let receipt = self
                 .session
                 .delivery_result(owner_id, conversation_id, operation_id)
-                .await?
-                .filter(|receipt| receipt.completed || receipt.paused_reason.is_some())
-            {
+                .await?;
+            let now = Instant::now();
+            let waiting = receipt.as_ref().is_some_and(|receipt| matches!(receipt.turn_outcome,
+                Some(nomifun_agent_contracts::AgentTurnOutcome::Waiting { .. } | nomifun_agent_contracts::AgentTurnOutcome::Paused { .. })));
+            if was_waiting {
+                // Human/resource waiting consumes no execution budget. Keep
+                // observing this exact owner without replaying its tools.
+                let suspended_for = now.saturating_duration_since(observed_at);
+                deadline += suspended_for;
+                grace_deadline += suspended_for;
+            }
+            observed_at = now;
+            was_waiting = waiting;
+            if let Some(receipt) = receipt.filter(|receipt| receipt.completed) {
                 return Ok(Some(receipt));
             }
-            if Instant::now() >= deadline {
-                break;
+            if !waiting && now >= grace_deadline {
+                return Ok(None);
             }
-            tokio::time::sleep(DELIVERY_RECEIPT_WAIT_POLL).await;
+            let poll = if !waiting && now >= deadline { DELIVERY_RECEIPT_POLL } else { DELIVERY_RECEIPT_WAIT_POLL };
+            tokio::time::sleep(poll).await;
         }
-
-        // Preserve the existing short commit grace: a runtime owner can finish
-        // immediately before its durable receipt finalizer commits.
-        let grace_deadline = Instant::now() + DELIVERY_RECEIPT_GRACE;
-        loop {
-            if let Some(receipt) = self
-                .session
-                .delivery_result(owner_id, conversation_id, operation_id)
-                .await?
-                .filter(|receipt| receipt.completed || receipt.paused_reason.is_some())
-            {
-                return Ok(Some(receipt));
-            }
-            if Instant::now() >= grace_deadline {
-                break;
-            }
-            tokio::time::sleep(DELIVERY_RECEIPT_POLL).await;
-        }
-        Ok(None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -386,18 +383,13 @@ impl AgentSessionAttemptRunner {
             )
             .await?;
         let boundary_message_id = delivery.message_id.clone();
-        let receipt = if delivery.completed || delivery.paused_reason.is_some() {
+        let receipt = if delivery.completed {
             Some(delivery)
         } else {
             self.await_delivery_receipt(owner_id, conversation_id, operation_id, timeout)
                 .await?
         };
         if let Some(receipt) = receipt {
-            if !receipt.completed && let Some(reason) = receipt.paused_reason {
-                return Ok(paused_delivery_outcome(
-                    conversation_id, &reason, self.session.take_turn_tokens(conversation_id),
-                ));
-            }
             let output = self.session.read_turn_output(
                 owner_id, conversation_id, Some(operation_id),
             ).await?;
@@ -782,26 +774,16 @@ fn managed_process_allowed_tools() -> Vec<&'static str> {
 /// Runtime idleness and transcript contents are observational only. The
 /// operation-scoped durable receipt is the sole authority which may mark an
 /// Agent turn successful, so its absence always produces a failed outcome.
-fn paused_delivery_outcome(conversation_id: &str, reason: &str, tokens: Option<i64>) -> AttemptOutcome {
-    AttemptOutcome {
-        user_input_request: None, user_input_turn: None,
-        conversation_id: conversation_id.to_owned(), text: None, output_files: Vec::new(),
-        ok: false, tokens,
-        error: Some(format!("agent_execution_paused: Agent turn paused ({reason}); no completed delivery exists. Automatic task replay is blocked.")),
-        error_code: Some("agent_execution_paused".into()), error_retryable: Some(false),
-    }
-}
-
 fn missing_delivery_receipt_outcome(
     conversation_id: &str,
     tokens: Option<i64>,
 ) -> AttemptOutcome {
     AttemptOutcome {
-        user_input_request: None, user_input_turn: None,
+        user_input_request: None, canonical_terminal: None,
         conversation_id: conversation_id.to_owned(),
         text: None,
         output_files: Vec::new(),
-        ok: false,
+        disposition: AttemptDisposition::Failed,
         tokens,
         error: Some(
             "Agent turn ended without a completed delivery receipt; automatic retry is blocked because the outcome is ambiguous"
@@ -840,14 +822,18 @@ fn completed_delivery_outcome(
         receipt.result_error_code = Some("agent_artifact_verification_failed".to_owned());
         receipt.result_error_retryable = Some(false);
     }
+    let disposition = if matches!(receipt.turn_outcome, Some(AgentTurnOutcome::Cancelled { .. })) {
+        AttemptDisposition::Cancelled
+    } else if receipt.result_ok == Some(true) && output.integrity_ok && public_result_valid {
+        if receipt.user_input_request.is_some() { AttemptDisposition::InputRequired } else { AttemptDisposition::Delivered }
+    } else { AttemptDisposition::Failed };
     AttemptOutcome {
-        user_input_turn: receipt.user_input_request.as_ref().and_then(|_| output.terminal_event_id.clone()
-            .map(|terminal| (output.canonical_operation_id.clone(), terminal))),
+        canonical_terminal: output.terminal_event_id.clone().map(|terminal| (output.canonical_operation_id.clone(), terminal)),
         user_input_request: receipt.user_input_request,
         conversation_id: conversation_id.to_owned(),
         text: receipt.result_text,
         output_files: output.output_files,
-        ok: receipt.result_ok.unwrap_or(false) && output.integrity_ok && public_result_valid,
+        disposition,
         tokens,
         error: receipt.result_error,
         error_code: receipt.result_error_code,
@@ -878,7 +864,7 @@ mod tests {
         created_request: Mutex<Option<CreateConversationRequest>>,
         directed_source: Mutex<Option<crate::DirectedDelegationSource>>,
         delivered: Mutex<Option<(String, SendMessageRequest)>>,
-        receipt: Option<AgentExecutionDelivery>,
+        receipt: Mutex<Option<AgentExecutionDelivery>>,
     }
 
     #[async_trait]
@@ -940,7 +926,7 @@ mod tests {
             _conversation_id: &str,
             _operation_id: &str,
         ) -> Result<Option<AgentExecutionDelivery>, AppError> {
-            Ok(self.receipt.clone())
+            Ok(self.receipt.lock().unwrap().clone())
         }
 
         async fn read_turn_output(
@@ -1074,31 +1060,29 @@ mod tests {
             directed_source: Mutex::new(None),
             create_calls: AtomicUsize::new(0),
             delivered: Mutex::new(None),
-            receipt,
+            receipt: Mutex::new(receipt),
         })
     }
 
     #[tokio::test]
-    async fn canonical_pause_stops_receipt_wait_without_claiming_completion_or_retry() {
-        let receipt = AgentExecutionDelivery {
+    async fn native_pause_keeps_the_exact_attempt_until_resume_or_cancel() {
+        let paused = AgentExecutionDelivery {
             turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Paused { message_ids: vec![] }),
-            user_input_request: None,
-            message_id: CURRENT_USER_TURN_ID.into(), replayed: true, completed: false,
-            paused_reason: Some("EXECUTION_MODEL_INVALID_REQUEST".into()),
+            user_input_request: None, message_id: CURRENT_USER_TURN_ID.into(), replayed: true, completed: false,
             result_ok: None, result_text: None, result_error: None,
             result_error_code: None, result_error_retryable: None,
         };
-        let runner = AgentSessionAttemptRunner::new(recording_session(Some(receipt.clone())));
-        let observed = tokio::time::timeout(Duration::from_secs(1), runner.await_delivery_receipt(
-            "owner", CONVERSATION_ID, "operation", Duration::from_secs(30 * 60),
-        )).await.expect("a canonical pause must not wait for the full attempt deadline").unwrap().unwrap();
-        assert_eq!(observed, receipt);
-        let outcome = paused_delivery_outcome(CONVERSATION_ID, observed.paused_reason.as_deref().unwrap(), Some(7));
-        assert!(!outcome.ok);
-        assert_eq!(outcome.error_retryable, Some(false));
-        assert_eq!(outcome.error_code.as_deref(), Some("agent_execution_paused"));
-        assert!(outcome.output_files.is_empty());
-        assert!(outcome.text.is_none());
+        let session = recording_session(Some(paused.clone()));
+        let runner = AgentSessionAttemptRunner::new(session.clone());
+        let wait = runner.await_delivery_receipt("owner", CONVERSATION_ID, "operation", Duration::from_millis(1));
+        tokio::pin!(wait);
+        assert!(tokio::time::timeout(Duration::from_millis(30), &mut wait).await.is_err(),
+            "a paused receipt must never settle or fail the Attempt");
+        let completed = AgentExecutionDelivery { completed: true, result_ok: Some(true),
+            turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Answered { message_ids: vec![CURRENT_USER_TURN_ID.into()] }), ..paused };
+        *session.receipt.lock().unwrap() = Some(completed.clone());
+        let observed = tokio::time::timeout(Duration::from_secs(2), &mut wait).await.unwrap().unwrap().unwrap();
+        assert_eq!(observed, completed);
     }
 
     #[tokio::test]
@@ -1318,16 +1302,38 @@ mod tests {
             delivery:AgentExecutionDelivery {
                 turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::InputRequired { request_id: request.request_id.as_ref().to_owned() }),
                 message_id:CURRENT_USER_TURN_ID.into(), replayed:true, completed:true,
-                user_input_request:Some(request.clone()), paused_reason:None,
+                user_input_request:Some(request.clone()),
                 result_ok:Some(true), result_text:Some("请补充姓名。".into()),
                 result_error:None, result_error_code:None, result_error_retryable:Some(false),
             }, output_files:vec!["/workspace/draft.pptx".into()], integrity_ok:true,
         };
         let outcome = completed_delivery_outcome(CONVERSATION_ID, output, Some(7));
-        assert!(outcome.ok);
+        assert_eq!(outcome.disposition, AttemptDisposition::InputRequired);
         assert_eq!(outcome.user_input_request, Some(request));
-        assert_eq!(outcome.user_input_turn, Some(("original-operation".into(),"original-terminal".into())));
+        assert_eq!(outcome.canonical_terminal, Some(("original-operation".into(),"original-terminal".into())));
         assert!(!crate::scheduler::agent_outcome_can_complete(&outcome));
+    }
+
+    #[test]
+    fn canonical_cancellation_is_typed_and_retains_exact_source_without_failure_classification() {
+        for typed_cancelled in [true, false] {
+            let output = AgentExecutionTurnOutput {
+                canonical_operation_id: "original-operation".into(), terminal_event_id: Some("original-terminal".into()),
+                delivery: AgentExecutionDelivery {
+                    message_id: CURRENT_USER_TURN_ID.into(), replayed: true, completed: true,
+                    turn_outcome: Some(if typed_cancelled { nomifun_agent_contracts::AgentTurnOutcome::Cancelled { message_ids:vec![] } }
+                        else { nomifun_agent_contracts::AgentTurnOutcome::Failed { message_ids:vec![] } }),
+                    user_input_request: None, result_ok: Some(false), result_text: None,
+                    result_error: Some("The caller cancelled or a timeout occurred".into()),
+                    result_error_code: Some(if typed_cancelled {"USER_LLM_PROVIDER_TIMEOUT"} else {"cancelled"}.into()),
+                    result_error_retryable: Some(true),
+                }, output_files: Vec::new(), integrity_ok: true,
+            };
+            let outcome = completed_delivery_outcome(CONVERSATION_ID, output, Some(7));
+            assert_eq!(outcome.disposition, if typed_cancelled {AttemptDisposition::Cancelled} else {AttemptDisposition::Failed});
+            assert_eq!(outcome.canonical_terminal, Some(("original-operation".into(), "original-terminal".into())));
+            assert!(!crate::scheduler::agent_outcome_can_complete(&outcome));
+        }
     }
 
     #[test]
@@ -1337,14 +1343,13 @@ mod tests {
             delivery: AgentExecutionDelivery {
                 turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Answered { message_ids: vec!["answer".into()] }),
                 user_input_request: None,
-                message_id: CURRENT_USER_TURN_ID.into(), replayed: true, completed: true,
-                paused_reason: None, result_ok: Some(true), result_text: Some("done".into()),
+                message_id: CURRENT_USER_TURN_ID.into(), replayed: true, completed: true, result_ok: Some(true), result_text: Some("done".into()),
                 result_error: None, result_error_code: None, result_error_retryable: Some(false),
             },
             output_files: Vec::new(), integrity_ok: false,
         };
         let outcome = completed_delivery_outcome(CONVERSATION_ID, output, Some(7));
-        assert!(!outcome.ok);
+        assert_eq!(outcome.disposition, AttemptDisposition::Failed);
         assert_eq!(outcome.error_code.as_deref(), Some("agent_artifact_verification_failed"));
         assert_eq!(outcome.error_retryable, Some(false));
         assert_eq!(outcome.tokens, Some(7));
@@ -1357,13 +1362,13 @@ mod tests {
             delivery: AgentExecutionDelivery {
                 message_id: CURRENT_USER_TURN_ID.into(), replayed: true, completed: true,
                 turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Unavailable),
-                user_input_request: None, paused_reason: None, result_ok: Some(true),
+                user_input_request: None, result_ok: Some(true),
                 result_text: Some("Earlier progress is not a final result".into()),
                 result_error: None, result_error_code: None, result_error_retryable: Some(false),
             }, output_files: vec![], integrity_ok: true,
         };
         let outcome = completed_delivery_outcome(CONVERSATION_ID, output, None);
-        assert!(!outcome.ok);
+        assert_eq!(outcome.disposition, AttemptDisposition::Failed);
         assert!(!crate::scheduler::agent_outcome_can_complete(&outcome));
         assert_eq!(outcome.error_code.as_deref(), Some("agent_turn_result_unavailable"));
         assert_eq!(outcome.error_retryable, Some(false));

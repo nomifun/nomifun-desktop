@@ -39,7 +39,7 @@ pub async fn validate_user_input_handoff_policy(
     match links.as_slice() {
         [] => Ok(()),
         [(Some(policy), Some(status), Some(attempt), Some(step), Some(attempt_id), runtime_state)]
-            if policy == "ask_user" && matches!(status.as_str(), "running" | "waiting_input")
+            if matches!(policy.as_str(), "ask_user" | "automatic") && matches!(status.as_str(), "running" | "waiting_input")
                 && attempt == "running" && step == "running" => {
             let effects = nomifun_db::AttemptConversationEffects::decode(runtime_state.as_deref())
                 .map_err(|error| AppError::Internal(error.to_string()))?;
@@ -49,9 +49,7 @@ pub async fn validate_user_input_handoff_policy(
             }
             Ok(())
         },
-        [(Some(policy), _, _, _, _, _)] if policy == "automatic" => Err(AppError::Conflict(
-            "This AgentExecution requires automatic decisions; continue its accepted work or report the unresolved result instead of requesting user input".into())),
-        _ => Err(AppError::Conflict("User input handoff has no unique active AskUser Attempt".into())),
+        _ => Err(AppError::Conflict("User input handoff has no unique active Attempt".into())),
     }
 }
 
@@ -88,7 +86,8 @@ mod tests {
             .bind(&attempt).bind(&execution).bind(&step).execute(db.pool()).await.unwrap();
         query("INSERT INTO conversation_execution_links(conversation_id,execution_id,relation,step_id,attempt_id,created_at,updated_at) VALUES(?,?,'attempt',?,?,1,1)")
             .bind(session.as_ref()).bind(&execution).bind(&step).bind(&attempt).execute(db.pool()).await.unwrap();
-        assert!(matches!(validate_user_input_handoff_policy(db.pool(),&owner,&session,&operation).await,Err(AppError::Conflict(message)) if message.contains("automatic decisions")));
+        assert!(validate_user_input_handoff_policy(db.pool(),&owner,&session,&operation).await.is_ok(),
+            "automatic decisions never authorize fabricating a required human answer");
         query("UPDATE agent_executions SET decision_policy='ask_user' WHERE execution_id=?").bind(&execution).execute(db.pool()).await.unwrap();
         assert!(validate_user_input_handoff_policy(db.pool(),&owner,&session,&operation).await.is_ok());
         let different:OperationId = format!("turn:user:{}:{}:different-input",owner.principal_id,session.as_ref()).into();

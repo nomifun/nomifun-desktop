@@ -64,11 +64,9 @@ pub struct AgentExecutionDelivery {
     /// Public result derived from the exact canonical Turn. A closed lifecycle
     /// alone never establishes an answer, input handoff or task delivery.
     pub turn_outcome: Option<nomifun_agent_contracts::AgentTurnOutcome>,
-    /// A normal handoff on a completed Turn; it does not complete the task.
+    /// Exact question from a parked Turn or a normal closed handoff.
     pub user_input_request: Option<nomifun_agent_contracts::AgentUserInputRequest>,
-    /// Exact operation's canonical nonterminal pause. A pause is not a
-    /// delivery receipt or permission to retry the task in a new Session.
-    pub paused_reason: Option<String>,
+    /// Terminal execution result. Suspension leaves this unset.
     pub result_ok: Option<bool>,
     pub result_text: Option<String>,
     pub result_error: Option<String>,

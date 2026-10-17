@@ -1245,6 +1245,42 @@ impl EngineKernelSession {
         Ok(())
     }
 
+    /// Model parking retains the original process owner and deadlines.
+    pub(super) async fn wait_processes(&self, operation: &str,
+        processes: &[nomifun_agent_runtime::AgentWaitProcess], cancellation: tokio_util::sync::CancellationToken)
+        -> Result<Vec<nomifun_agent_runtime::AgentOwnedProcessObservation>, AppError> {
+        {
+            let state = self.state.lock().map_err(|_| failure("resource state poisoned"))?;
+            if !state.turn.as_ref().is_some_and(|turn| turn.operation == operation && turn.cleanup.is_none()) {
+                return Err(failure("wait differs from the original live resource Turn"));
+            }
+        }
+        self.wave2.wait_runtime_processes(&self.principal.principal_id, self.session_id.as_ref(), operation, processes, cancellation).await
+    }
+
+    /// Release only Browser ownership for a human action, preserving all
+    /// process handles. The next Browser invocation obtains a fresh run and
+    /// must observe again; prior observation refs belong to the retired run.
+    pub(super) async fn yield_browser_for_input(&self, operation: &str,
+        cancellation: &tokio_util::sync::CancellationToken) -> Result<(), AppError> {
+        #[cfg(feature = "browser-use")]
+        {
+            {
+                let state = self.state.lock().map_err(|_| failure("resource state poisoned"))?;
+                if !state.turn.as_ref().is_some_and(|turn| turn.operation == operation && turn.cleanup.is_none()) {
+                    return Err(failure("Browser yield differs from the live resource Turn"));
+                }
+            }
+            self.browser.yield_to_user(&self.principal.principal_id, self.session_id.as_ref(), operation).await?;
+            if !cancellation.is_cancelled() {
+                self.browser.open_turn(&self.principal, &self.session_id, &operation.into(), &self.workspace, &self.compiled).await?;
+            }
+        }
+        #[cfg(not(feature = "browser-use"))]
+        let _ = (operation, cancellation);
+        Ok(())
+    }
+
     /// The journal owner calls this after its exact root's durable terminal.
     pub async fn finish_browser_turn(&self, root_message_id: &str) -> Result<(), AppError> {
         #[cfg(feature = "browser-use")]

@@ -149,6 +149,8 @@ pub enum AgentExecutionAttemptRecoveryDisposition {
     QueuedRescheduled,
     /// The exact initial-turn receipt was already terminal and was adopted.
     CompletedReceiptAdopted,
+    /// The exact canonical Turn was cancelled; no retry or failure is inferred.
+    CancelledReceiptAdopted,
     /// A normally closed Turn retained unfinished work and requested input.
     UserInputRequested,
     /// The effect boundary could not be proven untouched. The attempt is
@@ -162,6 +164,11 @@ pub struct AgentExecutionAttemptRecoveryResult {
     pub disposition: AgentExecutionAttemptRecoveryDisposition,
 }
 
+/// One reduction of an exact canonical terminal for Execution consumption.
+/// This transient value is never a second persisted outcome ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentExecutionAttemptDisposition { Delivered, InputRequired, Cancelled, Failed }
+
 /// Exact terminal output read through the canonical Session owner. This is
 /// transient reconciliation input, not a second completion receipt or log.
 #[derive(Debug, Clone)]
@@ -171,7 +178,7 @@ pub struct RecoveredAgentExecutionAttemptOutput {
     pub canonical_operation_id: String,
     pub terminal_event_id: String,
     pub user_input_request: Option<nomifun_agent_contracts::AgentUserInputRequest>,
-    pub ok: bool,
+    pub disposition: AgentExecutionAttemptDisposition,
     pub text: Option<String>,
     pub output_files: Vec<String>,
     pub error: Option<String>,
@@ -364,17 +371,34 @@ pub struct AgentExecutionActiveTurnGuard {
 }
 
 #[derive(Debug, Clone)]
-pub struct AgentExecutionUserInputTurnGuard {
-    pub conversation_id: String,
-    pub canonical_operation_id: String,
-    pub terminal_event_id: String,
-    pub user_input_request: nomifun_agent_contracts::AgentUserInputRequest,
+pub enum AgentExecutionTerminalTurnGuard {
+    InputRequired {
+        conversation_id: String,
+        canonical_operation_id: String,
+        terminal_event_id: String,
+        user_input_request: nomifun_agent_contracts::AgentUserInputRequest,
+    },
+    Cancelled {
+        conversation_id: String,
+        canonical_operation_id: String,
+        terminal_event_id: String,
+    },
+}
+
+impl AgentExecutionTerminalTurnGuard {
+    pub fn source(&self) -> (&str, &str, &str) {
+        match self {
+            Self::InputRequired { conversation_id, canonical_operation_id, terminal_event_id, .. }
+            | Self::Cancelled { conversation_id, canonical_operation_id, terminal_event_id } =>
+                (conversation_id, canonical_operation_id, terminal_event_id),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct SettleAgentExecutionAttemptParams {
     pub expected_active_session_turn: Option<AgentExecutionActiveTurnGuard>,
-    pub expected_user_input_turn: Option<AgentExecutionUserInputTurnGuard>,
+    pub expected_terminal_turn: Option<AgentExecutionTerminalTurnGuard>,
     pub attempt_status: ExecutionAttemptStatus,
     pub step_status: ExecutionStepStatus,
     pub execution_status: Option<AgentExecutionStatus>,

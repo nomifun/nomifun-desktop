@@ -1,6 +1,6 @@
 //! One read-only result reducer shared by history and delivery consumers.
 use std::collections::{BTreeMap, BTreeSet};
-use nomifun_agent_contracts::{AgentTurnOutcome, AgentUserInputRequest, SessionEventRecord,
+use nomifun_agent_contracts::{AgentTurnOutcome, AgentUserInputRequest, AgentWaitReason, OperationId, SessionEventRecord,
     canonical_assistant_step_message_id, digest_bytes};
 use serde::Deserialize;
 use serde_json::Value;
@@ -10,6 +10,7 @@ use crate::{ChatCausalityFacts, SessionStoreError, TurnReceipt, TurnReceiptStatu
 pub struct CanonicalTurnPublicResult {
     pub turn_outcome: Option<AgentTurnOutcome>,
     pub result_text: Option<String>,
+    pub user_input_request: Option<AgentUserInputRequest>,
 }
 
 fn invalid(detail: impl Into<String>) -> SessionStoreError {
@@ -19,7 +20,7 @@ fn invalid(detail: impl Into<String>) -> SessionStoreError {
 pub fn canonical_turn_public_result(facts: &ChatCausalityFacts, receipt: &TurnReceipt)
     -> Result<CanonicalTurnPublicResult, SessionStoreError> {
     if receipt.agent_session_id != facts.session.agent_session_id { return Err(invalid("Session differs from receipt")); }
-    derive_turn_public_result(receipt, facts.head.status == "paused"
+    derive_turn_public_result(receipt, matches!(facts.head.status.as_str(), "paused" | "reconciliation")
         && facts.head.active_turn_id.as_deref() == Some(receipt.operation_id.as_ref()),
         &facts.events, &facts.event_payloads)
 }
@@ -27,6 +28,45 @@ pub fn canonical_turn_public_result(facts: &ChatCausalityFacts, receipt: &TurnRe
 pub fn canonical_turn_outcome(facts: &ChatCausalityFacts, receipt: &TurnReceipt)
     -> Result<Option<AgentTurnOutcome>, SessionStoreError> {
     Ok(canonical_turn_public_result(facts, receipt)?.turn_outcome)
+}
+
+/// An exact active Turn's parked state at an observed canonical cursor. This
+/// projection grants no process ownership, input or recovery authorization.
+fn canonical_turn_waiting_outcome(events: &[SessionEventRecord], payloads: &BTreeMap<String, Value>,
+    operation: &OperationId, through_seq: u64) -> Result<Option<AgentTurnOutcome>, SessionStoreError> {
+    let mut pending_request = None;
+    let mut waiting = None;
+    for event in events.iter().filter(|event| event.seq <= through_seq && event.correlation_id.as_ref() == operation.as_ref()) {
+        if matches!(event.kind.0.as_str(), "turn/completed" | "turn/failed" | "turn/cancelled") { waiting = None; continue; }
+        if event.kind.0 != "runtime/progress-recorded" { continue; }
+        let progress = payloads.get(event.event_id.as_ref()).and_then(|value| value.get("event"))
+            .ok_or_else(|| invalid("waiting observation has no resolved Runtime payload"))?;
+        match progress.get("event").and_then(Value::as_str) {
+            Some("user_input_requested") => {
+                let request: AgentUserInputRequest = serde_json::from_value(progress.get("request").cloned()
+                    .ok_or_else(|| invalid("waiting question is missing"))?)?;
+                request.validate().map_err(invalid)?;
+                pending_request = Some(request.request_id.as_ref().to_owned());
+            }
+            Some("turn_waiting") => {
+                let reason: AgentWaitReason = serde_json::from_value(progress.get("reason").cloned()
+                    .ok_or_else(|| invalid("waiting reason is missing"))?)?;
+                let request_id = progress.get("request_id").filter(|value| !value.is_null()).map(|value|
+                    value.as_str().map(str::to_owned).ok_or_else(|| invalid("waiting request identity is invalid"))).transpose()?;
+                if request_id.as_ref().is_some_and(|id| pending_request.as_ref() != Some(id))
+                    || (reason == AgentWaitReason::UserInput && request_id.is_none()) {
+                    return Err(invalid("waiting does not reference its exact source question"));
+                }
+                waiting = Some(AgentTurnOutcome::Waiting { wait_seq:event.seq, request_id, reason });
+            }
+            Some("steering_inputs") if progress.get("inputs").and_then(Value::as_array).is_some_and(|inputs| !inputs.is_empty()) => {
+                waiting = None; pending_request = None;
+            },
+            Some("turn_wait_resolved" | "model_step_started" | "tool_started") => { waiting = None; pending_request = None; },
+            _ => {},
+        }
+    }
+    Ok(waiting)
 }
 
 #[derive(Deserialize)]
@@ -52,7 +92,7 @@ fn validate_public_message_id(id:&str)->Result<(),SessionStoreError> {
 pub(crate) fn derive_turn_public_result(receipt: &TurnReceipt, paused: bool,
     events: &[SessionEventRecord], payloads: &BTreeMap<String, Value>)
     -> Result<CanonicalTurnPublicResult, SessionStoreError> {
-    let result = |outcome| CanonicalTurnPublicResult { turn_outcome:outcome, result_text:None };
+    let result = |outcome| CanonicalTurnPublicResult { turn_outcome:outcome, result_text:None, user_input_request:None };
     if receipt.status == TurnReceiptStatus::NotFound { return Ok(result(None)); }
     let start = receipt.started_event.as_ref().ok_or_else(|| invalid("missing Turn start"))?;
     if start.agent_session_id != receipt.agent_session_id || start.kind.0 != "turn/started"
@@ -63,7 +103,20 @@ pub(crate) fn derive_turn_public_result(receipt: &TurnReceipt, paused: bool,
     };
     let root = payload(start)?.get("source_message_id").and_then(Value::as_str)
         .ok_or_else(|| invalid("start has no accepted source message"))?;
-    if receipt.status == TurnReceiptStatus::Running && !paused {return Ok(result(None));}
+    if receipt.status == TurnReceiptStatus::Running && !paused {
+        let outcome = canonical_turn_waiting_outcome(events, payloads, &receipt.operation_id, u64::MAX)?;
+        let mut public = result(outcome);
+        if let Some(AgentTurnOutcome::Waiting {request_id:Some(id),..}) = &public.turn_outcome {
+            for event in events.iter().filter(|event| event.correlation_id.as_ref()==receipt.operation_id.as_ref() && event.kind.0=="runtime/progress-recorded") {
+                let progress = payload(event)?.get("event").unwrap_or(&Value::Null);
+                if progress.get("event").and_then(Value::as_str)==Some("user_input_requested")
+                    && progress.pointer("/request/request_id").and_then(Value::as_str)==Some(id) {
+                    public.user_input_request = Some(serde_json::from_value(progress["request"].clone())?);
+                }
+            }
+        }
+        return Ok(public);
+    }
     let mut request=None;
     let mut terminal_model_step=None;
     let upper=if receipt.status==TurnReceiptStatus::Running {
@@ -154,7 +207,10 @@ pub(crate) fn derive_turn_public_result(receipt: &TurnReceipt, paused: bool,
         }
     }
     if receipt.status==TurnReceiptStatus::Completed && !parts.is_empty() {return Err(invalid("completed Turn has unfinished public content"));}
-    if let Some(request)=request {return Ok(result(Some(AgentTurnOutcome::InputRequired {request_id:request.request_id.as_ref().into()})));}
+    if let Some(request)=request {
+        let mut public=result(Some(AgentTurnOutcome::InputRequired {request_id:request.request_id.as_ref().into()}));
+        public.user_input_request=Some(request);return Ok(public);
+    }
     if receipt.status==TurnReceiptStatus::Completed {
         let Some(step)=terminal_model_step.filter(|step|proven_model_steps.contains(step)
             &&(!nonpublic.contains(step)||delivered_steps.contains(step))) else {
@@ -184,7 +240,7 @@ pub(crate) fn derive_turn_public_result(receipt: &TurnReceipt, paused: bool,
         TurnReceiptStatus::Running=>AgentTurnOutcome::Paused {message_ids:ids},
         TurnReceiptStatus::NotFound=>unreachable!(),
     };
-    Ok(CanonicalTurnPublicResult {turn_outcome:Some(outcome),result_text:text})
+    Ok(CanonicalTurnPublicResult {turn_outcome:Some(outcome),result_text:text,user_input_request:None})
 }
 
 #[cfg(test)]
@@ -193,6 +249,36 @@ mod tests {
     use nomifun_agent_contracts::{SessionEventKind,SessionEventPayloadRef};
     use serde_json::json;
     const ROOT:&str="0190f5fe-7c00-7a00-8000-000000000001";
+
+    #[test]
+    fn waiting_keeps_the_exact_question_and_yields_to_input_or_terminal() {
+        let mut f = Fixture::new();
+        f.receipt.status = TurnReceiptStatus::Running;
+        f.receipt.terminal_event = None;
+        f.push("runtime/progress-recorded", "operation", json!({"event":{"event":"user_input_requested","step":1,
+            "request":{"request_id":"authorize","question":"请完成浏览器授权","remaining_work":"验证登录并继续"}}}));
+        f.push("runtime/progress-recorded", "operation", json!({"event":{"event":"turn_waiting","model_steps":1,
+            "request_id":"authorize","reason":"user_input"}}));
+        let before = f.events.last().unwrap().seq;
+        let waiting = derive_turn_public_result(&f.receipt, false, &f.events, &f.payloads).unwrap();
+        assert_eq!(waiting.turn_outcome, Some(AgentTurnOutcome::Waiting {wait_seq:before,request_id:Some("authorize".into()),reason:AgentWaitReason::UserInput}));
+        assert_eq!(waiting.user_input_request.unwrap().question, "请完成浏览器授权");
+        f.push("runtime/progress-recorded", "foreign", json!({"event":{"event":"turn_wait_resolved","model_steps":1}}));
+        assert!(canonical_turn_waiting_outcome(&f.events,&f.payloads,&"operation".into(),u64::MAX).unwrap().is_some());
+        f.push("runtime/progress-recorded", "operation", json!({"event":{"event":"steering_inputs","inputs":[{"receipt_operation_id":"owner-answer"}]}}));
+        assert!(derive_turn_public_result(&f.receipt,false,&f.events,&f.payloads).unwrap().turn_outcome.is_none());
+        assert!(canonical_turn_waiting_outcome(&f.events,&f.payloads,&"operation".into(),before).unwrap().is_some());
+    }
+
+    #[test]
+    fn waiting_without_a_source_question_is_rejected_and_native_pause_wins() {
+        let mut f = Fixture::new();f.receipt.status=TurnReceiptStatus::Running;f.receipt.terminal_event=None;
+        f.push("runtime/progress-recorded","operation",json!({"event":{"event":"turn_waiting","model_steps":1,
+            "request_id":"invented","reason":"user_input"}}));
+        assert!(derive_turn_public_result(&f.receipt,false,&f.events,&f.payloads).is_err());
+        assert!(matches!(derive_turn_public_result(&f.receipt,true,&f.events,&f.payloads).unwrap().turn_outcome,
+            Some(AgentTurnOutcome::Paused {..})));
+    }
     struct Fixture {receipt:TurnReceipt,events:Vec<SessionEventRecord>,payloads:BTreeMap<String,Value>,next:u64}
     impl Fixture {
         fn new()->Self {

@@ -405,18 +405,26 @@ impl CanonicalAgentSessionOwner {
         idempotency_key: &str,
         input: Value,
     ) -> Result<AgentMutationReceipt, AppError> {
+        self.steer_with_wait_target(owner,session_id,idempotency_key,input,None).await
+    }
+
+    pub async fn steer_for_wait(&self, owner: &PrincipalRef, session_id: &AgentSessionId,
+        idempotency_key: &str, input: Value, expected_turn_id: &str, expected_wait_seq: u64)
+        -> Result<AgentMutationReceipt,AppError> {
+        self.steer_with_wait_target(owner,session_id,idempotency_key,input,Some((expected_turn_id,expected_wait_seq))).await
+    }
+
+    async fn steer_with_wait_target(&self, owner: &PrincipalRef, session_id: &AgentSessionId,
+        idempotency_key: &str, input: Value, expected_wait: Option<(&str,u64)>)
+        -> Result<AgentMutationReceipt,AppError> {
         self.require_executable(owner, session_id).await?;
         let key = scoped_key(owner, idempotency_key, session_id.as_ref())?;
-        let (target_operation_id, result) = self
-            .store
-            .steer_active_turn(
-                session_id,
-                IdempotencyKey::from(format!("{key}:steer")),
-                EventProducerId::from("session_api"),
-                StrictJsonValue(input),
-            )
-            .await
-            .map_err(store_error)?;
+        let idempotency=IdempotencyKey::from(format!("{key}:steer"));
+        let producer=EventProducerId::from("session_api");
+        let (target_operation_id,result)=match expected_wait {
+            Some((turn,wait_seq))=>self.store.steer_active_turn_for_wait(session_id,idempotency,producer,StrictJsonValue(input),turn,wait_seq).await,
+            None=>self.store.steer_active_turn(session_id,idempotency,producer,StrictJsonValue(input)).await,
+        }.map_err(store_error)?;
         let event_id = result
             .record
             .as_ref()

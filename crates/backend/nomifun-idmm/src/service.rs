@@ -403,6 +403,15 @@ impl IdmmService {
         };
 
         if let Some(active_turn_id) = observation.active_turn_id.as_deref() {
+            if observation.latest_turn.as_ref().is_some_and(|turn| turn.operation_id == active_turn_id
+                && matches!(turn.turn_outcome, Some(nomifun_agent_contracts::AgentTurnOutcome::Waiting { .. }
+                    | nomifun_agent_contracts::AgentTurnOutcome::Paused { .. }))) {
+                // Parked work deliberately produces no model progress. Human
+                // input and native resource ownership cannot be manufactured
+                // by the decision or stalled-turn recovery loops.
+                self.progress.remove(session_id);
+                return Ok(());
+            }
             return self
                 .evaluate_running(&mut record, &observation, active_turn_id, now)
                 .await;
@@ -1578,6 +1587,28 @@ mod tests {
         assert!(decisions[0].model.is_none());
         assert!(decisions[0].question.is_none());
         assert!(port.notices.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn parked_turn_is_neither_stalled_nor_an_automatic_decision() {
+        let mut waiting = observation("Please authorize in your browser");
+        waiting.active_turn_id = Some("active-turn".into());
+        waiting.latest_turn = Some(ObservedTurn { operation_id: "active-turn".into(), state: ObservedTurnState::Running,
+            error: None, origin: None, turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Waiting {
+                wait_seq: 41, request_id: Some("authorize".into()), reason: nomifun_agent_contracts::AgentWaitReason::UserInput,
+            }) });
+        let (service, port) = setup(waiting, r#"{"action":"answer","answer":"approved"}"#).await;
+        let session = "0190f5fe-7c00-7a00-8000-000000000007";
+        service.set_config(session, IdmmConfig { mode: IdmmMode::RuleOnly, idle_timeout_secs: 30,
+            min_interval_secs: 0, ..IdmmConfig::default() }).await.unwrap();
+        service.progress.insert(session.into(), Progress { turn_id: Some("active-turn".into()),
+            phase: IdmmProgressPhase::Model, at: now_ms() - 60_000 });
+        service.evaluate_now(session).await.unwrap();
+        assert!(port.deliveries.lock().await.is_empty());
+        assert!(port.decisions.lock().await.is_empty());
+        assert_eq!(port.cancelled.load(Ordering::SeqCst), 0);
+        assert_eq!(port.sidecar_calls.load(Ordering::SeqCst), 0);
+        assert!(!service.progress.contains_key(session));
     }
 
     #[tokio::test]

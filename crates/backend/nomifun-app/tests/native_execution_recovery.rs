@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 use nomifun_app::{AppConfig, compatibility::{AppServices, create_router}};
 use nomifun_auth::AuthPolicy;
+use nomifun_api_types::{ConversationRuntimeStateKind,ConversationRuntimeSummary};
 
 const TRUST: &str = "native-recovery-fixture";
 
@@ -198,9 +199,10 @@ fn push_answer_to_local_remote(project: &std::path::Path, remote_path: &std::pat
 #[tokio::test(flavor="multi_thread", worker_threads=4)]
 async fn owner_pause_resume_keeps_one_turn_and_one_write_across_generations() {
     let root = tempfile::tempdir().unwrap();
-    let project = root.path().join("project");
+    let fixture_root = root.path().canonicalize().unwrap();
+    let project = fixture_root.join("project");
     std::fs::create_dir_all(&project).unwrap();
-    let config = AppConfig { data_dir: root.path().join("data"), work_dir: root.path().join("work"),
+    let config = AppConfig { data_dir: fixture_root.join("data"), work_dir: fixture_root.join("work"),
         auth_policy: AuthPolicy::TrustLocalToken, local_trust_secret: Some(TRUST.into()), ..Default::default() };
     std::fs::create_dir_all(&config.data_dir).unwrap();
     let requests = Arc::new(AtomicUsize::new(0));
@@ -275,12 +277,11 @@ async fn owner_pause_resume_keeps_one_turn_and_one_write_across_generations() {
     assert_eq!(paused["checkpoint_retained"],true);
     let projection = call(&router,"GET",&format!("/api/agent-sessions/{id}/projection"),Value::Null).await;
     assert_eq!(projection["status"],"running");
-    assert_eq!(projection["extra"]["execution_phase"],"paused");
-    assert_eq!(projection["extra"]["execution_pause"]["cleanup_proven"], true,
-        "a pause beyond the first event page must retain its canonical cleanup proof");
-    assert_eq!(projection["runtime"]["can_send_message"],false);
-    assert_eq!(projection["runtime"]["is_processing"],false);
-    assert!(projection["runtime"]["active_turn_id"].is_string());
+    let runtime:ConversationRuntimeSummary=serde_json::from_value(projection["runtime"].clone()).unwrap();
+    assert_eq!(runtime.state,ConversationRuntimeStateKind::Paused);
+    assert!(!runtime.can_send_message);assert!(!runtime.can_steer);assert!(!runtime.is_processing);
+    assert!(runtime.active_turn_id.is_some());
+    assert!(matches!(runtime.turn_outcome,Some(nomifun_agent_contracts::AgentTurnOutcome::Paused {..})));
     assert_eq!(std::fs::read_to_string(project.join("answer.txt")).unwrap(),"PAUSE_RESUME_OK");
     assert_eq!(requests.load(Ordering::SeqCst),1);
     let (status,_) = response(&router,"POST",&format!("/api/agent-sessions/{id}/turns"),json!({"idempotency_key":"must-not-start","input":{"content":"Replace the task"}})).await;
@@ -335,9 +336,10 @@ async fn owner_pause_resume_keeps_one_turn_and_one_write_across_generations() {
 #[tokio::test(flavor="multi_thread", worker_threads=4)]
 async fn pause_cleans_a_running_process_before_resume_and_never_restarts_it() {
     let root = tempfile::tempdir().unwrap();
-    let project = root.path().join("project");
+    let fixture_root = root.path().canonicalize().unwrap();
+    let project = fixture_root.join("project");
     std::fs::create_dir_all(&project).unwrap();
-    let config = AppConfig { data_dir: root.path().join("data"), work_dir: root.path().join("work"),
+    let config = AppConfig { data_dir: fixture_root.join("data"), work_dir: fixture_root.join("work"),
         auth_policy: AuthPolicy::TrustLocalToken, local_trust_secret: Some(TRUST.into()), ..Default::default() };
     std::fs::create_dir_all(&config.data_dir).unwrap();
     let requests = Arc::new(AtomicUsize::new(0));
@@ -351,25 +353,30 @@ async fn pause_cleans_a_running_process_before_resume_and_never_restarts_it() {
         async move {
             let round = requests.fetch_add(1,Ordering::SeqCst);
             let data = match round {
-                0 => stream_body(Some(("start-helper","start_process",json!({
-                    "command":helper_command,"args":helper_args,"wait_ms":0
-                }))),""),
+                0 => stream_body(Some(("discover-process","ToolSearch",json!({"query":"start_process"}))),""),
                 1 => {
+                    assert!(body["tools"].as_array().unwrap().iter().any(|tool|tool.pointer("/function/name").and_then(Value::as_str)==Some("start_process")),
+                        "the deferred process schema must be discovered before the helper can start");
+                    stream_body(Some(("start-helper","start_process",json!({
+                        "command":helper_command,"args":helper_args,"wait_ms":0
+                    }))),"")
+                },
+                2 => {
                     entered.notify_one();
                     release.notified().await;
                     stream_body(Some(("read-before-pause","read_file",json!({"path":"helper.pid"}))),"")
                 },
-                2 => {
+                3 => {
                     let encoded = body.to_string();
                     assert!(encoded.contains("start-helper") && encoded.contains("read-before-pause"),
                         "resume lost reconciled process/read history");
                     stream_body(Some(("replan","update_plan",json!({"explanation":"Verify the marker after pause cleanup",
                         "plan":[{"step":"Verify helper marker","status":"in_progress"}]}))),"")
                 },
-                3 => stream_body(Some(("read-marker","read_file",json!({"path":"helper.pid"}))),""),
-                4 => stream_body(Some(("close-plan","update_plan",json!({"explanation":"Fresh marker read complete",
+                4 => stream_body(Some(("read-marker","read_file",json!({"path":"helper.pid"}))),""),
+                5 => stream_body(Some(("close-plan","update_plan",json!({"explanation":"Fresh marker read complete",
                     "plan":[{"step":"Verify helper marker","status":"completed"}]}))),""),
-                5 => stream_body(Some(("report","report_completion",json!({"summary":"Helper marker verified after pause cleanup",
+                6 => stream_body(Some(("report","report_completion",json!({"summary":"Helper marker verified after pause cleanup",
                     "criteria":[{"step":"Verify helper marker","disposition":"supported","evidence_call_ids":["read-marker"],
                         "requirement_ids":["input_0"],"rationale":"Fresh marker read confirms the helper started before pause"}]}))),""),
                 _ => panic!("unexpected process recovery model request {round}"),
@@ -395,6 +402,7 @@ async fn pause_cleans_a_running_process_before_resume_and_never_restarts_it() {
     call(&router,"POST",&format!("/api/agent-sessions/{id}/turns"),json!({"idempotency_key":"process-task",
         "input":{"content":"Start one helper that writes its PID to helper.pid, then verify the marker and report. Never start it twice."}})).await;
     tokio::time::timeout(Duration::from_secs(30),entered.notified()).await.unwrap();
+    let running = call(&router,"GET",&execution,Value::Null).await;
     let marker = project.join("helper.pid");
     let pid = tokio::time::timeout(Duration::from_secs(10),async {
         loop {
@@ -402,9 +410,19 @@ async fn pause_cleans_a_running_process_before_resume_and_never_restarts_it() {
                 && let Ok(pid) = text.trim().parse::<u32>() { break pid; }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-    }).await.unwrap();
+    }).await;
+    let pid=match pid {
+        Ok(pid)=>pid,
+        Err(_)=>{
+            let store=AgentSessionStore::from_pool(app.database.pool().clone()).await.unwrap();
+            let facts=store.native_recovery_facts(&id.to_owned().into(),&running["operation_id"].as_str().unwrap().to_owned().into()).await.unwrap();
+            let diagnostics=facts.events.iter().filter_map(|event|facts.event_payloads.get(event.event_id.as_ref()).and_then(|value|value.get("event")))
+                .filter(|event|event.get("event").and_then(Value::as_str)==Some("tool_completed")
+                    && event.pointer("/result/call_id").and_then(Value::as_str)==Some("start-helper")).cloned().collect::<Vec<_>>();
+            panic!("helper PID marker was never written; original start_process observations: {diagnostics:?}");
+        },
+    };
     assert!(process_exists(pid),"managed helper must be live before pause cleanup");
-    let running = call(&router,"GET",&execution,Value::Null).await;
     let pause = json!({"operation_id":running["operation_id"],"idempotency_key":"pause-process","reason":"inspect cleanup"});
     call(&router,"POST",&format!("{execution}/pause"),pause).await;
     release.notify_one();
@@ -443,7 +461,7 @@ async fn pause_cleans_a_running_process_before_resume_and_never_restarts_it() {
     let starts:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='tool_started' AND json_extract(inline_json,'$.event.action_id')='workspace.process/start'")
         .bind(id).fetch_one(app.database.pool()).await.unwrap();
     assert_eq!(starts,1,"resume must not replay the completed process start");
-    assert_eq!(requests.load(Ordering::SeqCst),6);
+    assert_eq!(requests.load(Ordering::SeqCst),7);
     for (kind,count) in [("turn/started",1i64),("turn/paused",1),("turn/resume-authorized",1),("turn/completed",1),("turn/failed",0)] {
         let actual:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind=?")
             .bind(id).bind(kind).fetch_one(app.database.pool()).await.unwrap();
@@ -457,9 +475,10 @@ async fn pause_cleans_a_running_process_before_resume_and_never_restarts_it() {
 #[tokio::test(flavor="multi_thread", worker_threads=4)]
 async fn cancel_interrupts_provider_retry_after_without_opening_another_request() {
     let root = tempfile::tempdir().unwrap();
-    let project = root.path().join("project");
+    let fixture_root = root.path().canonicalize().unwrap();
+    let project = fixture_root.join("project");
     std::fs::create_dir_all(&project).unwrap();
-    let config = AppConfig { data_dir: root.path().join("data"), work_dir: root.path().join("work"),
+    let config = AppConfig { data_dir: fixture_root.join("data"), work_dir: fixture_root.join("work"),
         auth_policy: AuthPolicy::TrustLocalToken, local_trust_secret: Some(TRUST.into()), ..Default::default() };
     std::fs::create_dir_all(&config.data_dir).unwrap();
     let requests = Arc::new(AtomicUsize::new(0));
@@ -523,9 +542,10 @@ async fn cancel_interrupts_provider_retry_after_without_opening_another_request(
 #[tokio::test(flavor="multi_thread", worker_threads=4)]
 async fn cancelled_turn_is_never_selected_by_startup_recovery() {
     let root = tempfile::tempdir().unwrap();
-    let project = root.path().join("project");
+    let fixture_root = root.path().canonicalize().unwrap();
+    let project = fixture_root.join("project");
     std::fs::create_dir_all(&project).unwrap();
-    let config = AppConfig { data_dir: root.path().join("data"), work_dir: root.path().join("work"),
+    let config = AppConfig { data_dir: fixture_root.join("data"), work_dir: fixture_root.join("work"),
         auth_policy: AuthPolicy::TrustLocalToken, local_trust_secret: Some(TRUST.into()), ..Default::default() };
     std::fs::create_dir_all(&config.data_dir).unwrap();
     let requests = Arc::new(AtomicUsize::new(0));
@@ -616,9 +636,10 @@ async fn startup_recovery_scenario(
 ) {
     assert!(!reconcile_external_effect || reconciliation_required);
     let root = tempfile::tempdir().unwrap();
-    let project = root.path().join("project");
+    let fixture_root = root.path().canonicalize().unwrap();
+    let project = fixture_root.join("project");
     std::fs::create_dir_all(&project).unwrap();
-    let config = AppConfig { data_dir: root.path().join("data"), work_dir: root.path().join("work"),
+    let config = AppConfig { data_dir: fixture_root.join("data"), work_dir: fixture_root.join("work"),
         auth_policy: AuthPolicy::TrustLocalToken, local_trust_secret: Some(TRUST.into()), ..Default::default() };
     std::fs::create_dir_all(&config.data_dir).unwrap();
     let mode = Arc::new(AtomicUsize::new(0));
@@ -735,9 +756,12 @@ async fn startup_recovery_scenario(
             }
         }).await.expect("startup quarantine must notify the live owner about the canonical pause");
         assert_eq!(paused_event.user_id,second.authoritative_user_id.as_ref());
-        assert_eq!(paused_event.event.data["execution_phase"],"paused");
-        assert_eq!(paused_event.event.data["can_send_message"],false);
         assert!(paused_event.event.data["turn_id"].as_str().is_some_and(|value|value.len()==36));
+        let projection=call(&restored_router,"GET",&format!("/api/agent-sessions/{id}/projection"),Value::Null).await;
+        let runtime:ConversationRuntimeSummary=serde_json::from_value(projection["runtime"].clone()).unwrap();
+        assert_eq!(runtime.state,ConversationRuntimeStateKind::Paused);
+        assert!(!runtime.can_send_message);assert!(!runtime.can_steer);assert!(!runtime.is_processing);
+        assert_eq!(runtime.active_turn_id.as_deref(),paused_event.event.data["turn_id"].as_str());
 
         let effect_id = pending_effect_id.as_ref().unwrap();
         let (effect_state, strategy, action_id, terminal_event_id): (String, String, String, Option<String>) =

@@ -1,3 +1,4 @@
+import { parseMessageId } from '@/common/types/ids';
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { createInstance } from 'i18next';
@@ -36,7 +37,7 @@ const profile = { companion_id: companionId, model: { provider_id: providerId, m
   robot: { model: { provider_id: providerId, model: 'model-b' }, skills: { enabled: [], disabled_auto: [] }, mcp_servers: [] },
 } as unknown as NonNullable<CompanionHandle['profile']>;
 const idle: TChatConversation = { id: conversationId, type: 'nomi', name: 'Companion', created_at: 0, modified_at: 0, status: 'pending',
-  model: { ...provider, use_model: 'model-a' }, extra: { workspace: '' }, runtime: { state: 'idle', is_processing: false, can_send_message: true, has_runtime: false },
+  model: { ...provider, use_model: 'model-a' }, extra: { workspace: '' }, runtime: { state: 'idle', is_processing: false, can_send_message: true, },
 };
 const agentOptions: ProductAgentOptions = { selection: { kind: 'template', template_key: 'companion.default' }, needs_model: false,
   options: [{ selection: { kind: 'template', template_key: 'companion.default' }, display_name: '', available: true, reason: null },
@@ -177,8 +178,8 @@ test('partial default save keeps the committed model and retries without another
 test.each(['running', 'paused'])('active or paused Turns disable Agent and model quick editing (%s)', async (phase) => {
   install();
   const conversation = { ...idle, status: 'running' as const,
-    runtime: { ...idle.runtime!, active_turn_id: 'active-turn', is_processing: phase === 'running' },
-    extra: { ...idle.extra, execution_phase: phase },
+    runtime: { ...idle.runtime!, active_turn_id: parseMessageId('0190f5fe-7c00-7a00-8000-000000000081'), is_processing: phase === 'running' },
+    extra: { ...idle.extra, },
   } as TChatConversation;
   const view = mount(async () => profile, conversation);
   await waitFor(() => expect(view.container.querySelectorAll('.arco-select')).toHaveLength(2));

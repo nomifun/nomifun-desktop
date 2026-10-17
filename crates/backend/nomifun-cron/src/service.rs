@@ -1463,6 +1463,7 @@ impl CronService {
             let gate = self.job_gate(&job.cron_job_id);
             let _job_guard = gate.lock().await;
 
+            if self.active_runs.contains_key(&reservation.cron_job_run_id) { continue; }
             let recovered = self
                 .recover_exact_reserved_run(&job, &reservation)
                 .await;
@@ -1490,6 +1491,30 @@ impl CronService {
             self.emit_job_executed_for(&job, status, result_error.as_deref())
                 .await;
         }
+    }
+
+    fn reattach_reserved_receipt_worker(&self, job: &CronJob,
+        reservation: &nomifun_db::models::CronRunReservationRow, conversation_id: &str) {
+        if self.active_runs.contains_key(&reservation.cron_job_run_id) { return; }
+        let service = self.clone();
+        let job = job.clone();
+        let run_id = reservation.cron_job_run_id.clone();
+        let planned_at = reservation.planned_at_ms;
+        let scheduled = reservation.trigger_kind == "scheduled";
+        let conversation_id = conversation_id.to_owned();
+        let active_run = self.mark_run_active(&job.cron_job_id, &run_id);
+        let task = tokio::spawn(async move {
+            let _active_run = active_run;
+            let result = service.executor.observe_reserved_turn(&job, &run_id, &conversation_id).await;
+            if scheduled {
+                if let Some(planned_at) = planned_at {
+                    service.handle_execution_result(job, &run_id, planned_at, result).await;
+                }
+            } else {
+                service.handle_run_now_result(&job, &run_id, result).await;
+            }
+        });
+        self.register_background_task(task);
     }
 
     async fn recover_exact_reserved_run(
@@ -1570,9 +1595,12 @@ impl CronService {
                         }
                     };
                 }
+                Ok(CronTurnReconciliation::LiveExactOwnerWait) => {
+                    self.reattach_reserved_receipt_worker(job, reservation, conversation_id);
+                    return None;
+                }
                 Ok(
-                    CronTurnReconciliation::LiveExactOwnerWait
-                    | CronTurnReconciliation::ExternalProofRequiredFailClosed
+                    CronTurnReconciliation::ExternalProofRequiredFailClosed
                     | CronTurnReconciliation::StaleConflict,
                 ) => {
                     warn!(
@@ -1613,17 +1641,27 @@ impl CronService {
                 .await
                 .then(|| ("error", Some(message.to_owned())))
             }
+            CronTurnReceiptState::Suspended(_) => {
+                self.reattach_reserved_receipt_worker(job, reservation, conversation_id);
+                None
+            },
             CronTurnReceiptState::Accepted { .. } => {
-                warn!(
-                    job_id = %job.cron_job_id,
-                    run_id = %reservation.cron_job_run_id,
-                    conversation_id,
-                    "Boot: accepted Conversation receipt remained non-terminal after reconciliation"
-                );
+                self.reattach_reserved_receipt_worker(job, reservation, conversation_id);
                 None
             }
-            CronTurnReceiptState::Completed(delivery) => match delivery.terminal_result() {
-                Some(Ok(())) => {
+            CronTurnReceiptState::Completed(delivery) => match delivery.disposition() {
+                Some(crate::session_port::CronTurnDisposition::Cancelled) => {
+                    self.finalize_run_once(job, &reservation.cron_job_run_id, "cancelled",
+                        Some(conversation_id), None, cancelled_run_projection()).await
+                        .then_some(("cancelled", None))
+                },
+                Some(crate::session_port::CronTurnDisposition::InputRequired) => {
+                    let projection = self.input_handoff_run_projection(job, conversation_id).await?;
+                    self.finalize_run_once(job, &reservation.cron_job_run_id, "input_required",
+                        Some(conversation_id), None, projection).await
+                        .then_some(("input_required", None))
+                },
+                Some(crate::session_port::CronTurnDisposition::Delivered) => {
                     let (status, result_error, projection) =
                         match self.success_run_projection(job, conversation_id).await {
                             Ok(projection) => ("ok", None, projection),
@@ -1643,7 +1681,7 @@ impl CronService {
                     .await
                     .then_some((status, result_error))
                 }
-                Some(Err(message)) => {
+                Some(crate::session_port::CronTurnDisposition::Failed(message)) => {
                     self.finalize_run_once(
                         job,
                         &reservation.cron_job_run_id,
@@ -2695,6 +2733,21 @@ impl CronService {
         let _job_guard = gate.lock().await;
 
         match result {
+            ExecutionResult::Cancelled { conversation_id } => {
+                if !self.finalize_run_once(&job, run_id, "cancelled", Some(&conversation_id), None,
+                    cancelled_run_projection()).await { return; }
+                self.advance_after_terminal_occurrence(&job, run_id, expected_planned_at_ms).await;
+                self.emit_persisted_job_updated_for(&job).await;
+                self.emit_job_executed_for(&job, "cancelled", None).await;
+            }
+            ExecutionResult::InputRequired { conversation_id } => {
+                let Some(projection) = self.input_handoff_run_projection(&job, &conversation_id).await else { return; };
+                if !self.finalize_run_once(&job, run_id, "input_required", Some(&conversation_id), None,
+                    projection).await { return; }
+                self.advance_after_terminal_occurrence(&job, run_id, expected_planned_at_ms).await;
+                self.emit_persisted_job_updated_for(&job).await;
+                self.emit_job_executed_for(&job, "input_required", None).await;
+            }
             ExecutionResult::Success { conversation_id } => {
                 let (status, error, projection) =
                     match self.success_run_projection(&job, &conversation_id).await {
@@ -2828,6 +2881,19 @@ impl CronService {
         let gate = self.job_gate(&job.cron_job_id);
         let _job_guard = gate.lock().await;
         match result {
+            ExecutionResult::Cancelled { conversation_id } => {
+                if !self.finalize_run_once(job, run_id, "cancelled", Some(&conversation_id), None,
+                    cancelled_run_projection()).await { return; }
+                self.emit_persisted_job_updated_for(job).await;
+                self.emit_job_executed_for(job, "cancelled", None).await;
+            }
+            ExecutionResult::InputRequired { conversation_id } => {
+                let Some(projection) = self.input_handoff_run_projection(job, &conversation_id).await else { return; };
+                if !self.finalize_run_once(job, run_id, "input_required", Some(&conversation_id), None,
+                    projection).await { return; }
+                self.emit_persisted_job_updated_for(job).await;
+                self.emit_job_executed_for(job, "input_required", None).await;
+            }
             ExecutionResult::Success { conversation_id } => {
                 let (status, error, projection) =
                     match self.success_run_projection(job, &conversation_id).await {
@@ -2920,6 +2986,14 @@ impl CronService {
                     "Cron run-now remains durably reserved because its accepted Conversation turn is not terminal"
                 );
             }
+        }
+    }
+
+    async fn input_handoff_run_projection(&self, job: &CronJob, conversation_id: &str) -> Option<CronJobRunProjection> {
+        match self.success_run_projection(job, conversation_id).await {
+            Ok(mut projection) => { projection.last_status = Some("input_required".into()); Some(projection) }
+            Err(error) => { warn!(job_id = %job.cron_job_id, error,
+                "Cannot settle the exact input handoff projection; retaining its reservation"); None }
         }
     }
 
@@ -3706,6 +3780,13 @@ fn restore_update_params(
     }
 }
 
+fn cancelled_run_projection() -> CronJobRunProjection {
+    CronJobRunProjection {
+        last_run_at: Some(now_ms()), last_status: Some("cancelled".into()), last_error: Some(None),
+        increment_run_count: true, reset_retry_count: true, bind_job_conversation_if_unbound: false,
+    }
+}
+
 fn error_run_projection(message: &str) -> CronJobRunProjection {
     CronJobRunProjection {
         last_run_at: Some(now_ms()),
@@ -4399,5 +4480,68 @@ mod tests {
         assert_eq!(value, "0 0 * * * *");
         assert_eq!(tz.as_deref(), Some("UTC"));
         assert_eq!(desc.as_deref(), Some("hourly"));
+    }
+}
+
+#[cfg(test)]
+mod reserved_receipt_worker_tests {
+    use super::*;
+    use crate::busy_guard::CronBusyGuard;
+    use crate::session_port::{CronTurnDelivery, test_support::ReceiptOnlySessions};
+    use nomifun_agent_contracts::{AgentTurnOutcome, AgentWaitReason};
+    use nomifun_db::{SqliteCronRepository, sqlx};
+
+    #[tokio::test]
+    async fn restart_reattaches_the_original_live_or_suspended_receipt_and_settles_cancellation_once() {
+        for suspended in [false, true] {
+            let db = nomifun_db::init_database_memory().await.unwrap();
+            let owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
+            let session = ConversationId::new().into_string();
+            let job_id = CronJobId::new().into_string();
+            let run_id = CronJobRunId::new().into_string();
+            let owner_ref = serde_json::json!({"principal_kind":"user","principal_id":owner}).to_string();
+            sqlx::query("INSERT INTO agent_sessions(agent_session_id,owner_ref_json,state,title,archived,pinned,agent_binding_json,next_seq,created_at) VALUES(?,?,'live','Original',0,0,'{}',1,1)")
+                .bind(&session).bind(owner_ref).execute(db.pool()).await.unwrap();
+            sqlx::query("INSERT INTO cron_jobs(cron_job_id,user_id,name,schedule_kind,schedule_value,payload_message,conversation_id,agent_type,created_by,created_at,updated_at) VALUES(?,?,'Original job','every','60000','Original input',?,?,'user',1,1)")
+                .bind(&job_id).bind(&owner).bind(&session).bind(AgentType::Nomi.serde_name()).execute(db.pool()).await.unwrap();
+            let repo = Arc::new(SqliteCronRepository::new(db.pool().clone()));
+            repo.reserve_run(&owner, &ReserveCronRunParams { cron_job_run_id: run_id.clone(), cron_job_id: job_id.clone(),
+                trigger_kind: "run_now".into(), operation_key: format!("original:{run_id}"), request_fingerprint: "original-input".into(),
+                schedule_revision: None, planned_at_ms: None, now: 1 }).await.unwrap();
+            repo.attach_run_conversation(&owner, &run_id, &session, 2).await.unwrap();
+            let active = CronTurnDelivery { message_id: "0190f5fe-7c00-7a00-8000-000000000011".into(), replayed: true,
+                completed: false, turn_outcome: Some(AgentTurnOutcome::Waiting { wait_seq: 41, request_id: None,
+                    reason: AgentWaitReason::ExternalResource }), user_input_request: None, result_ok: None,
+                result_text: None, result_error: None, result_error_code: None, result_error_retryable: None };
+            let initial = if suspended { CronTurnReceiptState::Suspended(active.clone()) }
+                else { CronTurnReceiptState::Accepted { message_id: active.message_id.clone() } };
+            let sessions = Arc::new(ReceiptOnlySessions::new(initial));
+            let executor = Arc::new(JobExecutor::new(Arc::from(owner.as_str()), sessions.clone(), Arc::new(CronBusyGuard::new()), PathBuf::new()));
+            let service = CronService::new(Arc::from(owner.as_str()), repo.clone(),
+                Arc::new(CronScheduler::new(Arc::new(|_, _, _, _, _| {}))), executor,
+                CronEventEmitter::new(Arc::new(nomifun_realtime::BroadcastEventBus::new(16))), PathBuf::new());
+            service.recover_interrupted_runs_on_boot().await;
+            service.recover_interrupted_runs_on_boot().await;
+            assert_eq!(service.active_runs.len(), 1);
+            assert!(repo.list_runs_by_job(&owner, &job_id, 7).await.unwrap().is_empty());
+            *sessions.receipt.lock().unwrap() = CronTurnReceiptState::Completed(CronTurnDelivery {
+                completed: true, turn_outcome: Some(AgentTurnOutcome::Cancelled { message_ids: vec![] }),
+                result_ok: Some(false), result_error_code: Some("cancelled".into()), ..active });
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    let row = repo.get_by_cron_job_id(&owner, &job_id).await.unwrap().unwrap();
+                    if row.last_status.as_deref() == Some("cancelled") && service.active_runs.is_empty() { break; }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }).await.unwrap();
+            service.recover_interrupted_runs_on_boot().await;
+            let saved = repo.get_by_cron_job_id(&owner, &job_id).await.unwrap().unwrap();
+            assert_eq!(saved.run_count, 1);
+            assert_eq!(saved.retry_count, 0);
+            assert_eq!(saved.last_error, None);
+            assert_eq!(repo.list_runs_by_job(&owner, &job_id, 7).await.unwrap().len(), 1);
+            assert!(repo.list_reserved_runs_for_scheduler().await.unwrap().is_empty());
+            repo.delete(&owner, &job_id).await.unwrap();
+        }
     }
 }

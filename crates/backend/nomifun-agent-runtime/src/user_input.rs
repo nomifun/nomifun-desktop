@@ -28,7 +28,7 @@ pub(crate) fn enabled(port: Option<&Arc<dyn AgentUserInputRequestPort>>) -> bool
 pub(crate) fn definition() -> ChatToolDefinition {
     ChatToolDefinition {
         name: TOOL_NAME.into(), deferred: false,
-        description: "Ask for user information needed to continue the accepted task, then hand back input after existing work is safely settled. Submit alone with question and remaining_work. This is not task completion, approval, an answer, or permission to fabricate personal information. Preserve the complete request, known failures and completed effects. Use report_completion only for the real completion account. Do not duplicate the question in assistant text. A running process, unresolved patch or locked completion review must settle through its original controls first.".into(),
+        description: "Ask for user information or an external user action needed to continue the accepted task. The host safely hands back input or keeps this same turn waiting with its original owned processes; waiting does not complete the task. Submit alone with question and remaining_work. This is not task completion, approval, an answer, or permission to fabricate personal information. Preserve the complete request, known failures and completed effects. Use report_completion only for the real completion account. Do not duplicate the question in assistant text. Unresolved patch obligations or a locked completion review still require their original controls. Never cancel an owned process merely to ask for required authorization.".into(),
         input_schema: StrictJsonValue(serde_json::json!({"type":"object","additionalProperties":false,
             "properties":{"question":{"type":"string","minLength":1,"maxLength":16384},
                 "remaining_work":{"type":"string","minLength":1,"maxLength":16384}},
@@ -88,6 +88,7 @@ pub(crate) fn recorded_pending(events: &[crate::AgentEngineEvent])
                 if pending.as_ref().is_some_and(|request| request.request_id == result.call_id) && result.is_error => return Err(invalid()),
             Event::ToolStarted { .. } if pending.is_some() => return Err(invalid()),
             Event::SteeringInputs { inputs } if !inputs.is_empty() => pending = None,
+            Event::TurnWaitResolved { .. } => pending = None,
             Event::TurnInputRequired { request, .. } if pending.as_ref() != Some(request) => return Err(invalid()),
             _ => {}
         }

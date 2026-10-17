@@ -29,12 +29,13 @@ interface ConversationErrorNoteProps {
   feedback?: boolean;
   /** Task blocker stays visible without competing with an adjacent recovery card. */
   compact?: boolean;
+  tone?: 'error' | 'notice';
 }
 
 /** Shared presentation for canonical failures, pauses and rejected requests. */
 const ConversationErrorNote: React.FC<ConversationErrorNoteProps> = ({
   error, rawDetail = error?.detail || error?.message, timestamp, turnId, sessionId,
-  messageId, creationTaskId, recoveryAction, currentModel, feedback = true, compact = false,
+  messageId, creationTaskId, recoveryAction, currentModel, feedback = true, compact = false, tone = 'error',
 }) => {
   const { t } = useTranslation();
   const [detailsExpanded, setDetailsExpanded] = useState(false);
@@ -95,12 +96,12 @@ const ConversationErrorNote: React.FC<ConversationErrorNoteProps> = ({
     {detailsExpanded && <CopyIconButton text={report} tooltip={t('conversation.agentError.copyDetails')} className='message-error-note__copy' />}
   </div>;
   return (
-    <div className={`message-error-note${compact ? ' message-error-note--compact' : ''}`}>
+    <div className={`message-error-note${compact ? ' message-error-note--compact' : ''}${tone === 'notice' ? ' message-error-note--notice' : ''}`}>
       <div className='message-error-note__summary'>
         <span className='message-error-note__icon' aria-hidden='true'>
           <Attention theme='outline' size='16' fill='currentColor' />
         </span>
-        <span className='message-error-note__title' role='alert'>
+        <span className='message-error-note__title' role={tone === 'notice' ? 'note' : 'alert'}>
           {title}
         </span>
         {compact && controls}

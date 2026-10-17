@@ -33,8 +33,8 @@ describe('terminal stream runtime reconciliation', () => {
   test('a durable pause stops activity without settling or opening the queue', async () => {
     const paused = {
       status: 'running',
-      extra: { execution_phase: 'paused' },
-      runtime: { state: 'idle', is_processing: false, can_send_message: false, active_turn_id: activeTurnId },
+      extra: { workspace: '' },
+      runtime: { state: 'paused', is_processing: false, can_send_message: false, active_turn_id: activeTurnId },
     } as TChatConversation;
     let pauseCalls = 0;
     let idleCalls = 0;
@@ -64,10 +64,10 @@ describe('terminal stream runtime reconciliation', () => {
   test('each explicit resync immediately adopts its exact canonical pause snapshot', async () => {
     const unproven = {
       status: 'running',
-      extra: { execution_phase: 'paused', execution_pause: {
+      extra: { workspace: '', execution_pause: {
         reason: 'EXECUTION_MODEL_RATE_LIMITED', cleanup_proven: false, paused_at_ms: 123,
       } },
-      runtime: { state: 'idle', is_processing: false, can_send_message: false, active_turn_id: activeTurnId },
+      runtime: { state: 'paused', is_processing: false, can_send_message: false, active_turn_id: activeTurnId },
     } as TChatConversation;
     const proven = { ...unproven, extra: { ...unproven.extra, execution_pause: {
       ...unproven.extra!.execution_pause!, cleanup_proven: true,
@@ -95,10 +95,10 @@ describe('terminal stream runtime reconciliation', () => {
   test('an unproven canonical pause immediately surfaces cleanupRequired', async () => {
     const paused = {
       status: 'running',
-      extra: { execution_phase: 'paused', execution_pause: {
+      extra: { workspace: '', execution_pause: {
         reason: 'EXECUTION_PAUSED', cleanup_proven: false, paused_at_ms: 456,
       } },
-      runtime: { state: 'idle', is_processing: false, can_send_message: false, active_turn_id: activeTurnId },
+      runtime: { state: 'paused', is_processing: false, can_send_message: false, active_turn_id: activeTurnId },
     } as TChatConversation;
     let reads = 0;
     let observed: TChatConversation | undefined;

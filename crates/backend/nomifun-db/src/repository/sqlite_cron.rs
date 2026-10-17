@@ -1104,14 +1104,14 @@ impl ICronRepository for SqliteCronRepository {
             .map_err(|error| DbError::Conflict(format!("invalid cron owner id: {error}")))?;
         CronJobRunId::parse(&params.cron_job_run_id)
             .map_err(|error| DbError::Conflict(format!("invalid cron run id: {error}")))?;
-        if !matches!(params.status.as_str(), "ok" | "error" | "skipped" | "missed") {
+        if !matches!(params.status.as_str(), "ok" | "error" | "skipped" | "missed" | "input_required" | "cancelled") {
             return Err(DbError::Conflict(format!(
                 "invalid cron run terminal status '{}'",
                 params.status
             )));
         }
         if let Some(last_status) = params.last_status.as_deref()
-            && !matches!(last_status, "ok" | "error" | "skipped" | "missed")
+            && !matches!(last_status, "ok" | "error" | "skipped" | "missed" | "input_required" | "cancelled")
         {
             return Err(DbError::Conflict(format!(
                 "invalid cron job projected status '{last_status}'"
@@ -1774,6 +1774,35 @@ mod tests {
                 assert_eq!(saved.preset_id, row.preset_id);
                 assert_eq!(saved.agent_snapshot, row.agent_snapshot);
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn input_handoff_and_cancellation_settle_once_without_failure_or_a_permanent_reservation() {
+        for status in ["input_required", "cancelled"] {
+            let (repo, _db, owner) = setup().await;
+            let job = make_row(&owner);
+            repo.insert(&job).await.unwrap();
+            let run = nomifun_common::CronJobRunId::new().into_string();
+            let params = ReserveCronRunParams { cron_job_run_id: run.clone(), cron_job_id: job.cron_job_id.clone(),
+                trigger_kind: "run_now".into(), operation_key: format!("handoff:{run}"), request_fingerprint: "exact-input".into(),
+                schedule_revision: None, planned_at_ms: None, now: 1_000 };
+            repo.reserve_run(&owner, &params).await.unwrap();
+            assert!(repo.delete(&owner, &job.cron_job_id).await.is_err());
+            let terminal = FinalizeCronRunParams { cron_job_run_id: run, status: status.into(),
+                conversation_id: None, result_error: None, now: 1_001, last_run_at: Some(1_001),
+                last_status: Some(status.into()), last_error: Some(None), increment_run_count: true,
+                reset_retry_count: true, bind_job_conversation_if_unbound: false };
+            assert_eq!(repo.finalize_run_with_job_projection(&owner, &terminal).await.unwrap(), FinalizeCronRunOutcome::Applied);
+            assert_eq!(repo.finalize_run_with_job_projection(&owner, &terminal).await.unwrap(), FinalizeCronRunOutcome::AlreadyApplied);
+            let saved = repo.get_by_cron_job_id(&owner, &job.cron_job_id).await.unwrap().unwrap();
+            assert_eq!(saved.last_status.as_deref(), Some(status));
+            assert_eq!(saved.last_error, None);
+            assert_eq!(saved.run_count, 1);
+            assert_eq!(saved.retry_count, 0);
+            assert_eq!(repo.list_runs_by_job(&owner, &job.cron_job_id, 7).await.unwrap()[0].status, status);
+            assert!(repo.list_reserved_runs_for_scheduler().await.unwrap().is_empty());
+            repo.delete(&owner, &job.cron_job_id).await.unwrap();
         }
     }
 

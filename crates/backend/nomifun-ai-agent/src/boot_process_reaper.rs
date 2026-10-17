@@ -514,10 +514,17 @@ mod tests {
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true);
         let mut root = command.spawn().unwrap();
         let identity = capture_child_identity(&root).unwrap();
-        tokio::time::timeout(Duration::from_secs(3), async {
-            while !marker.is_file() { tokio::time::sleep(Duration::from_millis(5)).await; }
-        }).await.unwrap();
-        let descendant = std::fs::read_to_string(&marker).unwrap().trim().parse::<u32>().unwrap();
+        let descendant = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                // Shell redirection creates the marker before printf writes
+                // its bytes. Read the actual identity, not file existence.
+                if let Ok(contents) = std::fs::read_to_string(&marker)
+                    && let Ok(pid) = contents.trim().parse::<u32>() {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.expect("fixture must publish its descendant identity");
         write_registry(dir.path(), vec![test_entry(identity.pid, "conv-root-only", Some(identity.clone()))]);
         std::fs::write(&exit_gate, b"exit").unwrap();
         root.wait().await.unwrap();

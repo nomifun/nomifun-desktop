@@ -20,7 +20,7 @@ test('canonical annotation notice is fetched, validated and shown immediately wi
     spyOn(ipcBridge.conversation[name], 'on').mockImplementation(() => () => {});
   }
   spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ id: conversationId, type: 'nomi', status: 'finished',
-    extra: { execution_phase: 'finished' }, runtime: { state: 'idle', is_processing: false, can_send_message: true } } as TChatConversation);
+    extra: { workspace: '' }, runtime: { state: 'idle', is_processing: false, can_send_message: true } } as TChatConversation);
   const notice = { decision: { intervention_id: '0190f5fe-7c00-7a00-8000-000000000081', source: 'rule' as const,
     reason_code: 'sensitive_input_required', rationale: 'Permission needs a person.',
     question: { message_id: '0190f5fe-7c00-7a00-8000-000000000083', sequence: 5, fingerprint: 'a'.repeat(64) } },
@@ -54,7 +54,7 @@ test('a delayed canonical notice is ordered before newer input and scoped respon
     spyOn(ipcBridge.conversation[name], 'on').mockImplementation(() => () => {});
   }
   spyOn(ipcBridge.conversation.get, 'invoke').mockImplementation(async ({ conversation_id }) => ({ id: conversation_id,
-    type: 'nomi', status: 'finished', extra: { execution_phase: 'finished' },
+    type: 'nomi', status: 'finished', extra: { workspace: '' },
     runtime: { state: 'idle', is_processing: false, can_send_message: true } } as TChatConversation));
   const responses: Array<(message: TMessage) => void> = [];
   const getMessage = spyOn(ipcBridge.database.getConversationMessage, 'invoke').mockImplementation(() =>

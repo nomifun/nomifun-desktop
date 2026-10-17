@@ -253,6 +253,35 @@ async fn unleased_supervisor_cannot_terminate_a_live_native_producer() {
 }
 
 #[tokio::test]
+async fn orphaned_live_waiting_becomes_reconciliation_without_a_failure_or_replayed_handle() {
+    let store=AgentSessionStore::open_in_memory().await.unwrap();
+    let (session,_)=create_ready(&store,"waiting-orphan").await;
+    let (input,started)=store.start_turn(&session.agent_session_id,"session_api".into(),"waiting-orphan-input".into(),"lease-turn".into(),
+        StrictJsonValue(json!({"content":"Wait for authorization"}))).await.unwrap();
+    let f=Fixture {session,root:input.ack.unwrap().event_id,started:started.ack.unwrap().event_id};
+    let lease=store.claim_native_execution(claim(&f,"waiting-owner",0,None)).await.unwrap();
+    let cp=checkpoint(&store,&f,&lease).await;
+    store.append_native_event(&lease,&progress(&f,"waiting-question",json!({"event":"user_input_requested","step":1,
+        "request":{"request_id":"old-owner-authorization","question":"Open the original OAuth link","remaining_work":"Verify login"}})),None).await.unwrap();
+    store.append_native_event(&lease,&progress(&f,"waiting-park",json!({"event":"turn_waiting","model_steps":1,
+        "request_id":"old-owner-authorization","reason":"user_input"})),None).await.unwrap();
+    assert!(matches!(store.turn_outcome(&f.session.agent_session_id,&"lease-turn".into()).await.unwrap(),
+        Some(nomifun_agent_contracts::AgentTurnOutcome::Waiting {..})));
+    expire(&store,&f).await;
+    store.quarantine_native_recovery(&owner(),&f.session.agent_session_id,&"lease-turn".into(),0).await.unwrap();
+    let inspection=store.inspect_latest_native_execution(&owner(),&f.session.agent_session_id).await.unwrap().unwrap();
+    assert_eq!(inspection.state,"paused");assert_eq!(inspection.turn_state,"running");
+    assert!(!inspection.pause.unwrap().cleanup_proven);assert_eq!(inspection.checkpoint_revision,cp.revision);
+    let checkpoint=store.load_native_checkpoint(&owner(),&f.session.agent_session_id,&"lease-turn".into()).await.unwrap().unwrap();
+    assert_eq!(checkpoint.state.0["model_steps"],0,"the saved checkpoint predates the live question");
+    assert!(matches!(store.turn_outcome(&f.session.agent_session_id,&"lease-turn".into()).await.unwrap(),
+        Some(nomifun_agent_contracts::AgentTurnOutcome::Paused {..})));
+    let terminals:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind IN ('turn/completed','turn/failed','turn/cancelled')")
+        .bind(f.session.agent_session_id.as_ref()).fetch_one(store.test_pool()).await.unwrap();
+    assert_eq!(terminals,0);assert!(store.verify_native_execution(&lease).await.is_err());
+}
+
+#[tokio::test]
 async fn recovery_quarantine_is_atomic_fenced_and_retains_checkpoint_without_success() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();
     let f = fixture(&store, "quarantine").await;

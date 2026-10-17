@@ -88,6 +88,10 @@
   color: var(--danger);
 }
 
+.message-error-note--notice .message-error-note__icon {
+  color: var(--color-text-3);
+}
+
 /* Center the SVG itself, not an inline text box with baseline/descender space. */
 .message-error-note .i-icon {
   display: inline-flex;

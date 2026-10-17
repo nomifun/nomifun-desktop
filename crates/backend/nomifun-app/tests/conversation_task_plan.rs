@@ -2,7 +2,7 @@
 use axum::{Router, body::Body, http::{Request, StatusCode}};
 use nomifun_agent_contracts::{
     AgentSessionId, EventId, OperationId, SessionEventAppend, SemanticSessionEventDraft,
-    SessionEventKind, SessionEventPayloadRef, StrictJsonValue,
+    SessionEventKind, SessionEventPayloadRef, StrictJsonValue, digest_bytes,
 };
 use nomifun_agent_session::AgentSessionStore;
 use nomifun_app::{AppConfig, compatibility::{AppServices, create_router}};
@@ -37,8 +37,9 @@ fn record(session: &AgentSessionId, started: &EventId, operation: &str, key: &st
 #[tokio::test]
 async fn task_plan_http_survives_long_history_and_restart_then_resets_for_the_next_turn() {
     let root = tempfile::tempdir().unwrap();
+    let canonical_root = root.path().canonicalize().unwrap();
     let config = AppConfig {
-        data_dir: root.path().join("data"), work_dir: root.path().join("work"),
+        data_dir: canonical_root.join("data"), work_dir: canonical_root.join("work"),
         auth_policy: AuthPolicy::TrustLocalToken, local_trust_secret: Some(TRUST.into()), ..Default::default()
     };
     std::fs::create_dir_all(&config.data_dir).unwrap();
@@ -80,19 +81,34 @@ async fn task_plan_http_survives_long_history_and_restart_then_resets_for_the_ne
     let initial = call(&router, "GET", &path, json!({})).await;
     for index in 0..80 {
         let message_id = uuid::Uuid::now_v7().to_string();
+        let content = format!("Later progress {index}");
         store.append_event(&SessionEventAppend {
             agent_session_id: sid.clone(), event_id: format!("later-{index}").into(), producer_id:"runtime_supervisor".into(),
             idempotency_key: format!("later-{index}").into(), semantic_event: SemanticSessionEventDraft {
-                kind:SessionEventKind("message/content-part".into()),kind_version:1,correlation_id:message_id.into(),
+                kind:SessionEventKind("message/content-part".into()),kind_version:1,correlation_id:message_id.as_str().into(),
                 causation_event_id:Some(started.clone()),payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-                    "content":format!("Later progress {index}"),"turn_id":initial["turn_id"]
+                    "content":content,"turn_id":initial["turn_id"]
+                }))),
+            },
+        }).await.unwrap();
+        store.append_event(&SessionEventAppend {
+            agent_session_id: sid.clone(), event_id: format!("later-seal-{index}").into(), producer_id:"runtime_supervisor".into(),
+            idempotency_key: format!("later-seal-{index}").into(), semantic_event: SemanticSessionEventDraft {
+                kind:SessionEventKind("message/completed".into()),kind_version:1,correlation_id:message_id.into(),
+                causation_event_id:Some(format!("later-{index}").into()),
+                payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "part_count":1,"content_digest":digest_bytes(content.as_bytes())
                 }))),
             },
         }).await.unwrap();
     }
     let history = call(&router, "GET", &format!("/api/agent-sessions/{id}/message-history?cursor=&page_size=1"), json!({})).await;
     assert!(history["total"].as_u64().unwrap() >= 80);
-    assert_eq!(history["items"].as_array().unwrap().len(), 1);
+    // Exact-Turn summaries accompany the raw page without consuming its
+    // message window. They must not turn page_size=1 into two message parts.
+    assert_eq!(history["items"].as_array().unwrap().iter().filter(|message|
+        message.pointer("/content/content").and_then(Value::as_str)
+            .is_some_and(|content| content.starts_with("Later progress "))).count(), 1);
     let snapshot = call(&router, "GET", &path, json!({})).await;
     assert_eq!(snapshot["plan"]["steps"][1]["status"], "blocked");
     assert_eq!(snapshot["turn_status"], "running");

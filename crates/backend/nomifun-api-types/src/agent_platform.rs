@@ -1162,9 +1162,19 @@ pub struct CreateAgentSessionTurnResponseDto {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct AgentWaitReplyTargetDto {
+    pub turn_id: String,
+    /// Cursor of the exact canonical waiting event, including requestless waits.
+    pub wait_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SteerAgentSessionTurnRequestDto {
     pub input: Value,
     pub idempotency_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_wait: Option<AgentWaitReplyTargetDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1676,6 +1686,22 @@ mod snapshot_tests {
         })).is_ok());
         assert!(serde_json::from_value::<SteerAgentSessionTurnRequestDto>(json!({
             "input": "continue"
+        })).is_err());
+        for wait_seq in [41, 52] {
+            let reply: SteerAgentSessionTurnRequestDto = serde_json::from_value(json!({
+                "input":{"content":"done"},"idempotency_key":"reply",
+                "expected_wait":{"turn_id":"0190f5fe-7c00-7a00-8abc-012345678901","wait_seq":wait_seq}
+            })).unwrap();
+            let target = reply.expected_wait.unwrap();
+            assert_eq!(target.turn_id, "0190f5fe-7c00-7a00-8abc-012345678901");
+            assert_eq!(target.wait_seq, wait_seq);
+        }
+        assert!(serde_json::from_value::<SteerAgentSessionTurnRequestDto>(json!({
+            "input":{"content":"done"},"idempotency_key":"reply","expected_wait":{"wait_seq":41}
+        })).is_err());
+        assert!(serde_json::from_value::<SteerAgentSessionTurnRequestDto>(json!({
+            "input":{"content":"done"},"idempotency_key":"reply",
+            "expected_wait":{"turn_id":"0190f5fe-7c00-7a00-8abc-012345678901","request_id":null}
         })).is_err());
         assert!(serde_json::from_value::<CancelAgentSessionTurnRequestDto>(json!({
             "idempotency_key": "cancel-1",

@@ -25,9 +25,9 @@ test.each(['idle', 'awaiting admission', 'newer Turn running', 'source Turn fini
     }
     const activeTurnId = scenario === 'newer Turn running' ? nextTurnId : scenario === 'source Turn finishes' ? sourceTurnId : undefined;
     const snapshot = (active?: typeof sourceTurnId): TChatConversation => ({ id: conversationId, type: 'nomi',
-      status: active ? 'running' : 'finished', extra: { workspace: '', execution_phase: active ? 'running' : 'ready' },
+      status: active ? 'running' : 'finished', extra: { workspace: '',  },
       runtime: { state: active ? 'running' : 'idle', is_processing: Boolean(active),
-        can_send_message: !active, has_runtime: Boolean(active), active_turn_id: active,
+        can_send_message: !active, active_turn_id: active,
         ...(active ? { processing_started_at: 1000 } : {}),
       },
     } as TChatConversation);
