@@ -1,7 +1,7 @@
 {
   "version": "0.8.12",
   "notes": "# v0.8.12\n\n**升级提醒：升级前请备份 NomiFun 数据目录。** 本版本延续 v0.8.2 起的破坏性基线升级：不在当前规范迁移链上的历史数据库会被自动退役并替换为全新数据集，旧会话、模型设置、凭据等数据库配置不会导入。当前受支持迁移链上的会话沿正常迁移保留。**macOS 最低系统版本为 14.0。**\n\n**Upgrade warning: back up the NomiFun data directory before upgrading.** This release retains the destructive baseline upgrade introduced in v0.8.2: historical databases outside the current canonical migration chain are automatically retired together with managed side stores and replaced with a fresh dataset. Old conversations, model settings, credentials, and other database configuration are not imported. Sessions on the currently supported migration chain are preserved through normal migrations. **macOS requires version 14.0 or later.**\n\n## macOS Packages / macOS 安装包\n\n- Apple Silicon：`NomiFun_0.8.12_aarch64.dmg`。\n- Intel：`NomiFun_0.8.12_x64.dmg`。\n- Apple Silicon: use `NomiFun_0.8.12_aarch64.dmg`.\n- Intel: use `NomiFun_0.8.12_x64.dmg`.\n\n## 中文\n\n- 新增伙伴与机器人独立角色，以及多会话切换、命名和归档；同一伙伴的会话共享有界的最新记忆和近期情境，机器人可异步委派电脑任务，并将结果回复到原设备会话。\n- 完善 Agent 工作台能力目录，保留用户明确选择的能力，并在保存、资源配置和执行时使用一致的授权。\n- 对话过程隐藏私有工具正文，规范会话存储复用重复工具内容，同时保留历史读取与恢复语义。\n- 修复浏览器任务的输入归属，覆盖整个使用浏览器的回合，避免任务中途丢失输入控制。\n- Custom 与 New API 模型在确认模型 ID 后自动执行一次真实 Agent 验证；区分密钥拒绝、模型权限、配额和超时等失败原因，端点连通性探测不再被误报为模型可用。\n\n## English\n\n- Added independent companion and robot roles, plus session switching, naming and archiving. Sessions belonging to the same companion share bounded current memory and recent context; robots can delegate desktop tasks asynchronously and receive results in the originating device session.\n- Expanded the Agent workbench capability catalog and preserved explicit capability selections consistently through saving, resource configuration and execution.\n- Hid private tool bodies in conversation projections and deduplicated canonical tool content while preserving history and recovery semantics.\n- Retained browser input ownership for the full browser-using turn so control is not released partway through a task.\n- Automatically verified Custom and New API models with one real Agent round trip after the model ID is confirmed. Failures distinguish rejected keys, model permissions, quota and timeouts; endpoint reachability no longer claims that a model is available.",
-  "pub_date": "2026-10-16T20:32:25.508Z",
+  "pub_date": "2026-10-17T02:22:04.426Z",
   "platforms": {
     "darwin-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODBpVXlNbVo4WDFTRzNKdmt4LzFnOVdUMUErVFpPaHNJMDFacUhNZ1NwVEN0VFFUVHNFbi9zYWxGRitnQ1UyT1BEcy85eEZHV2RJUWpwYW1Ia1NHeVFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTc1NjAwCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CldvRTRCRVN6MUM3aFl3Nndwa3ZOQkQzVEIwQURyYm8wSDNRR1RsdlBQTWxmaExRRldvNmkxWWpZcm1vUVE0WHFwTDNuT1lRL1FGTFFJQ2xLaUlra0N3PT0K",
@@ -14,6 +14,22 @@
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODd4TWFJZ1JqaUxTYUNnZFpxcUpaWk9wUGR5MklzMEFyQm9GUWVKMElLS3plWGYzL2JZT2NaU2JEZ2FtQW94enFFU2FSbjNObVkrYy9QS3pBelNVd0FnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTgyNzAxCWZpbGU6Tm9taUZ1bl8wLjguMTJfeDY0LXNldHVwLmV4ZQpuMFR0cEg5NjdIRWZWTVB5TXVPMXM5b0tZNUU2N0NCK1JvaWhoZTJtckZEUVloU2RDazl2M1RaQ255QmZNeVBtelhvQktpV0RLa1FhRDF0TXg0THlCZz09Cg==",
       "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.12/NomiFun_0.8.12_x64-setup.exe"
+    },
+    "linux-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODN3MzZPZEJ3blNmYzFDZlNnTW5JSXY3bGNITG1vMi9pTlRvRkN6K0dVNlRUOVE0c3dsY01WNTNkOXl1ZHlaSE5SL2s0RW5FaEY0MkpwUlpoSzN1T2c4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMjAzNzIyCWZpbGU6Tm9taUZ1bl8wLjguMTJfYW1kNjQuQXBwSW1hZ2UKRmx2UENnSVVTWTAwcCtSVDZoQnI4eG9xYjhmejNzSklGSVgzcThZYVRUcWtiblJubTJpZlkzZmllUHFTcFZOZ2JNNjBPbjN2ZnB2SmxkZE5ZcnpNQ1E9PQo=",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.12/NomiFun_0.8.12_amd64.AppImage"
+    },
+    "linux-x86_64-appimage": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODN3MzZPZEJ3blNmYzFDZlNnTW5JSXY3bGNITG1vMi9pTlRvRkN6K0dVNlRUOVE0c3dsY01WNTNkOXl1ZHlaSE5SL2s0RW5FaEY0MkpwUlpoSzN1T2c4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMjAzNzIyCWZpbGU6Tm9taUZ1bl8wLjguMTJfYW1kNjQuQXBwSW1hZ2UKRmx2UENnSVVTWTAwcCtSVDZoQnI4eG9xYjhmejNzSklGSVgzcThZYVRUcWtiblJubTJpZlkzZmllUHFTcFZOZ2JNNjBPbjN2ZnB2SmxkZE5ZcnpNQ1E9PQo=",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.12/NomiFun_0.8.12_amd64.AppImage"
+    },
+    "linux-x86_64-rpm": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHhCRnl4M20xVTZ2eGlyUVF2NE53V29rM0o5eXpCTk8ySE90MVBHUmQwTnEwZ1ZBc2IrVXliS3FpeXZSNTBWYjhUQ2x3U01SZEw2TkhZSW9NZ0Y5V1FRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMjAzNzIyCWZpbGU6Tm9taUZ1bi0wLjguMTItMS54ODZfNjQucnBtCnlPbm5BQmdnNjZJMUhWOENXR0owU1M5b2RuaWY3NUtOenRIMk5jdzU2QzMySHFub3lTcDFpMVZJaUdVRHUvaStjN20zMkkzbERjRUliODZWSlR1MkFBPT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.12/NomiFun-0.8.12-1.x86_64.rpm"
+    },
+    "linux-x86_64-deb": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODN0cWl4OEd5c2hET1FwbGlIL0c4TXduam5rOVdhVGpQSmNBOFBxTCtqWC9rOWdISHkrbUVxYTVwT3R5ZHZ6TmVrdDV6R29jYTN6YnorOFB6aVdHQ3dVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMjAzNzIyCWZpbGU6Tm9taUZ1bl8wLjguMTJfYW1kNjQuZGViCml6NXNYSG1EdFMyUmRLVWJDOE9tbDlwaS9xY0toWG0vc0V3MlJFQWUvaVloR1hiK3dUMmtUVjR6T1pFNTlCMjlDcmVka2Z3aGhJc2tnN2FQVHZYdkRBPT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.12/NomiFun_0.8.12_amd64.deb"
     }
   }
 }
