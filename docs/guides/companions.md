@@ -148,6 +148,22 @@ new session. Inspecting another session does not grant control over its tasks;
 questions and approvals still require explicit handling for the corresponding
 task.
 
+### Stopping delegated work
+
+The delegation card in the chat and its task detail both provide **Stop
+collaboration**. This cancels the collaboration and its unfinished subtasks,
+including work that is running, waiting for input, paused or being planned.
+**Back to main conversation** changes the view while the work continues;
+stopping the main reply also does not cancel work already delegated. The task
+history and confirmed results remain available after cancellation, and you can
+return to the main conversation to submit another request.
+
+If an interruption leaves the execution outcome unconfirmed, the detail shows
+a review warning and a stop control. A normal answer or automatic retry cannot
+resume that state because it could repeat operations that already happened.
+Stopping does not undo browser clicks, file changes or other completed effects;
+unconfirmed operations still need review.
+
 ### Multiple desktop companions on screen
 
 Every companion with the desktop-companion switch enabled gets its own desktop

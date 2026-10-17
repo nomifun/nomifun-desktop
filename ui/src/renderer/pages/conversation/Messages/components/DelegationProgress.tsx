@@ -11,8 +11,10 @@ import { useTranslation } from 'react-i18next';
 import { latestAttemptForStep } from '@/common/types/agentExecution/agentExecutionTypes';
 import type { OpenStepPayload } from '../../execution/DagCanvas';
 import type { ConversationDelegation } from '../conversationDelegationModel';
+import ExecutionStopControl from '../../execution/ExecutionStopControl';
+import { attemptRecoveryReview } from '../../execution/attemptRecoveryReview';
 
-/** Read-only progress; opening a task reuses the existing attempt transcript projection. */
+/** Collaboration progress and cancellation; task inspection reuses its transcript. */
 const DelegationProgress: React.FC<{
   delegation: ConversationDelegation;
   projectStep: (payload: OpenStepPayload) => void;
@@ -29,6 +31,8 @@ const DelegationProgress: React.FC<{
       {steps.length > 0 && <span className='conversation-delegation__count'>
         {t('agentExecution.progress.summary', { done: completed, total: steps.length })}
       </span>}
+      {detail && <ExecutionStopControl key={delegation.executionId} executionId={delegation.executionId}
+        executionVersion={detail.execution.version} status={detail.execution.status} refetch={refetch} />}
     </div>
     {!steps.length && <div className='conversation-delegation__empty' role='status'>
       {delegation.unfinished && <Spin size={12} />}
@@ -42,6 +46,7 @@ const DelegationProgress: React.FC<{
       const canOpen = Boolean(attempt?.conversation_id);
       const Header = canOpen ? 'button' : 'div';
       const status = attempt?.status === 'queued' && step.status === 'running' ? 'pending' : step.status;
+      const recoveryReview = attemptRecoveryReview(attempt?.runtime_state);
       return <div key={step.step_id} className={`conversation-delegation__task conversation-delegation__task--${status}`}>
         <Header type={canOpen ? 'button' : undefined} className='conversation-delegation__row'
           onClick={canOpen ? () => projectStep({ step, attempt, participant, participants: detail?.participants ?? [],
@@ -54,10 +59,12 @@ const DelegationProgress: React.FC<{
             <span className='conversation-delegation__name'>{step.title}</span>
             {participantLabel && <span className='conversation-delegation__participant'>{participantLabel}</span>}
           </span>
-          <span className='conversation-delegation__status'>{t(`agentExecution.status.step.${status}`)}</span>
+          <span className='conversation-delegation__status'>{t(recoveryReview && status === 'waiting_input'
+            ? 'agentExecution.recovery.title' : `agentExecution.status.step.${status}`)}</span>
           {canOpen && <Right theme='outline' size='12' />}
         </Header>
-        {step.status === 'waiting_input' && attempt?.question && <p className='conversation-delegation__note'>{attempt.question}</p>}
+        {step.status === 'waiting_input' && (recoveryReview || attempt?.question) && <p className='conversation-delegation__note'>
+          {recoveryReview ? t('agentExecution.recovery.description') : attempt?.question}</p>}
         {step.status === 'failed' && attempt?.error && <p className='conversation-delegation__note'>{attempt.error}</p>}
       </div>;
     })}

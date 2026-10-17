@@ -918,10 +918,29 @@ impl ExecutionScheduler {
             // Decision answers and steers are write-ahead effects in attempt
             // runtime_state.  Recover them before classifying a running
             // attempt as process-interrupted.
-            while self
-                .process_one_pending_conversation_effect(owner_id, execution_id, &lease, &mut running_jobs, &mut in_flight_step_ids)
-                .await?
-            {}
+            loop {
+                if self.inner.deps.lifecycle.is_cancelled() || *cancelled.borrow() {
+                    return Ok(SchedulerLoopExit::Normal);
+                }
+                if *lease_loss.borrow() {
+                    return Ok(SchedulerLoopExit::LeaseLost);
+                }
+                // Session control can itself stall while the native owner is
+                // stopping. Keep its write-ahead intent pending, and allow
+                // this scheduler generation to stop and release its lease.
+                let delivered = tokio::select! {
+                    biased;
+                    _ = cancelled.changed() => return Ok(SchedulerLoopExit::Normal),
+                    _ = self.inner.deps.lifecycle.cancelled() => return Ok(SchedulerLoopExit::Normal),
+                    _ = lease_loss.changed() => return Ok(SchedulerLoopExit::LeaseLost),
+                    result = self.process_one_pending_conversation_effect(
+                        owner_id, execution_id, &lease, &mut running_jobs, &mut in_flight_step_ids,
+                    ) => result?,
+                };
+                if !delivered {
+                    break;
+                }
+            }
             self.recover_interrupted(owner_id, execution_id, &lease, &in_flight_step_ids).await?;
             let mut deferred_error: Option<AppError> = None;
             loop {
@@ -974,10 +993,16 @@ impl ExecutionScheduler {
                     | AgentExecutionStatus::Failed
                     | AgentExecutionStatus::Cancelled => return Ok(SchedulerLoopExit::Normal),
                 }
-                if self
-                    .process_one_pending_conversation_effect(owner_id, execution_id, &lease, &mut running_jobs, &mut in_flight_step_ids)
-                    .await?
-                {
+                let delivered = tokio::select! {
+                    biased;
+                    _ = cancelled.changed() => return Ok(SchedulerLoopExit::Normal),
+                    _ = self.inner.deps.lifecycle.cancelled() => return Ok(SchedulerLoopExit::Normal),
+                    _ = lease_loss.changed() => return Ok(SchedulerLoopExit::LeaseLost),
+                    result = self.process_one_pending_conversation_effect(
+                        owner_id, execution_id, &lease, &mut running_jobs, &mut in_flight_step_ids,
+                    ) => result?,
+                };
+                if delivered {
                     continue;
                 }
                 if self.ensure_work_dir(owner_id, &mut detail, &lease).await? {
@@ -3968,6 +3993,9 @@ mod tests {
         fail_report_once: AtomicBool,
         report_operations: Mutex<Vec<String>>,
         fail_stop_once: AtomicBool,
+        block_stop: AtomicBool,
+        stop_started: AtomicBool,
+        cancelled_conversations: Mutex<Vec<String>>,
         conversation_operations: Mutex<Vec<String>>,
     }
 
@@ -3976,8 +4004,9 @@ mod tests {
         async fn cancel_attempt(
             &self,
             _owner_id: &str,
-            _conversation_id: &str,
+            conversation_id: &str,
         ) -> Result<(), AppError> {
+            self.cancelled_conversations.lock().unwrap().push(conversation_id.to_owned());
             Ok(())
         }
 
@@ -4001,6 +4030,10 @@ mod tests {
             _target_operation_id: &str,
         ) -> Result<(), AppError> {
             self.conversation_operations.lock().unwrap().push(operation_id.to_owned());
+            self.stop_started.store(true, Ordering::SeqCst);
+            if self.block_stop.load(Ordering::SeqCst) {
+                futures::future::pending::<()>().await;
+            }
             if self.fail_stop_once.swap(false, Ordering::SeqCst) {
                 return Err(AppError::Timeout("fixture stop failed".into()));
             }
@@ -4772,6 +4805,152 @@ mod tests {
         assert!(!scheduler.process_one_pending_conversation_effect(&owner, &execution_id, &lease, &mut jobs, &mut in_flight).await.unwrap());
         assert_eq!(*effects.conversation_operations.lock().unwrap(), ["stop-id", "stop-id", "steer-id"]);
         assert!(scheduler.detail(&owner, &execution_id).await.unwrap().attempts[0].runtime_state.is_none());
+        scheduler.shutdown().await.unwrap();
+        pool.close().await;
+    }
+
+    async fn start_harness_attempt(
+        scheduler: &ExecutionScheduler,
+        repository: &SqliteAgentExecutionRepository,
+        owner: &str,
+        execution_id: &str,
+        data_dir: &TempDir,
+        title: &str,
+        runtime_state: Option<String>,
+    ) -> (String, String, String, SqlitePool) {
+        let detail = scheduler.detail(owner, execution_id).await.unwrap();
+        let step = detail.steps.iter().find(|step| step.title == title).unwrap();
+        let created = repository.create_attempt(
+            owner, execution_id, &step.step_id, step.version, None,
+            &CreateAgentExecutionAttemptParams {
+                participant_id: step.assigned_participant_id.clone(), start_immediately: false,
+                trigger_reason: "interruption-fixture".into(), effective_config: "{}".into(),
+                retry_after: None, runtime_state,
+            }, &system_event(AgentExecutionEventKind::AttemptChanged, Some(&step.step_id), None, json!({})),
+        ).await.unwrap();
+        let attempt = &created.current_attempt.as_ref().unwrap().attempt;
+        let pool = sqlx::SqlitePool::connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new().filename(data_dir.path().join("harness.sqlite")),
+        ).await.unwrap();
+        let conversation_id = generate_id();
+        sqlx::query(
+            "INSERT INTO agent_sessions (agent_session_id,owner_ref_json,state,title,archived,pinned,agent_binding_json,next_seq,created_at) \
+             VALUES (?,?,'live','interrupted attempt',0,0,'{}',1,1)"
+        ).bind(&conversation_id).bind(json!({"principal_kind":"user","principal_id":owner}).to_string())
+            .execute(&pool).await.unwrap();
+        repository.start_attempt(
+            owner, execution_id, &step.step_id, created.step.version,
+            &attempt.attempt_id, attempt.version, &conversation_id,
+            AgentExecutionAttemptSessionKind::ChildAttempt, None,
+            &system_event(AgentExecutionEventKind::AttemptChanged, Some(&step.step_id), Some(&attempt.attempt_id), json!({})),
+        ).await.unwrap();
+        (step.step_id.clone(), attempt.attempt_id.clone(), conversation_id, pool)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn blocked_turn_stop_releases_scheduler_on_cancel_without_acknowledging_the_intent() {
+        let runner = Arc::new(HarnessAttemptRunner::overlap_probe());
+        let (mut scheduler, repository, execution_id, data_dir, owner) = make_scheduler_harness(
+            runner.clone(), &["blocked-stop"], &[], 1, AdaptationPolicy::Fixed, None,
+        ).await;
+        let effects = Arc::new(NoopConversationEffects::default());
+        effects.block_stop.store(true, Ordering::SeqCst);
+        Arc::get_mut(&mut scheduler.inner).unwrap().deps.conversation_effects = effects.clone();
+        let pending = AttemptConversationEffects {
+            pending_conversation_effects: vec![PendingConversationEffect::StopTurn {
+                operation_id: "blocked-stop-id".into(), target_operation_id: "original-turn".into(),
+            }],
+            ..Default::default()
+        };
+        let (_, attempt_id, _, pool) = start_harness_attempt(
+            &scheduler, &repository, &owner, &execution_id, &data_dir, "blocked-stop", Some(pending.encode().unwrap()),
+        ).await;
+        scheduler.start(owner.clone(), execution_id.clone());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !effects.stop_started.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.expect("scheduler reached the blocked canonical Turn stop");
+        scheduler.stop(&execution_id);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while scheduler.inner.active.contains_key(&execution_id) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.expect("a blocked control delivery must not hold the stopped scheduler or its lease");
+        let current = scheduler.detail(&owner, &execution_id).await.unwrap();
+        let retained = current.attempts.iter().find(|entry| entry.attempt_id == attempt_id).unwrap();
+        assert_eq!(retained.status, ExecutionAttemptStatus::Running);
+        assert_eq!(serde_json::from_value::<AttemptConversationEffects>(retained.runtime_state.clone().unwrap()).unwrap(), pending);
+        assert_eq!(runner.call_count("blocked-stop"), 0, "cancelling transport cannot replay the interrupted Turn");
+        let row = repository.get_execution(&owner, &execution_id).await.unwrap().unwrap();
+        assert!(row.lease_owner.is_none());
+        scheduler.shutdown().await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn interrupted_turn_review_can_be_cancelled_after_its_child_link_was_retired() {
+        let runner = Arc::new(HarnessAttemptRunner::overlap_probe());
+        let (mut scheduler, repository, execution_id, data_dir, owner) = make_scheduler_harness(
+            runner.clone(), &["interrupted", "not-started"], &[("interrupted", "not-started")],
+            1, AdaptationPolicy::Fixed, None,
+        ).await;
+        let effects = Arc::new(NoopConversationEffects::default());
+        Arc::get_mut(&mut scheduler.inner).unwrap().deps.conversation_effects = effects.clone();
+        let (_, attempt_id, conversation_id, pool) = start_harness_attempt(
+            &scheduler, &repository, &owner, &execution_id, &data_dir, "interrupted", None,
+        ).await;
+        let operation = format!("turn:user:{owner}:{conversation_id}:{attempt_id}:initial-turn");
+        let started_event = generate_id();
+        sqlx::query(
+            "INSERT INTO agent_events(session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,inline_json) \
+             VALUES(?,1,?,'interrupted-fixture',?,'turn/started',1,?,'{}')"
+        ).bind(&conversation_id).bind(&started_event).bind(&started_event).bind(&operation)
+            .execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO agent_turns(session_id,turn_id,operation_id,idempotency_key,state,started_event_id,accepted_at,started_at) \
+             VALUES(?,?,?,?,'running',?,1,1)"
+        ).bind(&conversation_id).bind(&operation).bind(&operation).bind(&operation).bind(&started_event)
+            .execute(&pool).await.unwrap();
+        scheduler.start(owner.clone(), execution_id.clone());
+        let waiting = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let current = scheduler.detail(&owner, &execution_id).await.unwrap();
+                if current.execution.status == AgentExecutionStatus::WaitingInput
+                    && !scheduler.inner.active.contains_key(&execution_id) {
+                    break current;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.expect("interrupted Turn is parked for review without model replay");
+        let interrupted = waiting.attempts.iter().find(|entry| entry.attempt_id == attempt_id).unwrap();
+        let review = interrupted.runtime_state.clone().unwrap();
+        assert_eq!(review["review_blocked"]["receipt_state"], "running");
+        assert_eq!(review["review_blocked"]["operation_id"], operation);
+        let links = repository.resolve_conversation_link(&owner, &conversation_id).await.unwrap();
+        assert!(links.iter().all(|link| !link.active));
+        assert_eq!(*effects.cancelled_conversations.lock().unwrap(), [conversation_id.clone()],
+            "retiring the recovery link must still dispatch its child cleanup");
+        repository.cancel_execution(
+            &owner, &execution_id, waiting.execution.version,
+            &system_event(AgentExecutionEventKind::StatusChanged, None, None,
+                json!({"status":"cancelled","reason":"cancelled_by_caller"})),
+        ).await.unwrap();
+        scheduler.stop(&execution_id);
+        scheduler.reconcile_conversation_cleanup_strict(&execution_id).await.unwrap();
+        let cancelled = scheduler.detail(&owner, &execution_id).await.unwrap();
+        assert_eq!(cancelled.execution.status, AgentExecutionStatus::Cancelled);
+        assert!(cancelled.steps.iter().all(|step| step.status == ExecutionStepStatus::Cancelled));
+        let interrupted = cancelled.attempts.iter().find(|entry| entry.attempt_id == attempt_id).unwrap();
+        assert_eq!(interrupted.status, ExecutionAttemptStatus::Cancelled);
+        assert!(interrupted.question.is_none());
+        assert_eq!(interrupted.runtime_state.as_ref(), Some(&review), "cancellation preserves the unknown prior effect evidence");
+        assert!(repository.list_pending_conversation_cleanups(Some(&execution_id), 100).await.unwrap().is_empty());
+        assert_eq!(runner.call_count("interrupted"), 0);
+        assert_eq!(runner.call_count("not-started"), 0);
+        let state: String = sqlx::query_scalar("SELECT state FROM agent_turns WHERE operation_id=?")
+            .bind(&operation).fetch_one(&pool).await.unwrap();
+        assert_eq!(state, "running", "an external cleanup adapter cannot fabricate a canonical terminal receipt");
         scheduler.shutdown().await.unwrap();
         pool.close().await;
     }

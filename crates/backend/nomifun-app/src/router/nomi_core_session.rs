@@ -185,6 +185,14 @@ pub(crate) struct NomiCoreSessionOwner {
     session_operation_locks:
         Arc<DashMap<String, Arc<tokio::sync::RwLock<()>>>>,
     companion_lifecycle_locks: Arc<DashMap<String, Arc<tokio::sync::RwLock<()>>>>,
+    #[cfg(test)]
+    cancellation_signal_barrier: std::sync::Mutex<Option<(AgentSessionId, Arc<NativeCancellationTestBarrier>)>>,
+}
+
+#[cfg(test)]
+pub(crate) struct NativeCancellationTestBarrier {
+    pub(crate) entered: tokio::sync::Notify,
+    pub(crate) release: tokio::sync::Notify,
 }
 
 /// Presentation context captured from the host-admitted binding. Error
@@ -751,11 +759,20 @@ impl NomiCoreSessionOwner {
             creation_service,
             session_operation_locks: Arc::new(DashMap::new()),
             companion_lifecycle_locks: Arc::new(DashMap::new()),
+            #[cfg(test)]
+            cancellation_signal_barrier: std::sync::Mutex::new(None),
         }
     }
 
     pub(crate) fn canonical(&self) -> &CanonicalAgentSessionOwner {
         &self.canonical
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_next_cancellation_signal(&self, session: &AgentSessionId) -> Arc<NativeCancellationTestBarrier> {
+        let barrier = Arc::new(NativeCancellationTestBarrier { entered: tokio::sync::Notify::new(), release: tokio::sync::Notify::new() });
+        *self.cancellation_signal_barrier.lock().unwrap() = Some((session.clone(), barrier.clone()));
+        barrier
     }
 
     pub(crate) fn install_companion_service(&self, service: &Arc<nomifun_companion::CompanionService>) -> Result<(), AppError> {
@@ -3047,12 +3064,37 @@ impl NomiCoreSessionOwner {
         target_operation_id: &OperationId,
         reason: nomifun_common::AgentKillReason,
     ) -> Result<AgentMutationReceipt, AppError> {
-        let receipt = self.canonical.cancel_exact_turn(
-            &PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() },
-            session_id, idempotency_key, target_operation_id,
-        ).await?;
-        self.cancel_receipted_runtime_turn(session_id, &receipt, reason).await?;
-        Ok(receipt)
+        let canonical = self.canonical.clone();
+        let runtimes = self.runtime_sessions.clone();
+        let engines = self.native_engines.get().and_then(std::sync::Weak::upgrade);
+        let principal = PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() };
+        let session = session_id.clone(); let target = target_operation_id.clone(); let key = idempotency_key.to_owned();
+        #[cfg(test)]
+        let barrier = {
+            let mut installed = self.cancellation_signal_barrier.lock().unwrap();
+            if installed.as_ref().is_some_and(|(id, _)| id == &session) { installed.take().map(|(_, barrier)| barrier) }
+                else { None }
+        };
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        // The scheduler may stop waiting after cancellation/lease loss. Own
+        // the canonical mutation itself, including commit acknowledgement,
+        // through the exact native signal so dropping that waiter cannot leave
+        // a cancelled canonical Turn running without its cancellation owner.
+        if !self.background_tasks.spawn(Box::pin(async move {
+            let result = async {
+                let receipt = canonical.cancel_exact_turn(&principal, &session, &key, &target).await?;
+                #[cfg(test)]
+                if let Some(barrier) = barrier { barrier.entered.notify_one(); barrier.release.notified().await; }
+                Self::signal_receipted_runtime_turn(canonical.store(), runtimes.as_ref(), engines,
+                    &session, &receipt, reason).await?;
+                Ok(receipt)
+            }.await;
+            if let Err(error) = &result { tracing::warn!(agent_session_id=session.as_ref(), %error, "exact Turn cancellation remains unacknowledged"); }
+            let _ = sender.send(result);
+        })) {
+            return Err(AppError::Conflict("Turn cancellation owner is shutting down".into()));
+        }
+        receiver.await.map_err(|_| AppError::Conflict("Turn cancellation owner ended without its exact receipt".into()))?
     }
 
     pub(crate) async fn cancel_management_exact_turn(
@@ -3129,16 +3171,28 @@ impl NomiCoreSessionOwner {
         receipt: &AgentMutationReceipt,
         reason: nomifun_common::AgentKillReason,
     ) -> Result<(), AppError> {
+        Self::signal_receipted_runtime_turn(self.canonical.store(), self.runtime_sessions.as_ref(),
+            self.native_engines.get().and_then(std::sync::Weak::upgrade), session_id, receipt, reason).await
+    }
+
+    async fn signal_receipted_runtime_turn(
+        store: &nomifun_agent_session::AgentSessionStore,
+        runtimes: &dyn AgentRuntimeSessions,
+        engines: Option<Arc<super::engine_session_host::EngineSessionHost>>,
+        session_id: &AgentSessionId,
+        receipt: &AgentMutationReceipt,
+        reason: nomifun_common::AgentKillReason,
+    ) -> Result<(), AppError> {
         // The mutation receipt fixes the cancelled Turn, including replays.
         // Native resume can advance that Turn's generation beyond its original
         // start sequence; resolve the exact generation from canonical storage.
-        let generation = self.canonical.store().native_execution_generation(
+        let generation = store.native_execution_generation(
             session_id, &receipt.target_operation_id,
         ).await.map_err(agent_session_store_error)?;
-        if let Some(engines) = self.native_engines.get().and_then(std::sync::Weak::upgrade) {
+        if let Some(engines) = engines {
             engines.cancel_knowledge_writeback(session_id, &receipt.target_operation_id)?;
         }
-        self.runtime_sessions.cancel_runtime_turn(
+        runtimes.cancel_runtime_turn(
             session_id.as_ref(),
             generation,
             Some(reason),
@@ -4687,7 +4741,35 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         owner_id: &str,
         conversation_id: &str,
     ) -> Result<(), AppError> {
-        self.cancel_session(owner_id, conversation_id).await
+        let session = AgentSessionId::from(conversation_id.to_owned());
+        // Capture native identity before any await. Canonical cancellation
+        // clears active_turn_id before the native signal; an empty head alone
+        // therefore cannot acknowledge this Attempt's runtime cleanup.
+        let generation = self.runtime_sessions.active_turn_generation(conversation_id);
+        let observation = self.canonical.get(&PrincipalRef {
+            principal_kind: "user".into(), principal_id: owner_id.into(),
+        }, &session).await?;
+        let target = if let Some(generation) = generation {
+            let operations: Vec<String> = sqlx::query_scalar(
+                "SELECT operation_id FROM agent_turns WHERE session_id=? \
+                 AND (CASE WHEN execution_generation>0 THEN execution_generation ELSE started_at END)=? LIMIT 2",
+            ).bind(conversation_id).bind(i64::try_from(generation).map_err(|_| AppError::Conflict("native cleanup generation exceeds canonical range".into()))?)
+                .fetch_all(&self.pool).await.map_err(|error| AppError::Internal(error.to_string()))?;
+            let [operation] = operations.as_slice() else {
+                return Err(AppError::Conflict("Attempt cleanup has no unique exact native Turn".into()));
+            };
+            Some(OperationId::from(operation.clone()))
+        } else { observation.head.active_turn_id.map(OperationId::from) };
+        let Some(target) = target else { return Ok(()); };
+        let receipt = self.cancel_exact_turn(owner_id, &session,
+            &format!("execution-cleanup:{}", target.as_ref()), &target,
+            nomifun_common::AgentKillReason::UserCancelled).await?;
+        let cancelled_generation = self.canonical.store().native_execution_generation(&session, &receipt.target_operation_id)
+            .await.map_err(agent_session_store_error)?;
+        if self.runtime_sessions.active_turn_generation(conversation_id) == Some(cancelled_generation) {
+            return Err(AppError::Conflict("Attempt native cleanup is still running for the exact cancelled Turn".into()));
+        }
+        Ok(())
     }
 
     async fn cancel_turn_for_execution(

@@ -412,6 +412,7 @@
 .conversation-delegation__heading {
   min-height: 28px;
   font-size: 14px;
+  flex-wrap: wrap;
 }
 
 .conversation-delegation__count {

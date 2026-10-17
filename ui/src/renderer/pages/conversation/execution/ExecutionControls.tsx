@@ -7,12 +7,12 @@
 import React, { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import classNames from 'classnames';
-import { Popconfirm } from '@arco-design/web-react';
-import { Loading, Pause, PauseOne, PlayOne, Refresh } from '@icon-park/react';
+import { Loading, PauseOne, PlayOne, Refresh } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { refreshOnVersionConflict } from './refreshOnVersionConflict';
 import { isTerminalExecutionStatus } from './executionStatusMeta';
+import ExecutionStopControl from './ExecutionStopControl';
 import type { ExecutionId } from '@/common/types/ids';
 
 /** A single status-gated header control. Never a bare `<button>` — a
@@ -22,8 +22,9 @@ const HeaderControl: React.FC<{
   onClick: () => void;
   busy: boolean;
   tone?: 'primary' | 'neutral' | 'danger';
+  title?: string;
   children: React.ReactNode;
-}> = ({ label, onClick, busy, tone = 'neutral', children }) => {
+}> = ({ label, onClick, busy, tone = 'neutral', title, children }) => {
   const primary = tone === 'primary';
   const hover =
     tone === 'danger'
@@ -37,6 +38,7 @@ const HeaderControl: React.FC<{
       tabIndex={0}
       aria-label={label}
       aria-disabled={busy}
+      title={title}
       onClick={busy ? undefined : onClick}
       onKeyDown={(e) => {
         if (busy) return;
@@ -68,9 +70,10 @@ export const ExecutionControls: React.FC<{
   executionVersion: number;
   status: string;
   inFlightCount?: number;
+  resumeBlocked?: boolean;
   refetch: () => Promise<void>;
   onReplan: () => void;
-}> = ({ executionId, executionVersion, status, inFlightCount, refetch, onReplan }) => {
+}> = ({ executionId, executionVersion, status, inFlightCount, resumeBlocked = false, refetch, onReplan }) => {
   const { t } = useTranslation();
   const [message, msgCtx] = useArcoMessage();
   const [busy, setBusy] = useState(false);
@@ -120,16 +123,6 @@ export const ExecutionControls: React.FC<{
       'agentExecution.controls.resumeOk',
       'agentExecution.controls.resumeError',
     );
-  const onCancel = () =>
-    void executeAction(
-      () =>
-        ipcBridge.agentExecution.cancel.invoke({
-          execution_id: executionId,
-          updates: { expected_version: executionVersion },
-        }),
-      'agentExecution.controls.cancelOk',
-      'agentExecution.controls.cancelError',
-    );
 
   return (
     <div className='flex shrink-0 items-center gap-8px'>
@@ -152,7 +145,8 @@ export const ExecutionControls: React.FC<{
         </HeaderControl>
       )}
       {status === 'paused' && (
-        <HeaderControl label={t('agentExecution.controls.resume')} onClick={onResume} busy={busy}>
+        <HeaderControl label={t('agentExecution.controls.resume')} onClick={onResume} busy={busy || resumeBlocked}
+          title={resumeBlocked ? t('agentExecution.recovery.description') : undefined}>
           <PlayOne theme='outline' size='14' strokeWidth={3} />
         </HeaderControl>
       )}
@@ -166,36 +160,8 @@ export const ExecutionControls: React.FC<{
           })}
         </span>
       )}
-      {!isTerminal && (
-        <Popconfirm
-          focusLock
-          title={t('agentExecution.controls.cancelConfirm')}
-          okText={t('agentExecution.controls.confirm')}
-          cancelText={t('agentExecution.controls.back')}
-          onOk={onCancel}
-        >
-          {/* Popconfirm needs a single focusable child; the control is busy-aware. */}
-          <div
-            role='button'
-            tabIndex={0}
-            aria-label={t('agentExecution.controls.cancel')}
-            aria-disabled={busy}
-            onKeyDown={(event) => {
-              if (busy || (event.key !== 'Enter' && event.key !== ' ')) return;
-              event.preventDefault();
-              event.currentTarget.click();
-            }}
-            className='flex h-30px shrink-0 cursor-pointer select-none items-center gap-5px rd-8px border border-solid border-[var(--border-base)] px-10px text-12px font-500 text-t-secondary transition-all duration-150 hover:border-danger hover:text-danger'
-            style={{
-              opacity: busy ? 0.6 : undefined,
-              pointerEvents: busy ? 'none' : undefined,
-            }}
-          >
-            <Pause theme='outline' size='14' strokeWidth={3} />
-            <span>{t('agentExecution.controls.cancel')}</span>
-          </div>
-        </Popconfirm>
-      )}
+      <ExecutionStopControl key={executionId} executionId={executionId} executionVersion={executionVersion}
+        status={status} refetch={refetch} disabled={busy} onBusyChange={setBusy} />
     </div>
   );
 };
