@@ -4,22 +4,13 @@
 //! plus its audio at a time). Splitting eagerly is what keeps first-audio latency
 //! low, so this runs on every stream chunk.
 //!
-//! There is no emotion channel in this text. The robot prompt once asked for a
-//! leading `[emotion:name]` marker and the model emitted `[winking]` instead, so
-//! the marker was spoken aloud and drove nothing; the prompt now forbids brackets
-//! outright and no marker is parsed anywhere. What remains is a content guard:
-//! [`nomifun_common::stage_direction::strip_stage_directions`], re-exported
-//! below, deletes a stage direction of ANY syntax, because a prohibition in a
-//! prompt is not a guarantee and the device must show normal text or nothing.
-//! It lives in `nomifun-common` because the desktop relay has to clean the same
-//! stream and must not depend on this device pipeline.
-//!
-//! What stays here is device-only — `TERMINATORS`, [`sanitize_for_speech`],
-//! [`sanitize_for_display`] and [`SentenceSplitter`] — because dropping emoji and
-//! collapsing whitespace is right for a speaker and a 128x64 OLED, and data loss
-//! anywhere else.
+//! This consumes canonical reply text without changing the source facts. The
+//! speaker and device display drop conversational decorations, stage directions
+//! and unsupported symbols. Expressions use the Session's granted device tools;
+//! there is no expression channel hidden in the spoken text.
 
 pub use nomifun_common::stage_direction::strip_stage_directions;
+use super::decorations::{guard_stages, sentence_protected_len, strip_decorations};
 
 /// Terminators that end a sentence. `\n` counts: the model uses it as a beat.
 const TERMINATORS: [char; 9] = ['。', '！', '？', '；', '!', '?', ';', '\n', '.'];
@@ -44,7 +35,9 @@ fn is_non_speech_char(ch: char) -> bool {
         | 0xFE00..=0xFE0F   // variation selectors
         | 0x200D            // zero-width joiner (glues emoji sequences)
         | 0x20E3            // combining enclosing keycap
+        | 0xE0020..=0xE007F // emoji tag sequences, including subdivision flags
         | 0x2122 | 0x2139   // ™ ℹ
+        | 0x3030 | 0x303D | 0x3297 | 0x3299 // isolated CJK emoji symbols
         | 0x203C | 0x2049   // ‼ ⁉
         | 0xFFFC | 0xFFFD   // object-replacement / replacement character
     )
@@ -56,10 +49,23 @@ fn is_non_speech_char(ch: char) -> bool {
 /// sentence that was only an emoji or only a stage direction) — the caller then
 /// skips synthesis instead of letting the engine 400 and cut the voice off.
 pub fn sanitize_for_speech(text: &str) -> String {
-    let guarded = strip_stage_directions(text);
+    // An image must be recognized before its [alt] can be mistaken for a stage
+    // direction, leaving the URL behind for the speech engine.
+    let decorated = strip_decorations(text);
+    let guarded = guard_stages(&decorated, strip_stage_directions);
     let mut out = String::with_capacity(guarded.len());
     let mut last_was_space = false;
-    for ch in guarded.chars() {
+    let mut chars = guarded.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if matches!(ch, '©' | '®') && chars.peek() == Some(&'\u{FE0F}') {
+            chars.next();
+            continue;
+        }
+        if ch.is_ascii_digit() || matches!(ch, '#' | '*') {
+            let mut sequence = chars.clone();
+            if sequence.peek() == Some(&'\u{FE0F}') { sequence.next(); }
+            if sequence.next() == Some('\u{20E3}') { chars = sequence; continue; }
+        }
         if ch.is_whitespace() {
             if !last_was_space && !out.is_empty() {
                 out.push(' ');
@@ -73,7 +79,12 @@ pub fn sanitize_for_speech(text: &str) -> String {
         out.push(ch);
         last_was_space = false;
     }
-    out.trim().to_owned()
+    let out = out.trim();
+    if !out.chars().any(char::is_alphanumeric) {
+        String::new()
+    } else {
+        out.to_owned()
+    }
 }
 
 
@@ -124,14 +135,20 @@ impl SentenceSplitter {
     /// Byte index just past the first real terminator, if any.
     fn find_terminator(&self) -> Option<usize> {
         let bytes_len = self.buf.len();
+        let mut protected_until = 0;
         for (index, ch) in self.buf.char_indices() {
+            if index < protected_until { continue; }
+            if let Some(bytes) = sentence_protected_len(&self.buf[index..]) {
+                protected_until = index + bytes;
+                continue;
+            }
             if !TERMINATORS.contains(&ch) {
                 continue;
             }
             let end = index + ch.len_utf8();
-            // An ASCII '.' surrounded by digits is a decimal point, not a full
-            // stop, and one that trails a digit at the very end of the buffer may
-            // still become one ("3." + "5"), so that case waits for more input.
+            // A dot inside a decimal or filename is content. A trailing dot
+            // after a number, path or underscored token waits so `T_T.rs`
+            // cannot become a face followed by a separately spoken extension.
             if ch == '.' {
                 let before = self.buf[..index].chars().next_back();
                 let after = if end < bytes_len {
@@ -139,11 +156,13 @@ impl SentenceSplitter {
                 } else {
                     None
                 };
-                if before.is_some_and(|c| c.is_ascii_digit()) {
-                    if after.is_some_and(|c| c.is_ascii_digit()) {
+                if before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    if after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
                         continue;
                     }
-                    if after.is_none() {
+                    let token = self.buf[..index].split_whitespace().next_back().unwrap_or("");
+                    if after.is_none() && (before.is_some_and(|ch| ch.is_ascii_digit())
+                        || token.contains(['_', '/', '\\', '.'])) {
                         return None;
                     }
                 }
@@ -189,6 +208,7 @@ mod tests {
             "3.5 is not a sentence end"
         );
         assert_eq!(s.push(" outside.").len(), 1);
+        assert_eq!(SentenceSplitter::default().push("价格$5。下一句。"), vec!["价格$5。", "下一句。"]);
     }
 
     #[test]
@@ -208,6 +228,36 @@ mod tests {
         assert_eq!(sanitize_for_speech("北京现在是 🌤️ 挺舒服的天气呢~"), "北京现在是 挺舒服的天气呢~");
         assert_eq!(sanitize_for_speech("好耶！🎉🎉"), "好耶！");
         assert_eq!(sanitize_for_speech("👍"), "", "a lone emoji leaves nothing to say");
+    }
+
+    #[test]
+    fn sanitize_removes_complete_emoji_sequences_and_faces() {
+        for decoration in ["1️⃣", "2\u{20E3}", "#️⃣", "*️⃣", "🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}", "👩🏽‍💻", "🇨🇳", "©️", "®️", "(^_^)", "(^_^)！", "👍。", "[笑哭]！", "(•̀ᴗ•́)و", ";-)", "QAQ!", "[微笑]", "[表情包：开心]", "![smile](https://example.test/sticker.png)"] {
+            assert_eq!(sanitize_for_speech(decoration), "", "{decoration}");
+            assert_eq!(sanitize_for_display(decoration), "", "{decoration}");
+        }
+        let plain = "第1项、#标题、a * b、（正常括号）、(x > y)、https://example.test/T_T、`T_T`、![diagram](https://example.test/diagram.png)";
+        assert_eq!(sanitize_for_speech(plain), plain);
+        assert_eq!(sanitize_for_speech("完成 (^_^) ，请看结果。"), "完成 ，请看结果。");
+    }
+
+    #[test]
+    fn splitting_keeps_chunked_faces_and_images_whole_for_the_guard() {
+        let mut splitter = SentenceSplitter::default();
+        for chunk in ["(", "^_", "^)", "\n", "!", "[sm", "ile](https://example.test/sticker", ".png)", "\n", ";", "-)", "\n", "正文。"] {
+            for sentence in splitter.push(chunk) {
+                let cleaned = sanitize_for_speech(&sentence);
+                assert!(cleaned.is_empty() || cleaned == "正文。", "{cleaned:?}");
+            }
+        }
+        assert!(splitter.flush().is_none());
+        // Malformed image input cannot hold back unlimited later speech.
+        let malformed = format!("![{}正文。", "a".repeat(2100));
+        assert_eq!(SentenceSplitter::default().push(&malformed), vec!["!", &malformed[1..]]);
+        let mut literal = SentenceSplitter::default();
+        assert!(literal.push("T_T.").is_empty());
+        assert!(literal.push("rs https://example.test/T_T").is_empty());
+        assert_eq!(sanitize_for_speech(&literal.flush().unwrap()), "T_T.rs https://example.test/T_T");
     }
 
     #[test]

@@ -387,6 +387,14 @@ Store 在同一事务中更新当前 binding 并保留必要的历史引用；�
 伙伴人格与历史记忆只影响交互，不声明退役 `nomi_*` 工具或未经授权的完整能力。实际名称、参数、目标范围及完成状态来自当前 Runtime 工具目录和真实回执；延迟展示的工具通过已授权目录检索，不能因为首轮未展开就断言能力缺失。
 Canonical Runtime 的静态 persona/instructions 取本次 admitted 的确切冻结 Revision payload；
 产品人格 Context 与实时事实分别装配，旧 extra 中的记忆快照不恢复为静态模型指令。
+伙伴人格 Context 在桌面、消息渠道和机器人路径统一要求可直接朗读的自然语言，禁止颜文字、
+emoji、表情包/贴纸标记、装饰符号和动作、神态、舞台描写；人格、额外设定、记忆、历史及 Skill
+不能覆盖这项规则。后台学习、归档和技能演化不把历史装饰习惯提炼为新的回复要求。伙伴
+产品身份由已验证 canonical opening 决定；最终模型指令缺少同一规则时由 Host 补齐，不依赖
+所选个人 Agent 是否包含伙伴 Persona Context；已有规则的完整贡献移到最终指令末尾而不重写，
+也不从 extra 或预设名称取得身份。伙伴气泡
+及机器人语音消费处的过滤仅派生展示/播报文字，不改写 canonical Event/Payload、历史消息、
+模型上下文或 native checkpoint，也不改变普通 Agent 的通用内容路径。
 
 伙伴与机器人是同一 `companion_id` 的两个并存产品角色，分别选择 Agent 和模型，使用独立 Session。
 产品归属来自 typed canonical opening；明确的当前代旧伙伴 opening 仍按精确命令身份识别。

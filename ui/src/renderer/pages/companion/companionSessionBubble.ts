@@ -10,6 +10,7 @@ import { agentUserInputRequestText, isUserInputRequestPresentation, type TMessag
 import { normalizeAgentTurnOutcome, mergeAgentTurnOutcome } from '@/common/chat/turnOutcome';
 import type { AgentTurnOutcome } from '@/common/protocolBindings/AgentTurnOutcome';
 import type { ConversationId, MessageId } from '@/common/types/ids';
+import { stripCompanionReplyDecorations } from './companionReplyDecorations';
 
 export type CompanionBubblePhase = 'idle' | 'accepted' | 'running' | 'paused' | 'settled';
 
@@ -38,7 +39,7 @@ export const emptyCompanionSessionBubble = (conversationId: ConversationId | nul
   segments: new Map(), segmentRevisions: new Map(), order: [], hint: '', outcome: null, handoff: null, readError: null,
 });
 
-const joinedText = (state: CompanionSessionBubbleState): string => {
+const joinedSourceText = (state: CompanionSessionBubbleState): string => {
   if (state.readError) return state.readError;
   if (state.outcome?.kind === 'input_required') {
     return state.handoff?.requestId === state.outcome.request_id ? state.handoff.text : '';
@@ -48,6 +49,12 @@ const joinedText = (state: CompanionSessionBubbleState): string => {
   const text = ids.map(id => state.segments.get(id as MessageId) ?? '').filter(Boolean).join('\n\n').trim();
   return !state.outcome && state.handoff ? [text, state.handoff.text].filter(Boolean).join('\n\n') : text;
 };
+
+// Recompute the presentation from complete current segments on every update.
+// A decoration split across model chunks is treated identically to history;
+// segments themselves retain the source for revisions and canonical recovery.
+const joinedText = (state: CompanionSessionBubbleState): string =>
+  stripCompanionReplyDecorations(joinedSourceText(state));
 
 export const beginCompanionSessionBubble = (
   state: CompanionSessionBubbleState, turnId: MessageId, phase: 'accepted' | 'running'

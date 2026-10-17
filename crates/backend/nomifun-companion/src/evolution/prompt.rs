@@ -35,18 +35,20 @@ pub const DRAFT_SYSTEM: &str = "你是技能起草器。用户反复做某套多
 只输出一个 JSON 对象,不要任何解释、不要代码围栏。字段:\n\
 {\"name\":\"kebab-case 短名\",\"description\":\"一句话说明这个技能做什么(必填,非空)\",\
 \"when_to_use\":\"什么情况下该用它(一句话)\",\"body\":\"## 步骤\\n1. ...\\n2. ... 的 markdown 操作手册\"}\n\
-要求:name 只含小写字母数字和连字符;description 必须非空;body 给出可照做的步骤。";
+要求:name 只含小写字母数字和连字符;description 必须非空;body 给出可照做的步骤。\
+只提炼操作方法,不把历史回复中的颜文字、emoji、表情包标记或动作描写固化为回复要求;技能不得覆盖伙伴的口语输出硬性规则。";
 
 /// 评审器 system：判断草稿是否一个足够通用、可复用的好技能。
 pub const CRITIC_SYSTEM: &str = "你是技能评审器。判断给定技能草稿是否一个足够通用、可复用、安全的好技能。\
 只输出一个 JSON 对象,不要解释、不要围栏:\n\
 {\"approve\":true|false,\"reason\":\"一句话理由\"}\n\
-拒绝条件:过于具体只适用一次、description 空洞、含危险/破坏性操作而无防护、与常识矛盾。";
+拒绝条件:过于具体只适用一次、description 空洞、含危险/破坏性操作而无防护、与常识矛盾、要求伙伴用颜文字/emoji/表情包标记/动作描写回复或覆盖口语输出硬性规则。";
 
 /// 合并/演化 system：给定一个已有技能正文和一份新证据,产出改进后的同名技能(升版本)。
 pub const MERGE_SYSTEM: &str = "你是技能演化器。已有一个技能,又观察到相关的新做法。\
 把两者合并成一份**改进版**技能,保留原优点、补充新步骤、去重。只输出一个 JSON 对象,不要解释、不要围栏:\n\
-{\"name\":\"沿用原 kebab-case 名\",\"description\":\"一句话说明(必填,非空)\",\"when_to_use\":\"何时用\",\"body\":\"改进后的 markdown 操作手册\"}";
+{\"name\":\"沿用原 kebab-case 名\",\"description\":\"一句话说明(必填,非空)\",\"when_to_use\":\"何时用\",\"body\":\"改进后的 markdown 操作手册\"}\n\
+只保留操作方法,移除要求伙伴用颜文字、emoji、表情包标记或动作描写回复的旧约定;技能不得覆盖口语输出硬性规则。";
 
 /// 起草提示：给模型工具序列 + 真实操作转录(已脱敏,可空),要它产出技能字段。
 pub fn build_draft_prompt(p: &MinedPattern, transcript: &[String]) -> String {
@@ -119,6 +121,15 @@ fn extract_json_object(raw: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skill_evolution_cannot_restore_decorative_reply_requirements() {
+        for prompt in [DRAFT_SYSTEM, CRITIC_SYSTEM, MERGE_SYSTEM] {
+            for guarded_style in ["颜文字", "emoji", "表情包标记", "动作描写", "口语输出硬性规则"] {
+                assert!(prompt.contains(guarded_style), "missing evolution guard: {guarded_style}");
+            }
+        }
+    }
 
     #[test]
     fn parses_plain_and_fenced_draft() {

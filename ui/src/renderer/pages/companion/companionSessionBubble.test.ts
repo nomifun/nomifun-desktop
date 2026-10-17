@@ -29,6 +29,29 @@ const stream = (state: ReturnType<typeof emptyCompanionSessionBubble>, message: 
 const running = () => beginCompanionSessionBubble(emptyCompanionSessionBubble(conversationId), root, 'running');
 
 describe('canonical companion Turn bubble presentation', () => {
+  test('filters decorated live and recovered replies without changing their source segments', () => {
+    const source = '你好(^_^)呀🧑🏽‍💻！[表情包：开心]![笑](https://example.test/hi.gif)';
+    let state = running();
+    for (const chunk of source) state = stream(state, frame(chunk));
+    expect(state.bubble).toBe('你好呀！');
+    expect(state.segments.get(segment)).toBe(source);
+    state = settleCompanionSessionBubble(state, root, 'Done');
+    expect(state.bubble).toBe('你好呀！');
+    const saved = { id: String(segment), message_id: segment, msg_id: segment, conversation_id: conversationId,
+      turn_id: root, position: 'left', type: 'text', content: { content: source }, created_at: 100 } as TMessage;
+    const recovered = hydrateCompanionSessionBubble(running(), [saved], running());
+    expect(recovered.bubble).toBe(state.bubble);
+    expect(recovered.segments.get(segment)).toBe(source);
+    expect(saved.content).toEqual({ content: source });
+    expect(stream(state, frame('修订(^_^)后。', { replace: true })).bubble).toBe('修订后。');
+  });
+  test('decoration-only replies settle without an endless typing bubble', () => {
+    const state = stream(running(), frame('🧑🏽‍💻(^_^)[表情包：微笑]'));
+    expect(state.bubble).toBe('…');
+    const settled = settleCompanionSessionBubble(state, root, 'Done');
+    expect(settled.loading).toBe(false);
+    expect(settled.bubble).toBe('Done');
+  });
   test('uses exact Session and Turn identities without sending-window or source markers', () => {
     const state = stream(running(), frame('Hello'));
     expect(state.bubble).toBe('Hello');

@@ -2455,6 +2455,8 @@ mod tests {
         assert!(context.system_prompt.contains("你是 Selected"));
         assert!(context.system_prompt.contains("沉稳温柔"));
         assert!(context.system_prompt.contains("叫主人老大"));
+        assert!(context.system_prompt.ends_with(crate::prompt::SPOKEN_REPLY_RULES),
+            "the actual bound BeforeTurn persona must carry the product reply contract");
         assert!(!context.system_prompt.contains(&other.companion_id));
         assert!(context.system_prompt.contains("当前运行时的已授权工具目录和工具说明为准"));
         assert!(context.system_prompt.contains("当前提供委派工具时"));

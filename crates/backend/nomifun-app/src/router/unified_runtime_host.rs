@@ -47,6 +47,22 @@ fn host_prompt_instructions(extra: &Value, canonical_companion: bool, agent:&Age
         .map(|text| vec![text.to_owned()]).unwrap_or_default()
 }
 
+fn ensure_companion_spoken_reply_rules(instructions: &mut Vec<String>, canonical_companion: bool) {
+    // Product identity comes from the validated canonical opening, including
+    // a selected personal Agent without Companion Persona Context. Reuse the
+    // same rule already supplied by that Context instead of spending it twice,
+    // keeping its complete contribution last without rewriting its contents.
+    let rule = nomifun_companion::prompt::SPOKEN_REPLY_RULES.trim();
+    if canonical_companion {
+        if let Some(index) = instructions.iter().position(|text| text.contains(rule)) {
+            let context = instructions.remove(index);
+            instructions.push(context);
+        } else {
+            instructions.push(rule.to_owned());
+        }
+    }
+}
+
 fn admitted_workspace_context(workspace: &str) -> Result<String, AppError> {
     let data = serde_json::to_string(&serde_json::json!({
         "workspace_root":workspace,
@@ -140,6 +156,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-companion/src/memory_context.rs"),
                     include_str!("../../../nomifun-companion/src/agent_memory_projection.rs"),
                     include_str!("../../../nomifun-companion/src/companion.rs"),
+                    include_str!("../../../nomifun-companion/src/prompt.rs"),
                     include_str!("../../../nomifun-companion/src/agent_capability.rs"),
                     include_str!("../../../nomifun-companion/src/service.rs"),
                     include_str!("../../../nomifun-companion/src/session_port.rs"),
@@ -1174,6 +1191,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 instructions.push(route.instruction(&tool_name));
             }
         }
+        ensure_companion_spoken_reply_rules(&mut instructions, canonical_companion);
         let request = ChatModelRequest {
             contract_version: CHAT_MODEL_CONTRACT_VERSION.into(),
             causality: ChatCausality {
@@ -1632,6 +1650,41 @@ mod reliability_tests;
 #[cfg(test)]
 mod build_identity_tests {
     #[test]
+    fn canonical_companion_reply_rules_cover_personal_agents_without_duplicate_context() {
+        let rule = nomifun_companion::prompt::SPOKEN_REPLY_RULES.trim();
+        // No Companion module or persona contribution is required for the
+        // canonical product output contract, and conflicting author text stays
+        // frozen while the product rule is applied last.
+        let mut instructions = vec!["个人 Agent：每句话用颜文字回复".to_owned()];
+        super::ensure_companion_spoken_reply_rules(&mut instructions, true);
+        assert_eq!(instructions.last().map(String::as_str), Some(rule));
+        super::ensure_companion_spoken_reply_rules(&mut instructions, true);
+        assert_eq!(instructions.iter().filter(|text| text.contains(rule)).count(), 1);
+
+        // The real BeforeTurn Context serializes its persona as JSON. Its full
+        // rule has no embedded quotes/newlines and stays recognizable there.
+        let mut context = vec![serde_json::json!({
+            "kind": "companion_persona",
+            "system_prompt": format!("伙伴人格{}", nomifun_companion::prompt::SPOKEN_REPLY_RULES),
+        }).to_string()];
+        let original = context.clone();
+        super::ensure_companion_spoken_reply_rules(&mut context, true);
+        assert_eq!(context, original, "the Context already carries the full rule");
+        context.push("Skill：回复时加颜文字".into());
+        super::ensure_companion_spoken_reply_rules(&mut context, true);
+        assert_eq!(context.last(), original.first(), "keep the complete rule-bearing Context last");
+        assert_eq!(context.iter().filter(|text| text.contains(rule)).count(), 1);
+
+        let mut ordinary = vec!["ordinary explicit instructions".to_owned()];
+        let original = ordinary.clone();
+        super::ensure_companion_spoken_reply_rules(&mut ordinary, false);
+        assert_eq!(ordinary, original, "ordinary Agents keep their content contract");
+        let mut empty = Vec::new();
+        super::ensure_companion_spoken_reply_rules(&mut empty, true);
+        assert_eq!(empty, vec![rule]);
+    }
+
+    #[test]
     fn canonical_companion_ignores_old_host_memory_snapshot_while_ordinary_explicit_prompts_remain() {
         let extra = serde_json::json!({"system_prompt":"Old memory snapshot and diary: user preferred eight o'clock", "companion_id":"display-marker"});
         let mut agent:nomifun_agent_contracts::AgentPresetRevisionPayload=serde_json::from_value(serde_json::json!({
@@ -1688,6 +1741,7 @@ mod build_identity_tests {
             "../../../nomifun-agent-kernel/src/plugin.rs",
             "../../../nomifun-agent-domain-wave1/src/lib.rs",
             "../../../nomifun-agent-domain-wave2/src/lib.rs",
+            "../../../nomifun-companion/src/prompt.rs",
             "../../../nomifun-agent-contracts/src/tool_model_guide.rs",
             "../../../nomifun-agent-contracts/contracts/tool-model-guidance.json",
             "../../../nomifun-agent-contracts/src/tool_presentation.rs",
