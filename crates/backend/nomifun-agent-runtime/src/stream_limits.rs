@@ -22,6 +22,9 @@ impl StreamBudget {
             return Err(invalid("model stream event count exceeded"));
         }
         match event {
+            ChatModelEvent::OutputTextDelta { source: Some(source), .. } => {
+                source.validate().map_err(invalid)?;
+            }
             ChatModelEvent::ToolCallDelta { call_id, name, .. } => identity(call_id, name)?,
             ChatModelEvent::ToolCallCompleted { call } => completed(call)?,
             ChatModelEvent::ProviderRoundId { round_id } if round_id.as_ref().len() > 4096 => {

@@ -10,6 +10,7 @@ import { agentUserInputRequestText, isUserInputRequestPresentation, type TMessag
 import { normalizeAgentTurnOutcome, mergeAgentTurnOutcome } from '@/common/chat/turnOutcome';
 import type { AgentTurnOutcome } from '@/common/protocolBindings/AgentTurnOutcome';
 import type { ConversationId, MessageId } from '@/common/types/ids';
+import { stripCompanionReplyDecorations } from './companionReplyDecorations';
 
 export type CompanionBubblePhase = 'idle' | 'accepted' | 'running' | 'paused' | 'settled';
 
@@ -38,16 +39,22 @@ export const emptyCompanionSessionBubble = (conversationId: ConversationId | nul
   segments: new Map(), segmentRevisions: new Map(), order: [], hint: '', outcome: null, handoff: null, readError: null,
 });
 
-const joinedText = (state: CompanionSessionBubbleState): string => {
+const joinedSourceText = (state: CompanionSessionBubbleState): string => {
   if (state.readError) return state.readError;
   if (state.outcome?.kind === 'input_required') {
     return state.handoff?.requestId === state.outcome.request_id ? state.handoff.text : '';
   }
-  if (state.outcome?.kind === 'unavailable') return '';
+  if (state.outcome?.kind === 'silent' || state.outcome?.kind === 'unavailable') return '';
   const ids = state.outcome && 'message_ids' in state.outcome ? state.outcome.message_ids : state.order;
   const text = ids.map(id => state.segments.get(id as MessageId) ?? '').filter(Boolean).join('\n\n').trim();
   return !state.outcome && state.handoff ? [text, state.handoff.text].filter(Boolean).join('\n\n') : text;
 };
+
+// Recompute the presentation from complete current segments on every update.
+// A decoration split across model chunks is treated identically to history;
+// segments themselves retain the source for revisions and canonical recovery.
+const joinedText = (state: CompanionSessionBubbleState): string =>
+  stripCompanionReplyDecorations(joinedSourceText(state));
 
 export const beginCompanionSessionBubble = (
   state: CompanionSessionBubbleState, turnId: MessageId, phase: 'accepted' | 'running'
@@ -108,6 +115,7 @@ export const hydrateCompanionSessionBubble = (
     hint: outcome?.kind === 'unavailable' ? unavailableHint : state.hint };
   const text = joinedText(next);
   if (!owned.length && outcome === state.outcome && handoff === state.handoff) return state;
+  if (outcome?.kind === 'silent') return { ...next, bubble: '', loading: false };
   return { ...next, bubble: text || next.hint || (state.phase === 'settled' ? '' : '…'),
     loading: !text && !next.hint && state.phase !== 'settled' };
 };
@@ -132,8 +140,12 @@ export const streamCompanionSessionBubble = (
       hint: outcome?.kind === 'unavailable' ? unavailableHint : state.hint,
     };
     const text = joinedText(next);
+    if (next.outcome?.kind === 'silent') return { ...next, bubble: '', loading: false };
     return { ...next, bubble: text || next.hint || (state.phase === 'settled' ? '' : '…'), loading: !text && !next.hint && state.phase !== 'settled' };
   }
+  // Only the host's typed terminal establishes silence. Late process frames
+  // must not reintroduce a tool hint or a completion acknowledgement.
+  if (state.outcome?.kind === 'silent') return state;
   if (message.hidden) {
     const segments = new Map(state.segments);
     segments.delete(message.msg_id);
@@ -170,7 +182,7 @@ export const settleCompanionSessionBubble = (
 ): CompanionSessionBubbleState => {
   if (state.turnId !== turnId || state.phase === 'settled') return state;
   return { ...state, phase: paused ? 'paused' : 'settled', loading: false,
-    bubble: state.dismissed ? '' : joinedText(state) || state.hint || fallback };
+    bubble: state.dismissed || state.outcome?.kind === 'silent' ? '' : joinedText(state) || state.hint || fallback };
 };
 
 export const clearCompanionSessionBubble = (

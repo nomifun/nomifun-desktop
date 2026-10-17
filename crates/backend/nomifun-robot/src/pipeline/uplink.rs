@@ -14,6 +14,10 @@ use crate::vad::{VadDecision, VadEngine};
 /// Longest single utterance we will buffer, in milliseconds.
 pub const MAX_UTTERANCE_MS: u32 = 60_000;
 
+// A continuous microphone may be quiet indefinitely. Retain a small lead-in
+// for VAD onset, without turning idle silence into a new ASR request at 60 s.
+const LEADING_SILENCE_MS: u32 = 300;
+
 fn max_samples() -> usize {
     (UPLINK_SAMPLE_RATE as u64 * MAX_UTTERANCE_MS as u64 / 1000) as usize
 }
@@ -34,6 +38,7 @@ pub struct UplinkPipeline {
     pcm: Vec<i16>,
     mode: ListeningMode,
     active: bool,
+    speech_started: bool,
 }
 
 impl UplinkPipeline {
@@ -45,6 +50,7 @@ impl UplinkPipeline {
             pcm: Vec::new(),
             mode: ListeningMode::Auto,
             active: false,
+            speech_started: false,
         })
     }
 
@@ -53,12 +59,18 @@ impl UplinkPipeline {
         self.mode = mode;
         self.active = true;
         self.pcm.clear();
+        self.speech_started = false;
         self.vad.reset();
     }
 
     /// Whether a listening window is open.
     pub fn is_active(&self) -> bool {
         self.active
+    }
+
+    /// The current continuous utterance has crossed its VAD speech onset.
+    pub(crate) fn is_speech_started(&self) -> bool {
+        self.speech_started
     }
 
     /// Feed one uplink Opus packet.
@@ -77,11 +89,32 @@ impl UplinkPipeline {
         };
         self.pcm.extend_from_slice(&frame);
 
+        // The listen window and an utterance have different lifetimes. In
+        // auto/realtime the device keeps sending after a VAD endpoint, even
+        // when the Agent finishes without speech or TTS never restarts it.
+        let decision = if matches!(self.mode, ListeningMode::Manual) {
+            None
+        } else {
+            let decision = self.vad.push_frame(&frame);
+            self.speech_started |= matches!(decision, VadDecision::Speech);
+            if !self.speech_started {
+                let retained = (UPLINK_SAMPLE_RATE as u64 * LEADING_SILENCE_MS as u64 / 1000) as usize;
+                if self.pcm.len() > retained {
+                    self.pcm.drain(..self.pcm.len() - retained);
+                }
+                return UplinkOutcome::Continue;
+            }
+            Some(decision)
+        };
+
         if self.pcm.len() >= max_samples() {
             tracing::warn!(
                 seconds = MAX_UTTERANCE_MS / 1000,
                 "robot: utterance hit the ceiling, forcing transcription"
             );
+            if matches!(self.mode, ListeningMode::Manual) {
+                self.active = false;
+            }
             return UplinkOutcome::Utterance(self.take_wav());
         }
 
@@ -90,17 +123,20 @@ impl UplinkPipeline {
             return UplinkOutcome::Continue;
         }
 
-        match self.vad.push_frame(&frame) {
-            VadDecision::EndOfUtterance => UplinkOutcome::Utterance(self.take_wav()),
-            VadDecision::Speech | VadDecision::Silence => UplinkOutcome::Continue,
+        match decision {
+            Some(VadDecision::EndOfUtterance) => UplinkOutcome::Utterance(self.take_wav()),
+            _ => UplinkOutcome::Continue,
         }
     }
 
     /// Close the window and emit whatever was buffered (device sent `listen
-    /// stop`). Returns `None` if nothing was captured.
+    /// stop`). Returns `None` for empty or continuous silence-only audio.
     pub fn finish(&mut self) -> Option<Vec<u8>> {
         self.active = false;
-        if self.pcm.is_empty() {
+        if self.pcm.is_empty() || (!matches!(self.mode, ListeningMode::Manual) && !self.speech_started) {
+            self.pcm.clear();
+            self.speech_started = false;
+            self.vad.reset();
             return None;
         }
         Some(self.take_wav())
@@ -110,12 +146,13 @@ impl UplinkPipeline {
     pub fn abort(&mut self) {
         self.active = false;
         self.pcm.clear();
+        self.speech_started = false;
         self.vad.reset();
     }
 
     fn take_wav(&mut self) -> Vec<u8> {
         let pcm = std::mem::take(&mut self.pcm);
-        self.active = false;
+        self.speech_started = false;
         self.vad.reset();
         pcm_to_wav(&pcm, UPLINK_SAMPLE_RATE)
     }
@@ -185,7 +222,7 @@ mod tests {
             wav_sample_count(&wav) >= 16_000 * 300 / 1000,
             "the speech is all in there"
         );
-        assert!(!p.is_active(), "the pipeline closes itself after emitting");
+        assert!(p.is_active(), "a VAD endpoint does not end continuous listening");
     }
 
     #[test]
@@ -245,6 +282,7 @@ mod tests {
             }
         }
         let wav = emitted.expect("the ceiling must force an emit");
+        assert!(!p.is_active(), "the manual recording ceiling still closes its window");
         let seconds = wav_sample_count(&wav) as f64 / 16_000.0;
         assert!(
             (59.0..=62.0).contains(&seconds),
@@ -254,23 +292,86 @@ mod tests {
 
     #[test]
     fn a_second_utterance_works_after_the_first() {
-        let mut p = pipeline();
-        for round in 0..2 {
-            p.begin(crate::protocol::ListeningMode::Auto);
-            for packet in loud_packets(200) {
-                p.push_packet(&packet);
+        for mode in [ListeningMode::Auto, ListeningMode::Realtime] {
+            let mut p = pipeline();
+            p.begin(mode);
+            for round in 0..3 {
+                for packet in loud_packets(200) {
+                    p.push_packet(&packet);
+                }
+                let mut got = false;
+                for packet in quiet_packets(900) {
+                    if matches!(p.push_packet(&packet), UplinkOutcome::Utterance(_)) {
+                        got = true;
+                        break;
+                    }
+                }
+                assert!(got, "round {round} must produce an utterance (VAD state was reset)");
+                assert!(p.is_active());
             }
-            let mut got = false;
-            for packet in quiet_packets(900) {
-                if matches!(p.push_packet(&packet), UplinkOutcome::Utterance(_)) {
-                    got = true;
-                    break;
+        }
+    }
+
+    #[test]
+    fn continuous_speech_ceiling_bounds_each_chunk_without_closing_listening() {
+        for mode in [ListeningMode::Auto, ListeningMode::Realtime] {
+            let mut p = pipeline(); p.begin(mode);
+            let mut emitted = 0;
+            for _ in 0..65 {
+                for packet in loud_packets(1000) {
+                    if let UplinkOutcome::Utterance(wav) = p.push_packet(&packet) {
+                        emitted += 1;
+                        assert!(wav_sample_count(&wav) <= max_samples() + UPLINK_FRAME_SAMPLES);
+                    }
+                    assert!(p.pcm.len() < max_samples());
                 }
             }
-            assert!(
-                got,
-                "round {round} must produce an utterance (VAD state was reset)"
-            );
+            assert_eq!(emitted, 1);
+            assert!(p.is_active());
+            assert!(p.finish().is_some(), "audio following the cap belongs to a fresh utterance");
+            assert!(!p.is_active());
+        }
+    }
+
+    #[test]
+    fn continuous_silence_stays_bounded_without_transcription_and_keeps_the_next_speech() {
+        for mode in [ListeningMode::Auto, ListeningMode::Realtime] {
+            let mut p = pipeline();
+            p.begin(mode);
+            for _ in 0..70 {
+                for packet in quiet_packets(1000) {
+                    assert_eq!(p.push_packet(&packet), UplinkOutcome::Continue);
+                    assert!(p.pcm.len() <= (UPLINK_SAMPLE_RATE * LEADING_SILENCE_MS / 1000) as usize);
+                }
+            }
+            assert!(p.is_active());
+            for packet in loud_packets(300) { p.push_packet(&packet); }
+            let wav = quiet_packets(900).into_iter().find_map(|packet| match p.push_packet(&packet) {
+                UplinkOutcome::Utterance(wav) => Some(wav), _ => None,
+            }).expect("speech after long idle must still be transcribed");
+            assert!(wav_sample_count(&wav) >= (UPLINK_SAMPLE_RATE * 300 / 1000) as usize);
+            assert!(wav_sample_count(&wav) < (UPLINK_SAMPLE_RATE * 2000 / 1000) as usize);
+            assert!(p.is_active());
+        }
+    }
+
+    #[test]
+    fn explicit_stop_and_abort_close_continuous_listening_without_a_late_reopen() {
+        for mode in [ListeningMode::Auto, ListeningMode::Realtime] {
+            for abort in [false, true] {
+                let mut p = pipeline(); p.begin(mode);
+                for packet in loud_packets(180) { p.push_packet(&packet); }
+                if abort { p.abort(); } else { assert!(p.finish().is_some()); }
+                for packet in loud_packets(180).into_iter().chain(quiet_packets(900)) {
+                    assert_eq!(p.push_packet(&packet), UplinkOutcome::Continue);
+                }
+                assert!(!p.is_active());
+                assert!(p.finish().is_none());
+            }
+            let mut p = pipeline(); p.begin(mode);
+            for packet in quiet_packets(900) { p.push_packet(&packet); }
+            assert!(p.finish().is_none(), "explicitly stopping silence is not an ASR utterance");
+            assert!(!p.is_active());
         }
     }
 

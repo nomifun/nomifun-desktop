@@ -1,6 +1,7 @@
 //! Read-only history for settled Runtime calls without an owner projection.
 //! Parameter refusals and internal controls never dispatch an owner, but their
-//! paired canonical results must remain inspectable in the conversation.
+//! paired canonical results remain inspectable in the conversation. The
+//! reserved silent-finish control stays in canonical audit only.
 
 use nomifun_agent_contracts::{AgentSessionId, canonical_json_bytes, digest_bytes, digest_payload};
 use serde_json::json;
@@ -36,6 +37,7 @@ WITH progress AS (
     WHERE json_extract(call.observation, '$.event') = 'tool_call_completed'
       AND json_type(call.observation, '$.call.call_id') = 'text'
       AND json_type(call.observation, '$.call.name') = 'text'
+      AND json_extract(call.observation, '$.call.name') <> 'finish_without_reply'
       AND json_extract(call.observation, '$.call.call_id') NOT LIKE 'agent-instructions:%'
       AND turn.source_message_id IS NOT NULL
       AND call.seq >= COALESCE(turn.started_at, turn.accepted_at)

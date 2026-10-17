@@ -1,5 +1,5 @@
 //! Endpointing. The device's own VAD only drives its LED and never ends a turn,
-//! so `mode=auto` sessions end **only** when this decides they did.
+//! so auto/realtime utterances end here while their listening window stays open.
 
 pub mod energy;
 pub mod silero;
@@ -240,6 +240,37 @@ mod tests {
             }
         }
         assert!(ended, "trailing silence must end the utterance");
+    }
+
+    #[test]
+    fn silero_uplink_segments_repeated_opus_speech_in_one_continuous_window() {
+        use crate::audio::{OpusStreamEncoder, UPLINK_FRAME_SAMPLES};
+        use crate::pipeline::{UplinkOutcome, UplinkPipeline};
+        for mode in [crate::protocol::ListeningMode::Auto, crate::protocol::ListeningMode::Realtime] {
+            let Ok(engine) = crate::vad::silero::SileroVad::new(VadTuning::default()) else {
+                eprintln!("skipping repeated Silero Opus coverage: ONNX runtime unavailable");
+                return;
+            };
+            assert_eq!(engine.name(), "silero");
+            let mut uplink = UplinkPipeline::new(Box::new(engine)).unwrap();
+            uplink.begin(mode);
+            let mut encoder = OpusStreamEncoder::new_uplink_for_test().unwrap();
+            for round in 0..3 {
+                let mut pcm = (0..10).flat_map(|frame| speech_like_frame(frame * UPLINK_FRAME_SAMPLES))
+                    .collect::<Vec<_>>();
+                pcm.extend(vec![0; 30 * UPLINK_FRAME_SAMPLES]);
+                let mut utterances = 0;
+                for packet in encoder.encode_frames(&pcm).unwrap() {
+                    if let UplinkOutcome::Utterance(wav) = uplink.push_packet(&packet) {
+                        assert!(wav.len() > 44);
+                        utterances += 1;
+                    }
+                }
+                assert_eq!(utterances, 1, "{mode:?} speech segment {round} must reach ASR");
+                assert!(uplink.is_active());
+            }
+        }
+        eprintln!("Silero Opus continuous-listening coverage verified in Auto and Realtime");
     }
 
     /// A frame Silero accepts as speech: a glottal pulse train (a harmonic stack

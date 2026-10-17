@@ -11,7 +11,7 @@ import React, { useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { isContextCompressionTip } from '../processTipModel';
 import { formatWorkspaceFileTarget } from '../processFileTargetLabel';
-import { projectAssistantText, stripInternalToolCallPayload, shouldShowToolRowDetail } from '../processTraceDisplayModel';
+import { hasVisibleProcessReasoning, projectAssistantText, stripInternalToolCallPayload, shouldShowToolRowDetail } from '../processTraceDisplayModel';
 import type { TurnDisclosureProcessState } from '../turnDisclosureModel';
 import type { MessageId } from '@/common/types/ids';
 import { getProcessItemState } from '../turnProcessState';
@@ -227,7 +227,7 @@ const ToolProcessTraceRows: React.FC<{ messages: ToolProcessMessage[]; workspace
   return <div className='turn-process-trace'>{rows.map(row => <ToolTraceRow key={row.key} row={row} workspaceRoots={workspaceRoots} />)}</div>;
 };
 
-const ProcessTraceItem: React.FC<{ item: ProcessTraceRenderableItem; variant?: 'list' | 'receipt'; workspaceRoots?: string[];
+const ProcessTraceItem: React.FC<{ item: ProcessTraceRenderableItem; workspaceRoots?: string[];
   stateOverride?: TurnDisclosureProcessState }> = ({ item, workspaceRoots, stateOverride }) => {
   const { t } = useTranslation();
   const context = useConversationContextSafe();
@@ -237,7 +237,7 @@ const ProcessTraceItem: React.FC<{ item: ProcessTraceRenderableItem; variant?: '
   if (item.type === 'tool_call' || item.type === 'tool_group') return <ToolProcessTraceRows messages={[item]} workspaceRoots={roots} stateOverride={stateOverride} />;
   if (item.type === 'thinking') {
     const content = toDisplayText(item.content.content).trim();
-    return !content || /^\[Private reasoning omitted(?: from replay)?\]$/i.test(content) ? null :
+    return !hasVisibleProcessReasoning(content) ? null :
       <MessageThinking message={item} variant='process' completed={state !== 'running'} />;
   }
   if (item.type === 'text') {

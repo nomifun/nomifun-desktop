@@ -9,9 +9,15 @@ import type { ToolReceiptDetailRow } from './components/toolGroupSummaryModel';
 export const shouldShowToolRowDetail = (row: ToolReceiptDetailRow): boolean =>
   Boolean(row.error);
 
+/** Reasoning without a public body cannot create an empty process group. */
+export const hasVisibleProcessReasoning = (content: string): boolean => {
+  const text = content.trim();
+  return Boolean(text) && !/^\[Private reasoning omitted(?: from replay)?\]$/i.test(text);
+};
+
 /**
  * Routine model lifecycle updates keep at most their current live activity.
- * Reasoning, public narration, and tool receipts retain their arrival order.
+ * Canonical content references determine reasoning, narration and tool order.
  */
 export const selectJournalProcessItems = <T>(
   items: T[],

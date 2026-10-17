@@ -52,10 +52,12 @@ pub fn reconcile_execution_tail(
     let mut discarded = false;
     let mut new_results = 0u32;
     let mut inputs: BTreeSet<_> = checkpoint.applied_steering_receipts.iter().cloned().collect();
-    let plan_changed = tail.iter().any(|event| matches!(event, AgentEngineEvent::PlanUpdated { plan } if plan.revision != checkpoint.plan.revision));
+    let mut plan_revision_at_step = checkpoint.plan.revision;
     let mut protocol_verdicts = BTreeSet::new();
     let mut correction_sources = BTreeSet::new();
     let mut input_requests = BTreeMap::new();
+    let mut live_wait_unresolved = false;
+    let mut phase_correction_steps = BTreeSet::new();
     for event in tail {
         match event {
             AgentEngineEvent::ModelStepStarted { step: current, correction_source, .. } => {
@@ -71,6 +73,7 @@ pub fn reconcile_execution_tail(
                     return Err(invalid("correction source has no committed continuing rejection"));
                 }
                 step = *current; proposed.clear(); order.clear(); current_results.clear(); discarded = false;
+                plan_revision_at_step = next.plan.revision;
             }
             AgentEngineEvent::ModelResponseValidated { step: current } => {
                 if *current != step || discarded || !current_results.is_empty()
@@ -93,6 +96,20 @@ pub fn reconcile_execution_tail(
                 if calls.get(call_id).is_none_or(|(recorded, _)| recorded != current) { return Err(invalid("tool admission has no exact completed proposal")); }
                 admitted.insert(call_id.clone());
             }
+            AgentEngineEvent::ToolCompleted {step:current,result,runtime_hold:Some(crate::RuntimeToolHoldReason::PhaseRestricted)} => {
+                let (recorded_step,_) = calls.get(&result.call_id).ok_or_else(|| invalid("phase correction has no proposal"))?;
+                if recorded_step != current || !result.is_error || admitted.contains(&result.call_id)
+                    || !completed.insert(result.call_id.clone()) {
+                    return Err(invalid("phase correction differs from its unadmitted feedback"));
+                }
+                result.validate_for(&result.call_id)?;
+                if *current>0 {
+                    current_results.insert(result.call_id.clone());new_results=new_results.saturating_add(1);
+                    // Runtime spends one correction per rejected model batch,
+                    // independent of its call count. Feedback is not work.
+                    if phase_correction_steps.insert(*current) { next.control_rejections.observe_phase_correction(); }
+                }
+            }
             AgentEngineEvent::ToolCompleted { step: current, result, .. }
             | AgentEngineEvent::ToolOutcomeReconciled { step: current, result, .. } => {
                 let (recorded_step, call) = calls.get(&result.call_id).ok_or_else(|| invalid("result has no proposal"))?;
@@ -105,8 +122,13 @@ pub fn reconcile_execution_tail(
                     || crate::exact_actions::proven_nonstart(call,result));
                 if *current > 0 {
                     current_results.insert(result.call_id.clone()); new_results = new_results.saturating_add(1);
-                    if admitted.contains(&result.call_id) { if let Some(segments) = next.segments.as_mut() { segments.observe(call,result)?; } }
-                    let changed = if call.name == crate::planning::TOOL_NAME { plan_changed } else { true };
+                    if admitted.contains(&result.call_id) {
+                        if let Some(segments) = next.segments.as_mut() { segments.observe(call,result)?; }
+                        if next.completion_review.phase == crate::AgentExecutionPhase::EndIntentReview {
+                            next.completion_review.phase = crate::AgentExecutionPhase::Execution;
+                        }
+                    }
+                    let changed = if call.name == crate::planning::TOOL_NAME { next.plan.revision != plan_revision_at_step } else { true };
                     next.control_rejections.observe(&call.name, result, changed);
                 }
             }
@@ -142,9 +164,19 @@ pub fn reconcile_execution_tail(
                 if next.pending_user_input.is_some() || next.completion_review.is_report_only() || *current != step
                     || source_step != current || crate::user_input_request::from_call(call).as_ref() != Ok(request)
                     || proposed.len() != 1 || admitted.contains(&request.request_id)
-                    || !next.work.running_processes.is_empty() { return Err(invalid("input handoff differs from its native source question")); }
+                    { return Err(invalid("input handoff differs from its native source question")); }
                 input_requests.insert(request.request_id.clone(), request.clone());
                 next.pending_user_input = Some(request.clone());
+            }
+            AgentEngineEvent::TurnWaiting { .. } => {
+                if next.work.running_processes.is_empty() { return Err(invalid("live wait has no original owned processes")); }
+                live_wait_unresolved = true;
+            }
+            AgentEngineEvent::TurnWaitResolved { .. } => { next.pending_user_input = None; live_wait_unresolved = false; },
+            AgentEngineEvent::OwnedProcessObserved { observation, .. } => {
+                observation.validate()?;
+                next.work.observe_owned_process(observation)?;
+                if let Some(segments) = next.segments.as_mut() { segments.observe_owner(observation)?; }
             }
             AgentEngineEvent::EndIntentReview { .. } => {
                 if next.completion_review.is_report_only() { return Err(invalid("ending intent cannot reopen a locked completion review")); }
@@ -196,9 +228,24 @@ pub fn reconcile_execution_tail(
             matches!(outcome.source,AgentReconciliationSource::NotDispatched)
                 ||crate::exact_actions::proven_nonstart(call,&outcome.result));
         if *call_step > 0 { new_results = new_results.saturating_add(1); }
-        if *call_step > 0 && admitted.contains(id) { if let Some(segments) = next.segments.as_mut() { segments.observe(call,&outcome.result)?; } }
+        if *call_step > 0 && admitted.contains(id) {
+            if let Some(segments) = next.segments.as_mut() { segments.observe(call,&outcome.result)?; }
+            if next.completion_review.phase == crate::AgentExecutionPhase::EndIntentReview {
+                next.completion_review.phase = crate::AgentExecutionPhase::Execution;
+            }
+        }
         observations.extend([AgentEngineEvent::ToolOutcomeReconciled { step: *call_step, result: outcome.result,
             source: outcome.source, evidence_event_id: outcome.evidence_event_id, owner_operation_id: outcome.owner_operation_id }]);
+    }
+    if live_wait_unresolved {
+        if !next.work.running_processes.is_empty() {
+            return Err(invalid("the original live wait owner has no reaped terminal observation; keep this Turn paused for reconciliation instead of republishing its old user-input request"));
+        }
+        // A real original-owner terminal can precede a crash at the wake
+        // publication boundary. Retire the old wait explicitly, retaining the
+        // source question and owner observation as immutable historical data.
+        next.pending_user_input = None;
+        observations.push(AgentEngineEvent::TurnWaitResolved { model_steps: step });
     }
     let discard_last = !keep_batch;
     next.plan.needs_replan = true;

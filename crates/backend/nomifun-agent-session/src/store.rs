@@ -1061,7 +1061,21 @@ impl AgentSessionStore {
         producer_id: EventProducerId,
         input: StrictJsonValue,
     ) -> Result<(OperationId, SessionEventAppendResult), SessionStoreError> {
-        self.steer_selected_turn(session_id, None, idempotency_key, producer_id, input, None,false).await
+        self.steer_selected_turn(session_id, None, idempotency_key, producer_id, input, None,false,None).await
+    }
+
+    /// Reply to an exact parked public input boundary. Target validation and
+    /// acceptance share the canonical writer transaction with normal steering.
+    pub async fn steer_active_turn_for_wait(&self, session_id: &AgentSessionId,
+        idempotency_key: IdempotencyKey, producer_id: EventProducerId, input: StrictJsonValue,
+        expected_turn_id: &str, expected_wait_seq: u64)
+        -> Result<(OperationId,SessionEventAppendResult),SessionStoreError> {
+        validate_uuidv7(expected_turn_id,"expected waiting Turn source")?;
+        if expected_wait_seq == 0 || expected_wait_seq > i64::MAX as u64 {
+            return Err(SessionStoreError::InvalidEvent("waiting reply requires an exact canonical wait sequence".into()));
+        }
+        self.steer_selected_turn(session_id,None,idempotency_key,producer_id,input,None,false,
+            Some((expected_turn_id,expected_wait_seq))).await
     }
 
     pub async fn steer_exact_turn(
@@ -1075,20 +1089,20 @@ impl AgentSessionStore {
         if target_operation_id.as_ref().trim().is_empty() {
             return Err(SessionStoreError::InvalidEvent("exact steering requires a target Turn".into()));
         }
-        self.steer_selected_turn(session_id, Some(target_operation_id), idempotency_key, producer_id, input, None,false).await
+        self.steer_selected_turn(session_id, Some(target_operation_id), idempotency_key, producer_id, input, None,false,None).await
     }
 
     pub async fn steer_exact_native_turn(&self,session_id:&AgentSessionId,target_operation_id:&OperationId,
         idempotency_key:IdempotencyKey,producer_id:EventProducerId,input:StrictJsonValue,fence:&NativeTurnMutationFence)
         ->Result<(OperationId,SessionEventAppendResult),SessionStoreError> {
         if target_operation_id.as_ref().trim().is_empty(){return Err(SessionStoreError::InvalidEvent("exact steering requires a target Turn".into()));}
-        self.steer_selected_turn(session_id,Some(target_operation_id),idempotency_key,producer_id,input,Some(fence),false).await
+        self.steer_selected_turn(session_id,Some(target_operation_id),idempotency_key,producer_id,input,Some(fence),false,None).await
     }
 
     pub async fn steer_exact_native_immediate_turn(&self,session_id:&AgentSessionId,target_operation_id:&OperationId,
         idempotency_key:IdempotencyKey,producer_id:EventProducerId,input:StrictJsonValue,fence:&NativeTurnMutationFence)
         ->Result<(OperationId,SessionEventAppendResult),SessionStoreError> {
-        self.steer_selected_turn(session_id,Some(target_operation_id),idempotency_key,producer_id,input,Some(fence),true).await
+        self.steer_selected_turn(session_id,Some(target_operation_id),idempotency_key,producer_id,input,Some(fence),true,None).await
     }
 
     async fn steer_selected_turn(
@@ -1100,7 +1114,9 @@ impl AgentSessionStore {
         input: StrictJsonValue,
         expected_native:Option<&NativeTurnMutationFence>,
         voice_immediate:bool,
+        expected_wait:Option<(&str,u64)>,
     ) -> Result<(OperationId, SessionEventAppendResult), SessionStoreError> {
+        let expected_wait_value=expected_wait.map(|(turn_id,wait_seq)|json!({"turn_id":turn_id,"wait_seq":wait_seq}));
         let mut tx = self.begin_write_transaction().await?;
         require_live_session_tx(&mut tx, session_id.as_ref()).await?;
         if let Some(existing) = event_by_producer_key_tx(
@@ -1127,6 +1143,7 @@ impl AgentSessionStore {
                         .and_then(Value::as_str)
                         == Some(target.as_ref())
                         && value.0.get("input") == Some(&input.0)
+                        && value.0.get("expected_wait") == expected_wait_value.as_ref()
                 }
                 SessionEventPayloadRef::Empty | SessionEventPayloadRef::Stored(_) => false,
             };
@@ -1179,6 +1196,26 @@ impl AgentSessionStore {
             )
         })?;
         let turn_event = event_from_row(turn_event)?;
+        if let Some((source,wait_seq))=expected_wait {
+            let started=payload_value_for_event_tx(&mut tx,&turn_event).await?;
+            if started.get("source_message_id").and_then(Value::as_str)!=Some(source) {
+                return Err(SessionStoreError::Conflict("the waiting reply targets a different Turn source".into()));
+            }
+            let result=history_turn_outcome::read(&mut tx,session_id,&target_operation_id).await?;
+            if !matches!(result.turn_outcome,Some(nomifun_agent_contracts::AgentTurnOutcome::Waiting {wait_seq:active,..}) if active==wait_seq) {
+                return Err(SessionStoreError::Conflict("the waiting question has changed or is no longer pending".into()));
+            }
+            // A targeted answer is consumed once at acceptance, even before
+            // the Runtime reaches its next input boundary. Its original fact
+            // remains the only receipt; a second window cannot answer it twice.
+            let answered:bool=sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM agent_events answer WHERE answer.session_id=? AND answer.correlation_id=? \
+                 AND answer.kind='turn/steer-accepted' AND json_extract(answer.inline_json,'$.expected_wait.turn_id')=? \
+                 AND json_extract(answer.inline_json,'$.expected_wait.wait_seq')=?)")
+                .bind(session_id.as_ref()).bind(target_operation_id.as_ref()).bind(source).bind(as_i64(wait_seq,"waiting reply sequence")?)
+                .fetch_one(&mut *tx).await?;
+            if answered { return Err(SessionStoreError::Conflict("the waiting question already has an accepted reply".into())); }
+        }
         if voice_immediate {
             let SessionEventPayloadRef::InlineJson(payload)=&turn_event.payload else{return Err(SessionStoreError::ExecutionFenced);};
             if payload.0.pointer("/admission/voice_input_context/supersede_model_step").and_then(Value::as_bool)!=Some(true) {
@@ -1186,6 +1223,7 @@ impl AgentSessionStore {
             }
         }
         let mut mutation_payload=json!({"target_operation_id":target_operation_id,"input":input});
+        if let Some(expected_wait)=expected_wait_value {mutation_payload["expected_wait"]=expected_wait;}
         if let Some(fence)=expected_native {mutation_payload["native_target_fence"]=serde_json::to_value(fence)?;}
         if voice_immediate {mutation_payload["voice_model_step_supersede"]=Value::Bool(true);}
         let append = SessionEventAppend {
@@ -2591,6 +2629,10 @@ impl AgentSessionStore {
         let page = Self::read_event_page_tx(&mut tx, session_id, after_seq, head.last_seq, limit).await?;
         let messages =
             Self::messages_after_tx(&mut tx, session_id, after_seq, head.last_seq).await?;
+        let active_turn_outcome = match &head.active_turn_id {
+            Some(operation) => history_turn_outcome::read(&mut tx, session_id, &OperationId::from(operation.clone())).await?.turn_outcome,
+            None => None,
+        };
         tx.commit().await?;
         Ok(SessionObservation {
             session,
@@ -2598,6 +2640,7 @@ impl AgentSessionStore {
             events: page.events,
             messages,
             next_cursor: page.next_cursor,
+            active_turn_outcome,
         })
     }
 

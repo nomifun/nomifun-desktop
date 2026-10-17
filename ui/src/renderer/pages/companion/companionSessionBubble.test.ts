@@ -29,6 +29,29 @@ const stream = (state: ReturnType<typeof emptyCompanionSessionBubble>, message: 
 const running = () => beginCompanionSessionBubble(emptyCompanionSessionBubble(conversationId), root, 'running');
 
 describe('canonical companion Turn bubble presentation', () => {
+  test('filters decorated live and recovered replies without changing their source segments', () => {
+    const source = '你好(^_^)呀🧑🏽‍💻！[表情包：开心]![笑](https://example.test/hi.gif)';
+    let state = running();
+    for (const chunk of source) state = stream(state, frame(chunk));
+    expect(state.bubble).toBe('你好呀！');
+    expect(state.segments.get(segment)).toBe(source);
+    state = settleCompanionSessionBubble(state, root, 'Done');
+    expect(state.bubble).toBe('你好呀！');
+    const saved = { id: String(segment), message_id: segment, msg_id: segment, conversation_id: conversationId,
+      turn_id: root, position: 'left', type: 'text', content: { content: source }, created_at: 100 } as TMessage;
+    const recovered = hydrateCompanionSessionBubble(running(), [saved], running());
+    expect(recovered.bubble).toBe(state.bubble);
+    expect(recovered.segments.get(segment)).toBe(source);
+    expect(saved.content).toEqual({ content: source });
+    expect(stream(state, frame('修订(^_^)后。', { replace: true })).bubble).toBe('修订后。');
+  });
+  test('decoration-only replies settle without an endless typing bubble', () => {
+    const state = stream(running(), frame('🧑🏽‍💻(^_^)[表情包：微笑]'));
+    expect(state.bubble).toBe('…');
+    const settled = settleCompanionSessionBubble(state, root, 'Done');
+    expect(settled.loading).toBe(false);
+    expect(settled.bubble).toBe('Done');
+  });
   test('uses exact Session and Turn identities without sending-window or source markers', () => {
     const state = stream(running(), frame('Hello'));
     expect(state.bubble).toBe('Hello');
@@ -199,6 +222,50 @@ test('canonical answered and failed bubbles retain only committed public message
     state = stream(state, frame('Late unreferenced output'));
     expect(state.bubble).toBe('Actual public reply');
   }
+});
+
+test('an explicit silent receipt clears the tool hint without a completion bubble and permits the next reply', () => {
+  let state = stream(running(), frame('', { type: 'tool_call' }));
+  expect(state.bubble).toBe('Using tools');
+  const receipt = frame('', { type: 'agent_status', stream_complete: true,
+    data: { backend: 'nomi', status: 'prepared', turn_summary: true, turn_state: 'completed', turn_outcome: { kind: 'silent' } } });
+  state = stream(state, receipt);
+  expect(state.bubble).toBe('');
+  expect(state.loading).toBe(false);
+  expect(state.outcome).toEqual({ kind: 'silent' });
+  state = settleCompanionSessionBubble(state, root, 'Done');
+  expect(state.bubble).toBe('');
+  for (const late of [frame('Late process text'), frame('', { type: 'tool_call' }), frame('', { type: 'finish' })]) {
+    expect(stream(state, late).bubble).toBe('');
+  }
+  const successor = beginCompanionSessionBubble(state, nextRoot, 'running');
+  expect(successor.bubble).toBe('…');
+  expect(successor.outcome).toBeNull();
+  expect(stream(successor, frame('北京今天晴。', { turn_id: nextRoot })).bubble).toBe('北京今天晴。');
+});
+
+test('silent completion refresh and cold history never resurrect narration, tool hints or fallback notices', () => {
+  const summary = { id: 'silent-summary', message_id: secondSegment, msg_id: secondSegment, conversation_id: conversationId,
+    turn_id: root, type: 'agent_status', position: 'center', content: { backend: 'nomi', status: 'prepared',
+      turn_summary: true, turn_state: 'completed', turn_outcome: { kind: 'silent' } } } as TMessage;
+  const narration = { id: 'process-text', message_id: segment, msg_id: segment, conversation_id: conversationId,
+    turn_id: root, type: 'text', position: 'left', content: { content: '过程中的文字。' }, created_at: 100 } as TMessage;
+  for (const initial of [stream(running(), frame('', { type: 'tool_call' })),
+    settleCompanionSessionBubble(running(), root, 'Done')]) {
+    let state = hydrateCompanionSessionBubble(initial, [summary, narration], initial, 'Unavailable result');
+    expect(state.bubble).toBe('');
+    expect(state.loading).toBe(false);
+    state = settleCompanionSessionBubble(state, root, 'Done');
+    expect(state.bubble).toBe('');
+    expect(hydrateCompanionSessionBubble(state, [narration, summary], state, 'Unavailable result').bubble).toBe('');
+  }
+});
+
+test('empty output and successful tool frames alone never author a silent outcome', () => {
+  let state = stream(running(), frame('', { type: 'tool_call' }));
+  state = stream(state, frame(''));
+  expect(state.outcome).toBeNull();
+  expect(settleCompanionSessionBubble(state, root, 'Done').bubble).toBe('Using tools');
 });
 
 test('a result-read failure remains visible through settlement and a later canonical receipt repairs it', () => {

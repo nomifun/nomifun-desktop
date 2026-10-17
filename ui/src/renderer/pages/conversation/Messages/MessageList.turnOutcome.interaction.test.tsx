@@ -79,7 +79,7 @@ function setup(f: ReturnType<typeof fixture>, initial: TMessage[], readOnly = fa
   spyOn(ipcBridge.conversation.turnCompleted, 'on').mockImplementation(listener => {
     completionListeners.add(listener); return () => completionListeners.delete(listener);
   });
-  const idle = { state: 'idle', can_send_message: true, has_runtime: false, is_processing: false } as const;
+  const idle = { state: 'idle', can_send_message: true, is_processing: false } as const;
   const authority = { id: f.session, type: 'nomi', status: 'finished', extra: { workspace: '' }, runtime: idle } as TChatConversation;
   spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue(authority);
   spyOn(ipcBridge.database.getConversationMessages, 'invoke').mockImplementation(async () => {
@@ -172,6 +172,67 @@ test('answered membership ignores later empty/narration rows and unavailable his
   const notice = await page.findByTestId('turn-outcome-unavailable');
   expect(notice.closest('.turn-process-disclosure')).toBeNull();
   expect(notice.textContent).toContain(messages.turnOutcomeUnavailable);
+});
+
+test('silent robot action keeps a settled tool trace through live completion, refresh and cold reopen', async () => {
+  const f = fixture(scenarios[0]);
+  const toolId = id(870);
+  const tool = f.row(toolId, 'tool_call', scenarios[0].startSeq + 20, { call_id: 'robot-sit', name: 'robot_action',
+    status: 'completed', description: '坐下动作' });
+  const receipt = f.row(f.summary, 'agent_status', scenarios[0].startSeq + 21, { backend: 'nomi', status: 'prepared',
+    turn_summary: true, turn_state: 'completed', started_at_ms: 1000, finished_at_ms: 3000, turn_outcome: { kind: 'silent' } }, 'center');
+  const h = setup(f, [f.user]);
+  const page = render(<h.App />);
+  await waitFor(() => expect(h.historyCalls()).toBe(1));
+  await act(async () => h.stream({ conversation_id: f.session, turn_id: f.root, msg_id: toolId,
+    type: 'tool_call', created_at: tool.created_at, data: tool.content }));
+  await act(async () => h.stream({ conversation_id: f.session, turn_id: f.root, msg_id: f.summary,
+    type: 'agent_status', stream_complete: true, data: receipt.content }));
+  const assertSilent = async () => {
+    await waitFor(() => expect(page.container.querySelector('.turn-process-disclosure__label')?.textContent).toBe('Worked for 2s'));
+    expect(page.container.querySelector('.turn-process-disclosure--live')).toBeNull();
+    expect(page.queryByTestId('turn-outcome-unavailable')).toBeNull();
+    expect(page.queryByTestId('turn-outcome-read-error')).toBeNull();
+    expect(page.container.querySelectorAll('[data-message-position="left"]')).toHaveLength(0);
+    expect(page.container.querySelector(`[data-message-business-id="${f.summary}"]`)).toBeNull();
+    const toggle = page.container.querySelector<HTMLButtonElement>('.turn-process-disclosure__toggle')!;
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(toggle);
+    expect(page.container.querySelector('[data-tool-call-id="robot-sit"]')).not.toBeNull();
+    fireEvent.click(toggle);
+  };
+  await assertSilent();
+  h.setHistory([f.user, tool, receipt]);
+  await act(async () => h.complete());
+  await waitFor(() => expect(h.historyCalls()).toBeGreaterThan(1));
+  await assertSilent();
+  page.rerender(<h.App visit={1} />);
+  await assertSilent();
+});
+
+test('a cold silent Turn does not suppress a following ordinary answer or failed action', async () => {
+  const f = fixture(scenarios[1]);
+  const nextRoot = id(880);
+  const answerId = id(881);
+  const failedRoot = id(882);
+  const failureId = id(883);
+  const rows = [f.user,
+    f.row(f.summary, 'agent_status', 31, { backend: 'nomi', status: 'prepared', turn_summary: true, turn_state: 'completed',
+      started_at_ms: 1000, finished_at_ms: 3000, turn_outcome: { kind: 'silent' } }, 'center'),
+    f.row(nextRoot, 'text', 40, { content: '北京今天的天气怎么样？' }, 'right', nextRoot),
+    f.row(id(884), 'agent_status', 41, { backend: 'nomi', status: 'prepared', turn_summary: true, turn_state: 'completed',
+      started_at_ms: 4000, finished_at_ms: 5000, turn_outcome: { kind: 'answered', message_ids: [answerId] } }, 'center', nextRoot),
+    f.row(answerId, 'text', 42, { content: '北京今天晴。' }, 'left', nextRoot),
+    f.row(failedRoot, 'text', 50, { content: '站起来。' }, 'right', failedRoot),
+    f.row(failureId, 'tips', 51, { type: 'error', content: '机器人连接已断开。',
+      error: { message: '机器人连接已断开。', code: 'ROBOT_DISCONNECTED', retryable: false },
+      turn_outcome: { kind: 'failed', message_ids: [failureId] } }, 'center', failedRoot)];
+  const h = setup(f, rows);
+  const page = render(<h.App />);
+  await waitFor(() => expect(markdownText(page.container)).toContain('北京今天晴。'));
+  await waitFor(() => expect(page.container.textContent).toContain('机器人连接已断开。'));
+  expect(page.queryByTestId('turn-outcome-unavailable')).toBeNull();
+  expect(page.queryByTestId('user-input-request-note')).toBeNull();
 });
 
 test('a result-read failure is a public notice and never replaces an existing canonical outcome', async () => {

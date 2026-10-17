@@ -211,11 +211,11 @@ mod tests {
             AgentEngineEvent::ExecutionCheckpointSaved { step: 0, revision: 1, digest: "c".repeat(64).into() }];
         let tail = vec![
             AgentEngineEvent::ModelStepStarted { step: 1, operation_id: "turn:model:1".into(), correction_source: None },
-            AgentEngineEvent::OutputTextDelta { step: 1, text: "abandoned-one".into() },
+            AgentEngineEvent::OutputTextDelta { step: 1, text: "abandoned-one".into(), source: None },
             AgentEngineEvent::ExecutionResumed { checkpoint_revision: 1, checkpoint_step: 0, model_steps: 1, execution_fence: 1, discarded_tool_call_ids: vec![] },
             AgentEngineEvent::ExecutionBudgetPrepared { context_window_tokens: 32768, max_output_tokens: 4096, max_model_steps: 32 },
             AgentEngineEvent::ModelStepStarted { step: 2, operation_id: "turn:model:2".into(), correction_source: None },
-            AgentEngineEvent::OutputTextDelta { step: 2, text: "abandoned-two".into() },
+            AgentEngineEvent::OutputTextDelta { step: 2, text: "abandoned-two".into(), source: None },
         ];
         let recovery = AgentTurnRecovery::new(checkpoint.clone(), 1, 2, prefix.clone(), tail.clone(), vec![]).unwrap();
         assert_eq!(recovery.last_model_step, 2);
@@ -223,7 +223,7 @@ mod tests {
         history_events.extend([
             AgentEngineEvent::ExecutionResumed { checkpoint_revision: 1, checkpoint_step: 0, model_steps: 2, execution_fence: 2, discarded_tool_call_ids: vec![] },
             AgentEngineEvent::ModelStepStarted { step: 3, operation_id: "turn:model:3".into(), correction_source: None },
-            AgentEngineEvent::OutputTextDelta { step: 3, text: "new-result".into() },
+            AgentEngineEvent::OutputTextDelta { step: 3, text: "new-result".into(), source: None },
             AgentEngineEvent::TurnCompleted { model_steps: 3, finish_reason: nomifun_chat_model_broker::ChatFinishReason::Completed },
         ]);
         let mut history = Vec::new();

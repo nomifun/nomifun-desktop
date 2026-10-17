@@ -36,6 +36,9 @@ pub struct TaskPlanSnapshot {
     pub sequence: u64,
     pub turn_id: Option<String>,
     pub turn_status: Option<String>,
+    /// Exact Turn result, independent of checklist progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_outcome: Option<nomifun_agent_contracts::AgentTurnOutcome>,
     pub plan: Option<TaskPlan>,
 }
 

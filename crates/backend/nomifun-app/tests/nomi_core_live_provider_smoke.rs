@@ -36,6 +36,9 @@ mod live_app_hosting;
 #[path = "support/live_user_input.rs"]
 mod live_user_input;
 
+#[path = "support/live_resource_wait.rs"]
+mod live_resource_wait;
+
 #[cfg(all(feature = "browser-use", feature = "computer-use"))]
 #[path = "support/live_general_desktop.rs"]
 mod live_general_desktop;
@@ -81,6 +84,7 @@ enum LiveCase {
     WorkspaceFile,
     ManagedComponent,
     UserInputHandoff,
+    ResourceWait,
     ReasoningLifecycle,
     CodingPreset,
     SnakeGame,
@@ -3166,6 +3170,7 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
         LiveCase::SelectedModel => run_selected_model_chain(&router, api_key.as_str(), &model).await,
         LiveCase::ManagedComponent => run_live_managed_component_chain(&router, api_key.as_str(), &model).await,
         LiveCase::UserInputHandoff => live_user_input::run(&router, api_key.as_str(), &model, root.path()).await,
+        LiveCase::ResourceWait => live_resource_wait::run(&router, api_key.as_str(), &model, root.path()).await,
         LiveCase::ReasoningLifecycle => live_reasoning_lifecycle::run(
             &router, api_key.as_str(), &model, &root.path().join("work")).await,
         LiveCase::Companion => run_live_companion_chain(&router, api_key.as_str(), &model).await,
@@ -3283,6 +3288,15 @@ async fn nomi_core_managed_component_reaches_live_stepfun() {
 #[ignore = "requires a live credential on stdin; use the runner --input-handoff-smoke"]
 async fn nomi_core_user_input_handoff_reaches_live_stepfun() {
     if let Err(failure) = run_live_provider_smoke(LiveCase::UserInputHandoff).await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
+        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a live credential on stdin; use the runner --resource-wait-smoke"]
+async fn nomi_core_resource_wait_reaches_live_stepfun() {
+    if let Err(failure) = run_live_provider_smoke(LiveCase::ResourceWait).await {
         eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
         panic!("NOMIFUN_LIVE_SMOKE_FAILED");
     }

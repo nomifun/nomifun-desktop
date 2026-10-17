@@ -375,7 +375,7 @@ async fn voice_pending_decision_fixture(fixture:&Fixture)->nomifun_agent_contrac
     let attempt=running.current_attempt.unwrap().attempt;let stop=nomifun_common::generate_id();
     let mut effects=AttemptConversationEffects::default();effects.push_stop_turn(stop.clone(),"cleanup-retry-turn".into()).unwrap();
     repository.settle_attempt(owner,&execution,&step,running.step.version,&attempt.attempt_id,attempt.version,None,&SettleAgentExecutionAttemptParams {
-        expected_user_input_turn:None,
+        expected_terminal_turn:None,
         expected_active_session_turn:Some(AgentExecutionActiveTurnGuard {conversation_id:session.clone(),canonical_operation_id:"cleanup-retry-turn".into()}),attempt_status:ExecutionAttemptStatus::WaitingInput,
         step_status:ExecutionStepStatus::WaitingInput,execution_status:Some(AgentExecutionStatus::WaitingInput),question:Some(Some("Choose option A or option B?".into())),error:None,output_summary:None,
         output_files:None,tokens:None,retry_after:None,runtime_state:Some(Some(effects.encode().unwrap())),started_at:None,finished_at:None,loop_repeat_reset:None},
@@ -414,7 +414,7 @@ async fn voice_off_original_decision_cas_keeps_its_unextended_payload() {
 #[tokio::test]
 async fn voice_actual_normal_input_handoff_presents_the_exact_native_turn_and_answers_once() {
     use nomifun_db::{IAgentExecutionRepository,SqliteAgentExecutionRepository,NewAgentExecutionEvent,
-        SettleAgentExecutionAttemptParams,AgentExecutionUserInputTurnGuard,AttemptConversationEffects};
+        SettleAgentExecutionAttemptParams,AgentExecutionTerminalTurnGuard,AttemptConversationEffects};
     use nomifun_common::{AgentExecutionStatus,AgentExecutionEventKind,AgentExecutionActor,ExecutionStepStatus,ExecutionAttemptStatus};
     use nomifun_voice_contracts::{VoiceApprovalAnswer,VoiceWorkStatus};
 
@@ -455,19 +455,19 @@ async fn voice_actual_normal_input_handoff_presents_the_exact_native_turn_and_an
     assert!(source.execution_generation>0,"the presentation must preserve a real native generation");
 
     let repository=SqliteAgentExecutionRepository::new(fixture.pool().clone());
-    let guard=AgentExecutionUserInputTurnGuard {conversation_id:session.as_ref().into(),canonical_operation_id:operation.as_ref().into(),
+    let guard=AgentExecutionTerminalTurnGuard::InputRequired {conversation_id:session.as_ref().into(),canonical_operation_id:operation.as_ref().into(),
         terminal_event_id:terminal.event_id.as_ref().into(),user_input_request:request.clone()};
-    let params=|guard|SettleAgentExecutionAttemptParams {expected_active_session_turn:None,expected_user_input_turn:Some(guard),
+    let params=|guard|SettleAgentExecutionAttemptParams {expected_active_session_turn:None,expected_terminal_turn:Some(guard),
         attempt_status:ExecutionAttemptStatus::WaitingInput,step_status:ExecutionStepStatus::WaitingInput,execution_status:Some(AgentExecutionStatus::WaitingInput),
         question:Some(Some(request.question.clone())),error:Some(None),output_summary:None,output_files:None,tokens:None,retry_after:None,
         runtime_state:Some(None),started_at:None,finished_at:None,loop_repeat_reset:None};
     let payload=json!({"canonical_operation_id":operation,"terminal_event_id":terminal.event_id,"question":request.question,"user_input_request":request});
     let event=|payload:Value|NewAgentExecutionEvent {event_type:AgentExecutionEventKind::DecisionRequested,step_id:Some(step.clone()),
         attempt_id:Some(attempt.attempt_id.clone()),actor:AgentExecutionActor::system(),payload:payload.to_string()};
-    let mut wrong_guard=guard.clone();wrong_guard.terminal_event_id=other_terminal.as_ref().into();
+    let mut wrong_guard=guard.clone();if let AgentExecutionTerminalTurnGuard::InputRequired {terminal_event_id,..}=&mut wrong_guard {*terminal_event_id=other_terminal.as_ref().into();}
     assert!(repository.settle_attempt(owner,&execution,&step,running.step.version,&attempt.attempt_id,attempt.version,None,
         &params(wrong_guard),&event(payload.clone())).await.is_err(),"a different canonical terminal cannot settle this handoff");
-    let mut changed_guard=guard.clone();changed_guard.user_input_request.question="Use a changed question?".into();
+    let mut changed_guard=guard.clone();if let AgentExecutionTerminalTurnGuard::InputRequired {user_input_request,..}=&mut changed_guard {user_input_request.question="Use a changed question?".into();}
     assert!(repository.settle_attempt(owner,&execution,&step,running.step.version,&attempt.attempt_id,attempt.version,None,
         &params(changed_guard),&event(payload.clone())).await.is_err(),"the canonical question cannot be replaced during settlement");
 
@@ -613,6 +613,28 @@ fn robot_interaction_context_uses_only_the_frozen_active_tool_mapping() {
 }
 
 #[test]
+fn robot_reply_style_follows_custom_guidance_and_applies_to_expanded_physical_agents() {
+    let original = vec!["Custom persona: append ヾ(≧▽≦*)o and emoji to every reply.".to_owned(),
+        "Quoted technical data: x <= 3, dog_v2, https://example.test/a_b".to_owned()];
+    for role_description in ["lean robot", "explicitly expanded robot"] {
+        let mut instructions = original.clone();
+        append_robot_reply_style(&mut instructions, true);
+        assert_eq!(&instructions[..original.len()], original.as_slice(), "{role_description} retains original input data");
+        assert_eq!(instructions.last().unwrap(), ROBOT_REPLY_STYLE_INSTRUCTION);
+        assert!(instructions.last().unwrap().contains("overrides decorative style in persona/custom settings"));
+        assert!(instructions.last().unwrap().contains("Preserve symbols in user-requested quotations, code, formulas"));
+        assert!(instructions.last().unwrap().contains("finish silently after all required tool receipts succeed"));
+        assert!(instructions.last().unwrap().contains("never invent an unavailable control or stop before the remaining actions"));
+        assert!(instructions.last().unwrap().contains("question or requires a verbal receipt"));
+        assert!(instructions.last().unwrap().contains("real failure, blocker, uncertain result or necessary clarification"));
+        assert!(!instructions.last().unwrap().contains("finish_without_reply"), "only the Runtime's actual exposed control gives its exact invocation contract");
+    }
+    let mut desktop = original.clone();
+    append_robot_reply_style(&mut desktop, false);
+    assert_eq!(desktop, original, "device resources or a decorative custom persona alone do not select physical delivery");
+}
+
+#[test]
 fn robot_profile_preserves_explicit_reasoning_and_does_not_guess_a_supported_low_tier() {
     assert!(session_reasoning(None).is_none(), "reasoning-capable routes do not advertise which default tier is supported");
     for (selected, expected) in [
@@ -700,6 +722,9 @@ async fn steering_replay_recovers_the_commit_to_runtime_queue_gap_once() {
     host.record_event(&message, &AgentEngineEvent::TurnStarted {
         binding:host.engine_binding.clone(),turn_operation_id:target.clone(),
     }).await.unwrap();
+    host.record_event(&message, &AgentEngineEvent::OutputTextDelta {
+        step: 1, text: "Before steering.".into(), source: None,
+    }).await.unwrap().expect("first text source commits before publication");
     let request = || nomifun_api_types::SendMessageRequest {
         content:"Original committed steering\n中文纠正必须保留".into(),files:vec![],inject_skills:vec![],hidden:false,
         origin:Some("agent_execution".into()),channel_platform:None,
@@ -720,6 +745,13 @@ async fn steering_replay_recovers_the_commit_to_runtime_queue_gap_once() {
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='turn/steer-accepted'")
         .bind(session.as_ref()).fetch_one(fixture.pool()).await.unwrap();
     assert_eq!(count, 1);
+    host.record_event(&message, &AgentEngineEvent::OutputTextDelta {
+        step: 1, text: "After steering.".into(), source: None,
+    }).await.unwrap().expect("the accepted owner boundary must invalidate the same-source live cache");
+    let source = super::super::engine_journal::canonical_assistant_step_message_id(message.source_message_id.as_deref().unwrap(), 1).unwrap();
+    let updates = fixture.owner.canonical().store().message_timeline_updates_for_turn(&session, message.source_message_id.as_deref().unwrap()).await.unwrap();
+    let segments = &updates.iter().find(|update| update.source_message_id == source).unwrap().timeline.segments;
+    assert_eq!(segments.len(), 2, "real user input retains an independent reading boundary");
     runtime.kill_and_wait(None).await.unwrap();
     fixture.finish().await;
 }
@@ -733,9 +765,9 @@ async fn system_permission_result_sequence_uses_the_real_host_ack_after_buffer_f
     let mut message = fixture.message.clone();
     message.msg_id = message.source_message_id.clone().unwrap();
     host.admit_preparation(&message, CancellationToken::new()).await.unwrap();
-    assert!(host.record_event(&message, &AgentEngineEvent::TurnStarted {
+    host.record_event(&message, &AgentEngineEvent::TurnStarted {
         binding: host.engine_binding.clone(), turn_operation_id: "cleanup-retry-turn".into(),
-    }).await.unwrap().is_none());
+    }).await.unwrap().expect("TurnStarted owns its exact canonical acknowledgement");
     for (index, is_error) in [true, false].into_iter().enumerate() {
         let call_id = format!("permission-sequence-{index}");
         host.record_event(&message, &AgentEngineEvent::ToolCallCompleted { step: 1, call: ChatToolCall {
@@ -746,8 +778,12 @@ async fn system_permission_result_sequence_uses_the_real_host_ack_after_buffer_f
             step: 1, call_id: call_id.clone().into(), capability_id: "workspace.files".into(),
             action_id: "workspace.files/read".into(),
         }).await.unwrap());
-        // Short text stays buffered until the result commits both records.
+        host.record_event(&message, &AgentEngineEvent::OutputTextDelta {
+            source: None, step: 1, text: "Source anchor. ".into(),
+        }).await.unwrap().expect("first source fragment commits before live publication");
+        // Later same-source text stays buffered until the result commits both records.
         assert!(host.record_event(&message, &AgentEngineEvent::OutputTextDelta {
+            source: None,
             step: 1, text: format!("buffered before {call_id}"),
         }).await.unwrap().is_none());
         let seq = host.record_event(&message, &AgentEngineEvent::ToolCompleted { runtime_hold: None, step: 1,
@@ -762,9 +798,9 @@ async fn system_permission_result_sequence_uses_the_real_host_ack_after_buffer_f
             AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='output_text_delta'")
             .bind(&host.options.conversation_id).fetch_one(fixture.pool()).await.unwrap();
         assert!(text_seq < persisted, "result identity must not borrow the flushed text acknowledgement");
-        assert!(host.record_event(&message, &AgentEngineEvent::ReasoningDelta {
+        host.record_event(&message, &AgentEngineEvent::ReasoningDelta {
             step: index as u16 + 2, text: "a later canonical observation".into(),
-        }).await.unwrap().is_none());
+        }).await.unwrap().expect("first reasoning activity fragment commits its own reference");
         let head = fixture.owner.canonical().store().head(&host.options.conversation_id.clone().into()).await.unwrap();
         assert!(head.last_seq > seq, "an unrelated later head is distinct from the result receipt");
     }
@@ -981,6 +1017,67 @@ async fn steering_cleanup_retry_retains_deferred_receipt_until_ack() {
 enum SteeringCleanupFault { PrivateRecord, PublicProjection, DeferredReceipt }
 
 #[tokio::test]
+async fn parked_host_receives_input_before_and_during_notification_registration_without_closing_the_turn() {
+    for before in [true,false] {
+        let fixture=Fixture::new(if before {"wait-input-before"} else {"wait-input-race"}).await;
+        let cancellation=CancellationToken::new();
+        let request=fixture.host.prepare_turn(&fixture.message,cancellation.clone()).await.unwrap();
+        let causality=request.model_request.causality.clone();
+        fixture.host.record_event(&fixture.message,&AgentEngineEvent::TurnStarted {
+            binding:fixture.host.engine_binding.clone(),turn_operation_id:causality.turn_operation_id.clone(),
+        }).await.unwrap();
+        fixture.host.record_event(&fixture.message,&AgentEngineEvent::TurnWaiting {model_steps:0,request_id:None,
+            reason:AgentWaitReason::InterventionRequired}).await.unwrap();
+        let generation=fixture.host.active.lock().await.as_ref().unwrap().epoch as u64;
+        let store=fixture.host.session_host.canonical_store().unwrap();
+        let queue=async {
+            tokio::task::yield_now().await;
+            let (_,receipt)=store.steer_active_turn(&fixture.host.options.conversation_id.clone().into(),
+                "owner-wait-answer".into(),"session_api".into(),StrictJsonValue(json!({"content":"Authorization completed"}))).await.unwrap();
+            assert!(fixture.host.queue_steer(nomifun_ai_agent::RuntimeSteerDelivery {
+                receipt_operation_id:receipt.ack.unwrap().event_id.as_ref().to_owned(),wire_turn_id:fixture.message.msg_id.clone(),
+                turn_generation:generation,text:"Authorization completed".into(),files:vec![],inject_skills:vec![],
+            }).await.unwrap());
+        };
+        let wait_port=request.wait_port.unwrap();let wait_request=AgentWaitRequest {processes:vec![]};
+        let wake=if before {
+            queue.await;
+            tokio::time::timeout(Duration::from_secs(2),wait_port.wait(&causality,&wait_request,cancellation.clone())).await.unwrap().unwrap()
+        } else {
+            let (wake,())=tokio::join!(tokio::time::timeout(Duration::from_secs(2),wait_port.wait(&causality,&wait_request,cancellation.clone())),queue);
+            wake.unwrap().unwrap()
+        };
+        assert!(matches!(wake,AgentWaitWake::InputsAvailable));
+        let input=request.input_port.unwrap().take(&causality,false).await.unwrap();
+        assert_eq!(input.len(),1);assert_eq!(input[0].text,"Authorization completed");
+        assert_eq!(fixture.state().await,"running");
+        assert!(!fixture.host.active.lock().await.as_ref().unwrap().cleanup_started);
+        if before {
+            fixture.host.record_event(&fixture.message,&AgentEngineEvent::TurnWaiting {model_steps:0,request_id:None,
+                reason:AgentWaitReason::ExternalResource}).await.unwrap();
+            let missing=AgentWaitRequest {processes:vec![AgentWaitProcess {process_id:"another-turn-process".into(),output_cursor:0}]};
+            let lost=tokio::time::timeout(Duration::from_secs(2),wait_port.wait(&causality,&missing,cancellation.clone())).await.unwrap();
+            assert!(matches!(lost,Err(AgentEngineError::WaitOwnerUnavailable)));
+            fixture.host.cleanup_turn(&fixture.message).await.unwrap();
+            fixture.host.record_event(&fixture.message,&AgentEngineEvent::TurnPaused {model_steps:0,
+                reason:"EXECUTION_WAIT_OWNER_UNAVAILABLE".into()}).await.unwrap();
+            assert_eq!(fixture.state().await,"running");
+            let head=store.head(&fixture.host.options.conversation_id.clone().into()).await.unwrap();
+            assert_eq!(head.status,"paused");
+            let failures:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='turn/failed'")
+                .bind(&fixture.host.options.conversation_id).fetch_one(fixture.pool()).await.unwrap();
+            assert_eq!(failures,0,"lost owner observation is reconciliation, not task failure");
+            store.cancel_active_turn(&fixture.host.options.conversation_id.clone().into(),"end-owner-loss".into(),"session_api".into()).await.unwrap();
+            fixture.assert_settled().await;fixture.finish().await;continue;
+        }
+        fixture.host.record_event(&fixture.message,&AgentEngineEvent::TurnWaitResolved {model_steps:0}).await.unwrap();
+        fixture.host.cleanup_turn(&fixture.message).await.unwrap();
+        fixture.host.record_event(&fixture.message,&AgentEngineEvent::TurnCancelled {model_steps:0}).await.unwrap();
+        fixture.assert_settled().await;fixture.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn steering_cleanup_retry_acknowledges_exact_cancelled_root_before_first_poll() {
     let fixture = Fixture::new("cancelled-before-first-poll").await;
     let store = fixture.host.session_host.canonical_store().unwrap();
@@ -1093,11 +1190,15 @@ async fn steering_cleanup_scenario(fault: SteeringCleanupFault) {
     };
     assert!(fixture.host.queue_steer(delivery.clone()).await.unwrap());
     assert!(fixture.host.queue_steer(delivery.clone()).await.unwrap());
-    let tail = "Partial response before cancellation.\n中文尾部：只写一次";
+    let anchor = "Initial source anchor.\n";
     fixture.host.record_event(&fixture.message, &AgentEngineEvent::OutputTextDelta {
-        step: 1, text: tail.into(),
-    }).await.unwrap();
-    assert_eq!(fixture.host.active.lock().await.as_ref().unwrap().journal.sequence(), 2);
+        step: 1, text: anchor.into(), source: None,
+    }).await.unwrap().expect("first source fragment commits before live publication");
+    let before_tail = fixture.host.active.lock().await.as_ref().unwrap().journal.sequence();
+    let tail = "Partial response before cancellation.\n中文尾部：只写一次";
+    assert!(fixture.host.record_event(&fixture.message, &AgentEngineEvent::OutputTextDelta {
+        step: 1, text: tail.into(), source: None }).await.unwrap().is_none(), "same-source tail remains buffered");
+    assert_eq!(fixture.host.active.lock().await.as_ref().unwrap().journal.sequence(), before_tail);
     let predicate = match fault {
         SteeringCleanupFault::PrivateRecord => "NEW.kind='runtime/progress-recorded' AND json_extract(NEW.inline_json,'$.event.event')='output_text_delta'",
         SteeringCleanupFault::PublicProjection => "NEW.kind='message/content-part'",
@@ -1123,10 +1224,10 @@ async fn steering_cleanup_scenario(fault: SteeringCleanupFault) {
     }
     let public_parts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='message/content-part'")
         .bind(&fixture.host.options.conversation_id).fetch_one(fixture.pool()).await.unwrap();
-    assert_eq!(public_parts, i64::from(matches!(fault, SteeringCleanupFault::DeferredReceipt)));
+    assert_eq!(public_parts, 1 + i64::from(matches!(fault, SteeringCleanupFault::DeferredReceipt)));
     let private_parts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='output_text_delta'")
         .bind(&fixture.host.options.conversation_id).fetch_one(fixture.pool()).await.unwrap();
-    assert_eq!(private_parts, i64::from(!matches!(fault, SteeringCleanupFault::PrivateRecord)));
+    assert_eq!(private_parts, 1 + i64::from(!matches!(fault, SteeringCleanupFault::PrivateRecord)));
     sqlx::query("DROP TRIGGER reject_steering_tail").execute(fixture.pool()).await.unwrap();
     sqlx::query("DROP TRIGGER reject_steering_cleanup_pause").execute(fixture.pool()).await.unwrap();
     fixture.host.cleanup_turn(&fixture.message).await.unwrap();
@@ -1139,10 +1240,10 @@ async fn steering_cleanup_scenario(fault: SteeringCleanupFault) {
     }
     let parts: Vec<String> = sqlx::query_scalar("SELECT json_extract(inline_json,'$.content') FROM agent_events WHERE session_id=? AND kind='message/content-part' ORDER BY seq")
         .bind(&fixture.host.options.conversation_id).fetch_all(fixture.pool()).await.unwrap();
-    assert_eq!(parts, vec![tail]);
+    assert_eq!(parts, vec![anchor, tail]);
     let private: Vec<String> = sqlx::query_scalar("SELECT json_extract(inline_json,'$.event.text') FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='output_text_delta'")
         .bind(&fixture.host.options.conversation_id).fetch_all(fixture.pool()).await.unwrap();
-    assert_eq!(private, vec![tail]);
+    assert_eq!(private, vec![anchor, tail]);
     let deferred: Vec<String> = sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='steering_deferred'")
         .bind(&fixture.host.options.conversation_id).fetch_all(fixture.pool()).await.unwrap();
     assert_eq!(deferred.len(), 1);

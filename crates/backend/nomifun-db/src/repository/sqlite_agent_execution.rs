@@ -29,7 +29,7 @@ use crate::repository::agent_execution::{
     NewAgentExecutionEvent, NewAgentExecutionParticipant, NewAgentExecutionStep,
     NewAgentExecutionStepDependency, ReconcileAgentExecutionPlanParams,
     PendingConversationCleanup, RetryAgentExecutionStep, SettleAgentExecutionAttemptParams,
-    RecoveredAgentExecutionAttemptOutput, AgentExecutionUserInputTurnGuard,
+    AgentExecutionAttemptDisposition, RecoveredAgentExecutionAttemptOutput, AgentExecutionTerminalTurnGuard,
     UpdateAgentExecutionParams,
 };
 
@@ -50,11 +50,19 @@ fn conflict(entity: &str) -> DbError {
     ))
 }
 
-async fn verify_user_input_turn_tx(
+async fn verify_terminal_turn_tx(
     tx: &mut Transaction<'_, Sqlite>, user_id: &str, execution_id: &str,
-    step_id: &str, attempt_id: &str, source: &AgentExecutionUserInputTurnGuard,
-) -> Result<bool, DbError> {
-    source.user_input_request.validate().map_err(DbError::Conflict)?;
+    step_id: &str, attempt_id: &str, source: &AgentExecutionTerminalTurnGuard,
+    allow_paused_reconciliation: bool,
+) -> Result<(), DbError> {
+    let (conversation_id, operation_id, terminal_event_id) = source.source();
+    let (turn_state, terminal_kind) = match source {
+        AgentExecutionTerminalTurnGuard::InputRequired { user_input_request, .. } => {
+            user_input_request.validate().map_err(DbError::Conflict)?;
+            ("completed", "turn/completed")
+        }
+        AgentExecutionTerminalTurnGuard::Cancelled { .. } => ("cancelled", "turn/cancelled"),
+    };
     let row: Option<(String, Option<String>, Option<Vec<u8>>, Option<String>)> = sqlx::query_as(
         "SELECT execution.decision_policy, terminal.inline_json, payload.body, attempt.runtime_state \
          FROM conversation_execution_links link \
@@ -79,12 +87,12 @@ async fn verify_user_input_turn_tx(
                AND peer.step_id=link.step_id AND peer.attempt_id=link.attempt_id \
                AND peer.active=1 AND peer.relation IN ('attempt','automation'))=1 \
            AND session.state='live' AND execution.user_id=? AND execution.deleted_at IS NULL \
-           AND execution.status IN ('running','waiting_input') \
+           AND (execution.status IN ('running','waiting_input') OR (? AND execution.status='paused')) \
            AND json_extract(session.owner_ref_json,'$.principal_kind')='user' \
            AND json_extract(session.owner_ref_json,'$.principal_id')=? \
-           AND turn.state='completed' AND terminal.event_id=? \
+           AND turn.state=? AND terminal.event_id=? \
            AND terminal.session_id=session.agent_session_id AND terminal.correlation_id=turn.operation_id \
-           AND terminal.kind='turn/completed' AND terminal.kind_version=1 \
+           AND terminal.kind=? AND terminal.kind_version=1 \
            AND started.session_id=session.agent_session_id AND started.correlation_id=turn.operation_id \
            AND started.kind='turn/started' AND started.kind_version=1 \
            AND terminal.seq>started.seq \
@@ -93,26 +101,34 @@ async fn verify_user_input_turn_tx(
                AND effect.state IN ('pending','unknown')) \
            AND NOT EXISTS(SELECT 1 FROM agent_turns successor WHERE successor.session_id=session.agent_session_id \
                AND successor.operation_id<>turn.operation_id AND successor.accepted_at>turn.accepted_at)",
-    ).bind(&source.canonical_operation_id).bind(&source.conversation_id).bind(execution_id)
-        .bind(step_id).bind(attempt_id).bind(user_id).bind(user_id).bind(&source.terminal_event_id)
+    ).bind(operation_id).bind(conversation_id).bind(execution_id)
+        .bind(step_id).bind(attempt_id).bind(user_id).bind(allow_paused_reconciliation).bind(user_id).bind(turn_state).bind(terminal_event_id).bind(terminal_kind)
         .fetch_optional(&mut **tx).await?;
-    let (policy, inline, stored, runtime_state) = row.ok_or_else(|| conflict("canonical user input source Turn"))?;
+    let (policy, inline, stored, runtime_state) = row.ok_or_else(|| conflict("canonical terminal source Turn"))?;
     let effects = AttemptConversationEffects::decode(runtime_state.as_deref()).map_err(|error| DbError::Init(error.to_string()))?;
     let key = effects.current_turn_operation_key(attempt_id).map_err(|error| DbError::Init(error.to_string()))?;
-    if source.canonical_operation_id != format!("turn:user:{user_id}:{}:{key}", source.conversation_id) {
-        return Err(conflict("current Agent Execution user input invocation"));
+    if operation_id != format!("turn:user:{user_id}:{conversation_id}:{key}") {
+        return Err(conflict("current Agent Execution terminal invocation"));
     }
     let value: serde_json::Value = match (inline, stored) {
         (Some(value), _) => serde_json::from_str(&value),
         (None, Some(bytes)) => serde_json::from_slice(&bytes),
-        _ => return Err(conflict("canonical user input payload")),
-    }.map_err(|_| conflict("canonical user input payload"))?;
-    let request: nomifun_agent_contracts::AgentUserInputRequest = serde_json::from_value(
-        value.get("user_input_request").cloned().ok_or_else(|| conflict("canonical user input request"))?
-    ).map_err(|_| conflict("canonical user input request"))?;
-    request.validate().map_err(DbError::Conflict)?;
-    if request != source.user_input_request { return Err(conflict("canonical user input request")); }
-    Ok(policy == "ask_user")
+        _ => return Err(conflict("canonical terminal payload")),
+    }.map_err(|_| conflict("canonical terminal payload"))?;
+    match source {
+        AgentExecutionTerminalTurnGuard::InputRequired { user_input_request, .. } => {
+            if !matches!(policy.as_str(), "automatic" | "ask_user") { return Err(conflict("canonical human handoff policy")); }
+            let request: nomifun_agent_contracts::AgentUserInputRequest = serde_json::from_value(
+                value.get("user_input_request").cloned().ok_or_else(|| conflict("canonical user input request"))?
+            ).map_err(|_| conflict("canonical user input request"))?;
+            request.validate().map_err(DbError::Conflict)?;
+            if &request != user_input_request { return Err(conflict("canonical user input request")); }
+        }
+        AgentExecutionTerminalTurnGuard::Cancelled { .. } => {
+            if value.get("user_input_request").is_some() { return Err(conflict("cancelled Turn cannot declare a human handoff")); }
+        }
+    }
+    Ok(())
 }
 
 fn is_terminal_execution_status(status: &str) -> bool {
@@ -346,6 +362,7 @@ async fn active_attempt_conversation_tx(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RunningAttemptReceiptReconciliation {
     CompletedReceiptAdopted,
+    CancelledReceiptAdopted,
     UserInputRequested,
     ReviewBlocked,
 }
@@ -434,20 +451,32 @@ async fn reconcile_running_attempt_receipt_tx(
         {
             return Err(conflict("canonical Agent Execution recovery output"));
         }
+        if (state == "cancelled") != (output.disposition == AgentExecutionAttemptDisposition::Cancelled)
+            || output.user_input_request.is_some() != (output.disposition == AgentExecutionAttemptDisposition::InputRequired) {
+            return Err(conflict("canonical terminal disposition"));
+        }
         // Session control metadata is not a public answer. Only typed output
         // returned by the canonical owner may settle the business result.
         let has_output = output.text.as_ref().is_some_and(|text| !text.trim().is_empty())
             || !output.output_files.is_empty();
-        let waiting = if let Some(request) = &output.user_input_request {
-            let source = AgentExecutionUserInputTurnGuard {
-                conversation_id: output.conversation_id.clone(),
-                canonical_operation_id: output.canonical_operation_id.clone(),
-                terminal_event_id: output.terminal_event_id.clone(), user_input_request: request.clone(),
-            };
-            verify_user_input_turn_tx(tx, user_id, execution_id, step_id, attempt_id, &source).await? && output.ok
-        } else { false };
-        let succeeded = state == "completed" && output.ok && has_output && output.user_input_request.is_none();
-        let error = (!succeeded && !waiting).then(|| output.error.as_deref().unwrap_or(
+        let waiting = output.disposition == AgentExecutionAttemptDisposition::InputRequired;
+        let cancelled = output.disposition == AgentExecutionAttemptDisposition::Cancelled;
+        if waiting || cancelled {
+            let source = if waiting {
+                AgentExecutionTerminalTurnGuard::InputRequired {
+                    conversation_id: output.conversation_id.clone(), canonical_operation_id: output.canonical_operation_id.clone(),
+                    terminal_event_id: output.terminal_event_id.clone(), user_input_request: output.user_input_request.clone()
+                        .ok_or_else(|| conflict("recovered canonical human handoff"))?,
+                }
+            } else { AgentExecutionTerminalTurnGuard::Cancelled {
+                conversation_id: output.conversation_id.clone(), canonical_operation_id: output.canonical_operation_id.clone(),
+                terminal_event_id: output.terminal_event_id.clone(),
+            } };
+            verify_terminal_turn_tx(tx, user_id, execution_id, step_id, attempt_id, &source, true).await?;
+        }
+        let succeeded = state == "completed" && output.disposition == AgentExecutionAttemptDisposition::Delivered
+            && has_output && output.user_input_request.is_none();
+        let error = (!succeeded && !waiting && !cancelled).then(|| output.error.as_deref().unwrap_or(
             "Canonical Agent Turn ended without a successful public delivery"
         ));
         let delivered_files = if succeeded || waiting { output.output_files.as_slice() } else { &[] };
@@ -460,7 +489,7 @@ async fn reconcile_running_attempt_receipt_tx(
              WHERE execution_id = ? AND step_id = ? AND attempt_id = ? AND version = ? \
                AND status = 'running'",
         )
-        .bind(if waiting { "waiting_input" } else if succeeded { "completed" } else { "failed" })
+        .bind(if waiting { "waiting_input" } else if cancelled { "cancelled" } else if succeeded { "completed" } else { "failed" })
         .bind(if waiting { output.user_input_request.as_ref().map(|request| request.question.as_str()) } else { None })
         .bind(error)
         .bind((succeeded || waiting).then_some(output.text.as_deref()).flatten())
@@ -483,7 +512,7 @@ async fn reconcile_running_attempt_receipt_tx(
              WHERE execution_id = ? AND step_id = ? AND version = ? \
                AND status = 'running' AND superseded_in_revision IS NULL",
         )
-        .bind(if waiting { "waiting_input" } else if succeeded { "completed" } else { "failed" })
+        .bind(if waiting { "waiting_input" } else if cancelled { "cancelled" } else if succeeded { "completed" } else { "failed" })
         .bind(now)
         .bind(execution_id)
         .bind(step_id)
@@ -505,6 +534,7 @@ async fn reconcile_running_attempt_receipt_tx(
         .execute(&mut **tx)
         .await?; }
         return Ok(if waiting { RunningAttemptReceiptReconciliation::UserInputRequested }
+            else if cancelled { RunningAttemptReceiptReconciliation::CancelledReceiptAdopted }
             else { RunningAttemptReceiptReconciliation::CompletedReceiptAdopted });
     }
 
@@ -1881,8 +1911,9 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         .bind(execution_id)
         .fetch_all(&mut *tx)
         .await?;
+        let mut cancellation_adopted = false;
         for (step_id, step_version, attempt_id, attempt_version) in running_attempts {
-            reconcile_running_attempt_receipt_tx(
+            cancellation_adopted |= reconcile_running_attempt_receipt_tx(
                 &mut tx,
                 user_id,
                 execution_id,
@@ -1893,7 +1924,12 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
                 recovered_outputs.iter().find(|output| output.attempt_id == attempt_id),
                 now,
             )
-            .await?;
+            .await? == RunningAttemptReceiptReconciliation::CancelledReceiptAdopted;
+        }
+        if cancellation_adopted {
+            sqlx::query("UPDATE agent_executions SET status='cancelled',version=version+1,updated_at=? WHERE execution_id=? AND user_id=? AND status='paused'")
+                .bind(now).bind(execution_id).bind(user_id).execute(&mut *tx).await?;
+            terminate_unfinished_execution_children_tx(&mut tx, execution_id, None, now).await?;
         }
 
         // Queued reservations have not crossed start_attempt and are the only
@@ -4127,6 +4163,9 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
                 RunningAttemptReceiptReconciliation::CompletedReceiptAdopted => {
                     AgentExecutionAttemptRecoveryDisposition::CompletedReceiptAdopted
                 }
+                RunningAttemptReceiptReconciliation::CancelledReceiptAdopted => {
+                    AgentExecutionAttemptRecoveryDisposition::CancelledReceiptAdopted
+                }
                 RunningAttemptReceiptReconciliation::UserInputRequested => {
                     AgentExecutionAttemptRecoveryDisposition::UserInputRequested
                 }
@@ -4136,17 +4175,21 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
             }
         };
 
-        let execution_status = matches!(
-            disposition,
-            AgentExecutionAttemptRecoveryDisposition::ReviewBlocked | AgentExecutionAttemptRecoveryDisposition::UserInputRequested
-        )
-        .then_some("waiting_input");
+        let execution_status = match disposition {
+            AgentExecutionAttemptRecoveryDisposition::CancelledReceiptAdopted => Some("cancelled"),
+            AgentExecutionAttemptRecoveryDisposition::ReviewBlocked | AgentExecutionAttemptRecoveryDisposition::UserInputRequested => Some("waiting_input"),
+            _ => None,
+        };
         let execution = sqlx::query(
             "UPDATE agent_executions SET status = COALESCE(?, status), \
+                lease_owner = CASE WHEN ?='cancelled' THEN NULL ELSE lease_owner END, \
+                lease_expires_at = CASE WHEN ?='cancelled' THEN NULL ELSE lease_expires_at END, \
                 version = version + 1, updated_at = ? \
              WHERE execution_id = ? AND user_id = ? AND deleted_at IS NULL \
                AND status IN ('running', 'waiting_input')",
         )
+        .bind(execution_status)
+        .bind(execution_status)
         .bind(execution_status)
         .bind(now)
         .bind(execution_id)
@@ -4155,6 +4198,9 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         .await?;
         if execution.rows_affected() != 1 {
             return Err(conflict("Agent Execution recovery"));
+        }
+        if disposition == AgentExecutionAttemptRecoveryDisposition::CancelledReceiptAdopted {
+            terminate_unfinished_execution_children_tx(&mut tx, execution_id, None, now).await?;
         }
         let mut event = scoped_event(event, step_id, Some(attempt_id));
         if disposition == AgentExecutionAttemptRecoveryDisposition::UserInputRequested {
@@ -4208,17 +4254,28 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         let now = now_ms();
         let mut tx = self.pool.begin().await?;
         fence_scheduler_write_tx(&mut tx, execution_id, lease, now).await?;
-        if params.expected_active_session_turn.is_some() && params.expected_user_input_turn.is_some() {
-            return Err(conflict("mutually exclusive decision source Turn guards"));
+        if params.expected_active_session_turn.is_some() && params.expected_terminal_turn.is_some() {
+            return Err(conflict("mutually exclusive canonical source Turn guards"));
         }
-        if let Some(source) = &params.expected_user_input_turn {
-            if params.attempt_status != ExecutionAttemptStatus::WaitingInput
-                || params.step_status != ExecutionStepStatus::WaitingInput
-                || params.execution_status != Some(AgentExecutionStatus::WaitingInput)
-                || params.question.as_ref().and_then(|question| question.as_deref()) != Some(source.user_input_request.question.as_str())
-                || !verify_user_input_turn_tx(&mut tx, user_id, execution_id, step_id, attempt_id, source).await? {
-                return Err(conflict("canonical user input decision policy"));
+        if let Some(source) = &params.expected_terminal_turn {
+            match source {
+                AgentExecutionTerminalTurnGuard::InputRequired { user_input_request, .. } => {
+                    if params.attempt_status != ExecutionAttemptStatus::WaitingInput
+                        || params.step_status != ExecutionStepStatus::WaitingInput
+                        || params.execution_status != Some(AgentExecutionStatus::WaitingInput)
+                        || params.question.as_ref().and_then(|question| question.as_deref()) != Some(user_input_request.question.as_str()) {
+                        return Err(conflict("canonical user input settlement"));
+                    }
+                }
+                AgentExecutionTerminalTurnGuard::Cancelled { .. } => {
+                    if params.attempt_status != ExecutionAttemptStatus::Cancelled
+                        || params.step_status != ExecutionStepStatus::Cancelled
+                        || params.execution_status != Some(AgentExecutionStatus::Cancelled) {
+                        return Err(conflict("canonical cancellation settlement"));
+                    }
+                }
             }
+            verify_terminal_turn_tx(&mut tx, user_id, execution_id, step_id, attempt_id, source, false).await?;
         }
         if let Some(source) = &params.expected_active_session_turn {
             if params.attempt_status != ExecutionAttemptStatus::WaitingInput
@@ -4364,6 +4421,9 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         .await?;
         if execution_result.rows_affected() != 1 {
             return Err(conflict("agent execution"));
+        }
+        if params.execution_status == Some(AgentExecutionStatus::Cancelled) {
+            terminate_unfinished_execution_children_tx(&mut tx, execution_id, None, now).await?;
         }
         if terminal {
             sqlx::query(

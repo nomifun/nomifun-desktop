@@ -4,7 +4,7 @@
 //! lifecycle SDK. Production composition supplies admitted Session/Broker/Kernel
 //! ports; neither adapter nor SDK creates a second persistence/authority owner.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -37,11 +37,6 @@ pub trait UnifiedRuntimeHost: Send + Sync {
     /// This is not a request to replace an active or paused Turn.
     fn requires_turn_boundary_recycle(&self) -> bool { false }
 
-    /// Validate a completed proposal against Host-owned delivery facts before
-    /// the lifecycle SDK records success. It can only narrow completion.
-    async fn completion_gate(
-        &self, _message: &SendMessageData,
-    ) -> Result<Option<EngineTurnTerminal>, AppError> { Ok(None) }
     async fn recoverable_preparation_step(&self, _message:&SendMessageData) -> Result<Option<u16>,AppError> { Ok(None) }
     async fn suspend_after_cleanup_failure(&self, _message: &SendMessageData) -> Result<bool,AppError> { Ok(false) }
     fn supports_execution_checkpoints(&self) -> bool { false }
@@ -88,6 +83,10 @@ pub trait UnifiedRuntimeHost: Send + Sync {
     ) -> Result<Vec<nomifun_agent_contracts::MessageTimelineUpdate>, AppError> {
         Ok(Vec::new())
     }
+
+    /// Canonical hosts publish text together with its exact reading boundary.
+    /// Hosts without canonical storage retain their plain stream contract.
+    fn supports_canonical_timeline(&self) -> bool { false }
 
     /// Hosts accepting concurrent steering must override this and atomically
     /// check the inbox and persist admission. False must record no ToolStarted.
@@ -179,6 +178,8 @@ struct TurnProjection {
     calls: Mutex<BTreeMap<String, PendingToolProjection>>,
     terminal: Mutex<Option<AgentEngineEvent>>,
     last_model_step: std::sync::atomic::AtomicU16,
+    pending_text: Mutex<VecDeque<TextEventData>>,
+    text_timeline: Mutex<Option<(u16, nomifun_agent_contracts::MessageTimeline)>>,
 }
 
 #[async_trait]
@@ -220,8 +221,31 @@ impl AgentEventSink for TurnProjection {
             AgentEngineEvent::ExecutionResumed { model_steps, .. } => { self.output.record_model_steps(*model_steps); }
             _ => {}
         }
-        self.project(event, event_seq)?;
-        if event_seq.is_some() { self.publish_timeline().await; }
+        let canonical_text = self.host.supports_canonical_timeline();
+        let has_pending_text = !self.pending_text.lock().unwrap_or_else(|e| e.into_inner()).is_empty();
+        let updates = if event_seq.is_some() || has_pending_text { self.read_timeline().await } else { None };
+        if canonical_text && matches!(event, AgentEngineEvent::OutputTextDelta { .. } | AgentEngineEvent::CompletionDelivered { .. }) {
+            let (step, text) = match event {
+                AgentEngineEvent::OutputTextDelta { step, text, .. } | AgentEngineEvent::CompletionDelivered { step, text } => (step, text),
+                _ => unreachable!(),
+            };
+            // A committed batch may contain a new provider/tool/message
+            // boundary. Never publish its bytes against an older running
+            // range if that exact canonical read is temporarily unavailable.
+            if event_seq.is_some() || has_pending_text {
+                *self.text_timeline.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }
+            self.pending_text.lock().unwrap_or_else(|e| e.into_inner()).push_back(TextEventData {
+                content: text, step: Some(step), timeline: None,
+            });
+            self.flush_pending_text(updates.as_deref());
+        } else {
+            self.flush_pending_text(updates.as_deref());
+            self.project(event, event_seq)?;
+        }
+        if let Some(updates) = updates.filter(|updates| !updates.is_empty()) {
+            self.output.publish(EngineProgress::CanonicalTimeline(updates));
+        }
         Ok(())
     }
 
@@ -234,16 +258,45 @@ impl AgentEventSink for TurnProjection {
 }
 
 impl TurnProjection {
-    async fn publish_timeline(&self) {
+    async fn read_timeline(&self) -> Option<Vec<nomifun_agent_contracts::MessageTimelineUpdate>> {
         // Presentation cannot become an unbounded wait before an admitted
         // owner invocation. Dropping this read never drops execution evidence.
         match tokio::time::timeout(std::time::Duration::from_millis(100),
             self.host.timeline_updates(&self.message)).await {
-            Ok(Ok(updates)) if !updates.is_empty() => {
-                self.output.publish(EngineProgress::CanonicalTimeline(updates));
+            Ok(Ok(updates)) => Some(updates),
+            Err(_) => None,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "canonical timeline display could not be refreshed");
+                None
             }
-            Ok(Ok(_)) | Err(_) => {},
-            Ok(Err(error)) => tracing::warn!(%error, "canonical timeline display could not be refreshed"),
+        }
+    }
+
+    async fn publish_timeline(&self) {
+        if let Some(updates) = self.read_timeline().await {
+            self.flush_pending_text(Some(&updates));
+            if !updates.is_empty() { self.output.publish(EngineProgress::CanonicalTimeline(updates)); }
+        }
+    }
+
+    fn flush_pending_text(&self, updates: Option<&[nomifun_agent_contracts::MessageTimelineUpdate]>) {
+        let mut pending = self.pending_text.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cached = self.text_timeline.lock().unwrap_or_else(|e| e.into_inner());
+        while let Some(data) = pending.front() {
+            let Some(step) = data.step else { break; };
+            let root = self.message.source_message_id.as_deref().unwrap_or(&self.message.msg_id);
+            let source = nomifun_agent_contracts::canonical_assistant_step_message_id(root, step).ok();
+            let timeline = if let Some(updates) = updates {
+                updates.iter().find(|update| update.call_id.is_none()
+                    && Some(update.source_message_id.as_str()) == source.as_deref()).map(|update| update.timeline.clone())
+            } else {
+                cached.as_ref().filter(|(previous, _)| *previous == step).map(|(_, timeline)| timeline.clone())
+            };
+            let Some(timeline) = timeline else { break; };
+            let mut data = pending.pop_front().expect("front inspected above");
+            data.timeline = Some(timeline.clone());
+            *cached = Some((step, timeline));
+            self.output.publish(EngineProgress::Text(data));
         }
     }
 
@@ -251,10 +304,11 @@ impl TurnProjection {
         let projected = match event {
             // The host has committed the full plan. Re-read the canonical
             // snapshot, including lifecycle and reset state, for presentation.
-            AgentEngineEvent::PlanUpdated { .. } => Some(EngineProgress::TaskPlanChanged),
+            AgentEngineEvent::PlanUpdated { .. } | AgentEngineEvent::TurnWaiting { .. }
+                | AgentEngineEvent::TurnWaitResolved { .. } => Some(EngineProgress::TaskPlanChanged),
             AgentEngineEvent::TurnStarted { .. } | AgentEngineEvent::ExecutionResumed { .. } => Some(EngineProgress::Started),
-            AgentEngineEvent::OutputTextDelta { step, text } | AgentEngineEvent::CompletionDelivered { step, text } => {
-                Some(EngineProgress::Text(TextEventData { content: text, step: Some(step) }))
+            AgentEngineEvent::OutputTextDelta { step, text, .. } | AgentEngineEvent::CompletionDelivered { step, text } => {
+                Some(EngineProgress::Text(TextEventData { content: text, step: Some(step), timeline: None }))
             }
             AgentEngineEvent::ReasoningDelta { step, text } => {
                 Some(EngineProgress::Thinking(ThinkingEventData {
@@ -293,6 +347,7 @@ impl TurnProjection {
                 let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
                 calls.get_mut(call_id.as_ref())
                     .filter(|call| !call.public.call_id.starts_with("agent-instructions:"))
+                    .filter(|call| call.public.name != nomifun_agent_runtime::FINISH_WITHOUT_REPLY_TOOL_NAME)
                     .map(|pending| {
                         let call = &mut pending.public;
                         call.identity.capability_id = Some(capability_id.as_ref().to_owned());
@@ -318,7 +373,8 @@ impl TurnProjection {
                 // These are engine-owned instruction preflight reads, not
                 // model-selected work. Keep their durable observations but do
                 // not flood the conversation with synthetic read/error rows.
-                if call.call_id.starts_with("agent-instructions:") {
+                if call.call_id.starts_with("agent-instructions:")
+                    || call.name == nomifun_agent_runtime::FINISH_WITHOUT_REPLY_TOOL_NAME {
                     return Ok(());
                 }
                 call.status = if result.is_error {
@@ -372,6 +428,7 @@ impl EngineSessionDriver for UnifiedSessionDriver {
             host: self.host.clone(), message: message.clone(), output,
             calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
             last_model_step: std::sync::atomic::AtomicU16::new(0),
+            pending_text: Mutex::new(VecDeque::new()), text_timeline: Mutex::new(None),
         });
         let session = self.engine.open_session(self.binding.clone(), self.model.clone(),
             self.tools.clone(), Some(projection.clone())).map_err(contract_error)?;
@@ -388,26 +445,24 @@ impl EngineSessionDriver for UnifiedSessionDriver {
             return Err(AppError::Conflict("Nomi turn principal differs from its Session owner".into()));
         }
         let execution = session.run_turn_cancellable(request, cancellation).await;
+        let has_pending_text = !projection.pending_text.lock().unwrap_or_else(|e| e.into_inner()).is_empty();
+        if has_pending_text {
+            projection.publish_timeline().await;
+        }
         let pending = projection.terminal.lock().unwrap_or_else(|e| e.into_inner()).take();
         match execution {
             Ok(result) => {
-                let mut outcome = EngineTurnOutcome {
+                let outcome = EngineTurnOutcome {
                     model_steps: result.model_steps,
                     terminal: match result.terminal {
                         AgentTurnTerminal::Completed { finish_reason } => EngineTurnTerminal::Completed { finish_reason },
                         AgentTurnTerminal::InputRequired { request } => EngineTurnTerminal::InputRequired { request },
                         AgentTurnTerminal::Cancelled => EngineTurnTerminal::Cancelled,
                         AgentTurnTerminal::Paused { reason } => EngineTurnTerminal::Paused { reason },
-                        AgentTurnTerminal::Failed { message } => EngineTurnTerminal::Failed { message, failure: None },
                     },
                 };
                 if pending.as_ref() != Some(&runtime_terminal(&outcome)) {
                     return Err(AppError::Conflict("Nomi result and terminal event disagree or terminal is absent".into()));
-                }
-                if matches!(outcome.terminal, EngineTurnTerminal::Completed { .. }) {
-                    if let Some(terminal) = self.host.completion_gate(message).await? {
-                        outcome.terminal = terminal;
-                    }
                 }
                 Ok(outcome)
             }
@@ -421,6 +476,10 @@ impl EngineSessionDriver for UnifiedSessionDriver {
                 };
                 Ok(EngineTurnOutcome { model_steps, terminal: EngineTurnTerminal::Failed { message, failure: None } })
             }
+            Err(AgentEngineError::WaitOwnerUnavailable) => Ok(EngineTurnOutcome {
+                model_steps:projection.last_model_step.load(std::sync::atomic::Ordering::Acquire),
+                terminal:EngineTurnTerminal::Paused {reason:"EXECUTION_WAIT_OWNER_UNAVAILABLE".into()},
+            }),
             Err(error @ (AgentEngineError::Model { .. } | AgentEngineError::ModelStreamEndedWithoutTerminal | AgentEngineError::InvalidModelEvent(_))) => {
                 // The model failure ends this Turn only after the existing
                 // cleanup and canonical receipt barriers. Completed effects
@@ -655,12 +714,12 @@ mod tests {
     struct Host {
         recycle_completed_turns: AtomicBool,
         prepared_inputs: Mutex<Vec<String>>,
-        block_completion: AtomicBool,
-        completion_checks: AtomicUsize,
         allow_user_input: AtomicBool,
         fail_terminal_record: AtomicBool,
         fail_record: AtomicBool,
         fail_timeline_read: AtomicBool,
+        canonical_timeline: AtomicBool,
+        timelines: Mutex<Vec<nomifun_agent_contracts::MessageTimelineUpdate>>,
         timeline_reads: AtomicUsize,
         events: Mutex<Vec<AgentEngineEvent>>,
         cleanup_turns: AtomicUsize,
@@ -679,12 +738,12 @@ mod tests {
             Arc::new(Self {
                 recycle_completed_turns: AtomicBool::new(false),
                 prepared_inputs: Mutex::new(Vec::new()),
-                block_completion: AtomicBool::new(false),
-                completion_checks: AtomicUsize::new(0),
                 allow_user_input: AtomicBool::new(false),
                 fail_terminal_record: AtomicBool::new(false),
                 fail_record: AtomicBool::new(false),
                 fail_timeline_read: AtomicBool::new(false),
+                canonical_timeline: AtomicBool::new(false),
+                timelines: Mutex::new(Vec::new()),
                 timeline_reads: AtomicUsize::new(0),
                 events: Mutex::new(Vec::new()),
                 cleanup_turns: AtomicUsize::new(0),
@@ -702,14 +761,9 @@ mod tests {
 
     #[async_trait]
     impl UnifiedRuntimeHost for Host {
+        fn supports_canonical_timeline(&self) -> bool { self.canonical_timeline.load(Ordering::Acquire) }
         fn requires_turn_boundary_recycle(&self) -> bool {
             self.recycle_completed_turns.load(Ordering::Acquire)
-        }
-        async fn completion_gate(&self, _message: &SendMessageData) -> Result<Option<EngineTurnTerminal>,AppError> {
-            self.completion_checks.fetch_add(1, Ordering::SeqCst);
-            Ok(self.block_completion.load(Ordering::Acquire).then(|| EngineTurnTerminal::Paused {
-                reason:"PLUGIN_DELIVERY_REQUIRED".into(),
-            }))
         }
         fn capability_activation_snapshot(
             &self,
@@ -821,7 +875,7 @@ mod tests {
             if self.fail_timeline_read.load(Ordering::Acquire) {
                 return Err(AppError::Conflict("presentation read unavailable".into()));
             }
-            Ok(Vec::new())
+            Ok(self.timelines.lock().unwrap().clone())
         }
         async fn cleanup_turn(&self, _message: &SendMessageData) -> Result<(), AppError> {
             if self.block_cleanup.load(Ordering::Acquire) {
@@ -862,7 +916,7 @@ mod tests {
             }
             Ok(Box::pin(futures_util::stream::iter(vec![
                 Ok(ChatModelEvent::OutputTextDelta {
-                    text: "reply".to_owned(),
+                    text: "reply".to_owned(), source: None,
                 }),
                 Ok(ChatModelEvent::Completed {
                     finish_reason: ChatFinishReason::Completed,
@@ -915,7 +969,6 @@ mod tests {
 
     fn input_request_runtime(host: Arc<Host>) -> UnifiedAgentRuntime {
         host.allow_user_input.store(true, Ordering::Release);
-        host.block_completion.store(true, Ordering::Release);
         static WORKSPACE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         let workspace = WORKSPACE.get_or_init(|| tempfile::tempdir().unwrap());
         // This SDK-only host has no filesystem or Knowledge owner to lease.
@@ -969,7 +1022,6 @@ mod tests {
         assert_eq!(recorded.iter().filter(|event| matches!(event, AgentEngineEvent::TurnInputRequired { .. })).count(), 1);
         assert!(!recorded.iter().any(|event| matches!(event, AgentEngineEvent::TurnCompleted { .. } | AgentEngineEvent::CompletionReview { .. })));
         drop(recorded);
-        assert_eq!(host.completion_checks.load(Ordering::Acquire), 0);
         assert_eq!(runtime.status(), Some(ConversationStatus::Finished));
         assert!(runtime.requires_turn_boundary_recycle(), "recorded InputRequired closes this Turn before the next input admission");
         runtime.kill_and_wait(None).await.unwrap();
@@ -992,7 +1044,6 @@ mod tests {
             assert!(!runtime.is_transport_healthy());
             assert!(!runtime.requires_turn_boundary_recycle(), "unconfirmed cleanup or terminal receipt cannot permit a normal boundary recycle");
             assert!(runtime.send_message(message()).await.is_err());
-            assert_eq!(host.completion_checks.load(Ordering::Acquire), 0);
             host.fail_cleanup.store(false, Ordering::Release);
             host.fail_terminal_record.store(false, Ordering::Release);
             runtime.kill_and_wait(None).await.unwrap();
@@ -1105,7 +1156,7 @@ mod tests {
         impl AgentModelPort for InterruptedModel {
             async fn open_stream(&self, _: ChatModelRequest, _: CancellationToken) -> Result<AgentModelStream, ChatModelError> {
                 Ok(Box::pin(futures_util::stream::iter(vec![
-                    Ok(ChatModelEvent::OutputTextDelta { text: "Completed work remains available.".into() }),
+                    Ok(ChatModelEvent::OutputTextDelta { text: "Completed work remains available.".into(), source: None, }),
                     Err(ChatModelError::new(nomifun_chat_model_broker::ChatModelErrorCode::ProviderUnavailable,
                         "original temporary provider failure", nomifun_chat_model_broker::ChatRetryDirective::Never)),
                 ])))
@@ -1140,6 +1191,7 @@ mod tests {
             host: host.clone(), message: message(), output: EngineTurnOutput::new(state.clone(), turn),
             calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
             last_model_step: std::sync::atomic::AtomicU16::new(0),
+            pending_text: Mutex::new(VecDeque::new()), text_timeline: Mutex::new(None),
         };
         let mut events = state.subscribe();
         let proposed = AgentEngineEvent::ToolCallCompleted { step: 1,
@@ -1167,6 +1219,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn silent_robot_finish_remains_canonical_without_a_user_visible_control_row() {
+        let host = Host::new();
+        let state = AgentRuntimeState::new(SESSION, "silent-projection-workspace", 32);
+        let turn = state.reset_for_new_turn(ConversationStatus::Running);
+        let projection = TurnProjection {
+            host: host.clone(), message: message(), output: EngineTurnOutput::new(state.clone(), turn),
+            calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
+            last_model_step: std::sync::atomic::AtomicU16::new(0),
+            pending_text: Mutex::new(VecDeque::new()), text_timeline: Mutex::new(None),
+        };
+        let mut stream = state.subscribe();
+        for (id, name, capability, action) in [
+            ("motion", "robot_motion", "robot", "robot/motion"),
+            ("quiet", nomifun_agent_runtime::FINISH_WITHOUT_REPLY_TOOL_NAME, "engine.control", "engine.control/finish"),
+        ] {
+            projection.emit(AgentEngineEvent::ToolCallCompleted { step: 1,
+                call: nomifun_chat_model_broker::ChatToolCall { call_id: id.into(), name: name.into(),
+                    arguments: nomifun_agent_contracts::StrictJsonValue(serde_json::json!({})), provider_metadata: None } }).await.unwrap();
+            projection.emit(AgentEngineEvent::ToolStarted { step: 1, call_id: id.into(),
+                capability_id: capability.into(), action_id: action.into() }).await.unwrap();
+            projection.emit(AgentEngineEvent::ToolCompleted { step: 1, runtime_hold: None,
+                result: AgentToolResult::text(id.into(), "accepted", false) }).await.unwrap();
+        }
+        projection.emit(AgentEngineEvent::SilentCompletion { step: 1, tool_call_ids: vec!["motion".into()] }).await.unwrap();
+        let recorded = host.events.lock().unwrap();
+        assert!(recorded.iter().any(|event| matches!(event, AgentEngineEvent::SilentCompletion {step:1,tool_call_ids}
+            if tool_call_ids.as_slice()==[nomifun_chat_model_broker::ToolCallId::from("motion")])));
+        assert!(recorded.iter().any(|event| matches!(event, AgentEngineEvent::ToolCompleted {result,..} if result.call_id.as_ref()=="quiet")));
+        drop(recorded);
+        let mut visible = Vec::new();
+        while let Ok(event) = stream.try_recv() { visible.push(event); }
+        assert_eq!(visible.len(), 2, "only the real device running/result rows are user-facing");
+        assert!(visible.iter().all(|event| matches!(event, AgentStreamEvent::ToolCall(call) if call.call_id=="motion")));
+        assert!(projection.calls.lock().unwrap().is_empty(), "hidden controls still settle their pending projection entries");
+    }
+
+    #[tokio::test]
     async fn task_plan_change_is_published_only_after_its_canonical_record() {
         let host = Host::new();
         let state = AgentRuntimeState::new(SESSION, "projection-workspace", 32);
@@ -1175,6 +1264,7 @@ mod tests {
             host: host.clone(), message: message(), output: EngineTurnOutput::new(state.clone(), turn),
             calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
             last_model_step: std::sync::atomic::AtomicU16::new(0),
+            pending_text: Mutex::new(VecDeque::new()), text_timeline: Mutex::new(None),
         };
         let mut events = state.subscribe();
         let mut plan = nomifun_agent_runtime::AgentPlan::default();
@@ -1203,6 +1293,7 @@ mod tests {
             host: host.clone(), message: message(), output: EngineTurnOutput::new(state.clone(), turn),
             calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
             last_model_step: std::sync::atomic::AtomicU16::new(0),
+            pending_text: Mutex::new(VecDeque::new()), text_timeline: Mutex::new(None),
         };
         let mut events = state.subscribe();
         projection.emit(AgentEngineEvent::ReasoningDelta {
@@ -1214,7 +1305,7 @@ mod tests {
         assert_eq!(running.step, Some(1));
         assert_eq!(running.status.as_deref(), Some("thinking"));
 
-        let text = AgentEngineEvent::OutputTextDelta { step: 1, text: "I will inspect the files.".into() };
+        let text = AgentEngineEvent::OutputTextDelta { step: 1, text: "I will inspect the files.".into(), source: None, };
         host.fail_record.store(true, Ordering::Release);
         assert!(projection.emit(text.clone()).await.is_err());
         assert!(events.try_recv().is_err(), "uncommitted text must not close reasoning");
@@ -1224,9 +1315,62 @@ mod tests {
         assert!(events.try_recv().is_err());
         assert_eq!(state.status(), Some(ConversationStatus::Running));
 
-        projection.emit(AgentEngineEvent::OutputTextDelta { step: 1, text: "More progress".into() }).await.unwrap();
+        projection.emit(AgentEngineEvent::OutputTextDelta { step: 1, text: "More progress".into(), source: None, }).await.unwrap();
         assert!(matches!(events.try_recv().unwrap(), AgentStreamEvent::Text(_)));
         assert!(events.try_recv().is_err(), "display references alone own canonical phase completion");
+    }
+
+    #[tokio::test]
+    async fn canonical_text_carries_its_boundary_atomically_and_waits_for_unavailable_metadata() {
+        use nomifun_agent_contracts::{MessageTimeline, MessageTimelineSegment, MessageTimelineUpdate,
+            TimelineSegmentKind, TimelineSegmentState};
+        let host = Host::new();
+        host.canonical_timeline.store(true, Ordering::Release);
+        let mut input = message();
+        input.source_message_id = Some("0190f5fe-7c00-7a00-8000-000000000001".into());
+        let source = nomifun_agent_contracts::canonical_assistant_step_message_id(input.source_message_id.as_deref().unwrap(), 1).unwrap();
+        let block = |id: &str, seq, start, end, state| MessageTimelineSegment {
+            segment_id: id.into(), group_id: "process:root".into(), first_seq: seq, last_seq: seq,
+            kind: TimelineSegmentKind::Narration, state, start_utf16: Some(start), end_utf16: Some(end), call_id: None,
+        };
+        let first = block("first", 1, 0, 2, TimelineSegmentState::Running);
+        *host.timelines.lock().unwrap() = vec![MessageTimelineUpdate { source_message_id: source.clone(), call_id: None,
+            timeline: MessageTimeline { through_seq: 1, segments: vec![first.clone()] } }];
+        let state = AgentRuntimeState::new(SESSION, "atomic-text-boundary", 32);
+        let turn = state.reset_for_new_turn(ConversationStatus::Running);
+        let projection = TurnProjection { host: host.clone(), message: input,
+            output: EngineTurnOutput::new(state.clone(), turn), calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
+            last_model_step: std::sync::atomic::AtomicU16::new(0), pending_text: Mutex::new(VecDeque::new()), text_timeline: Mutex::new(None) };
+        let mut events = state.subscribe();
+        let native_source = |id: &str| Some(nomifun_agent_contracts::ChatOutputTextSource {
+            item_id: id.into(), output_index: None, content_index: 0,
+        });
+        projection.emit(AgentEngineEvent::OutputTextDelta { step: 1, text: "前文".into(), source: native_source("first") }).await.unwrap();
+        let AgentStreamEvent::Text(data) = events.try_recv().unwrap() else { panic!("first text") };
+        assert_eq!(data.timeline.unwrap().segments, vec![first.clone()]);
+        assert!(matches!(events.try_recv().unwrap(), AgentStreamEvent::CanonicalTimeline(_)));
+
+        host.fail_timeline_read.store(true, Ordering::Release);
+        projection.emit(AgentEngineEvent::OutputTextDelta { step: 1, text: "后".into(), source: native_source("next") }).await.unwrap();
+        assert!(events.try_recv().is_err(), "a failed display read must not publish bytes against a stale source range");
+        assert_eq!(projection.pending_text.lock().unwrap().len(), 1);
+        assert_eq!(state.status(), Some(ConversationStatus::Running));
+
+        let mut closed = first;
+        closed.state = TimelineSegmentState::Completed;
+        let next = block("next", 2, 2, 4, TimelineSegmentState::Running);
+        *host.timelines.lock().unwrap() = vec![MessageTimelineUpdate { source_message_id: source, call_id: None,
+            timeline: MessageTimeline { through_seq: 3, segments: vec![closed.clone(), next.clone()] } }];
+        host.fail_timeline_read.store(false, Ordering::Release);
+        projection.emit(AgentEngineEvent::OutputTextDelta { step: 1, text: "续".into(), source: native_source("next") }).await.unwrap();
+        for expected in ["后", "续"] {
+            let AgentStreamEvent::Text(data) = events.try_recv().unwrap() else { panic!("retained text") };
+            assert_eq!(data.content, expected);
+            assert_eq!(data.timeline.unwrap().segments, vec![closed.clone(), next.clone()]);
+        }
+        assert!(projection.pending_text.lock().unwrap().is_empty());
+        assert!(matches!(events.try_recv().unwrap(), AgentStreamEvent::CanonicalTimeline(_)));
+        assert_eq!(host.events.lock().unwrap().len(), 3, "display retry cannot repeat canonical writes");
     }
 
     #[tokio::test]
@@ -1238,6 +1382,7 @@ mod tests {
             host, message: message(), output: EngineTurnOutput::new(state.clone(), turn),
             calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
             last_model_step: std::sync::atomic::AtomicU16::new(0),
+            pending_text: Mutex::new(VecDeque::new()), text_timeline: Mutex::new(None),
         };
         let mut events = state.subscribe();
         projection.emit(AgentEngineEvent::ReasoningDelta { step: 1, text: "Inspect".into() }).await.unwrap();
@@ -1265,6 +1410,7 @@ mod tests {
             calls: Mutex::new(BTreeMap::new()),
             terminal: Mutex::new(None),
             last_model_step: std::sync::atomic::AtomicU16::new(0),
+            pending_text: Mutex::new(VecDeque::new()), text_timeline: Mutex::new(None),
         };
         let mut events = state.subscribe();
         let call_id = ToolCallId::from("tool-call");
@@ -1329,7 +1475,7 @@ mod tests {
         let state = AgentRuntimeState::new(SESSION, "product-file-projection", 32);
         let turn = state.reset_for_new_turn(ConversationStatus::Running);
         let projection = TurnProjection { host:host.clone(),message:message(),output:EngineTurnOutput::new(state.clone(),turn),
-            calls:Mutex::new(BTreeMap::new()),terminal:Mutex::new(None),last_model_step:std::sync::atomic::AtomicU16::new(0) };
+            calls:Mutex::new(BTreeMap::new()),terminal:Mutex::new(None),last_model_step:std::sync::atomic::AtomicU16::new(0), pending_text:Mutex::new(VecDeque::new()), text_timeline:Mutex::new(None) };
         let mut events = state.subscribe();
         for (index, (name, action, arguments, target)) in [
             ("write_file", "workspace.files/write", serde_json::json!({"path":"notes/a  b.md","content":"PRIVATE_TOOL_BODY"}), Some("notes/a  b.md")),
@@ -1372,6 +1518,7 @@ mod tests {
             calls: Mutex::new(BTreeMap::new()),
             terminal: Mutex::new(None),
             last_model_step: std::sync::atomic::AtomicU16::new(0),
+            pending_text: Mutex::new(VecDeque::new()), text_timeline: Mutex::new(None),
         };
         let mut events = state.subscribe();
         let call_id = ToolCallId::from("agent-instructions:100");
@@ -1411,6 +1558,7 @@ mod tests {
             host: host.clone(), message: message(), output: EngineTurnOutput::new(state.clone(), turn),
             calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
             last_model_step: std::sync::atomic::AtomicU16::new(0),
+            pending_text: Mutex::new(VecDeque::new()), text_timeline: Mutex::new(None),
         };
         let body = serde_json::json!({"schema":"system-permission-required.v1","capability":"computer",
             "action_id":"computer/observe","operation":"screenshot","permissions":["screen_recording"],
@@ -1440,25 +1588,6 @@ mod tests {
             assert_eq!(completed.identity.permission_required.is_some(), index == 0);
             assert_eq!(completed.identity.error_code.as_deref(), (index == 0).then_some("SYSTEM_PERMISSION_REQUIRED"));
         }
-    }
-
-    #[tokio::test]
-    async fn host_delivery_obligation_cannot_be_satisfied_by_final_model_text() {
-        let host=Host::new();
-        host.block_completion.store(true,Ordering::Release);
-        let runtime=runtime(host.clone(),model(false,false));
-        let mut events=runtime.subscribe();
-        runtime.send_message(message()).await.unwrap();
-        assert!(matches!(terminal(&mut events).await,AgentStreamEvent::Finish(data)
-            if data.stop_reason==Some(TurnStopReason::Paused)));
-        runtime.cancel().await.unwrap();
-        let recorded=host.events.lock().unwrap();
-        assert!(!recorded.iter().any(|event|matches!(event,AgentEngineEvent::TurnCompleted {..})));
-        assert!(recorded.iter().any(|event|matches!(event,
-            AgentEngineEvent::TurnPaused {reason,..} if reason=="PLUGIN_DELIVERY_REQUIRED")));
-        assert_eq!(host.cleanup_turns.load(Ordering::Acquire),1);
-        drop(recorded);
-        runtime.kill_and_wait(None).await.unwrap();
     }
 
     #[tokio::test]
@@ -1556,7 +1685,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_turn_boundary_recycle_preserves_active_and_paused_turns() {
+    async fn host_turn_boundary_recycle_preserves_active_turns() {
         let host = Host::new();
         host.recycle_completed_turns.store(true, Ordering::Release);
         let pending_model = model(true, false);
@@ -1570,17 +1699,6 @@ mod tests {
         assert!(running_runtime.requires_turn_boundary_recycle());
         running_runtime.kill_and_wait(None).await.unwrap();
 
-        let host = Host::new();
-        host.recycle_completed_turns.store(true, Ordering::Release);
-        host.block_completion.store(true, Ordering::Release);
-        let paused = runtime(host, model(false, false));
-        let mut events = paused.subscribe();
-        paused.send_message(message()).await.unwrap();
-        assert!(matches!(terminal(&mut events).await, AgentStreamEvent::Finish(data)
-            if data.stop_reason == Some(TurnStopReason::Paused)));
-        assert_eq!(paused.status(), Some(ConversationStatus::Finished));
-        assert!(!paused.requires_turn_boundary_recycle(), "a paused accepted operation must retain its resume boundary");
-        paused.kill_and_wait(None).await.unwrap();
     }
 
     #[tokio::test]
@@ -1663,7 +1781,7 @@ mod tests {
                 -> Result<AgentModelStream, ChatModelError> {
                 if self.opened.fetch_add(1, Ordering::AcqRel) == 0 {
                     return Ok(Box::pin(futures_util::stream::iter(vec![
-                        Ok(ChatModelEvent::OutputTextDelta { text:"partial reply".into() }),
+                        Ok(ChatModelEvent::OutputTextDelta { text:"partial reply".into(), source: None, }),
                         Ok(ChatModelEvent::Completed { finish_reason:ChatFinishReason::MaxOutputTokens }),
                     ])));
                 }

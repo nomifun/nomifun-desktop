@@ -100,6 +100,9 @@ export const reconcileConversationAuthoritativeRuntime = async (
       if (!isCurrent()) return false;
       if (getConversationPauseNotice(conversation)) {
         onPaused?.(conversation!);
+        // The final body may have committed while its live timeline lookup
+        // was unavailable. Pause retains the Turn but still reloads its facts.
+        emitter.emit('conversation.history.refresh', conversationId);
         // Pause ends this stream, but never releases the turn or its queue.
         return false;
       }

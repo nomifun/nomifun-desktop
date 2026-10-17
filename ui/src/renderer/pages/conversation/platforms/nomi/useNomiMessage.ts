@@ -17,7 +17,9 @@ import {
   isCompleteMessageProjection,
   isConversationProcessing,
   getConversationPauseNotice,
+  getConversationWaitingNotice,
   type ConversationPauseNotice,
+  type ConversationWaitingNotice,
 } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { ThoughtData } from '../thoughtTypes';
@@ -106,6 +108,7 @@ export const useNomiMessage = (
   // disclosure to this moment ("you stopped after {duration}"). Session-local.
   const [stopNotice, setStopNotice] = useState<{ stoppedAt: number } | null>(null);
   const [pauseNotice, setPauseNotice] = useState<ConversationPauseNotice | null>(null);
+  const [waitingNotice, setWaitingNotice] = useState<ConversationWaitingNotice | null>(null);
   // Current active message ID to filter out events from old requests (prevents aborted request events from interfering with new ones)
   const activeMsgIdRef = useRef<MessageId | null>(null);
   const rootTurnIdRef = useRef<MessageId | null>(null);
@@ -214,6 +217,7 @@ export const useNomiMessage = (
   }, []);
 
   const settleCompletedTurn = useCallback(() => {
+    setWaitingNotice(null);
     setPauseNotice(null);
     if (turnSettledRef.current && !rootTurnIdRef.current && !awaitingBackendTurnRef.current) {
       return;
@@ -246,6 +250,7 @@ export const useNomiMessage = (
     dispatchTurn({ type: 'reset' });
     setThought({ subject: '', description: '' });
     setPauseNotice(notice);
+    setWaitingNotice(null);
     setHasHydratedRunningState(true);
   }, [setActiveMsgId, setRootTurnId]);
 
@@ -279,6 +284,9 @@ export const useNomiMessage = (
     turnSettledRef.current = false;
     setStopNotice(null);
     setPauseNotice(null);
+    const waiting = getConversationWaitingNotice(conversation);
+    setWaitingNotice(waiting);
+    if (waiting) setThought({ subject: '', description: '' });
     if (shouldRaiseRunning) dispatchTurn({ type: 'hydrate', isRunning: true });
     setHasHydratedRunningState(true);
   }, [setActiveMsgId, setRootTurnId]);
@@ -404,6 +412,14 @@ export const useNomiMessage = (
           conversation_id: message.conversation_id, turn_id: message.turn_id, updates: message.data });
         return;
       }
+      if (message.type === 'task_plan_changed') {
+        // State-change notifications are not transcript items or authority.
+        // Only the exact current owner may trigger its reconciliation.
+        if (message.turn_id === rootTurnIdRef.current || !rootTurnIdRef.current && !awaitingBackendTurnRef.current) {
+          startAuthoritativeRuntimeReconciliation({ immediate: true });
+        }
+        return;
+      }
 
       // These canonical receipts update the original reply's compact notice.
       // They must not reconcile or re-raise the current Turn's busy state.
@@ -499,10 +515,6 @@ export const useNomiMessage = (
             setThought({ subject: '', description: '' });
             reconcileAfterStreamTerminal();
           }
-          break;
-        case 'task_plan_changed':
-          // Progress is re-read by useConversationTaskPlan. It is neither a
-          // transcript item nor lifecycle authority for the busy state.
           break;
         case 'system':
           // Non-transcript System events never grant Turn lifecycle authority.
@@ -780,6 +792,7 @@ export const useNomiMessage = (
   ]);
 
   const resetState = useCallback(() => {
+    setWaitingNotice(null);
     turnLifecycleGenerationRef.current += 1;
     turnSettledRef.current = true;
     const rootTurnId = rootTurnIdRef.current;
@@ -805,6 +818,7 @@ export const useNomiMessage = (
 
   // External setter used by the send box to raise the spinner on submit.
   const setWaitingResponse = useCallback((value: boolean) => {
+    setWaitingNotice(null);
     turnLifecycleGenerationRef.current += 1;
     if (value) {
       turnStartGenerationRef.current += 1;
@@ -828,6 +842,7 @@ export const useNomiMessage = (
   }, [setRootTurnId]);
 
   const confirmStopped = useCallback(() => {
+    setWaitingNotice(null);
     setPauseNotice(null);
     turnLifecycleGenerationRef.current += 1;
     setRootTurnId(null);
@@ -851,6 +866,7 @@ export const useNomiMessage = (
     hasHydratedRunningState,
     stopNotice,
     pauseNotice,
+    waitingNotice,
     tokenUsage,
     setActiveMsgId,
     markTurnAccepted,

@@ -1,4 +1,6 @@
-//! Exact official-document profiles used only while editing model settings.
+//! Exact official-document profiles for model-editor suggestions. The narrow
+//! reasoning-effort lookup also supports an explicitly selected transient
+//! reception policy; it never supplies runtime limits or configuration defaults.
 //! Native catalog limits remain authoritative, and unknown IDs remain valid.
 use std::sync::LazyLock;
 
@@ -84,6 +86,20 @@ pub fn documented_model_defaults(platform: &str, model: &str) -> Option<ModelCon
     })
 }
 
+/// Return only explicitly documented effort values for this exact platform,
+/// model and protocol. Runtime callers must still admit the actual route's
+/// Reasoning feature and preserve explicit choices. This does not infer a
+/// vendor from a gateway model name or expose editor limits/default parameters.
+pub fn documented_reasoning_efforts(
+    platform: &str, model: &str, protocol_id: &str,
+) -> Option<&'static [String]> {
+    let provider = provider_profile(platform)?;
+    let profile = provider.models.iter().find(|profile| profile.ids.iter().any(|id| id == model))?;
+    let documented_protocol = profile.chat_protocol.as_deref().or(provider.chat_protocol.as_deref())?;
+    if documented_protocol != protocol_id { return None; }
+    profile.reasoning_efforts.as_deref()
+}
+
 fn documentation_sources(provider: &ProviderProfile, model: &DocumentedModel) -> Vec<String> {
     let preferred = if model.sources.is_empty() { &provider.sources } else { &model.sources };
     let mut sources = Vec::new();
@@ -126,6 +142,22 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use crate::manifest::{platform_presets, protocol_manifest_for_model_connection, validate_provider_params_for_protocol};
+
+    #[test]
+    fn runtime_effort_lookup_requires_exact_documented_platform_model_and_protocol() {
+        let efforts = documented_reasoning_efforts("openai", "gpt-6.1-sol", "openai.responses").unwrap();
+        assert!(efforts.iter().any(|effort| effort == "low"));
+        for (platform, model, protocol) in [
+            ("custom", "gpt-6.1-sol", "openai.responses"),
+            ("openrouter", "gpt-6.1-sol", "openai.responses"),
+            ("openai", "gpt-6.1-sol-unreleased", "openai.responses"),
+            ("openai", " gpt-6.1-sol", "openai.responses"),
+            ("openai", "gpt-6.1-sol", "openai.chat_text"),
+            ("anthropic", "unknown-model", "anthropic.messages"),
+        ] {
+            assert!(documented_reasoning_efforts(platform, model, protocol).is_none(), "{platform}/{model}/{protocol}");
+        }
+    }
 
     #[test]
     fn model_documentation_sources_take_priority_and_are_deduplicated() {

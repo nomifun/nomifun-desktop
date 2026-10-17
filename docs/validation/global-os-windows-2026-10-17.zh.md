@@ -6,6 +6,8 @@
 
 ## 本轮最终结果
 
+下表是已完成的91410生产冻结批次。PR26创建后，main继续前进到 `2c6b1df36fc5f42b08c8dc296c77b49954ce467d` 并形成三份生成合同冲突；已保留0590完整交付与全部原生证据，继续普通feature合并及新源码补验，不改写main、不将下表借用为新合并树认证。后继批次以本文新增结果和实际Git回执为准。
+
 Windows 实现、本机原生回归、独立安装版初始化/业务/退出/卸载和限定测试资源清理已完成。生产源码冻结为 `91410efd5dd3227104b783bf794591254c014d82`，其后仅有验证脚本、测试和文档收尾；完整 Git 交付使用 `codex/windows-global-os`，不改写 main。下列 PASS 均限定于对应来源和报告，不把中间构建的旧结果合并成全平台认证。
 
 | 证据面 | 最终结果 |
@@ -311,3 +313,11 @@ App21108 关闭后，七份已明确终态/恢复报告对应的14个 workspace/
 安装版烟测的两个空目录也已精确非递归删除：`installed-release-29936-empty-smoke-cleanup-f1c15378-ea61-447b-a98f-aa5b874c1eda.json` SHA-256 `7d867ab34e7b46a0a9c535ed618b0bfe44f9cd56cdbadd1e53d52aba21052551`。两份新旧数据根、JWT及有用证据保留；没有递归清空Temp、禁用系统保护或启动日常App。
 
 最后一次默认测试App退出且卸载库存核对完成后，日常URI修复的只读守卫通过（7a4beb9e报告SHA-256 `8f4b6e3c29e4a6811d9fa15ebfe294cfdd9656f43495b7ced8f45303c4664b43`）；随后 `windows-uri-handler-restoration-f65ea425-32bd-4bf1-8159-84fe18f31dde.json` SHA-256 `22b576731a690069c9651d2ac2c9419bf80d68352166d78de0399b8571464798` 为 applied_and_readback_verified。pin/hash核对当前d22测试副本与日常0.8.4后，只写两个既存默认值，32/64视图读回均指向 `D:\Users\muli\AppData\Local\Programs\NomiFun\nomifun-desktop.exe`；无进程启动、键新增/删除或ACL变化。此为用户已授权的目标修复，不冒充未知历史原值恢复。
+
+## 当前 main 的合并与补验
+
+完整源码和记录已保存并普通推送为 `0590a1922f8f2484314b00a75889640595fb08de`，tree `545bb5ee9297f5b312c11f624bf6da5ce3ca12aa`；已创建并附加 [draft PR26](https://github.com/nomifun/nomifun-desktop/pull/26)。PR创建时main为2c6b1df36，GitHub只读核对mergeable=false/dirty。未把该冲突交付称为最终整合；在feature分支继续普通merge，保留所有提交，不rebase/force/main覆盖。
+
+merge-tree与实际merge均仅三份生成合同冲突。保留双方相同的平台矩阵和fixture refs，使用合并后的正式Rust schema/Cargo.lock通过现役generator重新生成，而非盲选ours/theirs。`write`、`check`及定向diff-check实际0，原受限token的嵌套git EPERM和过早读取冲突manifest失败单独保留。`windows-current-main-contract-regeneration-receipt.json` SHA-256 `b19dfa371f14d131e288d68aa60d3636678b1b48045c9430eab330a8357d876d`；仅三冲突文件被再生。合并canonical schema摘要为 `b41dc3fb2d72933ea17deddd58d70c166395725821fce31078351d26b91fd577`，lock摘要 `b64ca7e6b7ff0b4d4e68ebd7504c1692c1a9acb9be8fa1a3c995d0c488d249a8`。
+
+自动合并独立源码审查未发现Windows typed NativeFileError、historical scope refresh/fatal owner、effect→read失效、terminal只读或late I/O的覆盖。新main的等待/取消、会话结果和renderer变化须补相应检查和native，不从源码审查推断成功；当前UI typecheck与2180源880×600边界已实际0。

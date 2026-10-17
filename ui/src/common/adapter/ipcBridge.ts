@@ -80,6 +80,8 @@ import type {
 import type { OfficePreviewRequest, OfficePreviewStatus, PreviewHistoryTarget, PreviewSnapshotInfo } from '../types/office/preview';
 import type { TaskPlanSnapshot } from '../protocolBindings/TaskPlanSnapshot';
 import type { TurnStopReason } from '../protocolBindings/TurnStopReason';
+import type { AgentTurnOutcome } from '../protocolBindings/AgentTurnOutcome';
+import { normalizeAgentTurnOutcome } from '../chat/turnOutcome';
 import {
   parsePreviewSnapshotId,
 } from '../types/ids';
@@ -988,12 +990,12 @@ export const fromApiTurnCompletedEvent = (raw: unknown): IConversationTurnComple
   const runtime: IConversationTurnCompletedEvent['runtime'] = {
     state: (rawRuntime.state ?? 'idle') as IConversationTurnCompletedEvent['runtime']['state'],
     can_send_message: (rawRuntime.can_send_message ?? true) as boolean,
-    has_runtime: (rawRuntime.has_runtime ?? false) as boolean,
-    runtime_status: rawRuntime.runtime_status as IConversationTurnCompletedEvent['runtime']['runtime_status'],
+    can_steer: rawRuntime.can_steer === true,
     // Missing terminal runtime authority must never be interpreted as an
     // already-released turn. Lifecycle consumers fail closed on `true`.
     is_processing:
       typeof rawRuntime.is_processing === 'boolean' ? rawRuntime.is_processing : true,
+    turn_outcome: normalizeAgentTurnOutcome(rawRuntime.turn_outcome),
     ...(rawRuntime.active_turn_id == null
       ? {}
       : { active_turn_id: parseMessageId(rawRuntime.active_turn_id) }),
@@ -1008,6 +1010,7 @@ export const fromApiTurnCompletedEvent = (raw: unknown): IConversationTurnComple
     conversation_id: parseConversationId(r.conversation_id),
     turn_id: r.turn_id == null ? undefined : parseMessageId(r.turn_id),
     stop_reason: r.stop_reason as TurnStopReason | undefined,
+    turn_outcome: normalizeAgentTurnOutcome(r.turn_outcome),
     status: (r.status ?? 'finished') as IConversationTurnCompletedEvent['status'],
     state: (r.state ??
       (r.status === 'finished' ? 'ai_waiting_input' : 'unknown')) as IConversationTurnCompletedEvent['state'],
@@ -1145,6 +1148,7 @@ export const conversation = {
         `/api/agent-sessions/${p.conversation_id}/turns/steer`,
         {
           idempotency_key: idempotencyKey,
+          ...(p.expected_wait ? { expected_wait: p.expected_wait } : {}),
           input: {
             content: p.input,
             files: p.files,
@@ -1203,8 +1207,7 @@ export const conversation = {
       runtime: {
         state: (rawRuntime.state ?? 'starting') as IConversationTurnStartedEvent['runtime']['state'],
         can_send_message: (rawRuntime.can_send_message ?? false) as boolean,
-        has_runtime: (rawRuntime.has_runtime ?? true) as boolean,
-        runtime_status: rawRuntime.runtime_status as IConversationTurnStartedEvent['runtime']['runtime_status'],
+        can_steer: rawRuntime.can_steer === true,
         is_processing: (rawRuntime.is_processing ?? true) as boolean,
         ...(rawRuntime.active_turn_id == null
           ? {}
@@ -2901,7 +2904,7 @@ export const cron = {
   onJobRemoved: wsMappedEmitter<{ cron_job_id: CronJobId }>('cron.job-removed', (value) => ({ cron_job_id: parseCronJobId(value.cron_job_id) })),
   onJobExecuted: wsMappedEmitter<{
     cron_job_id: CronJobId;
-    status: 'ok' | 'error' | 'skipped' | 'missed';
+    status: ICronJobRunStatus;
     error?: string;
   }>('cron.job-executed', (value) => ({ ...value, cron_job_id: parseCronJobId(value.cron_job_id) })),
 };
@@ -2915,7 +2918,7 @@ export type ICronSchedule =
   | { kind: 'every'; every_ms: number; description: string }
   | { kind: 'cron'; expr: string; tz?: string; description: string };
 
-export type ICronJobRunStatus = 'ok' | 'error' | 'skipped' | 'missed';
+export type ICronJobRunStatus = 'ok' | 'error' | 'skipped' | 'missed' | 'input_required' | 'cancelled';
 
 export interface ICronJob {
   cron_job_id: CronJobId;
@@ -3220,6 +3223,8 @@ interface ISendMessageParams {
   /** Automatic Guid/QuickStart handoff; never set for explicit user sends. */
   initial_only?: boolean;
   inject_skills?: string[];
+  /** A reply may only wake the exact canonical waiting event the user saw. */
+  expected_wait?: { turn_id: MessageId; wait_seq: number };
 }
 
 // Server-assigned identifier for the newly created user message. Clients must
@@ -3367,11 +3372,11 @@ export interface IConversationTurnStartedEvent {
   detail: string;
   can_send_message: boolean;
   runtime: {
-    state: 'idle' | 'starting' | 'running';
+    state: 'idle' | 'starting' | 'running' | 'waiting' | 'paused' | 'reconciliation';
     can_send_message: boolean;
-    has_runtime: boolean;
-    runtime_status?: 'pending' | 'running' | 'finished';
+    can_steer?: boolean;
     is_processing: boolean;
+    turn_outcome?: AgentTurnOutcome;
     active_turn_id?: MessageId;
     processing_started_at?: number;
   };
@@ -3383,6 +3388,7 @@ export interface IConversationTurnCompletedEvent {
    * retain a runtime-state fallback for backward compatibility. */
   turn_id?: MessageId;
   stop_reason?: TurnStopReason;
+  turn_outcome?: AgentTurnOutcome;
   status: 'pending' | 'running' | 'finished';
   state:
     | 'ai_generating'
@@ -3394,11 +3400,11 @@ export interface IConversationTurnCompletedEvent {
   detail: string;
   can_send_message: boolean;
   runtime: {
-    state: 'idle' | 'starting' | 'running';
+    state: 'idle' | 'starting' | 'running' | 'waiting' | 'paused' | 'reconciliation';
     can_send_message: boolean;
-    has_runtime: boolean;
-    runtime_status?: 'pending' | 'running' | 'finished';
+    can_steer?: boolean;
     is_processing: boolean;
+    turn_outcome?: AgentTurnOutcome;
     active_turn_id?: MessageId;
     processing_started_at?: number;
   };

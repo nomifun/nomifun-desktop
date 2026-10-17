@@ -29,6 +29,7 @@ struct Fact {
     causation_event_id: Option<String>,
     source_root: Option<String>,
     content: Option<String>,
+    text_source_json: Option<String>,
     has_content: i64,
     runtime_kind: Option<String>,
     runtime_step: Option<i64>,
@@ -66,99 +67,119 @@ struct Timeline {
     group: String,
     sources: BTreeMap<String, Source>,
     tools: BTreeMap<String, Tool>,
-    active: Option<(String, usize)>,
-    phase: Option<(Kind, Option<i64>)>,
+    narration_active: Option<(String, usize)>,
+    reasoning_active: Option<(String, usize)>,
+    activity: Option<(Kind, Option<i64>)>,
     // The active narration anchor is needed even when paging did not select
     // its body. It is always the first part event, never the current page edge.
-    narration: Option<(String, String)>,
+    narration: Option<(String, String, Option<nomifun_agent_contracts::ChatOutputTextSource>)>,
     reasoning_start: Option<(String, u64)>,
     withdrawn: BTreeSet<String>,
+    internal_silent_finishes: BTreeSet<String>,
 }
 
 impl Timeline {
     fn new(turn: &TimelineTurn) -> Self {
         Self { root: turn.source_message_id.clone(), operation: turn.operation_id.clone(), started_event: turn.started_event_id.clone(),
             group: format!("process:{}", turn.source_message_id), sources: BTreeMap::new(),
-            tools: BTreeMap::new(), active: None, phase: None, narration: None,
-            reasoning_start: None, withdrawn: BTreeSet::new() }
+            tools: BTreeMap::new(), narration_active: None, reasoning_active: None, activity: None, narration: None,
+            reasoning_start: None, withdrawn: BTreeSet::new(), internal_silent_finishes: BTreeSet::new() }
     }
 
-    fn close(&mut self, seq: u64, state: State) {
-        if let Some((source, index)) = self.active.take()
+    fn settle_active(&mut self, active: Option<(String, usize)>, seq: u64, state: State) {
+        if let Some((source, index)) = active
             && let Some(segment) = self.sources.get_mut(&source).and_then(|source| source.segments.get_mut(index))
             && segment.state == State::Running {
             segment.state = state;
             segment.last_seq = segment.last_seq.max(seq);
         }
-        self.phase = None;
-        self.narration = None;
+    }
+
+    fn close_reasoning(&mut self, seq: u64, state: State) {
+        let active = self.reasoning_active.take();
+        self.settle_active(active, seq, state);
         self.reasoning_start = None;
     }
 
-    fn phase(&mut self, kind: Kind, step: Option<i64>, seq: u64) {
-        if self.phase.is_some_and(|previous| previous.0 != kind
-            || (previous.1.is_some() && step.is_some() && previous.1 != step)) {
+    fn close(&mut self, seq: u64, state: State) {
+        let active = self.narration_active.take();
+        self.settle_active(active, seq, state);
+        self.close_reasoning(seq, state);
+        self.activity = None;
+        self.narration = None;
+    }
+
+    fn activity(&mut self, kind: Kind, step: Option<i64>, seq: u64) {
+        if self.activity.is_some_and(|previous| previous.1.zip(step).is_some_and(|(old, new)| old != new)) {
             self.close(seq, State::Completed);
+        } else if self.activity.is_some_and(|previous| previous.0 != kind) {
+            // Activity transitions end a reasoning disclosure, not a body.
+            // Providers may interleave reasoning with a single text block or
+            // deliver an atomic reasoning block after that body has started.
+            self.close_reasoning(seq, State::Completed);
         }
-        let step = step.or_else(|| self.phase.filter(|previous| previous.0 == kind).and_then(|previous| previous.1));
-        self.phase = Some((kind, step));
+        let step = step.or_else(|| self.activity.filter(|previous| previous.0 == kind).and_then(|previous| previous.1));
+        self.activity = Some((kind, step));
     }
 
     fn text(&mut self, fact: &Fact, kind: Kind) -> Result<(), SessionStoreError> {
         if fact.source_root.as_deref() != Some(self.root.as_str()) { return Ok(()); }
         if kind == Kind::Narration && self.withdrawn.contains(&fact.correlation_id) { return Ok(()); }
         let seq = as_u64(fact.seq, "timeline text sequence")?;
-        self.phase(kind, None, seq);
-        let phase = self.phase;
-        // Every nonempty narration run is a boundary, including runs outside
-        // the loaded message page. Its body is not needed to identify it.
+        let text_source = fact.text_source_json.as_deref().map(serde_json::from_str::<nomifun_agent_contracts::ChatOutputTextSource>)
+            .transpose().map_err(|_| invalid("invalid typed text source"))?;
+        if let Some(source) = &text_source { source.validate().map_err(|_| invalid("invalid typed text source identity"))?; }
         if kind == Kind::Narration && fact.has_content != 0 {
-            let same = self.narration.as_ref().is_some_and(|(source, _)| source == &fact.correlation_id);
+            let same = self.narration.as_ref().is_some_and(|(source, _, identity)|
+                source == &fact.correlation_id && identity == &text_source);
             if !same {
+                let activity = self.activity;
                 self.close(seq, State::Completed);
-                self.phase = phase;
-                self.narration = Some((fact.correlation_id.clone(), fact.event_id.clone()));
+                self.activity = activity;
+                self.narration = Some((fact.correlation_id.clone(), fact.event_id.clone(), text_source));
             }
         }
         let Some(text) = &fact.content else {
-            if kind == Kind::Narration && let Some((_, anchor)) = &self.narration {
+            if kind == Kind::Narration && let Some((_, anchor, _)) = &self.narration {
                 self.group = format!("process:{anchor}");
             }
             return Ok(());
         };
+        let activity = self.activity.filter(|activity| activity.0 == kind);
         let source = self.sources.entry(fact.correlation_id.clone()).or_insert_with(Source::text);
-        if kind == Kind::Reasoning { source.reasoning_step = phase.and_then(|phase| phase.1); }
+        if kind == Kind::Reasoning { source.reasoning_step = activity.and_then(|activity| activity.1); }
         let start = source.offset;
         let units = text.chars().map(|character| character.len_utf16() as u64).sum::<u64>();
         source.offset = start.checked_add(units).ok_or_else(|| invalid("UTF-16 range overflow"))?;
         if text.is_empty() { return Ok(()); }
-        let continuing = self.active.as_ref().filter(|(id, _)| id == &fact.correlation_id)
-            .map(|(_, index)| *index);
+        let active = if kind == Kind::Narration { &self.narration_active } else { &self.reasoning_active };
+        let continuing = active.as_ref().filter(|(id, _)| id == &fact.correlation_id).map(|(_, index)| *index);
         if let Some(index) = continuing {
             let segment = &mut source.segments[index];
             if segment.kind != kind || segment.end_utf16 != Some(start) { return Err(invalid("noncontiguous source segment")); }
             segment.last_seq = seq;
             segment.end_utf16 = Some(source.offset);
         } else {
-            // Switching source identities always closes the preceding phase;
-            // ranges remain relative to their own complete source projection.
-            self.close(seq, State::Completed);
-            self.phase = phase;
+            if kind == Kind::Reasoning {
+                let active = self.reasoning_active.take();
+                self.settle_active(active, seq, State::Completed);
+            }
             let source = self.sources.get_mut(&fact.correlation_id).expect("source inserted above");
             let index = source.segments.len();
             source.segments.push(MessageTimelineSegment {
                 segment_id: fact.event_id.clone(), group_id: self.group.clone(), first_seq: seq, last_seq: seq,
-                kind, state: if kind == Kind::Reasoning && phase.and_then(|phase| phase.1).is_none() {
+                kind, state: if kind == Kind::Reasoning && activity.and_then(|activity| activity.1).is_none() {
                     State::Completed
                 } else { State::Running },
                 start_utf16: Some(start), end_utf16: Some(source.offset), call_id: None,
             });
-            self.active = Some((fact.correlation_id.clone(), index));
             if kind == Kind::Narration {
-                self.narration = Some((fact.correlation_id.clone(), fact.event_id.clone()));
+                self.narration_active = Some((fact.correlation_id.clone(), index));
+            } else {
+                self.reasoning_active = Some((fact.correlation_id.clone(), index));
             }
         }
-        if kind == Kind::Narration && let Some((_, anchor)) = &self.narration {
+        if kind == Kind::Narration && let Some((_, anchor, _)) = &self.narration {
             self.group = format!("process:{anchor}");
         }
         Ok(())
@@ -166,7 +187,7 @@ impl Timeline {
 
     fn tool(&mut self, fact: &Fact, owner: bool, visible: bool) -> Result<(), SessionStoreError> {
         let Some(call_id) = &fact.call_id else { return Err(invalid("tool identity missing")); };
-        if call_id.starts_with("agent-instructions:") { return Ok(()); }
+        if call_id.starts_with("agent-instructions:") || self.internal_silent_finishes.contains(call_id) { return Ok(()); }
         if owner && fact.causation_event_id.as_deref() != Some(self.started_event.as_str()) { return Ok(()); }
         if self.tools.get(call_id).is_some_and(|tool| tool.step.zip(fact.runtime_step).is_some_and(|(original,current)| original != current)) {
             return Ok(());
@@ -195,6 +216,7 @@ impl Timeline {
 
     fn result(&mut self, fact: &Fact) -> Result<(), SessionStoreError> {
         let Some(call_id) = &fact.call_id else { return Err(invalid("result identity missing")); };
+        if self.internal_silent_finishes.contains(call_id) { return Ok(()); }
         let Some(tool) = self.tools.get_mut(call_id) else { return Ok(()); };
         if tool.step.zip(fact.runtime_step).is_some_and(|(original,current)| original != current) { return Ok(()); }
         if fact.kind == "tool/result-recorded" && tool.owner.as_deref() != Some(fact.correlation_id.as_str()) {
@@ -210,17 +232,28 @@ impl Timeline {
 
     fn accept(&mut self, fact: &Fact) -> Result<(), SessionStoreError> {
         // Runtime lifecycle is owned by the formal supervisor. An event from
-        // another producer cannot close/reopen a phase or settle its tool.
+        // another producer cannot close/reopen an activity or settle its tool.
         if fact.kind == "runtime/progress-recorded" && fact.producer_id != "runtime_supervisor" {
             return Ok(());
         }
         if fact.kind_version != 1 { return Err(invalid("unsupported canonical event version")); }
+        if fact.kind=="runtime/progress-recorded" && fact.correlation_id==self.operation {
+            if fact.tool_name.as_deref()==Some("finish_without_reply")
+                && matches!(fact.runtime_kind.as_deref(),Some("tool_call_delta"|"tool_call_completed")) {
+                if let Some(call)=&fact.call_id { self.internal_silent_finishes.insert(call.clone()); }
+                return Ok(());
+            }
+            if fact.call_id.as_ref().is_some_and(|call|self.internal_silent_finishes.contains(call))
+                && matches!(fact.runtime_kind.as_deref(),Some("tool_call_delta"|"tool_call_completed"|"tool_started"|"tool_completed"|"host_tool_settled")) {
+                return Ok(());
+            }
+        }
         let seq = as_u64(fact.seq, "timeline sequence")?;
         match fact.kind.as_str() {
             "message/content-part" => self.text(fact, Kind::Narration)?,
             "thinking/content-part" => self.text(fact, Kind::Reasoning)?,
             "message/completed" => {
-                if self.active.as_ref().is_some_and(|(source, _)| source == &fact.correlation_id) {
+                if self.narration_active.as_ref().is_some_and(|(source, _)| source == &fact.correlation_id) {
                     self.close(seq, State::Completed);
                 }
             }
@@ -233,10 +266,14 @@ impl Timeline {
             "runtime/progress-recorded" if fact.correlation_id == self.operation => {
                 match fact.runtime_kind.as_deref() {
                     Some("reasoning_delta") => {
-                        self.phase(Kind::Reasoning, fact.runtime_step, seq);
+                        self.activity(Kind::Reasoning, fact.runtime_step, seq);
                         if self.reasoning_start.is_none() { self.reasoning_start = Some((fact.event_id.clone(), seq)); }
                     }
-                    Some("output_text_delta" | "completion_delivered") => self.phase(Kind::Narration, fact.runtime_step, seq),
+                    Some("output_text_delta") => self.activity(Kind::Narration, fact.runtime_step, seq),
+                    Some("completion_delivered") => {
+                        self.close(seq, State::Completed);
+                        self.activity(Kind::Narration, fact.runtime_step, seq);
+                    }
                     Some("tool_call_completed") => self.tool(fact, false, false)?,
                     Some("tool_started") => self.tool(fact, false, true)?,
                     Some("tool_completed" | "host_tool_settled") => self.result(fact)?,
@@ -252,7 +289,7 @@ impl Timeline {
                     Some("model_step_started" | "execution_resumed" | "tool_call_delta" | "model_output_truncated"
                         | "model_response_rejected" | "delivery_review_superseded"
                         | "user_input_requested") => self.close(seq, State::Completed),
-                    Some("turn_completed" | "turn_input_required") => self.close(seq, State::Completed),
+                    Some("silent_completion" | "turn_completed" | "turn_input_required") => self.close(seq, State::Completed),
                     Some("turn_failed") => self.close(seq, State::Failed),
                     Some("turn_cancelled") => self.close(seq, State::Cancelled),
                     Some("turn_paused") => self.close(seq, State::Interrupted),
@@ -265,19 +302,19 @@ impl Timeline {
     }
 
     fn finish(mut self, turn: &TimelineTurn, through: u64) -> Result<Vec<MessageTimelineUpdate>, SessionStoreError> {
-        if self.active.is_none() && let Some((Kind::Reasoning, Some(step))) = self.phase
+        if self.reasoning_active.is_none() && let Some((Kind::Reasoning, Some(step))) = self.activity
             && let Some((event_id, seq)) = &self.reasoning_start
             && let Some((source_id, source)) = self.sources.iter_mut().find(|(_, source)| source.reasoning_step == Some(step)) {
-            // The journal may preserve an empty phase start after its bounded
+            // The journal may preserve an empty activity start after its bounded
             // reasoning body budget is exhausted. A zero-length reference
-            // expresses that real phase without reusing an earlier body.
+            // expresses that real activity without reusing an earlier body.
             let index = source.segments.len();
             source.segments.push(MessageTimelineSegment {
                 segment_id: event_id.clone(), group_id: self.group.clone(), first_seq: *seq, last_seq: *seq,
                 kind: Kind::Reasoning, state: State::Running,
                 start_utf16: Some(source.offset), end_utf16: Some(source.offset), call_id: None,
             });
-            self.active = Some((source_id.clone(), index));
+            self.reasoning_active = Some((source_id.clone(), index));
         }
         if let Some(end) = turn.last_seq.filter(|end| *end >= 0 && *end as u64 <= through) {
             self.close(as_u64(end, "timeline Turn end")?, match turn.state.as_str() {
@@ -338,7 +375,7 @@ async fn read_turn(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionId, t
         for id in selected { ids.push_bind(id); }
         ids.push_unseparated(")");
     } else { query.push("1"); }
-    query.push(" THEN json_extract(fact,'$.content') END AS content, \
+    query.push(" THEN json_extract(fact,'$.content') END AS content, json_extract(fact,'$.source') AS text_source_json, \
         COALESCE(length(json_extract(fact,'$.content'))>0,0) AS has_content, \
         json_extract(fact,'$.event.event') AS runtime_kind,json_extract(fact,'$.event.step') AS runtime_step, \
         COALESCE(json_extract(fact,'$.call_id'),json_extract(fact,'$.event.call.call_id'), \
@@ -351,17 +388,12 @@ async fn read_turn(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionId, t
              THEN json_extract(fact,'$.output.is_error') \
              WHEN kind='tool/result-recorded' AND json_type(fact,'$.output') IS NOT NULL \
              THEN 0 END AS result_error, \
-        json_extract(fact,'$.event.call.name') AS tool_name FROM facts ORDER BY seq LIMIT ")
+        COALESCE(json_extract(fact,'$.event.call.name'),json_extract(fact,'$.event.name')) AS tool_name FROM facts ORDER BY seq LIMIT ")
         .push_bind((MAX_TIMELINE_EVENTS + 1) as i64);
     let facts = query.build_query_as::<Fact>().fetch_all(&mut **tx).await?;
     if facts.len() > MAX_TIMELINE_EVENTS { return Err(invalid("event budget exceeded")); }
     let mut timeline = Timeline::new(turn);
-    for fact in facts {
-        // Synthetic instruction reads remain canonical audit facts but are
-        // intentionally absent from the conversation's process surface.
-        if fact.tool_name.as_deref().is_some_and(|_| fact.call_id.as_deref().is_some_and(|id| id.starts_with("agent-instructions:"))) { continue; }
-        timeline.accept(&fact)?;
-    }
+    for fact in facts { timeline.accept(&fact)?; }
     timeline.finish(turn, through)
 }
 
@@ -442,14 +474,14 @@ mod tests {
         Fact { seq, event_id: format!("event-{seq}"), kind: kind.into(), correlation_id: source.into(),
             kind_version: 1, producer_id: "runtime_supervisor".into(),
             causation_event_id: Some("start".into()),
-            source_root: Some(ROOT.into()), content: content.map(str::to_owned), has_content: i64::from(content.is_some_and(|text| !text.is_empty())),
+            source_root: Some(ROOT.into()), content: content.map(str::to_owned), text_source_json: None, has_content: i64::from(content.is_some_and(|text| !text.is_empty())),
             runtime_kind: None, runtime_step: None, call_id: None, result_error: None, tool_name: None }
     }
     fn runtime(seq: i64, name: &str, step: i64) -> Fact {
         Fact { runtime_kind: Some(name.into()), runtime_step: Some(step), ..fact(seq, "runtime/progress-recorded", "turn-operation", None) }
     }
     fn tool(seq: i64, name: &str, call: &str) -> Fact {
-        Fact { call_id: Some(call.into()), tool_name: Some("read_file".into()), ..runtime(seq, name, 1) }
+        Fact { call_id: Some(call.into()), ..runtime(seq, name, 1) }
     }
     fn ordered(updates: &[MessageTimelineUpdate]) -> Vec<&MessageTimelineSegment> {
         let mut segments = updates.iter().flat_map(|update| &update.timeline.segments).collect::<Vec<_>>();
@@ -475,6 +507,134 @@ mod tests {
         assert_eq!(segments[0].segment_id,"event-3");
         assert_eq!(segments[2].segment_id,"event-7");
         assert!(segments.iter().all(|segment| segment.group_id == format!("process:{ROOT}")));
+    }
+
+    #[test]
+    fn silent_finish_control_never_splits_public_text_or_reveals_its_result_as_a_tool() {
+        for failed in [0,1] {
+            let mut timeline=Timeline::new(&turn());
+            for event in [
+                fact(2,"message/content-part","answer",Some("A")),
+                Fact {tool_name:Some("finish_without_reply".into()),..tool(3,"tool_call_delta","quiet-finish")},
+                Fact {tool_name:Some("finish_without_reply".into()),..tool(4,"tool_call_completed","quiet-finish")},
+                Fact {tool_name:None,result_error:Some(failed),..tool(5,"tool_completed","quiet-finish")},
+                fact(6,"message/content-part","answer",Some("B")),
+                Fact {tool_name:Some("robot_dog_action".into()),..tool(7,"tool_call_completed","motion")},
+                tool(8,"tool_started","motion"),
+                Fact {result_error:Some(1),..tool(9,"tool_completed","motion")},
+                Fact {tool_name:Some("report_completion".into()),..tool(10,"tool_call_completed","report")},
+                Fact {result_error:Some(0),..tool(11,"tool_completed","report")},
+            ] {timeline.accept(&event).unwrap();}
+            let updates=timeline.finish(&turn(),11).unwrap();
+            assert!(!updates.iter().any(|update|update.call_id.as_deref()==Some("quiet-finish")));
+            let answer=source(&updates,"answer");assert_eq!(answer.segments.len(),1);assert_eq!(answer.segments[0].end_utf16,Some(2));
+            assert_eq!(updates.iter().find(|update|update.call_id.as_deref()==Some("motion")).unwrap().timeline.segments[0].state,State::Failed);
+            assert!(updates.iter().any(|update|update.call_id.as_deref()==Some("report")),"other controls remain inspectable");
+        }
+    }
+
+    #[test]
+    fn narration_identity_survives_interleaved_runtime_and_atomic_reasoning() {
+        for (prefix, suffix) in [("我将", "按照飞书官方文档的步骤安装。先安装 CLI："),
+            ("**CL", "I** 和 [SKILL](https://example.test) 都已安装成功。😀")] {
+            let mut timeline = Timeline::new(&turn());
+            for event in [runtime(2,"output_text_delta",1),fact(3,"message/content-part","answer",Some(prefix)),
+                runtime(4,"reasoning_delta",1),fact(5,"thinking/content-part","thought",Some("inspect")),
+                runtime(6,"output_text_delta",1),fact(7,"message/content-part","answer",Some(suffix)),
+                fact(8,"thinking/content-part","late-thought",Some("atomic late reasoning"))] {
+                timeline.accept(&event).unwrap();
+            }
+            let updates = timeline.finish(&turn(),8).unwrap();
+            let segments = &source(&updates,"answer").segments;
+            assert_eq!(segments.len(),1,"reasoning delivery never creates a text boundary");
+            assert_eq!(segments[0].segment_id,"event-3");
+            assert_eq!((segments[0].start_utf16,segments[0].end_utf16),
+                (Some(0),Some(format!("{prefix}{suffix}").encode_utf16().count() as u64)));
+            assert_eq!(segments[0].state,State::Running);
+            assert_eq!(source(&updates,"late-thought").segments[0].state,State::Completed,
+                "late reasoning bytes do not reopen a runtime activity");
+        }
+    }
+
+    #[test]
+    fn open_reasoning_and_narration_have_independent_lifecycles() {
+        let mut timeline = Timeline::new(&turn());
+        for event in [runtime(2,"output_text_delta",1),fact(3,"message/content-part","answer",Some("CL")),
+            runtime(4,"reasoning_delta",1),fact(5,"thinking/content-part","thought",Some("inspect"))] {
+            timeline.accept(&event).unwrap();
+        }
+        let updates = timeline.finish(&turn(),5).unwrap();
+        assert_eq!(source(&updates,"answer").segments[0].state,State::Running);
+        assert_eq!(source(&updates,"thought").segments[0].state,State::Running);
+        assert_eq!(source(&updates,"answer").segments[0].last_seq,3,
+            "reasoning activity does not change a body range or its source cursor");
+    }
+
+    #[test]
+    fn terminal_activity_settles_both_open_content_channels() {
+        for (event,state) in [("turn_failed",State::Failed),("turn_cancelled",State::Cancelled),
+            ("turn_paused",State::Interrupted),("turn_completed",State::Completed),
+            ("silent_completion",State::Completed)] {
+            let mut timeline = Timeline::new(&turn());
+            for event in [runtime(2,"output_text_delta",1),fact(3,"message/content-part","answer",Some("CL")),
+                runtime(4,"reasoning_delta",1),fact(5,"thinking/content-part","thought",Some("inspect")),runtime(6,event,1)] {
+                timeline.accept(&event).unwrap();
+            }
+            let updates = timeline.finish(&turn(),6).unwrap();
+            for id in ["answer","thought"] {
+                assert_eq!(source(&updates,id).segments[0].state,state);
+                assert_eq!(source(&updates,id).segments[0].last_seq,6);
+            }
+        }
+    }
+
+    #[test]
+    fn typed_text_blocks_and_final_delivery_remain_real_boundaries() {
+        let block = |index| serde_json::json!({"item_id":"message-one","output_index":0,"content_index":index}).to_string();
+        let mut timeline = Timeline::new(&turn());
+        for event in [Fact {text_source_json:Some(block(0)),..fact(2,"message/content-part","answer",Some("one"))},
+            runtime(3,"reasoning_delta",1),fact(4,"thinking/content-part","thought",Some("inspect")),
+            Fact {text_source_json:Some(block(0)),..fact(5,"message/content-part","answer",Some(" continued"))},
+            Fact {text_source_json:Some(block(1)),..fact(6,"message/content-part","answer",Some("two"))},
+            runtime(7,"completion_delivered",1),fact(8,"message/content-part","answer",Some("final"))] {
+            timeline.accept(&event).unwrap();
+        }
+        let updates = timeline.finish(&turn(),8).unwrap();
+        let segments = &source(&updates,"answer").segments;
+        assert_eq!(segments.len(),3);
+        assert_eq!(segments.iter().map(|segment| (segment.segment_id.as_str(),segment.start_utf16,segment.end_utf16)).collect::<Vec<_>>(),
+            [("event-2",Some(0),Some(13)),("event-6",Some(13),Some(16)),("event-8",Some(16),Some(21))]);
+    }
+
+    #[test]
+    fn malformed_or_unknown_text_source_metadata_fails_closed() {
+        for value in [
+            serde_json::json!({"item_id":"","content_index":0}),
+            serde_json::json!({"item_id":"body","content_index":-1}),
+            serde_json::json!({"item_id":"body","content_index":0,"unknown_identity":"future"}),
+            serde_json::json!({"item_id":"body"}),
+            serde_json::json!("body"),
+        ] {
+            let mut timeline = Timeline::new(&turn());
+            assert!(timeline.accept(&Fact {text_source_json:Some(value.to_string()),
+                ..fact(2,"message/content-part","answer",Some("body"))}).is_err());
+        }
+    }
+
+    #[test]
+    fn distinct_messages_steps_and_steering_cannot_merge_across_reasoning() {
+        let mut timeline = Timeline::new(&turn());
+        for event in [runtime(2,"output_text_delta",1),fact(3,"message/content-part","answer",Some("first")),
+            runtime(4,"reasoning_delta",1),fact(5,"message/content-part","other",Some("other")),
+            fact(6,"message/content-part","answer",Some("again")),runtime(7,"reasoning_delta",2),
+            fact(8,"message/content-part","answer",Some("step two")),fact(9,"turn/steer-accepted","turn-operation",None),
+            fact(10,"message/content-part","answer",Some("after steering"))] {
+            timeline.accept(&event).unwrap();
+        }
+        let updates = timeline.finish(&turn(),10).unwrap();
+        assert_eq!(source(&updates,"answer").segments.iter().map(|segment| segment.segment_id.as_str()).collect::<Vec<_>>(),
+            ["event-3","event-6","event-8","event-10"]);
+        assert_eq!(source(&updates,"other").segments.len(),1);
     }
 
     #[test]
@@ -537,7 +697,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_phase_handoffs_empty_reopening_and_pause_preserve_source_lifecycle() {
+    fn typed_activity_handoffs_empty_reopening_and_pause_preserve_source_lifecycle() {
         let mut timeline=Timeline::new(&turn());
         for event in [runtime(2,"reasoning_delta",1),fact(3,"thinking/content-part","thought",Some("inspect")),
             runtime(4,"output_text_delta",1),runtime(5,"reasoning_delta",1)] {timeline.accept(&event).unwrap();}

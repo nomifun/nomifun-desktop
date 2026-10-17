@@ -13,7 +13,7 @@ use crate::broker::{BrokerEventEnvelope, ChatBrokerPort};
 use crate::contracts::{
     CHAT_MODEL_CONTRACT_VERSION, ChatCausality, ChatContentPart, ChatFinishReason, ChatMessage,
     ChatModelError, ChatModelErrorCode, ChatModelEvent, ChatModelInput, ChatModelRequest,
-    ChatModality, ChatReasoningRequest, ChatResponseFormat, ChatRetryDirective, ChatRole,
+    ChatModality, ChatOutputTextSource, ChatReasoningRequest, ChatResponseFormat, ChatRetryDirective, ChatRole,
     ChatToolCall, ChatToolChoice, ChatToolDefinition,
     ChatToolResultPart, ChatUsage, PromptCachePolicy, ProviderResponseId, ProviderRoundId,
     ToolCallId, ToolArgumentDiagnostic,
@@ -257,6 +257,8 @@ pub enum ResponsesBridgeEvent {
     OutputTextDelta {
         response_id: ProviderResponseId,
         delta: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<ChatOutputTextSource>,
     },
     #[serde(rename = "response.output_audio.delta")]
     OutputAudioDelta {
@@ -431,9 +433,10 @@ fn map_broker_event(
 ) -> Option<ResponsesBridgeEvent> {
     match envelope.event {
         ChatModelEvent::ResponseStarted { .. } => None,
-        ChatModelEvent::OutputTextDelta { text } => Some(ResponsesBridgeEvent::OutputTextDelta {
+        ChatModelEvent::OutputTextDelta { text, source } => Some(ResponsesBridgeEvent::OutputTextDelta {
             response_id,
             delta: text,
+            source,
         }),
         ChatModelEvent::OutputAudioDelta {
             media_type,

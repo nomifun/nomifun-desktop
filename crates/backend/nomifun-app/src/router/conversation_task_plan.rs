@@ -32,6 +32,7 @@ fn project(
         sequence: state.sequence,
         turn_id: state.turn_id,
         turn_status: state.turn_status,
+        turn_outcome: state.turn_outcome,
         plan,
     })
 }
@@ -78,7 +79,7 @@ mod tests {
         let output = project(&"0190f5fe-7c00-7a00-8000-000000000001".into(),
             nomifun_agent_session::RuntimeStateObservation {
                 sequence: 200, turn_id: Some("turn".into()), turn_status: Some("paused".into()),
-                event: Some(serde_json::to_value(AgentEngineEvent::PlanUpdated { plan }).unwrap()),
+                event: Some(serde_json::to_value(AgentEngineEvent::PlanUpdated { plan }).unwrap()), turn_outcome: None,
             }).unwrap();
         let json = serde_json::to_value(output).unwrap();
         assert_eq!(json["plan"]["steps"][0]["status"], "blocked");

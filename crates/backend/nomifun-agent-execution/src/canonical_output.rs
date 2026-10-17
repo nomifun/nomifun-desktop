@@ -93,7 +93,7 @@ pub fn canonical_turn_delivery(
     let mut delivery = AgentExecutionDelivery {
         message_id: start_payload.source_message_id.clone(), replayed,
         turn_outcome: public_result.turn_outcome,
-        completed: terminal.is_some(), user_input_request: None, paused_reason: None,
+        completed: terminal.is_some(), user_input_request: public_result.user_input_request,
         result_ok: None, result_text, result_error: None,
         result_error_code: None, result_error_retryable: None,
     };
@@ -139,8 +139,10 @@ pub fn canonical_turn_delivery(
         }
         TurnReceiptStatus::Cancelled => {
             delivery.result_ok = Some(false);
-            delivery.result_error = Some("Turn cancelled".into());
-            delivery.result_error_code = Some("cancelled".into());
+            // The shared typed outcome carries cancellation. It is not a
+            // business failure and never enters the failure/retry classifier.
+            delivery.result_error = None;
+            delivery.result_error_code = None;
         }
         _ => unreachable!(),
     }
@@ -714,7 +716,8 @@ mod tests {
         fixture.receipt.terminal_event.as_mut().unwrap().kind = SessionEventKind("turn/cancelled".into());
         let delivery = canonical_turn_delivery(&fixture.facts, &fixture.receipt, true).unwrap();
         assert_eq!(delivery.result_ok, Some(false));
-        assert_eq!(delivery.result_error_code.as_deref(), Some("cancelled"));
+        assert!(delivery.result_error_code.is_none());
+        assert!(matches!(delivery.turn_outcome, Some(nomifun_agent_contracts::AgentTurnOutcome::Cancelled { .. })));
         assert!(delivery.result_text.is_none());
     }
 

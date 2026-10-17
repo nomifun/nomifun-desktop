@@ -25,8 +25,6 @@ const finishedSnapshot = {
   runtime: {
     state: 'idle',
     can_send_message: true,
-    has_runtime: false,
-    runtime_status: 'finished',
     is_processing: false,
   },
 } as TChatConversation;

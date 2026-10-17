@@ -240,6 +240,8 @@ pub enum AgentEngineEvent {
     OutputTextDelta {
         step: u16,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<nomifun_agent_contracts::ChatOutputTextSource>,
     },
     ReasoningDelta {
         step: u16,
@@ -303,6 +305,12 @@ pub enum AgentEngineEvent {
         step: u16,
         usage: ChatUsage,
     },
+    /// Explicit public-reply intent after the terminal input/host fences.
+    /// This never proves physical movement or an asynchronous task completed.
+    SilentCompletion {
+        step: u16,
+        tool_call_ids: Vec<ToolCallId>,
+    },
     TurnCompleted {
         model_steps: u16,
         finish_reason: ChatFinishReason,
@@ -314,6 +322,13 @@ pub enum AgentEngineEvent {
     EndIntentReview {
         status: crate::AgentWorkStatus,
     },
+    TurnWaiting {
+        model_steps: u16,
+        request_id: Option<String>,
+        reason: nomifun_agent_contracts::AgentWaitReason,
+    },
+    TurnWaitResolved { model_steps: u16 },
+    OwnedProcessObserved { model_steps: u16, observation: crate::AgentOwnedProcessObservation },
     TurnInputRequired {
         model_steps: u16,
         request: nomifun_agent_contracts::AgentUserInputRequest,
@@ -351,8 +366,10 @@ impl AgentEngineEvent {
             | Self::ModelResponseRejected { .. }
             | Self::DeliveryReviewSuperseded { .. }
             | Self::VoiceModelStepSuperseded { .. }
+            | Self::SilentCompletion { .. }
             | Self::TurnCompleted { .. }
             | Self::UserInputRequested { .. }
+            | Self::TurnWaiting { .. }
             | Self::TurnInputRequired { .. }
             | Self::TurnCancelled { .. }
             | Self::TurnPaused { .. }

@@ -400,7 +400,7 @@ impl AgentSessionStore {
         let mut sequence: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND correlation_id=? AND kind='runtime/progress-recorded'")
             .bind(session.as_ref()).bind(request.operation_id.as_ref()).fetch_one(&mut *tx).await?;
         for observation in prepared.observations {
-            if !matches!(observation.0.get("event").and_then(Value::as_str), Some("tool_outcome_reconciled" | "owner_outcome_reconciled" | "execution_tail_reconciled")) {
+            if !matches!(observation.0.get("event").and_then(Value::as_str), Some("tool_outcome_reconciled" | "owner_outcome_reconciled" | "execution_tail_reconciled" | "turn_wait_resolved")) {
                 return Err(SessionStoreError::InvalidEvent("resume may append observations, never tool admissions".into()));
             }
             sequence += 1;

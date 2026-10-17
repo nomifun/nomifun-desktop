@@ -16,7 +16,8 @@ import type { TFunction } from 'i18next';
  * A canonical pause remains distinct from an idle model stream.
  */
 const conversationActiveLabel = (c: TChatConversation, t: TFunction): string => {
-  if (c.status === 'running' && c.extra?.execution_phase === 'paused') {
+  if (c.runtime?.state === 'waiting') return t('messages.planWaiting');
+  if (c.runtime?.state === 'paused') {
     return t('messages.planPaused');
   }
   if (c.runtime?.state) {

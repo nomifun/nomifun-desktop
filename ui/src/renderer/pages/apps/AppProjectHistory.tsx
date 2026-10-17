@@ -65,7 +65,8 @@ export default function AppProjectHistory({ items, selectedSessionId, selectedNa
                 onClick={() => select(String(conversation.id), editable_in_app)}>
                 <span className={styles.projectHistoryName}>{conversation.name || t('appHosting.project.untitled')}
                   {archived && <Tag size='small'>{t('appHosting.project.archived')}</Tag>}
-                  {isAppProjectSessionBusy(conversation) && <Tag size='small' color='green'>{t(conversation.extra.execution_phase === 'paused' ? 'appHosting.project.paused' : 'appHosting.project.processing')}</Tag>}
+                  {isAppProjectSessionBusy(conversation) && <Tag size='small' color='green'>{t(conversation.runtime?.state === 'waiting' ? 'messages.planWaiting'
+                    : conversation.runtime?.state === 'paused' ? 'appHosting.project.paused' : 'appHosting.project.processing')}</Tag>}
                 </span>
                 <span className={styles.projectHistoryMeta}>
                   <time dateTime={new Date(conversation.modified_at).toISOString()}>{new Intl.DateTimeFormat(i18n.language, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(conversation.modified_at)}</time>

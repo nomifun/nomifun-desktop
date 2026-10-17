@@ -735,7 +735,7 @@ async fn recovery_fixture_for_owner(
         .bind(&terminal_event_id).execute(db.pool()).await.unwrap();
     (created.execution_id, running, RecoveredAgentExecutionAttemptOutput {
         attempt_id: attempt.attempt_id, conversation_id, canonical_operation_id: operation_id,
-        terminal_event_id, user_input_request: None, ok: true, text: Some("已完成游戏实现".to_owned()),
+        terminal_event_id, user_input_request: None, disposition:nomifun_db::AgentExecutionAttemptDisposition::Delivered, text: Some("已完成游戏实现".to_owned()),
         output_files: vec!["/workspace/index.html".to_owned()], error: None, tokens: Some(12),
     })
 }
@@ -771,7 +771,7 @@ async fn resume_waiting_attempt_waits_for_writer_and_rechecks_versions_and_targe
                 attempt.version,
                 None,
                 &nomifun_db::SettleAgentExecutionAttemptParams {
-                    expected_user_input_turn: None,
+                    expected_terminal_turn: None,
                     expected_active_session_turn: None,
                     attempt_status: nomifun_common::ExecutionAttemptStatus::WaitingInput,
                     step_status: ExecutionStepStatus::WaitingInput,
@@ -975,22 +975,23 @@ async fn user_input_fixture(
     nomifun_db::sqlx::query("UPDATE agent_executions SET decision_policy=? WHERE execution_id=?")
         .bind(policy).bind(&execution_id).execute(db.pool()).await.unwrap();
     output.user_input_request = Some(request);
+    output.disposition = nomifun_db::AgentExecutionAttemptDisposition::InputRequired;
     output.text = Some("请提供姓名后继续。".into());
     (execution_id, running, output)
 }
 
 #[tokio::test]
-async fn completed_input_source_guard_rejects_policy_identity_content_and_successor_drift() {
-    for mutation in ["automatic", "content", "terminal", "successor", "link"] {
+async fn completed_input_source_guard_rejects_identity_content_and_successor_drift() {
+    for mutation in ["content", "terminal", "successor", "link"] {
         let db = database().await;
         let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
         let (execution_id, running, output) = user_input_fixture(&db,&repository,if mutation=="automatic" {"automatic"} else {"ask_user"}).await;
-        let mut source = nomifun_db::AgentExecutionUserInputTurnGuard {
+        let mut source = nomifun_db::AgentExecutionTerminalTurnGuard::InputRequired {
             conversation_id:output.conversation_id.clone(),canonical_operation_id:output.canonical_operation_id.clone(),
             terminal_event_id:output.terminal_event_id.clone(),user_input_request:output.user_input_request.clone().unwrap(),
         };
-        if mutation=="content" { source.user_input_request.remaining_work="changed scope".into(); }
-        if mutation=="terminal" { source.terminal_event_id=nomifun_common::generate_id(); }
+        if mutation=="content" { if let nomifun_db::AgentExecutionTerminalTurnGuard::InputRequired { user_input_request, .. } = &mut source { user_input_request.remaining_work="changed scope".into(); } }
+        if mutation=="terminal" { if let nomifun_db::AgentExecutionTerminalTurnGuard::InputRequired { terminal_event_id, .. } = &mut source { *terminal_event_id=nomifun_common::generate_id(); } }
         if mutation=="successor" {
             nomifun_db::sqlx::query("UPDATE agent_session_heads SET active_turn_id='successor',status='running' WHERE session_id=?")
                 .bind(&output.conversation_id).execute(db.pool()).await.unwrap();
@@ -1002,7 +1003,7 @@ async fn completed_input_source_guard_rejects_policy_identity_content_and_succes
         let result=repository.settle_attempt(OWNER_ID,&execution_id,&running.step.step_id,running.step.version,
             &output.attempt_id,running.current_attempt.as_ref().unwrap().attempt.version,None,
             &nomifun_db::SettleAgentExecutionAttemptParams {
-                expected_active_session_turn:None,expected_user_input_turn:Some(source),
+                expected_active_session_turn:None,expected_terminal_turn:Some(source),
                 attempt_status:nomifun_common::ExecutionAttemptStatus::WaitingInput,
                 step_status:ExecutionStepStatus::WaitingInput,execution_status:Some(AgentExecutionStatus::WaitingInput),
                 question:Some(Some("请提供姓名。".into())),error:None,output_summary:None,output_files:None,
@@ -1110,7 +1111,7 @@ async fn recovery_pause_uses_the_current_decision_turn_instead_of_the_closed_ini
         OWNER_ID, &execution_id, &running.step.step_id, running.step.version,
         &attempt.attempt_id, attempt.version, None,
         &nomifun_db::SettleAgentExecutionAttemptParams {
-            expected_user_input_turn: None,
+            expected_terminal_turn: None,
             expected_active_session_turn: None,
             attempt_status: nomifun_common::ExecutionAttemptStatus::WaitingInput,
             step_status: ExecutionStepStatus::WaitingInput,
@@ -1175,7 +1176,7 @@ async fn native_decision_request_is_atomically_bound_to_the_calling_turn() {
          VALUES (?,'running',?,1,2,0)",
     ).bind(&original.conversation_id).bind(&successor).execute(db.pool()).await.unwrap();
     let mut params = nomifun_db::SettleAgentExecutionAttemptParams {
-        expected_user_input_turn: None,
+        expected_terminal_turn: None,
         expected_active_session_turn: Some(nomifun_db::AgentExecutionActiveTurnGuard {
             conversation_id: original.conversation_id.clone(),
             canonical_operation_id: original.canonical_operation_id.clone(),
@@ -1205,4 +1206,128 @@ async fn native_decision_request_is_atomically_bound_to_the_calling_turn() {
     let active: String = nomifun_db::sqlx::query_scalar("SELECT active_turn_id FROM agent_session_heads WHERE session_id=?")
         .bind(&original.conversation_id).fetch_one(db.pool()).await.unwrap();
     assert_eq!(active, successor, "domain WaitingInput does not cancel or replace a different canonical Turn");
+}
+
+async fn cancelled_terminal_fixture(db: &nomifun_db::Database, repository: &SqliteAgentExecutionRepository)
+    -> (String, nomifun_db::AgentExecutionStepDetailRow, RecoveredAgentExecutionAttemptOutput) {
+    let (execution_id, running, mut output) = user_input_fixture(db, repository, "automatic").await;
+    nomifun_db::sqlx::query("UPDATE agent_turns SET state='cancelled' WHERE session_id=? AND operation_id=?")
+        .bind(&output.conversation_id).bind(&output.canonical_operation_id).execute(db.pool()).await.unwrap();
+    nomifun_db::sqlx::query("UPDATE agent_events SET kind='turn/cancelled',inline_json='{}' WHERE event_id=?")
+        .bind(&output.terminal_event_id).execute(db.pool()).await.unwrap();
+    output.disposition = nomifun_db::AgentExecutionAttemptDisposition::Cancelled;
+    output.user_input_request = None;
+    output.error = None;
+    output.text = None;
+    output.output_files.clear();
+    (execution_id, running, output)
+}
+
+#[tokio::test]
+async fn automatic_human_handoff_keeps_the_exact_attempt_waiting_until_a_real_reply() {
+    let db = database().await;
+    let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
+    let (execution_id, running, output) = user_input_fixture(&db, &repository, "automatic").await;
+    let request = output.user_input_request.clone().unwrap();
+    let source = nomifun_db::AgentExecutionTerminalTurnGuard::InputRequired {
+        conversation_id: output.conversation_id.clone(), canonical_operation_id: output.canonical_operation_id.clone(),
+        terminal_event_id: output.terminal_event_id.clone(), user_input_request: request.clone(),
+    };
+    let waiting = repository.settle_attempt(OWNER_ID, &execution_id, &running.step.step_id, running.step.version,
+        &output.attempt_id, running.current_attempt.as_ref().unwrap().attempt.version, None,
+        &nomifun_db::SettleAgentExecutionAttemptParams {
+            expected_active_session_turn: None, expected_terminal_turn: Some(source),
+            attempt_status:nomifun_common::ExecutionAttemptStatus::WaitingInput, step_status:ExecutionStepStatus::WaitingInput,
+            execution_status:Some(AgentExecutionStatus::WaitingInput), question:Some(Some(request.question)), error:Some(None),
+            output_summary:None, output_files:None, tokens:None, retry_after:Some(None), runtime_state:Some(None),
+            started_at:None, finished_at:None, loop_repeat_reset:None,
+        }, &event(AgentExecutionEventKind::DecisionRequested)).await.unwrap();
+    let attempt = waiting.current_attempt.unwrap().attempt;
+    assert_eq!(attempt.attempt_id, output.attempt_id);
+    assert_eq!(attempt.status, "waiting_input");
+    assert!(attempt.finished_at.is_none() && attempt.error.is_none() && attempt.retry_after.is_none());
+    assert_eq!(repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap().status, "waiting_input");
+    let links = repository.resolve_conversation_link(OWNER_ID, &output.conversation_id).await.unwrap();
+    assert_eq!(links.iter().filter(|link| link.active && link.attempt_id.as_deref() == Some(output.attempt_id.as_str())).count(), 1);
+}
+
+#[tokio::test]
+async fn cancelled_canonical_terminal_settles_domain_cancellation_and_rejects_foreign_source() {
+    for mutation in ["terminal", "kind", "successor", "link", "unknown_effect", "valid"] {
+        let db = database().await;
+        let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
+        let (execution_id, running, output) = cancelled_terminal_fixture(&db, &repository).await;
+        match mutation {
+            "kind" => { nomifun_db::sqlx::query("UPDATE agent_events SET kind='turn/completed' WHERE event_id=?")
+                .bind(&output.terminal_event_id).execute(db.pool()).await.unwrap(); },
+            "successor" => { nomifun_db::sqlx::query("UPDATE agent_session_heads SET status='running',active_turn_id='different-turn' WHERE session_id=?")
+                .bind(&output.conversation_id).execute(db.pool()).await.unwrap(); },
+            "link" => { nomifun_db::sqlx::query("UPDATE conversation_execution_links SET active=0 WHERE conversation_id=?")
+                .bind(&output.conversation_id).execute(db.pool()).await.unwrap(); },
+            "unknown_effect" => {
+                let started: String = nomifun_db::sqlx::query_scalar("SELECT started_event_id FROM agent_turns WHERE session_id=? AND operation_id=?")
+                    .bind(&output.conversation_id).bind(&output.canonical_operation_id).fetch_one(db.pool()).await.unwrap();
+                nomifun_db::sqlx::query("INSERT INTO agent_effects(effect_id,session_id,turn_id,operation_id,owner_domain,capability_module,action_id,input_digest,strategy,state,started_event_id,created_at) VALUES(?,?,?,?,'workspace','workspace.process','workspace.process/start',?,'managed_effect','pending',?,1)")
+                    .bind(nomifun_common::generate_id()).bind(&output.conversation_id).bind(&output.canonical_operation_id)
+                    .bind(&output.canonical_operation_id).bind("a".repeat(64)).bind(started).execute(db.pool()).await.unwrap();
+            },
+            _ => {},
+        }
+        let result = repository.settle_attempt(OWNER_ID, &execution_id, &running.step.step_id, running.step.version,
+            &output.attempt_id, running.current_attempt.as_ref().unwrap().attempt.version, None,
+            &nomifun_db::SettleAgentExecutionAttemptParams {
+                expected_active_session_turn:None, expected_terminal_turn:Some(nomifun_db::AgentExecutionTerminalTurnGuard::Cancelled {
+                    conversation_id:output.conversation_id.clone(), canonical_operation_id:output.canonical_operation_id.clone(),
+                    terminal_event_id:if mutation=="terminal" {nomifun_common::generate_id()} else {output.terminal_event_id.clone()},
+                }),
+                attempt_status:nomifun_common::ExecutionAttemptStatus::Cancelled, step_status:ExecutionStepStatus::Cancelled,
+                execution_status:Some(AgentExecutionStatus::Cancelled), question:Some(None),error:Some(None),output_summary:None,
+                output_files:None,tokens:None,retry_after:Some(None),runtime_state:Some(None),started_at:None,finished_at:None,loop_repeat_reset:None,
+            }, &event(AgentExecutionEventKind::AttemptChanged)).await;
+        if mutation!="valid" {
+            assert!(result.is_err());
+            assert_eq!(repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap().status, "running");
+        } else {
+            let cancelled = result.unwrap();
+            assert_eq!(cancelled.step.status, "cancelled");
+            let attempt = cancelled.current_attempt.unwrap().attempt;
+            assert_eq!(attempt.status, "cancelled");
+            assert!(attempt.error.is_none() && attempt.retry_after.is_none());
+            let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
+            assert_eq!(execution.status, "cancelled");
+            assert!(execution.lease_owner.is_none());
+            assert!(repository.resolve_conversation_link(OWNER_ID, &output.conversation_id).await.unwrap().iter().all(|link|!link.active));
+        }
+    }
+}
+
+#[tokio::test]
+async fn recovery_and_manual_pause_adopt_canonical_cancellation_without_retry_or_failure() {
+    for during_pause in [false, true] {
+        let db = database().await;
+        let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
+        let (execution_id, running, output) = cancelled_terminal_fixture(&db, &repository).await;
+        let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
+        if during_pause {
+            let result = repository.pause_execution(OWNER_ID, &execution_id, execution.version, &[output.clone()],
+                &event(AgentExecutionEventKind::StatusChanged)).await.unwrap();
+            assert_eq!(result.status, "cancelled");
+        } else {
+            let lease = AgentExecutionLeaseToken::new("cancel-recovery-owner".into());
+            repository.try_acquire_lease(&execution_id, execution.version, lease.owner(), nomifun_common::now_ms()+30_000).await.unwrap().unwrap();
+            let result = repository.reconcile_recovered_attempt(OWNER_ID, &execution_id, &running.step.step_id, running.step.version,
+                &output.attempt_id, running.current_attempt.as_ref().unwrap().attempt.version, &lease, Some(&output),
+                &event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();
+            assert_eq!(result.disposition, AgentExecutionAttemptRecoveryDisposition::CancelledReceiptAdopted);
+        }
+        let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
+        assert_eq!(execution.status, "cancelled");
+        assert!(execution.lease_owner.is_none());
+        let detail = repository.get_step_detail(OWNER_ID, &execution_id, &running.step.step_id).await.unwrap().unwrap();
+        assert_eq!(detail.step.status, "cancelled");
+        let attempt = detail.current_attempt.unwrap().attempt;
+        assert_eq!(attempt.attempt_id, output.attempt_id);
+        assert_eq!(attempt.status, "cancelled");
+        assert!(attempt.error.is_none() && attempt.retry_after.is_none());
+    }
 }

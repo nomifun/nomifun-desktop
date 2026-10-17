@@ -4,8 +4,12 @@ import type { PropsWithChildren } from 'react';
 import { ipcBridge } from '@/common';
 import type { IConversationTurnCompletedEvent } from '@/common/adapter/ipcBridge';
 import type { TMessage } from '@/common/chat/chatLib';
+import type { TChatConversation } from '@/common/config/storage';
 import { parseEntityId, parseConversationId, parseMessageId, type ConversationId } from '@/common/types/ids';
 import { emitter } from '@/renderer/utils/emitter';
+import { reconcileConversationAuthoritativeRuntime } from '../platforms/reconcileConversationTurnAfterStreamTerminal';
+import { getConversationPauseNotice } from '../utils/conversationRuntime';
+import { projectProcessSegments } from './processSegments';
 import {
   MessageListProvider, MessageListLoadingProvider, useMessageList,
   useAddOrUpdateMessage, useMessageListLoading, useMessageLstCache,
@@ -50,6 +54,11 @@ function mockHistoryTransport() {
     completed = listener;
     return () => { completed = undefined; };
   });
+  let paused: Parameters<typeof ipcBridge.conversation.turnPaused.on>[0] | undefined;
+  spyOn(ipcBridge.conversation.turnPaused, 'on').mockImplementation(listener => {
+    paused = listener;
+    return () => { paused = undefined; };
+  });
   let agentChanged: Parameters<typeof ipcBridge.agentPlatform.sessions.onAgentChanged.on>[0] | undefined;
   spyOn(ipcBridge.agentPlatform.sessions.onAgentChanged, 'on').mockImplementation((listener) => {
     agentChanged = listener;
@@ -62,13 +71,14 @@ function mockHistoryTransport() {
   };
   const refresh = () => { act(() => { reconnect?.(); }); };
   const complete = (event: IConversationTurnCompletedEvent) => { act(() => { completed?.(event); }); };
+  const pause = (id = a) => { act(() => { paused?.({ conversation_id: id, turn_id: message(10).msg_id! }); }); };
   const switchAgent = (id = a) => { act(() => { agentChanged?.({
     agent_session_id: parseEntityId('agent-session', id),
     transition_id: '0190f5fe-7c00-7a00-8000-000000000053',
     previous_agent_label: 'Before', current_agent_label: 'After',
     binding_version: 2, effective_from: 'next_turn',
   }); }); };
-  return { requests, reply, refresh, complete, switchAgent };
+  return { requests, reply, refresh, complete, pause, switchAgent };
 }
 
 function mountHistory(strict = false) {
@@ -233,6 +243,61 @@ test('settle refresh is scoped to the mounted conversation and unsubscribes on u
   expect(h.requests).toHaveLength(2);
 });
 
+test('pause refresh is scoped to the mounted conversation and unsubscribes on unmount', async () => {
+  const h = mountHistory();
+  await h.reply(0, [message(20)], false);
+  h.pause(b);
+  expect(h.requests).toHaveLength(1);
+  h.pause();
+  expect(h.requests).toHaveLength(2);
+  await h.reply(1, [message(30)], false);
+  h.hook.unmount();
+  h.pause();
+  act(() => { emitter.emit('conversation.history.refresh', a); });
+  expect(h.requests).toHaveLength(2);
+});
+
+test('an authoritative pause reloads a committed body withheld after live metadata failures without settling the Turn', async () => {
+  const h = mountHistory();
+  const turnId = message(10).msg_id!;
+  const body = 'CLI 和 SKILL 都已安装成功。';
+  const source = (content: string, end: number, state: 'running' | 'interrupted'): TMessage => ({
+    ...message(20), type: 'text', position: 'left', turn_id: turnId, content: { content, timeline: { through_seq: state === 'running' ? 3 : 9,
+      segments: [{ segment_id: 'source-start', group_id: `process:${turnId}`, first_seq: 2,
+        last_seq: state === 'running' ? 3 : 9, kind: 'narration', state, start_utf16: 0, end_utf16: end }] } },
+  });
+  await h.reply(0, [source('CL', 2, 'running')], false);
+  // The canonical suffix exists, but its live frame was withheld because its
+  // exact reading boundaries could not be fetched. No suffix reached ingress.
+  expect(h.hook.result.current.messages[0].content).toMatchObject({ content: 'CL' });
+  const paused = { status: 'running', extra: { workspace: '/fixture', execution_pause: {
+    reason: 'EXECUTION_MODEL_PROVIDER_UNAVAILABLE', cleanup_proven: true, paused_at_ms: 123,
+  } }, runtime: { state: 'paused', is_processing: false, can_send_message: false, active_turn_id: turnId } } as TChatConversation;
+  let adopted: TChatConversation | undefined;
+  const settled: ConversationId[] = [];
+  const onSettled = (id: ConversationId) => { settled.push(id); };
+  emitter.on('conversation.turn.settled', onSettled);
+  try {
+    await act(async () => {
+      expect(await reconcileConversationAuthoritativeRuntime(a, {
+        isCurrent: () => true, onIdle: () => { throw new Error('pause cannot settle'); },
+        onPaused: snapshot => { adopted = snapshot; }, getConversation: async () => paused,
+        delaysMs: [0], retryForever: false,
+      })).toBe(false);
+    });
+    expect(h.requests).toHaveLength(2);
+    expect(h.requests[1].query.cursor).toBe('');
+    await h.reply(1, [source(body, body.length, 'interrupted')], false);
+    const rows = projectProcessSegments(h.hook.result.current.messages, new Set());
+    expect(rows).toHaveLength(1);
+    expect(rows[0].content).toMatchObject({ content: body });
+    expect(rows[0].processSegmentState).toBe('completed');
+    expect(adopted?.runtime).toMatchObject({ state: 'paused', is_processing: false, can_send_message: false, active_turn_id: turnId });
+    expect(getConversationPauseNotice(adopted)).toMatchObject({ turnId, cleanupProven: true, pausedAt: 123 });
+    expect(settled).toEqual([]);
+  } finally { emitter.off('conversation.turn.settled', onSettled); }
+});
+
 test('Agent switches refresh their durable boundary immediately, preserve older pages and unsubscribe on unmount', async () => {
   const h = mountHistory();
   await h.reply(0, [message(20)]);
@@ -385,7 +450,7 @@ test('terminal events refresh only this conversation with an explicitly idle run
     conversation_id: a, status: 'finished', state: 'ai_waiting_input', detail: '',
     can_send_message: true, workspace: '', model: { platform: '', name: '', use_model: '' },
     last_message: { content: '', created_at: 20 },
-    runtime: { state: 'idle', can_send_message: true, has_runtime: true, is_processing: false },
+    runtime: { state: 'idle', can_send_message: true, is_processing: false },
   };
   h.complete({ ...event, conversation_id: b });
   h.complete({ ...event, runtime: { ...event.runtime, is_processing: true } });

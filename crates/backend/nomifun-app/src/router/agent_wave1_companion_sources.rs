@@ -105,7 +105,7 @@ pub(super) async fn resolve(
     let opening = store.read_events(&context.agent_session_id, None, 1).await.map_err(invalid)?;
     let head = store.head(&context.agent_session_id).await.map_err(invalid)?;
     let observation = SessionObservation {session, head, events:opening.events,
-        messages:Vec::new(), next_cursor:opening.next_cursor};
+        messages:Vec::new(), next_cursor:opening.next_cursor, active_turn_outcome:None};
     let origin = super::super::nomi_core_session::canonical_companion_origin(
         &context.principal.principal_id, &observation).map_err(invalid)?;
     let input: CanonicalInput = serde_json::from_value(payload.0).map_err(invalid)?;

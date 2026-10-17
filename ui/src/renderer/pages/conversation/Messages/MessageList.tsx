@@ -486,13 +486,11 @@ export const ImagePreviewContext = createContext<{ inPreviewGroup: boolean }>({ 
 
 const renderProcessTraceItem = (
   item: IRenderableItem,
-  variant: 'list' | 'receipt' = 'list',
   workspaceRoots: string[] = [],
   stateOverride?: TurnDisclosureProcessState
 ) => (
   <ProcessTraceItem
     item={item}
-    variant={variant}
     workspaceRoots={workspaceRoots}
     stateOverride={stateOverride}
   />
@@ -551,7 +549,7 @@ const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean; hideActi
         return <MessageTips message={message} compactError={compactError}></MessageTips>;
       case 'tool_call':
       case 'tool_group':
-        return <ProcessTraceItem item={message} variant='receipt' />;
+        return <ProcessTraceItem item={message} />;
       case 'agent_status':
         if (message.content.turn_outcome?.kind === 'unavailable') {
           return <div role='note' data-testid='turn-outcome-unavailable' className='text-t-secondary text-13px'>
@@ -625,8 +623,8 @@ const MessageList: React.FC<{
 
   // Pre-process message list to group tool outputs into summary cards
   const processedList = useMemo(() => {
-    // Reasoning and public narration both separate adjacent tool stages.
-    // Only routine model lifecycle activity is omitted from the journal.
+    // Canonical content references own reading boundaries. Routine model
+    // lifecycle activity does not introduce another content boundary.
     const journalSources = selectJournalProcessItems(list, {
       running: conversationContext?.isProcessing === true,
       isPrivateActivity: isPrivateJournalActivity,
@@ -1031,7 +1029,7 @@ const MessageList: React.FC<{
     hideScrollButton,
   } = useAutoScroll({
     messages: list,
-    itemCount: displayList.length + (pauseError ? 1 : 0),
+    itemCount: displayList.length + (pauseError ? 1 : 0) + (conversationContext?.executionWait ? 1 : 0),
     followTurn: followedTurn ? { id: followedTurn.msg_id, running: followedTurn.running } : undefined,
   });
   const handleColumnRef = useConversationColumnRef(handleContentRef);
@@ -1225,7 +1223,6 @@ const MessageList: React.FC<{
       if (layoutKind === 'text' || layoutKind === 'thinking' || layoutKind === 'tool') {
         return renderProcessTraceItem(
           processItem,
-          layoutKind === 'tool' ? 'receipt' : 'list',
           workspaceRoots,
           layoutKind === 'thinking' || !item.running ? processState : undefined
         );
@@ -1255,7 +1252,6 @@ const MessageList: React.FC<{
           renderProcessItem={(detailItem) =>
             renderProcessTraceItem(
               detailItem,
-              'receipt',
               workspaceRoots,
               item.running ? undefined : processState
             )
@@ -1295,7 +1291,7 @@ const MessageList: React.FC<{
         receipt={item}
         highlighted={highlighted}
         renderProcessItem={(processItem) =>
-          renderProcessTraceItem(processItem, 'receipt', workspaceRoots)
+          renderProcessTraceItem(processItem, workspaceRoots)
         }
       />
     );
@@ -1483,6 +1479,10 @@ const MessageList: React.FC<{
               <div className='h-10px' />
               {renderedRows}
               {pauseError && <div className='mt-6px' data-testid='conversation-pause-error'><MessageTips message={pauseError} /></div>}
+              {conversationContext?.executionWait && <div role='note' data-testid='conversation-waiting-notice'
+                className='mt-6px bg-message-tips rd-8px px-12px py-10px text-t-secondary text-13px'>
+                {t(`messages.waitingReasons.${conversationContext.executionWait.outcome.reason}`)}
+              </div>}
               <div className='h-20px' />
             </div>
           </NomiScrollArea>

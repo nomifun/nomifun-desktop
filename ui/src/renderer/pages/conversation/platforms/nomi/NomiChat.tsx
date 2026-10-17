@@ -112,9 +112,9 @@ const NomiChat: React.FC<{
   useEffect(() => {
     updateLocalImage({ root: workspace });
   }, [workspace]);
-  const resolvedIsProcessing = turnActivity.hasHydratedRunningState
+  const resolvedIsProcessing = !turnActivity.waitingNotice && (turnActivity.hasHydratedRunningState
     ? turnActivity.running
-    : isProcessing === true || turnActivity.running;
+    : isProcessing === true || turnActivity.running);
   const currentModel = useMemo(
     () => currentModelProviderTarget(modelSelection.current_model, modelSelection.providers),
     [modelSelection.current_model?.id, modelSelection.current_model?.use_model, modelSelection.providers]
@@ -134,6 +134,7 @@ const NomiChat: React.FC<{
       activeRequestMessageId: turnActivity.activeRequestMessageId,
       stopNotice: turnActivity.stopNotice,
       executionPause: turnActivity.pauseNotice,
+      executionWait: turnActivity.waitingNotice,
       currentAgent,
       currentModel,
     };
@@ -150,6 +151,7 @@ const NomiChat: React.FC<{
     turnActivity.activeRequestMessageId,
     turnActivity.stopNotice,
     turnActivity.pauseNotice,
+    turnActivity.waitingNotice,
     currentAgent,
     currentModel,
   ]);

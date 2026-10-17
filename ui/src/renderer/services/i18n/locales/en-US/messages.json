@@ -147,13 +147,19 @@
   "planTodoList": "Task list",
   "planProgress": "{{done}}/{{total}}",
   "planBlocked": "Blocked",
+  "planWaiting": "Waiting",
+  "waitingReasons": {
+    "user_input": "Waiting for your input",
+    "external_resource": "Waiting for an external resource",
+    "intervention_required": "Waiting for your instructions"
+  },
   "planPaused": "Paused",
   "planNeedsReplan": "Plan needs updating",
   "planPending": "Pending",
   "planInProgress": "In progress",
   "planCompleted": "Completed",
   "planStopped": "Stopped",
-  "planFailed": "Failed",
+  "planFailed": "This turn failed",
   "fileChanges": "File Changes",
   "fileChangesCount": "{{count}} File Changes",
   "turnDeliverables": {

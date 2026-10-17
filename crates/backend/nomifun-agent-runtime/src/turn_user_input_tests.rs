@@ -149,8 +149,9 @@ async fn user_input_policy_and_shape_rejections_share_existing_control_budget() 
         let model = Arc::new(ObservingModel {steps:std::sync::Mutex::new(steps),requests:Default::default()});
         let journal = Arc::new(InputJournal::default());
         let turn = input_request(Default::default()).with_user_input_request_port(Arc::new(InputPolicy {deny:true,cancel:None}));
-        let error = input_session(model.clone(), Arc::new(EchoTool), journal.clone()).run_turn(turn).await.unwrap_err();
-        assert!(matches!(error, AgentEngineError::TurnFailed(reason) if reason.contains("four consecutive")));
+        let result = input_session(model.clone(), Arc::new(EchoTool), journal.clone()).run_turn(turn).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Paused { reason } if reason == "EXECUTION_INTERVENTION_REQUIRED"));
+        assert_eq!(journal.journal.checkpoints.lock().unwrap().last().unwrap().work.failed_tools, 4);
         assert_eq!(model.requests.lock().unwrap().len(),4);
         assert!(!journal.journal.events.lock().unwrap().iter().any(|event| matches!(event,
             AgentEngineEvent::UserInputRequested { .. } | AgentEngineEvent::TurnInputRequired { .. })));
@@ -233,7 +234,7 @@ async fn user_input_rejection_keeps_the_bounded_end_intent_surface_closed() {
     let model = Arc::new(ObservingModel {steps:std::sync::Mutex::new(steps),requests:Default::default()});
     let turn = input_request(settlement_tool_plan()).with_user_input_request_port(Arc::new(InputPolicy{deny:true,cancel:None}));
     let result = input_session(model.clone(),Arc::new(InputHelpTool{calls:AtomicUsize::new(0),failed:false}),Arc::new(InputJournal::default())).run_turn(turn).await;
-    assert!(matches!(result,Err(AgentEngineError::TurnFailed(_))));
+    assert!(matches!(result.unwrap().terminal, AgentTurnTerminal::Paused { reason } if reason == "EXECUTION_INTERVENTION_REQUIRED"));
     let requests = model.requests.lock().unwrap();
     assert_eq!(requests.len(),6);
     for request in &requests[2..] {
@@ -256,7 +257,7 @@ async fn user_input_recovered_locked_report_phase_cannot_reopen_ending_intent() 
     let model = Arc::new(ObservingModel {steps:std::sync::Mutex::new((0..4).map(|index| input_step(&format!("refused-{index}"))).collect()),requests:Default::default()});
     let journal = Arc::new(InputJournal::default());
     let result = input_session(model.clone(),Arc::new(EchoTool),journal.clone()).run_turn(input_request(Default::default()).with_recovery(recovery)).await;
-    assert!(matches!(result,Err(AgentEngineError::TurnFailed(_))),"{result:?}");
+    assert!(matches!(result.unwrap().terminal, AgentTurnTerminal::Paused { reason } if reason == "EXECUTION_INTERVENTION_REQUIRED"));
     let requests = model.requests.lock().unwrap();
     assert_eq!(requests.len(),4);
     assert!(requests.iter().all(|request| request.input.tools.iter().all(|tool|tool.name==crate::completion::TOOL_NAME)));
@@ -264,20 +265,15 @@ async fn user_input_recovered_locked_report_phase_cannot_reopen_ending_intent() 
 }
 
 #[tokio::test]
-async fn user_input_running_process_and_real_failure_stop_cannot_escape_through_question() {
-    for failed in [false, true] {
-        let first = if failed {control_step("failure","exec_command",json!({"command":"help"}))}
-            else {control_step("launch","start_process",json!({"command":"helper"}))};
-        let mut steps = vec![first];
-        steps.extend((0..4).map(|index| input_step(&format!("refused-{index}"))));
-        let tools: Arc<dyn AgentToolInvoker> = if failed {Arc::new(InputHelpTool {calls:AtomicUsize::new(0),failed:true})}
-            else {Arc::new(SettlementTool::default())};
-        let journal = Arc::new(InputJournal::default());
-        let result = input_session(Arc::new(ScriptedModel {steps:std::sync::Mutex::new(steps)}),tools,journal.clone())
-            .run_turn(input_request(settlement_tool_plan())).await;
-        assert!(matches!(result,Err(AgentEngineError::TurnFailed(_))), "failed={failed}: {result:?}");
-        assert!(!journal.journal.events.lock().unwrap().iter().any(|event| matches!(event,AgentEngineEvent::UserInputRequested{..}|AgentEngineEvent::TurnInputRequired{..})));
-    }
+async fn user_input_cannot_escape_a_real_failure_stop() {
+    let mut steps = vec![control_step("failure","exec_command",json!({"command":"help"}))];
+    steps.extend((0..4).map(|index| input_step(&format!("refused-{index}"))));
+    let tools = Arc::new(InputHelpTool {calls:AtomicUsize::new(0),failed:true});
+    let journal = Arc::new(InputJournal::default());
+    let result = input_session(Arc::new(ScriptedModel {steps:std::sync::Mutex::new(steps)}),tools,journal.clone())
+        .run_turn(input_request(settlement_tool_plan())).await;
+    assert!(matches!(result.unwrap().terminal, AgentTurnTerminal::Paused { reason } if reason == "EXECUTION_INTERVENTION_REQUIRED"));
+    assert!(!journal.journal.events.lock().unwrap().iter().any(|event| matches!(event,AgentEngineEvent::UserInputRequested{..}|AgentEngineEvent::TurnInputRequired{..})));
 }
 
 #[test]

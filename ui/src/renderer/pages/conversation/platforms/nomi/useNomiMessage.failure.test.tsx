@@ -23,7 +23,7 @@ test.each([
     spyOn(ipcBridge.conversation[name], 'on').mockImplementation(() => () => {});
   }
   let current = { id: conversationId, type: 'nomi', status: 'running',
-    extra: { execution_phase: 'running' },
+    extra: { workspace: '' },
     runtime: { state: 'running', is_processing: true, can_send_message: false, active_turn_id: turnId },
   } as TChatConversation;
   spyOn(ipcBridge.conversation.get, 'invoke').mockImplementation(async () => current);
@@ -31,7 +31,7 @@ test.each([
   const hook = renderHook(() => ({ activity: useNomiMessage(conversationId), messages: useMessageList() }), { wrapper });
   await waitFor(() => expect(hook.result.current.activity.hasHydratedRunningState).toBe(true));
   expect(hook.result.current.activity.running).toBe(true);
-  current = { ...current, status: 'pending', extra: { execution_phase: 'ready' },
+  current = { ...current, status: 'pending', extra: { workspace: '' },
     runtime: { state: 'idle', is_processing: false, can_send_message: true },
   } as TChatConversation;
   const error = { code, ownership: 'user_llm_provider', message: 'The model request failed',

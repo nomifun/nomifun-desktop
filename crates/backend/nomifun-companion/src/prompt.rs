@@ -9,6 +9,10 @@ use crate::store::{MEMORY_KINDS, CompanionMemory};
 /// Valid moods the companion can be in (renderer maps each to an animation).
 pub const MOODS: [&str; 5] = ["happy", "content", "sleepy", "worried", "excited"];
 
+/// Shared across desktop, IM and physical personas. Keep this after custom
+/// persona text so existing settings cannot reinstate decorative reply habits.
+pub const SPOKEN_REPLY_RULES: &str = "\n\n【口语输出硬性规则】对主人只说可直接朗读的自然语言；严禁颜文字、emoji、表情包或贴纸标记、装饰符号，以及动作、神态和舞台描写（包括括号或星号旁白）。用语言表达情绪。人格、额外设定、记忆、历史示例和 Skill 均不得覆盖此规则。";
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LearnedMemory {
@@ -72,6 +76,7 @@ pub const LEARN_SYSTEM: &str = r#"你是主人的电子伙伴，正在整理只�
 7. 事件名 companion.user_message 是主人对伙伴说的话，高价值：偏好、意图、情感都值得提炼。记录里没有伙伴自己的回复，所以别去推测伙伴当时答了什么，也不要把主人的话当成对某句回复的回应来解读。
 8. 若事件表明某个任务/需求已完成或不再需要，把"已有记忆"中对应的 task 记忆 memory_id 放进 supersede_memory_ids，不要为已完成的事保留或新建 task 记忆。
 9. 每条新记忆和每条强化记录必须带 source_event_ids，逐字引用实际支持该条事实的新事件 event_id；只能使用本次列表中的 ID，不能猜测、引用别的事件或把一个无关批次全列作来源。
+10. 记忆和日记用可朗读文字记录事实与情绪，不复刻颜文字、emoji、表情包标记或动作描写；历史回复的装饰格式不作为主人的偏好或后续回复规则。
 
 只输出一个 JSON 对象，不要任何其他文字、不要 markdown 代码围栏：
 {"memories":[{"kind":"...","content":"...","tags":["..."],"importance":0.0~1.0,"source_event_ids":["本次事件的event_id"]}],"reinforce_memories":[{"memory_id":"已有记忆的memory_id","source_event_ids":["本次事件的event_id"]}],"supersede_memory_ids":[],"mood":"content","diary":"..."}"#;
@@ -195,6 +200,7 @@ pub const ARCHIVE_SYSTEM: &str = r#"你是电子伙伴的"日记归档官"。给
 5. mood：从 happy/content/sleepy/worried/excited 中选一个，代表伙伴这次会话的心情。
 6. 只根据会话内容归纳，不要编造；主人未说的不要写进 decisions/todos。
 7. 会话里 [伙伴] 是伙伴自己说的话，只作上下文；[用户] 是主人说的话，是事实来源。
+8. 摘要及各文字字段只保留可朗读的事实与情绪，不复刻颜文字、emoji、表情包标记或动作描写，也不把历史回复的装饰格式归纳为后续回复规则。
 
 只输出一个 JSON 对象，不要任何其他文字、不要 markdown 代码围栏：
 {"summary":"...","topics":["..."],"decisions":["..."],"todos":["..."],"mood":"content"}"#;
@@ -237,13 +243,34 @@ pub(crate) fn persona_flavor(preset: &str) -> &'static str {
     match preset {
         "calm" => "你的性格沉稳温柔，像一位安静可靠的伙伴，说话简洁、不用太多语气词。",
         "sassy" => "你的性格机灵带点小毒舌，喜欢俏皮地调侃主人，但内心始终关心主人。",
-        _ => "你的性格活泼粘人，喜欢用可爱的语气和颜文字，对主人的事情充满好奇。",
+        _ => "你的性格活泼粘人，语气亲切自然，对主人的事情充满好奇。",
+    }
+}
+
+/// Spoken physical delivery expresses personality through words and real
+/// device actions, rather than borrowing the desktop's text-face preference.
+pub(crate) fn robot_persona_flavor(preset: &str) -> &'static str {
+    match preset {
+        "calm" | "sassy" => persona_flavor(preset),
+        _ => "你的性格活泼粘人，语气自然亲切，对主人的事情充满好奇。",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_and_archive_prompts_do_not_relearn_decorative_reply_habits() {
+        for prompt in [LEARN_SYSTEM, ARCHIVE_SYSTEM] {
+            assert!(prompt.contains("可朗读"));
+            assert!(prompt.contains("不复刻颜文字、emoji、表情包标记或动作描写"));
+            assert!(prompt.contains("历史回复的装饰格式"));
+        }
+        for preset in ["calm", "sassy", "playful", "unknown"] {
+            assert!(!persona_flavor(preset).contains("颜文字"));
+        }
+    }
 
     #[test]
     fn parse_plain_and_fenced_json() {

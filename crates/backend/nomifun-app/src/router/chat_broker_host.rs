@@ -606,9 +606,31 @@ struct FrozenModelConfiguration {
     capabilities: Vec<FrozenCapabilityConfiguration>,
 }
 
+impl FrozenModelConfiguration {
+    fn matches_route(&self, route: &ResolvedChatRoute) -> bool {
+        self.route.model_route_id == route.model_route_id
+            && self.route.model_route_revision == route.model_route_revision
+            && self.route.provider_id == route.provider_id && self.route.model == route.model
+            && self.route.protocol == route.protocol
+            && self.route.connection_config_ref == route.connection_config_ref
+            && self.route.credential_ref == route.credential_ref
+            && self.route.config_revision_digest == route.config_revision_digest
+    }
+}
+
 struct FrozenTurnConfiguration {
     operation: String,
     candidates: Vec<FrozenModelConfiguration>,
+    reception_policy: TurnModelReceptionPolicy,
+}
+
+/// A transient presentation choice installed by trusted preparation for the
+/// exact admitted Turn. It never changes a saved model, Agent or Session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum TurnModelReceptionPolicy {
+    #[default]
+    ProviderDefault,
+    ResponsiveRobot,
 }
 
 /// Created separately for each Runtime, installed only by trusted Turn
@@ -647,8 +669,30 @@ impl TurnModelConfiguration {
         }
         let mut active = self.0.write().map_err(|_| ProductionRepositoryError::Unavailable)?;
         if active.is_some() { return Err(ProductionRepositoryError::InvalidData); }
-        *active = Some(FrozenTurnConfiguration { operation: operation.into(), candidates });
+        *active = Some(FrozenTurnConfiguration {
+            operation: operation.into(), candidates, reception_policy: TurnModelReceptionPolicy::ProviderDefault,
+        });
         Ok(())
+    }
+
+    /// The host opts in only for a canonical lean physical Robot with no
+    /// explicit Session reasoning choice. A stale caller cannot alter the next
+    /// Turn's pin, and terminal clear removes this policy with its model facts.
+    pub(super) fn set_reception_policy(
+        &self, operation: &str, policy: TurnModelReceptionPolicy,
+    ) -> Result<(), ProductionRepositoryError> {
+        let mut active = self.0.write().map_err(|_| ProductionRepositoryError::Unavailable)?;
+        let view = active.as_mut().filter(|view| view.operation == operation)
+            .ok_or(ProductionRepositoryError::InvalidData)?;
+        view.reception_policy = policy;
+        Ok(())
+    }
+
+    fn reception_policy_for_route(&self, route: &ResolvedChatRoute) -> Result<TurnModelReceptionPolicy, ProductionRepositoryError> {
+        let active = self.0.read().map_err(|_| ProductionRepositoryError::Unavailable)?;
+        let view = active.as_ref().filter(|view| view.candidates.iter().any(|saved| saved.matches_route(route)))
+            .ok_or(ProductionRepositoryError::InvalidData)?;
+        Ok(view.reception_policy)
     }
 
     pub(super) fn clear(&self, operation: &str) -> Result<(), ProductionRepositoryError> {
@@ -686,14 +730,7 @@ impl TurnModelConfiguration {
 
     fn candidate(&self, route: &ResolvedChatRoute) -> Result<FrozenModelConfiguration, ProductionRepositoryError> {
         self.0.read().map_err(|_| ProductionRepositoryError::Unavailable)?.as_ref()
-            .and_then(|view| view.candidates.iter().find(|saved|
-                saved.route.model_route_id == route.model_route_id
-                && saved.route.model_route_revision == route.model_route_revision
-                && saved.route.provider_id == route.provider_id && saved.route.model == route.model
-                && saved.route.protocol == route.protocol
-                && saved.route.connection_config_ref == route.connection_config_ref
-                && saved.route.credential_ref == route.credential_ref
-                && saved.route.config_revision_digest == route.config_revision_digest))
+            .and_then(|view| view.candidates.iter().find(|saved| saved.matches_route(route)))
             .cloned().ok_or(ProductionRepositoryError::InvalidData)
     }
 
@@ -1085,7 +1122,7 @@ impl ProductionModelRepository {
         }
 
         let provider = sqlx::query(
-            "SELECT base_url, bedrock_config FROM providers WHERE provider_id = ?",
+            "SELECT platform, base_url, bedrock_config FROM providers WHERE provider_id = ?",
         )
         .bind(route.provider_id.as_ref())
         .fetch_optional(&self.pool)
@@ -1094,6 +1131,8 @@ impl ProductionModelRepository {
         .ok_or(ProductionRepositoryError::Missing)?;
         let provider_base_url: String = provider
             .try_get("base_url")
+            .map_err(|_| ProductionRepositoryError::InvalidData)?;
+        let platform: String = provider.try_get("platform")
             .map_err(|_| ProductionRepositoryError::InvalidData)?;
         let bedrock_config: Option<String> = provider
             .try_get("bedrock_config")
@@ -1201,8 +1240,13 @@ impl ProductionModelRepository {
             url: endpoint,
             framing,
             region,
+            platform,
             provider_params,
             output_limit,
+            reception_policy: match &self.turn_configuration {
+                Some(view) => view.reception_policy_for_route(&route)?,
+                None => TurnModelReceptionPolicy::ProviderDefault,
+            },
         })
     }
 }
@@ -1212,8 +1256,60 @@ struct ProviderAttemptTarget {
     url: String,
     framing: SingleAttemptFraming,
     region: Option<String>,
+    platform: String,
     provider_params: Value,
     output_limit: Option<i64>,
+    reception_policy: TurnModelReceptionPolicy,
+}
+
+impl ProviderAttemptTarget {
+    /// Apply the transient reception preference to a copy of this attempt's
+    /// saved defaults. Native typed reasoning in the request still wins during
+    /// the ordinary merge. Failover uses its own platform/model/protocol facts.
+    fn merge_wire_body(
+        &self, body: Value, protocol: ChatProtocol, model: &str, features: &BTreeSet<ChatModelFeature>,
+    ) -> Result<Value, ChatModelError> {
+        let mut parameters = self.provider_params.clone();
+        if self.reception_policy == TurnModelReceptionPolicy::ResponsiveRobot
+            && features.contains(&ChatModelFeature::Reasoning)
+        {
+            apply_robot_reception_reasoning(&mut parameters, &self.platform, model, protocol);
+        }
+        merge_chat_provider_params(body, &parameters, protocol, self.output_limit)
+    }
+}
+
+fn apply_robot_reception_reasoning(parameters: &mut Value, platform: &str, model: &str, protocol: ChatProtocol) {
+    // Messages/native thinking modes have different controls. Do not invent an
+    // effort field or translate a saved native token budget into a tier.
+    if !matches!(protocol, ChatProtocol::OpenaiChat | ChatProtocol::OpenaiResponses | ChatProtocol::Gemini) { return; }
+    let Some(efforts) = nomifun_model_invoke::model_profiles::documented_reasoning_efforts(
+        platform, model, protocol_id(protocol),
+    ) else { return };
+    let Some(preferred) = ["minimal", "low"].into_iter().find(|candidate| efforts.iter().any(|effort| effort.as_str() == *candidate))
+        else { return };
+    let Some(parameters) = parameters.as_object_mut() else { return };
+    // A native mode is already a concrete choice. The reception policy must
+    // not create mutually exclusive Gemini thinking controls or weaken it by
+    // interpreting an opaque vendor extension.
+    if parameters.get("thinking").is_some()
+        || parameters.get("enable_thinking").is_some()
+        || parameters.get("thinking_budget").is_some()
+        || parameters.get("reasoning").and_then(|value| value.get("effort")).is_some()
+        || parameters.get("generationConfig").and_then(|value| value.get("thinkingConfig")).is_some()
+    { return; }
+    let rank = |effort: &str| ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+        .iter().position(|candidate| *candidate == effort);
+    if let Some(configured) = parameters.get("reasoning_effort") {
+        let Some(configured) = configured.as_str() else { return };
+        let Some(configured_rank) = rank(configured) else { return };
+        // Never raise none/minimal/low, or attempt to repair an unsupported
+        // existing value as a side effect of a latency preference.
+        if configured_rank <= rank(preferred).expect("preferred tier is bounded")
+            || !efforts.iter().any(|effort| effort == configured)
+        { return; }
+    }
+    parameters.insert("reasoning_effort".into(), Value::String(preferred.into()));
 }
 
 #[async_trait]
@@ -1676,11 +1772,11 @@ impl ChatModelInvokePort for ProductionChatModelInvoke {
             })?;
         let lease = OpaqueCredentialLease::new(&credential_handle)
             .map_err(invoke_error_to_chat_error)?;
-        let mut body = merge_chat_provider_params(
+        let mut body = target.merge_wire_body(
             request.body,
-            &target.provider_params,
             request.protocol,
-            target.output_limit,
+            &request.model,
+            &request.route_features,
         )?;
         let configured_reasoning = nomifun_chat_model_broker::chat_request_uses_reasoning(request.protocol, &body);
         if configured_reasoning && !request.route_features.contains(&ChatModelFeature::Reasoning) {
@@ -2070,6 +2166,137 @@ mod tests {
         ChatRouteProtocol, ChatRouteRecord, ChatRouteRecordSchema, ChatRouteTask,
     };
     use serde_json::json;
+
+    fn robot_reception_target(platform: &str, parameters: Value) -> ProviderAttemptTarget {
+        ProviderAttemptTarget {
+            url: "https://fixture.invalid".into(), framing: SingleAttemptFraming::Sse, region: None,
+            platform: platform.into(), provider_params: parameters, output_limit: Some(8192),
+            reception_policy: TurnModelReceptionPolicy::ResponsiveRobot,
+        }
+    }
+
+    #[test]
+    fn robot_reception_wire_lowers_only_documented_defaults_and_preserves_explicit_reasoning() {
+        let reasoning = BTreeSet::from([ChatModelFeature::Reasoning]);
+        let saved = json!({"reasoning_effort":"high", "temperature":0.3, "reasoning":{"summary":"concise"}});
+        let target = robot_reception_target("openai", saved.clone());
+        let wire = target.merge_wire_body(json!({"model":"gpt-6.1-sol","input":[]}),
+            ChatProtocol::OpenaiResponses, "gpt-6.1-sol", &reasoning).unwrap();
+        assert_eq!(wire["reasoning"]["effort"], "low");
+        assert_eq!(wire["reasoning"]["summary"], "concise");
+        assert_eq!(wire["temperature"], 0.3);
+        assert_eq!(wire["max_output_tokens"], 8192);
+        assert_eq!(target.provider_params, saved, "the saved model parameters are never rewritten");
+        for effort in ["none", "minimal", "low", "high", "ultra"] {
+            let wire = target.merge_wire_body(json!({"reasoning":{"effort":effort,"summary":"none"}}),
+                ChatProtocol::OpenaiResponses, "gpt-6.1-sol", &reasoning).unwrap();
+            assert_eq!(wire["reasoning"]["effort"], effort, "typed caller reasoning always wins");
+            assert_eq!(wire["reasoning"]["summary"], "none");
+        }
+        let defaults = robot_reception_target("openai", json!({}));
+        let wire = defaults.merge_wire_body(json!({}), ChatProtocol::OpenaiResponses, "gpt-5", &reasoning).unwrap();
+        assert_eq!(wire["reasoning"]["effort"], "minimal");
+        for effort in ["none", "minimal", "low"] {
+            let target = robot_reception_target("openai", json!({"reasoning_effort":effort}));
+            let wire = target.merge_wire_body(json!({}), ChatProtocol::OpenaiResponses, "gpt-6.1-sol", &reasoning).unwrap();
+            assert_eq!(wire["reasoning"]["effort"], effort, "a lower model default is never raised");
+        }
+        let mut native_disabled = json!({"enable_thinking":false,"vendor":{"mode":"native"}});
+        let original = native_disabled.clone();
+        apply_robot_reception_reasoning(&mut native_disabled, "openai", "gpt-6.1-sol", ChatProtocol::OpenaiResponses);
+        assert_eq!(native_disabled, original, "a saved native switch cannot be reinterpreted as an effort preference");
+    }
+
+    #[test]
+    fn robot_reception_attempts_keep_unknown_gateway_protocol_and_feature_defaults() {
+        let reasoning = BTreeSet::from([ChatModelFeature::Reasoning]);
+        let saved = json!({"reasoning_effort":"high", "vendor":{"opaque":true}});
+        for (platform, model, protocol, features) in [
+            ("custom", "gpt-6.1-sol", ChatProtocol::OpenaiResponses, reasoning.clone()),
+            ("openrouter", "gpt-6.1-sol", ChatProtocol::OpenaiResponses, reasoning.clone()),
+            ("openai", "gpt-6.1-sol-unknown", ChatProtocol::OpenaiResponses, reasoning.clone()),
+            ("openai", "gpt-6.1-sol", ChatProtocol::OpenaiChat, reasoning.clone()),
+            ("openai", "gpt-6.1-sol", ChatProtocol::OpenaiResponses, BTreeSet::new()),
+        ] {
+            let target = robot_reception_target(platform, saved.clone());
+            let original = merge_chat_provider_params(json!({}), &saved, protocol, target.output_limit).unwrap();
+            assert_eq!(target.merge_wire_body(json!({}), protocol, model, &features).unwrap(), original,
+                "{platform}/{model}/{protocol:?} must retain its own configuration");
+        }
+        let mut ordinary = robot_reception_target("openai", saved.clone());
+        ordinary.reception_policy = TurnModelReceptionPolicy::ProviderDefault;
+        assert_eq!(ordinary.merge_wire_body(json!({}), ChatProtocol::OpenaiResponses, "gpt-6.1-sol", &reasoning).unwrap()
+            ["reasoning"]["effort"], "high");
+        let anthropic = robot_reception_target("anthropic", json!({"thinking":{"type":"enabled","budget_tokens":2048}}));
+        let wire = anthropic.merge_wire_body(json!({"max_tokens":8192}), ChatProtocol::Anthropic, "claude-sonnet-4-5", &reasoning).unwrap();
+        assert_eq!(wire["thinking"], json!({"type":"enabled","budget_tokens":2048}));
+        assert!(wire.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn robot_reception_gemini_keeps_native_modes_and_typed_budget() {
+        let reasoning = BTreeSet::from([ChatModelFeature::Reasoning]);
+        let target = robot_reception_target("gemini", json!({"reasoning_effort":"high"}));
+        let wire = target.merge_wire_body(json!({}), ChatProtocol::Gemini, "gemini-3.6-flash", &reasoning).unwrap();
+        assert_eq!(wire["generationConfig"]["thinkingConfig"]["thinkingLevel"], "minimal");
+        let typed = json!({"generationConfig":{"thinkingConfig":{"thinkingBudget":2048}}});
+        let wire = target.merge_wire_body(typed, ChatProtocol::Gemini, "gemini-3.6-flash", &reasoning).unwrap();
+        assert_eq!(wire["generationConfig"]["thinkingConfig"], json!({"thinkingBudget":2048}));
+        for thinking in [json!({"thinkingLevel":"high"}), json!({"thinkingBudget":4096})] {
+            let target = robot_reception_target("gemini", json!({"generationConfig":{"thinkingConfig":thinking}}));
+            let wire = target.merge_wire_body(json!({}), ChatProtocol::Gemini, "gemini-3.6-flash", &reasoning).unwrap();
+            assert_eq!(wire["generationConfig"]["thinkingConfig"], thinking);
+        }
+        let unknown = robot_reception_target("gemini", json!({}));
+        let wire = unknown.merge_wire_body(json!({}), ChatProtocol::Gemini, "gemini-2.5-pro", &reasoning).unwrap();
+        assert!(wire.get("generationConfig").and_then(|generation| generation.get("thinkingConfig")).is_none(),
+            "a native budget model must not inherit another Gemini model's tier support");
+    }
+
+    #[test]
+    fn robot_reception_pin_is_operation_scoped_and_failover_uses_its_own_model() {
+        let mut primary = convert_chat_route_candidate(&candidate()).unwrap();
+        primary.protocol = ChatProtocol::OpenaiResponses;
+        primary.model = "gpt-6.1-sol".into();
+        primary.features.insert(ChatModelFeature::Reasoning);
+        let mut fallback = primary.clone();
+        fallback.model_route_id = "fallback".into();
+        fallback.provider_id = "gateway-provider".into();
+        fallback.model = "unknown-fallback".into();
+        let frozen = |route| FrozenModelConfiguration {
+            route, digest_scope: ProviderConfigurationScope::ModelV2, capabilities: Vec::new(),
+        };
+        let view = TurnModelConfiguration::default();
+        assert!(view.set_reception_policy("turn-one", TurnModelReceptionPolicy::ResponsiveRobot).is_err());
+        *view.0.write().unwrap() = Some(FrozenTurnConfiguration {
+            operation: "turn-one".into(), candidates: vec![frozen(primary.clone()), frozen(fallback.clone())],
+            reception_policy: TurnModelReceptionPolicy::ProviderDefault,
+        });
+        assert!(view.set_reception_policy("stale-turn", TurnModelReceptionPolicy::ResponsiveRobot).is_err());
+        assert_eq!(view.reception_policy_for_route(&primary).unwrap(), TurnModelReceptionPolicy::ProviderDefault);
+        view.set_reception_policy("turn-one", TurnModelReceptionPolicy::ResponsiveRobot).unwrap();
+        let saved = json!({"reasoning_effort":"high"});
+        for (route, platform, expected) in [(&primary, "openai", "low"), (&fallback, "custom", "high")] {
+            let mut target = robot_reception_target(platform, saved.clone());
+            target.reception_policy = view.reception_policy_for_route(route).unwrap();
+            let wire = target.merge_wire_body(json!({}), route.protocol, &route.model, &route.features).unwrap();
+            assert_eq!(wire["reasoning"]["effort"], expected);
+        }
+        let mut unrelated = primary.clone();
+        unrelated.credential_ref = "different-credential".into();
+        assert!(view.reception_policy_for_route(&unrelated).is_err());
+        view.clear("turn-one").unwrap();
+        assert!(view.reception_policy_for_route(&primary).is_err());
+        *view.0.write().unwrap() = Some(FrozenTurnConfiguration {
+            operation: "turn-two".into(), candidates: vec![frozen(primary.clone())],
+            reception_policy: TurnModelReceptionPolicy::ProviderDefault,
+        });
+        assert!(view.set_reception_policy("turn-one", TurnModelReceptionPolicy::ResponsiveRobot).is_err());
+        assert_eq!(view.reception_policy_for_route(&primary).unwrap(), TurnModelReceptionPolicy::ProviderDefault,
+            "the next Turn does not inherit the prior Robot policy");
+        assert!(TurnModelConfiguration::default().set_reception_policy("turn-two", TurnModelReceptionPolicy::ResponsiveRobot).is_err(),
+            "a separate desktop Runtime cannot inherit the physical Runtime pin");
+    }
 
     #[tokio::test]
     async fn cancelling_provider_open_releases_only_its_credential_lease() {

@@ -42,7 +42,7 @@ fn broker_reexports_the_exact_canonical_chat_types_and_wire_values() {
     let decoded: canonical::ChatModelRequest = serde_json::from_value(expected).unwrap();
     assert_eq!(decoded, broker_request);
 
-    let event: canonical::ChatModelEvent = ChatModelEvent::OutputTextDelta { text: "increment".into() };
+    let event: canonical::ChatModelEvent = ChatModelEvent::OutputTextDelta { text: "increment".into(), source: None };
     assert_eq!(serde_json::to_value(&event).unwrap(), serde_json::json!({
         "type": "output_text_delta", "text": "increment"
     }));
@@ -567,7 +567,7 @@ fn bounded_json_fallback_decodes_openai_chat_and_gemini_responses() {
             .unwrap();
         assert!(events.iter().any(|event| matches!(
             event,
-            ChatModelEvent::OutputTextDelta { text } if text == "hello"
+            ChatModelEvent::OutputTextDelta { text, .. } if text == "hello"
         )));
         assert!(matches!(
             events.last(),
@@ -655,7 +655,8 @@ fn openai_chat_raw_sse_shape_decodes_text_tools_usage_and_finish() {
                 ))
             },
             ChatModelEvent::OutputTextDelta {
-                text: "Hello ".to_owned()
+                text: "Hello ".to_owned(),
+                source: None,
             },
             ChatModelEvent::ToolCallDelta {
                 call_id: nomifun_chat_model_broker::ToolCallId("call_raw_1".to_owned()),
@@ -694,6 +695,25 @@ fn openai_chat_raw_sse_shape_decodes_text_tools_usage_and_finish() {
             }
         ]
     );
+}
+
+#[test]
+fn chat_content_and_reasoning_in_one_frame_share_the_response_text_source() {
+    let transports = transport_map(std::iter::empty::<(ChatProtocol, Arc<dyn ProviderTransport>)>());
+    let adapter = OpenAiChatAdapter::new(transports[&ChatProtocol::OpenaiChat].clone());
+    let mut events = Vec::new();
+    for delta in [serde_json::json!({"content":"CL", "reasoning_content":"check"}),
+        serde_json::json!({"content":"I 和 SKILL 都已安装成功。"})]
+    {
+        events.extend(adapter.decode_frame(ProviderWireFrame { diagnostic:None, event:"message".into(),
+            data:serde_json::json!({"id":"stepfun_response", "choices":[{"index":0, "delta":delta}]})
+        }).unwrap());
+    }
+    assert!(events.iter().any(|event| matches!(event, ChatModelEvent::ReasoningDelta {text} if text == "check")));
+    let text = events.iter().filter_map(|event| match event {
+        ChatModelEvent::OutputTextDelta { text, source:None } => Some(text.as_str()), _ => None,
+    }).collect::<String>();
+    assert_eq!(text, "CLI 和 SKILL 都已安装成功。");
 }
 
 #[test]
@@ -845,7 +865,7 @@ fn openai_chat_id_less_prelude_text_stream_completes_once() {
     let text = events
         .iter()
         .filter_map(|event| match event {
-            ChatModelEvent::OutputTextDelta { text } => Some(text.as_str()),
+            ChatModelEvent::OutputTextDelta { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<String>();
@@ -937,7 +957,8 @@ fn openai_chat_done_marker_completes_a_stream_without_finish_reason() {
                 ))
             },
             ChatModelEvent::OutputTextDelta {
-                text: "complete me".to_owned()
+                text: "complete me".to_owned(),
+                source: None,
             },
             ChatModelEvent::Usage {
                 usage: nomifun_chat_model_broker::ChatUsage {
@@ -1089,7 +1110,8 @@ fn gemini_raw_sse_and_json_shapes_decode_parts_usage_and_finish() {
         json_events,
         vec![
             ChatModelEvent::OutputTextDelta {
-                text: "done".to_owned()
+                text: "done".to_owned(),
+                source: None,
             },
             ChatModelEvent::Usage {
                 usage: nomifun_chat_model_broker::ChatUsage {
@@ -2267,7 +2289,7 @@ async fn broker_discards_failed_pre_semantic_attempt_and_fails_over_once() {
     assert!(events.iter().any(|event| {
         matches!(
             &event.event,
-            ChatModelEvent::OutputTextDelta { text } if text == "hello from failover"
+            ChatModelEvent::OutputTextDelta { text, .. } if text == "hello from failover"
         )
     }));
     assert!(
@@ -2378,7 +2400,7 @@ async fn broker_never_switches_route_after_semantic_output() {
         item,
         Ok(event) if matches!(
             &event.event,
-            ChatModelEvent::OutputTextDelta { text } if text == "committed text"
+            ChatModelEvent::OutputTextDelta { text, .. } if text == "committed text"
         )
     )));
     let error = output.last().unwrap().as_ref().unwrap_err();

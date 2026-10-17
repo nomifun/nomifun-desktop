@@ -11,8 +11,8 @@ import { useSessionCommandActivity, type SessionCommandActivity } from './useSes
 const ID = parseConversationId('0190f5fe-7c00-7a00-8000-000000000321');
 const OTHER = parseConversationId('0190f5fe-7c00-7a00-8000-000000000322');
 const idle = { id: ID, type: 'nomi', status: 'finished' } as TChatConversation;
-const paused = { ...idle, status: 'running', extra: { execution_phase: 'paused' }, runtime: {
-  state: 'idle', is_processing: false, can_send_message: false,
+const paused = { ...idle, status: 'running', extra: { workspace: '' }, runtime: {
+  state: 'paused', is_processing: false, can_send_message: false,
   active_turn_id: parseMessageId('0190f5fe-7c00-7a00-8000-000000000323'),
 } } as TChatConversation;
 beforeEach(() => {

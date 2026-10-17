@@ -18,8 +18,9 @@ pub const MAX_MATCHES: usize = 5;
 /// Maximum wire-visible tools, including Runtime control definitions.
 pub const MAX_VISIBLE_TOOL_DEFINITIONS: usize = 128;
 /// ToolSearch, plan/report, history/search/read/load, prior-task, context and
-/// the three authenticated MCP resource controls can coexist on one step.
-pub const RUNTIME_CONTROL_TOOL_SLOTS: usize = 12;
+/// the three authenticated MCP resource controls and opt-in silent Robot
+/// completion can coexist on one step.
+pub const RUNTIME_CONTROL_TOOL_SLOTS: usize = 13;
 pub const MAX_VISIBLE_AUTHORIZED_TOOL_DEFINITIONS: usize =
     MAX_VISIBLE_TOOL_DEFINITIONS - RUNTIME_CONTROL_TOOL_SLOTS;
 /// Leave enough presentation slots for every result of one ToolSearch call.

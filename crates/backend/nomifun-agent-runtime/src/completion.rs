@@ -869,16 +869,6 @@ impl CompletionTracker {
         self.report = None;
     }
 
-    /// A bounded host settlement rejection proves authorized work remains.
-    /// Release the report-only surface for that work without buying another
-    /// candidate review or resetting any inputs, observations or work counts.
-    pub(crate) fn resume_host_work(&mut self) {
-        self.invalidate();
-        self.review.phase = crate::AgentExecutionPhase::Execution;
-        self.review.delivery_pending = false;
-        self.review.account_repair = false;
-    }
-
     pub(crate) fn settled_failure_gate(&self) -> bool { self.settled_failure_gate }
     pub(crate) fn set_settled_failure_gate(&mut self, allowed: bool) { self.settled_failure_gate = allowed; }
     /// Called after a tool result or engine-only deferral. The host separately
@@ -1580,27 +1570,6 @@ fn file_paths_may_overlap(observed: &str, target: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn host_rejection_releases_report_only_phase_without_renewing_delivery_review() {
-        let mut completion = CompletionTracker::default();
-        completion.revision = 7;
-        completion.settled_failure_gate = true;
-        completion.review = crate::AgentCompletionReviewState {
-            phase: crate::AgentExecutionPhase::CompletionReview,
-            delivery_pending: false, delivery_used: true, input_revision: 2, account_repair: true,
-        };
-        completion.resume_host_work();
-        assert_eq!(completion.review, crate::AgentCompletionReviewState {
-            phase: crate::AgentExecutionPhase::Execution,
-            delivery_pending: false, delivery_used: true, input_revision: 2, account_repair: false,
-        });
-        assert_eq!(completion.revision, 8, "the prior completion account remains invalidated");
-        assert!(!completion.settled_failure_gate);
-        let inputs = vec![crate::context_lifecycle::text_message(nomifun_chat_model_broker::ChatRole::User,
-            "1. Add\n2. Verify".into()); 2];
-        assert!(!completion.review.begin(&inputs, 3), "host feedback cannot buy another candidate review");
-    }
 
     async fn strict_history_fixture()->(crate::tool_archive::ToolArchive,Vec<ChatMessage>,String) {
         strict_history_fixture_with_path("result.txt").await

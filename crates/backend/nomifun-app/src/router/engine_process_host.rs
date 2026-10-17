@@ -9,7 +9,7 @@ use std::time::Duration;
 use super::engine_journal::{EngineJournalWrite, EngineTurnJournal};
 use super::engine_process_recovery::ProcessWitness;
 use super::agent_wave2_host::PreparedWave2Invocation;
-use futures_util::FutureExt;
+use futures_util::{FutureExt, StreamExt};
 use nomifun_agent_contracts::StrictJsonValue;
 use nomifun_agent_domain_wave2::Wave2HostPortError;
 use nomifun_engine_core::{
@@ -200,7 +200,60 @@ fn cleanup_is_proven(poll: &EngineProcessPoll) -> bool {
         | EngineProcessPoll::TimedOut { cleanup, .. } | EngineProcessPoll::Lost { cleanup, .. } if cleanup.reaped)
 }
 
+async fn next_process_change(mut receiver: tokio::sync::watch::Receiver<u64>)
+    -> Result<tokio::sync::watch::Receiver<u64>, tokio::sync::watch::error::RecvError> {
+    receiver.changed().await?;
+    Ok(receiver)
+}
+
 impl EngineProcessScope {
+    /// Wait on retained owner terminals. No tool admission, stdout reader,
+    /// process lease renewal or change to the original deadline occurs here.
+    pub(crate) async fn wait_for_changes(&self, processes: &[nomifun_agent_runtime::AgentWaitProcess],
+        cancellation: CancellationToken) -> Result<Vec<nomifun_agent_runtime::AgentOwnedProcessObservation>, Wave2HostPortError> {
+        if processes.is_empty() || processes.len() > 64 { return Err(error("wait requires exact owned process identities")); }
+        let mut changes = futures_util::stream::FuturesUnordered::new();
+        let mut has_system = false;
+        {
+            let state = self.state.lock().await;
+            let mut seen = BTreeSet::new();
+            for process in processes {
+                if !seen.insert(&process.process_id) { return Err(error("duplicate process wait identity")); }
+                let entry = state.sessions.get(&process.process_id).ok_or_else(|| error("wait process is not owned by this exact Turn"))?;
+                if let Some(receiver) = entry.session.terminal_changes() {
+                    changes.push(next_process_change(receiver));
+                } else { has_system = true; }
+            }
+        }
+        loop {
+            if cancellation.is_cancelled() || self.closed.load(Ordering::Acquire) { return Err(error("process wait cancelled")); }
+            let mut observations = Vec::new();
+            {
+                let mut state = self.state.lock().await;
+                for process in processes {
+                    let entry = state.sessions.get_mut(&process.process_id).ok_or_else(|| error("wait process ownership changed"))?;
+                    if let Some(poll) = self.owner.terminal_observation_if_ready(&mut entry.session, self.cancellation.clone()).await.map_err(outcome_unknown)? {
+                        if cleanup_is_proven(&poll) { entry.terminal = Some(poll.clone()); }
+                        observations.push(nomifun_agent_runtime::AgentOwnedProcessObservation { process_id: process.process_id.clone(), poll });
+                    }
+                }
+            }
+            if !observations.is_empty() { return Ok(observations); }
+            tokio::select! { biased;
+                _ = cancellation.cancelled() => return Err(error("process wait cancelled")),
+                _ = self.cancellation.cancelled() => return Err(error("process scope closed")),
+                receiver = changes.next(), if !changes.is_empty() => {
+                    match receiver {
+                        Some(Ok(receiver)) => changes.push(next_process_change(receiver)),
+                        Some(Err(_)) => return Err(outcome_unknown("original process lifecycle closed without a terminal observation")),
+                        None => return Err(outcome_unknown("original process lifecycle owner is unavailable")),
+                    }
+                },
+                _ = tokio::time::sleep(Duration::from_millis(250)), if has_system => {},
+            }
+        }
+    }
+
     pub(crate) fn close_admission(&self) {
         self.closed.store(true, Ordering::Release);
         self.cancellation.cancel();
@@ -874,6 +927,38 @@ mod tests {
         scope.cleanup().await.unwrap();
         drop(scope);
         pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn owner_lifecycle_closed_without_a_terminal_is_not_requeued() {
+        let (sender,receiver)=tokio::sync::watch::channel(0u64);
+        drop(sender);
+        assert!(tokio::time::timeout(Duration::from_millis(100),next_process_change(receiver)).await.unwrap().is_err(),
+            "lost owner notification must return unknown, not become a perpetually ready wait future");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn parked_owner_wait_wakes_for_any_process_and_preserves_the_original_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let (journal, pool) = super::super::engine_journal::test_fixture().await;
+        let scope = EngineProcessScope::new(root.path(), journal).unwrap();
+        let mut processes = Vec::new();
+        for (index, timeout) in [5000, 150].into_iter().enumerate() {
+            let started = scope.invoke(StrictJsonValue(serde_json::json!({
+                "operation":"start","command":"/bin/sh","args":["-c","IFS= read -r line"],
+                "wait_ms":0,"timeout_ms":timeout
+            })), &format!("start-parked-{index}")).await.unwrap().0;
+            processes.push(nomifun_agent_runtime::AgentWaitProcess {process_id:started["process_id"].as_str().unwrap().into(),output_cursor:0});
+        }
+        let observed = tokio::time::timeout(Duration::from_secs(3), scope.wait_for_changes(&processes,CancellationToken::new())).await.unwrap().unwrap();
+        assert!(observed.iter().any(|event|event.process_id==processes[1].process_id && matches!(event.poll,EngineProcessPoll::TimedOut {..})));
+        assert!(scope.state.lock().await.sessions[&processes[0].process_id].terminal.is_none(),"unrelated live process must remain owned");
+        let already_finished=scope.wait_for_changes(&processes[1..],CancellationToken::new()).await.unwrap();
+        assert_eq!(observed,already_finished,"terminal-before-registration remains observable");
+        let cancellation=CancellationToken::new();cancellation.cancel();
+        assert!(scope.wait_for_changes(&processes[..1],cancellation).await.is_err());
+        scope.cleanup().await.unwrap();drop(scope);pool.close().await;
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 //! The two audio pipelines and the text plumbing between them.
 
 pub mod downlink;
+mod decorations;
 pub mod sentence;
 pub mod uplink;
 

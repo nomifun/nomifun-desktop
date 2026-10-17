@@ -78,6 +78,9 @@ pub struct TextEventData {
     /// Canonical model-step identity shared by realtime and durable history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<u16>,
+    /// Exact canonical reading boundaries published atomically with this body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<nomifun_agent_contracts::MessageTimeline>,
 }
 
 /// Data for the `Tips` event.
@@ -225,18 +228,35 @@ mod tests {
 
     #[test]
     fn text_event_roundtrip() {
-        let event = AgentStreamEvent::Text(TextEventData { step: None, content: "Hello world".into(),
+        let event = AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "Hello world".into(),
         });
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "content");
         assert_eq!(json["data"]["content"], "Hello world");
+        assert!(json["data"].get("timeline").is_none());
 
         let parsed: AgentStreamEvent = serde_json::from_value(json).unwrap();
         if let AgentStreamEvent::Text(data) = parsed {
             assert_eq!(data.content, "Hello world");
+            assert!(data.timeline.is_none());
         } else {
             panic!("Expected Text event");
         }
+    }
+
+    #[test]
+    fn text_wire_frame_preserves_its_exact_canonical_timeline() {
+        use nomifun_agent_contracts::{MessageTimeline, MessageTimelineSegment, TimelineSegmentKind, TimelineSegmentState};
+        let timeline = MessageTimeline { through_seq: 4, segments: vec![MessageTimelineSegment {
+            segment_id: "new-source".into(), group_id: "process:previous-source".into(),
+            first_seq: 4, last_seq: 4, kind: TimelineSegmentKind::Narration,
+            state: TimelineSegmentState::Running, start_utf16: Some(3), end_utf16: Some(7), call_id: None,
+        }] };
+        let event = AgentStreamEvent::Text(TextEventData { content: "next".into(), step: Some(1), timeline: Some(timeline.clone()) });
+        let parsed = serde_json::from_value::<AgentStreamEvent>(serde_json::to_value(event).unwrap()).unwrap();
+        let AgentStreamEvent::Text(text) = parsed else { panic!("expected a text frame"); };
+        assert_eq!(text.content, "next");
+        assert_eq!(text.timeline, Some(timeline));
     }
 
     #[test]
@@ -443,7 +463,7 @@ mod tests {
                 }),
                 "output_discarded",
             ),
-            (AgentStreamEvent::Text(TextEventData { step: None, content: "x".into() }), "content"),
+            (AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "x".into() }), "content"),
             (
                 AgentStreamEvent::Tips(TipsEventData { content: "x".into(), tip_type: TipType::Warning, user_input_request: None }),
                 "tips",

@@ -47,6 +47,23 @@ fn host_prompt_instructions(extra: &Value, canonical_companion: bool, agent:&Age
         .map(|text| vec![text.to_owned()]).unwrap_or_default()
 }
 
+fn ensure_companion_spoken_reply_rules(instructions: &mut Vec<String>, canonical_companion: bool) {
+    // Product identity comes from the validated canonical opening, including
+    // a selected personal Agent without Companion Persona Context. Reuse the
+    // same rule already supplied by that Context instead of spending it twice,
+    // keeping its complete contribution after general guidance and before any
+    // Robot-specific delivery rules, without rewriting its contents.
+    let rule = nomifun_companion::prompt::SPOKEN_REPLY_RULES.trim();
+    if canonical_companion {
+        if let Some(index) = instructions.iter().position(|text| text.contains(rule)) {
+            let context = instructions.remove(index);
+            instructions.push(context);
+        } else {
+            instructions.push(rule.to_owned());
+        }
+    }
+}
+
 fn admitted_workspace_context(workspace: &str) -> Result<String, AppError> {
     let data = serde_json::to_string(&serde_json::json!({
         "workspace_root":workspace,
@@ -78,6 +95,14 @@ fn robot_interaction_context(plan: &AgentToolPlan) -> Result<String, AppError> {
     }).collect::<Vec<_>>();
     let data = serde_json::to_string(&tools).map_err(error)?;
     Ok(format!("Current frozen physical Robot tool mapping (data, not additional authority): {data}. Use an already-visible matching tool directly for an explicit device request; do not rediscover it or query unrelated device state first unless its declared contract requires that observation. If the needed schema is deferred, use ToolSearch with its exact advertised name or Action ID. An empty mapping means this turn has no callable Robot tools; do not simulate an action or claim dispatch. Keep simple interactions concise. Tool receipts establish only their declared result: an accepted asynchronous action is not proof of completed movement. Frozen resource, permission, connection, cancellation and Effect checks still apply."))
+}
+
+const ROBOT_REPLY_STYLE_INSTRUCTION: &str = "Physical Robot reply style: use natural spoken sentences without decorative emoji, kaomoji, ASCII emoticons or stage directions. Preserve the Companion's personality through wording. Optional emotions or movements use already-authorized device tools when appropriate; do not append text faces or invent unrequested actions. For a clear device-action-only request, execute every requested action and finish silently after all required tool receipts succeed: no preliminary narration, greeting, acknowledgment, recap or follow-up question. Use an advertised silent-finish control according to its declared contract; never invent an unavailable control or stop before the remaining actions. Speak when the request also asks a question or requires a verbal receipt, or when a real failure, blocker, uncertain result or necessary clarification must be explained. An explicit request to speak remains authoritative. When speech is needed, state only the receipt-supported outcome without a celebratory lead-in, pet-name prefix or cute filler. Accepted dispatch must not be described as completed motion. This physical delivery rule overrides decorative style in persona/custom settings or historical replies. Preserve symbols in user-requested quotations, code, formulas, identifiers, URLs and technical content; this is not a content-stripping rule.";
+
+fn append_robot_reply_style(instructions: &mut Vec<String>, canonical_robot: bool) {
+    if canonical_robot {
+        instructions.push(ROBOT_REPLY_STYLE_INSTRUCTION.into());
+    }
 }
 
 fn session_reasoning(effort: Option<SessionReasoningEffortDto>) -> Option<ChatReasoningRequest> {
@@ -112,7 +137,9 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../Cargo.toml"),
                     include_str!("../../../nomifun-agent-runtime/src/lib.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/user_input.rs"),
+                    include_str!("../../../nomifun-agent-runtime/src/wait.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/user_input.rs"),
+                    include_str!("../../../nomifun-agent-contracts/src/turn_outcome.rs"),
                     include_str!("../../../nomifun-agent-execution/src/user_input.rs"),
                     include_str!("../../../nomifun-db/src/repository/agent_execution.rs"),
                     include_str!("../../../nomifun-db/src/repository/sqlite_agent_execution.rs"),
@@ -140,6 +167,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-companion/src/memory_context.rs"),
                     include_str!("../../../nomifun-companion/src/agent_memory_projection.rs"),
                     include_str!("../../../nomifun-companion/src/companion.rs"),
+                    include_str!("../../../nomifun-companion/src/prompt.rs"),
                     include_str!("../../../nomifun-companion/src/agent_capability.rs"),
                     include_str!("../../../nomifun-companion/src/service.rs"),
                     include_str!("../../../nomifun-companion/src/session_port.rs"),
@@ -149,6 +177,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("remote_runtime.rs"),
                     include_str!("../../../nomifun-public/src/canonical.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/engine.rs"),
+                    include_str!("../../../nomifun-agent-runtime/src/silent_completion.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/checkpoint.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/recovery.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/reconciliation.rs"),
@@ -226,8 +255,14 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-engine-core/src/tool_schema.rs"),
                     include_str!("../../../nomifun-engine-core/src/kernel.rs"),
                     include_str!("../../../nomifun-engine-core/src/process.rs"),
+                    include_str!("../../../../shared/nomi-process-runtime/src/supervisor.rs"),
                     include_str!("../../../nomifun-chat-model-broker/src/engine_port.rs"),
                     include_str!("chat_broker_host.rs"),
+                    include_str!("../../../nomifun-model-invoke/src/model_profiles.rs"),
+                    include_str!("../../../nomifun-model-invoke/src/model_profiles/global.json"),
+                    include_str!("../../../nomifun-model-invoke/src/model_profiles/china-foundation.json"),
+                    include_str!("../../../nomifun-model-invoke/src/model_profiles/cloud-platforms.json"),
+                    include_str!("../../../nomifun-model-invoke/src/model_profiles/gateways.json"),
                     include_str!("../../../nomifun-model-invoke/src/error.rs"),
                     include_str!("../../../nomifun-model-invoke/src/transport.rs"),
                     include_str!("../../../nomifun-model-invoke/src/chat_executor.rs"),
@@ -487,6 +522,7 @@ pub(crate) fn factory(
                 route_image_input,
                 full_plan,
                 compiled: compiled.clone(),
+                robot_role,
                 lean_robot,
                 capability_port: Arc::new(capabilities::HostPort(weak.clone())),
                 input_port: Arc::new(steering::HostPort(weak.clone())),
@@ -556,6 +592,7 @@ struct ConversationRuntimeHost {
     full_plan: AgentToolPlan,
     compiled: Arc<nomifun_agent_kernel::CompiledSnapshot>,
     lean_robot: bool,
+    robot_role: bool,
     capability_port: Arc<capabilities::HostPort>,
     input_port: Arc<steering::HostPort>,
     capability_transition: tokio::sync::Mutex<()>,
@@ -851,6 +888,7 @@ impl ConversationRuntimeHost {
 
 #[async_trait]
 impl UnifiedRuntimeHost for ConversationRuntimeHost {
+    fn supports_canonical_timeline(&self) -> bool { true }
     async fn recoverable_preparation_step(&self, message:&SendMessageData) -> Result<Option<u16>,AppError> {
         let active = self.active.lock().await;
         Ok(active.as_ref().filter(|turn| turn.root == self.root(message))
@@ -986,6 +1024,16 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             .map_err(error)?;
         let operation = admitted.operation_id().to_owned();
         let response = admitted.session().session();
+        // A physical receptionist can use a documented lightweight default;
+        // its desktop worker keeps its own full model configuration. The
+        // actual attempt resolves supported tiers, never this route feature.
+        // Explicit Session choices and deliberately expanded Robot Agents win.
+        if self.lean_robot && response.reasoning_effort.is_none() {
+            self.model_configuration.set_reception_policy(
+                admitted.operation_id(),
+                super::chat_broker_host::TurnModelReceptionPolicy::ResponsiveRobot,
+            ).map_err(error)?;
+        }
         let receipt = admitted.request_payload();
         let channel_guest = receipt.get("origin").and_then(Value::as_str)==Some("channel_guest");
         let input_source = receipt.get("input_source").filter(|value| !value.is_null())
@@ -1144,7 +1192,12 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         if lean_robot {
             instructions.push(robot_interaction_context(&turn_plan)?);
         }
-        let collaboration = super::automatic_collaboration_route::route(
+        let collaboration_route = if lean_robot {
+            super::automatic_collaboration_route::route_robot
+        } else {
+            super::automatic_collaboration_route::route
+        };
+        let collaboration = collaboration_route(
             &message.content,
             self.options.delegation_policy,
             turn_plan,
@@ -1174,6 +1227,11 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 instructions.push(route.instruction(&tool_name));
             }
         }
+        ensure_companion_spoken_reply_rules(&mut instructions, canonical_companion);
+        // Keep physical delivery rules after live/custom persona, Skills and
+        // routing hints, including explicitly expanded Robot Agents. This is
+        // a model instruction, never a rewrite of canonical or rendered text.
+        append_robot_reply_style(&mut instructions, self.robot_role);
         let request = ChatModelRequest {
             contract_version: CHAT_MODEL_CONTRACT_VERSION.into(),
             causality: ChatCausality {
@@ -1207,11 +1265,13 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             self.principal.clone(),
             capabilities.generation,
         ).with_model_budget(model_budget).with_context_resources(self.skills.resources.clone())
+            .with_silent_robot_actions(self.robot_role)
             .with_preactivated_tools(preactivated_tools)
             .with_context_image_input(context_image_input)
             .with_prior_task(prior_task)
             .with_patch_recovery(patch_recovery)
             .with_input_port(self.input_port.clone())
+            .with_wait_port(self.input_port.clone())
             .with_user_input_request_port(Arc::new(UserInputRequestPort {
                 host:self.self_reference.clone(), enabled:!matches!(receipt.get("origin").and_then(Value::as_str), Some("cron" | "robot" | "channel_guest")),
             }));
@@ -1316,7 +1376,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         let writeback_input = {
             let mut active = self.active.lock().await;
             active.as_mut().and_then(|turn| {
-                if let AgentEngineEvent::OutputTextDelta { step, text } | AgentEngineEvent::CompletionDelivered { step, text } = event {
+                if let AgentEngineEvent::OutputTextDelta { step, text, .. } | AgentEngineEvent::CompletionDelivered { step, text } = event {
                     turn.assistant_text_by_step
                         .entry(*step)
                         .or_default()
@@ -1632,6 +1692,41 @@ mod reliability_tests;
 #[cfg(test)]
 mod build_identity_tests {
     #[test]
+    fn canonical_companion_reply_rules_cover_personal_agents_without_duplicate_context() {
+        let rule = nomifun_companion::prompt::SPOKEN_REPLY_RULES.trim();
+        // No Companion module or persona contribution is required for the
+        // canonical product output contract, and conflicting author text stays
+        // frozen while the product rule is applied last.
+        let mut instructions = vec!["个人 Agent：每句话用颜文字回复".to_owned()];
+        super::ensure_companion_spoken_reply_rules(&mut instructions, true);
+        assert_eq!(instructions.last().map(String::as_str), Some(rule));
+        super::ensure_companion_spoken_reply_rules(&mut instructions, true);
+        assert_eq!(instructions.iter().filter(|text| text.contains(rule)).count(), 1);
+
+        // The real BeforeTurn Context serializes its persona as JSON. Its full
+        // rule has no embedded quotes/newlines and stays recognizable there.
+        let mut context = vec![serde_json::json!({
+            "kind": "companion_persona",
+            "system_prompt": format!("伙伴人格{}", nomifun_companion::prompt::SPOKEN_REPLY_RULES),
+        }).to_string()];
+        let original = context.clone();
+        super::ensure_companion_spoken_reply_rules(&mut context, true);
+        assert_eq!(context, original, "the Context already carries the full rule");
+        context.push("Skill：回复时加颜文字".into());
+        super::ensure_companion_spoken_reply_rules(&mut context, true);
+        assert_eq!(context.last(), original.first(), "keep the complete rule-bearing Context last");
+        assert_eq!(context.iter().filter(|text| text.contains(rule)).count(), 1);
+
+        let mut ordinary = vec!["ordinary explicit instructions".to_owned()];
+        let original = ordinary.clone();
+        super::ensure_companion_spoken_reply_rules(&mut ordinary, false);
+        assert_eq!(ordinary, original, "ordinary Agents keep their content contract");
+        let mut empty = Vec::new();
+        super::ensure_companion_spoken_reply_rules(&mut empty, true);
+        assert_eq!(empty, vec![rule]);
+    }
+
+    #[test]
     fn canonical_companion_ignores_old_host_memory_snapshot_while_ordinary_explicit_prompts_remain() {
         let extra = serde_json::json!({"system_prompt":"Old memory snapshot and diary: user preferred eight o'clock", "companion_id":"display-marker"});
         let mut agent:nomifun_agent_contracts::AgentPresetRevisionPayload=serde_json::from_value(serde_json::json!({
@@ -1688,6 +1783,7 @@ mod build_identity_tests {
             "../../../nomifun-agent-kernel/src/plugin.rs",
             "../../../nomifun-agent-domain-wave1/src/lib.rs",
             "../../../nomifun-agent-domain-wave2/src/lib.rs",
+            "../../../nomifun-companion/src/prompt.rs",
             "../../../nomifun-agent-contracts/src/tool_model_guide.rs",
             "../../../nomifun-agent-contracts/contracts/tool-model-guidance.json",
             "../../../nomifun-agent-contracts/src/tool_presentation.rs",

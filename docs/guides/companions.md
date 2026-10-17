@@ -9,6 +9,12 @@ long-term memory still belong to the same companion. See the
 [companion architecture and acceptance status](../architecture/companion.zh.md)
 (Chinese) for integration progress and validation boundaries.
 
+Companion replies use natural language that can be read aloud directly. Kaomoji,
+emoji, meme or sticker markers, and action or stage directions are prohibited;
+emotion is expressed through words. Custom personas, memories and skills cannot
+override this rule. Desktop bubbles and robot speech filter recognized
+nonverbal decorations to keep conversations and speech coherent.
+
 > The entry point is the **Desktop Companion** page in the sidebar (the `/nomi`
 > route); the right-click menu of any desktop companion window ("Open chat")
 > deep-links there too.

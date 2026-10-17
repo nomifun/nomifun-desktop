@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { parseConversationId } from '@/common/types/ids';
+import { parseConversationId, parseMessageId } from '@/common/types/ids';
 import { conversation } from './ipcBridge';
 
 const source = readFileSync(new URL('./ipcBridge.ts', import.meta.url), 'utf8');
@@ -16,6 +16,27 @@ const sendMessageSource = source.slice(sendStart, sendEnd);
 const realFetch = globalThis.fetch;
 
 describe('conversation send-message wire contract', () => {
+  test('a wait reply preserves its exact target while ordinary steering omits the guard', async () => {
+    const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000211');
+    const turnId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000212');
+    const requests: Array<Record<string, unknown>> = [];
+    try {
+      globalThis.fetch = (async (_url, init) => {
+        requests.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({ success: true,
+          data: { message_id: '0190f5fe-7c00-7a00-8000-000000000213', duplicate: false } }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }) as typeof fetch;
+      for (const waitSeq of [41, 52]) await conversation.steer.invoke({ conversation_id: conversationId,
+        input: 'done', idempotency_key: `reply-${waitSeq}`, expected_wait: { turn_id: turnId, wait_seq: waitSeq } });
+      await conversation.steer.invoke({ conversation_id: conversationId, input: 'adjust the task', idempotency_key: 'ordinary' });
+      expect(requests[0].expected_wait).toEqual({ turn_id: turnId, wait_seq: 41 });
+      expect(requests[1].expected_wait).toEqual({ turn_id: turnId, wait_seq: 52 });
+      expect(requests[2].expected_wait).toBeUndefined();
+      expect(requests.every(request => typeof request.input === 'object')).toBe(true);
+    } finally { globalThis.fetch = realFetch; }
+  });
+
   test('uses the canonical AgentSession turn DTO', () => {
     expect(sendStart).toBeGreaterThan(-1);
     expect(sendEnd).toBeGreaterThan(sendStart);

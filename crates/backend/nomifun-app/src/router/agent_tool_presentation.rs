@@ -16,9 +16,9 @@ pub(super) fn project(plan: AgentToolPlan, discovery_available: bool) -> Result<
 }
 
 /// A robot-only interaction has already selected its device and Action grants.
-/// Keep its bounded concrete surface in the initial window instead of spending
-/// a model round discovering that same device again. Non-deferred definitions
-/// also remain visible when later ToolSearch results replace deferred schemas.
+/// Keep its bounded concrete surface and task bridge in the initial window
+/// instead of spending a model round discovering them again. Non-deferred
+/// definitions remain visible when later ToolSearch results replace schemas.
 pub(super) fn project_robot_interaction(plan: AgentToolPlan, discovery_available: bool) -> Result<AgentToolPlan, AppError> {
     project_with_policy(plan, discovery_available, true)
 }
@@ -46,6 +46,7 @@ fn project_with_policy(plan: AgentToolPlan, discovery_available: bool, robot_int
         // exact same plan and are revealed by the selected ToolSearch policy.
         let initially_ready = if robot_interaction {
             matches!(binding.capability_id.as_ref(), "robot" | "companion.memory")
+                || is_robot_task_entry_point(&binding)
         } else {
             matches!(binding.capability_id.as_ref(),
                 "workspace.files" | "workspace.vcs" | "workspace.process" | "web.research" | "agent.collaboration")
@@ -77,7 +78,8 @@ fn project_with_policy(plan: AgentToolPlan, discovery_available: bool, robot_int
     let representatives = representatives.into_values().map(|(_, name)| name).collect::<std::collections::BTreeSet<_>>();
     bindings.sort_by_key(|binding| (
         if robot_interaction {
-            robot_visibility_priority(binding) + if representatives.contains(&binding.model_name) { 0 } else { 4 }
+            robot_visibility_priority(binding) + if binding.capability_id.as_ref() != "robot"
+                || representatives.contains(&binding.model_name) { 0 } else { 8 }
         } else { initial_visibility_priority(binding) },
         binding.model_name.clone(),
     ));
@@ -102,12 +104,25 @@ fn project_with_policy(plan: AgentToolPlan, discovery_available: bool, robot_int
 
 fn robot_visibility_priority(binding: &nomifun_agent_runtime::AgentToolBinding) -> u8 {
     match (binding.capability_id.as_ref(), binding.action_id.as_ref()) {
-        ("robot", "robot/motion") => 0,
-        ("robot", "robot/device") => 1,
-        ("robot", "robot/display" | "robot/vision") => 2,
-        ("companion.memory", _) => 3,
-        _ => 4,
+        // Reserve the small platform bridge before an arbitrary device catalog
+        // consumes the byte/count budget. These exact frozen grants keep work
+        // available from the physical role without loading desktop schemas.
+        ("agent.collaboration", "agent/delegate") => 0,
+        ("session.management", "session.management/execution_status"
+            | "session.management/execution_cancel" | "session.management/execution_answer_decision") => 1,
+        ("robot", "robot/motion") => 2,
+        ("robot", "robot/device") => 3,
+        ("robot", "robot/display" | "robot/vision") => 4,
+        ("companion.memory", _) => 5,
+        _ => 6,
     }
+}
+
+fn is_robot_task_entry_point(binding: &nomifun_agent_runtime::AgentToolBinding) -> bool {
+    matches!((binding.capability_id.as_ref(), binding.action_id.as_ref()),
+        ("agent.collaboration", "agent/delegate")
+        | ("session.management", "session.management/execution_status"
+            | "session.management/execution_cancel" | "session.management/execution_answer_decision"))
 }
 
 fn initial_visibility_priority(binding: &nomifun_agent_runtime::AgentToolBinding) -> u8 {
@@ -189,9 +204,15 @@ mod tests {
 
         let manifest = official_preset_seed_manifest_payload();
         let general = &manifest.templates[&OfficialPresetKey::AssistantGeneral];
-        assert_eq!(general.enabled_capabilities.iter().map(|selection| selection.action_allowlist.len()).sum::<usize>(), 89);
         // A normal installation may have no KB, SSH or desktop adapter yet.
-        // The other seventy Actions have automatic or zero resource needs.
+        // Derive the native surface from the current manifest: this tests
+        // presentation under pressure, not a historical preset action count.
+        let total_actions = general.enabled_capabilities.iter()
+            .map(|selection| selection.action_allowlist.len()).sum::<usize>();
+        let unavailable_actions = general.enabled_capabilities.iter()
+            .filter(|selection| matches!(selection.capability.id.as_ref(), "knowledge" | "ssh" | "browser" | "computer"))
+            .map(|selection| selection.action_allowlist.len()).sum::<usize>();
+        let native_actions = total_actions - unavailable_actions;
         let mut bindings = general.enabled_capabilities.iter()
             .filter(|selection| !matches!(selection.capability.id.as_ref(), "knowledge" | "ssh" | "browser" | "computer"))
             .flat_map(|selection| selection.action_allowlist.iter().map(|action| {
@@ -204,7 +225,7 @@ mod tests {
                 native
             }))
             .collect::<Vec<_>>();
-        assert_eq!(bindings.len(), 70);
+        assert_eq!(bindings.len(), native_actions);
         bindings.extend((0..60).map(|index| binding(
             &format!("mcp_fixture_tool_{index:02}"),
             &format!("mcp.fixture.tool_{index:02}"),
@@ -212,7 +233,8 @@ mod tests {
         )));
         let original = AgentToolPlan::new(bindings).unwrap();
         let projected = project(original.clone(), true).unwrap();
-        assert_eq!(projected.len(), 130);
+        assert_eq!(projected.len(), native_actions + 60);
+        assert!(projected.len() > MAX_VISIBLE_TOOLS, "the fixture must exceed the hard visible-tool count");
         let visible = projected.model_definitions().into_iter().filter(|definition| !definition.deferred).collect::<Vec<_>>();
         assert!(visible.len() <= INITIAL_VISIBLE_TOOLS);
         assert!(serde_json::to_vec(&visible).unwrap().len() <= INITIAL_TOOL_BYTES);
@@ -226,7 +248,7 @@ mod tests {
             after.definition.deferred = before.definition.deferred;
             assert_eq!(&after, before, "presentation must retain exact authority and schema for {}", definition.name);
         }
-        assert!(project(original, false).is_err(), "without discovery all 130 tools would be directly visible");
+        assert!(project(original, false).is_err(), "without discovery the complete catalog exceeds the visible-tool count");
     }
 
     #[test]
@@ -265,6 +287,163 @@ mod tests {
         tool.effect_class = EngineEffectClass::ExternalUncertainEffect;
         tool.parallel_safe = false;
         tool
+    }
+
+    fn robot_task_bindings() -> Vec<EngineToolBinding> {
+        [
+            ("custom_delegate", "agent.collaboration", "agent/delegate"),
+            ("custom_status", "session.management", "session.management/execution_status"),
+            ("custom_cancel", "session.management", "session.management/execution_cancel"),
+            ("custom_answer", "session.management", "session.management/execution_answer_decision"),
+        ].into_iter().map(|(name, capability, action)| {
+            let mut tool = binding(name, capability, &"Task entry point. ".repeat(64));
+            tool.action_id = action.into();
+            tool
+        }).collect()
+    }
+
+    #[test]
+    fn robot_platform_bridge_survives_large_motion_catalog_and_preserves_exact_grants() {
+        let mut tools = robot_task_bindings();
+        tools.extend((0..128).map(|index| robot_binding(
+            &format!("motion_{index:03}"), "robot/motion", "Move the selected device",
+        )));
+        tools.push(robot_binding("rich_motion", "robot/motion", &"x".repeat(INITIAL_TOOL_BYTES - 512)));
+        tools.push(robot_binding("device_status", "robot/device", "Read the bound device status"));
+        let mut broad_control = binding("other_session_control", "session.management", "Create another session");
+        broad_control.action_id = "session.management/create".into();
+        tools.push(broad_control);
+        let mut broad_collaboration = binding("other_collaboration", "agent.collaboration", "Fork work");
+        broad_collaboration.action_id = "agent/fork".into();
+        tools.push(broad_collaboration);
+        let original = AgentToolPlan::new(tools).unwrap();
+        let projected = project_robot_interaction(original.clone(), true).unwrap();
+        for name in ["custom_delegate", "custom_status", "custom_cancel", "custom_answer", "motion_000", "device_status"] {
+            assert!(!projected.binding(name).unwrap().definition.deferred,
+                "device catalog pressure must not hide the platform bridge or basic device Actions: {name}");
+        }
+        for name in ["rich_motion", "other_session_control", "other_collaboration"] {
+            assert!(projected.binding(name).unwrap().definition.deferred,
+                "only the exact narrow task Actions get reserved slots: {name}");
+        }
+        let visible = projected.model_definitions().into_iter().filter(|definition| !definition.deferred).collect::<Vec<_>>();
+        assert!(visible.len() <= INITIAL_VISIBLE_TOOLS);
+        assert!(serde_json::to_vec(&visible).unwrap().len() <= INITIAL_TOOL_BYTES);
+        assert_eq!(projected.len(), original.len());
+        for definition in original.model_definitions() {
+            let before = original.binding(&definition.name).unwrap();
+            let mut after = projected.binding(&definition.name).unwrap().clone();
+            after.definition.deferred = before.definition.deferred;
+            assert_eq!(&after, before, "presentation cannot change grants, resources, schemas or Effects");
+        }
+    }
+
+    #[test]
+    fn oversized_robot_task_schema_remains_discoverable_without_manufacturing_other_controls() {
+        let mut tools = robot_task_bindings();
+        tools[0].definition.description = "x".repeat(INITIAL_TOOL_BYTES);
+        tools.push(robot_binding("motion", "robot/motion", "Move"));
+        let original = AgentToolPlan::new(tools).unwrap();
+        let projected = project_robot_interaction(original.clone(), true).unwrap();
+        assert!(projected.binding("custom_delegate").unwrap().definition.deferred);
+        assert_eq!(projected.model_name_for_action("agent.collaboration", "agent/delegate"), Some("custom_delegate"));
+        assert!(!projected.binding("motion").unwrap().definition.deferred);
+        assert!(projected.model_name_for_action("agent.collaboration", "agent/fork").is_none());
+        assert!(projected.model_name_for_action("session.management", "session.management/create").is_none());
+        let mut deferred = projected.binding("custom_delegate").unwrap().clone();
+        deferred.definition.deferred = false;
+        assert_eq!(&deferred, original.binding("custom_delegate").unwrap());
+    }
+
+    #[tokio::test]
+    async fn robot_platform_bridge_stays_visible_when_tool_search_replaces_deferred_schemas() {
+        use async_trait::async_trait;
+        use nomifun_agent_runtime::{AgentEngine, AgentEngineBuild, AgentEngineError, AgentModelPort,
+            AgentModelStream, AgentToolDiscoveryCandidate, AgentToolDiscoveryPort, AgentToolInvocation,
+            AgentToolInvoker, AgentToolResult, AgentTurnRequest, AgentTurnTerminal};
+        use nomifun_chat_model_broker::{ChatCausality, ChatContentPart, ChatFinishReason, ChatMessage,
+            ChatModelError, ChatModelEvent, ChatModelRequest, ChatRole, ChatToolCall, ChatToolChoice};
+        use std::sync::{Arc, Mutex};
+        use tokio_util::sync::CancellationToken;
+
+        #[derive(Debug)]
+        struct ExactDiscovery;
+        #[async_trait]
+        impl AgentToolDiscoveryPort for ExactDiscovery {
+            async fn select(&self, _: &ChatCausality, _: u64, query: &str,
+                candidates: &[AgentToolDiscoveryCandidate], _: usize, _: CancellationToken,
+            ) -> Result<Vec<String>, AgentEngineError> {
+                Ok(candidates.iter().filter(|candidate| candidate.name == query)
+                    .map(|candidate| candidate.name.clone()).collect())
+            }
+        }
+        #[derive(Default)]
+        struct ObservingModel(Mutex<usize>);
+        #[async_trait]
+        impl AgentModelPort for ObservingModel {
+            async fn open_stream(&self, request: ChatModelRequest, _: CancellationToken)
+                -> Result<AgentModelStream, ChatModelError> {
+                let mut step = self.0.lock().unwrap();
+                let step_index = *step;
+                for name in ["custom_delegate", "custom_status", "custom_cancel", "custom_answer", "motion"] {
+                    assert!(request.input.tools.iter().any(|tool| tool.name == name),
+                        "non-deferred task/device entry point must survive discovery window replacement: {name}, step {step_index}");
+                }
+                if *step > 0 {
+                    let current = if *step == 1 { "extension_one" } else { "extension_two" };
+                    assert!(request.input.tools.iter().any(|tool| tool.name == current));
+                }
+                if *step == 2 {
+                    assert!(!request.input.tools.iter().any(|tool| tool.name == "extension_one"),
+                        "the oversized older schema must actually have left the discovery window");
+                }
+                let events = if *step < 2 {
+                    let name = if *step == 0 { "extension_one" } else { "extension_two" };
+                    vec![Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                        call_id: format!("search-{step_index}").into(), name: "ToolSearch".into(),
+                        arguments: StrictJsonValue(json!({"query":name})), provider_metadata: None,
+                    }}), Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls })]
+                } else {
+                    vec![Ok(ChatModelEvent::OutputTextDelta { text: "Ready.".into(), source: None }),
+                        Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed })]
+                };
+                *step += 1;
+                Ok(Box::pin(futures_util::stream::iter(events)))
+            }
+        }
+        struct NoEffects;
+        #[async_trait]
+        impl AgentToolInvoker for NoEffects {
+            async fn invoke(&self, _: AgentToolInvocation, _: CancellationToken)
+                -> Result<AgentToolResult, AgentEngineError> {
+                panic!("discovery changes presentation without invoking a device or delegated task")
+            }
+        }
+        let mut tools = robot_task_bindings();
+        tools.push(robot_binding("motion", "robot/motion", "Move"));
+        for name in ["extension_one", "extension_two"] {
+            tools.push(robot_binding(name, "robot/device", &"x".repeat(INITIAL_TOOL_BYTES)));
+        }
+        let plan = project_robot_interaction(AgentToolPlan::new(tools).unwrap(), true).unwrap();
+        let engine = AgentEngine::new(AgentEngineBuild {
+            build_id: "robot-bridge-discovery".into(), build_digest: "a".repeat(64).into(),
+        }).unwrap();
+        let mut request = nomifun_chat_model_broker::recorded_conformance_fixtures().remove(0).request;
+        let binding = engine.bind(request.causality.agent_session_id.clone(), "robot-bridge-binding".into(),
+            request.causality.resolved_snapshot_ref.clone()).unwrap();
+        request.input.instructions.clear();
+        request.input.messages = vec![ChatMessage { role: ChatRole::User,
+            content: vec![ChatContentPart::Text { text: "Inspect the available device extensions.".into() }],
+            provider_round_id: None }];
+        request.input.tools.clear();
+        request.input.tool_choice = ChatToolChoice::Auto;
+        let model = Arc::new(ObservingModel::default());
+        let session = engine.open_session(binding, model.clone(), Arc::new(NoEffects), None).unwrap();
+        let result = session.run_turn(AgentTurnRequest::new(request, plan,
+            nomifun_agent_contracts::PrincipalRef { principal_kind: "user".into(), principal_id: "owner".into() }, 0)
+            .with_tool_discovery_port(Arc::new(ExactDiscovery))).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert_eq!(*model.0.lock().unwrap(), 3);
     }
 
     #[test]

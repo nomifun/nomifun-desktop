@@ -674,6 +674,10 @@ pub(crate) async fn run_session_owned(
     // queueing can delay an utterance past a later question presentation.
     let mut presented_question_id:Option<String>=None;
     let mut recording_question_id:Option<String>=None;
+    // Auto/realtime VAD cuts another utterance within the same device listen
+    // window. Freeze its question at the next speech onset, not idle silence or
+    // Turn completion, and never let a late Done reopen a stopped microphone.
+    let mut awaiting_next_utterance = false;
     let mut transcriptions = Transcriptions::default();
     let mut ping = interval(Duration::from_secs(PING_INTERVAL_SECS));
     ping.tick().await; // the first tick is immediate; skip it
@@ -859,8 +863,15 @@ pub(crate) async fn run_session_owned(
                     }
                     Frame::Binary(bytes) => {
                         let Some(pipeline) = uplink.as_mut() else { continue };
-                        if let UplinkOutcome::Utterance(wav) = pipeline.push_packet(&bytes) {
+                        let question_at_packet_start=presented_question_id.clone();
+                        let outcome=pipeline.push_packet(&bytes);
+                        if awaiting_next_utterance && pipeline.is_speech_started() {
+                            recording_question_id=question_at_packet_start;
+                            awaiting_next_utterance=false;
+                        }
+                        if let UplinkOutcome::Utterance(wav) = outcome {
                             utterance = Some(wav);
+                            awaiting_next_utterance=pipeline.is_active();
                         }
                     }
                     Frame::Text(raw) => {
@@ -879,6 +890,7 @@ pub(crate) async fn run_session_owned(
                                 utterance_queue.clear();
                                 presented_question_id=None;
                                 recording_question_id=None;
+                                awaiting_next_utterance=false;
                                 playback_sources=CanonicalPlaybackSources::default();
                                 let record = deps.registry.list().await.into_iter().find(|r| r.robot_id == robot_id);
                                 let Some(bound) = record.as_ref().and_then(|r| r.companion_id.clone()) else {
@@ -970,6 +982,7 @@ pub(crate) async fn run_session_owned(
                                 match state {
                                     ListenState::Start => {
                                         recording_question_id=presented_question_id.clone();
+                                        awaiting_next_utterance=false;
                                         pipeline.begin(mode.unwrap_or(ListeningMode::Auto));
                                         if let Some(bound) = &companion_id {
                                             deps.status
@@ -978,6 +991,7 @@ pub(crate) async fn run_session_owned(
                                         }
                                     }
                                     ListenState::Stop => {
+                                        awaiting_next_utterance=false;
                                         if let Some(wav) = pipeline.finish() {
                                             utterance = Some(wav);
                                         }
@@ -1004,6 +1018,7 @@ pub(crate) async fn run_session_owned(
                                 }
                                 utterance_queue.clear();
                                 recording_question_id=None;
+                                awaiting_next_utterance=false;
                                 if let Some(request) = active_request.take()
                                     && let Err(error) = deps.dispatcher.cancel(&request).await
                                 {
@@ -1310,6 +1325,93 @@ mod tests {
         assert_eq!(requests[2].presented_question_id.as_deref(),Some("presentation-2"));
         assert!(requests.iter().all(|request|request.connection_id==connection));
         drop(tx);task.await.unwrap();
+    }
+
+    async fn continuous_realtime_question_cut_tracks_speech_onset(question_before_speech: bool) {
+        let (mut deps, link, tx, written, _dir) = harness(true).await;
+        let mut calls = controlled_asr(&mut deps);
+        let registry = deps.deps.registry.clone();
+        let status = deps.deps.status.clone();
+        let dispatcher = deps.dispatcher_mock();
+        let robot = "aa:bb:cc:dd:ee:ff";
+        dispatcher.script_turn(vec![TurnEvent::Done]);
+        dispatcher.script_turn(vec![TurnEvent::Done]);
+        let task = tokio::spawn(run_session(link, deps.deps.clone()));
+        tx.send(Frame::Text(r#"{"type":"hello","version":1,"transport":"websocket","features":{"mcp":true}}"#.into()))
+            .await.unwrap();
+        let initialize = await_frame(&written, |frame| frame["payload"]["method"] == "initialize").await;
+        let connection = registry.current_connection(robot).await.unwrap();
+        tx.send(Frame::Text(r#"{"type":"listen","state":"start","mode":"realtime"}"#.into()))
+            .await.unwrap();
+
+        // Establish the continuation path after a silent action. No subsequent
+        // listen.start may establish or overwrite the next question cut.
+        send_tone(&tx, 300).await;
+        send_audio(&tx, 900, false).await;
+        next_asr(&mut calls).await.reply.send(Ok("坐下".into())).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if dispatcher.dispatched_requests().len() == 1
+                    && status.snapshot().await.first().is_some_and(|snapshot| snapshot.phase == "idle")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("initial silent action must settle before presenting a question");
+
+        send_audio(&tx, 1200, false).await;
+        if !question_before_speech {
+            // This user started speaking before Q1 existed. Presenting Q1
+            // halfway through the utterance must never claim that old speech.
+            send_tone(&tx, 300).await;
+        }
+        // The actor emits tools/list only after consuming this response, so
+        // every earlier silence/speech packet has passed the onset boundary.
+        reply_mcp(&tx, &initialize, serde_json::json!({})).await;
+        await_frame(&written, |frame| frame["payload"]["method"] == "tools/list").await;
+        let q1 = nomifun_voice_contracts::VoiceSpeechSourceRef {
+            message_id: "continuous-question-1".into(), revision: 11, through_seq: 11,
+        };
+        let q2 = nomifun_voice_contracts::VoiceSpeechSourceRef {
+            message_id: "continuous-question-2".into(), revision: 21, through_seq: 21,
+        };
+        registry.speak_requested_question_source(robot, &connection, "你的名字？".into(), q1,
+            "continuous-presentation-1".into()).await.unwrap();
+        await_frame(&written, |frame| frame["type"] == "tts" && frame["state"] == "stop").await;
+
+        send_tone(&tx, 300).await;
+        send_audio(&tx, 900, false).await;
+        let held = next_asr(&mut calls).await;
+        registry.speak_requested_question_source(robot, &connection, "几点？".into(), q2,
+            "continuous-presentation-2".into()).await.unwrap();
+        // A later presented question cannot rebind an already recorded WAV,
+        // even while the provider keeps its transcription result in flight.
+        held.reply.send(Ok("小明".into())).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while dispatcher.dispatched_requests().len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("held transcription must still become a request");
+        let requests = dispatcher.dispatched_requests();
+        assert_eq!(requests[0].presented_question_id, None);
+        assert_eq!(requests[1].text, "小明");
+        assert_eq!(requests[1].presented_question_id.as_deref(),
+            question_before_speech.then_some("continuous-presentation-1"),
+            "only speech beginning after Q1 presentation may carry Q1; Q2 cannot rewrite the frozen cut");
+        assert!(requests.iter().all(|request| request.connection_id == connection));
+        drop(tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn continuous_realtime_question_after_leading_silence_is_frozen_at_speech_onset() {
+        continuous_realtime_question_cut_tracks_speech_onset(true).await;
+    }
+
+    #[tokio::test]
+    async fn continuous_realtime_speech_started_before_question_is_never_rebound() {
+        continuous_realtime_question_cut_tracks_speech_onset(false).await;
     }
 
     struct FloodingStream {
@@ -2200,6 +2302,233 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn silent_action_turns_return_idle_without_tts_and_accept_the_next_question() {
+        let (deps, link, tx, written, _dir) = harness(true).await;
+        let speech = deps.speech_mock();
+        let dispatcher = deps.dispatcher_mock();
+        let status = deps.deps.status.clone();
+        speech.push_transcript("坐下");
+        speech.push_transcript("站起来");
+        speech.push_transcript("现在天气如何");
+        dispatcher.script_turn(vec![TurnEvent::Done]);
+        dispatcher.script_turn(vec![TurnEvent::Done]);
+        dispatcher.script_turn(vec![TurnEvent::Text("有小雨。".into()), TurnEvent::Done]);
+
+        let task = tokio::spawn(run_session(link, deps.deps.clone()));
+        tx.send(Frame::Text(r#"{"type":"hello","version":1,"transport":"websocket"}"#.into())).await.unwrap();
+        for expected in 1..=3 {
+            tx.send(Frame::Text(r#"{"session_id":"s","type":"listen","state":"start","mode":"manual"}"#.into())).await.unwrap();
+            send_audio(&tx, 200, true).await;
+            tx.send(Frame::Text(r#"{"session_id":"s","type":"listen","state":"stop"}"#.into())).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if dispatcher.dispatched_text().len() == expected
+                        && status.snapshot().await.first().is_some_and(|snapshot| snapshot.phase == "idle")
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("each admitted turn must settle and release the next utterance");
+            if expected <= 2 {
+                assert!(speech.synthesized_text().is_empty(), "silent actions must not invoke speech synthesis");
+                assert!(!texts(&written).iter().any(|message| message["type"] == "tts"),
+                    "silent actions must not start speaking, display a sentence or report a false failure");
+                assert!(!written.lock().unwrap().iter().any(|frame| matches!(frame, Frame::Binary(_))),
+                    "silent actions have no downlink audio");
+            }
+        }
+        assert_eq!(dispatcher.dispatched_text(), vec!["坐下", "站起来", "现在天气如何"]);
+        assert_eq!(speech.synthesized_text(), vec!["有小雨。".to_owned()], "the following question still gets its answer");
+        drop(tx);
+        task.await.unwrap();
+        assert_eq!(status.snapshot().await[0].phase, "offline");
+    }
+
+    async fn silent_actions_keep_one_automatic_listen_window_usable(mode: &str) {
+        let (deps, link, tx, written, _dir) = harness(true).await;
+        let speech = deps.speech_mock();
+        let dispatcher = deps.dispatcher_mock();
+        let status = deps.deps.status.clone();
+        // Deterministic protocol/endpointing coverage; loading a provider or
+        // Silero is unrelated to whether the next utterance is still admitted.
+        dispatcher.set_vad_engine("energy");
+        speech.push_transcript("坐下");
+        speech.push_transcript("站起来");
+        speech.push_transcript("现在天气如何");
+        dispatcher.script_turn(vec![TurnEvent::Done]);
+        dispatcher.script_turn(vec![TurnEvent::Done]);
+        dispatcher.script_turn(vec![TurnEvent::Text("有小雨。".into()), TurnEvent::Done]);
+
+        let task = tokio::spawn(run_session(link, deps.deps.clone()));
+        tx.send(Frame::Text(r#"{"type":"hello","version":1,"transport":"websocket"}"#.into()))
+            .await.unwrap();
+        tx.send(Frame::Text(serde_json::json!({
+            "session_id": "s", "type": "listen", "state": "start", "mode": mode,
+        }).to_string())).await.unwrap();
+
+        for expected in 1..=3 {
+            // One device listening window, with server-side VAD endpoints.
+            // In particular, do not manufacture a new listen.start/stop after
+            // Done: a silent physical robot has no speech transition that
+            // would make the firmware send that otherwise missing frame.
+            send_tone(&tx, 300).await;
+            send_audio(&tx, 900, false).await;
+            let settled = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if dispatcher.dispatched_text().len() == expected
+                        && status.snapshot().await.first().is_some_and(|snapshot| snapshot.phase == "idle")
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await;
+            if settled.is_err() {
+                let dispatched = dispatcher.dispatched_text();
+                let calls = speech.transcribe_calls();
+                drop(tx);
+                task.await.unwrap();
+                panic!("{mode} utterance {expected} was not admitted/settled in the existing listen window; dispatched={dispatched:?}, ASR calls={calls}");
+            }
+            if expected <= 2 {
+                assert!(speech.synthesized_text().is_empty(), "silent actions must not synthesize an acknowledgement");
+                assert!(!texts(&written).iter().any(|message|
+                    message["type"] == "tts" && message["state"] == "sentence_start"),
+                    "silent actions must not display an acknowledgement or false failure");
+                assert!(!written.lock().unwrap().iter().any(|frame| matches!(frame, Frame::Binary(_))),
+                    "silent actions must not send downlink speech audio");
+            }
+        }
+        assert_eq!(dispatcher.dispatched_text(), vec!["坐下", "站起来", "现在天气如何"]);
+        assert_eq!(speech.transcribe_calls(), 3, "each distinct utterance is transcribed exactly once");
+        assert_eq!(speech.synthesized_text(), vec!["有小雨。".to_owned()], "a later question still gets its spoken answer");
+        drop(tx);
+        task.await.unwrap();
+        assert_eq!(status.snapshot().await[0].phase, "offline");
+    }
+
+    #[tokio::test]
+    async fn silent_actions_auto_window_accepts_following_voice_without_another_listen_start() {
+        silent_actions_keep_one_automatic_listen_window_usable("auto").await;
+    }
+
+    #[tokio::test]
+    async fn silent_actions_realtime_window_accepts_following_voice_without_another_listen_start() {
+        silent_actions_keep_one_automatic_listen_window_usable("realtime").await;
+    }
+
+    async fn automatic_listen_window_stays_closed_until_the_next_start(mode: &str, close: &str) {
+        let (mut deps, link, tx, written, _dir) = harness(true).await;
+        let mut calls = controlled_asr(&mut deps);
+        let dispatcher = deps.dispatcher_mock();
+        let status = deps.deps.status.clone();
+        dispatcher.script_turn(vec![TurnEvent::Done]);
+        let task = tokio::spawn(run_session(link, deps.deps.clone()));
+        tx.send(Frame::Text(r#"{"type":"hello","version":1,"transport":"websocket","features":{"mcp":true}}"#.into()))
+            .await.unwrap();
+        let initialize = await_frame(&written, |frame| frame["payload"]["method"] == "initialize").await;
+        tx.send(Frame::Text(serde_json::json!({
+            "type": "listen", "state": "start", "mode": mode,
+        }).to_string())).await.unwrap();
+        let close_message = match close {
+            "stop" => serde_json::json!({"type": "listen", "state": "stop"}),
+            "abort" => serde_json::json!({"type": "abort", "reason": "wake_word_detected"}),
+            other => panic!("unsupported fixture control: {other}"),
+        };
+        tx.send(Frame::Text(close_message.to_string())).await.unwrap();
+        send_tone(&tx, 300).await;
+        send_audio(&tx, 900, false).await;
+
+        // tools/list is emitted only after the actor has consumed this MCP
+        // response, so it fences every earlier audio frame in the read loop.
+        // The closed-window assertion is not based on an arbitrary sleep while
+        // the frames could still be waiting to be read.
+        reply_mcp(&tx, &initialize, serde_json::json!({})).await;
+        await_frame(&written, |frame| frame["payload"]["method"] == "tools/list").await;
+        assert!(tokio::time::timeout(Duration::from_millis(100), calls.recv()).await.is_err(),
+            "{mode} must discard voice after explicit {close}, not restart a microphone window");
+        assert!(dispatcher.dispatched_text().is_empty());
+
+        tx.send(Frame::Text(serde_json::json!({
+            "type": "listen", "state": "start", "mode": mode,
+        }).to_string())).await.unwrap();
+        send_tone(&tx, 300).await;
+        send_audio(&tx, 900, false).await;
+        next_asr(&mut calls).await.reply.send(Ok("重新开始后坐下".into())).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if dispatcher.dispatched_text() == vec!["重新开始后坐下"]
+                    && status.snapshot().await.first().is_some_and(|snapshot| snapshot.phase == "idle")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("only a new explicit listen.start may reopen the microphone window");
+        assert!(calls.try_recv().is_err(), "there is no extra closed-window ASR request");
+        drop(tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn automatic_listen_stop_rejects_voice_until_a_new_listen_start() {
+        for mode in ["auto", "realtime"] {
+            automatic_listen_window_stays_closed_until_the_next_start(mode, "stop").await;
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_listen_abort_rejects_voice_until_a_new_listen_start() {
+        for mode in ["auto", "realtime"] {
+            automatic_listen_window_stays_closed_until_the_next_start(mode, "abort").await;
+        }
+    }
+
+    #[tokio::test]
+    async fn realtime_voice_after_spoken_reply_needs_no_new_listen_start() {
+        let (deps, link, tx, written, _dir) = harness(true).await;
+        let speech = deps.speech_mock();
+        let dispatcher = deps.dispatcher_mock();
+        let status = deps.deps.status.clone();
+        dispatcher.set_vad_engine("energy");
+        speech.push_transcript("在吗");
+        speech.push_transcript("坐下");
+        dispatcher.script_turn(vec![TurnEvent::Text("在的。".into()), TurnEvent::Done]);
+        dispatcher.script_turn(vec![TurnEvent::Done]);
+        let task = tokio::spawn(run_session(link, deps.deps.clone()));
+        tx.send(Frame::Text(r#"{"type":"hello","version":1,"transport":"websocket"}"#.into()))
+            .await.unwrap();
+        tx.send(Frame::Text(r#"{"type":"listen","state":"start","mode":"realtime"}"#.into()))
+            .await.unwrap();
+        send_tone(&tx, 300).await;
+        send_audio(&tx, 900, false).await;
+        await_frame(&written, |frame| frame["type"] == "tts" && frame["state"] == "stop").await;
+        // Realtime firmware stays in its existing microphone window across
+        // playback. Do not fake the auto-mode firmware's next listen.start.
+        send_tone(&tx, 300).await;
+        send_audio(&tx, 900, false).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if dispatcher.dispatched_text().len() == 2
+                    && status.snapshot().await.first().is_some_and(|snapshot| snapshot.phase == "idle")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("realtime speech after TTS must still reach ASR and the next Agent turn");
+        assert_eq!(dispatcher.dispatched_text(), vec!["在吗", "坐下"]);
+        assert_eq!(speech.transcribe_calls(), 2);
+        assert_eq!(speech.synthesized_text(), vec!["在的。".to_owned()]);
+        assert_eq!(texts(&written).iter().filter(|frame|
+            frame["type"] == "tts" && frame["state"] == "sentence_start").count(), 1,
+            "the following action has no spoken/displayed acknowledgement");
+        drop(tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn tts_failure_shows_a_one_time_notice_beside_the_reply() {
         let (deps, link, tx, written, _dir) = harness(true).await;
         let speech = deps.speech_mock();
@@ -2246,14 +2575,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emoji_and_markers_are_filtered_before_synthesis() {
-        let (deps, link, tx, _written, _dir) = harness(true).await;
+    async fn emoji_faces_and_stickers_are_filtered_before_synthesis() {
+        let (deps, link, tx, written, _dir) = harness(true).await;
         let speech = deps.speech_mock();
         speech.push_transcript("天气如何");
         deps.dispatcher_mock().script_turn(vec![
-            // A reply with an emoji mid-sentence, then an emoji-only fragment.
-            TurnEvent::Text("北京现在是 🌤️ 挺舒服的天气呢~。".into()),
-            TurnEvent::Text("👍".into()),
+            // Faces and image syntax can cross arbitrary provider chunks. The
+            // splitter must keep them intact until the consumer guard runs.
+            TurnEvent::Text("北京现在是 🌤️ (•̀".into()),
+            TurnEvent::Text("ᴗ•́)و 挺舒服的天气呢~。".into()),
+            TurnEvent::Text("(^".into()),
+            TurnEvent::Text("_^)！\nQAQ!\n[笑哭]！\n👍。\n[表情包：开心]\n!".into()),
+            TurnEvent::Text("[smile](https://example.test/".into()),
+            TurnEvent::Text("sticker.png)\n1️⃣🏴\u{E0067}\u{E0062}\u{E007F}👍".into()),
             TurnEvent::Done,
         ]);
 
@@ -2274,7 +2608,7 @@ mod tests {
         ))
         .await
         .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        await_frame(&written, |frame| frame["type"] == "tts" && frame["state"] == "stop").await;
         drop(tx);
         task.await.unwrap();
 
@@ -2283,14 +2617,12 @@ mod tests {
             spoken.iter().any(|t| t.contains("挺舒服的天气")),
             "the words around the emoji are still spoken: {spoken:?}"
         );
-        assert!(
-            spoken.iter().all(|t| !t.contains('🌤') && !t.contains('👍')),
-            "no emoji ever reaches the TTS engine: {spoken:?}"
-        );
-        // The emoji-only fragment "👍" sanitizes to empty, so it produced no
-        // synthesis call at all (and thus no failure): exactly one sentence was
-        // spoken, the words one.
-        assert_eq!(spoken.len(), 1, "the emoji-only fragment is skipped, not synthesized: {spoken:?}");
+        assert_eq!(spoken, vec!["北京现在是 挺舒服的天气呢~。"],
+            "decoration-only fragments never invoke synthesis, while the natural reply survives");
+        let displayed: Vec<String> = texts(&written).into_iter()
+            .filter(|frame| frame["type"] == "tts" && frame["state"] == "sentence_start")
+            .filter_map(|frame| frame["text"].as_str().map(str::to_owned)).collect();
+        assert_eq!(displayed, spoken, "the device display uses the same plain reply");
     }
 
     #[tokio::test]

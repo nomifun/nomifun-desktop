@@ -331,20 +331,17 @@ async fn cleanup_retry_preserves_completed_previous_assistant_step() {
         test_fixture().await
     };
     journal.append(serde_json::to_string(&AgentEngineEvent::OutputTextDelta {
-        step: 1, text: "first response".into(),
-    }).unwrap(), None, EngineJournalWrite::Progress).await.unwrap();
+        step: 1, text: "first response".into(), source: None }).unwrap(), None, EngineJournalWrite::Progress).await.unwrap();
     sqlx::query("CREATE TRIGGER reject_previous_completion BEFORE INSERT ON agent_events WHEN NEW.kind='message/completed' BEGIN SELECT RAISE(FAIL,'fixture previous step completion failure'); END")
         .execute(&pool).await.unwrap();
     let second = serde_json::to_string(&AgentEngineEvent::OutputTextDelta {
-        step: 2, text: "second response".into(),
-    }).unwrap();
+        step: 2, text: "second response".into(), source: None }).unwrap();
     let failure = journal.append(second.clone(), None, EngineJournalWrite::Cleanup).await.unwrap_err();
     assert!(failure.to_string().contains("fixture previous step completion failure"));
     assert_eq!(journal.sequence(), 1);
     let before = journal.0.store.current_cursor(&journal.0.session).await.unwrap();
     assert!(journal.append(serde_json::to_string(&AgentEngineEvent::OutputTextDelta {
-        step: 2, text: "different response".into(),
-    }).unwrap(), None, EngineJournalWrite::Cleanup).await.is_err());
+        step: 2, text: "different response".into(), source: None }).unwrap(), None, EngineJournalWrite::Cleanup).await.is_err());
     assert_eq!(journal.0.store.current_cursor(&journal.0.session).await.unwrap(), before);
     sqlx::query("DROP TRIGGER reject_previous_completion").execute(&pool).await.unwrap();
     journal.append(second, None, EngineJournalWrite::Cleanup).await.unwrap();

@@ -145,8 +145,6 @@ describe('ipc bridge wire ID contracts', () => {
       runtime: {
         state: 'idle',
         can_send_message: true,
-        has_runtime: false,
-        runtime_status: 'finished',
         is_processing: false,
         active_turn_id: null,
       },
@@ -162,6 +160,8 @@ describe('ipc bridge wire ID contracts', () => {
     const mapped = fromApiTurnCompletedEvent({ ...wire, stop_reason: 'input_required' });
     expect(mapped.stop_reason).toBe('input_required');
     expect(mapped.state).toBe('ai_waiting_input');
+    expect(fromApiTurnCompletedEvent({ ...wire, turn_outcome: { kind: 'input_required', request_id: 'authorize' } }).turn_outcome)
+      .toEqual({ kind: 'input_required', request_id: 'authorize' });
     expect(isAuthoritativeCompletionRuntimeIdle(mapped.runtime)).toBe(true);
     expect(fromApiTurnCompletedEvent(wire).stop_reason).toBeUndefined();
   });
