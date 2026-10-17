@@ -9,7 +9,7 @@ import type { IProvider } from '@/common/config/storage';
 import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import { parseProviderId } from '@/common/types/ids';
 import { uuidv7 } from '@/common/utils';
-import NomiModal from '@/renderer/components/base/NomiModal';
+import ModelConfigurationPanel from '@/renderer/pages/modelHub/ModelConfigurationPanel';
 import useModeModeList from '@/renderer/hooks/agent/useModeModeList';
 import type { DeepLinkAddProviderDetail } from '@/renderer/hooks/system/useDeepLink';
 import {
@@ -97,6 +97,8 @@ const AddPlatformModal = ModalHOC<{
   const [baseUrlDirty, setBaseUrlDirty] = useState(false);
   const [authSchemeDirty, setAuthSchemeDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [gatewaySaving, setGatewaySaving] = useState(false);
+  const [gatewayFooterContainer, setGatewayFooterContainer] = useState<HTMLElement | null>(null);
   const [protocolDetecting, setProtocolDetecting] = useState(false);
   const [discoverySkipped, setDiscoverySkipped] = useState(false);
   const [focusedCallConfigTask, setFocusedCallConfigTask] = useState<ModelTask>();
@@ -497,22 +499,19 @@ const AddPlatformModal = ModalHOC<{
   );
 
   return (
-    <NomiModal
+    <ModelConfigurationPanel
       visible={modalProps.visible}
-      onCancel={modalCtrl.close}
-      unmountOnExit
-      header={{
-        title: focusedCallConfigTask
-          ? `${t(`settings.modelTask.${focusedCallConfigTask}`, {
-              defaultValue: focusedCallConfigTask,
-            })} · ${t('settings.modelAdvanced.callConfigurationTitle', {
-              defaultValue: '调用配置',
-            })}`
-          : t('settings.addProvider', { defaultValue: '添加供应商' }),
-        showClose: true,
-      }}
+      busy={saving || gatewaySaving}
+      onBack={focusedCallConfigTask ? () => modelEditorRef.current?.cancelCallConfig() : modalCtrl.close}
+      title={focusedCallConfigTask
+        ? `${t(`settings.modelTask.${focusedCallConfigTask}`, {
+            defaultValue: focusedCallConfigTask,
+          })} · ${t('settings.modelAdvanced.callConfigurationTitle', {
+            defaultValue: '调用配置',
+          })}`
+        : t('settings.addProvider', { defaultValue: '添加供应商' })}
       footer={
-        isModelGateway ? null : focusedCallConfigTask ? (
+        isModelGateway ? <div ref={setGatewayFooterContainer} /> : focusedCallConfigTask ? (
           <ModelCallConfigModalFooter
             task={focusedCallConfigTask}
             onCancel={() => modelEditorRef.current?.cancelCallConfig()}
@@ -529,26 +528,6 @@ const AddPlatformModal = ModalHOC<{
           />
         )
       }
-      style={{
-        width: focusedCallConfigTask ? 840 : 820,
-        maxWidth: '95vw',
-        maxHeight: focusedCallConfigTask ? '96vh' : '94vh',
-        borderRadius: 16,
-      }}
-      contentStyle={{
-        background: 'var(--dialog-fill-0)',
-        borderRadius: 16,
-        padding: '20px 24px 16px',
-        overflow: 'auto',
-        maxHeight: focusedCallConfigTask ? 'calc(96vh - 72px)' : undefined,
-      }}
-      onOk={() => void submit()}
-      confirmLoading={saving}
-      okButtonProps={{
-        disabled: !validation.valid || autoConfiguration.isLoading || protocolDetecting,
-      }}
-      okText={t('common.confirm')}
-      cancelText={t('common.cancel')}
     >
       {messageContext}
       <div className='pt-4px pb-12px flex flex-col gap-18px'>
@@ -560,6 +539,7 @@ const AddPlatformModal = ModalHOC<{
           <Form.Item label={t('settings.modelPlatform')} field='platform' required rules={[{ required: true }]}>
             <Select
               showSearch
+              disabled={saving || gatewaySaving}
               onChange={selectPreset}
               filterOption={(input, option) => {
                 const value = (option as React.ReactElement<{ value?: string }>)?.props?.value;
@@ -597,7 +577,7 @@ const AddPlatformModal = ModalHOC<{
             required
             rules={[{ required: true }]}
           >
-            <Input placeholder={t('settings.modelProvider')} />
+            <Input autoCapitalize='none' autoCorrect='off' spellCheck={false} placeholder={t('settings.modelProvider')} />
           </Form.Item>
 
           <Form.Item
@@ -610,7 +590,7 @@ const AddPlatformModal = ModalHOC<{
               defaultValue: '预设默认值始终显示并可修改；模态卡内可设置任务级覆盖。',
             })}
           >
-            <Input onChange={() => setBaseUrlDirty(true)} />
+            <Input autoCapitalize='none' autoCorrect='off' spellCheck={false} onChange={() => setBaseUrlDirty(true)} />
           </Form.Item>
 
           <Form.Item
@@ -623,6 +603,7 @@ const AddPlatformModal = ModalHOC<{
             })}
           >
             <AutoComplete
+              inputProps={{ autoCapitalize: 'none', autoCorrect: 'off', spellCheck: false }}
               data={authSchemeOptions.map((scheme) => ({ value: scheme, name: scheme }))}
               loading={manifestState.loadingTasks.includes('chat')}
               filterOption={false}
@@ -640,7 +621,7 @@ const AddPlatformModal = ModalHOC<{
             rules={[{ required: !isBedrock }]}
             extra={t('settings.multiApiKeyTip')}
           >
-            <Input.TextArea rows={3} placeholder={t('settings.apiKeyPlaceholder')} />
+            <Input.TextArea autoCapitalize='none' autoCorrect='off' spellCheck={false} rows={3} placeholder={t('settings.apiKeyPlaceholder')} />
           </Form.Item>
 
           <Form.Item
@@ -664,7 +645,7 @@ const AddPlatformModal = ModalHOC<{
             required={isBedrock}
             rules={[{ required: isBedrock }]}
           >
-            <Input placeholder='us-east-1' />
+            <Input autoCapitalize='none' autoCorrect='off' spellCheck={false} placeholder='us-east-1' />
           </Form.Item>
 
           <Form.Item
@@ -674,7 +655,7 @@ const AddPlatformModal = ModalHOC<{
             required={isBedrock && bedrockAuthMethod === 'accessKey'}
             rules={[{ required: isBedrock && bedrockAuthMethod === 'accessKey' }]}
           >
-            <Input.Password placeholder='AKIA...' visibilityToggle />
+            <Input.Password autoCapitalize='none' autoCorrect='off' spellCheck={false} placeholder='AKIA...' visibilityToggle />
           </Form.Item>
 
           <Form.Item
@@ -684,7 +665,7 @@ const AddPlatformModal = ModalHOC<{
             required={isBedrock && bedrockAuthMethod === 'accessKey'}
             rules={[{ required: isBedrock && bedrockAuthMethod === 'accessKey' }]}
           >
-            <Input.Password visibilityToggle />
+            <Input.Password autoCapitalize='none' autoCorrect='off' spellCheck={false} visibilityToggle />
           </Form.Item>
 
           <Form.Item
@@ -693,7 +674,7 @@ const AddPlatformModal = ModalHOC<{
             field='bedrockSessionToken'
             extra={t('settings.bedrock.sessionTokenHint')}
           >
-            <Input.Password visibilityToggle />
+            <Input.Password autoCapitalize='none' autoCorrect='off' spellCheck={false} visibilityToggle />
           </Form.Item>
 
           <Form.Item
@@ -704,7 +685,7 @@ const AddPlatformModal = ModalHOC<{
             rules={[{ required: isBedrock && bedrockAuthMethod === 'profile' }]}
             extra={t('settings.bedrock.profileHint')}
           >
-            <Input placeholder='default' />
+            <Input autoCapitalize='none' autoCorrect='off' spellCheck={false} placeholder='default' />
           </Form.Item>
 
           {isBedrock && bedrockAuthMethod === 'defaultChain' ? (
@@ -720,6 +701,8 @@ const AddPlatformModal = ModalHOC<{
           initialName={deepLinkData?.platform === 'nomifun-model-gateway' ? deepLinkData.name : undefined}
           onCreated={(created) => { onSubmit(created); modalCtrl.close(); }}
           onCancel={modalCtrl.close}
+          onSavingChange={setGatewaySaving}
+          footerContainer={gatewayFooterContainer}
         />}
 
         {!isModelGateway && !focusedCallConfigTask && (
@@ -800,7 +783,7 @@ const AddPlatformModal = ModalHOC<{
           onCreateConnection={addPendingConnection}
         />}
       </div>
-    </NomiModal>
+    </ModelConfigurationPanel>
   );
 });
 

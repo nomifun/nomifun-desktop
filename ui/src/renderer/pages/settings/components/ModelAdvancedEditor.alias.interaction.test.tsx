@@ -94,6 +94,26 @@ describe('existing model alias editing', () => {
     expect((await open()).value).toBe('原有别名');
   });
 
+  test('outside clicks and Escape keep an alias draft open and available to save', async () => {
+    const { page, open, saved } = mount();
+    const input = await open();
+    fireEvent.change(input, { target: { value: '保留未保存的别名' } });
+
+    fireEvent.mouseDown(document.body);
+    fireEvent.click(document.body);
+    fireEvent.keyDown(input, { key: 'Escape', code: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape', code: 'Escape' });
+
+    expect(page.queryByRole('dialog')).toBeNull();
+    expect(page.getByLabelText(aliasLabel)).toBe(input);
+    expect(input.value).toBe('保留未保存的别名');
+    expect(saved).toHaveLength(0);
+    await waitFor(() => expect((page.getByRole('button', { name: zhCommon.save }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(page.getByRole('button', { name: zhCommon.save }));
+    await waitFor(() => expect(saved).toHaveLength(1));
+    expect(saved[0].display_name).toBe('保留未保存的别名');
+  });
+
   test('a failed save keeps the alias draft available for retry', async () => {
     const { page, open, saved } = mount(true);
     fireEvent.change(await open(), { target: { value: '等待重试' } });

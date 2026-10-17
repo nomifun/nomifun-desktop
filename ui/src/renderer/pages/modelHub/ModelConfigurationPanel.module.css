@@ -1,0 +1,147 @@
+/* codevisual's mini-panel surfaces and section-components controls, using app tokens. */
+.workspace {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  container: model-configuration / inline-size;
+}
+.overview { flex: 1; min-height: 0; overflow-y: auto; }
+.outlet { flex: 1; min-height: 0; min-width: 0; }
+.editor {
+  --model-surface: var(--color-bg-1);
+  --model-canvas: var(--color-fill-1);
+  --model-border: var(--color-border-2);
+  --model-ink: var(--color-text-1);
+  --model-muted: var(--color-text-3);
+  --model-focus: var(--control-focus-ring, var(--color-primary-light-3));
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  color: var(--model-ink);
+  background: var(--model-canvas);
+  -webkit-font-smoothing: antialiased;
+}
+.width { width: 100%; max-width: 980px; margin: 0 auto; padding: 20px 24px; box-sizing: border-box; }
+.header, .footer { flex-shrink: 0; background: var(--model-surface); }
+.header { border-bottom: 1px solid var(--model-border); }
+.heading { display: flex; align-items: center; gap: 14px; padding-top: 22px; padding-bottom: 22px; }
+.headingCopy { min-width: 0; }
+.back:global(.arco-btn) { width: 32px; height: 32px; padding: 0; flex-shrink: 0; border: 1px solid var(--model-border); border-radius: 9px; color: var(--color-text-2); background: var(--model-surface); }
+.back:global(.arco-btn):not(:disabled):hover { color: var(--model-ink); background: var(--model-canvas); }
+.title { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -.4px; line-height: 1.4; overflow-wrap: anywhere; }
+.title:focus { outline: none; }
+.title:focus-visible { outline: 2px solid var(--model-focus); outline-offset: 4px; border-radius: 4px; }
+.subtitle { margin-top: 5px; font-size: 12px; line-height: 1.5; color: var(--model-muted); overflow-wrap: anywhere; }
+.body { flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
+.body > .width { padding-top: 24px; padding-bottom: 32px; }
+.sheet { min-width: 0; padding: 24px; border: 1px solid var(--model-border); border-radius: 16px; background: var(--model-surface); box-shadow: 0 1px 3px color-mix(in srgb, var(--model-ink) 3%, transparent); }
+.sheet > :first-child { padding-top: 0; }
+.footer { border-top: 1px solid var(--model-border); }
+.footer .width { padding-top: 14px; padding-bottom: 14px; }
+
+/* Keep real Arco inputs and their validation, replacing only their presentation. */
+.editor .sheet :global(.arco-form-item) { margin-bottom: 22px; }
+.editor :global(.arco-form-label-item) { padding-bottom: 8px; }
+.editor :global(.arco-form-label-item > label), .editor :global(label) { font-size: 13px; font-weight: 500; line-height: 1.6; color: var(--color-text-2); }
+.editor :global(.arco-form-item-extra), .editor :global(.arco-form-item-help) { margin-top: 6px; font-size: 12px; line-height: 1.65; }
+.editor :global(.arco-input), .editor :global(.arco-textarea), .editor :global(.arco-input-inner-wrapper), .editor :global(.arco-select-view) {
+  min-height: 38px; box-sizing: border-box; border: 1px solid var(--model-border); border-radius: 8px; background: var(--model-surface); color: var(--model-ink); font-size: 13px;
+  transition: border-color .15s, box-shadow .15s, background-color .15s;
+}
+.editor :global(.arco-input) { padding: 8px 11px; line-height: 20px; }
+.editor :global(.arco-input-inner-wrapper .arco-input), .editor :global(.arco-input-number .arco-input), .editor :global(.arco-select-view-input) {
+  min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none;
+}
+.editor :global(.arco-input-inner-wrapper) { padding: 0 11px; }
+.editor :global(.arco-select-view) { padding: 2px 11px; }
+.editor :global(.arco-select-view-value) { line-height: 32px; }
+.editor :global(.arco-input):not(:disabled):hover, .editor :global(.arco-textarea):not(:disabled):hover, .editor :global(.arco-input-inner-wrapper):not(:global(.arco-input-inner-wrapper-disabled)):hover, .editor :global(.arco-select-view):hover { border-color: var(--color-border-3); }
+.editor :global(.arco-input):focus, .editor :global(.arco-textarea):focus, .editor :global(.arco-input-inner-wrapper-focus), .editor :global(.arco-select-focused .arco-select-view) {
+  border-color: var(--color-border-4); box-shadow: 0 0 0 3px var(--model-focus);
+}
+.editor :global(.arco-input-inner-wrapper .arco-input):focus { box-shadow: none; }
+.editor :global(.arco-input[readonly]), .editor :global(.arco-input:disabled), .editor :global(.arco-input-inner-wrapper-disabled), .editor :global(.arco-select-disabled .arco-select-view) { background: var(--model-canvas); color: var(--model-muted); }
+.editor :global(.arco-input-error), .editor :global(.arco-textarea-error), .editor :global(.arco-input-inner-wrapper-error), .editor :global(.arco-select-error .arco-select-view) { border-color: var(--danger); }
+.editor :global(.arco-input-error):hover, .editor :global(.arco-input-error):focus,
+.editor :global(.arco-textarea-error):hover, .editor :global(.arco-textarea-error):focus,
+.editor :global(.arco-input-inner-wrapper-error):hover, .editor :global(.arco-input-inner-wrapper-error):focus-within,
+.editor :global(.arco-select-error .arco-select-view):hover, .editor :global(.arco-select-error.arco-select-focused .arco-select-view) { border-color: var(--danger); }
+.editor :global(.arco-input-warning), .editor :global(.arco-textarea-warning), .editor :global(.arco-input-inner-wrapper-warning), .editor :global(.arco-select-warning .arco-select-view),
+.editor :global(.arco-input-warning):hover, .editor :global(.arco-input-warning):focus,
+.editor :global(.arco-textarea-warning):hover, .editor :global(.arco-textarea-warning):focus,
+.editor :global(.arco-input-inner-wrapper-warning):hover, .editor :global(.arco-input-inner-wrapper-warning):focus-within,
+.editor :global(.arco-select-warning .arco-select-view):hover, .editor :global(.arco-select-warning.arco-select-focused .arco-select-view) { border-color: var(--warning); }
+.editor :global(.arco-textarea) { min-height: 96px; padding: 10px 12px; line-height: 1.7; resize: vertical; }
+.editor :global(.arco-btn) { border-radius: 8px; font-size: 12px; font-weight: 500; transition: color .15s, background-color .15s, border-color .15s, box-shadow .15s; }
+.editor :global(.arco-btn-secondary), .editor :global(.arco-btn-default) { border: 1px solid var(--model-border); background: var(--model-surface); color: var(--color-text-2); }
+.editor :global(.arco-btn-secondary):not(:disabled):hover, .editor :global(.arco-btn-default):not(:disabled):hover { background: var(--model-canvas); color: var(--model-ink); }
+.editor :global(.arco-btn-text):not(:global(.arco-btn-status-danger)) { color: var(--color-text-2); }
+.editor :global(.arco-btn-text):not(:global(.arco-btn-status-danger)):not(:disabled):hover { color: var(--model-ink); background: var(--model-canvas); }
+.footer :global(.arco-btn) { height: 36px; padding: 0 18px; border-radius: 8px; }
+.footer :global(.arco-btn-primary) { background: var(--control-selected-bg, var(--model-ink)); border: 1px solid var(--control-selected-bg, var(--model-ink)); color: var(--control-selected-fg, var(--model-surface)); }
+.footer :global(.arco-btn-primary):not(:disabled):hover { opacity: .88; }
+.footer :global(.arco-btn-primary):disabled { opacity: .45; }
+.editor :global(button):focus-visible { outline: 2px solid var(--model-focus); outline-offset: 3px; }
+
+/* ModelDefinitionEditor hooks are shared by create-provider and add-model. */
+.editor :global([data-model-identity]) { padding-bottom: 8px; }
+.editor :global([data-model-identity-title]) { margin: 0 0 20px; font-size: 14px; font-weight: 600; line-height: 1.5; }
+.editor :global([data-model-identity-fields]) { display: grid; gap: 20px; }
+.editor :global([data-model-identity-fields] > [hidden]) { display: none; }
+.editor :global([data-model-identity-fields] > div > label) { display: block; }
+.editor :global([data-model-identity] [data-readonly-model-id]) { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+.editor :global([data-model-identity] [role='note']), .editor :global([data-model-catalog-status]) { font-size: 12px; line-height: 1.6; }
+.editor :global([data-capability-card-list]) { display: flex; flex-direction: column; gap: 20px; }
+.editor :global([data-capability-card]) { border-radius: 12px; border-color: var(--model-border); }
+.editor :global([data-capability-card][data-capability-expanded='true']) { overflow: visible; }
+.editor :global([data-capability-card-header]) { border-radius: 12px 12px 0 0; background: var(--model-canvas); }
+.editor :global([data-capability-card-header] > div) { padding: 16px 18px; }
+.editor :global([data-capability-card-header] .arco-btn-secondary) { background: var(--model-surface); }
+.editor :global([data-capability-card-header] .arco-tag) { border-radius: 6px; }
+.editor :global([data-model-protocol-discovery]) { padding: 12px 18px; }
+.editor :global([data-model-protocol-discovery] > div:first-child) { flex-wrap: wrap; row-gap: 8px; font-size: 12px; line-height: 1.6; }
+.editor :global([data-model-protocol-candidate] .arco-btn-primary) { border: 1px solid var(--control-idle-border, var(--model-border)); background: var(--control-idle-bg, var(--model-canvas)); color: var(--model-ink); }
+.editor :global([data-model-protocol-candidate] .arco-btn-primary)::before { content: '✓'; margin-right: 5px; }
+.editor :global([data-model-context-settings]) { padding: 18px; }
+.editor :global([data-model-context-fields]) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 20px 16px; }
+.editor :global([data-model-context-fields] > div > div:first-child) { font-size: 12px; font-weight: 500; line-height: 1.5; }
+.editor :global([data-model-context-fields] [data-output-limit-custom]) { grid-template-columns: minmax(0, 1fr); }
+.editor :global([data-model-description-editor]) { margin-top: 24px; padding-top: 22px; border-top: 1px solid var(--model-border); }
+.editor :global([data-model-description-editor] > div:last-child) { font-size: 12px; line-height: 1.6; }
+.editor :global([data-call-config-context]) { padding-bottom: 4px; font-size: 12px; }
+.editor :global([data-call-config-summary]) { padding: 14px 16px; border: 1px solid var(--model-border); background: var(--model-canvas); color: var(--model-ink); }
+.editor :global([data-call-config-summary] > .i-icon) { color: var(--success); }
+.editor :global([data-capability-has-error='true'] [data-call-config-summary]) { border-color: var(--danger); }
+.editor :global([data-capability-has-error='true'] [data-call-config-summary] > .i-icon) { color: var(--danger); }
+.editor :global([data-call-config-tabs]) { margin: 20px 0; padding: 4px; border: 1px solid var(--model-border); border-radius: 9px; background: var(--model-canvas); }
+.editor :global([data-call-config-tabs] > div) { gap: 3px; }
+.editor :global([data-call-config-tab]) { flex: 1; min-width: 0; height: 34px; padding: 0 10px; border: 1px solid transparent; border-radius: 6px; color: var(--color-text-2); font-size: 12px; }
+.editor :global([data-call-config-tab][aria-selected='true']) { border-color: var(--model-border); color: var(--model-ink); background: var(--model-surface); box-shadow: 0 1px 2px color-mix(in srgb, var(--model-ink) 4%, transparent); }
+.editor :global([data-call-config-tab] .i-icon) { display: none; }
+.editor :global([data-protocol-transport-disclosure]), .editor :global([data-provider-params-disclosure]) { margin-top: 16px; padding: 13px 14px; border-radius: 10px; background: var(--model-canvas); }
+.editor :global([data-transport-group]), .editor :global([data-token-limits]), .editor :global([data-call-config-branch='diagnostics']) { padding: 18px; border-radius: 12px; }
+.editor :global([data-call-config-branch='diagnostics'] > div:nth-child(2)) { overflow: hidden; border-radius: 8px; background: var(--model-canvas); }
+.editor :global([data-call-config-branch='diagnostics'] > div:nth-child(2) span:last-child) { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.editor :global([data-provider-params-json]) { overflow: hidden; border: 1px solid var(--model-border); border-radius: 10px; background: var(--model-canvas); }
+.editor :global([data-provider-params-valid='false']) { border-color: var(--danger); }
+.editor :global([data-provider-params-json] > div:first-child) { padding: 10px 14px; border-bottom: 1px solid var(--model-border); font-size: 12px; font-weight: 500; }
+.editor :global([data-provider-params-json] .arco-textarea) { min-height: 148px; border: 0; border-radius: 0; padding: 14px; background: var(--model-surface); font: 12px/1.8 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.editor :global([data-provider-params-json] > div:last-child) { padding: 0 14px 12px; font-size: 12px; line-height: 1.6; }
+
+@container model-configuration (min-width: 680px) {
+  .width { padding-left: 32px; padding-right: 32px; }
+  .editor :global([data-model-identity-mode='existing'] [data-model-identity-fields]) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .editor :global([data-model-context-fields]) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@container model-configuration (max-width: 560px) {
+  .width { padding-left: 18px; padding-right: 18px; }
+  .sheet { padding: 18px; }
+  .editor :global([data-model-context-fields]) { grid-template-columns: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .editor :global(.arco-btn), .editor :global(.arco-input), .editor :global(.arco-textarea), .editor :global(.arco-input-inner-wrapper), .editor :global(.arco-select-view) { transition: none; }
+}

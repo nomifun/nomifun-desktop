@@ -6608,6 +6608,8 @@ export type I18nKey =
   | 'settings.modelCatalogReferenceCompact'
   | 'settings.modelCatalogUnauthorized'
   | 'settings.modelCatalogUnavailable'
+  | 'settings.modelConfiguration.back'
+  | 'settings.modelConfiguration.identityTitle'
   | 'settings.modelCount'
   | 'settings.modelDeletion.confirm'
   | 'settings.modelDeletion.deleteModel'

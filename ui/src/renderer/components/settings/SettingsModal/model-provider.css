@@ -49,3 +49,237 @@
   outline-offset: 2px;
   border-radius: 6px;
 }
+
+/* Provider management opts into the same quiet surfaces as the model hub. */
+.model-provider-management {
+  min-width: 0;
+  container-type: inline-size;
+}
+
+.model-provider-management .model-provider-page-header {
+  gap: 14px;
+  margin-bottom: 22px;
+  padding-bottom: 22px;
+  border-bottom: 0;
+}
+
+.model-provider-management .page-header__description {
+  margin-top: 6px;
+  line-height: 20px;
+}
+
+.model-provider-management .model-provider-add-btn.arco-btn {
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 8px;
+  background: var(--bg-base);
+  border-color: var(--color-border-2);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.model-provider-management .model-provider-add-btn.arco-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--color-border-3);
+}
+
+.model-provider-management .model-provider-notice {
+  gap: 10px;
+  padding: 13px 14px;
+  border-color: var(--color-border-2);
+  border-radius: 10px;
+  background-color: var(--bg-1);
+}
+
+.model-provider-management .model-provider-notice > .i-icon {
+  color: var(--color-text-3);
+}
+
+.model-provider-management .model-provider-notice .font-600 {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.model-provider-management .model-provider-scope-note {
+  margin-top: 0;
+  padding: 0 2px;
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.model-provider-management .model-provider-list > * + * {
+  margin-top: 18px;
+}
+
+.model-provider-management .model-provider-card.arco-collapse {
+  border: 0;
+  border-radius: 14px;
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--text-primary) 3%, transparent);
+}
+
+.model-provider-management .model-provider-card .arco-collapse-item {
+  overflow: hidden;
+  border: 1px solid var(--color-border-2);
+  border-radius: 14px;
+  background: var(--bg-base);
+}
+
+.model-provider-management .model-provider-card .arco-collapse-item-header {
+  min-height: 58px;
+  gap: 8px;
+  padding: 11px 14px 11px 34px;
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--bg-1) 72%, var(--bg-base));
+  transition: background 140ms ease;
+}
+
+.model-provider-management .model-provider-card .arco-collapse-item-header:hover {
+  background: var(--bg-hover);
+}
+
+.model-provider-management .model-provider-card .arco-collapse-item-active > .arco-collapse-item-header {
+  border-radius: 13px 13px 0 0;
+}
+
+.model-provider-management .model-provider-card .arco-collapse-item-header-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.model-provider-management .model-provider-card .arco-collapse-item-header-icon {
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+
+.model-provider-management .model-provider-name {
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.model-provider-management .model-provider-header-actions {
+  gap: 10px;
+}
+
+.model-provider-management .model-provider-header-actions > span {
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+
+.model-provider-management .model-provider-card .arco-collapse-item-content {
+  border-radius: 0 0 13px 13px;
+  border-top: 1px solid var(--color-border-2);
+  background: var(--bg-base);
+}
+
+.model-provider-management .model-provider-card .arco-collapse-item-content-box {
+  padding: 0 14px 12px;
+}
+
+.model-provider-management .model-provider-model-row {
+  gap: 14px;
+  padding: 16px 0;
+}
+
+.model-provider-management .model-provider-model-row:hover {
+  background: color-mix(in srgb, var(--bg-hover) 60%, var(--bg-base));
+}
+
+.model-provider-management .model-provider-model-line {
+  flex-wrap: wrap;
+  column-gap: 7px;
+  row-gap: 6px;
+}
+
+.model-provider-management .model-provider-model-name {
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.model-provider-management .model-provider-model-id,
+.model-provider-management .model-provider-model-description {
+  margin-top: 4px;
+  padding-left: 31px;
+  color: var(--color-text-3);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.model-provider-management .model-provider-model-description {
+  font-size: 12px;
+}
+
+.model-provider-management .model-provider-capability-tag.arco-tag {
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 5px;
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.model-provider-management .model-provider-capability-tag[data-capability-health-status='unknown'] {
+  border-color: var(--color-border-2);
+  background: var(--bg-1);
+  color: var(--color-text-2);
+}
+
+.model-provider-management .model-provider-action-btn.arco-btn,
+.model-provider-management .model-provider-tool-btn.arco-btn {
+  border-radius: 7px;
+  border-color: transparent !important;
+  background: transparent !important;
+  color: var(--color-text-3);
+  box-shadow: none !important;
+}
+
+.model-provider-management .model-provider-action-btn.arco-btn:hover,
+.model-provider-management .model-provider-action-btn.arco-btn:focus-visible,
+.model-provider-management .model-provider-tool-btn.arco-btn:hover,
+.model-provider-management .model-provider-tool-btn.arco-btn:focus-visible {
+  border-color: var(--color-border-2) !important;
+  background: var(--bg-hover) !important;
+  color: var(--text-primary);
+}
+
+.model-provider-management .model-provider-drag-handle .arco-btn {
+  color: var(--color-text-4);
+}
+
+.model-provider-management .model-provider-empty {
+  padding: 40px 24px;
+  border: 1px dashed var(--color-border-2);
+  border-radius: 14px;
+  background: var(--bg-1);
+}
+
+.model-provider-management .model-provider-empty > .i-icon {
+  margin-bottom: 12px;
+  color: var(--color-text-3);
+}
+
+.model-provider-management .model-provider-empty h3 {
+  margin-top: 0;
+  font-size: 14px;
+}
+
+.model-provider-management .model-provider-empty p {
+  margin-bottom: 0;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+@container (max-width: 560px) {
+  .model-provider-management .model-provider-header-line {
+    flex-wrap: wrap;
+  }
+
+  .model-provider-management .model-provider-header-actions {
+    margin-left: 32px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .model-provider-management .model-provider-card .arco-collapse-item-header {
+    transition: none;
+  }
+}

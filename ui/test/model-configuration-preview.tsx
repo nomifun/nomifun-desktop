@@ -1,7 +1,7 @@
 /** Local visual acceptance of the actual shared editor; no credentials or backend writes. */
 import React, { useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Button, ConfigProvider, Modal } from '@arco-design/web-react';
+import { Button, ConfigProvider } from '@arco-design/web-react';
 import '@arco-design/web-react/es/_util/react-19-adapter';
 import zhCN from '@arco-design/web-react/es/locale/zh-CN';
 import { createInstance } from 'i18next';
@@ -14,6 +14,7 @@ import '../src/renderer/styles/modal-contract.css';
 import settings from '../src/renderer/services/i18n/locales/zh-CN/settings.json';
 import common from '../src/renderer/services/i18n/locales/zh-CN/common.json';
 import ModelDefinitionEditor from '../src/renderer/pages/settings/components/ModelDefinitionEditor';
+import ModelConfigurationPanel, { ModelConfigurationWorkspace } from '../src/renderer/pages/modelHub/ModelConfigurationPanel';
 import { capabilityInputsFromDefinition, createModelDefinitionDraft, validateModelDefinition, type ModelDefinitionDraft } from '../src/renderer/pages/settings/components/providerModelAdvanced';
 import type { ModelCatalogSuggestion } from '../src/renderer/pages/settings/components/ModelDefinitionEditor';
 import { aliasProviderBaseUrl } from './fixtures/modelAliasEditor';
@@ -57,9 +58,8 @@ function Preview() {
   const [catalog, setCatalog] = useState(INITIAL_CATALOG);
   const [saved, setSaved] = useState('');
   const validation = useMemo(() => validateModelDefinition(value, manifests, aliasProviderBaseUrl, [], [], [], 'bearer'), [value]);
-  return <main>
-    <div className='preview-note'>共享模型编辑器 · 测试数据 · 不连接供应商、不写入实际配置</div>
-    <Modal visible title='添加模型' style={{ width: 760 }} bodyStyle={{ maxHeight: 'calc(92vh - 120px)', overflow: 'auto' }} mask={false} closable={false} footer={
+  return <ModelConfigurationWorkspace>
+    <ModelConfigurationPanel visible title='添加模型' subtitle='共享模型编辑器 · 测试数据' onBack={() => setSaved('已返回')} footer={
       <Button type='primary' disabled={!validation.valid} onClick={() => setSaved(JSON.stringify({ model: value.model, capabilities: capabilityInputsFromDefinition(value) }))}>确认</Button>
     }>
       <ModelDefinitionEditor value={value} onChange={setValue} providerBaseUrl={aliasProviderBaseUrl} providerAuthScheme='bearer' manifests={manifests}
@@ -67,10 +67,10 @@ function Preview() {
         catalogSource={previewReferenceCatalog ? 'official_documentation' : undefined}
         onRefreshCatalog={() => setCatalog([...INITIAL_CATALOG, { value: 'latest-refreshed-model', label: 'latest-refreshed-model', tasks: [], traits: [] }])} />
       {saved && <output aria-label='预览保存结果' style={{ display: 'block', overflowWrap: 'anywhere', marginTop: 12 }}>已确认：{saved}</output>}
-    </Modal>
-  </main>;
+    </ModelConfigurationPanel>
+  </ModelConfigurationWorkspace>;
 }
 const style = document.createElement('style');
-style.textContent = 'html,body,#root{margin:0;min-width:880px;min-height:600px;font-family:Inter,"Microsoft YaHei",system-ui,sans-serif;background:var(--color-bg-1)}.preview-note{text-align:center;padding:12px;font-size:12px;color:var(--color-text-3)}';
+style.textContent = 'html,body,#root{margin:0;height:100%;min-width:880px;min-height:600px;font-family:Inter,"Microsoft YaHei",system-ui,sans-serif;background:var(--color-bg-1)}';
 document.head.append(style);
 createRoot(document.getElementById('root')!).render(<I18nextProvider i18n={i18n}><ConfigProvider locale={zhCN} theme={{ primaryColor: '#ef2355' }}><Preview /></ConfigProvider></I18nextProvider>);

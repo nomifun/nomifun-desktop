@@ -15,6 +15,7 @@ import '../src/renderer/styles/themes/index.css';
 import '../src/renderer/styles/modal-contract.css';
 import settings from '../src/renderer/services/i18n/locales/zh-CN/settings.json';
 import common from '../src/renderer/services/i18n/locales/zh-CN/common.json';
+import { ModelConfigurationWorkspace } from '../src/renderer/pages/modelHub/ModelConfigurationPanel';
 import { scenarioProvider, scenarioConnections, scenarioManifests } from './fixtures/scenarioModelEditing';
 import type { ProviderResponse } from '../src/common/types/provider/providerApi';
 import type { SaveProviderModelRequest } from '../src/common/protocolBindings/SaveProviderModelRequest';
@@ -60,6 +61,7 @@ class FixtureSocket extends EventTarget {
 globalThis.WebSocket = FixtureSocket as unknown as typeof WebSocket;
 
 const { default: ModalityModelsPanel } = await import('../src/renderer/pages/modelHub/ModalityModelsPanel');
+const { default: ModelHubPage } = await import('../src/renderer/pages/modelHub');
 const { MODALITY_SPECS } = await import('../src/renderer/pages/modelHub/modalityModels');
 const { ThemeProvider } = await import('../src/renderer/hooks/context/ThemeContext');
 type Modality = keyof typeof MODALITY_SPECS;
@@ -67,7 +69,8 @@ const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'zh-CN', resources: { 'zh-CN': { translation: { settings, common } } }, interpolation: { escapeValue: false } });
 function Preview() {
   const [modality, setModality] = useState<Modality>('chat');
-  return <main className='preview-model-page'>
+  if (new URLSearchParams(location.search).has('workspace')) return <ModelHubPage />;
+  return <ModelConfigurationWorkspace><main className='preview-model-page'>
     <div className='preview-note'>共享场景列表与编辑器 · 测试数据 · 不连接供应商、不写入实际配置</div>
     <nav className='flex flex-wrap gap-6px mb-20px'>
       {(Object.keys(MODALITY_SPECS) as Modality[]).map((key) => <Button key={key} size='small' type={key === modality ? 'primary' : 'secondary'} onClick={() => setModality(key)}>
@@ -75,10 +78,10 @@ function Preview() {
       </Button>)}
     </nav>
     <ModalityModelsPanel modality={modality} titleKey='settings.modelHub.title' subtitleKey='settings.modelHub.subtitle' />
-  </main>;
+  </main></ModelConfigurationWorkspace>;
 }
 const style = document.createElement('style');
-style.textContent = 'html,body,#root{margin:0;min-width:880px;min-height:600px;font-family:Inter,"Microsoft YaHei",system-ui,sans-serif;background:var(--color-bg-1)}.preview-model-page{padding:24px;max-width:1000px;margin:auto}.preview-note{font-size:12px;color:var(--color-text-3);margin-bottom:20px}';
+style.textContent = 'html,body,#root{margin:0;height:100%;min-width:880px;min-height:600px;font-family:Inter,"Microsoft YaHei",system-ui,sans-serif;background:var(--color-bg-1)}.preview-model-page{padding:24px;max-width:1000px;margin:auto}.preview-note{font-size:12px;color:var(--color-text-3);margin-bottom:20px}';
 document.head.append(style);
 createRoot(document.getElementById('root')!).render(<I18nextProvider i18n={i18n}><ConfigProvider locale={zhCN} theme={{ primaryColor: '#ef2355' }}>
   <SWRConfig value={{ provider: () => new Map(), revalidateOnFocus: false }}><HashRouter><ThemeProvider><Preview /></ThemeProvider></HashRouter></SWRConfig>

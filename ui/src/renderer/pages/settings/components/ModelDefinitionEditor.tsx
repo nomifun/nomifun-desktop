@@ -297,6 +297,9 @@ const InlineConnectionEditor: React.FC<{
             })}
       </div>
       <Input
+        autoCapitalize='none'
+        autoCorrect='off'
+        spellCheck={false}
         value={connectionRole}
         readOnly={roleReadOnly}
         status={!isValidConnectionRole(connectionRole) ? 'error' : undefined}
@@ -305,11 +308,17 @@ const InlineConnectionEditor: React.FC<{
         aria-label={t('settings.connections.role', { defaultValue: '连接角色' })}
       />
       <Input
+        autoCapitalize='none'
+        autoCorrect='off'
+        spellCheck={false}
         value={connectionLabel}
         onChange={setConnectionLabel}
         placeholder={t('settings.connections.label', { defaultValue: '连接名称' })}
       />
       <Input
+        autoCapitalize='none'
+        autoCorrect='off'
+        spellCheck={false}
         value={connectionBaseUrl}
         status={!connectionBaseUrl.trim() ? 'error' : undefined}
         onChange={setConnectionBaseUrl}
@@ -329,6 +338,9 @@ const InlineConnectionEditor: React.FC<{
       />
       {schemeSelection === CUSTOM_AUTH_SCHEME && (
         <Input
+          autoCapitalize='none'
+          autoCorrect='off'
+          spellCheck={false}
           value={customScheme}
           onChange={setCustomScheme}
           placeholder='header_key:x-api-key'
@@ -336,6 +348,9 @@ const InlineConnectionEditor: React.FC<{
       )}
       {credentialsKind === 'api_keys' && (
         <Input.TextArea
+          autoCapitalize='none'
+          autoCorrect='off'
+          spellCheck={false}
           value={credentials.apiKeysText}
           onChange={(apiKeysText) => setCredentials((previous) => ({ ...previous, apiKeysText }))}
           placeholder={t('settings.connections.apiKeys', { defaultValue: 'API Key（多个用逗号或换行分隔）' })}
@@ -345,16 +360,25 @@ const InlineConnectionEditor: React.FC<{
       {credentialsKind === 'volc_voice' && (
         <div className='flex flex-col gap-6px'>
           <Input
+            autoCapitalize='none'
+            autoCorrect='off'
+            spellCheck={false}
             value={credentials.appKey}
             onChange={(appKey) => setCredentials((previous) => ({ ...previous, appKey }))}
             placeholder={t('settings.connections.volcAppKey', { defaultValue: 'App Key' })}
           />
           <Input
+            autoCapitalize='none'
+            autoCorrect='off'
+            spellCheck={false}
             value={credentials.accessKey}
             onChange={(accessKey) => setCredentials((previous) => ({ ...previous, accessKey }))}
             placeholder={t('settings.connections.volcAccessKey', { defaultValue: 'Access Key' })}
           />
           <Input
+            autoCapitalize='none'
+            autoCorrect='off'
+            spellCheck={false}
             value={credentials.resourceId}
             onChange={(resourceId) => setCredentials((previous) => ({ ...previous, resourceId }))}
             placeholder={t('settings.connections.volcResourceId', { defaultValue: 'Resource ID' })}
@@ -363,6 +387,9 @@ const InlineConnectionEditor: React.FC<{
       )}
       {credentialsKind === 'custom' && (
         <Input.TextArea
+          autoCapitalize='none'
+          autoCorrect='off'
+          spellCheck={false}
           value={credentials.rawJson}
           onChange={(rawJson) => setCredentials((previous) => ({ ...previous, rawJson }))}
           placeholder={t('settings.connections.rawCredentials', { defaultValue: '凭据 JSON' })}
@@ -715,6 +742,9 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
 
   return (
     <div className='flex flex-col gap-16px' data-model-definition-editor>
+      <div hidden={focusedCallConfigTask !== undefined} data-model-identity data-model-identity-mode={modelReadOnly ? 'existing' : 'new'}>
+        <h3 data-model-identity-title>{t('settings.modelConfiguration.identityTitle')}</h3>
+        <div data-model-identity-fields>
       {!modelReadOnly ? (
         <div
           hidden={focusedCallConfigTask !== undefined}
@@ -827,6 +857,9 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                 onVisibleChange: setCatalogPopupVisible,
               }}
               inputProps={{
+                autoCapitalize: 'none',
+                autoCorrect: 'off',
+                spellCheck: false,
                 id: modelInputId,
                 'aria-describedby': `${modelInputId}-hint`,
                 onKeyDown: (event) => {
@@ -896,6 +929,9 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
             {modelAliasExpanded && (
               <>
                 <Input
+                  autoCapitalize='none'
+                  autoCorrect='off'
+                  spellCheck={false}
                   id={modelAliasInputId}
                   value={value.displayName ?? ''}
                   placeholder={t('settings.modelDisplayNamePlaceholder', {
@@ -967,7 +1003,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
           <label htmlFor={modelInputId} className='text-13px font-500 text-t-secondary'>
             {t('settings.modelId', { defaultValue: '模型 ID' })}
           </label>
-          <Input id={modelInputId} value={value.model} readOnly data-readonly-model-id />
+          <Input autoCapitalize='none' autoCorrect='off' spellCheck={false} id={modelInputId} value={value.model} readOnly data-readonly-model-id />
         </div>
       )}
 
@@ -977,6 +1013,9 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
             {t('settings.modelDisplayNameTitle', { defaultValue: '模型别名（选填）' })}
           </label>
           <Input
+            autoCapitalize='none'
+            autoCorrect='off'
+            spellCheck={false}
             id={modelAliasInputId}
             value={value.displayName ?? ''}
             placeholder={t('settings.modelDisplayNamePlaceholder', { defaultValue: '例如：Seedance 1.5 Pro' })}
@@ -991,6 +1030,8 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
           </div>
         </div>
       )}
+        </div>
+      </div>
 
       {capabilityTask === undefined && value.capabilities.length === 0 && (
         <section hidden={focusedCallConfigTask !== undefined} className='space-y-8px' data-model-purpose-required>
@@ -1402,7 +1443,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   </div>
                   {modelDefaults && <ModelConfigurationReference key={`${modelDefaults.model}:${modelDefaults.protocol_id}`} defaults={modelDefaults} />}
                 </div>
-                <div className='grid grid-cols-2 gap-10px'>
+                <div className='grid grid-cols-2 gap-10px' data-model-context-fields>
                   <div className='space-y-6px'>
                     <div className='text-12px text-t-secondary'>
                       {t('settings.contextLimit', { defaultValue: '上下文窗口（tokens）' })}
@@ -1442,7 +1483,6 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                       </div>
                     )}
                   </div>
-                </div>
                   <div className='space-y-6px'>
                     <div className='text-12px text-t-secondary'>
                       {t('settings.modelAdvanced.compactionThresholdLabel', {
@@ -1472,6 +1512,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                       })}
                     </div>}
                   </div>
+                </div>
               </div>
             )}
 
@@ -1966,6 +2007,9 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   </Checkbox>
                   <div className='flex items-center gap-8px'>
                     <Input
+                      autoCapitalize='none'
+                      autoCorrect='off'
+                      spellCheck={false}
                       value={capability.baseUrlOverride}
                       placeholder={actualBaseUrl}
                       disabled={!capability.baseUrlOverride}
@@ -2058,6 +2102,9 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   </div>
                   <div className='flex items-center gap-8px'>
                     <Input
+                      autoCapitalize='none'
+                      autoCorrect='off'
+                      spellCheck={false}
                       // The protocol default is a PLACEHOLDER, never a value.
                       // Rendering it as the value made it look like the user's
                       // own setting, inviting a "correction" to the provider's
@@ -2496,11 +2543,14 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               </div>
             )}
 
-            <div className='space-y-6px' data-provider-params-json>
+            <div className='space-y-6px' data-provider-params-json data-provider-params-valid={providerParamsValid}>
               <div className='text-12px text-t-secondary'>
                 {t('settings.modelAdvanced.params', { defaultValue: '供应商参数 JSON' })}
               </div>
               <Input.TextArea
+                autoCapitalize='none'
+                autoCorrect='off'
+                spellCheck={false}
                 value={capability.providerParamsJson}
                 rows={4}
                 status={providerParamsValid ? undefined : 'error'}

@@ -49,6 +49,7 @@ import { SerializedLatestWriteQueue } from './serializedLatestWriteQueue';
 import ModelHubPageHeader from './ModelHubPageHeader';
 import { modelProviderManagementRoute } from './modelAdditionIntent';
 import ModelAdvancedEditor, { type ModelAdvancedPatch } from '@/renderer/pages/settings/components/ModelAdvancedEditor';
+import styles from './ModalityModelsPanel.module.css';
 
 type GenerationDefaultModel = NonNullable<
   ConfigKeyMap['models.default.imageGeneration']
@@ -163,10 +164,11 @@ const GenerationDefaultControl: React.FC<
             : 'settings.modelHub.creation.defaultUnset');
 
   return (
-    <div className='mt-14px'>
+    <div className={styles.defaults}>
       {messageContext}
-      <NomiSettingList>
+      <NomiSettingList className={styles.defaultList}>
         <NomiSettingRow
+          className={styles.defaultRow}
           title={t(preferenceKey === 'models.default.vision'
             ? 'settings.modelHub.modality.visionDefaultTitle'
             : 'settings.modelHub.creation.defaultTitle')}
@@ -336,27 +338,26 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
   );
 
   const renderGroup = (group: ModalityProviderGroup) => (
-    <div key={group.providerId} className='flex flex-col gap-6px'>
-      <div className='flex min-w-0 items-center gap-8px flex-wrap'>
+    <div key={group.providerId} className={styles.providerGroup}>
+      <div className={styles.providerHeader}>
         <span className='text-13px font-500 leading-18px text-t-primary truncate'>
           {group.providerName}
         </span>
-        <span className='text-11px text-t-tertiary shrink-0'>
+        <span className={styles.platform}>
           {group.platform}
         </span>
         {!group.enabled && (
-          <Tag size='small' color='gray'>
+          <Tag size='small' color='gray' className={styles.statusTag}>
             {t('settings.modelHub.modality.modelDisabled')}
           </Tag>
         )}
-        <span className='text-11px text-t-tertiary shrink-0'>
-          ·{' '}
+        <span className={styles.modelCount}>
           {t('settings.modelHub.modality.modelCount', {
             count: group.models.length,
           })}
         </span>
       </div>
-      <NomiSettingList>
+      <NomiSettingList className={styles.modelList}>
         {group.models.map((row) => (
           (() => {
             const displayName = modelDisplayLabel(row.model, row.definition.display_name);
@@ -364,27 +365,30 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
             return (
           <NomiSettingRow
             key={row.model}
+            className={styles.modelRow}
+            descriptionClassName={styles.modelDescription}
+            controlsClassName={styles.modelControls}
             title={
               <div className='flex min-w-0 items-center gap-6px flex-wrap'>
                 <span className='truncate text-13px font-400 leading-18px'>{displayName}</span>
-                <Tag size='small' color='arcoblue'>
+                <Tag size='small' color='gray' className={styles.capabilityTag}>
                   {t(`settings.modelTask.${row.capability.task}` as I18nKey)}
                 </Tag>
                 {row.traits.includes('vision_input') && (
-                  <Tag size='small' color='purple'>
+                  <Tag size='small' color='gray' className={styles.capabilityTag}>
                     {t('settings.modelHub.modality.traitVision')}
                   </Tag>
                 )}
                 {row.capability.health?.unsupported_technical_capabilities?.includes('function_calling') && (
-                  <Tag size='small' color='red'>
+                  <Tag size='small' color='red' className={styles.statusTag}>
                     {t('settings.modelHub.modality.functionCallingUnsupported')}
                   </Tag>
                 )}
-                <Tag size='small' color='gray'>
+                <Tag size='small' color='gray' className={styles.protocolTag}>
                   {row.protocol}
                 </Tag>
                 {!row.enabled && (
-                  <Tag size='small' color='gray'>
+                  <Tag size='small' color='gray' className={styles.statusTag}>
                     {t('settings.modelHub.modality.modelDisabled')}
                   </Tag>
                 )}
@@ -411,7 +415,8 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
                 <Button
                   size='mini'
                   type='secondary'
-                  icon={<Edit theme='outline' size='12' strokeWidth={3} />}
+                  className={styles.editButton}
+                  icon={<Edit theme='outline' size='12' strokeWidth={2} />}
                   aria-label={t('settings.modelHub.modality.editModelConfiguration')}
                   onClick={() => editModel(row)}
                   data-edit-scenario-model={row.model}
@@ -429,7 +434,7 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
   );
 
   return (
-    <div className='flex min-h-0 flex-col'>
+    <div className={styles.panel}>
       {messageContext}
       {editingModel && editingProvider && editingDefinition && (
         <ModelAdvancedEditor
@@ -450,12 +455,13 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
           onSave={saveModelConfiguration}
         />
       )}
-      <ModelHubPageHeader title={t(titleKey)} description={t(subtitleKey)} />
+      <ModelHubPageHeader className={styles.header} title={t(titleKey)} description={t(subtitleKey)} />
 
       {showDefaultModel && (
-        <div className='mt-14px'>
-          <NomiSettingList>
+        <div className={styles.defaults}>
+          <NomiSettingList className={styles.defaultList}>
             <NomiSettingRow
+              className={styles.defaultRow}
               title={t('settings.modelHub.modality.defaultRow')}
               description={t('settings.modelHub.modality.chatDefaultHint')}
               controls={
@@ -479,9 +485,9 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
         />
       )}
 
-      <NomiScrollArea className='mt-14px flex-1 min-h-0' disableOverflow>
+      <NomiScrollArea className={styles.groupsArea} disableOverflow>
         {groups.length === 0 ? (
-          <div className='flex flex-col items-center justify-center py-42px text-center'>
+          <div className={styles.empty}>
             <h3 className='m-0 text-16px font-500 text-t-primary'>
               {t('settings.modelHub.modality.empty')}
             </h3>
@@ -490,16 +496,17 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
             </p>
           </div>
         ) : (
-          <div className='flex flex-col gap-14px'>
+          <div className={styles.groups}>
             {groups.map(renderGroup)}
           </div>
         )}
       </NomiScrollArea>
 
-      <div className='mt-12px flex items-center gap-8px flex-wrap'>
+      <div className={styles.footer}>
         <Button
           type='text'
           size='small'
+          className={styles.manageButton}
           icon={<LinkCloud theme='outline' size='14' />}
           onClick={() => navigate(modelProviderManagementRoute(MODALITY_SPECS[modality].task))}
         >

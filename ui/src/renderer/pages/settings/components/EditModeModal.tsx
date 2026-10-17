@@ -7,11 +7,11 @@
 import { ipcBridge } from '@/common';
 import type { IProvider } from '@/common/config/storage';
 import type { ProviderCredentials } from '@/common/types/provider/providerApi';
-import NomiModal from '@/renderer/components/base/NomiModal';
+import ModelConfigurationPanel from '@/renderer/pages/modelHub/ModelConfigurationPanel';
 import { getProviderLogo } from '@/renderer/utils/model/modelPlatforms';
 import ModalHOC from '@/renderer/utils/ui/ModalHOC';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
-import { AutoComplete, Form, Input, Select } from '@arco-design/web-react';
+import { AutoComplete, Button, Form, Input, Select } from '@arco-design/web-react';
 import { LinkCloud } from '@icon-park/react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -207,22 +207,16 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
     ) : undefined;
 
     return (
-      <NomiModal
+      <ModelConfigurationPanel
         visible={modalProps.visible}
-        onCancel={modalCtrl.close}
-        header={{ title: t('settings.editModel'), showClose: true }}
-        style={{ minHeight: 400, maxHeight: '90vh', borderRadius: 16 }}
-        contentStyle={{
-          background: 'var(--dialog-fill-0)',
-          borderRadius: 16,
-          padding: '20px 24px 16px',
-          overflow: 'auto',
-        }}
-        onOk={() => void save()}
-        confirmLoading={modalProps.confirmLoading || saving}
-        okButtonProps={{ disabled: apiKeysLoading }}
-        okText={t('common.save')}
-        cancelText={t('common.cancel')}
+        onBack={modalCtrl.close}
+        busy={saving}
+        title={t('settings.editModel')}
+        subtitle={data?.name}
+        footer={<div className='flex justify-end gap-8px'>
+          <Button disabled={saving} onClick={modalCtrl.close}>{t('common.cancel')}</Button>
+          <Button type='primary' disabled={apiKeysLoading || saving} loading={saving} onClick={() => void save()}>{t('common.save')}</Button>
+        </div>}
       >
         {messageContext}
         <div className='py-20px'>
@@ -238,7 +232,7 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
               required
               rules={[{ required: true }]}
             >
-              <Input placeholder={t('settings.modelProvider')} />
+              <Input autoCapitalize='none' autoCorrect='off' spellCheck={false} placeholder={t('settings.modelProvider')} />
             </Form.Item>
 
             <Form.Item
@@ -248,7 +242,7 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
               rules={[{ required: !isBedrock }]}
               extra={t('settings.providerBaseUrlVisibleHint')}
             >
-              <Input />
+              <Input autoCapitalize='none' autoCorrect='off' spellCheck={false} />
             </Form.Item>
 
             <Form.Item
@@ -259,6 +253,7 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
               extra={t('settings.authSchemeManifestHint')}
             >
               <AutoComplete
+                inputProps={{ autoCapitalize: 'none', autoCorrect: 'off', spellCheck: false }}
                 data={authSchemeOptions.map((scheme) => ({ value: scheme, name: scheme }))}
                 loading={manifestState.loadingTasks.includes('chat')}
                 filterOption={false}
@@ -281,6 +276,9 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
               }
             >
               <Input.TextArea
+                autoCapitalize='none'
+                autoCorrect='off'
+                spellCheck={false}
                 rows={4}
                 placeholder={t('settings.apiKeyPlaceholder')}
                 disabled={apiKeysLoading}
@@ -309,7 +307,7 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
               rules={[{ required: isBedrock }]}
               extra={t('settings.bedrock.regionHint')}
             >
-              <AutoComplete data={AWS_REGIONS.map((region) => ({ value: region, name: region }))} />
+              <AutoComplete inputProps={{ autoCapitalize: 'none', autoCorrect: 'off', spellCheck: false }} data={AWS_REGIONS.map((region) => ({ value: region, name: region }))} />
             </Form.Item>
 
             <Form.Item
@@ -320,7 +318,7 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
               rules={[{ required: accessKeysRequired }]}
               extra={storedCredentialsHint}
             >
-              <Input.Password placeholder='AKIA...' visibilityToggle />
+              <Input.Password autoCapitalize='none' autoCorrect='off' spellCheck={false} placeholder='AKIA...' visibilityToggle />
             </Form.Item>
 
             <Form.Item
@@ -330,7 +328,7 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
               required={accessKeysRequired}
               rules={[{ required: accessKeysRequired }]}
             >
-              <Input.Password visibilityToggle />
+              <Input.Password autoCapitalize='none' autoCorrect='off' spellCheck={false} visibilityToggle />
             </Form.Item>
 
             <Form.Item
@@ -339,7 +337,7 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
               field='bedrockSessionToken'
               extra={t('settings.bedrock.sessionTokenHint')}
             >
-              <Input.Password visibilityToggle />
+              <Input.Password autoCapitalize='none' autoCorrect='off' spellCheck={false} visibilityToggle />
             </Form.Item>
 
             <Form.Item
@@ -350,7 +348,7 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
               rules={[{ required: isBedrock && bedrockAuthMethod === 'profile' }]}
               extra={t('settings.bedrock.profileHint')}
             >
-              <Input placeholder='default' />
+              <Input autoCapitalize='none' autoCorrect='off' spellCheck={false} placeholder='default' />
             </Form.Item>
 
             {isBedrock && bedrockAuthMethod === 'defaultChain' ? (
@@ -360,7 +358,7 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
             ) : null}
           </Form>
         </div>
-      </NomiModal>
+      </ModelConfigurationPanel>
     );
   }
 );

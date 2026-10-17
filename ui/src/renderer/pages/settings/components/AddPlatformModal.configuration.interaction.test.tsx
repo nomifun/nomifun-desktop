@@ -8,6 +8,7 @@ import { SWRConfig } from 'swr';
 import zhCommon from '@/renderer/services/i18n/locales/zh-CN/common.json';
 import zhSettings from '@/renderer/services/i18n/locales/zh-CN/settings.json';
 import { aliasProtocolManifest, aliasProviderId } from '../../../../../test/fixtures/modelAliasEditor';
+import type { ModelGatewayCatalogResponse } from '@/common/types/provider/modelGateway';
 
 const originalFetch = globalThis.fetch;
 const originalWindowFetch = window.fetch;
@@ -53,6 +54,66 @@ const manifest = {
 };
 
 describe('add-provider interface configuration', () => {
+  test('gateway creation keeps its fixed footer and blocks returning or changing platform until persistence settles', async () => {
+    const listProtocols = spyOn(ipcBridge.modelProtocol.list, 'invoke').mockResolvedValue({
+      ...manifest, preset: 'nomifun-model-gateway', platform: 'nomifun-model-gateway',
+    });
+    const meta = spyOn(ipcBridge.modelGateway.meta, 'invoke').mockResolvedValue({
+      contract_version: '1.0', operator: { name: '测试网关', homepage_url: null, console_url: null,
+        purchase_url: null, terms_url: null, privacy_url: null }, capabilities: [], optional_endpoints: [],
+    });
+    const catalog: ModelGatewayCatalogResponse = { contract_version: '1.0', imports: [], models: [{
+      id: 'custom-chat', display_name: 'Custom Chat', vendor: 'custom', tasks: ['chat'],
+      task_endpoints: { chat: { endpoints: ['openai-response'], preferred_endpoint: 'openai-response' } },
+      context_window: 128000, max_output_tokens: 8192, input_modalities: ['text'], traits: [], pricing: [],
+      included_in_plan: true, status: 'available',
+    }] };
+    const loadCatalog = spyOn(ipcBridge.modelGateway.catalog, 'invoke').mockResolvedValue(catalog);
+    let rejectCreation!: (error: Error) => void;
+    const create = spyOn(ipcBridge.modelGateway.create, 'invoke').mockImplementation(() =>
+      new Promise((_resolve, reject) => { rejectCreation = reject; }));
+    restorers.push(() => listProtocols.mockRestore(), () => meta.mockRestore(),
+      () => loadCatalog.mockRestore(), () => create.mockRestore());
+    const deepLinkData = { platform: 'nomifun-model-gateway', base_url: 'https://gateway.example' };
+    function Harness() {
+      const [control, panel] = AddPlatformModal.useModal({ deepLinkData, onSubmit() {} });
+      return <><button onClick={() => control.open()}>Open gateway configuration</button>{panel}</>;
+    }
+    const page = render(<I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map() }}>
+      <ThemeProvider><Harness /></ThemeProvider>
+    </SWRConfig></I18nextProvider>);
+    fireEvent.click(page.getByRole('button', { name: 'Open gateway configuration' }));
+    fireEvent.click(await page.findByRole('button', { name: zhSettings.modelGateway.checkOperator }));
+    fireEvent.change(await page.findByLabelText(zhSettings.apiKey), { target: { value: 'synthetic-test-key' } });
+    fireEvent.click(page.getByRole('button', { name: zhSettings.modelGateway.loadCatalog }));
+    await page.findByText('Custom Chat');
+    const createButton = page.getByRole('button', { name: zhSettings.modelGateway.addSelected }) as HTMLButtonElement;
+    const footer = createButton.closest('footer');
+    expect(footer).not.toBeNull();
+    expect(page.container.querySelector('[data-model-configuration-body]')?.contains(createButton)).toBe(false);
+    fireEvent.click(createButton);
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    const back = page.getByRole('button', { name: zhSettings.modelConfiguration.back }) as HTMLButtonElement;
+    const cancel = page.getByRole('button', { name: zhCommon.cancel }) as HTMLButtonElement;
+    const platform = page.getByRole('combobox');
+    expect(back.disabled).toBe(true);
+    expect(cancel.disabled).toBe(true);
+    expect(platform.getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(back);
+    fireEvent.click(cancel);
+    fireEvent.click(platform);
+    expect(page.getByText('Custom Chat')).toBeTruthy();
+    expect(page.queryByRole('option')).toBeNull();
+    await act(async () => rejectCreation(new Error('fixture save failure')));
+    await waitFor(() => expect(back.disabled).toBe(false));
+    expect(cancel.disabled).toBe(false);
+    expect(platform.getAttribute('aria-disabled')).toBe('false');
+    expect(footer?.contains(createButton)).toBe(true);
+    expect((page.getByLabelText(zhSettings.apiKey) as HTMLInputElement).value).toBe('synthetic-test-key');
+    fireEvent.click(back);
+    expect(page.queryByText('Custom Chat')).toBeNull();
+  });
+
   test('verifies the committed model once and waits for explicit detection after credentials change while preserving the chosen connection', async () => {
     const discover = spyOn(ipcBridge.mode.discoverModelProtocols, 'invoke').mockResolvedValue({ candidates: [], elapsed_ms: 1 });
     const listProtocols = spyOn(ipcBridge.modelProtocol.list, 'invoke').mockResolvedValue(manifest);

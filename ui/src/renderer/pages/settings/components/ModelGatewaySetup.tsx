@@ -8,7 +8,8 @@ import { ipcBridge } from '@/common';
 import type { IProvider } from '@/common/config/storage';
 import type { ModelGatewayCatalogResponse, ModelGatewayMetaResponse } from '@/common/types/provider/modelGateway';
 import { Alert, Button, Checkbox, Input, Tag } from '@arco-design/web-react';
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { gatewayAddress, gatewayExternalUrl } from './modelGatewayForm';
 
@@ -38,7 +39,9 @@ const ModelGatewaySetup: React.FC<{
   initialName?: string;
   onCreated(provider: IProvider): void;
   onCancel(): void;
-}> = ({ initialBaseUrl = '', initialName = '', onCreated, onCancel }) => {
+  onSavingChange?: (saving: boolean) => void;
+  footerContainer?: HTMLElement | null;
+}> = ({ initialBaseUrl = '', initialName = '', onCreated, onCancel, onSavingChange, footerContainer }) => {
   const { t } = useTranslation();
   const [baseUrl, setBaseUrl] = useState(initialBaseUrl);
   const [name, setName] = useState(initialName);
@@ -54,6 +57,11 @@ const ModelGatewaySetup: React.FC<{
   const models = useMemo(() => catalog?.models.filter((model) =>
     `${model.id} ${model.display_name} ${model.vendor}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())
   ) ?? [], [catalog, search]);
+
+  useEffect(() => {
+    onSavingChange?.(busy === 'create');
+    return () => onSavingChange?.(false);
+  }, [busy, onSavingChange]);
 
   const changeAddress = (value: string) => {
     revision.current += 1;
@@ -95,28 +103,32 @@ const ModelGatewaySetup: React.FC<{
     } catch { setError(t('settings.modelGateway.saveFailed')); }
     finally { setBusy(undefined); }
   };
+  const actions = <div className='flex justify-end gap-8px mt-4px'>
+    <Button onClick={onCancel} disabled={busy === 'create'}>{t('common.cancel')}</Button>
+    <Button type='primary' onClick={() => void save()} loading={busy === 'create'} disabled={!catalog || !name.trim() || selected.length === 0 || !!busy}>{t('settings.modelGateway.addSelected')}</Button>
+  </div>;
   return (
     <div className='flex flex-col gap-12px' data-model-gateway-setup>
       <div className='text-12px text-t-secondary'>{t('settings.modelGateway.setupDescription')}</div>
       <label className='flex flex-col gap-6px'>
         <span>{t('settings.modelGateway.address')}</span>
-        <Input value={baseUrl} onChange={changeAddress} disabled={busy === 'create'} placeholder='https://models.example.com' aria-label={t('settings.modelGateway.address')} />
+        <Input autoCapitalize='none' autoCorrect='off' spellCheck={false} value={baseUrl} onChange={changeAddress} disabled={busy === 'create'} placeholder='https://models.example.com' aria-label={t('settings.modelGateway.address')} />
       </label>
       {baseUrl.trim() && !address && <Alert type='error' content={t('settings.modelGateway.invalidAddress')} />}
       {address?.insecure && <Alert type='warning' content={t('settings.modelGateway.insecureAddress')} />}
       <Button onClick={() => void loadMeta()} disabled={!address || !!busy} loading={busy === 'meta'}>{t('settings.modelGateway.checkOperator')}</Button>
       {meta && <>
         <GatewayOperator meta={meta} />
-        <label className='flex flex-col gap-6px'><span>{t('settings.modelProvider')}</span><Input value={name} onChange={setName} disabled={busy === 'create'} aria-label={t('settings.modelProvider')} /></label>
+        <label className='flex flex-col gap-6px'><span>{t('settings.modelProvider')}</span><Input autoCapitalize='none' autoCorrect='off' spellCheck={false} value={name} onChange={setName} disabled={busy === 'create'} aria-label={t('settings.modelProvider')} /></label>
         <label className='flex flex-col gap-6px'>
           <span>{t('settings.apiKey')}</span>
-          <Input.Password value={apiKey} onChange={changeKey} disabled={busy === 'create'} aria-label={t('settings.apiKey')} autoComplete='off' />
+          <Input.Password autoCapitalize='none' autoCorrect='off' spellCheck={false} value={apiKey} onChange={changeKey} disabled={busy === 'create'} aria-label={t('settings.apiKey')} autoComplete='off' />
           <span className='text-12px text-t-secondary'>{t('settings.modelGateway.keyDestination', { domain: address?.domain ?? '' })}</span>
         </label>
         <Button onClick={() => void loadCatalog()} disabled={!apiKey.trim() || !!busy} loading={busy === 'catalog'}>{t('settings.modelGateway.loadCatalog')}</Button>
       </>}
       {catalog && <>
-        <Input.Search value={search} onChange={setSearch} placeholder={t('settings.modelGateway.searchModels')} aria-label={t('settings.modelGateway.searchModels')} />
+        <Input.Search autoCapitalize='none' autoCorrect='off' spellCheck={false} value={search} onChange={setSearch} placeholder={t('settings.modelGateway.searchModels')} aria-label={t('settings.modelGateway.searchModels')} />
         <Checkbox checked={selected.length === catalog.models.length && catalog.models.length > 0} indeterminate={selected.length > 0 && selected.length < catalog.models.length} disabled={busy === 'create'} onChange={(checked) => setSelected(checked ? catalog.models.map((model) => model.id) : [])}>{t('settings.modelGateway.selectAll', { selected: selected.length, total: catalog.models.length })}</Checkbox>
         {catalog.models.length === 0 && <Alert content={t('settings.modelGateway.emptyCatalog')} />}
         <div className='max-h-240px overflow-auto flex flex-col gap-8px' data-gateway-catalog>
@@ -129,10 +141,7 @@ const ModelGatewaySetup: React.FC<{
         </div>
       </>}
       {error && <Alert type='error' content={error} />}
-      <div className='flex justify-end gap-8px mt-4px'>
-        <Button onClick={onCancel} disabled={busy === 'create'}>{t('common.cancel')}</Button>
-        <Button type='primary' onClick={() => void save()} loading={busy === 'create'} disabled={!catalog || !name.trim() || selected.length === 0 || !!busy}>{t('settings.modelGateway.addSelected')}</Button>
-      </div>
+      {footerContainer ? createPortal(actions, footerContainer) : actions}
     </div>
   );
 };

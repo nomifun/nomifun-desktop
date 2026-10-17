@@ -12,7 +12,7 @@ import type { ProviderId } from '@/common/types/ids';
 import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import type { ProviderModelCapabilityResponse } from '@/common/types/provider/providerModel';
 import { ipcBridge } from '@/common';
-import NomiModal from '@/renderer/components/base/NomiModal';
+import ModelConfigurationPanel from '@/renderer/pages/modelHub/ModelConfigurationPanel';
 import ModelDefinitionEditor, { type ModelDefinitionEditorHandle } from './ModelDefinitionEditor';
 import {
   capabilityDraftFromResponse,
@@ -198,38 +198,20 @@ const ModelAdvancedEditor: React.FC<ModelAdvancedEditorProps> = ({
 
   return (
     <>
-      <NomiModal
+      <ModelConfigurationPanel
         visible={open}
-        onCancel={handleClose}
-        unmountOnExit
-        maskClosable={!saving}
-        escToExit={!saving}
-        header={{
-          title: focusedCallConfigTask
-            ? `${t(`settings.modelTask.${focusedCallConfigTask}`, {
-                defaultValue: focusedCallConfigTask,
-              })} · ${t('settings.modelAdvanced.callConfigurationTitle', {
-                defaultValue: '调用配置',
-              })}`
-            : task
-              ? `${t(`settings.modelTask.${task}`, { defaultValue: task })} · ${t('settings.modelAdvanced.titleForTask', { defaultValue: '编辑模型' })}`
-              : t('settings.editModelCapabilities'),
-          showClose: true,
-        }}
-        style={{
-          width: focusedCallConfigTask ? 840 : 760,
-          maxWidth: '94vw',
-          maxHeight: focusedCallConfigTask ? '96vh' : '92vh',
-        }}
-        contentStyle={{
-          background: 'var(--dialog-fill-0)',
-          borderRadius: 16,
-          padding: '20px 24px',
-          overflow: 'auto',
-          maxHeight: focusedCallConfigTask
-            ? 'calc(96vh - 72px)'
-            : 'calc(92vh - 160px)',
-        }}
+        busy={saving}
+        onBack={focusedCallConfigTask ? () => modelEditorRef.current?.cancelCallConfig() : handleClose}
+        subtitle={`${providerName} · ${model}`}
+        title={focusedCallConfigTask
+          ? `${t(`settings.modelTask.${focusedCallConfigTask}`, {
+              defaultValue: focusedCallConfigTask,
+            })} · ${t('settings.modelAdvanced.callConfigurationTitle', {
+              defaultValue: '调用配置',
+            })}`
+          : task
+            ? `${t(`settings.modelTask.${task}`, { defaultValue: task })} · ${t('settings.modelAdvanced.titleForTask', { defaultValue: '编辑模型' })}`
+            : t('settings.editModelCapabilities')}
         footer={focusedCallConfigTask ? (
           <ModelCallConfigModalFooter
             task={focusedCallConfigTask}
@@ -309,15 +291,15 @@ const ModelAdvancedEditor: React.FC<ModelAdvancedEditorProps> = ({
             </div>
           )}
         </div>
-      </NomiModal>
+      </ModelConfigurationPanel>
       {!hideTrigger && (
-        <Tooltip content={t('settings.editModelCapabilities', { defaultValue: '编辑模态、协议与地址' })}>
+        <Tooltip content={t('settings.editModelCapabilities', { defaultValue: '编辑模型配置' })}>
           <Button
             size='mini'
             className='model-provider-action-btn !w-24px !h-24px !min-w-24px shrink-0 text-t-secondary hover:text-t-primary'
             icon={<SettingTwo theme='outline' size='14' />}
             aria-label={t('settings.editModelCapabilities', {
-              defaultValue: '编辑模型调用配置',
+              defaultValue: '编辑模型配置',
             })}
             onClick={handleOpen}
           />
