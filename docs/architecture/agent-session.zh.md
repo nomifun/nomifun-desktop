@@ -142,6 +142,8 @@ Action schema 和实际组装结果。Runtime 只消费现役 ToolPlan，不依�
 
 普通操作以当前登录用户执行；需要系统身份时，现役 process 工具的 `execution_identity=administrator` 使用原生系统组件，复用相同效果及进程生命周期。它不是用户权限模式，不授予TCC或交互桌面。管理员认证、系统独立许可、缺失环境与工程未实现分别表达，未知部分效果不得盲重放。完整执行与环境合同见[全局操作系统能力](global-os-capabilities.zh.md)。
 
+指令预检按真实 canonical 目录及执行身份发现和缓存 AGENTS，文件路径与进程 cwd 中合法的 `..`、符号链接等原生拼写保留在原工具调用内；仅拼写与 canonical 路径不同不延期，也不改写调用参数。实际新增或变化的指令仍在执行前发布上下文并延期，后续须提交新调用；效果后的缓存失效、只读与身份分域、未知效果禁止重放的边界不变。
+
 ### 受管组件调用
 
 `workspace.process/exec` 与 `start` 的启动目标由 `component`、`command`、`cmd` 三选一。

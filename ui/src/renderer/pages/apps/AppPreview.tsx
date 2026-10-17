@@ -91,6 +91,7 @@ export default function AppPreview({ app, onPreview, previewBusy = false, previe
             <Button size='small' onClick={() => setExpanded(false)}>{t('appHosting.workspace.collapse')}</Button>
           </div></div>
         <iframe key={`${app.id}:${app.pid}:${url}:${refreshRevision}`} src={url!} title={t('appHosting.workspace.previewTitle', { name: app.name })}
+          allow="camera 'none'; microphone 'none'"
           className={styles.previewFrame} sandbox='allow-scripts allow-forms allow-same-origin' referrerPolicy='no-referrer' />
       </dialog>
       <Button type='text' size='small' onClick={() => { setRequested(false); setExpanded(false); }}>{t('appHosting.workspace.closePreview')}</Button></>

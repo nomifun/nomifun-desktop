@@ -457,13 +457,16 @@ fn wave2_effect_resource_key(
             })?;
         let canonical_root = match std::fs::canonicalize(root) {
             Ok(root) => root,
-            Err(error) if context.capability_id.as_ref() == "workspace.files"
-                && error.kind() == std::io::ErrorKind::NotFound
-                && Path::new(root).is_absolute()
-                && !Path::new(root).components().any(|part| matches!(part, std::path::Component::ParentDir)) => {
-                // File access uses native targets; a missing default is still
-                // the same frozen project identity, never a replacement root.
-                PathBuf::from(root)
+            Err(error) if matches!(context.capability_id.as_ref(), "workspace.files" | "workspace.process")
+                && error.kind() == std::io::ErrorKind::NotFound => {
+                // Absolute file targets and an explicit process cwd do not
+                // require the default directory. Preserve its original native
+                // identity spelling (including Windows verbatim prefixes), so
+                // existing effects and unknown-outcome fences keep one key.
+                nomifun_knowledge::canonical_unbound_workspace_path(Path::new(root))
+                    .map_err(|error| Wave2HostPortError::invalid_payload(format!(
+                        "workspace effect root could not be resolved: {error}"
+                    )))?
             }
             Err(error) => return Err(Wave2HostPortError::invalid_payload(format!(
                 "workspace effect root could not be resolved: {error}"
@@ -3397,6 +3400,57 @@ mod tests {
         assert!(error.message.contains("os error 13"));
         assert!(error.message.contains("TCC"));
         assert!(error.message.contains("Do not replay"));
+    }
+
+    #[test]
+    fn missing_default_directory_keeps_file_and_process_effect_keys_and_vcs_strictness() {
+        let fixture = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(fixture.path()).unwrap();
+        let workspace = base.join("frozen-default");
+        std::fs::create_dir(&workspace).unwrap();
+        let files = context(&workspace);
+        let mut process = files.clone();
+        process.capability_id = CapabilityId::from("workspace.process");
+        process.action_id = ActionId::from("workspace.process/exec");
+        process.resource_bindings[0].resource_kind = ResourceKind::from("process_session");
+        let original = wave2_effect_resource_key(&files, &files.resource_bindings[0]).unwrap();
+        assert_eq!(wave2_effect_resource_key(&process, &process.resource_bindings[0]).unwrap(), original);
+        std::fs::remove_dir(&workspace).unwrap();
+        assert_eq!(wave2_effect_resource_key(&files, &files.resource_bindings[0]).unwrap(), original);
+        assert_eq!(wave2_effect_resource_key(&process, &process.resource_bindings[0]).unwrap(), original);
+        let mut vcs = files;
+        vcs.capability_id = CapabilityId::from("workspace.vcs");
+        vcs.action_id = ActionId::from("workspace.vcs/commit");
+        assert_eq!(wave2_effect_resource_key(&vcs, &vcs.resource_bindings[0]).unwrap_err().code, "INVALID_PAYLOAD");
+        assert!(!workspace.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn missing_default_effect_keys_keep_windows_plain_and_verbatim_namespace() {
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("frozen-default");
+        std::fs::create_dir(&workspace).unwrap();
+        let native = std::fs::canonicalize(&workspace).unwrap();
+        let plain = nomifun_common::paths::simplified(&native);
+        let mut cases = Vec::new();
+        for root in [&plain, &native] {
+            for module in ["workspace.files", "workspace.process"] {
+                let mut context = context(root);
+                context.capability_id = CapabilityId::from(module);
+                if module == "workspace.process" {
+                    context.action_id = ActionId::from("workspace.process/exec");
+                    context.resource_bindings[0].resource_kind = ResourceKind::from("process_session");
+                }
+                let key = wave2_effect_resource_key(&context, &context.resource_bindings[0]).unwrap();
+                cases.push((context, key));
+            }
+        }
+        assert!(cases.iter().all(|(_, key)| key == &cases[0].1));
+        std::fs::remove_dir(&workspace).unwrap();
+        for (context, key) in cases {
+            assert_eq!(wave2_effect_resource_key(&context, &context.resource_bindings[0]).unwrap(), key);
+        }
     }
 
     #[tokio::test]

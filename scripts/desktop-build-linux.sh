@@ -44,6 +44,7 @@ cd "$ROOT"
 CONF="apps/desktop/tauri.conf.json"
 DIST="$ROOT/dist/desktop"
 RELEASE_LOCK_TOOL="$ROOT/scripts/release/release-lock.mjs"
+SYSTEM_EXECUTION_TOOL="$ROOT/scripts/prepare-linux-system-execution.mjs"
 
 for tool in bun git rustup node; do
   command -v "$tool" >/dev/null 2>&1 || {
@@ -53,6 +54,10 @@ for tool in bun git rustup node; do
 done
 [[ -f "$RELEASE_LOCK_TOOL" ]] || {
   echo "❌ missing release-lock tool: $RELEASE_LOCK_TOOL" >&2
+  exit 1
+}
+[[ -f "$SYSTEM_EXECUTION_TOOL" ]] || {
+  echo "❌ missing Linux system execution packaging tool: $SYSTEM_EXECUTION_TOOL" >&2
   exit 1
 }
 
@@ -66,6 +71,9 @@ require_linux_build_deps() {
     pkg-config --exists webkit2gtk-4.1 || missing+=("libwebkit2gtk-4.1-dev (pkg-config: webkit2gtk-4.1)")
     pkg-config --exists gbm || missing+=("libgbm-dev (pkg-config: gbm)")
     pkg-config --exists librsvg-2.0 || missing+=("librsvg2-dev (pkg-config: librsvg-2.0)")
+    pkg-config --atleast-version=1.14 gstreamer-1.0 || missing+=("libgstreamer1.0-dev >= 1.14 (pkg-config: gstreamer-1.0)")
+    pkg-config --atleast-version=1.14 gstreamer-app-1.0 || missing+=("libgstreamer-plugins-base1.0-dev >= 1.14 (pkg-config: gstreamer-app-1.0)")
+    pkg-config --atleast-version=1.14 gstreamer-video-1.0 || missing+=("libgstreamer-plugins-base1.0-dev >= 1.14 (pkg-config: gstreamer-video-1.0)")
     if ! pkg-config --exists ayatana-appindicator3-0.1 && ! pkg-config --exists appindicator3-0.1; then
       missing+=("libayatana-appindicator3-dev 或 libappindicator3-dev (pkg-config: *appindicator3-0.1)")
     fi
@@ -80,12 +88,13 @@ require_linux_build_deps() {
     cat >&2 <<'EOF'
 
 Debian/Ubuntu 可先安装:
-  sudo apt-get install -y build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libgbm-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+  sudo apt-get install -y build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libgbm-dev libayatana-appindicator3-dev librsvg2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev patchelf
 
 说明:
   - libgbm-dev 提供 -lgbm 链接名与 gbm.pc。
   - libayatana-appindicator3-dev 提供 Tauri 托盘/AppIndicator 打包探测。
   - librsvg2-dev 提供 linuxdeploy GTK 插件需要的 librsvg-2.0.pc。
+  - GStreamer core/app/video >= 1.14 是 Linux Computer 的链接依赖；运行时另需发行版的 PipeWire、base/good plugins 与匹配桌面的 portal backend。
   - 本脚本会设置 APPIMAGE_EXTRACT_AND_RUN=1，让 linuxdeploy AppImage 在无 FUSE2 的构建机上也能运行。
 EOF
     exit 1
@@ -217,7 +226,11 @@ for t in "${TRIPLES[@]}"; do
   if [[ -d "$bundle_dir" ]]; then
     find "$bundle_dir" -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' -o -name '*.sig' \) -delete
   fi
-  CI=true bun x tauri build --config "$CONF" --target "$t" ${PASSTHRU[@]+"${PASSTHRU[@]}"}
+  # Build the exact target's runner and freeze package inputs before Tauri.
+  # The final internal overlay makes the installed path/policy independent of
+  # optional caller overlays. This does not install or authorize the runner.
+  system_execution_config="$(bun "$SYSTEM_EXECUTION_TOOL" --target "$t" --profile release)"
+  CI=true bun x tauri build --config "$CONF" --target "$t" ${PASSTHRU[@]+"${PASSTHRU[@]}"} --config "$system_execution_config"
 
   # Linux 产物在 target/<triple>/release/bundle/{deb,appimage,rpm}/
   host="$ROOT/target/$t/release/nomifun-desktop"

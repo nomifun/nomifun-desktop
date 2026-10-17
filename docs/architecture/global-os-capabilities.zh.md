@@ -8,6 +8,10 @@
 
 原子写入和 patch 继续固定真实父目录句柄，校验源版本、发布前置条件和并发变化。读取、写入及 patch 跟随合法目标链接；删除和重命名操作链接本身。重命名不覆盖既存目标，跨卷失败保留真实结果。操作系统 ACL、属主和文件系统错误仍然生效；`SYSTEM_ACCESS_DENIED` 保留原始 I/O 原因，不能把所有拒绝自动归类为管理员不足。
 
+Linux 原子替换在已固定的源与 staging fd 上保留 UID/GID、mode 和内核可观察的 ACL/xattrs，复核源与目标后再发布；权限或元数据复制失败在发布前返回真实错误。普通用户无权观察的属性不能由测试补造。新 regular file 在文件系统明确不支持 `renameat2(RENAME_NOREPLACE)` 时可用同目录 `linkat` 原子 no-replace 发布，随后精确处理 staging 清理；通用重命名不采用覆盖或复制后删除降级，文件系统不支持时保留真实错误和源文件。
+
+已冻结的默认目录删除后，Session 新 Turn、File/Process Effect 身份和无知识挂载的运行时租约仍使用原锚点；合法绝对文件路径与显式外部 cwd 可以继续，不重建目录、不换绑。进程缺省 cwd 若不可用仍返回其真实系统错误。实际知识挂载、VCS 和新选择目录继续要求对应的真实目录；无知识挂载租约仍持有原签名 registry/用户级 OS 锁，目录重建或别名变化不能分裂既有 authority/unknown fence。
+
 项目 watcher、VCS、产物和应用归属继续指向确切项目。工作区外写入不发布伪造的工作区相对文件事件，也不因为物理路径相邻而成为项目产物。Session/Turn/Event/Payload/Effect 仍是唯一 Agent 事实链。
 
 `read_file` 的 text、image 和 instruction_scope 共用 `execution_identity`，缺省是当前用户。管理员读取仍是同一个只读 Action，不新增工具或文件写入权限：原生 worker 使用轻量 `nomi-native-files` 获取受限体积的真实源或目录 scope，App 复用 FileService 的 UTF-8、分页、完整 SHA-256、版本 pin、项目路径投影及图片 decoder。普通与管理员读取共用同一原生读取和 scope 扫描核心；真实缺失、访问拒绝、过大源和失效版本分别处理，拒绝不能成为 absence。
@@ -28,7 +32,13 @@ Rust worker 经 Swift/C 入口退出时，在返回前显式写完并 flush JSON
 
 helper 从连接的真实调用用户解析 HOME，保持用户环境；系统命令没有交互桌面资格。用户要求持久的 launchd 服务、登录项、系统计划任务是原生系统产物，其运行与卸载按任务意图处理。任务临时子进程仍须清理，不通过双重 fork 假装持久化，也不把任务结束的全树清理作用到已正式注册的独立服务。
 
-Windows、Linux 当前共享接口对尚未实现的管理员适配返回明确 `SYSTEM_EXECUTION_NOT_AVAILABLE`。它们需要目标平台设计、实现和原生验证，不能把 macOS helper 编译成功写成三平台已完成。
+Linux 使用固定 `/usr/bin/pkexec --disable-internal-agent /usr/libexec/nomifun-system-runner --stdio`，由发行版 polkit 完成系统认证。普通 GUI 继续使用登录用户；runner 通过原监督器管理 Pipe/PTY 与 typed readonly worker。每连接使用有界帧和并发 RPC，握手核对真实 root、`PKEXEC_UID` 对应的调用用户及同源 build identity。调用用户的 HOME/USER/LOGNAME 从系统用户记录取得，不使用 root HOME；认证等待可取消，认证完成前不派发操作。丢失回执保持 unknown，断联和输出写失败进入原监督器清理，不能用新连接重放未知操作。
+
+Linux 的 pkexec 必须由拥有原 child 整个寿命的专用创建线程启动；不能在返回后会被回收的临时 blocking thread 上创建。pkexec 的父线程死亡保护保持启用，client 关闭 stdin 后创建线程仍等待原 runner 完成 EOF cleanup 并实际退出回收。原生认证错误保留真实 exit code/signal 与有界 stderr 诊断，不把无回执或信号退出概括为密码错误。
+
+Linux `.deb`/`.rpm` 将 runner 和固定 action 安装为系统文件，开发构建与 AppImage 携带同版本显式安装入口。action 绑定固定 executable 和 `--stdio`，各 session 类型均使用系统的 `auth_admin_keep`，不安装 sudoers、不保存密码，也不由 GUI 启动时偷偷写系统目录。缺组件、无认证代理、拒绝、取消、超时与未知结果分别表达。实际认证和原生产品通过范围见 [Linux 验证](../validation/global-os-linux-2026-10-17.zh.md)。
+
+Windows 尚未实现的管理员适配继续返回 `SYSTEM_EXECUTION_NOT_AVAILABLE`；Linux runner 的编译或 root 隔离夹具也不能代替 Windows 或真实 polkit 授权证明。
 
 ## 命令、环境与依赖
 
@@ -54,7 +64,9 @@ Computer 继续在登录桌面的 App 进程执行，每次操作按实际需要
 
 权限库存包含实际 PID 和可解析的真实 App bundle 身份。AX/CG 返回 false 只证明 `not_granted`；FDA、Automation 和局域网没有适用于所有目标的全局可靠探针，保留 unknown，实际目标操作再给真实结果。Camera/Microphone 使用原生状态；使用说明与 Apple Events automation entitlement 随 App 打包。详见[系统许可](system-permissions.zh.md)。
 
-普通监听、本机/局域网访问、原生安装、服务与系统设置复用上述通用路径。SIP、UAC、安全桌面、TCC、ACL、网络设施和实际设备存在性仍按系统真实限制表达。Linux Computer 产品入口、X11/Wayland/portal 和 Windows 高完整性桌面路径仍有工程缺口，不能归因于用户权限不足。
+普通监听、本机/局域网访问、原生安装、服务与系统设置复用上述通用路径。SIP、UAC、安全桌面、TCC、ACL、网络设施和实际设备存在性仍按系统真实限制表达。Linux Computer 已接入正式模块与资源选择：完整 X11 后端核实真实服务器、窗口管理器及 EWMH 激活结果，不以点击窗口中心代替聚焦，也不把 XWayland 当作全局桌面。Wayland 使用系统 RemoteDesktop/ScreenCast portal、受控会话与 PipeWire/GStreamer 帧，通过同一 Computer 工具链观察和输入；缺 backend、尚未授权、session 关闭与失效必须如实返回，输入不能隐式重新弹出授权后继续旧动作。Wayland 没有通用的全局窗口枚举/聚焦和指针查询接口，这些操作保留明确限制，不用 XWayland 规避 compositor。
+
+独立 X11 虚拟桌面测试、portal 协议 fixture 与真实用户桌面授权分别计证，见 [Linux 桌面验证](../validation/global-os-linux-desktop-2026-10-17.zh.md)。Windows 高完整性桌面路径仍有工程缺口，不能归因于用户权限不足。
 
 ## 验证与平台接续
 

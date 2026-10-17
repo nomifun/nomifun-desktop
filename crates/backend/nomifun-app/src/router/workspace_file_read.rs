@@ -75,10 +75,14 @@ fn system_read_error(error: nomi_system_execution::SystemExecutionError) -> AppE
         "RESOURCE_NOT_FOUND" => AppError::NotFound(message),
         "SYSTEM_EXECUTION_NOT_AVAILABLE"
         | "SYSTEM_EXECUTION_APPROVAL_REQUIRED"
+        | "SYSTEM_EXECUTION_AUTHENTICATION_UNAVAILABLE"
         | "NATIVE_FILE_ACQUIRE_UNAVAILABLE" => AppError::ComponentUnavailable {
             component: "system-execution".into(),
             reason: message,
         },
+        "SYSTEM_EXECUTION_AUTHENTICATION_DENIED"
+        | "SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED" => AppError::Forbidden(message),
+        "SYSTEM_EXECUTION_AUTHENTICATION_TIMED_OUT" => AppError::Timeout(message),
         _ => AppError::Internal(format!("{message}; native read details: {}", error.details)),
     }
 }

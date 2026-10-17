@@ -31,11 +31,12 @@ describe('complete macOS application build routing', () => {
     expect(desktopBuildCommand('darwin', ['--config', 'overlay.json'])).toEqual({
       command: 'bash', args: [resolve(REPO, 'scripts/desktop-build-mac.sh'), '--config', 'overlay.json'], prune: false,
     });
-    for (const platform of ['linux', 'win32']) {
-      expect(desktopBuildCommand(platform, ['--config', 'overlay.json'])).toEqual({
-        command: 'bun', args: ['x', 'tauri', 'build', '--config', 'apps/desktop/tauri.conf.json', '--config', 'overlay.json'], prune: true,
-      });
-    }
+    expect(desktopBuildCommand('linux', ['--config', 'overlay.json'])).toEqual({
+      command: 'bash', args: [resolve(REPO, 'scripts/desktop-build-linux.sh'), '--config', 'overlay.json'], prune: false,
+    });
+    expect(desktopBuildCommand('win32', ['--config', 'overlay.json'])).toEqual({
+      command: 'bun', args: ['x', 'tauri', 'build', '--config', 'apps/desktop/tauri.conf.json', '--config', 'overlay.json'], prune: true,
+    });
   });
 
   test('updater selection follows the final user overlay before the internal Tauri override', async () => {

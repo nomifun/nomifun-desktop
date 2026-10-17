@@ -44,7 +44,10 @@ impl SystemExecutionClient {
                     details: json!({"cleanup_proven":false}),
                 })?;
             match connected {
-                Ok(client) => return Ok(client),
+                Ok(client) => {
+                    client.wait_ready().await?;
+                    return Ok(client);
+                },
                 Err(error)
                     if error.code == "SYSTEM_EXECUTION_APPROVAL_REQUIRED"
                         && tokio::time::Instant::now() < deadline =>

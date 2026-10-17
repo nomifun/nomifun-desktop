@@ -46,6 +46,8 @@ mod unix_delete;
 mod unix_directory;
 #[cfg(unix)]
 mod unix_publication;
+#[cfg(target_os = "linux")]
+mod linux_publication_metadata;
 #[cfg(windows)]
 mod windows_read;
 #[cfg(windows)]

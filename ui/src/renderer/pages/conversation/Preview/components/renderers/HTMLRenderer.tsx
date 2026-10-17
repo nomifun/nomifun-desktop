@@ -281,6 +281,7 @@ const HTMLRenderer: React.FC<HTMLRendererProps> = ({ content, file_path, workspa
     >
       <iframe
         ref={iframeRef}
+        allow="camera 'none'; microphone 'none'"
         srcDoc={browserHtmlContent}
         className='w-full h-full border-0'
         style={{

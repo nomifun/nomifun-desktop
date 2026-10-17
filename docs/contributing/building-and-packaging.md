@@ -23,6 +23,32 @@ The desktop config is
 platform requirements and `frontendDist` live there. The workspace version
 comes from [Cargo.toml](../../Cargo.toml).
 
+Linux `build` and `build:linux` build and freeze the system runner for the selected
+architecture before bundling. Deb/rpm install the runner and its polkit action at
+fixed system paths; AppImage carries an explicit installer because mounting an
+image cannot install host authentication components. `build:fast` stages a debug
+runner and prints its manual installation command. Development startup does not
+change system files. Installation, upgrade/removal, authentication requirements
+and checks are in the [Linux system execution guide](../../apps/desktop/linux-system-execution/README.md).
+
+Linux Computer also links GStreamer core/app/video (system version 1.14 or newer).
+The build preflight checks all three pkg-config modules. Debian/Ubuntu build
+packages are `libgstreamer1.0-dev` and `libgstreamer-plugins-base1.0-dev`; runtime
+packages are `gstreamer1.0-pipewire`, `gstreamer1.0-plugins-base` and
+`gstreamer1.0-plugins-good`. The RPM dependency names follow Fedora's
+`pipewire-gstreamer`, `gstreamer1-plugins-base` and `gstreamer1-plugins-good`.
+The native packages declare these runtime-loaded plugins and `xdg-desktop-portal`;
+ELF library scanning cannot discover the required `pipewiresrc`, `videoconvert`,
+`videoflip` and `appsink` factories by itself. Wayland additionally needs the
+logged-in desktop's working PipeWire service and a portal backend implementing
+the requested ScreenCast/RemoteDesktop interfaces and native consent.
+
+AppImage still requires those matching host services and GStreamer plugins.
+Its actual linked libraries/plugin search path must be inspected in the finished
+image with the target desktop; the bundler's `bundleMediaFramework` option alone
+does not prove that `pipewiresrc` or a host portal backend is present. AppImage
+Wayland operation remains unverified until that packaged runtime is exercised.
+
 ## Web deployment artifacts
 
 Build the SPA before running a non-embedded Web host:

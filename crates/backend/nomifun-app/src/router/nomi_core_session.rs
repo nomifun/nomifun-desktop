@@ -801,9 +801,11 @@ impl NomiCoreSessionOwner {
         }
         workspace
             .map(|workspace| {
-                canonical_existing_workspace_directory(
+                // Creation already froze an existing canonical directory into
+                // this exact owner/binding. Its later absence must not block
+                // independent absolute file targets or an explicit process cwd.
+                super::nomi_core_wave2::canonical_workspace_root(
                     std::path::Path::new(&workspace),
-                    WorkspaceDirectoryCheck::Runtime,
                 )
                 .map(|path| path.to_string_lossy().into_owned())
             })
