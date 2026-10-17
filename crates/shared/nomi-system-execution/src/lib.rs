@@ -8,7 +8,7 @@ use nomi_process_runtime::{
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
-    ffi::{CStr, CString, c_char, c_void},
+    ffi::{CString, c_char, c_void},
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -16,7 +16,13 @@ use std::{
 use uuid::Uuid;
 
 mod readonly;
-pub use readonly::SystemReadReceipt;
+pub use readonly::{SystemReadReceipt, nomifun_system_readonly_worker};
+#[cfg(target_os = "macos")]
+use std::ffi::CStr;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::run_stdio_helper;
 
 #[derive(Clone, Debug, thiserror::Error)]
 #[error("{code}: {message}")]
@@ -54,6 +60,8 @@ impl SystemExecutionError {
 /// the helper shuts down and proves cleanup for every admitted temporary task.
 #[derive(Debug)]
 pub struct SystemExecutionClient {
+    #[cfg(target_os = "linux")]
+    linux: linux::LinuxClient,
     #[cfg(target_os = "macos")]
     native: Arc<NativeClient>,
     #[cfg(target_os = "macos")]
@@ -109,12 +117,26 @@ impl SystemExecutionClient {
                 admission: Arc::new(tokio::sync::RwLock::new(())),
             })
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            Ok(Self { linux: linux::LinuxClient::connect()? })
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             Err(SystemExecutionError::unavailable(
                 "Native administrator execution awaits this platform's implementation and native validation",
             ))
         }
+    }
+
+    /// Linux authentication is an asynchronous OS interaction. Dropping this
+    /// client while approval is pending closes its transport and cancels that
+    /// attempt before any user operation is dispatched.
+    pub async fn wait_ready(&self) -> Result<(), SystemExecutionError> {
+        #[cfg(target_os = "linux")]
+        { self.linux.wait_ready().await }
+        #[cfg(not(target_os = "linux"))]
+        { Ok(()) }
     }
 
     pub async fn call(&self, request: Value) -> Result<Value, SystemExecutionError> {
@@ -181,7 +203,11 @@ impl SystemExecutionClient {
             })?;
             result
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            self.linux.call(request).await
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = request;
             Err(SystemExecutionError::unavailable(
@@ -205,7 +231,13 @@ impl SystemExecutionClient {
             unsafe { nomifun_system_client_free(error) };
             Err(SystemExecutionError::unavailable(message))
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            Err(SystemExecutionError::unavailable(
+                "Remove the Linux system-execution package component with its native package manager",
+            ))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             Err(SystemExecutionError::unavailable(
                 "Native administrator execution is not implemented on this platform",
@@ -239,7 +271,23 @@ fn cursor(request: &Value) -> OutputCursor {
     OutputCursor::new(request["cursor"].as_u64().unwrap_or(0))
 }
 fn output(value: &OutputSnapshot) -> Value {
-    json!({"chunks":value.chunks.iter().map(|chunk|json!({"seq":chunk.seq,"start":chunk.start,"stream":match chunk.stream { nomi_process_runtime::OutputStream::Stdout=>"stdout",nomi_process_runtime::OutputStream::Stderr=>"stderr",nomi_process_runtime::OutputStream::Pty=>"pty"},"bytes":chunk.bytes,"text":chunk.text})).collect::<Vec<_>>(),"next_cursor":value.next_cursor.offset(),"retained_bytes":value.retained_bytes,"dropped_bytes":value.dropped_bytes,"encoding":{"source_encoding":value.encoding.source_encoding,"decode_errors":value.encoding.decode_errors}})
+    json!({"chunks":value.chunks.iter().map(output_chunk).collect::<Vec<_>>(),"next_cursor":value.next_cursor.offset(),"retained_bytes":value.retained_bytes,"dropped_bytes":value.dropped_bytes,"encoding":{"source_encoding":value.encoding.source_encoding,"decode_errors":value.encoding.decode_errors}})
+}
+fn output_chunk(chunk: &nomi_process_runtime::OutputChunk) -> Value {
+    let value = json!({"seq":chunk.seq,"start":chunk.start,"stream":match chunk.stream {
+        nomi_process_runtime::OutputStream::Stdout=>"stdout",nomi_process_runtime::OutputStream::Stderr=>"stderr",nomi_process_runtime::OutputStream::Pty=>"pty"
+    },"text":chunk.text});
+    // The Linux engine consumes text and its original encoding/counts. Do not
+    // materialize an unused second JSON byte array for every output chunk.
+    // Readonly acquisition reads native bytes directly inside its supervisor.
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut value = value;
+        value["bytes"] = json!(chunk.bytes);
+        value
+    }
+    #[cfg(target_os = "linux")]
+    { value }
 }
 fn cleanup(value: &CleanupReport) -> Value {
     json!({"interrupt_attempted":value.interrupt_attempted,"terminate_attempted":value.terminate_attempted,"force_kill_attempted":value.force_kill_attempted,"reaped":value.reaped,"elapsed_ms":value.elapsed.as_millis(),"errors":value.errors})

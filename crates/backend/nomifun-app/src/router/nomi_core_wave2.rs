@@ -429,6 +429,15 @@ impl NomiCoreWave2Host {
         if failures.is_empty() { Ok(()) } else { Err(AppError::Conflict(failures.join("; "))) }
     }
 
+    pub(crate) async fn wait_runtime_processes(&self, user: &str, session: &str, operation: &str,
+        processes: &[nomifun_agent_runtime::AgentWaitProcess], cancellation: tokio_util::sync::CancellationToken)
+        -> Result<Vec<nomifun_agent_runtime::AgentOwnedProcessObservation>, AppError> {
+        let scope = self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?
+            .get(&(user.to_owned(), session.to_owned(), operation.to_owned())).cloned()
+            .ok_or_else(|| AppError::Conflict("wait has no original Turn process owner".into()))?;
+        scope.wait_for_changes(processes, cancellation).await.map_err(|error| AppError::Conflict(error.to_string()))
+    }
+
     async fn invoke_ssh(
         &self,
         request: Wave2HostRequest,

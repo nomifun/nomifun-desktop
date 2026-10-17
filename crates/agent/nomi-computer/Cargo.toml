@@ -26,6 +26,19 @@ base64.workspace = true
 # "Windows cannot find 'X'" dialog). macOS/Linux use `open`/`xdg-open`.
 open.workspace   = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Query the logged-in user's desktop services directly. Environment variables
+# identify the session to contact; they do not establish portal permission.
+zbus = { version = "5", features = ["tokio"] }
+zbus_xml = "5"
+futures-util.workspace = true
+x11rb = "0.13"
+# Native single-frame capture from the fd/node granted by ScreenCast. The
+# platform packages supply GStreamer; capture never downloads a runtime.
+gstreamer = "0.24"
+gstreamer-app = "0.24"
+gstreamer-video = "0.24"
+
 # macOS TCC permission probing (Accessibility / Screen Recording): proactive
 # status + prompt via AXIsProcessTrusted(WithOptions) and CG*ScreenCaptureAccess.
 [target.'cfg(target_os = "macos")'.dependencies]

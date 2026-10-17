@@ -6,7 +6,7 @@ pub(super) async fn read(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessio
     let row=sqlx::query_as::<_,StoredTurnRow>(
         "SELECT turn_id,operation_id,state,started_event_id,terminal_event_id FROM agent_turns WHERE session_id=? AND operation_id=?")
         .bind(session.as_ref()).bind(operation.as_ref()).fetch_optional(&mut **tx).await?;
-    let Some(row)=row else { return Ok(crate::CanonicalTurnPublicResult {turn_outcome:None,result_text:None}); };
+    let Some(row)=row else { return Ok(crate::CanonicalTurnPublicResult {turn_outcome:None,result_text:None,user_input_request:None}); };
     if row.turn_id!=operation.as_ref() || row.operation_id!=operation.as_ref() {return Err(SessionStoreError::InvalidSession("Turn outcome identity differs".into()));}
     let start=event_by_event_id_tx(tx,&row.started_event_id).await?.map(event_from_row).transpose()?
         .ok_or_else(||SessionStoreError::InvalidSession("Turn outcome start missing".into()))?;
@@ -28,7 +28,7 @@ pub(super) async fn read(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessio
          ('turn/started','turn/completed','turn/failed','turn/cancelled','message/content-part','message/completed') \
          OR (e.kind='runtime/progress-recorded' AND COALESCE(json_extract(e.inline_json,'$.event.event'),\
          json_extract(CAST(p.body AS TEXT),'$.value.event.event')) IN \
-         ('model_step_started','output_text_delta','completion_delivered','model_output_truncated','model_response_rejected','tool_call_completed','voice_model_step_superseded'))) \
+         ('model_step_started','output_text_delta','completion_delivered','silent_completion','model_output_truncated','model_response_rejected','tool_call_completed','voice_model_step_superseded','user_input_requested','turn_waiting','turn_wait_resolved','steering_inputs','tool_started'))) \
          ORDER BY e.seq LIMIT 1000001")
         .bind(session.as_ref()).bind(as_i64(start.seq,"Turn outcome start")?).bind(as_i64(upper,"Turn outcome end")?)
         .fetch_all(&mut **tx).await?;
@@ -39,7 +39,7 @@ pub(super) async fn read(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessio
     let receipt=TurnReceipt {agent_session_id:session.clone(),operation_id:operation.clone(),status,
         started_event:Some(start),terminal_event:terminal};
     crate::turn_outcome::derive_turn_public_result(&receipt,
-        head.status=="paused"&&head.active_turn_id.as_deref()==Some(operation.as_ref()),&events,&payloads)
+        matches!(head.status.as_str(),"paused"|"reconciliation")&&head.active_turn_id.as_deref()==Some(operation.as_ref()),&events,&payloads)
 }
 
 pub(super) async fn hydrate(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionId, projections: &mut [MessageProjection])
@@ -47,7 +47,12 @@ pub(super) async fn hydrate(tx: &mut Transaction<'_, Sqlite>, session: &AgentSes
     for projection in projections.iter_mut().filter(|row|row.presentation_intent=="turn_summary") {
         let operation=projection.projection.get("turn_operation_id").and_then(Value::as_str)
             .ok_or_else(||SessionStoreError::InvalidSession("Turn summary operation missing".into()))?;
-        if let Some(outcome)=read(tx,session,&OperationId::from(operation)).await?.turn_outcome {
+        let result=read(tx,session,&OperationId::from(operation)).await?;
+        if let Some(request)=result.user_input_request {
+            projection.projection["user_input_request"]=serde_json::to_value(request)?;
+            projection.message_type=Some("tips".into());
+        }
+        if let Some(outcome)=result.turn_outcome {
             projection.projection["turn_outcome"]=serde_json::to_value(outcome)?;
             projection.semantic_digest=digest_payload(&projection.projection)?.0;
         }

@@ -28,7 +28,7 @@ test.each(['idle', 'awaiting admission', 'original Turn release pending', 'next 
     spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ id: conversationId, type: 'nomi',
       status: activeTurnId ? 'running' : 'finished', runtime: {
         state: activeTurnId ? 'running' : 'idle', is_processing: Boolean(activeTurnId),
-        can_send_message: !activeTurnId, has_runtime: Boolean(activeTurnId), active_turn_id: activeTurnId,
+        can_send_message: !activeTurnId, active_turn_id: activeTurnId,
         ...(activeTurnId ? { processing_started_at: 3000 } : {}),
       },
     } as TChatConversation);

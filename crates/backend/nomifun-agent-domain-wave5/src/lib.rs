@@ -2456,6 +2456,9 @@ mod tests {
             "strategy": "planned", "goal": "organize the requested local files", "target_role": "desktop"
         })));
         assert!(validator.is_valid(&serde_json::json!({
+            "strategy": "planned", "goal": "北京今天的天气怎么样？查询当前天气并简短回答。", "target_role": "desktop"
+        })), "a short current-information query can use the same directed Agent path");
+        assert!(validator.is_valid(&serde_json::json!({
             "strategy": "parallel",
             "tasks": [{"name":"marker","prompt":"Reply with the exact marker"}],
             "synthesize": false

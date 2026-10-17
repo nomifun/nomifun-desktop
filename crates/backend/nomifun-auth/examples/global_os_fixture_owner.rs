@@ -1,13 +1,13 @@
-//! Prepare an isolated macOS native-acceptance owner through the real setup
+//! Prepare an isolated Unix native-acceptance owner through the real setup
 //! router. This is fixture preparation, never native product acceptance.
 //!
-//! First use --prepare-empty-fixture /private/tmp/nomifun-global-os-UNIQUE0001/native-data,
-//! then let the signed App bootstrap that empty directory through its real
+//! First use --prepare-empty-fixture <platform-tmp>/nomifun-global-os-UNIQUE0001/native-data,
+//! then let the native App bootstrap that empty directory through its real
 //! dataset coordinator. Only then use --initialize-running-fixture with that
 //! path. This tool never fabricates startup receipts or precreates a database.
 //! Credentials are written once to separate 0600 credential.json, never printed.
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod fixture {
     use std::{
         error::Error,
@@ -28,6 +28,8 @@ mod fixture {
     use nomifun_db::{IUserRepository, SqliteUserRepository, init_database};
     use serde_json::json;
     use tower::ServiceExt;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::fs::MetadataExt;
 
     const MARKER: &str = "nomifun-global-os-native-acceptance-fixture.v1\n";
 
@@ -44,8 +46,9 @@ mod fixture {
         if suffix.len() < 8 || !suffix.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') {
             return Err("fixture parent must have a unique alphanumeric suffix of at least eight characters".into());
         }
-        if root.parent() != Some(Path::new("/private/tmp")) {
-            return Err("fixture parent must be a direct child of /private/tmp".into());
+        let temporary = if cfg!(target_os = "linux") { "/tmp" } else { "/private/tmp" };
+        if root.parent() != Some(Path::new(temporary)) {
+            return Err("fixture parent must be a direct child of the platform temporary directory".into());
         }
         Ok(root.to_owned())
     }
@@ -82,6 +85,49 @@ mod fixture {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
+    fn verify_platform_app(pid: u32, port: u64, data: &Path) -> Result<(), Box<dyn Error>> {
+        verify_macos_app(pid, port, data)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn verify_platform_app(pid: u32, port: u64, data: &Path) -> Result<(), Box<dyn Error>> {
+        let process = PathBuf::from(format!("/proc/{pid}"));
+        let executable = fs::read_link(process.join("exe"))?;
+        if !executable.is_absolute() || executable.file_name().and_then(|name| name.to_str()) != Some("nomifun-desktop") {
+            return Err("fixture pid is not a real NomiFun native App executable".into());
+        }
+        let driver_uid = fs::metadata("/proc/self")?.uid();
+        if driver_uid == 0 || fs::metadata(&process)?.uid() != driver_uid || fs::metadata(data)?.uid() != driver_uid {
+            return Err("native App, fixture and driver must use the same ordinary login uid".into());
+        }
+        let database = data.join("nomifun-backend.db");
+        let mut descriptors = Vec::new();
+        for entry in fs::read_dir(process.join("fd"))? {
+            match fs::read_link(entry?.path()) {
+                Ok(target) => descriptors.push(target),
+                // Real App workers may close temporary descriptors between
+                // enumeration and readlink; other I/O failures remain fatal.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if !descriptors.iter().any(|target| target == &database) {
+            return Err("native App does not own the exact fixture database".into());
+        }
+        let address = format!("0100007F:{port:04X}");
+        let listeners = fs::read_to_string(process.join("net/tcp"))?;
+        let owns_listener = listeners.lines().skip(1).any(|line| {
+            let columns: Vec<_> = line.split_whitespace().collect();
+            columns.len() > 9 && columns[1] == address && columns[3] == "0A"
+                && descriptors.iter().any(|target| target.to_str() == Some(&format!("socket:[{}]", columns[9])))
+        });
+        if !owns_listener {
+            return Err("native App does not own the exact loopback listener".into());
+        }
+        Ok(())
+    }
+
     fn running_app(data: &Path) -> Result<u32, Box<dyn Error>> {
         for path in [data.to_owned(), data.join("port.json"), data.join("nomifun-backend.db")] {
             let metadata=fs::symlink_metadata(&path)?;
@@ -94,6 +140,17 @@ mod fixture {
         let pid=announcement["pid"].as_u64().filter(|pid|*pid>1 && *pid<=u32::MAX as u64).ok_or("port.json has no valid App pid")? as u32;
         let port=announcement["port"].as_u64().filter(|port|*port>0 && *port<=65535).ok_or("port.json has no valid port")?;
         if announcement["host"]!="127.0.0.1" { return Err("fixture App must listen on IPv4 loopback".into()); }
+        verify_platform_app(pid, port, data)?;
+        let status=Command::new("/usr/bin/curl").args(["--silent","--show-error","--fail","--max-time","5",&format!("http://127.0.0.1:{port}/api/auth/status")]).output()?;
+        let status_body:serde_json::Value=serde_json::from_slice(&status.stdout)?;
+        if !status.status.success() || status_body["success"]!=true || status_body["needs_setup"]!=true {
+            return Err("live App does not have an uninitialized fixture owner".into());
+        }
+        Ok(pid)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn verify_macos_app(pid: u32, port: u64, data: &Path) -> Result<(), Box<dyn Error>> {
         let command=Command::new("/bin/ps").args(["-ww","-p",&pid.to_string(),"-o","comm="]).output()?;
         let program=String::from_utf8(command.stdout)?.trim().to_owned();
         let app=program.strip_suffix("/Contents/MacOS/nomifun-desktop").ok_or("port.json pid is not a real NomiFun App executable")?;
@@ -114,19 +171,14 @@ mod fixture {
                 return Err("live App did not prove ownership of both the announced listener and exact fixture database".into());
             }
         }
-        let status=Command::new("/usr/bin/curl").args(["--silent","--show-error","--fail","--max-time","5",&format!("http://127.0.0.1:{port}/api/auth/status")]).output()?;
-        let status_body:serde_json::Value=serde_json::from_slice(&status.stdout)?;
-        if !status.status.success() || status_body["success"]!=true || status_body["needs_setup"]!=true {
-            return Err("live App does not have an uninitialized fixture owner".into());
-        }
-        Ok(pid)
+        Ok(())
     }
 
     pub async fn run() -> Result<(), Box<dyn Error>> {
         let mut args = std::env::args_os().skip(1);
         let mode=args.next().ok_or("expected --prepare-empty-fixture or --initialize-running-fixture")?;
         if mode!="--prepare-empty-fixture" && mode!="--initialize-running-fixture" { return Err("unsupported fixture mode".into()); }
-        let data = PathBuf::from(args.next().ok_or("expected /private/tmp/nomifun-global-os-UNIQUE0001/native-data")?);
+        let data = PathBuf::from(args.next().ok_or("expected <platform-tmp>/nomifun-global-os-UNIQUE0001/native-data")?);
         if args.next().is_some() { return Err("expected exactly one native-data path".into()); }
         let root = exact_fixture_path(&data)?;
         prepare_parent(&root)?;
@@ -167,7 +219,7 @@ mod fixture {
         if !setup.success || setup.user.username != username || setup.token.is_empty() {
             return Err("production setup API did not prove successful fixture-owner creation".into());
         }
-        // Discard the setup JWT. The real signed App must issue its own JWT
+        // Discard the setup JWT. The real native App must issue its own JWT
         // via /login against the persisted normal password hash.
         drop(setup);
         credential.write_all(&serde_json::to_vec_pretty(&json!({"username": username, "password": password}))?)?;
@@ -180,7 +232,7 @@ mod fixture {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::main]
 async fn main() {
     if let Err(error) = fixture::run().await {
@@ -189,8 +241,8 @@ async fn main() {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn main() {
-    eprintln!("This isolated native-acceptance owner preparation requires macOS /private/tmp.");
+    eprintln!("This isolated native-acceptance owner preparation requires macOS or Linux.");
     std::process::exit(1);
 }

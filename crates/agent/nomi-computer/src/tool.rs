@@ -16,7 +16,7 @@ use crate::input::{self, ScrollDirection};
 use crate::keys::parse_key_combo;
 use crate::scale::{map_llm_coord, map_screen_coord};
 use crate::screen::{
-    CANONICAL_SCREENSHOT_PNG_BYTES, CaptureGeometry, capture_screen,
+    CANONICAL_SCREENSHOT_PNG_BYTES, CaptureGeometry,
     encode_png_with_limit,
 };
 use crate::fallback_backend;
@@ -121,6 +121,8 @@ impl ComputerTool {
     /// owners use this at observation/settlement boundaries; an admitted input
     /// keeps its geometry until it has settled.
     pub fn clear_cached_observation(&self) {
+        #[cfg(target_os = "linux")]
+        crate::linux_wayland_input::clear_capture();
         *self.last_snapshot.lock().unwrap_or_else(|p| p.into_inner()) = None;
         *self.last_capture.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
@@ -481,7 +483,10 @@ impl ComputerTool {
             Ok(msg) => ToolResult::text(format!(
                 "{msg} Take a screenshot or run `observe` to see the result."
             )),
-            Err(e) => ToolResult::error(e),
+            Err(e) => {
+                self.clear_cached_observation();
+                ToolResult::error(e)
+            },
         }
     }
 
@@ -514,6 +519,10 @@ impl ComputerTool {
     }
 
     async fn do_screenshot(&self, input: &Value) -> ToolResult {
+        // A failed refresh must not leave earlier display geometry available
+        // to direct native callers. The canonical role owner has the same
+        // observation boundary, and this keeps the library path consistent.
+        self.clear_cached_observation();
         let display = match input.get("display") {
             None | Some(Value::Null) => None,
             Some(v) => match v.as_u64() {
@@ -530,9 +539,26 @@ impl ComputerTool {
         };
 
         let max_edge = self.max_screenshot_edge;
-        let captured = tokio::task::spawn_blocking(move || capture_screen(display, max_edge))
+        #[cfg(target_os = "linux")]
+        let (cancellation, completed, mut cancel_guard) = {
+            let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (completed, completion) = std::sync::mpsc::sync_channel(1);
+            let guard = crate::linux_native_worker::CancelAndJoin::new(cancellation.clone(), completion);
+            (cancellation, completed, guard)
+        };
+        let captured = tokio::task::spawn_blocking(move || {
+            #[cfg(target_os = "linux")]
+            {
+                let _completion = crate::linux_native_worker::Completion(completed);
+                return crate::screen::capture_screen_cancellable(display, max_edge, cancellation);
+            }
+            #[cfg(not(target_os = "linux"))]
+            crate::screen::capture_screen(display, max_edge)
+        })
             .await
             .unwrap_or_else(|e| Err(format!("Screenshot task failed: {e}")));
+        #[cfg(target_os = "linux")]
+        cancel_guard.disarm();
 
         match captured {
             Ok(shot) => {
@@ -555,10 +581,16 @@ impl ComputerTool {
                         );
                         ToolResult::text(text).with_images(vec![encoded.image])
                     }
-                    Err(e) => ToolResult::error(e),
+                    Err(e) => {
+                        self.clear_cached_observation();
+                        ToolResult::error(e)
+                    },
                 }
             }
-            Err(e) => ToolResult::error(e),
+            Err(e) => {
+                self.clear_cached_observation();
+                ToolResult::error(e)
+            },
         }
     }
 

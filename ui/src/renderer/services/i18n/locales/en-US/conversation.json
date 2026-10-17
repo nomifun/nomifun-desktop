@@ -398,6 +398,18 @@
         "title": "Task resource cleanup is unconfirmed",
         "body": "Resource cleanup for this turn is unconfirmed, so new messages cannot be sent yet. Wait for the app to confirm cleanup and update its state; if sending remains blocked, review the technical details and send feedback."
       },
+      "EXECUTION_DEPENDENCY_BLOCKED": {
+        "title": "Waiting for a dependency",
+        "body": "This turn has kept its progress and is waiting for an external condition or required information. Outstanding work remains open."
+      },
+      "EXECUTION_INTERVENTION_REQUIRED": {
+        "title": "Your input is needed",
+        "body": "The Agent has paused automatic execution and kept its progress. Review the task list and existing results to decide the next step."
+      },
+      "EXECUTION_WAIT_OWNER_UNAVAILABLE": {
+        "title": "The waiting resource needs verification",
+        "body": "The resource or owner holding this wait was interrupted. Existing progress is preserved. Verify the resource state before continuing; effects will not be replayed automatically."
+      },
       "EXECUTION_PAUSED": {
         "title": "Task paused",
         "body": "This turn paused, and completed operations are retained. Review the process record and existing results to identify any remaining work."

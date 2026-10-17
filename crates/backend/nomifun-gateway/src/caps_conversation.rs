@@ -220,16 +220,16 @@ async fn list(
     ok(json!({ "total": resp.total, "conversations": items }))
 }
 
-/// Assess a nonterminal conversation without a live Runtime.
-///
-/// Durable `running` also represents paused work. Without a canonical pause
-/// cause, absence of a local Runtime cannot establish why execution stopped.
-/// Keep the existing diagnostic flag and offer the exact-turn stop path.
+/// Waiting and native suspension retain their exact owner; absence of model
+/// sampling is not a stuck execution. Only unproven ownership needs recovery.
 fn stuck_assessment(
     is_persisted_running: bool,
-    has_runtime: bool,
+    state: nomifun_api_types::ConversationRuntimeStateKind,
+    has_exact_owner: bool,
 ) -> (bool, Option<&'static str>) {
-    let stuck = is_persisted_running && !has_runtime;
+    use nomifun_api_types::ConversationRuntimeStateKind;
+    let stuck = is_persisted_running && (state == ConversationRuntimeStateKind::Reconciliation
+        || !has_exact_owner && state != ConversationRuntimeStateKind::Starting);
     (
         stuck,
         stuck.then_some(
@@ -252,7 +252,8 @@ async fn status(
     let runtime = deps.conversation.runtime_summary_for(id).await;
     let (stuck, stuck_hint) = stuck_assessment(
         conv.status == nomifun_common::ConversationStatus::Running,
-        runtime.has_runtime,
+        runtime.state,
+        runtime.active_turn_id.is_some(),
     );
     let last_receipt = match deps
         .conversation
@@ -809,21 +810,19 @@ mod tests {
     }
 
     #[test]
-    fn stuck_assessment_flags_only_durable_running_without_runtime() {
-        let (stuck, hint) = stuck_assessment(true, false);
-        assert!(stuck, "nonterminal work without a local Runtime needs status confirmation");
-        assert_eq!(
-            hint,
-            Some("会话尚未结束，当前没有可确认的活动执行；请检查会话状态和已有结果，可用 nomi_stop_conversation 请求结束本回合"),
-        );
-
-        for (is_persisted_running, has_runtime) in [(true, true), (false, false), (false, true)] {
-            let (stuck, hint) = stuck_assessment(is_persisted_running, has_runtime);
-            assert!(
-                !stuck && hint.is_none(),
-                "({is_persisted_running}, {has_runtime}) must not be reported stuck"
-            );
+    fn stuck_assessment_preserves_waiting_and_suspension_with_exact_ownership() {
+        use nomifun_api_types::ConversationRuntimeStateKind as Phase;
+        for phase in [Phase::Running, Phase::Waiting, Phase::Paused, Phase::Starting] {
+            assert_eq!(stuck_assessment(true, phase, true), (false, None));
         }
+        assert_eq!(stuck_assessment(true, Phase::Starting, false), (false, None));
+        for (phase, owner) in [(Phase::Reconciliation, true), (Phase::Idle, false),
+            (Phase::Running, false), (Phase::Waiting, false)] {
+            let (stuck, hint) = stuck_assessment(true, phase, owner);
+            assert!(stuck);
+            assert!(hint.is_some());
+        }
+        assert_eq!(stuck_assessment(false, Phase::Idle, false), (false, None));
     }
 
     #[test]

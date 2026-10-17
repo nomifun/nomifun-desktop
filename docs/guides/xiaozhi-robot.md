@@ -211,13 +211,35 @@ Speech playback consumes the current turn's final valid public answer, excluding
 reasoning, pre-tool narration and withdrawn steps. The firmware defines what an
 `accepted` receipt means; a spoken reply does not prove physical completion.
 
+In `auto` and `realtime` modes, one `listen.start` opens a continuous listening
+window. Server-side VAD separates utterances without closing that window. After
+a motion finishes silently, the next utterance can still be recognized without
+a TTS start/stop transition. Continuous silence retains only bounded pre-roll
+audio and does not repeatedly submit empty transcriptions. An explicit
+`listen.stop`, `abort`, or connection closure ends the window; manual mode still
+follows the device's explicit start/stop lifecycle. Local regressions must send
+multiple Opus utterances after a single start, rather than sending another start
+before every command. This contract does not establish that the current change
+has passed physical microphone, playback, or interaction-latency acceptance.
+
 ## 7. Desktop Tasks and Multiple Sessions
 
-For computer work, Robot can direct a task to the same companion's desktop role.
+Clear movement or expression commands execute directly and finish without speech after all requested actions are accepted.
+Answer questions and explicit requests for a spoken receipt; explain failures, blockers, uncertainty or necessary clarification.
+Ordinary companionship follows your requested depth.
+Physical replies use natural spoken wording without decorative emoji, kaomoji, ASCII emoticons or stage directions.
+Requested quotations, formulas and code retain their symbols; existing historical replies remain unchanged.
+For missing capabilities such as weather, current information, knowledge, computer work or elaborate motion planning,
+Robot can direct even a short question to the same companion's desktop role.
 The task runs in a separate linked session using Companion's own model, tools
 and resources. It does not inject work into the chat you are viewing or transfer
-computer authority to Robot. Acceptance means the task was received; completion
-and artifacts require the corresponding task receipt. See the
+computer authority to Robot. The reception Turn ends after acceptance; recorded results return to the original valid device connection;
+completion and artifacts require the corresponding task receipt. Current-information queries still require working network
+tools and credentials on Companion's side. A lean Robot with no explicit Session reasoning choice uses a lightweight
+reception tier only for models with exact documented support; unknown models retain their defaults and desktop workers
+use their own model settings. For an edited official Robot missing delegation, use **Edit Agent → Add recommended capabilities**;
+for a personal Agent, select collaboration's `agent/delegate` manually in the workbench. Save, then **Apply latest settings**
+to the idle device Session. See the
 [companion architecture](../architecture/companion.zh.md) for the current status
 of automatic follow-up orchestration and spoken result delivery.
 

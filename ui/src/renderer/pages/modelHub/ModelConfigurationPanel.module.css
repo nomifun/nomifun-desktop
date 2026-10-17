@@ -14,7 +14,7 @@
   --model-canvas: var(--color-fill-1);
   --model-border: var(--color-border-2);
   --model-ink: var(--color-text-1);
-  --model-muted: var(--color-text-3);
+  --model-muted: var(--text-secondary);
   --model-focus: var(--control-focus-ring, var(--color-primary-light-3));
   display: flex;
   flex-direction: column;
@@ -47,7 +47,7 @@
 .editor .sheet :global(.arco-form-item) { margin-bottom: 22px; }
 .editor :global(.arco-form-label-item) { padding-bottom: 8px; }
 .editor :global(.arco-form-label-item > label), .editor :global(label) { font-size: 13px; font-weight: 500; line-height: 1.6; color: var(--color-text-2); }
-.editor :global(.arco-form-item-extra), .editor :global(.arco-form-item-help) { margin-top: 6px; font-size: 12px; line-height: 1.65; }
+.editor :global(.arco-form-extra), .editor :global(.arco-form-item-extra), .editor :global(.arco-form-item-help) { margin-top: 6px; font-size: 12px; line-height: 1.65; color: var(--text-secondary); }
 .editor :global(.arco-input), .editor :global(.arco-textarea), .editor :global(.arco-input-inner-wrapper), .editor :global(.arco-select-view) {
   min-height: 38px; box-sizing: border-box; border: 1px solid var(--model-border); border-radius: 8px; background: var(--model-surface); color: var(--model-ink); font-size: 13px;
   transition: border-color .15s, box-shadow .15s, background-color .15s;
@@ -82,10 +82,29 @@
 .editor :global(.arco-btn-text):not(:global(.arco-btn-status-danger)) { color: var(--color-text-2); }
 .editor :global(.arco-btn-text):not(:global(.arco-btn-status-danger)):not(:disabled):hover { color: var(--model-ink); background: var(--model-canvas); }
 .footer :global(.arco-btn) { height: 36px; padding: 0 18px; border-radius: 8px; }
-.footer :global(.arco-btn-primary) { background: var(--control-selected-bg, var(--model-ink)); border: 1px solid var(--control-selected-bg, var(--model-ink)); color: var(--control-selected-fg, var(--model-surface)); }
-.footer :global(.arco-btn-primary):not(:disabled):hover { opacity: .88; }
-.footer :global(.arco-btn-primary):disabled { opacity: .45; }
+/* Primary text is also set globally with !important. Keep the foreground and
+   surface together, including themes whose primary buttons use gradients. */
+.editor :global(.arco-btn-primary) {
+  --button-primary-text: var(--control-selected-fg, var(--model-surface)) !important;
+}
+.editor :global(.arco-btn.arco-btn-primary:not(:disabled):not(.arco-btn-disabled):not(.arco-btn-status-danger):not(.arco-btn-status-warning):not(.arco-btn-status-success)) {
+  border: 1px solid var(--control-selected-bg, var(--model-ink)) !important;
+  background-color: var(--control-selected-bg, var(--model-ink)) !important;
+  background-image: none !important;
+  color: var(--control-selected-fg, var(--model-surface)) !important;
+}
+.editor :global(.arco-btn.arco-btn-primary:not(:disabled):not(.arco-btn-disabled):not(.arco-btn-status-danger):not(.arco-btn-status-warning):not(.arco-btn-status-success):hover) {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--control-selected-fg, var(--model-surface)) 28%, transparent);
+}
 .editor :global(button):focus-visible { outline: 2px solid var(--model-focus); outline-offset: 3px; }
+/* Configuration pages are portaled beside the provider overview, so its tag
+   rules cannot cover onboarding results and gateway plan/status labels here. */
+.editor :global(.arco-tag.arco-tag-checked:not(.arco-tag-checkable)) { color: var(--text-primary) !important; }
+.editor :global([data-provider-compatibility-mode] .arco-radio-button.arco-radio-checked:not(.arco-radio-disabled)) {
+  background-color: var(--control-selected-bg, var(--model-ink)) !important;
+  color: var(--control-selected-fg, var(--model-surface)) !important;
+}
+.editor :global([data-provider-compatibility-mode] .arco-radio-button.arco-radio-checked:not(.arco-radio-disabled) .arco-radio-button-inner) { color: inherit !important; }
 
 /* ModelDefinitionEditor hooks are shared by create-provider and add-model. */
 .editor :global([data-model-identity]) { padding-bottom: 8px; }
@@ -104,7 +123,6 @@
 .editor :global([data-capability-card-header] .arco-tag) { border-radius: 6px; }
 .editor :global([data-model-protocol-discovery]) { padding: 12px 18px; }
 .editor :global([data-model-protocol-discovery] > div:first-child) { flex-wrap: wrap; row-gap: 8px; font-size: 12px; line-height: 1.6; }
-.editor :global([data-model-protocol-candidate] .arco-btn-primary) { border: 1px solid var(--control-idle-border, var(--model-border)); background: var(--control-idle-bg, var(--model-canvas)); color: var(--model-ink); }
 .editor :global([data-model-protocol-candidate] .arco-btn-primary)::before { content: '✓'; margin-right: 5px; }
 .editor :global([data-model-context-settings]) { padding: 18px; }
 .editor :global([data-model-context-fields]) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 20px 16px; }

@@ -30,6 +30,9 @@ const MODEL_PAUSE_CODES: Readonly<Record<string, string>> = {
 const PUBLIC_PAUSE_REASONS = new Set([
   ...Object.keys(MODEL_PAUSE_CODES),
   'EXECUTION_PAUSED',
+  'EXECUTION_DEPENDENCY_BLOCKED',
+  'EXECUTION_INTERVENTION_REQUIRED',
+  'EXECUTION_WAIT_OWNER_UNAVAILABLE',
   'EXECUTION_USER_REQUESTED',
   'EXECUTION_ATTACH_FAILED',
   'EXECUTION_PREPARATION_BLOCKED',
@@ -78,7 +81,7 @@ export const conversationPauseErrorMessage = (
   created_at: pause.pausedAt,
   position: 'center',
   content: {
-    type: 'error',
+    type: 'warning',
     content: '',
     error: conversationPauseError(pause),
     execution_pause: {

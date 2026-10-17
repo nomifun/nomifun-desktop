@@ -228,7 +228,7 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
           </NomiSelect>
         )}
       </div>
-      {!hideHint && hint && <span className='text-11px leading-tight text-warning-6'>{hint}</span>}
+      {!hideHint && hint && <span className='text-11px leading-tight text-t-secondary'>{hint}</span>}
     </div>
   );
 };

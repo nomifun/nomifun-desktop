@@ -317,7 +317,7 @@ test.each([false, true])('Turn completion preserves an active composer and IME d
   const startedAt = Date.now() - 1000;
   let authority = { id: sessionId, name: 'Active conversation', type: 'nomi', status: 'running',
     extra: { workspace: '' }, runtime: { state: 'running', is_processing: true,
-      can_send_message: false, has_runtime: true, active_turn_id: turnId, processing_started_at: startedAt },
+      can_send_message: false, active_turn_id: turnId, processing_started_at: startedAt },
   } as TChatConversation;
   spyOn(ipcBridge.conversation.get, 'invoke').mockImplementation(async () => authority);
   spyOn(ipcBridge.conversation.taskPlan, 'invoke').mockResolvedValue({
@@ -365,10 +365,10 @@ test.each([false, true])('Turn completion preserves an active composer and IME d
   expect(editor.value).toBe(imeBuffer);
 
   authority = { ...authority, status: 'finished', runtime: { state: 'idle', is_processing: false,
-    can_send_message: true, has_runtime: true } };
+    can_send_message: true, } };
   act(() => completions.forEach(listener => listener({ conversation_id: sessionId, turn_id: turnId,
     status: 'finished', state: 'ai_waiting_input', detail: '', can_send_message: true,
-    runtime: { state: 'idle', is_processing: false, can_send_message: true, has_runtime: true },
+    runtime: { state: 'idle', is_processing: false, can_send_message: true, },
     workspace: '', model: { platform: 'openai', name: 'Test provider', use_model: 'test-model' },
     last_message: { content: 'Task finished', created_at: Date.now() },
   })));

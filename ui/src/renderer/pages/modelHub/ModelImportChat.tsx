@@ -19,10 +19,10 @@ const ModelImportChat: React.FC = () => {
   };
   return (
     <div className='mb-16px flex flex-wrap items-center gap-8px'>
-      <Button type='outline' loading={starting} disabled={!canStart} onClick={() => void open()}>
+      <Button type='secondary' loading={starting} disabled={!canStart} onClick={() => void open()}>
         {t('settings.modelHub.importChatAction')}
       </Button>
-      <span className='text-12px leading-18px text-t-tertiary'>
+      <span className='text-12px leading-18px text-t-secondary'>
         {t(canStart ? 'settings.modelHub.importChatHint' : 'settings.modelHub.importChatNeedsModel')}
       </span>
     </div>

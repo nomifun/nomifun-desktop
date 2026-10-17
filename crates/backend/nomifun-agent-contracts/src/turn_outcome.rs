@@ -3,14 +3,35 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Why an active Turn has parked its model while its owner retains execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+pub enum AgentWaitReason {
+    UserInput,
+    ExternalResource,
+    InterventionRequired,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 pub enum AgentTurnOutcome {
     /// Exact, nonempty, sealed public messages; never reasoning or tool output.
     Answered { message_ids: Vec<String> },
+    /// This exact Turn intentionally has no public reply. Physical actions
+    /// and their acceptance/completion remain owned by their original facts.
+    Silent {},
     /// The question remains in the original typed user-input request.
     InputRequired { request_id: String },
+    /// Nonterminal: the exact Turn still owns its live resources and input.
+    Waiting {
+        /// Identity of this exact waiting episode, derived from its Event.
+        #[ts(type = "number")]
+        wait_seq: u64,
+        request_id: Option<String>,
+        reason: AgentWaitReason,
+    },
     Failed { message_ids: Vec<String> },
     Cancelled { message_ids: Vec<String> },
     Paused { message_ids: Vec<String> },
@@ -40,5 +61,8 @@ mod tests {
         let mut invalid = value;
         invalid["question"] = serde_json::json!("another fact source");
         assert!(serde_json::from_value::<AgentTurnOutcome>(invalid).is_err());
+        assert_eq!(serde_json::from_value::<AgentTurnOutcome>(serde_json::json!({"kind":"silent"})).unwrap(),
+            AgentTurnOutcome::Silent {});
+        assert!(serde_json::from_value::<AgentTurnOutcome>(serde_json::json!({"kind":"silent","message_ids":[]})).is_err());
     }
 }

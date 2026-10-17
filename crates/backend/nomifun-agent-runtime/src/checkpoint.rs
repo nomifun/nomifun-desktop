@@ -61,8 +61,7 @@ impl AgentExecutionCheckpoint {
             || self.plan.exact_actions.iter().any(|action|action.source.input>=self.accepted_input_count
                 || action.id.is_empty()||action.id.len()>64||!exact_ids.insert(&action.id)||action.source.quote.chars().count()>512
                 || action.fields.values().chain(action.stdin_sha256.iter()).chain(action.receiver_digest.iter()).any(|digest|digest.len()!=64||!digest.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b)))
-                || (action.succeeded&&(!action.settled||action.attempted_call_id.is_none()))
-                || (action.settled&&action.attempted_call_id.is_none())) {
+                || (action.succeeded&&action.attempted_call_id.is_none())) {
             return Err(AgentEngineError::InvalidContract("checkpoint exact action metadata is invalid".into()));
         }
         crate::exact_actions::validate_receivers(&self.plan.exact_actions).map_err(AgentEngineError::InvalidContract)?;

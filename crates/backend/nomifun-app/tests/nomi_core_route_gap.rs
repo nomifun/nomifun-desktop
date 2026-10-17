@@ -7558,3 +7558,7 @@ async fn nomi_core_remote_mcp_uses_installation_auth_and_nomi_core_operations() 
     services.shutdown_browser_platform().await.expect("browser cleanup");
     services.database.close().await;
 }
+
+#[cfg(target_os = "linux")]
+#[path = "support/missing_default_workspace.rs"]
+mod missing_default_workspace;

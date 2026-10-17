@@ -173,6 +173,7 @@ const GenerationDefaultControl: React.FC<
             ? 'settings.modelHub.modality.visionDefaultTitle'
             : 'settings.modelHub.creation.defaultTitle')}
           description={description}
+          descriptionClassName='!text-t-secondary'
           controls={
             <div className='flex min-w-0 flex-wrap items-center justify-end gap-8px'>
               <TaskModelSelect
@@ -464,6 +465,7 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
               className={styles.defaultRow}
               title={t('settings.modelHub.modality.defaultRow')}
               description={t('settings.modelHub.modality.chatDefaultHint')}
+              descriptionClassName='!text-t-secondary'
               controls={
                 <TaskModelSelect
                   task='chat'

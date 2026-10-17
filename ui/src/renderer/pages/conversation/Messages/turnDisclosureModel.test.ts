@@ -139,6 +139,36 @@ describe('buildTurnDisclosureItems', () => {
     expect([...selectTurnPublicResultIds([summary,first,tail])]).toEqual(['first','tail']);
   });
 
+  test('an explicit silent result keeps the completed tool trace and clock without electing a reply', () => {
+    const entries = [item('user', 'user'),
+      item('tool', 'process', { createdAt: 2000, processState: 'completed', sourceMessageIds: [SOURCE_1] }),
+      item('process-text', 'assistant', { createdAt: 2500, publicText: true, sourceMessageIds: [SOURCE_2] }),
+      item('summary', 'metadata', { createdAt: 3000, turnStartedAt: 1000, turnEndedAt: 3000,
+        processState: 'completed', turnOutcome: { kind: 'silent' } })];
+    const result = buildTurnDisclosureItems(entries, { tailClosed: true });
+    expect([...selectTurnPublicResultIds(entries)]).toEqual([]);
+    expect(result.filter(entry => entry.type === 'item').map(entry => entry.id)).toEqual(['user']);
+    expect(result.find(entry => entry.type === 'turn_disclosure')).toMatchObject({
+      state: 'completed', running: false, defaultCollapsed: true, startAt: 1000, endAt: 3000,
+      processItemIds: ['tool', 'process-text'],
+    });
+  });
+
+  test('a silent result has no unavailable placeholder and cannot hide the following answered Turn', () => {
+    const entries = [item('user', 'user'),
+      item('silent', 'metadata', { turnOutcome: { kind: 'silent' }, turnStartedAt: 1000, turnEndedAt: 2000 }),
+      item('next-user', 'user', { turnId: TURN_2, createdAt: 3000 }),
+      item('next-summary', 'metadata', { turnId: TURN_2, turnStartedAt: 3000, turnEndedAt: 4000,
+        turnOutcome: { kind: 'answered', message_ids: [SOURCE_2] } }),
+      item('answer', 'assistant', { turnId: TURN_2, createdAt: 4000, publicText: true, sourceMessageIds: [SOURCE_2] })];
+    expect([...selectTurnPublicResultIds(entries)]).toEqual(['answer']);
+    const result = buildTurnDisclosureItems(entries, { tailClosed: true });
+    expect(result.filter(entry => entry.type === 'item').map(entry => entry.id)).toEqual(['user', 'next-user', 'answer']);
+    expect(result.find(entry => entry.type === 'turn_disclosure' && entry.turnId === TURN_1)).toMatchObject({
+      state: 'completed', running: false, startAt: 1000, endAt: 2000,
+    });
+  });
+
   test('unreferenced and missing public sources cannot become the final reply', () => {
     const first=item('preamble','assistant',{createdAt:2000,sourceMessageIds:[SOURCE_1],publicText:true});
     const final=item('final','assistant',{createdAt:4000,sourceMessageIds:[SOURCE_2],publicText:true});

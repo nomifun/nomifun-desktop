@@ -122,8 +122,11 @@ pub(crate) async fn resolve_command_for_spawn(
     } else {
         (command.to_owned(), args.to_vec())
     };
-    let current = std::env::current_dir()?;
-    let cwd = cwd.filter(|path| !path.as_os_str().is_empty()).unwrap_or(&current);
+    let current;
+    let cwd = match cwd.filter(|path| !path.as_os_str().is_empty()) {
+        Some(cwd) => cwd,
+        None => { current = std::env::current_dir()?; &current }
+    };
     nomifun_runtime::prepare_process_launch(&program, &args, cwd, &env.cloned().unwrap_or_default())
         .await.map_err(|error| crate::error::TerminalError::Spawn(format!("prepare terminal command {program}: {error}")))
 }

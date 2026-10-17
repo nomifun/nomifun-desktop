@@ -16,8 +16,12 @@ import type {
   AutoUpdateStatus,
 } from '@/common/update/updateTypes';
 import { useTranslation } from 'react-i18next';
-import { getUpdateErrorMessageKey } from './updateErrorMessage';
+import { getUpdateErrorMessageKey, getInstallBlockMessageKey } from './updateErrorMessage';
 import { deriveUpdateStatus, shouldApplyDownloadEvent } from './deriveUpdateStatus';
+import {
+  AutoInstallUnsupportedError,
+  type UpdaterInstallContext,
+} from '@/common/adapter/tauriUpdateInstall';
 import { reportNoUpdateAvailable, reportUpdateAvailable } from '@renderer/hooks/system/useUpdateAvailability';
 import './UpdateModal.css';
 
@@ -27,6 +31,7 @@ type UpdateStatus =
   | 'available'
   | 'downloading'
   | 'downloaded'
+  | 'installBlocked'
   | 'installing'
   | 'error';
 
@@ -59,6 +64,9 @@ const UpdateModal: React.FC = () => {
   // Whether the native updater has an installable release.
   const [autoUpdateAvailable, setAutoUpdateAvailable] = useState(false);
   const [autoUpdateInfo, setAutoUpdateInfo] = useState<{ version: string; releaseNotes?: string } | null>(null);
+  // The native install context when this process may not replace its own
+  // bundle; drives the reason-specific 'installBlocked' surface.
+  const [installBlock, setInstallBlock] = useState<UpdaterInstallContext | null>(null);
   const installRequestedRef = useRef(false);
   // A download already in flight. `startDownload` had no re-entrancy guard, so a
   // second trigger started a second flow whose independent byte counter fought
@@ -82,6 +90,7 @@ const UpdateModal: React.FC = () => {
     setReleasePageUrl('');
     setAutoUpdateAvailable(false);
     setAutoUpdateInfo(null);
+    setInstallBlock(null);
   };
 
   const includePrerelease = useMemo(() => localStorage.getItem('update.includePrerelease') === 'true', [visible]);
@@ -129,6 +138,7 @@ const UpdateModal: React.FC = () => {
       let retainedVersion: string | null = null;
       let packageState: import('@/common/adapter/tauriShell').TauriUpdatePackageState | null = null;
       let packageVersion: string | null = null;
+      let installContext: UpdaterInstallContext | null = null;
       // Captured locally: setAutoUpdateInfo below only lands on the NEXT render,
       // so reading that state back in this same pass would see a stale version.
       let autoUpdateVersion = '';
@@ -137,6 +147,7 @@ const UpdateModal: React.FC = () => {
         retainedVersion = res?.data?.retainedVersion ?? null;
         packageState = res?.data?.packageState ?? null;
         packageVersion = res?.data?.packageVersion ?? null;
+        installContext = res?.data?.installContext ?? null;
         if (res?.success && res.data?.updateInfo) {
           autoUpdateOk = true;
           autoUpdateVersion = res.data.updateInfo.version;
@@ -175,12 +186,14 @@ const UpdateModal: React.FC = () => {
           retainedVersion,
           slotState: packageState,
           slotVersion: packageVersion,
+          autoInstallSupported: installContext?.autoInstallSupported,
         });
         if (derived === 'downloading') {
           // Re-attach to the running download rather than re-arming Download.
           downloadRequestedRef.current = true;
           downloadVersionRef.current = packageVersion;
         }
+        setInstallBlock(derived === 'installBlocked' ? installContext : null);
         setStatus(derived);
         return;
       }
@@ -259,6 +272,13 @@ const UpdateModal: React.FC = () => {
       installRequestedRef.current = false;
       const msg = err instanceof Error ? err.message : String(err);
       console.error('Install failed:', err);
+      if (err instanceof AutoInstallUnsupportedError) {
+        // The context changed between check and install: land on the same
+        // reason-specific surface instead of a toast plus a dead Install loop.
+        setInstallBlock(err.context);
+        setStatus('installBlocked');
+        return;
+      }
       const messageKey = getUpdateErrorMessageKey(msg);
       Message.error(t(messageKey));
       if (messageKey === 'update.packageNoLongerReady') {
@@ -389,7 +409,7 @@ const UpdateModal: React.FC = () => {
   };
 
   const showDetails = () => {
-    if (status === 'available' || status === 'error') {
+    if (status === 'available' || status === 'error' || status === 'installBlocked') {
       setPresentation('detail');
     }
   };
@@ -419,6 +439,23 @@ const UpdateModal: React.FC = () => {
     'shrink-0 border-t border-t-solid border-[rgba(var(--warning-6),0.18)] bg-[color-mix(in_srgb,var(--color-fill-1)_60%,transparent)] px-20px py-8px text-left update-modal__disclaimer'
   );
 
+  const installBlockMessage = installBlock
+    ? t(getInstallBlockMessageKey(installBlock.reason), { tempDir: installBlock.tempDir })
+    : '';
+
+  const renderVersionRow = (availableVersion: string) => (
+    <div className='update-compact-card__version-row'>
+      <span>{formatVersion(currentVersion)}</span>
+      <span className='update-compact-card__version-arrow' aria-hidden='true'>
+        →
+      </span>
+      <strong>{formatVersion(availableVersion)}</strong>
+      <button type='button' className='update-compact-card__detail-link' onClick={showDetails}>
+        {t('update.viewDetails')}
+      </button>
+    </div>
+  );
+
   const renderCompactContent = () => {
     const availableVersion = updateInfo?.version || autoUpdateInfo?.version || '';
     const canDismiss = status !== 'installing';
@@ -427,7 +464,9 @@ const UpdateModal: React.FC = () => {
         ? t('update.compactProgressTitle')
         : status === 'error'
           ? t('update.errorTitle')
-          : t('update.compactTitle');
+          : status === 'installBlocked'
+            ? t('update.installBlockedTitle')
+            : t('update.compactTitle');
 
     return (
       <section
@@ -473,22 +512,35 @@ const UpdateModal: React.FC = () => {
 
         {status === 'available' && (
           <>
-            <div className='update-compact-card__version-row'>
-              <span>{formatVersion(currentVersion)}</span>
-              <span className='update-compact-card__version-arrow' aria-hidden='true'>
-                →
-              </span>
-              <strong>{formatVersion(availableVersion)}</strong>
-              <button type='button' className='update-compact-card__detail-link' onClick={showDetails}>
-                {t('update.viewDetails')}
-              </button>
-            </div>
+            {renderVersionRow(availableVersion)}
             <div className='update-compact-card__actions'>
               <Button type='primary' size='mini' onClick={startDownload} className='update-compact-card__action'>
                 {t('update.updateNow')}
               </Button>
               <Button size='mini' onClick={handleClose} className='update-compact-card__action'>
                 {t('update.later')}
+              </Button>
+            </div>
+          </>
+        )}
+
+        {status === 'installBlocked' && (
+          <>
+            {renderVersionRow(availableVersion)}
+            <div className='update-compact-card__notice' aria-live='polite'>
+              {installBlockMessage}
+            </div>
+            {installBlock?.appBundlePath && (
+              <div className='update-install-location'>
+                {t('update.installBlockedLocation', { path: installBlock.appBundlePath })}
+              </div>
+            )}
+            <div className='update-compact-card__actions'>
+              <Button type='primary' size='mini' onClick={openReleasePage} className='update-compact-card__action'>
+                {t('update.goToRelease')}
+              </Button>
+              <Button size='mini' onClick={openBaiduReleaseMirror} className='update-compact-card__action'>
+                {t('settings.baiduManualDownload')}
               </Button>
             </div>
           </>
@@ -591,6 +643,7 @@ const UpdateModal: React.FC = () => {
   const renderDetailContent = () => {
     switch (status) {
       case 'available':
+      case 'installBlocked':
         return (
           <div className='flex h-full min-h-0 flex-col'>
             <div className='update-modal__available'>
@@ -609,6 +662,17 @@ const UpdateModal: React.FC = () => {
               {!autoUpdateAvailable && (
                 <div className='update-modal__compatibility-warning'>
                   {t('update.noCompatibleAssetManual')}
+                </div>
+              )}
+
+              {status === 'installBlocked' && (
+                <div className='update-modal__compatibility-warning'>
+                  {installBlockMessage}
+                  {installBlock?.appBundlePath && (
+                    <div className='update-install-location'>
+                      {t('update.installBlockedLocation', { path: installBlock.appBundlePath })}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -654,7 +718,7 @@ const UpdateModal: React.FC = () => {
             </div>
             {disclaimer}
             <div className='update-modal__actions'>
-              {!autoUpdateAvailable && releasePageUrl ? (
+              {status === 'installBlocked' || (!autoUpdateAvailable && releasePageUrl) ? (
                 <Button type='primary' size='small' onClick={openReleasePage} className='update-modal__action'>
                   {t('update.goToRelease')}
                 </Button>
@@ -721,7 +785,7 @@ const UpdateModal: React.FC = () => {
     return null;
   };
 
-  const isAvailableDialog = status === 'available';
+  const isAvailableDialog = status === 'available' || status === 'installBlocked';
   const isErrorDialog = status === 'error';
   const canShowDetails = isAvailableDialog || isErrorDialog;
 

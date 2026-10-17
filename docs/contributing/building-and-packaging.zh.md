@@ -21,6 +21,26 @@
 平台要求和 `frontendDist`；workspace 版本来自
 [Cargo.toml](../../Cargo.toml)。
 
+Linux 的 `build` 和 `build:linux` 在打包前构建并冻结对应架构的管理员 runner。
+deb/rpm 将 runner 和 polkit action 安装到固定系统路径；AppImage 携带显式安装脚本，
+挂载镜像本身不能安装宿主认证设施。`build:fast` 准备 debug runner 并打印手动安装命令；
+开发启动不修改系统文件。安装、升级/卸载、原生认证要求和检查见
+[Linux 系统执行组件说明](../../apps/desktop/linux-system-execution/README.md)。
+
+Linux Computer 还链接系统 GStreamer core/app/video（至少 1.14），构建预检检查这三个
+pkg-config 模块。Debian/Ubuntu 构建依赖为 `libgstreamer1.0-dev` 和
+`libgstreamer-plugins-base1.0-dev`；运行时需要 `gstreamer1.0-pipewire`、
+`gstreamer1.0-plugins-base`、`gstreamer1.0-plugins-good`。RPM 依赖名采用 Fedora 的
+`pipewire-gstreamer`、`gstreamer1-plugins-base`、`gstreamer1-plugins-good`。
+原生包明确声明这些动态加载插件及 `xdg-desktop-portal`；仅扫描 ELF 链接库无法发现
+必需的 `pipewiresrc`、`videoconvert`、`videoflip`、`appsink` factories。
+Wayland 还需要登录桌面的实际 PipeWire 服务，以及实现所请求 ScreenCast/RemoteDesktop
+接口的 portal backend 和原生用户同意。
+
+AppImage 同样需要这些匹配的宿主服务和 GStreamer 插件。成品的动态库及插件搜索路径须
+结合目标桌面实查；`bundleMediaFramework` 开关本身不证明包含 `pipewiresrc` 或宿主 portal
+backend。只有实际运行对应 AppImage 后才能记录其 Wayland 验收通过。
+
 ## Web 部署产物
 
 运行未内嵌 SPA 的 Web 宿主前先构建前端：

@@ -135,12 +135,65 @@ impl ComputerModuleAvailability {
 /// Return a truthful point-in-time availability projection without prompting
 /// for permission or synthesizing any input.
 pub fn module_availability() -> ComputerModuleAvailability {
+    #[cfg(target_os = "linux")]
+    {
+        let facilities = crate::linux_portal::probe_blocking();
+        return linux_module_availability(
+            crate::linux_x11::desktop_state(),
+            facilities.accessibility.is_available(),
+            crate::linux_wayland::session_is_active(),
+            facilities.wayland_guidance(),
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
     let permissions = crate::permissions::permission_status();
     let desktop = desktop_is_available();
     let supported = cfg!(any(target_os = "windows", target_os = "macos"));
     module_availability_for(permissions, desktop, supported, std::env::consts::OS)
+    }
 }
 
+#[cfg(target_os = "linux")]
+fn linux_module_availability(
+    desktop: crate::linux_x11::DesktopState,
+    accessibility_available: bool,
+    wayland_session_active: bool,
+    wayland_guidance: String,
+) -> ComputerModuleAvailability {
+    use crate::linux_x11::DesktopState;
+    let actions = ComputerAction::ALL.into_iter().map(|action| {
+        let (state, guidance) = match action {
+            ComputerAction::Launch => (ComputerAvailabilityState::Available, None),
+            ComputerAction::A11yObserve if accessibility_available => (ComputerAvailabilityState::Available, None),
+            ComputerAction::A11yObserve => (
+                ComputerAvailabilityState::Unknown,
+                Some("The current user's AT-SPI registry could not be reached. This is a desktop facility failure, not a missing administrator grant.".to_owned()),
+            ),
+            ComputerAction::Observe if matches!(desktop, DesktopState::X11 { .. }) => (ComputerAvailabilityState::Available, None),
+            ComputerAction::Input if matches!(desktop, DesktopState::X11 { input: true, .. }) => (ComputerAvailabilityState::Available, None),
+            ComputerAction::Observe | ComputerAction::Input if matches!(desktop, DesktopState::Wayland) && wayland_session_active => (
+                ComputerAvailabilityState::Available,
+                Some("The native desktop sharing session is active. Input still requires a fresh observation from this exact session; window enumeration, activation and cursor queries depend on compositor facilities and may remain unavailable.".to_owned()),
+            ),
+            ComputerAction::Observe | ComputerAction::Input => match &desktop {
+                DesktopState::Wayland => (
+                    ComputerAvailabilityState::Unknown,
+                    Some(wayland_guidance.clone()),
+                ),
+                DesktopState::X11 { .. } => (
+                    ComputerAvailabilityState::Unknown,
+                    Some("The X11 server is reachable but does not expose XTEST input synthesis.".to_owned()),
+                ),
+                DesktopState::Unavailable(error) => (ComputerAvailabilityState::NoDesktop, Some(error.clone())),
+            },
+        };
+        ComputerActionAvailability { action_id: action.id().to_owned(), state, guidance }
+    }).collect();
+    ComputerModuleAvailability { module_id: COMPUTER_MODULE_ID.to_owned(), platform: "linux".to_owned(), actions }
+}
+
+#[cfg(any(not(target_os = "linux"), test))]
 fn module_availability_for(
     permissions: crate::permissions::PermissionStatus,
     desktop: bool,
@@ -215,6 +268,7 @@ fn module_availability_for(
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn desktop_is_available() -> bool {
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
@@ -345,5 +399,27 @@ mod tests {
                 assert_eq!(availability.action(action).unwrap().state, state, "{action:?}");
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_wayland_does_not_inherit_xwayland_input_or_capture_readiness() {
+        let availability = linux_module_availability(crate::linux_x11::DesktopState::Wayland, true, false, "native portal grant required".to_owned());
+        assert_eq!(availability.action(ComputerAction::Observe).unwrap().state, ComputerAvailabilityState::Unknown);
+        assert_eq!(availability.action(ComputerAction::Input).unwrap().state, ComputerAvailabilityState::Unknown);
+        assert_eq!(availability.action(ComputerAction::A11yObserve).unwrap().state, ComputerAvailabilityState::Available);
+        assert_eq!(availability.action(ComputerAction::Launch).unwrap().state, ComputerAvailabilityState::Available);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_x11_capture_input_and_accessibility_have_independent_facilities() {
+        let availability = linux_module_availability(crate::linux_x11::DesktopState::X11 { input: false, window_management: false }, false, false, String::new());
+        assert_eq!(availability.action(ComputerAction::Observe).unwrap().state, ComputerAvailabilityState::Available);
+        assert_eq!(availability.action(ComputerAction::Input).unwrap().state, ComputerAvailabilityState::Unknown);
+        assert_eq!(availability.action(ComputerAction::A11yObserve).unwrap().state, ComputerAvailabilityState::Unknown);
+        let missing = linux_module_availability(crate::linux_x11::DesktopState::Unavailable("display disconnected".to_owned()), false, false, String::new());
+        assert_eq!(missing.action(ComputerAction::Observe).unwrap().state, ComputerAvailabilityState::NoDesktop);
+        assert_eq!(missing.action(ComputerAction::Launch).unwrap().state, ComputerAvailabilityState::Available);
     }
 }

@@ -7,13 +7,15 @@ pub struct RuntimeStateObservation {
     pub turn_id: Option<String>,
     pub turn_status: Option<String>,
     pub event: Option<Value>,
+    pub turn_outcome: Option<nomifun_agent_contracts::AgentTurnOutcome>,
 }
 
 impl AgentSessionStore {
     /// Read one named runtime fact and its owning lifecycle in the same SQLite
     /// snapshot. Only the latest started turn participates, even if that turn
     /// has not produced this fact. Unrelated later records and message paging
-    /// cannot evict the state. The Store does not interpret the engine payload.
+    /// cannot evict the state. Public disposition uses the shared exact-Turn
+    /// reducer; the selected named engine payload remains unchanged.
     pub async fn latest_runtime_state(
         &self,
         session: &AgentSessionId,
@@ -28,17 +30,18 @@ impl AgentSessionStore {
              WHERE t.session_id = ? ORDER BY started.seq DESC LIMIT 1",
         ).bind(session.as_ref()).fetch_optional(&mut *tx).await?;
         let mut result = RuntimeStateObservation {
-            sequence: head.last_seq, turn_id: None, turn_status: None, event: None,
+            sequence: head.last_seq, turn_id: None, turn_status: None, event: None, turn_outcome: None,
         };
         if let Some((operation, source, status, started_seq)) = turn {
+            result.turn_outcome = history_turn_outcome::read(&mut tx, session, &OperationId::from(operation.clone())).await?.turn_outcome;
             result.turn_id = source;
             // A native pause suspends a running Turn without inventing a new
             // terminal state. Project the same active operation's canonical
             // head disposition; a terminal Turn always keeps its own state.
             result.turn_status = Some(if status == "running"
                 && head.active_turn_id.as_deref() == Some(operation.as_str())
-                && head.status == "paused"
-            { "paused".to_owned() } else { status });
+                && matches!(head.status.as_str(), "paused" | "reconciliation")
+            { head.status.clone() } else { status });
             let event_id: Option<String> = sqlx::query_scalar(
                 "WITH progress AS (SELECT e.seq, e.event_id, \
                    COALESCE(json_extract(e.inline_json, '$.event'), \

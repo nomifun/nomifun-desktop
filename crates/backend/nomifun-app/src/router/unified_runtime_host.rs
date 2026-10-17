@@ -51,7 +51,8 @@ fn ensure_companion_spoken_reply_rules(instructions: &mut Vec<String>, canonical
     // Product identity comes from the validated canonical opening, including
     // a selected personal Agent without Companion Persona Context. Reuse the
     // same rule already supplied by that Context instead of spending it twice,
-    // keeping its complete contribution last without rewriting its contents.
+    // keeping its complete contribution after general guidance and before any
+    // Robot-specific delivery rules, without rewriting its contents.
     let rule = nomifun_companion::prompt::SPOKEN_REPLY_RULES.trim();
     if canonical_companion {
         if let Some(index) = instructions.iter().position(|text| text.contains(rule)) {
@@ -96,6 +97,14 @@ fn robot_interaction_context(plan: &AgentToolPlan) -> Result<String, AppError> {
     Ok(format!("Current frozen physical Robot tool mapping (data, not additional authority): {data}. Use an already-visible matching tool directly for an explicit device request; do not rediscover it or query unrelated device state first unless its declared contract requires that observation. If the needed schema is deferred, use ToolSearch with its exact advertised name or Action ID. An empty mapping means this turn has no callable Robot tools; do not simulate an action or claim dispatch. Keep simple interactions concise. Tool receipts establish only their declared result: an accepted asynchronous action is not proof of completed movement. Frozen resource, permission, connection, cancellation and Effect checks still apply."))
 }
 
+const ROBOT_REPLY_STYLE_INSTRUCTION: &str = "Physical Robot reply style: use natural spoken sentences without decorative emoji, kaomoji, ASCII emoticons or stage directions. Preserve the Companion's personality through wording. Optional emotions or movements use already-authorized device tools when appropriate; do not append text faces or invent unrequested actions. For a clear device-action-only request, execute every requested action and finish silently after all required tool receipts succeed: no preliminary narration, greeting, acknowledgment, recap or follow-up question. Use an advertised silent-finish control according to its declared contract; never invent an unavailable control or stop before the remaining actions. Speak when the request also asks a question or requires a verbal receipt, or when a real failure, blocker, uncertain result or necessary clarification must be explained. An explicit request to speak remains authoritative. When speech is needed, state only the receipt-supported outcome without a celebratory lead-in, pet-name prefix or cute filler. Accepted dispatch must not be described as completed motion. This physical delivery rule overrides decorative style in persona/custom settings or historical replies. Preserve symbols in user-requested quotations, code, formulas, identifiers, URLs and technical content; this is not a content-stripping rule.";
+
+fn append_robot_reply_style(instructions: &mut Vec<String>, canonical_robot: bool) {
+    if canonical_robot {
+        instructions.push(ROBOT_REPLY_STYLE_INSTRUCTION.into());
+    }
+}
+
 fn session_reasoning(effort: Option<SessionReasoningEffortDto>) -> Option<ChatReasoningRequest> {
     // The route advertises reasoning as a capability, not a supported effort
     // set. Preserve explicit choices; model-editor suggestions cannot justify
@@ -128,7 +137,9 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../Cargo.toml"),
                     include_str!("../../../nomifun-agent-runtime/src/lib.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/user_input.rs"),
+                    include_str!("../../../nomifun-agent-runtime/src/wait.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/user_input.rs"),
+                    include_str!("../../../nomifun-agent-contracts/src/turn_outcome.rs"),
                     include_str!("../../../nomifun-agent-execution/src/user_input.rs"),
                     include_str!("../../../nomifun-db/src/repository/agent_execution.rs"),
                     include_str!("../../../nomifun-db/src/repository/sqlite_agent_execution.rs"),
@@ -166,6 +177,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("remote_runtime.rs"),
                     include_str!("../../../nomifun-public/src/canonical.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/engine.rs"),
+                    include_str!("../../../nomifun-agent-runtime/src/silent_completion.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/checkpoint.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/recovery.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/reconciliation.rs"),
@@ -243,8 +255,14 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-engine-core/src/tool_schema.rs"),
                     include_str!("../../../nomifun-engine-core/src/kernel.rs"),
                     include_str!("../../../nomifun-engine-core/src/process.rs"),
+                    include_str!("../../../../shared/nomi-process-runtime/src/supervisor.rs"),
                     include_str!("../../../nomifun-chat-model-broker/src/engine_port.rs"),
                     include_str!("chat_broker_host.rs"),
+                    include_str!("../../../nomifun-model-invoke/src/model_profiles.rs"),
+                    include_str!("../../../nomifun-model-invoke/src/model_profiles/global.json"),
+                    include_str!("../../../nomifun-model-invoke/src/model_profiles/china-foundation.json"),
+                    include_str!("../../../nomifun-model-invoke/src/model_profiles/cloud-platforms.json"),
+                    include_str!("../../../nomifun-model-invoke/src/model_profiles/gateways.json"),
                     include_str!("../../../nomifun-model-invoke/src/error.rs"),
                     include_str!("../../../nomifun-model-invoke/src/transport.rs"),
                     include_str!("../../../nomifun-model-invoke/src/chat_executor.rs"),
@@ -504,6 +522,7 @@ pub(crate) fn factory(
                 route_image_input,
                 full_plan,
                 compiled: compiled.clone(),
+                robot_role,
                 lean_robot,
                 capability_port: Arc::new(capabilities::HostPort(weak.clone())),
                 input_port: Arc::new(steering::HostPort(weak.clone())),
@@ -573,6 +592,7 @@ struct ConversationRuntimeHost {
     full_plan: AgentToolPlan,
     compiled: Arc<nomifun_agent_kernel::CompiledSnapshot>,
     lean_robot: bool,
+    robot_role: bool,
     capability_port: Arc<capabilities::HostPort>,
     input_port: Arc<steering::HostPort>,
     capability_transition: tokio::sync::Mutex<()>,
@@ -1003,6 +1023,16 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             .map_err(error)?;
         let operation = admitted.operation_id().to_owned();
         let response = admitted.session().session();
+        // A physical receptionist can use a documented lightweight default;
+        // its desktop worker keeps its own full model configuration. The
+        // actual attempt resolves supported tiers, never this route feature.
+        // Explicit Session choices and deliberately expanded Robot Agents win.
+        if self.lean_robot && response.reasoning_effort.is_none() {
+            self.model_configuration.set_reception_policy(
+                admitted.operation_id(),
+                super::chat_broker_host::TurnModelReceptionPolicy::ResponsiveRobot,
+            ).map_err(error)?;
+        }
         let receipt = admitted.request_payload();
         let channel_guest = receipt.get("origin").and_then(Value::as_str)==Some("channel_guest");
         let input_source = receipt.get("input_source").filter(|value| !value.is_null())
@@ -1161,7 +1191,12 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         if lean_robot {
             instructions.push(robot_interaction_context(&turn_plan)?);
         }
-        let collaboration = super::automatic_collaboration_route::route(
+        let collaboration_route = if lean_robot {
+            super::automatic_collaboration_route::route_robot
+        } else {
+            super::automatic_collaboration_route::route
+        };
+        let collaboration = collaboration_route(
             &message.content,
             self.options.delegation_policy,
             turn_plan,
@@ -1192,6 +1227,10 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             }
         }
         ensure_companion_spoken_reply_rules(&mut instructions, canonical_companion);
+        // Keep physical delivery rules after live/custom persona, Skills and
+        // routing hints, including explicitly expanded Robot Agents. This is
+        // a model instruction, never a rewrite of canonical or rendered text.
+        append_robot_reply_style(&mut instructions, self.robot_role);
         let request = ChatModelRequest {
             contract_version: CHAT_MODEL_CONTRACT_VERSION.into(),
             causality: ChatCausality {
@@ -1225,11 +1264,13 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             self.principal.clone(),
             capabilities.generation,
         ).with_model_budget(model_budget).with_context_resources(self.skills.resources.clone())
+            .with_silent_robot_actions(self.robot_role)
             .with_preactivated_tools(preactivated_tools)
             .with_context_image_input(context_image_input)
             .with_prior_task(prior_task)
             .with_patch_recovery(patch_recovery)
             .with_input_port(self.input_port.clone())
+            .with_wait_port(self.input_port.clone())
             .with_user_input_request_port(Arc::new(UserInputRequestPort {
                 host:self.self_reference.clone(), enabled:!matches!(receipt.get("origin").and_then(Value::as_str), Some("cron" | "robot" | "channel_guest")),
             }));

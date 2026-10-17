@@ -33,6 +33,8 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
 
 mod browser_surface;
+#[cfg(target_os = "linux")]
+mod linux_media;
 #[cfg(target_os = "macos")]
 mod macos_development_launch;
 #[cfg(target_os = "macos")]
@@ -2774,7 +2776,11 @@ fn complete_main_thread_setup(
             "embedded backend failed during window setup: {error}"
         ));
     }
-    win_builder.build()?;
+    let main_window = win_builder.build()?;
+    #[cfg(target_os = "linux")]
+    linux_media::install(&main_window)?;
+    #[cfg(not(target_os = "linux"))]
+    let _ = main_window;
 
     // System tray. Closing the main window HIDES it here instead of
     // quitting (see the CloseRequested handler in on_window_event); the
@@ -2903,9 +2909,9 @@ fn desktop_process_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri_plugin_process::init()
 }
 
-#[cfg(target_os = "macos")]
-/// Register terminal and development-parent shutdown before backend startup.
-fn install_macos_exit_observers(app: &tauri::AppHandle) -> anyhow::Result<()> {
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+/// Register terminal shutdown before backend startup, plus the macOS development-parent lifetime.
+fn install_unix_exit_observers(app: &tauri::AppHandle) -> anyhow::Result<()> {
     use tokio::signal::unix::{signal, SignalKind};
 
     let (mut interrupt, mut terminate) = tauri::async_runtime::block_on(async {
@@ -2929,6 +2935,7 @@ fn install_macos_exit_observers(app: &tauri::AppHandle) -> anyhow::Result<()> {
         }
     });
 
+    #[cfg(target_os = "macos")]
     if macos_development_launch::development_application_is_eligible() {
         if let Some(socket_path) = std::env::var_os("NOMIFUN_DEV_LIFETIME_SOCKET") {
             let lifetime_app = app.clone();
@@ -3423,8 +3430,9 @@ fn main() -> std::process::ExitCode {
             {
                 app.manage(setup_exit_reporter.clone());
                 macos_appkit_termination::install(&app_handle, coordinator.clone(), setup_exit_reporter)?;
-                install_macos_exit_observers(&app_handle)?;
             }
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            install_unix_exit_observers(&app_handle)?;
 
             // In dev, the desktop webview loads the live Vite server; the LAN
             // listener must proxy to the same source instead of stale assets.

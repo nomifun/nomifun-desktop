@@ -154,30 +154,68 @@ followed by explicit polling rather than restoring the old template's non-produc
 The early-visible component notice reads the same guidance and is derived only from actual
 component fields in the exact authorized ToolPlan, preserving visibility budgets and grants.
 
-### User-input handoff
+### User-input handoff and owned-resource waiting
 
-The Runtime's `request_user_input` control declares a question and remaining work for an ordinary
-conversation. Its identity comes from the exact tool call; the host verifies the owner, Session and
-active Turn. This is a normal handoff, never an answer, permission or completion evidence.
-`report_completion` retains the actual delivery evidence gate. Both intents share the original
-terminal input fence, resource cleanup and one canonical terminal commit; no waiting state or
-question ledger is added.
+`request_user_input` declares the exact question and remaining work; the host verifies the owner,
+Session and active Turn. A question supplies neither an answer, authority nor completion evidence.
+`report_completion` retains the delivery-evidence gate. The host selects a quiescent closed-turn
+handoff or live waiting from the original resource owners, never from a model-authored keep-alive
+grant. Waiting uses the existing typed Runtime Event/Payload chain, without a wait table, question
+ledger, copied task state or additional checkpoint.
 
-When task accounting is active and a response has no explicit end intent, the existing bounded
-review allows either completion or input handoff. Questions cannot escape actual report review,
-failure-stop or unknown-effect fences. The original typed Runtime Event and native checkpoint
-retain a committed request. Recovery only settles that handoff; it never re-asks, replays tools or
-restores live process handles. Already-admitted replies use steering; replies after closure start
-a new Turn in the same Session. Context reads canonical questions and unfinished requirements;
-the remaining-work description is neither wider authority nor effect evidence.
+With no resource requiring its continued lifetime, the original terminal-input fence, cleanup
+proof and canonical commit close the Turn normally with `user_input_request` on `turn/completed`.
+Already-admitted replies use steering; later replies start a new Turn in the same Session. Canonical
+context retains the question and unfinished requirements. Quiescent checkpoint recovery settles
+only that original handoff, without re-asking, replaying effects or restoring live process handles.
 
-After cleanup proof and terminal acknowledgement, `turn/completed` carries `user_input_request`
-to indicate normal return of this turn's input control. Realtime and history share an ordinary
-question notice; rendering never guesses from prose, manufactures idle or rewrites old failures.
-Canonical AgentExecution output, recovery, adoption and scheduling consume that typed handoff;
-a closed turn with public text cannot complete a Step. AskUser still validates the exact active
-Link, Attempt, policy and original Turn receipt. Automatic decisions and Cron gain no human
-authority from a question. No reply means no model polling or effect replay.
+An authorization helper that must survive human action parks the same Turn inside the host.
+The model stops sampling and `run_turn` does not return a terminal result. Its owner retains the
+execution lease, resources, cancellation and original process deadline. Public `waiting` references
+the original question ID. The host registers notifications before reading durable steering and
+resource revisions, preventing lost replies at the sleep boundary. Real input, original-owner
+observations, expiry and cancellation settle the wait. Owner observations are canonical facts,
+not fabricated `poll_process` calls or tool evidence. Waiting consumes no model steps, tool-failure
+counts or model no-progress windows, and renews neither budgets nor authorization lifetimes.
+A user saying authorization finished is not its success receipt; actual timeout remains a command
+attempt result while unfinished work can still require attention.
+
+A provider stop ends one response. One stop-resolution decision uses actual plans, current reports
+and resource state to select review, live waiting, native suspension or completion. An unfinished
+plan alone never proves failure. Exhausted plan, report or end-intent correction retains the work
+for human intervention without changing actual command or tool-failure counts. Live resources
+stay with their owner; their exit grants no additional correction attempt. Only quiescent resources
+can use native suspension. An owner deferred beyond its soft window retains the acknowledged
+checkpoint and canonical tail; suspension creates no renewal or invented checkpoint receipt.
+Actual faults, failure-stop policy, unknown Effects and patch recovery retain their
+original fences and cannot be escaped by a question.
+
+REST, realtime, history, task progress and domain consumers use the same typed public outcome.
+Plan steps describe work progress independently of waiting or suspension; a Turn fault cannot
+make every pending item a failed task. A parked Turn accepts its exact steering reply while
+retaining new-Turn and queue admission fences. IDMM does not treat legitimate waiting as a stalled
+model; Cron and Execution distinguish human attention from failure retries or delivered work.
+A closed Cron input handoff settles its existing invocation as the non-fault `input_required`
+terminal, consuming that occurrence without a retry or permanent reservation. A live resource
+wait remains nonterminal. An exact cancellation settles as `cancelled`, clears failure diagnostics and never
+enters failure retries. Domain cancellation and direct cancellation of the linked Session converge on the same
+canonical cancellation fact. Both AskUser and Automatic policies route a real input handoff through the existing
+WaitingInput boundary; an automatic policy's inability to answer for a person does not fail the task. Human replies
+still validate the exact active Link, Attempt, original question and source receipt, preserving user admission and
+native authorization fences. Automatic policy cannot fabricate human answers or authorization.
+The original Cron receipt worker remains attached across waiting and suspension, freezing its remaining
+observation budget until the exact Turn settles. Restart reattaches that read-only consumer from the original
+reservation and active-runs fence; it creates no invocation, Turn or ledger and never prepares or sends again.
+The existing settlement CAS consumes the terminal result once before ordinary scheduling advances.
+Restart never treats a durable wait as proof a process survived:
+missing owner proof enters recovery/reconciliation without restoring handles or restarting commands.
+
+Waiting replies carry `expected_wait` with the exact source Turn and canonical wait-event `wait_seq`.
+The question remains referenced by its original fact rather than mirrored as client authority.
+The original steering writer validates the active wait and single reply consumption in one
+transaction. Old notices, replaced questions and concurrent windows cannot inject answers into
+a successor. Idempotent retries return their original accepted receipt; changing or removing
+the guard cannot replay it. Ordinary steering uses the same writer.
 
 ### Execution windows and suspension
 
@@ -192,7 +230,7 @@ polls, poll argument changes and instruction reads do not extend stall protectio
 exhaustion, unknown outcomes, cancellation and missing checkpoint acknowledgement keep the
 existing fail-closed behavior.
 
-The renderer shares an idle/running/paused interpretation of the existing canonical projection
+The renderer shares an idle/running/waiting/paused interpretation of the existing canonical projection
 without another persistent lifecycle. Suspension retains the original Turn and input fence;
 an explicit end-turn action replaces the execution animation and cancels that exact Turn.
 Input reopens only after release is confirmed. Public pause notices preserve known execution,
@@ -245,7 +283,7 @@ Official seeds grant concrete business Actions rather than deriving authority fr
 | `coding.codex` | Files, version control, processes, artifacts, project memory, research, collaboration, SSH, knowledge and Session management; retains headless Runtime requirements without browser or desktop-control dependencies. |
 | `app.developer` | Complete Coding baseline plus ten application-hosting actions; its independent project uses ordinary Sessions and the same application owner. Other presets keep application hosting optional. |
 | `companion.default` | Desktop Companion: persona, shared memory, channels, schedules and everyday files, processes, artifacts, research, browser, computer, media, assets, Office, SSH, collaboration and management. Physical Robot tools are omitted by default and can be explicitly selected. |
-| `companion.robot` | Robot defaults: the same Companion identity and memory, independent device Sessions and four explicit Robot Actions; targeted desktop delegation and source-scoped task status, cancellation and ordinary-question answers. Users can explicitly add desktop work, collaboration and management capabilities. |
+| `companion.robot` | Robot defaults: the same Companion identity and memory, independent device Sessions and four explicit Robot Actions; directed desktop delegation supplies real-time queries, research, knowledge, computer work and elaborate motion planning. Source-scoped task controls and result Turns remain available. Users can explicitly add capabilities. |
 | `customer-service.default` | Customer notes, handoff, knowledge retrieval, channel replies and sends, files, processes, artifacts, research and schedules; no default global knowledge-registry, cross-Session or terminal management. |
 | `creative-studio.default` | Media, Canvas, assets, templates, Office, files, processes, artifacts, project memory, research, browser, collaboration and schedules; retains its three creative Package Skills. |
 
@@ -274,11 +312,33 @@ The derived model context is bounded to 128 KiB, with at most four complete hist
 16 historical messages. Oversized historical turns are omitted whole, retaining tool call/result pairs in kept
 turns; the accepted current input is never truncated. Canonical history and history APIs remain complete.
 Cross-Agent handoffs are loaded verbatim up to 16 KiB; larger handoffs receive a short model-projection notice while their canonical facts remain intact. JSON is not truncated and old tasks are not inferred or inherited.
-Each turn permits eight model steps without execution-window renewal. Explicit reasoning settings and model defaults remain unchanged.
-Frozen, currently authorized Robot tools receive priority within the existing 24 KiB/initial-definition budget,
-with small representatives of granted Actions before richer definitions. Initially visible definitions remain
+Each turn permits eight model steps without execution-window renewal. Explicit Session reasoning choices remain unchanged.
+With no explicit choice, a canonical lean Robot can attach a transient `ResponsiveRobot` preference to its existing
+Turn model-configuration pin. Only exact documented provider/model/protocol effort support permits `minimal` or `low`
+on that actual attempt. Unknown models, gateways, native thinking controls and lighter settings retain their configuration;
+desktop workers use their own model settings. No Session field, saved model setting or frozen authority is rewritten.
+Within the existing 24 KiB/initial-definition budget, retain directed delegation and source-task controls first,
+then small representatives of granted Robot Actions before richer definitions. Initially visible definitions remain
 non-deferred and cannot be evicted by later ToolSearch windows. Oversized definitions remain discoverable;
 schemas, resource authority, connection leases and dispatch-time permission checks are unchanged.
+
+Clear physical commands use their matching device tools directly and default to no public reply once every requested
+action has a successful receipt. Questions, explicitly requested receipts, failures, uncertainty and necessary clarification
+still get a reply. Ordinary companionship follows the requested depth. Missing platform work, including
+a short real-time weather query, uses the same Companion's saved desktop Agent through
+`strategy=planned,target_role=desktop`; this single-target path skips the planning model. Deep research and elaborate
+motion design can use that worker's reasoning, returning a concise answer or a plan for the original Robot to execute
+within the original user request and its own device grants. Parent Turns end after acceptance without polling;
+typed result Turns return to the original valid device connection. Current live Persona and Runtime guidance apply to
+already-authorized device Sessions; seed instructions do not overwrite saved authorship or widen existing Snapshots.
+
+The optional `finish_without_reply` Runtime control declares that the entire physical interaction needs no public answer.
+It can follow the final motion/display batch, with real execution still serialized. Host settlement, cancellation and the
+atomic terminal-input fence must pass before the typed `silent_completion` observation is committed. An exact completed
+Turn with that intent and its empty closing seal derives `AgentTurnOutcome::Silent`; old empty answers remain unavailable.
+This is reply intent, never evidence that physical movement or delegated work finished. UI history retains tool activity
+without a manufactured answer, while Robot receives only `Done` and does not start TTS. UI/API contract version 37 requires
+matching frontend and backend builds. Other Agent empty-answer and delivery guarantees stay unchanged.
 
 Robot ASR runs as an owned task, with at most one recognition in flight and two queued recordings per connection.
 The device reader continues handling MCP replies, abort, disconnect and ping. Abort clears unsubmitted audio
@@ -293,7 +353,7 @@ navigation-table field; archiving does not redirect incoming device or quick-win
 
 The App's compilation surface remains desktop regardless of optional Browser/Computer adapters. Deferring physical availability in the resource ceiling requires an exact pinned bundled public Provider with one member, one resource kind, complete Action operation contracts, and no private implementation, dependencies, Context or Events. Unsupported physical members enter only the current compiled object's non-executable set, never Snapshot or checkpoint data; binding and invocation still reject them. Other Providers, incomplete contracts and direct non-Agent operations retain strict admission.
 
-The authorized catalog is not truncated at 128 Modules or Actions. With ToolSearch, initial schema presentation projects within 24 KiB and 111 tools, reserving Runtime controls and five latest search matches while preserving every binding and schema in the original ToolPlan. Later searches protect the latest set of up to five matches, fill remaining space with older displayed tools, and leave omitted tools searchable. Explicit Host preactivation uses the final authorized frozen names and atomically presents the entire requested set; it does not split them into five-match searches that can evict earlier members. Both latest search results and explicit Host sets may exceed the soft 24 KiB target. The hard limits remain 116 authorized definitions, 128 visible tools including Runtime controls, and the whole-request context budget; an oversized set is rejected without partially changing activation. Canonical recovery rebuilds presentation from its original facts and applies the corresponding set rules. Without ToolSearch, only the actual assembled visible tool count is limited. This window is presentation state, not a second authority set or persistent ledger.
+The authorized catalog is not truncated at 128 Modules or Actions. With ToolSearch, initial schema presentation projects within 24 KiB and 110 tools, reserving Runtime controls and five latest search matches while preserving every binding and schema in the original ToolPlan. Later searches protect the latest set of up to five matches, fill remaining space with older displayed tools, and leave omitted tools searchable. Explicit Host preactivation uses the final authorized frozen names and atomically presents the entire requested set; it does not split them into five-match searches that can evict earlier members. Both latest search results and explicit Host sets may exceed the soft 24 KiB target. The hard limits remain 115 authorized definitions, 128 visible tools including Runtime controls, and the whole-request context budget; an oversized set is rejected without partially changing activation. Canonical recovery rebuilds presentation from its original facts and applies the corresponding set rules. Without ToolSearch, only the actual assembled visible tool count is limited. This window is presentation state, not a second authority set or persistent ledger.
 
 ### Relocating the same current dataset
 
@@ -381,8 +441,12 @@ typed resource and BrowserRunGuard. Attached Chrome remains a separate connected
 Turn preparation freezes Browser authority without locking the managed browser. The first actual managed browser
 invocation acquires the current Workspace's native input gate and guard for the remainder of that Turn. Tool completion,
 ordinary tool failure, model thinking and unrelated subsequent tools do not release ownership. Settlement drains native
-operations while retaining the hardware input gate; only the exact durable Turn terminal followed by successful finish
-permits final release. Failed settlement, uncertain native cleanup and terminal-write or finish failures retain the gate
+operations while retaining the hardware input gate; normal terminal settlement requires the exact durable Turn terminal
+followed by successful finish before final release. A committed same-Turn human wait is another explicit handoff:
+the original Store verifies the exact owner, active Operation, `waiting` outcome and absence of pending/unknown Effects
+both before and after settlement. Only Browser ownership is released; original process owners and deadlines remain.
+The next Browser action obtains a fresh lazy admission and observation under the frozen grants. Earlier observations
+cannot be reused, and an ordinary model stop never grants a release. Failed settlement, uncertain native cleanup and terminal-write or finish failures retain the gate
 for the original Turn's recovery. User APIs use the actual coordinator gate, without deriving ownership from Session
 running or paused, model prose or configured Browser permissions. Turns that never invoke the managed browser,
 including chat, file work, attached Chrome and background rendering, leave it available to the user.
@@ -427,7 +491,7 @@ Every initial or resumed narration/reasoning phase commits its first real fragme
 
 Process narration and public answers share `ConversationProse` and a Session-scoped ephemeral display cursor. Messages retain their original zero-delay ingress batches and complete received text; copying, result membership, cancellation and Runtime busy state never wait for animation. Live ingress explicitly admits sources for frame-paced presentation, sharing progress across exact canonical source/ranges; history reads do not grant live eligibility or replay a process-to-answer handoff. A parsed Markdown tree is reused within each presented source revision, revealing only arrived characters and complete syntax ranges. Code blocks and display math keep stable widgets containing their actual received content; other Markdown consumers keep their default renderer. Cursors are neither persisted nor another appended body. Replacement, withdrawal, cancellation, pause, Session changes and reduced-motion settings retain their immediate boundaries.
 
-The existing ToolCall product projection retains capability/action identity, call names, existing path/operation labels and actual status. Live history and conversation exports exclude file bodies, search snippets, write content, patches, stdin, inline scripts and raw tool output. Existing operation rows remain unchanged; no replacement file list, card or interaction is introduced, and a row with no remaining detail has no empty disclosure. Canonical model arguments and observations are unaffected. Typed process outcomes, permission requirements, bounded-search results, knowledge-write notices and produced media are extracted before product-body removal and continue through their existing product paths. The renderer does not reconstruct these states from arbitrary output JSON. The unused `content_mode` query option and business-ignored knowledge-write `title` are retired. UI/API contract version 34 requires matching frontend/backend builds instead of allowing an old renderer to infer status from retired bodies.
+The existing ToolCall product projection retains capability/action identity, call names, existing path/operation labels and actual status. Live history and conversation exports exclude file bodies, search snippets, write content, patches, stdin, inline scripts and raw tool output. Existing operation rows remain unchanged; no replacement file list, card or interaction is introduced, and a row with no remaining detail has no empty disclosure. Canonical model arguments and observations are unaffected. Typed process outcomes, permission requirements, bounded-search results, knowledge-write notices and produced media are extracted before product-body removal and continue through their existing product paths. The renderer does not reconstruct these states from arbitrary output JSON. The unused `content_mode` query option and business-ignored knowledge-write `title` are retired. UI/API contract version 37 requires matching frontend/backend builds instead of allowing an old renderer to infer status from retired bodies.
 
 `ToolCompleted.runtime_hold` records only a bounded Runtime reason why one proposal did not reach its owner port. `ToolStarted` remains write-ahead admission intent. Discovery, held proposals, owner failures, cancellation and unknown Effects keep distinct semantics. Missing historical reasons remain unclassified rather than guessed from English output. Host settlement remains readable when cancellation prevents a Runtime completion. Display metadata never changes authority, work accounting, delivery review or replay decisions. New reports use the v5 public format without automatically appended aggregate failure counts. Work accounting and delivery gates retain their original values; saved current-generation older deliveries keep exact text validation without rewriting history.
 

@@ -19,6 +19,7 @@ import { OutputLimitInput } from './OutputLimitInput';
 import ModelProtocolDiscoveryControl from './ModelProtocolDiscoveryControl';
 import ModelConfigurationReference from './ModelConfigurationReference';
 import ProtocolParameterTransitionFeedback from './ProtocolParameterTransitionFeedback';
+import './model-definition-readability.css';
 import { applyDiscoveredModelProtocol, modelProtocolDiscoveryAppliesDefaults, modelProtocolDiscoverySnapshot,
   type ModelProtocolDiscoveryContext } from './modelProtocolDiscovery';
 import {
@@ -907,8 +908,8 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                 type='secondary'
                 className={`!h-32px !w-32px !min-w-32px !shrink-0 !p-0 ${
                   modelAliasExpanded || modelAlias
-                    ? '!bg-primary-1 !text-primary-6'
-                    : '!bg-fill-1 !text-t-tertiary hover:!bg-fill-2 hover:!text-t-secondary'
+                    ? '!bg-[var(--control-selected-bg,var(--text-primary))] !text-[var(--control-selected-fg,var(--color-bg-1))]'
+                    : '!bg-fill-1 !text-t-secondary hover:!bg-fill-2 hover:!text-t-secondary'
                 }`}
                 icon={<TagOne theme='outline' size='15' />}
                 aria-label={modelAliasActionLabel}
@@ -960,7 +961,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                 />
                 <div
                   id={`${modelAliasInputId}-hint`}
-                  className='text-11px leading-4 text-t-tertiary'
+                  className='text-11px leading-4 text-t-secondary'
                   role='note'
                 >
                   {t('settings.modelDisplayNameHint', {
@@ -993,7 +994,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   })}
           </div>
           {(catalogBusy || effectiveCatalogError || (catalogWasRefreshed && catalogSource !== 'official_documentation') || !catalogFetchReady || catalogSuggestions.length === 0) && (
-            <div className={`text-11px leading-4 ${effectiveCatalogError ? 'text-warning-6' : 'text-t-tertiary'}`} role={effectiveCatalogError ? 'alert' : 'status'} data-model-catalog-status>
+            <div className={`text-11px leading-4 ${effectiveCatalogError ? 'text-warning-6' : 'text-t-secondary'}`} role={effectiveCatalogError ? 'alert' : 'status'} data-model-catalog-status>
               {catalogStatus}
             </div>
           )}
@@ -1025,7 +1026,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
             aria-describedby={`${modelAliasInputId}-hint`}
             data-model-alias-input
           />
-          <div id={`${modelAliasInputId}-hint`} className='text-11px leading-4 text-t-tertiary'>
+          <div id={`${modelAliasInputId}-hint`} className='text-11px leading-4 text-t-secondary'>
             {t('settings.modelDisplayNameHint', { defaultValue: '非必填，仅用于界面展示；实际请求仍使用原始模型 ID。' })}
           </div>
         </div>
@@ -1457,7 +1458,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                         {t(capabilityValidationMessageKey('invalid_token_limit'))}
                       </div>
                     )}
-                    {!protocolDiscovery && <div className='text-11px leading-4 text-t-tertiary'>
+                    {!protocolDiscovery && <div className='text-11px leading-4 text-t-secondary'>
                       {t('settings.modelAdvanced.contextLimitCompactHint', {
                         defaultValue: '未填写不覆盖模型上下文。仅采用供应商明确提供的窗口；未知时请按模型文档填写，安全预算独立。',
                       })}
@@ -1506,7 +1507,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                       })}
                       data-model-compaction-threshold
                     />
-                    {!protocolDiscovery && <div className='text-11px leading-4 text-t-tertiary'>
+                    {!protocolDiscovery && <div className='text-11px leading-4 text-t-secondary'>
                       {t('settings.modelAdvanced.compactionThresholdHint', {
                         defaultValue: '达到可用输入空间的这个比例时自动压缩；调低会更早压缩。',
                       })}
@@ -1658,19 +1659,19 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               </div>
               <div className='divide-y divide-[var(--color-border-2)] rounded-8px border border-solid border-[var(--color-border-2)]'>
                 <div className='grid grid-cols-[116px_minmax(0,1fr)] gap-10px px-12px py-9px text-12px'>
-                  <span className='text-t-tertiary'>
+                  <span className='text-t-secondary'>
                     {t('settings.modelAdvanced.protocol', { defaultValue: '调用协议' })}
                   </span>
                   <span className='text-t-primary'>{protocolSummary}</span>
                 </div>
                 <div className='grid grid-cols-[116px_minmax(0,1fr)] gap-10px px-12px py-9px text-12px'>
-                  <span className='text-t-tertiary'>
+                  <span className='text-t-secondary'>
                     {t('settings.modelAdvanced.connectionRole', { defaultValue: '连接档案' })}
                   </span>
                   <span className='text-t-primary'>{selectedRole}</span>
                 </div>
                 <div className='grid grid-cols-[116px_minmax(0,1fr)] gap-10px px-12px py-9px text-12px'>
-                  <span className='text-t-tertiary'>
+                  <span className='text-t-secondary'>
                     {t('settings.modelAdvanced.resolvedUrl', { defaultValue: '实际请求地址' })}
                   </span>
                   <span className='break-all text-t-primary'>
@@ -1678,7 +1679,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   </span>
                 </div>
                 <div className='grid grid-cols-[116px_minmax(0,1fr)] gap-10px px-12px py-9px text-12px'>
-                  <span className='text-t-tertiary'>
+                  <span className='text-t-secondary'>
                     {t('settings.authScheme', { defaultValue: '鉴权方式' })}
                   </span>
                   <span className={authSchemeCompatible ? 'text-t-primary' : 'text-danger-6'}>
@@ -1787,7 +1788,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   candidate.task === capability.task ? changeCapabilityProtocol(candidate, protocol, manifest) : candidate) }))}
               />
               {capability.task === 'chat' && (capability.protocol === 'openai.responses' || capability.protocol === 'openai.chat_text') && (
-                <div className='text-11px text-t-tertiary' data-openai-protocol-hint={capability.protocol}>
+                <div className='text-11px text-t-secondary' data-openai-protocol-hint={capability.protocol}>
                   {capability.protocol === 'openai.responses'
                     ? t('settings.modelAdvanced.responsesProtocolHint', {
                         defaultValue: 'Responses API（/responses）：适用于新版 OpenAI 模型；兼容网关需要明确支持此接口。最大输出默认使用 max_output_tokens。',
@@ -1806,7 +1807,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                 </div>
               )}
               {descriptor && descriptor.allowed_auth_schemes.length > 0 && (
-                <div className='text-11px text-t-tertiary' data-protocol-auth-schemes>
+                <div className='text-11px text-t-secondary' data-protocol-auth-schemes>
                   {t('settings.protocolAllowedAuthSchemes', {
                     defaultValue: '允许的鉴权格式',
                   })}
@@ -1847,7 +1848,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                         defaultValue: '地址与 Endpoint 覆盖',
                       })}
                     </span>
-                    <span className='mt-1px block truncate text-11px text-t-tertiary'>
+                    <span className='mt-1px block truncate text-11px text-t-secondary'>
                       {actualRequestUrl || baseUrlSummary}
                     </span>
                   </span>
@@ -1857,9 +1858,9 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                       : t('common.edit', { defaultValue: '修改' })}
                   </span>
                   {protocolTransportOpen ? (
-                    <Down theme='outline' size='13' className='shrink-0 text-t-tertiary' />
+                    <Down theme='outline' size='13' className='shrink-0 text-t-secondary' />
                   ) : (
-                    <Right theme='outline' size='13' className='shrink-0 text-t-tertiary' />
+                    <Right theme='outline' size='13' className='shrink-0 text-t-secondary' />
                   )}
                 </button>
               )}
@@ -1897,7 +1898,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                 <div className='text-12px text-t-secondary'>
                   {t('settings.modelAdvanced.connectionRole', { defaultValue: '连接档案' })}
                 </div>
-                <div className='text-11px leading-4 text-t-tertiary'>
+                <div className='text-11px leading-4 text-t-secondary'>
                   {t('settings.modelAdvanced.connectionRoleHint', {
                     defaultValue: '决定这次请求用哪套地址、鉴权方式和凭据。',
                   })}
@@ -1924,7 +1925,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                 {onCreateConnection && (
                   <Button
                     size='mini'
-                    type='outline'
+                    type='secondary'
                     data-create-named-connection={capability.task}
                     onClick={() =>
                       setCustomConnectionTask((current) =>
@@ -2025,7 +2026,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                       {t('settings.restoreProviderDefault', { defaultValue: '恢复默认' })}
                     </Button>
                   </div>
-                  <div className='text-11px text-t-tertiary'>
+                  <div className='text-11px text-t-secondary'>
                     {capability.baseUrlOverride
                       ? t('settings.modelAdvanced.baseUrlOverridden', { defaultValue: '当前为任务级覆盖值。' })
                       : t('settings.modelAdvanced.baseUrlInherited', {
@@ -2033,7 +2034,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                         })}
                   </div>
                   {rootShape && (
-                    <div className='text-11px text-t-tertiary' data-root-shape={rootShape}>
+                    <div className='text-11px text-t-secondary' data-root-shape={rootShape}>
                       {rootShape === 'versioned_root'
                         ? t('settings.modelAdvanced.rootShapeVersioned', {
                             defaultValue: '该协议要求 Base URL 自带版本段（如 …/v1），请求路径不带版本。',
@@ -2063,7 +2064,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                 className='space-y-10px border-0 border-l border-solid border-[var(--color-border-2)] pl-12px'
                 data-transport-level='endpoints'
               >
-                <div className='text-11px leading-4 text-t-tertiary'>
+                <div className='text-11px leading-4 text-t-secondary'>
                   {t('settings.modelAdvanced.endpointsHint', {
                     defaultValue: '相对路径，拼在上方生效的 Base URL 之后。',
                   })}
@@ -2129,7 +2130,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   </div>
                   {resolvedUrl && (
                     <div
-                      className='text-11px text-t-tertiary break-all'
+                      className='text-11px text-t-secondary break-all'
                       data-resolved-endpoint-url={field}
                     >
                       {t('settings.modelAdvanced.resolvedUrl', { defaultValue: '实际请求地址' })}:{' '}
@@ -2190,7 +2191,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                       <div className='text-12px text-t-secondary'>
                         {t('settings.modelAdvanced.reasoningEffort', { defaultValue: '思考深度' })}
                       </div>
-                      <div className='mt-2px text-11px leading-4 text-t-tertiary'>
+                      <div className='mt-2px text-11px leading-4 text-t-secondary'>
                         {t('settings.modelAdvanced.reasoningEffortDescription', {
                           defaultValue: '作为该模型 Chat 能力的默认值，影响速度、质量和 token 消耗。',
                         })}
@@ -2219,7 +2220,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                             data-reasoning-effort={option.key}
                             className={`min-w-58px border-0 border-r border-solid border-[var(--color-border-2)] px-11px py-6px text-12px last:border-r-0 disabled:cursor-not-allowed disabled:opacity-45 ${
                               selected
-                                ? 'bg-primary-1 text-primary-6'
+                                ? 'bg-[var(--control-selected-bg,var(--text-primary))] text-[var(--control-selected-fg,var(--color-bg-1))]'
                                 : 'bg-transparent text-t-secondary hover:bg-fill-2'
                             }`}
                             onClick={() =>
@@ -2250,7 +2251,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   <div
                     className={`text-11px leading-4 ${
                       providerParamsValid && reasoningEffortProtocolSupported
-                        ? 'text-t-tertiary'
+                        ? 'text-t-secondary'
                         : 'text-warning-7'
                     }`}
                     data-reasoning-effort-hint
@@ -2370,7 +2371,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                     defaultValue: '供应商专用参数',
                   })}
                 </span>
-                <span className='mt-1px block text-11px text-t-tertiary'>
+                <span className='mt-1px block text-11px text-t-secondary'>
                   {capability.providerParamsJson.trim()
                     ? t('settings.modelAdvanced.providerOptionsConfigured', {
                         defaultValue: '已设置自定义参数',
@@ -2386,9 +2387,9 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   : t('common.edit', { defaultValue: '修改' })}
               </span>
               {protocolParamsOpen ? (
-                <Down theme='outline' size='13' className='shrink-0 text-t-tertiary' />
+                <Down theme='outline' size='13' className='shrink-0 text-t-secondary' />
               ) : (
-                <Right theme='outline' size='13' className='shrink-0 text-t-tertiary' />
+                <Right theme='outline' size='13' className='shrink-0 text-t-secondary' />
               )}
             </button>
             <div hidden={!protocolParamsOpen} className='space-y-12px'>
@@ -2418,7 +2419,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                     })}
                     triggerProps={{ getPopupContainer: () => document.body }}
                   />
-                  <div className='text-11px text-t-tertiary'>
+                  <div className='text-11px text-t-secondary'>
                     {t('settings.modelAdvanced.maxTokensFieldHint', {
                       defaultValue: '按供应商文档选择输出上限字段：较新的 GPT Chat 接口使用 max_completion_tokens，部分兼容供应商使用 max_tokens。协议默认不代表在线探测，也可输入自定义字段名。',
                     })}
@@ -2449,7 +2450,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                     }}
                     triggerProps={{ getPopupContainer: () => document.body }}
                   />
-                  <div className='text-11px text-t-tertiary'>
+                  <div className='text-11px text-t-secondary'>
                     {t('settings.modelAdvanced.streamUsageHint', {
                       defaultValue: '供应商不接受 stream_options 时选择不发送；这可能使 token 用量无法取得。自定义选项可在下方 JSON 中调整。',
                     })}
@@ -2493,7 +2494,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   }
                   triggerProps={{ getPopupContainer: () => document.body }}
                 />
-                <div className='text-11px text-t-tertiary'>
+                <div className='text-11px text-t-secondary'>
                   {providerParamsValid
                     ? t('settings.modelAdvanced.defaultVoiceHint', {
                         defaultValue:
@@ -2530,7 +2531,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                     defaultValue: 'Chain turns with previous_response_id (sets store: true)',
                   })}
                 </Checkbox>
-                <div className={`text-11px ${providerParamsValid ? 'text-t-tertiary' : 'text-danger-6'}`}>
+                <div className={`text-11px ${providerParamsValid ? 'text-t-secondary' : 'text-danger-6'}`}>
                   {providerParamsValid
                     ? t('settings.modelAdvanced.chainRoundsRetention', {
                         defaultValue:
@@ -2557,7 +2558,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                 placeholder='{\n  "voice": "alloy"\n}'
                 onChange={(providerParamsJson) => updateCapability(capability.task, { providerParamsJson })}
               />
-              <div className={`text-11px ${providerParamsValid ? 'text-t-tertiary' : 'text-danger-6'}`}>
+              <div className={`text-11px ${providerParamsValid ? 'text-t-secondary' : 'text-danger-6'}`}>
                 {providerParamsValid
                   ? t('settings.modelAdvanced.providerParamsOnly', {
                       defaultValue: '只填写供应商原始参数；切换协议会保留自定义值，不兼容的参数需要明确修正。URL 和凭据边界独立管理。',

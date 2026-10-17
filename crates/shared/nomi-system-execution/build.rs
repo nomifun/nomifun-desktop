@@ -2,7 +2,8 @@ use sha2::{Digest, Sha256};
 use std::{env, path::PathBuf, process::Command};
 
 fn main() {
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
+    if !matches!(target_os.as_str(), "macos" | "linux") {
         return;
     }
     let sources = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -63,6 +64,9 @@ fn main() {
         "cargo:rustc-env=NOMIFUN_SYSTEM_EXECUTION_BUILD_ID={:x}",
         identity.finalize()
     );
+    if target_os == "linux" {
+        return;
+    }
     let arch = match env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str() {
         "aarch64" => "arm64",
         "x86_64" => "x86_64",

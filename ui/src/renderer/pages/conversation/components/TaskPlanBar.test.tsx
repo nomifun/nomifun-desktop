@@ -39,7 +39,8 @@ test('paused and terminal tasks preserve progress without an active spinner', ()
   expect(result.getByTestId('task-plan-summary').textContent).toContain('Stopped');
   expect(result.queryByTestId('task-plan-progress-indicator')).toBeNull();
   result.rerender(view(snapshot('failed')));
-  expect(result.getByTestId('task-plan-summary').textContent).toContain('Failed');
+  expect(result.getByTestId('task-plan-summary').textContent).toContain('This turn failed');
+  expect(result.getByTestId('task-plan-summary').textContent).toContain('1/3');
   expect(result.queryByTestId('task-plan-progress-indicator')).toBeNull();
 });
 
@@ -62,6 +63,19 @@ test('completed tasks keep the full checklist', () => {
   data.plan!.steps.forEach((step) => { step.status = 'completed'; });
   const result = render(view(data));
   expect(result.getByTestId('task-plan-summary').textContent).toContain('3/3');
+  expect(result.queryByTestId('task-plan-progress-indicator')).toBeNull();
+});
+
+test.each(['running', 'completed'])('a %s input handoff keeps progress without failure or a spinner', status => {
+  const data = snapshot(status);
+  data.turn_outcome = status === 'running'
+    ? { kind: 'waiting', wait_seq: 41, request_id: 'authorize', reason: 'user_input' }
+    : { kind: 'input_required', request_id: 'authorize' };
+  const result = render(view(data));
+  expect(result.getByTestId('task-plan-summary').textContent).toContain('1/3');
+  expect(result.getByTestId('task-plan-summary').textContent).toContain('Waiting');
+  expect(result.getByTestId('task-plan-summary').textContent).not.toContain('your input');
+  expect(result.getByTestId('task-plan-summary').textContent).not.toContain('Failed');
   expect(result.queryByTestId('task-plan-progress-indicator')).toBeNull();
 });
 

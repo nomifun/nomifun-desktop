@@ -1,12 +1,14 @@
 #!/usr/bin/env bun
-// Every macOS product build signs and verifies its final app before distribution.
+// Product builds use the platform's complete application packaging pipeline.
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 export function desktopBuildCommand(platform, args) {
-  return platform === 'darwin'
-    ? { command: 'bash', args: [fileURLToPath(new URL('./desktop-build-mac.sh', import.meta.url)), ...args], prune: false }
-    : { command: 'bun', args: ['x', 'tauri', 'build', '--config', 'apps/desktop/tauri.conf.json', ...args], prune: true };
+  if (platform === 'darwin' || platform === 'linux') {
+    const script = platform === 'darwin' ? 'desktop-build-mac.sh' : 'desktop-build-linux.sh';
+    return { command: 'bash', args: [fileURLToPath(new URL(`./${script}`, import.meta.url)), ...args], prune: false };
+  }
+  return { command: 'bun', args: ['x', 'tauri', 'build', '--config', 'apps/desktop/tauri.conf.json', ...args], prune: true };
 }
 
 if (import.meta.main) {

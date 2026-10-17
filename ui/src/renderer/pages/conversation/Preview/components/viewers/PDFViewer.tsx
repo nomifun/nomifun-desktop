@@ -129,6 +129,7 @@ const PDFPreview: React.FC<PDFPreviewProps> = ({ file_path, content, hideToolbar
         {/* key ensures the iframe remounts when the file path changes */}
         <iframe
           key={pdfSrc}
+          allow="camera 'none'; microphone 'none'"
           src={pdfSrc}
           className='w-full h-full border-0'
           title={t('preview.pdf.title')}

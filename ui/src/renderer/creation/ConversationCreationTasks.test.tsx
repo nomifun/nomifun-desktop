@@ -94,7 +94,7 @@ function completedEvent(id: ConversationId = conversationId): IConversationTurnC
     conversation_id: id, turn_id: messageId, status: 'finished', state: 'ai_waiting_input', detail: '',
     can_send_message: true, workspace: '', model: { platform: '', name: '', use_model: '' },
     last_message: { content: '', created_at: 0 },
-    runtime: { state: 'idle', can_send_message: true, has_runtime: true, is_processing: false },
+    runtime: { state: 'idle', can_send_message: true, is_processing: false },
   };
 }
 

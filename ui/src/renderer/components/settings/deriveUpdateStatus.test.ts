@@ -68,6 +68,38 @@ describe('deriveUpdateStatus', () => {
       })
     ).toBe('downloaded');
   });
+
+  test('a refused install context blocks the update even with retained bytes', () => {
+    // Nothing this process retains can be installed by it, so the block must
+    // win over both the install affordance and a live download re-attach.
+    expect(
+      deriveUpdateStatus({
+        availableVersion: '0.4.2',
+        retainedVersion: '0.4.2',
+        autoInstallSupported: false,
+      })
+    ).toBe('installBlocked');
+    expect(
+      deriveUpdateStatus({
+        availableVersion: '0.4.2',
+        slotState: 'downloading',
+        slotVersion: '0.4.2',
+        autoInstallSupported: false,
+      })
+    ).toBe('installBlocked');
+  });
+
+  test('a supported or unknown install context keeps the existing derivation', () => {
+    expect(
+      deriveUpdateStatus({ availableVersion: '0.4.2', retainedVersion: '0.4.2', autoInstallSupported: true })
+    ).toBe('downloaded');
+    expect(
+      deriveUpdateStatus({ availableVersion: '0.4.2', retainedVersion: '0.4.2', autoInstallSupported: null })
+    ).toBe('downloaded');
+    expect(
+      deriveUpdateStatus({ availableVersion: '0.4.2', autoInstallSupported: true })
+    ).toBe('available');
+  });
 });
 
 describe('shouldApplyDownloadEvent', () => {

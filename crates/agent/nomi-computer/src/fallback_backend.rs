@@ -6,7 +6,7 @@
 //!
 //! xcap 0.9 has no focus/activate API. Windows therefore uses Win32 and macOS
 //! uses the Accessibility actor to identify and activate the selected window.
-//! Linux retains the explicitly reported click-to-raise fallback. Window
+//! Linux uses EWMH activation and verifies the exact active window. Window
 //! x/y/width/height from xcap are global logical points on macOS.
 
 use xcap::Window;
@@ -14,11 +14,6 @@ use xcap::Window;
 #[cfg(target_os = "macos")]
 #[path = "macos_self_focus.rs"]
 mod macos_self_focus;
-
-// The click-to-raise focus fallback (and only that) uses synthetic input; on
-// Windows and macOS activate the real window through native APIs.
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-use crate::input;
 
 /// A snapshot of one window's metadata.
 #[derive(Debug, Clone)]
@@ -41,6 +36,8 @@ pub fn list_windows() -> Result<Vec<WindowInfo>, String> {
 }
 
 fn list_windows_inner() -> Result<Vec<WindowInfo>, String> {
+    #[cfg(target_os = "linux")]
+    crate::linux_x11::require_global_x11(false)?;
     let windows = Window::all().map_err(|e| format!("Failed to enumerate windows: {e}"))?;
     let mut infos = Vec::with_capacity(windows.len());
     for w in &windows {
@@ -96,7 +93,8 @@ pub fn find_window(window_id: u32) -> Result<WindowInfo, String> {
 /// exact target HWND, restoring it if minimized, with a foreground-lock
 /// workaround) so subsequent `type`/`key` input lands in the intended window.
 /// On macOS, match the window's current owner, title and bounds in the
-/// Accessibility tree and verify native focus. Linux uses click-to-raise.
+/// Accessibility tree and verify native focus. Linux requests EWMH activation
+/// and checks the exact active window without clicking application content.
 pub async fn focus_window(window_id: u32) -> Result<String, String> {
     #[cfg(not(target_os = "macos"))]
     let info = tokio::task::spawn_blocking(move || find_window(window_id))
@@ -122,26 +120,22 @@ pub async fn focus_window(window_id: u32) -> Result<String, String> {
             .map_err(|e| format!("Focus task failed: {e}"))?
     }
 
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(target_os = "linux")]
     {
-        if info.width == 0 || info.height == 0 {
-            return Err(format!(
-                "Window {window_id} ({:?}) has zero size; it may be minimized or hidden. \
-                 Cannot focus it by clicking.",
-                info.title
-            ));
-        }
-
-        let cx = info.x + info.width as i32 / 2;
-        let cy = info.y + info.height as i32 / 2;
-        input::click(cx, cy, enigo::Button::Left, 1).await?;
+        tokio::task::spawn_blocking(move || crate::linux_x11::focus_window(window_id))
+            .await
+            .map_err(|e| format!("Focus task failed: {e}"))??;
         Ok(format!(
-            "Clicked the center of window {window_id} ({:?} — {:?}) at ({cx}, {cy}) to focus it. \
-             Note: the platform exposes no direct focus API, so this is a click-to-raise fallback; \
-             the click may interact with whatever is at the window center. \
-             Take a screenshot to verify the result.",
+            "Activated window {window_id} ({:?} — {:?}) through the X11 window manager; \
+             the exact _NET_ACTIVE_WINDOW was verified. Observe again before further input.",
             info.app_name, info.title
         ))
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        let _ = info;
+        Err("Native window activation is unavailable on this platform".to_owned())
     }
 }
 

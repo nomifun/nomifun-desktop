@@ -30,9 +30,9 @@ const noteId = parseMessageId('019f0000-0000-7000-8000-000000000917');
 const request = { request_id: 'ask:choose-path', question: 'Which directory should I use?', remaining_work: 'Write and verify the report.' };
 const questionText = `${request.question}\n\n${request.remaining_work}`;
 const idle = { id: conversationId, status: 'finished', runtime: { state: 'idle', can_send_message: true,
-  is_processing: false, has_runtime: false } } as TChatConversation;
+  is_processing: false, } } as TChatConversation;
 const busy = (turn = root) => ({ ...idle, status: 'running', runtime: { state: 'running', can_send_message: false,
-  is_processing: true, has_runtime: true, active_turn_id: turn } }) as TChatConversation;
+  is_processing: true, active_turn_id: turn } }) as TChatConversation;
 const accepted = (turn = root, extra: Partial<IUserMessageCreatedEvent> = {}): IUserMessageCreatedEvent => ({
   conversation_id: conversationId, msg_id: turn, content: 'Question', position: 'right', status: 'finish', created_at: 100, ...extra,
 });
@@ -148,6 +148,46 @@ describe('companion bubble observes canonical cross-window lifecycle', () => {
     await act(async () => { wire.reconnect(); });
     expect(view.result.current.bubble).toBe('Complete answer from the disconnected Turn');
     expect(view.result.current.running).toBe(false);
+  });
+  test('a silent action clears the live tool hint and completion refresh stays quiet before the next question', async () => {
+    const wire = transport(busy());
+    const view = renderHook(() => useCompanionSessionBubble(companionId), { wrapper });
+    await flush();
+    await act(async () => wire.stream(content('', { type: 'tool_call' })));
+    expect(view.result.current.bubble).not.toBe('');
+    const receipt = { backend: 'nomi', status: 'prepared' as const, turn_summary: true, turn_state: 'completed' as const,
+      started_at_ms: 1000, finished_at_ms: 2000, turn_outcome: { kind: 'silent' as const } };
+    await act(async () => wire.stream(content('', { msg_id: noteId, type: 'agent_status', stream_complete: true, data: receipt })));
+    expect(view.result.current.bubble).toBe('');
+    expect(view.result.current.loading).toBe(false);
+    wire.setAuthority(idle);
+    wire.setSaved([{ ...stored(''), id: 'silent-summary', message_id: noteId, msg_id: noteId,
+      type: 'agent_status', position: 'center', content: receipt }]);
+    await act(async () => wire.finish(completed()));
+    expect(view.result.current.phase).toBe('settled');
+    expect(view.result.current.running).toBe(false);
+    expect(view.result.current.bubble).toBe('');
+    await act(async () => wire.reconnect());
+    expect(view.result.current.bubble).toBe('');
+    wire.setAuthority(busy(successor));
+    await act(async () => { wire.user(accepted(successor)); wire.start(successor);
+      wire.stream(content('北京今天晴。', { turn_id: successor })); });
+    expect(view.result.current.turnId).toBe(successor);
+    expect(view.result.current.bubble).toBe('北京今天晴。');
+  });
+  test('mid-turn mount followed by a recovered silent terminal does not show a Done fallback', async () => {
+    const wire = transport(busy());
+    wire.setSaved([{ ...stored(''), id: 'silent-summary', message_id: noteId, msg_id: noteId,
+      type: 'agent_status', position: 'center', content: { backend: 'nomi', status: 'prepared',
+        turn_summary: true, turn_state: 'completed', turn_outcome: { kind: 'silent' } } }]);
+    const view = renderHook(() => useCompanionSessionBubble(companionId), { wrapper });
+    await flush();
+    expect(view.result.current.bubble).toBe('');
+    expect(view.result.current.loading).toBe(false);
+    wire.setAuthority(idle);
+    await act(async () => wire.reconnect());
+    expect(view.result.current.running).toBe(false);
+    expect(view.result.current.bubble).toBe('');
   });
   test('binding resolution retains early streams and terminal even when admission was missed', async () => {
     const wire = transport();

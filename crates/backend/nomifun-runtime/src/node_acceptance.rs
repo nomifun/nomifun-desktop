@@ -1,5 +1,5 @@
 //! Opt-in real Node/npm regression with an offline package and an isolated user.
-#![cfg(all(test, target_os = "macos"))]
+#![cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 use crate::{ToolId, managed::specification};
 use std::{collections::HashMap, fs::{self, File}, path::{Path, PathBuf}};
 
@@ -31,7 +31,7 @@ fn seed_verified_archive(root: &Path, archive: &Path) {
 
 async fn execute(root: &Path, command: &str, args: &[String]) -> serde_json::Value {
     let configured = HashMap::from([
-        ("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into()),
+        ("PATH".into(), root.join("empty-path").to_string_lossy().into_owned()),
         ("HOME".into(), root.join("home").to_string_lossy().into_owned()),
         ("NPM_CONFIG_USERCONFIG".into(), root.join("home/.npmrc").to_string_lossy().into_owned()),
         ("NPM_CONFIG_CACHE".into(), root.join("npm-cache").to_string_lossy().into_owned()),
@@ -71,7 +71,7 @@ async fn official_node_offline_npm_lifecycle_argv_and_restart() {
             let user_bin = root.join("user-node-only"); fs::create_dir(&user_bin).unwrap();
             fs::copy(&tool.executable_path, user_bin.join("node")).unwrap();
             let configured = HashMap::from([
-                ("PATH".into(), format!("{}:/usr/bin:/bin", user_bin.display())),
+                ("PATH".into(), user_bin.to_string_lossy().into_owned()),
                 ("HOME".into(), root.join("home").to_string_lossy().into_owned()),
                 ("NPM_CONFIG_USERCONFIG".into(), root.join("home/.npmrc").to_string_lossy().into_owned()),
             ]);
@@ -109,7 +109,7 @@ async fn official_node_offline_npm_lifecycle_argv_and_restart() {
     let cargo_home = std::env::var_os("CARGO_HOME").map(PathBuf::from).unwrap_or_else(|| dirs::home_dir().unwrap().join(".cargo"));
     let archive = cargo_home.join("nomifun-component-cache/node").join(&asset.sha256).join("approved.asset");
     assert!(archive.is_file(), "build.rs must retain its verified official archive");
-    let temporary = tempfile::tempdir().unwrap(); let root = dunce::canonicalize(temporary.path()).unwrap(); fs::create_dir_all(root.join("home")).unwrap(); archive_fixture(&root); seed_verified_archive(&root, &archive);
+    let temporary = tempfile::tempdir().unwrap(); let root = dunce::canonicalize(temporary.path()).unwrap(); fs::create_dir_all(root.join("home")).unwrap(); fs::create_dir(root.join("empty-path")).unwrap(); std::os::unix::fs::symlink("/bin/sh", root.join("empty-path/sh")).unwrap(); archive_fixture(&root); seed_verified_archive(&root, &archive);
     for phase in ["install", "retained", "restart"] {
         if phase == "retained" {
             // Cache replacement must not remove already installed user tools.
@@ -117,7 +117,7 @@ async fn official_node_offline_npm_lifecycle_argv_and_restart() {
         }
         let mut child = nomi_process_runtime::ChildProcessBuilder::clean_cli(std::env::current_exe().unwrap());
         child.args(["--ignored", "--exact", TEST, "--nocapture"]).env(CHILD_ROOT, &root).env(CHILD_PHASE, phase)
-            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin").env("HOME", root.join("home"))
+            .env("PATH", root.join("empty-path")).env("HOME", root.join("home"))
             .env("USERPROFILE", root.join("home")).env("APPDATA", root.join("appdata"))
             .env("LOCALAPPDATA", root.join("localappdata")).env("XDG_DATA_HOME", root.join("xdg-data"))
             .env_remove("NOMIFUN_NODE_PATH").env_remove("NOMIFUN_BUN_PATH").env_remove("NPM_CONFIG_PREFIX")

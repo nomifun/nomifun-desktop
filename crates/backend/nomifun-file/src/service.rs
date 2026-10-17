@@ -6830,6 +6830,130 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn native_new_file_publication_consumes_staging_on_mounts() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let events = Arc::new(PublicationEvents::default());
+        let svc = FileService::new(events.clone(), vec![workspace.path().to_owned()]);
+        let scope = crate::resource::workspace_binding(nomifun_common::generate_id(), "new-file-binding", "project", "owner",
+            [crate::resource::READ_OPERATION, crate::resource::WRITE_OPERATION, crate::resource::DELETE_OPERATION], workspace.path()).unwrap();
+        let target = outside.path().join("value 中文.txt");
+        let path = target.to_str().unwrap();
+        let receipt = svc.write_file_with_observation_for_agent_session(&scope, path, b"new file needle\n").await.unwrap();
+        assert!(receipt.created && receipt.workspace_path.is_none());
+        assert_eq!(svc.read_file_for_agent_session(&scope, path).await.unwrap().as_deref(), Some("new file needle\n"));
+        let search = svc.search_text_for_agent_session(&scope, crate::AgentTextSearchRequest {
+            query: "needle".into(), path: Some(outside.path().to_string_lossy().into_owned()), limit: Some(10),
+        }).await.unwrap();
+        assert_eq!(search.matches.len(), 1);
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 1, "new publication must consume the temporary link");
+        svc.remove_entry_for_agent_session(&scope, path).await.unwrap();
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+        assert!(events.0.lock().unwrap().is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn native_external_file_publication_supports_mounted_directory() {
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        let outside = fixture.path().join("outside 中文");
+        fs::create_dir(&workspace).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let events = Arc::new(PublicationEvents::default());
+        let svc = FileService::new(events.clone(), vec![workspace.clone()]);
+        let scope = crate::resource::workspace_binding(nomifun_common::generate_id(), "mount-binding", "project", "owner",
+            [crate::resource::READ_OPERATION, crate::resource::WRITE_OPERATION, crate::resource::DELETE_OPERATION], &workspace).unwrap();
+        let target = outside.join("nested/value.txt");
+        let path = target.to_str().unwrap();
+        let receipt = svc.write_file_with_observation_for_agent_session(&scope, path, b"before needle\n").await.unwrap();
+        assert!(receipt.created && receipt.workspace_path.is_none());
+        let result = svc.apply_patch_for_agent_session(&scope, AgentSessionPatchRequest { files: vec![AgentSessionFilePatch {
+            path: path.into(), expected_source: Default::default(), hunks: vec![replace_hunk(1, 1, 1, 1, vec![
+                AgentSessionPatchLine::Remove { text: "before needle".into() },
+                AgentSessionPatchLine::Add { text: "after needle".into() },
+            ])],
+        }] }).await.unwrap();
+        assert!(result.files[0].workspace_path.is_none());
+        assert_eq!(svc.read_file_for_agent_session(&scope, "../outside 中文/nested/value.txt").await.unwrap().as_deref(), Some("after needle\n"));
+        let search = svc.search_text_for_agent_session(&scope, crate::AgentTextSearchRequest {
+            query: "after needle".into(), path: Some(outside.to_string_lossy().into_owned()), limit: Some(10),
+        }).await.unwrap();
+        assert_eq!(search.matches.len(), 1);
+        assert_eq!(Path::new(&search.matches[0].path), target.canonicalize().unwrap());
+        assert_eq!(fs::read_dir(target.parent().unwrap()).unwrap().count(), 1, "successful link publication must consume its staging link");
+        svc.remove_entry_for_agent_session(&scope, path).await.unwrap();
+        assert_eq!(fs::read_dir(target.parent().unwrap()).unwrap().count(), 0);
+        assert!(events.0.lock().unwrap().is_empty());
+        assert!(!workspace.join(".nomifun").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_external_file_lifecycle_keeps_project_identity_and_read_only_binding() {
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        let external = fixture.path().join("external 中文");
+        fs::create_dir(&workspace).unwrap();
+        fs::create_dir(&external).unwrap();
+        fs::create_dir(external.join("child")).unwrap();
+        // alias/.. must follow the native link first, rather than normalizing
+        // lexically back into the Session's project directory.
+        std::os::unix::fs::symlink(external.join("child"), workspace.join("alias")).unwrap();
+        let events = Arc::new(PublicationEvents::default());
+        let svc = FileService::new(events.clone(), vec![workspace.clone()]);
+        let scope = crate::resource::workspace_binding(nomifun_common::generate_id(), "native-binding", "project", "owner",
+            [crate::resource::READ_OPERATION, crate::resource::WRITE_OPERATION, crate::resource::DELETE_OPERATION], &workspace).unwrap();
+        let source = external.join("source.txt");
+        let written = svc.write_file_with_observation_for_agent_session(&scope, "alias/../source.txt", b"before needle\n").await.unwrap();
+        assert!(written.created);
+        assert_eq!(Path::new(&written.native_path), source.canonicalize().unwrap());
+        assert!(written.workspace_path.is_none());
+        assert_eq!(svc.read_file_for_agent_session(&scope, "../external 中文/source.txt").await.unwrap().as_deref(), Some("before needle\n"));
+        let search = svc.search_text_for_agent_session(&scope, crate::AgentTextSearchRequest {
+            query: "needle".into(), path: Some(external.to_string_lossy().into_owned()), limit: Some(10),
+        }).await.unwrap();
+        assert_eq!(search.matches.len(), 1);
+        assert_eq!(Path::new(&search.matches[0].path), source.canonicalize().unwrap());
+        let patched = svc.apply_patch_for_agent_session(&scope, AgentSessionPatchRequest {
+            files: vec![AgentSessionFilePatch {
+                path: source.to_string_lossy().into_owned(), expected_source: Default::default(),
+                hunks: vec![replace_hunk(1, 1, 1, 1, vec![
+                    AgentSessionPatchLine::Remove { text: "before needle".into() },
+                    AgentSessionPatchLine::Add { text: "after needle".into() },
+                ])],
+            }],
+        }).await.unwrap();
+        assert!(patched.files[0].workspace_path.is_none());
+        let read_only = crate::resource::workspace_binding(nomifun_common::generate_id(), "readonly-binding", "project", "owner",
+            [crate::resource::READ_OPERATION], &workspace).unwrap();
+        assert_eq!(svc.read_file_for_agent_session(&read_only, "alias/../source.txt").await.unwrap().as_deref(), Some("after needle\n"));
+        assert!(matches!(svc.write_file_for_agent_session(&read_only, "alias/../source.txt", b"forbidden").await, Err(AppError::Forbidden(_))));
+        assert!(matches!(svc.remove_entry_for_agent_session(&read_only, "alias/../source.txt").await, Err(AppError::Forbidden(_))));
+        assert_eq!(fs::read(&source).unwrap(), b"after needle\n");
+        let destination = external.join("renamed.txt");
+        let renamed = svc.rename_entry_with_observation_for_agent_session(&scope, "../external 中文/source.txt", destination.to_str().unwrap()).await.unwrap();
+        assert!(renamed.source_workspace_path.is_none() && renamed.destination_workspace_path.is_none());
+        assert!(!source.exists());
+        assert_eq!(fs::read(&destination).unwrap(), b"after needle\n");
+        assert!(events.0.lock().unwrap().is_empty(), "external file content must not be published as project content");
+        let alias = workspace.join("file-link");
+        std::os::unix::fs::symlink(&destination, &alias).unwrap();
+        svc.remove_entry_for_agent_session(&scope, "file-link").await.unwrap();
+        assert!(fs::symlink_metadata(&alias).is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"after needle\n", "unlink operates on the link, not its target");
+        let deleted = svc.remove_entry_with_receipt_for_agent_session(&scope, destination.to_str().unwrap()).await.unwrap();
+        assert!(deleted.workspace_path.is_none());
+        assert!(!destination.exists());
+        let events = serde_json::to_value(&*events.0.lock().unwrap()).unwrap();
+        assert_eq!(events.as_array().unwrap().len(), 1, "only the actual in-project link deletion is a project event");
+        assert_eq!(events[0]["data"]["relative_path"], "file-link");
+        assert_eq!(events[0]["data"]["operation"], "delete");
+        assert!(!workspace.join(".nomifun").exists(), "external work does not create project artifacts");
+    }
+
     #[tokio::test]
     async fn agent_search_accepts_native_paths_and_root_spellings() {
         let root = tempfile::tempdir().unwrap();

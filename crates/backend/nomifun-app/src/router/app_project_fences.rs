@@ -195,7 +195,10 @@ impl NomiCoreSessionOwner {
         let mut root = None;
         for resource in resources {
             if let Some(path) = resource.typed_parameters.get("workspace_root") {
-                let canonical = canonical_existing_workspace_directory(std::path::Path::new(path), WorkspaceDirectoryCheck::Runtime)?;
+                // A frozen default remains the same project admission key
+                // when absent. Keep the directory fence without requiring a
+                // directory that independent absolute OS targets do not use.
+                let canonical = super::super::nomi_core_wave2::canonical_workspace_root(std::path::Path::new(path))?;
                 if root.as_ref().is_some_and(|previous| previous != &canonical) {
                     return Err(AppError::Conflict("A Session cannot admit work in ambiguous project directories".into()));
                 }

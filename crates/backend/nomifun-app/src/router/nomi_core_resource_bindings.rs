@@ -1318,7 +1318,7 @@ impl ProductResourceAuthority {
         &self,
         request: &ResourceAuthorityRequest,
     ) -> Result<ServerResolvedResource, ResourceSelectionResolutionError> {
-        if !cfg!(feature = "computer-use") || !cfg!(any(target_os = "windows", target_os = "macos")) {
+        if !cfg!(feature = "computer-use") || !cfg!(any(target_os = "windows", target_os = "macos", target_os = "linux")) {
             return Err(ResourceSelectionResolutionError::unavailable(
                 self.kind, &request.resource_id, "Computer control is unavailable in this build or on this host",
             ));

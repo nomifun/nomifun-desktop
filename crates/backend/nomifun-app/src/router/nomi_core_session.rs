@@ -801,9 +801,11 @@ impl NomiCoreSessionOwner {
         }
         workspace
             .map(|workspace| {
-                canonical_existing_workspace_directory(
+                // Creation already froze an existing canonical directory into
+                // this exact owner/binding. Its later absence must not block
+                // independent absolute file targets or an explicit process cwd.
+                super::nomi_core_wave2::canonical_workspace_root(
                     std::path::Path::new(&workspace),
-                    WorkspaceDirectoryCheck::Runtime,
                 )
                 .map(|path| path.to_string_lossy().into_owned())
             })
@@ -1911,12 +1913,9 @@ impl NomiCoreSessionOwner {
         session_id: &AgentSessionId,
         root_message_id: &str,
     ) -> WebSocketMessage<Value> {
-        WebSocketMessage::new("turn.paused",json!({
-            "conversation_id":session_id,"turn_id":root_message_id,"status":"paused","execution_phase":"paused",
-            "state":"ai_waiting_input","detail":"Execution paused; owner authorization is required to continue.","can_send_message":false,
-            "runtime":{"state":"idle","execution_phase":"paused","can_send_message":false,"has_runtime":true,
-                "runtime_status":"finished","is_processing":false,"active_turn_id":root_message_id},
-        }))
+        // Identity-only notification. The same typed GET projection owns
+        // paused disposition, exact ownership and its recovery diagnostics.
+        WebSocketMessage::new("turn.paused",json!({ "conversation_id":session_id,"turn_id":root_message_id }))
     }
 
     fn canonical_turn_completed_wire_event(
@@ -1936,6 +1935,7 @@ impl NomiCoreSessionOwner {
             _ => None,
         };
         let turn_outcome=match terminal {AgentStreamEvent::Finish(data)=>data.turn_outcome.as_ref(),_=>None};
+        let runtime = canonical_runtime_summary(ConversationRuntimeStateKind::Idle, None, None, None);
         WebSocketMessage::new(
             "turn.completed",
             json!({
@@ -1947,14 +1947,7 @@ impl NomiCoreSessionOwner {
                 "stop_reason": stop_reason,
                 "turn_outcome": turn_outcome,
                 "can_send_message": true,
-                "runtime": {
-                    "state": "idle",
-                    "can_send_message": true,
-                    "has_runtime": false,
-                    "runtime_status": "finished",
-                    "is_processing": false,
-                    "active_turn_id": null,
-                },
+                "runtime": runtime,
             }),
         )
     }
@@ -1964,6 +1957,7 @@ impl NomiCoreSessionOwner {
         root_message_id: &str,
         detail: &str,
     ) -> WebSocketMessage<Value> {
+        let runtime = canonical_runtime_summary(ConversationRuntimeStateKind::Idle, None, None, None);
         WebSocketMessage::new(
             "turn.completed",
             json!({
@@ -1973,14 +1967,7 @@ impl NomiCoreSessionOwner {
                 "state": "error",
                 "detail": detail,
                 "can_send_message": true,
-                "runtime": {
-                    "state": "idle",
-                    "can_send_message": true,
-                    "has_runtime": false,
-                    "runtime_status": "finished",
-                    "is_processing": false,
-                    "active_turn_id": null,
-                },
+                "runtime": runtime,
             }),
         )
     }
@@ -1990,6 +1977,8 @@ impl NomiCoreSessionOwner {
         root_message_id: &str,
         processing_started_at: i64,
     ) -> WebSocketMessage<Value> {
+        let runtime = canonical_runtime_summary(ConversationRuntimeStateKind::Running, Some(root_message_id.to_owned()),
+            Some(processing_started_at), None);
         WebSocketMessage::new(
             "turn.started",
             json!({
@@ -2000,15 +1989,7 @@ impl NomiCoreSessionOwner {
                 "state": "ai_generating",
                 "detail": "",
                 "can_send_message": false,
-                "runtime": {
-                    "state": "running",
-                    "can_send_message": false,
-                    "has_runtime": true,
-                    "runtime_status": "running",
-                    "is_processing": true,
-                    "active_turn_id": root_message_id,
-                    "processing_started_at": processing_started_at,
-                },
+                "runtime": runtime,
             }),
         )
     }
@@ -2499,7 +2480,7 @@ impl NomiCoreSessionOwner {
     ) -> Result<Option<ConversationResponse>, AppError> {
         let projection = self.canonical_conversation_projection_readonly(owner_id, session_id).await?;
         let Some(response) = projection.as_ref() else { return Ok(None); };
-        if response.extra.get("execution_phase").and_then(Value::as_str) != Some("paused") {
+        if response.runtime.as_ref().map(|runtime| runtime.state) != Some(ConversationRuntimeStateKind::Paused) {
             return Ok(projection);
         }
         // Projection is also called under admission/recovery locks. Those
@@ -3504,14 +3485,35 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
         &self,
         query: &nomifun_cron::CronTurnReceiptQuery,
     ) -> Result<nomifun_cron::CronTurnReceiptState, AppError> {
-        Ok(cron_turn_state_from_conversation(
-            self.session_turn_delivery_state(
+        let state = self.session_turn_delivery_state(
                 &query.owner_id,
                 query.agent_session_id.as_ref(),
                 &query.idempotency_key,
             )
-            .await?,
-        ))
+            .await?;
+        if let PublicTurnDeliveryState::Accepted { ref message_id } = state {
+            let operation = Self::turn_operation_id(&query.owner_id, query.agent_session_id.as_ref(), &query.idempotency_key);
+            let outcome = self.canonical.store().turn_outcome(&query.agent_session_id, &operation)
+                .await.map_err(agent_session_store_error)?;
+            if matches!(outcome, Some(nomifun_agent_contracts::AgentTurnOutcome::Waiting { .. }
+                | nomifun_agent_contracts::AgentTurnOutcome::Paused { .. })) {
+                return Ok(nomifun_cron::CronTurnReceiptState::Suspended(nomifun_cron::CronTurnDelivery {
+                    message_id: message_id.clone(), replayed: true, completed: false, turn_outcome: outcome,
+                    user_input_request: None, result_ok: None, result_text: None, result_error: None,
+                    result_error_code: None, result_error_retryable: None,
+                }));
+            }
+            if outcome.is_some() {
+                // The exact Turn can close between the receipt and outcome
+                // reads. Its committed terminal is irreversible: re-read the
+                // same operation instead of publishing stale Accepted as a
+                // resumed execution and spending a suspended wait's budget.
+                return Ok(cron_turn_state_from_conversation(self.session_turn_delivery_state(
+                    &query.owner_id, query.agent_session_id.as_ref(), &query.idempotency_key,
+                ).await?));
+            }
+        }
+        Ok(cron_turn_state_from_conversation(state))
     }
 
     async fn reconcile_turn_receipt(
@@ -4587,16 +4589,10 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
                 });
                 // Authorization and exact operation lookup above must precede
                 // reading suspension. Runtime idleness is not a receipt.
-                delivery.paused_reason = self.canonical.store().native_pause_state(
+                delivery.turn_outcome=self.canonical.store().turn_outcome(
                     &AgentSessionId::from(conversation_id.to_owned()),
-                    &Self::turn_operation_id(owner_id, conversation_id, operation_id),
-                ).await.map_err(agent_session_store_error)?.map(|pause| pause.reason);
-                if delivery.paused_reason.is_some() {
-                    delivery.turn_outcome=self.canonical.store().turn_outcome(
-                        &AgentSessionId::from(conversation_id.to_owned()),
-                        &Self::turn_operation_id(owner_id,conversation_id,operation_id),
-                    ).await.map_err(agent_session_store_error)?;
-                }
+                    &Self::turn_operation_id(owner_id,conversation_id,operation_id),
+                ).await.map_err(agent_session_store_error)?;
                 Some(delivery)
             },
             PublicTurnDeliveryState::Completed(delivery) => {
@@ -4633,11 +4629,7 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         if receipt.status == nomifun_agent_session::TurnReceiptStatus::NotFound { return Ok(None); }
         let facts = self.canonical.store().turn_output_facts(&session_id, &operation_id)
             .await.map_err(agent_session_store_error)?;
-        let mut delivery = nomifun_agent_execution::canonical_turn_delivery(&facts, &receipt, true)?;
-        if !delivery.completed {
-            delivery.paused_reason = self.canonical.store().native_pause_state(&session_id, &operation_id)
-                .await.map_err(agent_session_store_error)?.map(|pause| pause.reason);
-        }
+        let delivery = nomifun_agent_execution::canonical_turn_delivery(&facts, &receipt, true)?;
         let (output_files, integrity_ok) = if delivery.completed {
             let workspace = frozen_workspace_root(
                 &self.managed_workspace_root, owner_id, &session_id, &facts.session.agent_binding,
@@ -4861,7 +4853,6 @@ fn agent_execution_delivery_from_conversation(
         message_id: delivery.message_id,
         replayed: delivery.replayed,
         completed: delivery.completed,
-        paused_reason: None,
         result_ok: delivery.result_ok,
         result_text: delivery.result_text,
         result_error: delivery.result_error,
@@ -5455,6 +5446,14 @@ fn visible_conversation_execution(
     )
 }
 
+fn canonical_runtime_summary(state: ConversationRuntimeStateKind, active_turn_id: Option<String>,
+    processing_started_at: Option<i64>, turn_outcome: Option<nomifun_agent_contracts::AgentTurnOutcome>) -> ConversationRuntimeSummary {
+    let can_steer = active_turn_id.is_some() && matches!(state, ConversationRuntimeStateKind::Running | ConversationRuntimeStateKind::Waiting);
+    ConversationRuntimeSummary { state, can_send_message: state == ConversationRuntimeStateKind::Idle && active_turn_id.is_none(), can_steer,
+        is_processing: state == ConversationRuntimeStateKind::Running, active_turn_id,
+        processing_started_at, turn_outcome }
+}
+
 fn canonical_pause_notice(status: &str, operation: Option<&str>, through_seq: u64, events: &[nomifun_agent_contracts::SessionEventRecord]) -> Option<Value> {
     if status != "paused" { return None; }
     let operation = operation?;
@@ -5477,6 +5476,7 @@ fn canonical_pause_notice(status: &str, operation: Option<&str>, through_seq: u6
             .into_iter().any(|reason| pause.reason == reason.code())
         || pause.reason == nomifun_agent_session::NATIVE_RECOVERY_BLOCKED
         || matches!(pause.reason.as_str(), "EXECUTION_ATTACH_FAILED"
+            | "EXECUTION_DEPENDENCY_BLOCKED" | "EXECUTION_INTERVENTION_REQUIRED" | "EXECUTION_WAIT_OWNER_UNAVAILABLE"
             | "EXECUTION_PREPARATION_BLOCKED" | "EXECUTION_CLEANUP_UNPROVEN"
             | "EXECUTION_MODEL_STREAM_ENDED_WITHOUT_TERMINAL" | "EXECUTION_MODEL_INVALID_EVENT")
     );
@@ -5487,6 +5487,27 @@ fn canonical_pause_notice(status: &str, operation: Option<&str>, through_seq: u6
 #[cfg(test)]
 mod paused_projection_tests {
     use super::*;
+    #[test]
+    fn waiting_and_suspension_share_one_typed_owner_projection() {
+        let waiting = canonical_runtime_summary(ConversationRuntimeStateKind::Waiting, Some("exact-turn".into()),
+            Some(123), Some(nomifun_agent_contracts::AgentTurnOutcome::Waiting { wait_seq: 41, request_id: Some("authorize".into()),
+                reason: nomifun_agent_contracts::AgentWaitReason::UserInput }));
+        assert!(!waiting.can_send_message);
+        assert!(waiting.can_steer);
+        assert!(!waiting.is_processing);
+        assert_eq!(waiting.active_turn_id.as_deref(), Some("exact-turn"));
+        for state in [ConversationRuntimeStateKind::Paused, ConversationRuntimeStateKind::Reconciliation] {
+            let suspended = canonical_runtime_summary(state, Some("exact-turn".into()), Some(123), None);
+            assert!(!suspended.can_send_message);
+            assert!(!suspended.can_steer);
+            assert!(!suspended.is_processing);
+        }
+        let unknown = canonical_runtime_summary(ConversationRuntimeStateKind::Reconciliation, None, None, None);
+        assert!(!unknown.can_send_message);
+        let idle = canonical_runtime_summary(ConversationRuntimeStateKind::Idle, None, None, None);
+        assert!(idle.can_send_message);
+        assert!(!idle.can_steer);
+    }
 
     fn paused_event(operation: &str, reason: &str) -> nomifun_agent_contracts::SessionEventRecord {
         nomifun_agent_contracts::SessionEventRecord {
@@ -5586,7 +5607,7 @@ fn canonical_conversation_response(
         .find(|event| event.seq == 1 && event.kind.0 == "session/opening"
             && event.producer_id.as_ref() == "session_api")
         .and_then(|event| event.idempotency_key.as_ref().strip_prefix(&creation_prefix)).map(str::to_owned));
-    let SessionObservation { session, head, events, .. } = observed;
+    let SessionObservation { session, head, events, active_turn_outcome, .. } = observed;
     let super::agent_binding_projection::SavedAgentBindingProjection {
         binding,
         projection,
@@ -5613,7 +5634,7 @@ fn canonical_conversation_response(
         Value::Bool(is_temporary_workspace),
     );
     extra.remove("temp_workspace_id");
-    extra.insert("execution_phase".to_owned(),Value::String(head.status.clone()));
+    extra.remove("execution_phase");
     extra.remove("execution_pause");
     if let Some(pause) = canonical_pause_notice(&head.status,head.active_turn_id.as_deref(),head.last_seq,&events) {
         extra.insert("execution_pause".to_owned(),pause);
@@ -5666,19 +5687,17 @@ fn canonical_conversation_response(
         "opening" => ConversationStatus::Pending,
         _ => ConversationStatus::Finished,
     };
-    let runtime = Some(ConversationRuntimeSummary {
-        state: if head.status == "running" {
-            ConversationRuntimeStateKind::Running
-        } else {
-            ConversationRuntimeStateKind::Idle
-        },
-        can_send_message: head.active_turn_id.is_none(),
-        has_runtime: head.status == "running",
-        runtime_status: Some(status),
-        is_processing: head.status == "running",
-        active_turn_id: active_turn.as_ref().map(|(message_id, _)| message_id.clone()),
-        processing_started_at: active_turn.as_ref().map(|(_, started_at)| *started_at),
-    });
+    let runtime_state = match head.status.as_str() {
+        "paused" => ConversationRuntimeStateKind::Paused,
+        "reconciliation" => ConversationRuntimeStateKind::Reconciliation,
+        "running" if matches!(active_turn_outcome, Some(nomifun_agent_contracts::AgentTurnOutcome::Waiting { .. })) => ConversationRuntimeStateKind::Waiting,
+        "running" => ConversationRuntimeStateKind::Running,
+        "opening" => ConversationRuntimeStateKind::Starting,
+        _ => ConversationRuntimeStateKind::Idle,
+    };
+    let runtime = Some(canonical_runtime_summary(runtime_state,
+        active_turn.as_ref().map(|(message_id, _)| message_id.clone()),
+        active_turn.as_ref().map(|(_, started_at)| *started_at), active_turn_outcome));
     let name = session
         .metadata
         .title
@@ -6752,8 +6771,6 @@ mod session_boundary_tests {
         assert_eq!(wire.data["can_send_message"], true);
         assert_eq!(wire.data["runtime"]["state"], "idle");
         assert_eq!(wire.data["runtime"]["can_send_message"], true);
-        assert_eq!(wire.data["runtime"]["has_runtime"], false);
-        assert_eq!(wire.data["runtime"]["runtime_status"], "finished");
         assert_eq!(wire.data["runtime"]["is_processing"], false);
         assert!(wire.data["runtime"]["active_turn_id"].is_null());
     }
@@ -8231,15 +8248,7 @@ impl nomifun_gateway::ConversationCapabilityPort for GatewayAgentSessionCapabili
             .await
             .ok()
             .and_then(|conversation| conversation.runtime)
-            .unwrap_or(ConversationRuntimeSummary {
-                state: ConversationRuntimeStateKind::Idle,
-                can_send_message: true,
-                has_runtime: false,
-                runtime_status: Some(ConversationStatus::Finished),
-                is_processing: false,
-                active_turn_id: None,
-                processing_started_at: None,
-            })
+            .unwrap_or_else(|| canonical_runtime_summary(ConversationRuntimeStateKind::Reconciliation, None, None, None))
     }
 
     async fn latest_completed_turn_receipt(
@@ -15017,11 +15026,18 @@ fn canonical_message_response_with_observation(
         let started_at_ms = document.get("started_at_ms").cloned().unwrap_or(Value::Null);
         let finished_at_ms = document.get("finished_at_ms").cloned().unwrap_or(Value::Null);
         if let Some(value) = document.get("user_input_request") {
-            if state != "completed" {
-                return Err(AppError::Conflict("User input handoff has no normal Turn terminal".into()).into());
-            }
             let request: AgentUserInputRequest = serde_json::from_value(value.clone())?;
             request.validate().map_err(AppError::Conflict)?;
+            let outcome: Option<nomifun_agent_contracts::AgentTurnOutcome> = document.get("turn_outcome")
+                .filter(|value| !value.is_null()).cloned().map(serde_json::from_value).transpose()?;
+            let exact_request = match outcome.as_ref() {
+                Some(nomifun_agent_contracts::AgentTurnOutcome::InputRequired { request_id }) if state == "completed" => request_id == request.request_id.as_ref(),
+                Some(nomifun_agent_contracts::AgentTurnOutcome::Waiting { request_id: Some(request_id), .. }) if state == "running" => request_id == request.request_id.as_ref(),
+                _ => false,
+            };
+            if !exact_request {
+                return Err(AppError::Conflict("User input request does not match the exact Turn disposition".into()).into());
+            }
             return Ok(Some(MessageResponse {
                 message_id: summary_message_id.to_owned(), conversation_id: session_id.as_ref().to_owned(),
                 msg_id: Some(summary_message_id.to_owned()), r#type: MessageType::Tips,
@@ -16066,16 +16082,13 @@ async fn steer_nomi_core_agent_session_turn(
     let key = canonical_nonempty(&request.idempotency_key, "idempotency_key")?;
     let turn = bounded_turn_input(request.input)?;
     let input = canonical_turn_input(&turn);
-    let receipt = state
-        .session_owner
-        .canonical()
-        .steer(
-            &authenticated_principal(&owner),
-            &session_id,
-            &key,
-            input,
-        )
-        .await?;
+    let principal = authenticated_principal(&owner);
+    let receipt = if let Some(target) = request.expected_wait {
+        state.session_owner.canonical().steer_for_wait(&principal, &session_id, &key, input,
+            &target.turn_id, target.wait_seq).await?
+    } else {
+        state.session_owner.canonical().steer(&principal, &session_id, &key, input).await?
+    };
     state.session_owner.queue_receipted_steering(&session_id, &receipt).await?;
     Ok(Json(ApiResponse::ok(AgentSessionTurnMutationResponseDto {
         agent_session_id: session_id.as_ref().to_owned(),
@@ -18124,7 +18137,8 @@ mod failure_pause_settlement_tests {
         assert_eq!(store.head(&session).await.unwrap().status, "paused");
         let projected = request(&router, "GET", &format!("/api/agent-sessions/{}/projection", session.as_ref()), Value::Null).await;
         assert_eq!(projected["runtime"]["can_send_message"], true);
-        assert_eq!(projected["extra"]["execution_phase"], "ready");
+        assert_eq!(projected["runtime"]["state"], "idle");
+        assert!(projected["extra"].get("execution_phase").is_none());
         assert!(projected["runtime"]["active_turn_id"].is_null());
         let failed = store.read_turn_receipt(&session, &operation).await.unwrap();
         assert_eq!(failed.status, nomifun_agent_session::TurnReceiptStatus::Failed);

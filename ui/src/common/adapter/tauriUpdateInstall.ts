@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-type UpdaterInstallReason =
+export type UpdaterInstallReason =
   | 'app_bundle_not_found'
   | 'app_translocation'
   | 'mounted_volume'
@@ -22,6 +22,20 @@ export interface UpdaterInstallContext {
 }
 
 export const AUTO_INSTALL_UNSUPPORTED_ERROR = 'NOMIFUN_UPDATER_AUTO_INSTALL_UNSUPPORTED';
+
+/**
+ * The preflight refusal, carrying the native context so the caller can show the
+ * specific reason and running path instead of collapsing every cause into one
+ * generic message.
+ */
+export class AutoInstallUnsupportedError extends Error {
+  readonly context: UpdaterInstallContext;
+  constructor(context: UpdaterInstallContext) {
+    super(`${AUTO_INSTALL_UNSUPPORTED_ERROR}:${context.reason ?? 'metadata_unavailable'}`);
+    this.name = 'AutoInstallUnsupportedError';
+    this.context = context;
+  }
+}
 
 /**
  * Marker the native `install_update` puts on failures that provably never reached
@@ -91,7 +105,7 @@ async function exitAfterInstallFailure(
 export async function installUpdateWithPreflight(deps: InstallUpdateDependencies): Promise<void> {
   const context = await deps.getContext();
   if (!context.autoInstallSupported) {
-    throw new Error(`${AUTO_INSTALL_UNSUPPORTED_ERROR}:${context.reason ?? 'metadata_unavailable'}`);
+    throw new AutoInstallUnsupportedError(context);
   }
 
   try {

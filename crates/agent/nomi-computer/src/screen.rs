@@ -151,10 +151,114 @@ fn select_monitor(monitors: &[Monitor], display: Option<usize>) -> Result<usize,
 /// through AppKit (`NSScreen`), so the native capture work is dispatched to the
 /// main queue before it touches xcap.
 pub fn capture_screen(display: Option<usize>, max_edge: u32) -> Result<CapturedScreen, String> {
+    #[cfg(target_os = "linux")]
+    return capture_screen_cancellable(display, max_edge, std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    #[cfg(not(target_os = "linux"))]
     crate::macos_main::run_blocking(move || capture_screen_inner(display, max_edge))
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn capture_screen_cancellable(
+    display: Option<usize>, max_edge: u32, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<CapturedScreen, String> {
+    if cancel.load(std::sync::atomic::Ordering::Acquire) {
+        return Err("COMPUTER_CAPTURE_CANCELLED: capture was cancelled before native admission".to_owned());
+    }
+    #[cfg(target_os = "linux")]
+    if matches!(crate::linux_x11::desktop_state(), crate::linux_x11::DesktopState::Wayland) {
+        return capture_wayland(display, max_edge, cancel);
+    }
+    crate::macos_main::run_blocking(move || capture_screen_inner(display, max_edge))
+}
+
+#[cfg(target_os = "linux")]
+fn capture_wayland(display: Option<usize>, max_edge: u32, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<CapturedScreen, String> {
+    crate::linux_wayland_input::clear_capture();
+    let session = crate::linux_wayland::run_blocking(crate::linux_wayland::session_cancellable(cancel.clone()))
+        .map_err(|error| error.to_string())?;
+    let check_cancelled = || -> Result<(), String> {
+        if !cancel.load(std::sync::atomic::Ordering::Acquire) { return Ok(()); }
+        let cancelled_session = session.clone();
+        crate::linux_wayland::run_blocking(async move { cancelled_session.close().await })
+            .map_err(|error| error.to_string())?;
+        Err("COMPUTER_CAPTURE_CANCELLED: capture was cancelled and its exact native desktop session was closed".to_owned())
+    };
+    check_cancelled()?;
+    let index = display.unwrap_or(0);
+    let stream = session.streams().get(index).cloned().ok_or_else(|| format!(
+        "WAYLAND_DISPLAY_UNAVAILABLE: display {index} is not one of the {} shared monitor streams", session.streams().len()
+    ))?;
+    // The portal's logical coordinate extent is independent of PipeWire pixel
+    // size (HiDPI). Never invent pixel-as-logical geometry for later input.
+    let (logical_w, logical_h) = stream.size.ok_or_else(||
+        "WAYLAND_STREAM_GEOMETRY_UNAVAILABLE: the compositor returned no logical monitor size; pointer coordinates cannot be mapped safely".to_owned()
+    )?;
+    let (origin_x, origin_y) = stream.position.ok_or_else(||
+        "WAYLAND_STREAM_GEOMETRY_UNAVAILABLE: the compositor returned no logical monitor position; global pointer coordinates cannot be mapped safely".to_owned()
+    )?;
+    let remote_session = session.clone();
+    let fd = crate::linux_wayland::run_blocking(async move { remote_session.open_pipewire_remote().await })
+        .map_err(|error| error.to_string())?;
+    check_cancelled()?;
+    let frame = match crate::linux_pipewire::capture_portal_frame(fd, stream.node_id, stream.pipewire_serial) {
+        Ok(frame) if !session.is_closed() => frame,
+        Ok(_) => return Err("WAYLAND_SESSION_CLOSED: screen sharing ended during capture; no input geometry was retained".to_owned()),
+        Err(error) => { session.invalidate(); return Err(error); }
+    };
+    check_cancelled()?;
+    let (physical_w, physical_h) = frame.dimensions();
+    if let Err(error) = check_wayland_frame_geometry(session.generation(), stream.node_id, (physical_w, physical_h)) {
+        // A format change can mean a rotated/resized/replaced monitor. The
+        // logical metadata returned by Start cannot safely be reused then.
+        session.invalidate();
+        return Err(error);
+    }
+    let (img_w, img_h) = fit_within(physical_w, physical_h, max_edge);
+    let image = if (img_w, img_h) == (physical_w, physical_h) { frame } else {
+        image::imageops::resize(&frame, img_w, img_h, image::imageops::FilterType::Triangle)
+    };
+    crate::linux_wayland_input::record_capture(
+        session.generation(), stream.node_id, (origin_x, origin_y), (logical_w, logical_h),
+    )?;
+    check_cancelled()?;
+    Ok(CapturedScreen {
+        image,
+        geometry: CaptureGeometry { img_w, img_h, logical_w, logical_h, origin_x, origin_y },
+        physical_w, physical_h, display_index: index,
+    })
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct WaylandFrameGeometry {
+    generation: u64,
+    streams: std::collections::BTreeMap<u32, (u32, u32)>,
+}
+
+#[cfg(target_os = "linux")]
+impl WaylandFrameGeometry {
+    fn check(&mut self, generation: u64, node: u32, dimensions: (u32, u32)) -> Result<(), String> {
+        if self.generation != generation {
+            self.generation = generation;
+            self.streams.clear();
+        }
+        if self.streams.get(&node).is_some_and(|previous| *previous != dimensions) {
+            return Err("WAYLAND_DISPLAY_CHANGED: the shared monitor's physical frame geometry changed; the previous logical geometry was retired. Capture again to obtain a new native session and monitor metadata before input.".to_owned());
+        }
+        self.streams.insert(node, dimensions);
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn check_wayland_frame_geometry(generation: u64, node: u32, dimensions: (u32, u32)) -> Result<(), String> {
+    static GEOMETRY: std::sync::OnceLock<std::sync::Mutex<WaylandFrameGeometry>> = std::sync::OnceLock::new();
+    GEOMETRY.get_or_init(Default::default).lock().unwrap_or_else(|poisoned| poisoned.into_inner()).check(generation, node, dimensions)
+}
+
 fn capture_screen_inner(display: Option<usize>, max_edge: u32) -> Result<CapturedScreen, String> {
+    #[cfg(target_os = "linux")]
+    crate::linux_x11::require_global_x11(false)?;
     // Proactive + authoritative on macOS: a denied Screen Recording grant lets
     // capture "succeed" with a black frame, so fail fast with a clear message
     // instead of relying solely on the downstream black-frame heuristic.
@@ -227,6 +331,18 @@ fn capture_screen_inner(display: Option<usize>, max_edge: u32) -> Result<Capture
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wayland_display_format_change_retires_previous_logical_geometry() {
+        let mut geometry = WaylandFrameGeometry::default();
+        geometry.check(1, 42, (3840, 2160)).unwrap();
+        geometry.check(1, 43, (1920, 1080)).unwrap();
+        geometry.check(1, 42, (3840, 2160)).unwrap();
+        assert!(geometry.check(1, 42, (2160, 3840)).unwrap_err().starts_with("WAYLAND_DISPLAY_CHANGED:"));
+        geometry.check(2, 42, (2160, 3840)).unwrap();
+        assert_eq!(geometry.streams.len(), 1, "a new native session retires earlier stream geometry");
+    }
 
     // Requires a real display and (on macOS) Screen Recording permission.
     #[test]

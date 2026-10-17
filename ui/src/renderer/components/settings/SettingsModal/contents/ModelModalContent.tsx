@@ -650,7 +650,7 @@ const ModelModalContent: React.FC = () => {
               {result.attempted_url && (
                 <>
                   <br />
-                  <span className='text-t-tertiary break-all'>
+                  <span className='text-t-secondary break-all'>
                     {t('settings.modelAdvanced.resolvedUrl', { defaultValue: '实际请求地址' })}:{' '}
                     {result.attempted_url}
                   </span>
@@ -770,7 +770,7 @@ const ModelModalContent: React.FC = () => {
           </> : <div>{t('settings.modelDeletion.providerSummary', { count: deletion.provider.models.length })}</div>}
           <div>{t('settings.modelDeletion.effects')}</div>
           <div>{t('settings.modelDeletion.preserve')}</div>
-          {deletionError && <div role='alert' className='break-words text-danger-6'>{deletionError}</div>}
+          {deletionError && <div role='alert' className='model-provider-deletion-error break-words'>{deletionError}</div>}
         </div>}
       </NomiModal>}
 
@@ -805,7 +805,7 @@ const ModelModalContent: React.FC = () => {
           </div>
         </div>
         {/* 职责收窄：本页只管接入与凭证；「按用途找模型」已迁到模态分区。 */}
-        <div className='model-provider-scope-note mt-8px text-12px leading-18px text-t-tertiary'>
+        <div className='model-provider-scope-note mt-8px text-12px leading-18px text-t-secondary'>
           {t('settings.modelHub.provider.scopeNote')}
         </div>
       </div>
@@ -824,7 +824,7 @@ const ModelModalContent: React.FC = () => {
                 href='https://github.com/nomifun/nomifun-app/wiki/LLM-Configuration'
                 target='_blank'
                 rel='noopener noreferrer'
-                className='text-primary-6 hover:text-primary-5 underline ml-4px'
+                className='text-t-primary hover:text-t-secondary underline underline-offset-2 ml-4px'
               >
                 {t('settings.configGuide')}
               </a>
@@ -1080,7 +1080,7 @@ const ModelModalContent: React.FC = () => {
 
                               {rawModelId && (
                                 <div
-                                  className='model-provider-model-id text-11px text-t-tertiary font-mono leading-16px truncate pr-8px'
+                                  className='model-provider-model-id text-11px text-t-secondary font-mono leading-16px truncate pr-8px'
                                   title={rawModelId}
                                 >
                                   {t('settings.modelId', { defaultValue: '模型 ID' })}: {rawModelId}

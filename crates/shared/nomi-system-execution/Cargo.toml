@@ -17,6 +17,9 @@ tokio.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 

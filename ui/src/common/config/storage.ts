@@ -35,14 +35,14 @@ import type { SessionReasoningEffort } from '@/common/types/reasoningEffort';
 type ConversationSource = 'nomifun' | 'telegram' | 'lark' | 'dingtalk' | 'weixin' | 'wecom' | (string & {});
 
 type TChatConversationStatus = 'pending' | 'running' | 'finished';
-type TConversationRuntimeStateKind = 'idle' | 'starting' | 'running';
+type TConversationRuntimeStateKind = 'idle' | 'starting' | 'running' | 'waiting' | 'paused' | 'reconciliation';
 
 type TConversationRuntimeSummary = {
   state: TConversationRuntimeStateKind;
   can_send_message: boolean;
-  has_runtime: boolean;
-  runtime_status?: TChatConversationStatus;
+  can_steer?: boolean;
   is_processing: boolean;
+  turn_outcome?: import('../protocolBindings/AgentTurnOutcome').AgentTurnOutcome;
   /** Exact backend turn currently owning this runtime. This is lifecycle
    * authority; processing_started_at is display-only and may collide. */
   active_turn_id?: MessageId;
@@ -117,7 +117,6 @@ export type TChatConversation = IChatConversation<
   {
     workspace: string;
     /** Canonical native execution state; a pause retains ownership of its turn. */
-    execution_phase?: string;
     execution_pause?: { reason: string; cleanup_proven: boolean; paused_at_ms: number };
     custom_workspace?: boolean;
     proxy?: string;

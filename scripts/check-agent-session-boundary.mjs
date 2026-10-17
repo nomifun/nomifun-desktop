@@ -84,11 +84,38 @@ const policyForwardMigration = 'crates/backend/nomifun-db/migrations/005_retire_
 const uploadForwardMigration = 'crates/backend/nomifun-db/migrations/006_retire_upload_workspace_preference.sql';
 const terminalForwardMigration = 'crates/backend/nomifun-db/migrations/007_retire_terminal_content_mirrors.sql';
 const payloadForwardMigration = 'crates/backend/nomifun-db/migrations/008_retire_payload_object_placeholder.sql';
-if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration, policyForwardMigration, uploadForwardMigration, terminalForwardMigration, payloadForwardMigration].includes(path))) {
+const cronInputForwardMigration = 'crates/backend/nomifun-db/migrations/009_cron_input_handoff.sql';
+if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration, policyForwardMigration, uploadForwardMigration, terminalForwardMigration, payloadForwardMigration, cronInputForwardMigration].includes(path))) {
   failures.push('Agent clean cut requires its canonical baseline and only explicitly supported forward migrations');
 }
 const migrationStatements = (path) => readFileSync(resolve(ROOT, path), 'utf8')
   .replace(/--[^\r\n]*/g, '').split(';').map((statement) => statement.replace(/\s+/g, ' ').trim()).filter(Boolean);
+if (migrations.includes(cronInputForwardMigration)) {
+  const original = migrationStatements(baseline);
+  const tables = ['cron_job_runs', 'cron_jobs', 'cron_run_reservations'];
+  const expected = [
+    'CREATE TEMP TABLE cron_wait_sequences (name TEXT PRIMARY KEY, seq INTEGER NOT NULL)',
+    "INSERT INTO cron_wait_sequences SELECT name, seq FROM sqlite_sequence WHERE name IN ('cron_job_runs', 'cron_jobs', 'cron_run_reservations')",
+  ];
+  for (const table of tables) {
+    const create = original.find(statement => statement.startsWith(`CREATE TABLE ${table} (`));
+    expected.push(create?.replace(`CREATE TABLE ${table} (`, `CREATE TABLE ${table}_next (`)
+      .replaceAll("'missed')", "'missed', 'input_required', 'cancelled')"),
+      `INSERT INTO ${table}_next SELECT * FROM ${table}`,
+      `DROP TABLE ${table}`,
+      `ALTER TABLE ${table}_next RENAME TO ${table}`);
+  }
+  expected.push(...original.filter(statement => /^CREATE (?:UNIQUE )?INDEX /.test(statement)
+    && tables.some(table => statement.includes(` ON ${table}(`))),
+    "UPDATE sqlite_sequence SET seq = MAX(seq, COALESCE((SELECT old.seq FROM cron_wait_sequences old WHERE old.name = sqlite_sequence.name), 0)) WHERE name IN ('cron_job_runs', 'cron_jobs', 'cron_run_reservations')",
+    'DROP TABLE cron_wait_sequences',
+    'CREATE TEMP TABLE cron_wait_integrity (valid INTEGER NOT NULL CHECK(valid = 1))',
+    'INSERT INTO cron_wait_integrity SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM pragma_foreign_key_check',
+    'DROP TABLE cron_wait_integrity');
+  if (JSON.stringify(migrationStatements(cronInputForwardMigration)) !== JSON.stringify(expected)) {
+    failures.push(`${cronInputForwardMigration}: only extend existing Cron status constraints; preserve all columns, rows, indexes, sequence high-water marks and canonical Agent facts`);
+  }
+}
 if (migrations.includes(terminalForwardMigration)) {
   const statements = migrationStatements(terminalForwardMigration);
   const drops = [

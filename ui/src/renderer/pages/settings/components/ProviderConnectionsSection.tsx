@@ -158,7 +158,7 @@ const ConnectionForm: React.FC<{
           </div>
           <Input autoCapitalize='none' autoCorrect='off' spellCheck={false} value={role} onChange={setRole} disabled={isEdit} placeholder='voice' />
           {!isEdit && (
-            <div className='text-11px text-t-tertiary leading-4'>
+            <div className='text-11px text-t-secondary leading-4'>
               {t('settings.connections.roleHint', {
                 defaultValue: '小写字母开头，可含数字、下划线、连字符，最长 32 位；default 为保留角色',
               })}
@@ -256,7 +256,7 @@ const ConnectionForm: React.FC<{
             />
           )}
           {isEdit && (
-            <div className='text-11px text-t-tertiary leading-4'>
+            <div className='text-11px text-t-secondary leading-4'>
               {t('settings.connections.keepCredentialsHint', {
                 defaultValue: '留空保持现有凭证不变',
               })}
@@ -338,14 +338,14 @@ const ProviderConnectionsSection: React.FC<{ provider: IProvider }> = ({ provide
                 backgroundColor: 'rgba(var(--primary-6),0.06)',
               }}
             >
-              <span className='text-12px leading-5 text-primary-6 min-w-0'>
+              <span className='text-12px leading-5 text-t-primary min-w-0'>
                 {t('settings.connections.voiceHint', {
                   defaultValue: '语音识别/合成需要独立的语音连接档案（role: voice）',
                 })}
               </span>
               <Button
                 size='mini'
-                type='outline'
+                type='secondary'
                 className='shrink-0'
                 onClick={() => setForm({ prefillRole: 'voice', prefillScheme: 'volc_voice' })}
               >
@@ -355,7 +355,7 @@ const ProviderConnectionsSection: React.FC<{ provider: IProvider }> = ({ provide
           )}
 
           {connections.length === 0 && !isLoading && (
-            <div className='text-12px text-t-tertiary leading-5 px-2px'>
+            <div className='text-12px text-t-secondary leading-5 px-2px'>
               {t('settings.connections.empty', {
                 defaultValue: '暂无独立连接档案（默认使用供应商自身的地址与密钥）',
               })}

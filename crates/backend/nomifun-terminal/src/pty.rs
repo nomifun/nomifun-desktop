@@ -92,12 +92,16 @@ impl PtyHandle {
         FOut: Fn(Vec<u8>) + Send + 'static,
         FExit: FnOnce(PtyExit, Vec<u8>) + Send + 'static,
     {
-        let session_cwd = std::env::current_dir()
-            .map_err(|error| TerminalError::Spawn(format!("resolve current directory: {error}")))?;
         let requested_cwd = if params.cwd.is_empty() {
             PathBuf::from(".")
         } else {
             PathBuf::from(&params.cwd)
+        };
+        // A valid absolute cwd is independent of the host's default directory,
+        // which may have been removed while the desktop remained running.
+        let session_cwd = if requested_cwd.is_absolute() { requested_cwd.clone() } else {
+            std::env::current_dir()
+                .map_err(|error| TerminalError::Spawn(format!("resolve current directory: {error}")))?
         };
         let scrollback = Arc::new(Mutex::new(Vec::<u8>::new()));
         let dirty = Arc::new(AtomicBool::new(false));
@@ -485,6 +489,50 @@ mod tests {
                 vec!["-c".to_owned(), script.to_owned()],
             )
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn absolute_terminal_cwd_survives_a_deleted_host_default_directory() {
+        const FIXTURE_ENV: &str = "NOMIFUN_TEST_DELETED_TERMINAL_CWD";
+        if let Some(root) = std::env::var_os(FIXTURE_ENV) {
+            // Only this isolated subprocess changes cwd. Parallel tests in the
+            // parent process retain their own environment and directory.
+            let root = PathBuf::from(root);
+            assert!(root.file_name().unwrap().to_string_lossy().starts_with("nomifun-terminal-absolute-cwd-"));
+            let deleted = root.join("deleted-default");
+            assert_eq!(std::env::current_dir().unwrap(), deleted);
+            std::fs::remove_dir(&deleted).unwrap();
+            assert!(std::env::current_dir().is_err());
+            let target = root.join("actual cwd 中文");
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let args = vec!["-c".into(), "pwd -P; printf 'terminal-ready\\n'; sleep 30".into()];
+                let prepared = crate::types::resolve_command_for_spawn("/bin/sh", &args, None, Some(&target)).await.unwrap();
+                let handle = PtyHandle::spawn(SpawnParams {
+                    program: prepared.program, args: prepared.args, cwd: target.to_string_lossy().into_owned(),
+                    env: prepared.environment, cols: 100, rows: 30,
+                }, 0, |_| {}, |_, _| {}).await.unwrap();
+                handle.activate();
+                for _ in 0..100 {
+                    if String::from_utf8_lossy(&handle.scrollback()).contains("terminal-ready") { break; }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                handle.kill().await.unwrap();
+                let observed = String::from_utf8_lossy(&handle.scrollback()).into_owned();
+                assert!(observed.contains(target.to_str().unwrap()) && observed.contains("terminal-ready"), "{observed:?}");
+                assert!(!std::path::Path::new(&format!("/proc/{}", handle.pid().unwrap())).exists());
+            });
+            return;
+        }
+        let root = tempfile::Builder::new().prefix("nomifun-terminal-absolute-cwd-").tempdir().unwrap();
+        let deleted = root.path().join("deleted-default");
+        std::fs::create_dir(&deleted).unwrap();
+        std::fs::create_dir(root.path().join("actual cwd 中文")).unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["pty::tests::absolute_terminal_cwd_survives_a_deleted_host_default_directory", "--exact", "--nocapture"])
+            .current_dir(&deleted).env(FIXTURE_ENV, root.path()).output().unwrap();
+        assert!(result.status.success(), "subprocess failed: {}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+        assert!(!deleted.exists());
     }
 
     #[test]

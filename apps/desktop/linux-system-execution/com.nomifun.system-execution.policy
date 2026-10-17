@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+  "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<policyconfig>
+  <vendor>NomiFun</vendor>
+  <vendor_url>https://nomifun.com</vendor_url>
+  <action id="com.nomifun.system-execution.run">
+    <description>Run a NomiFun system operation</description>
+    <description xml:lang="zh_CN">执行 NomiFun 系统操作</description>
+    <message>Authentication is required for NomiFun to perform a system operation</message>
+    <message xml:lang="zh_CN">NomiFun 执行系统操作需要管理员认证</message>
+    <defaults>
+      <allow_any>auth_admin_keep</allow_any>
+      <allow_inactive>auth_admin_keep</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/nomifun-system-runner</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">--stdio</annotate>
+  </action>
+</policyconfig>

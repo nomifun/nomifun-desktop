@@ -48,7 +48,7 @@ const ProviderCompatibilityModePicker: React.FC<{
           })}
         </Radio>
       </Radio.Group>
-      <div className='text-11px leading-4 text-t-tertiary'>
+      <div className='text-11px leading-4 text-t-secondary'>
         {value === 'auto'
           ? t('settings.providerCompatibilityMode.autoHint', {
               defaultValue: '探测可用协议；无法确认时使用 Chat Completions。仅支持 Responses 的网关请选择 OpenAI Responses。',

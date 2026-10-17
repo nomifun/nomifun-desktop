@@ -17,9 +17,10 @@ export default function TaskPlanBar({ snapshot }: { snapshot?: TaskPlanSnapshot 
   const listId = useId();
   const plan = deriveTaskPlan(snapshot);
   if (!plan) return null;
-  const stateLabel = plan.paused ? t('messages.planPaused', { defaultValue: 'Paused' })
+  const stateLabel = plan.waiting ? t('messages.planWaiting', { defaultValue: 'Waiting' })
+    : plan.paused ? t('messages.planPaused', { defaultValue: 'Paused' })
     : plan.stopped ? t('messages.planStopped', { defaultValue: 'Stopped' })
-    : plan.failed ? t('messages.planFailed', { defaultValue: 'Failed' })
+    : plan.failed ? t('messages.planFailed', { defaultValue: 'This turn failed' })
     : plan.needsReplan ? t('messages.planNeedsReplan', { defaultValue: 'Plan needs updating' })
     : plan.blocked > 0 ? t('messages.planBlocked', { defaultValue: 'Blocked' }) : null;
 
@@ -48,7 +49,7 @@ export default function TaskPlanBar({ snapshot }: { snapshot?: TaskPlanSnapshot 
         }}
         onClick={() => setExpanded(true)}
       >
-        {plan.active && plan.steps.some((step) => step.status === 'in_progress') && !plan.needsReplan && (
+        {plan.active && !plan.waiting && plan.steps.some((step) => step.status === 'in_progress') && !plan.needsReplan && (
           <Loading aria-hidden='true' data-testid='task-plan-progress-indicator' theme='outline' size='14'
             className='shrink-0 animate-spin' />
         )}

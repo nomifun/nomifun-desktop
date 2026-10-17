@@ -96,6 +96,7 @@ async fn read_product_origin_at_snapshot(
         events: events.events,
         messages: Vec::new(),
         next_cursor: events.next_cursor,
+        active_turn_outcome: None,
     };
     super::super::nomi_core_session::canonical_companion_origin(
         &principal.principal_id,

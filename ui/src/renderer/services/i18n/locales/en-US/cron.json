@@ -47,6 +47,8 @@
     "enabled": "Enabled",
     "paused": "Paused",
     "runStatus": {
+      "cancelled": "Cancelled",
+      "input_required": "Needs your input",
       "ok": "Success",
       "error": "Failed",
       "skipped": "Skipped",

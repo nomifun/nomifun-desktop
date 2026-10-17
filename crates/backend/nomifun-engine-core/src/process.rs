@@ -179,6 +179,11 @@ impl EngineProcessSession {
     pub fn cursor(&self) -> u64 {
         self.cursor.offset()
     }
+
+    /// The original owner's lifecycle only; no stdout reader or I/O authority.
+    pub fn terminal_changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        self.terminal.as_ref().map(ProcessTerminalWitness::subscribe)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1169,6 +1174,44 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn native_external_symlink_cwd_process_is_observed_and_stopped() {
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        let outside = fixture.path().join("external 中文");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir_all(outside.join("child")).unwrap();
+        std::fs::write(outside.join("value.txt"), "modified native bytes").unwrap();
+        std::os::unix::fs::symlink(outside.join("child"), workspace.join("alias")).unwrap();
+        let owner = ManagedEngineProcessOwner::new(&workspace, SupervisorConfig::default()).unwrap();
+        for transport in [EngineProcessTransport::Pipe, EngineProcessTransport::Pty { cols: 100, rows: 30 }] {
+            let mut request = sleeper_request();
+            request.cwd = Some("alias/..".into());
+            request.transport = transport;
+            request.args = vec!["-c".into(), r#"pwd -P; cat value.txt; sleep 30 & child=$!; printf '\nchild=%s\n' "$child"; wait "$child""#.into()];
+            let mut session = owner.start(request, CancellationToken::new()).await.unwrap();
+            let pid = session.pid;
+            let mut observed = String::new();
+            for _ in 0..30 {
+                match owner.poll(&mut session, Duration::from_millis(100), CancellationToken::new()).await.unwrap() {
+                    EngineProcessPoll::Running { output, .. } => observed.push_str(&output.text),
+                    terminal => panic!("fixture must stay live until cancelled: {terminal:?}"),
+                }
+                if observed.contains("child=") && observed.ends_with('\n') { break; }
+            }
+            // Always settle the real owner before checking the captured output.
+            let terminal = owner.cancel(&mut session).await.unwrap();
+            let EngineProcessPoll::Cancelled { cleanup, .. } = terminal else { panic!("live fixture must cancel"); };
+            assert!(cleanup.reaped, "the actual process group must be reaped");
+            assert!(observed.contains(outside.canonicalize().unwrap().to_str().unwrap()), "{observed:?}");
+            assert!(observed.contains("modified native bytes"), "{observed:?}");
+            let child: u32 = observed.lines().find_map(|line| line.strip_prefix("child=")).unwrap().trim().parse().unwrap();
+            assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists(), "process remains alive after its proven stop");
+            assert!(!std::path::Path::new(&format!("/proc/{child}")).exists(), "descendant remains alive after its proven stop");
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn managed_owner_rejects_a_non_executable_without_shell_fallback() {
@@ -1227,7 +1270,8 @@ mod tests {
 
         let mut zsh = EngineProcessRequest::pipe("/bin/zsh");
         zsh.args = vec![
-            "-lc".to_owned(),
+            // Shell semantics must not depend on the test user's dotfiles.
+            "-flc".to_owned(),
             "printf 'zsh:%s' \"$ZSH_VERSION\"".to_owned(),
         ];
         let zsh = owner

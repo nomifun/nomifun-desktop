@@ -50,6 +50,12 @@
   border-radius: 6px;
 }
 
+/* The confirmation is portaled outside the management page. Keep its error
+ * text readable while preserving the danger hue and alert semantics. */
+.model-provider-deletion-error {
+  color: color-mix(in srgb, var(--danger) 40%, var(--text-primary));
+}
+
 /* Provider management opts into the same quiet surfaces as the model hub. */
 .model-provider-management {
   min-width: 0;
@@ -92,7 +98,7 @@
 }
 
 .model-provider-management .model-provider-notice > .i-icon {
-  color: var(--color-text-3);
+  color: var(--text-secondary);
 }
 
 .model-provider-management .model-provider-notice .font-600 {
@@ -162,7 +168,7 @@
 }
 
 .model-provider-management .model-provider-header-actions > span {
-  color: var(--color-text-3);
+  color: var(--text-secondary);
   font-size: 11px;
 }
 
@@ -200,7 +206,7 @@
 .model-provider-management .model-provider-model-description {
   margin-top: 4px;
   padding-left: 31px;
-  color: var(--color-text-3);
+  color: var(--text-secondary);
   font-size: 11px;
   line-height: 18px;
 }
@@ -217,6 +223,12 @@
   line-height: 18px;
 }
 
+/* Static status tags keep their status fill; small labels use the readable
+ * foreground instead of Arco's light green/orange palette step. */
+.model-provider-management .arco-tag.arco-tag-checked {
+  color: var(--text-primary) !important;
+}
+
 .model-provider-management .model-provider-capability-tag[data-capability-health-status='unknown'] {
   border-color: var(--color-border-2);
   background: var(--bg-1);
@@ -228,7 +240,7 @@
   border-radius: 7px;
   border-color: transparent !important;
   background: transparent !important;
-  color: var(--color-text-3);
+  color: var(--text-secondary);
   box-shadow: none !important;
 }
 
@@ -242,7 +254,7 @@
 }
 
 .model-provider-management .model-provider-drag-handle .arco-btn {
-  color: var(--color-text-4);
+  color: var(--text-secondary);
 }
 
 .model-provider-management .model-provider-empty {
@@ -254,7 +266,7 @@
 
 .model-provider-management .model-provider-empty > .i-icon {
   margin-bottom: 12px;
-  color: var(--color-text-3);
+  color: var(--text-secondary);
 }
 
 .model-provider-management .model-provider-empty h3 {

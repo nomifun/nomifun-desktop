@@ -270,7 +270,10 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
               required={!isBedrock && !credentialsCanBePreserved}
               rules={[{ required: !isBedrock && !credentialsCanBePreserved }]}
               extra={
-                <div className={`text-11px mt-2 ${apiKeysLoadFailed ? 'text-danger-6' : 'text-t-secondary'}`}>
+                <div
+                  className={`text-11px mt-2 ${apiKeysLoadFailed ? 'font-500 text-t-primary' : 'text-t-secondary'}`}
+                  role={apiKeysLoadFailed ? 'alert' : undefined}
+                >
                   {apiKeysLoadFailed ? t('settings.apiKeyLoadFailed') : t('settings.multiApiKeyEditTip')}
                 </div>
               }

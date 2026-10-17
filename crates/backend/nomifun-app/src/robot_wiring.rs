@@ -679,6 +679,14 @@ fn completed_robot_delivery_events(
     if delivery.user_input_request.is_some() {
         return vec![robot_stream_failure("The non-interactive robot invocation requires user input")];
     }
+    // A typed canonical silent delivery proves that this Turn intentionally
+    // has no public reply. Device receipts remain in the canonical tool/effect
+    // chain; silence does not claim that accepted motion physically finished.
+    if delivery.result_ok == Some(true)
+        && matches!(delivery.turn_outcome, Some(nomifun_agent_contracts::AgentTurnOutcome::Silent {}))
+    {
+        return vec![TurnEvent::Done];
+    }
     if delivery.result_ok == Some(true) && !matches!(delivery.turn_outcome,
         Some(nomifun_agent_contracts::AgentTurnOutcome::Answered { .. })) {
         return vec![robot_stream_failure("The canonical robot turn has no public answer")];
@@ -973,6 +981,43 @@ pub(crate) fn mount(
 
 #[cfg(test)]
 mod tests {
+    fn robot_delivery(outcome: nomifun_agent_contracts::AgentTurnOutcome) -> nomifun_conversation::IdempotentMessageDelivery {
+        nomifun_conversation::IdempotentMessageDelivery {
+            message_id: "robot-turn-root".into(), replayed: false, completed: true,
+            turn_outcome: Some(outcome), result_ok: Some(true), result_text: None,
+            result_error: None, result_error_code: None, result_error_retryable: None,
+            user_input_request: None,
+        }
+    }
+
+    #[test]
+    fn canonical_silent_robot_delivery_finishes_without_speech_or_failure() {
+        let mut delivery = robot_delivery(nomifun_agent_contracts::AgentTurnOutcome::Silent {});
+        for replayed in [false, true] {
+            delivery.replayed = replayed;
+            assert_eq!(completed_robot_delivery_events(&delivery), vec![TurnEvent::Done]);
+        }
+        delivery.result_text = Some("stale optional display text must not become speech".into());
+        assert_eq!(completed_robot_delivery_events(&delivery), vec![TurnEvent::Done], "typed delivery, not incidental text, selects silence");
+    }
+
+    #[test]
+    fn robot_delivery_keeps_questions_answers_and_failures_distinct_from_silence() {
+        let mut delivery = robot_delivery(nomifun_agent_contracts::AgentTurnOutcome::Answered {
+            message_ids: vec!["answer".into()],
+        });
+        delivery.result_text = Some("北京今天有小雨。".into());
+        assert_eq!(completed_robot_delivery_events(&delivery), vec![TurnEvent::Text("北京今天有小雨。".into()), TurnEvent::Done]);
+        delivery.turn_outcome = Some(nomifun_agent_contracts::AgentTurnOutcome::Unavailable);
+        assert!(matches!(completed_robot_delivery_events(&delivery).as_slice(), [TurnEvent::Failed { provider_fault: false, .. }]));
+        delivery.turn_outcome = Some(nomifun_agent_contracts::AgentTurnOutcome::Silent {});
+        delivery.result_ok = Some(false);
+        delivery.result_error = Some("device connection lost".into());
+        assert_eq!(completed_robot_delivery_events(&delivery), vec![TurnEvent::Failed {
+            message: "device connection lost".into(), provider_fault: false,
+        }], "a typed silent intent cannot hide a failed canonical Turn");
+    }
+
     fn companion_voice_request() -> nomifun_robot::services::RobotTurnRequest {
         nomifun_robot::services::RobotTurnRequest {
             robot_id: "robot-1".into(),

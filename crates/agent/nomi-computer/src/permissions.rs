@@ -157,6 +157,8 @@ pub fn screen_capture_hint() -> String {
              If macOS requests a restart or access remains unavailable after granting, completely \
              quit and reopen {app}, then resume the task."
         )
+    } else if cfg!(target_os = "linux") {
+        "X11 capture requires the current user's reachable X server. Wayland capture requires a native ScreenCast portal backend and a granted session; XWayland pixels do not represent the full Wayland desktop.".to_owned()
     } else {
         "Check that a display is connected and the app is allowed to capture the screen.".to_string()
     }
@@ -174,6 +176,8 @@ pub fn accessibility_hint() -> String {
              a fresh observation before input. Computer-use runs inside {app} itself, so grant \
              {app}. If the grant remains stale, completely quit and reopen {app}, then resume."
         )
+    } else if cfg!(target_os = "linux") {
+        "X11 input requires the current user's reachable X server and XTEST. Accessibility requires a reachable AT-SPI bus. Wayland global input requires an implemented RemoteDesktop portal backend and an explicit session grant; root does not grant desktop access.".to_owned()
     } else {
         "Check that the app is allowed to control the mouse and keyboard.".to_string()
     }

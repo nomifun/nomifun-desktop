@@ -39,7 +39,7 @@
   min-height: 22px;
   margin: 13px 0 6px;
   padding: 0 10px;
-  color: var(--color-text-3);
+  color: var(--text-secondary);
   font-size: 11px;
   font-weight: 500;
   line-height: 18px;
@@ -107,4 +107,14 @@
 .content {
   padding-top: 28px;
   padding-bottom: 32px;
+}
+
+/* The failover editor lives outside ModelConfigurationPanel. Keep its primary
+   action on the same paired palette, above preset gradients and hover rules. */
+.failoverSaveButton:global(.arco-btn.arco-btn-primary:not(:disabled):not(.arco-btn-disabled):not(.arco-btn-status-danger):not(.arco-btn-status-warning):not(.arco-btn-status-success)) {
+  --button-primary-text: var(--control-selected-fg, var(--bg-base)) !important;
+  background-color: var(--control-selected-bg, var(--text-primary)) !important;
+  background-image: none !important;
+  border-color: var(--control-selected-bg, var(--text-primary)) !important;
+  color: var(--control-selected-fg, var(--bg-base)) !important;
 }

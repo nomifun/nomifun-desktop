@@ -38,6 +38,7 @@ pub struct ProcessHandle {
 #[derive(Clone)]
 pub struct ProcessTerminalWitness {
     state: Arc<Mutex<SessionState>>,
+    lifecycle: tokio::sync::watch::Receiver<u64>,
 }
 
 impl std::fmt::Debug for ProcessTerminalWitness {
@@ -47,6 +48,9 @@ impl std::fmt::Debug for ProcessTerminalWitness {
 }
 
 impl ProcessTerminalWitness {
+    /// Subscribe before inspecting terminal state, so an exit between the
+    /// inspection and the wait remains observable. This does not renew leases.
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> { self.lifecycle.clone() }
     pub fn terminal(&self, cursor: OutputCursor) -> Option<ProcessOutcome> {
         self.state.lock().expect("process terminal witness state lock is poisoned")
             .terminal.as_ref().map(|record| Session::outcome_from(record, cursor))
@@ -495,7 +499,7 @@ impl ProcessSupervisor {
                     session_id,
                     pid,
                     started_at,
-                    terminal: ProcessTerminalWitness { state: Arc::clone(&session.state) },
+                    terminal: ProcessTerminalWitness { state: Arc::clone(&session.state), lifecycle: session.lifecycle.subscribe() },
                 }, session))
             }
             CommitResult::Retiring(retirement) => {

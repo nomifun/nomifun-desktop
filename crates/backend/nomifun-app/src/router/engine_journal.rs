@@ -1499,6 +1499,33 @@ mod history_display_tests {
     }
 
     #[tokio::test]
+    async fn silent_robot_completion_survives_cleanup_terminal_and_history_without_an_answer() {
+        let (journal, pool) = test_fixture().await;
+        for event in [
+            AgentEngineEvent::ModelStepStarted {step:1,operation_id:format!("{}:model:1",journal.0.operation.as_ref()).into(),correction_source:None},
+            AgentEngineEvent::SilentCompletion {step:1,tool_call_ids:vec!["owned-motion-call".into()]},
+        ] {
+            journal.append(serde_json::to_string(&event).unwrap(),None,EngineJournalWrite::Progress).await.unwrap();
+        }
+        journal.append(json!({"event":"host_cleanup_proven"}).to_string(),None,EngineJournalWrite::Cleanup).await.unwrap();
+        journal.append(serde_json::to_string(&AgentEngineEvent::TurnCompleted {model_steps:1,
+            finish_reason:nomifun_chat_model_broker::ChatFinishReason::Completed}).unwrap(),None,EngineJournalWrite::Terminal).await.unwrap();
+        let store=AgentSessionStore::from_pool(pool).await.unwrap();
+        assert_eq!(store.turn_outcome(&journal.0.session,&journal.0.operation).await.unwrap(),
+            Some(nomifun_agent_contracts::AgentTurnOutcome::Silent {}));
+        let facts=store.turn_output_facts(&journal.0.session,&journal.0.operation).await.unwrap();
+        let receipt=store.read_turn_receipt(&journal.0.session,&journal.0.operation).await.unwrap();
+        let result=nomifun_agent_session::canonical_turn_public_result(&facts,&receipt).unwrap();
+        assert_eq!(result.turn_outcome,Some(nomifun_agent_contracts::AgentTurnOutcome::Silent {}));
+        assert!(result.result_text.is_none());
+        let history=store.message_history_before(&journal.0.session,None,50).await.unwrap().0;
+        assert!(history.iter().any(|row|row.presentation_intent=="turn_summary"
+            && row.projection["turn_outcome"]==json!({"kind":"silent"})));
+        let final_id=canonical_assistant_step_message_id(journal.0.root.as_ref(),1).unwrap();
+        assert!(history.iter().any(|row|row.projection["correlation_id"]==final_id&&row.projection["part_count"]==0));
+    }
+
+    #[tokio::test]
     async fn a_public_tool_preface_followed_by_an_empty_final_step_is_not_a_delivered_answer() {
         let (journal,pool)=test_fixture().await;
         for event in [AgentEngineEvent::OutputTextDelta {step:1,text:"I will start working.".into()},

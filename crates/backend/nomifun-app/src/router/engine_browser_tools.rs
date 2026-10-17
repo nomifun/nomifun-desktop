@@ -412,8 +412,32 @@ impl BrowserRoleOwner {
         Ok(())
     }
 
-    /// Called only after the trusted journal owner commits this exact Turn's
-    /// terminal. Failed downstream cleanup or terminal writes retain input lock.
+    /// A parked model gives the human the Browser while the same Turn retains
+    /// its other owners. Settlement precedes unlock, and old guards/observations
+    /// are retired. A later invocation needs a newly opened lazy admission.
+    pub(crate) async fn yield_to_user(&self, principal_id: &str, agent_session_id: &str, turn_id: &str) -> Result<(), AppError> {
+        self.require_parked_turn(principal_id, agent_session_id, turn_id).await?;
+        self.settle_turn(principal_id, agent_session_id, turn_id).await?;
+        self.require_parked_turn(principal_id, agent_session_id, turn_id).await?;
+        self.finish_turn(principal_id, agent_session_id, turn_id).await
+    }
+
+    async fn require_parked_turn(&self, principal_id: &str, agent_session_id: &str, turn_id: &str) -> Result<(), AppError> {
+        let session=AgentSessionId::from(agent_session_id);
+        let observed=self.effect_store.observe(&session,None,1).await.map_err(browser_lifecycle_error)?;
+        if observed.session.owner_ref.principal_kind != "user" || observed.session.owner_ref.principal_id != principal_id
+            || observed.head.status != "running" || observed.head.active_turn_id.as_deref() != Some(turn_id)
+            || !matches!(observed.active_turn_outcome,Some(nomifun_agent_contracts::AgentTurnOutcome::Waiting {..})) {
+            return Err(browser_lifecycle_error("Browser user handoff requires the exact canonical parked Turn"));
+        }
+        if self.effect_store.has_unsettled_effects(&session).await.map_err(browser_lifecycle_error)? {
+            return Err(browser_lifecycle_error("Browser user handoff cannot release an unsettled effect"));
+        }
+        Ok(())
+    }
+
+    /// Called after the trusted owner commits a terminal or enters an exact
+    /// parked boundary. Failed settlement retains the native input lock.
     pub(crate) async fn finish_turn(&self, principal_id: &str, agent_session_id: &str, turn_id: &str) -> Result<(), AppError> {
         let key = TurnKey::new(principal_id, agent_session_id, turn_id);
         let admission = self.turns.lock().map_err(|_| browser_lifecycle_error("Browser turn registry is poisoned"))?.get(&key).cloned();
@@ -1830,6 +1854,64 @@ mod managed_user_browser_tests {
         assert!(owner.turns.lock().unwrap().is_empty());
         resources.shutdown().await.unwrap();
         db.close().await;
+    }
+
+    #[tokio::test]
+    async fn parked_browser_yields_user_control_and_retires_old_observation_authority() {
+        use nomifun_agent_contracts::{AgentBindingValue,AgentPresetId,PresetRevisionRef,
+            SemanticSessionEventDraft,SessionEventAppend,SessionEventKind,SessionEventPayloadRef};
+        let db=nomifun_db::init_database_memory().await.unwrap();
+        let store=nomifun_agent_session::AgentSessionStore::from_pool(db.pool().clone()).await.unwrap();
+        let sessions=nomifun_conversation::CanonicalAgentSessionOwner::from_pool(db.pool().clone()).await.unwrap();
+        let principal_id="0190f5fe-7c00-7a00-8000-000000000001";
+        let principal=PrincipalRef {principal_kind:"user".into(),principal_id:principal_id.into()};
+        let authority=navigate_admission(principal_id,"before-open");
+        let opened=sessions.open(principal.clone(),AgentBindingValue {
+            preset_revision_ref:PresetRevisionRef {preset_id:AgentPresetId::from("browser-wait-fixture"),revision:1,revision_digest:"a".repeat(64).into()},
+            resolved_snapshot_ref:authority.snapshot.clone(),typed_resource_bindings:vec![authority.binding.clone()],binding_version:1,
+        },None,vec![],"browser-wait-fixture",1).await.unwrap();
+        let session=opened.session.agent_session_id;
+        let active=sessions.start_turn(&principal,&session,"browser-wait-turn",serde_json::json!({"content":"Authorize in the browser"})).await.unwrap();
+        let started=sessions.turn_receipt(&principal,&session,&active.operation_id).await.unwrap().started_event.unwrap();
+        let root=tempfile::tempdir().unwrap();crate::config::load_or_create_storage_generation(root.path()).unwrap();
+        let locked=Arc::new(AtomicBool::new(false));
+        let resources=Arc::new(BrowserResourceService::new(Arc::new(GateFactory(
+            Arc::new(AtomicBool::new(false)),locked.clone(),Arc::new(AtomicBool::new(false))))));
+        let owner=BrowserRoleOwner::new(Some(resources.clone()),None,root.path().to_path_buf(),None,store.clone());
+        let mut original=navigate_admission(principal_id,session.as_ref());
+        Arc::get_mut(&mut original).unwrap().key.turn_id=active.operation_id.as_ref().to_owned();
+        owner.turns.lock().unwrap().insert(original.key.clone(),original.clone());
+        owner.dispatch(&original,Wave2TypedCapabilityOperation::BrowserNavigate {
+            input:StrictJsonValue(serde_json::json!({"url":"https://example.test/authorize"})),
+        }).await.unwrap();
+        assert!(locked.load(Ordering::SeqCst));
+        assert!(owner.yield_to_user(principal_id,session.as_ref(),active.operation_id.as_ref()).await.is_err(),"an active unparked model cannot yield user input");
+        assert!(locked.load(Ordering::SeqCst));assert!(!original.cancelled.load(Ordering::Acquire));
+        store.append_event(&SessionEventAppend {
+            agent_session_id:session.clone(),event_id:"browser-park".into(),producer_id:"runtime_supervisor".into(),idempotency_key:"browser-park".into(),
+            semantic_event:SemanticSessionEventDraft {kind:SessionEventKind("runtime/progress-recorded".into()),kind_version:1,
+                correlation_id:active.operation_id.as_ref().into(),causation_event_id:Some(started.event_id),
+                payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(serde_json::json!({"producer_seq":1,
+                    "event":{"event":"turn_waiting","model_steps":1,"request_id":null,"reason":"external_resource"}})))},
+        }).await.unwrap();
+        owner.yield_to_user(principal_id,session.as_ref(),active.operation_id.as_ref()).await.unwrap();
+        assert!(!locked.load(Ordering::SeqCst));
+        assert!(original.cancelled.load(Ordering::Acquire),"old native operations remain revoked");
+        assert!(owner.turns.lock().unwrap().is_empty());
+        let user=resources.get_for_agent_session(principal_id,session.as_ref()).await.unwrap().unwrap();
+        user.user_command(BrowserTabCommand::Create {url:"https://example.test/human-authorized".into()}).await.unwrap();
+        let mut resumed=navigate_admission(principal_id,session.as_ref());
+        Arc::get_mut(&mut resumed).unwrap().key.turn_id=active.operation_id.as_ref().to_owned();
+        owner.turns.lock().unwrap().insert(resumed.key.clone(),resumed.clone());
+        assert!(resumed.run.get().is_none());
+        assert!(resumed.attached_observations.lock().unwrap().is_empty());
+        owner.dispatch(&resumed,Wave2TypedCapabilityOperation::BrowserNavigate {
+            input:StrictJsonValue(serde_json::json!({"url":"https://example.test/verify"})),
+        }).await.unwrap();
+        assert!(locked.load(Ordering::SeqCst));
+        owner.settle_turn(principal_id,session.as_ref(),active.operation_id.as_ref()).await.unwrap();
+        owner.finish_turn(principal_id,session.as_ref(),active.operation_id.as_ref()).await.unwrap();
+        resources.shutdown().await.unwrap();db.close().await;
     }
 
     #[tokio::test]

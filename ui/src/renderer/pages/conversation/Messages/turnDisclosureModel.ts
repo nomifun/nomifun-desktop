@@ -95,11 +95,18 @@ export function selectTurnPublicResultIds(items: TurnDisclosureInputItem[]): Rea
       continue;
     }
     switch (outcome.kind) {
+      case 'silent':
+        // A deliberate no-reply terminal still retains its process disclosure.
+        // Empty text or successful tools alone never establish this outcome.
+        break;
       case 'answered':
         if (item.publicText && item.sourceMessageIds?.some(id => outcome.message_ids.includes(id))) visible.add(item.id);
         break;
       case 'input_required':
         if (item.userInputRequestId === outcome.request_id) visible.add(item.id);
+        break;
+      case 'waiting':
+        if (item.userInputRequestId === outcome.request_id || item.publicText) visible.add(item.id);
         break;
       case 'unavailable':
         if (item.turnOutcome?.kind === 'unavailable') visible.add(item.id);

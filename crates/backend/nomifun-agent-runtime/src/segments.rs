@@ -149,6 +149,18 @@ impl AgentExecutionSegmentState {
         Ok(())
     }
 
+    /// A reaped original owner is a real safe-boundary advance, including a
+    /// timeout that needs a truthful partial account. Waiting itself and wake
+    /// notifications buy no model allowance or fresh deadline.
+    pub(crate) fn observe_owner(&mut self, observation: &crate::AgentOwnedProcessObservation) -> Result<(), AgentEngineError> {
+        if observation.reaped() && self.progress_fingerprints.len() < MAX_PROGRESS_FINGERPRINTS {
+            let digest = digest_payload(&serde_json::json!({"owner_process_terminal":observation}))
+                .map_err(|error| AgentEngineError::InvalidContract(error.to_string()))?;
+            if !self.progress_fingerprints.contains(&digest) { self.progress_fingerprints.push(digest); }
+        }
+        Ok(())
+    }
+
     pub(crate) fn renewed(&self, model_steps: u16) -> Result<Self, AgentExecutionStopReason> {
         if model_steps >= self.total_model_limit() { return Err(AgentExecutionStopReason::TotalModelBudget); }
         if self.segment >= self.policy.max_segments { return Err(AgentExecutionStopReason::SegmentBudget); }

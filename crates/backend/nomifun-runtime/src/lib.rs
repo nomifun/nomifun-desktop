@@ -36,5 +36,5 @@ pub use shell_env::enhance_process_path;
 #[cfg(unix)]
 pub use login_shell::resolve_login_shell;
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod node_acceptance;

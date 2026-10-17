@@ -50,7 +50,6 @@ fn exact_action_reservation_and_owner_success_reconcile_without_replay() {
     let restored=reconcile_execution_tail(&cp,1,&tail,&BTreeSet::from(["written".into()]),
         &BTreeMap::from([("written".into(),success)]),&Default::default()).unwrap();
     assert!(restored.checkpoint.plan.exact_actions[0].succeeded);
-    assert!(restored.checkpoint.plan.exact_actions[0].settled);
     let AgentEngineEvent::ToolCallCompleted {call,..}=proposal("fresh-replay") else {unreachable!()};
     assert!(restored.checkpoint.plan.exact_action_gate(&call,true).is_some());
     tail.push(AgentEngineEvent::ToolCompleted { runtime_hold: None, step:1,result:receipt});
@@ -139,4 +138,62 @@ fn explicit_segment_increase_preserves_consumed_steps_and_cumulative_limits() {
     assert_eq!(result.checkpoint.segments.unwrap().total_model_limit(),6);
     let over_limit = NativeBudgetIncrease { additional_segments:31, ..Default::default() };
     assert!(reconcile_execution_tail(&cp,1,&[],&BTreeSet::new(),&BTreeMap::new(),&over_limit).is_err());
+}
+
+fn interrupted_live_wait() -> Vec<AgentEngineEvent> {
+    let question = nomifun_agent_contracts::AgentUserInputRequest { request_id: "authorize".into(),
+        question: "Authorize the original live helper".into(), remaining_work: "Verify the original helper and finish".into() };
+    vec![
+        started(),
+        AgentEngineEvent::ToolCallCompleted { step: 1, call: ChatToolCall { call_id: "launch".into(), name: "start_process".into(),
+            arguments: StrictJsonValue(json!({"command":"helper"})), provider_metadata: None } },
+        AgentEngineEvent::ToolStarted { step: 1, call_id: "launch".into(), capability_id: "workspace.process".into(), action_id: "workspace.process/start".into() },
+        AgentEngineEvent::ToolCompleted { step: 1, runtime_hold: None, result: AgentToolResult::text("launch".into(), "original owner running", false) },
+        AgentEngineEvent::WorkStatus { status: crate::AgentWorkStatus { running_processes: BTreeSet::from(["owned".into()]), ..Default::default() } },
+        AgentEngineEvent::ModelStepStarted { step: 2, operation_id: "turn:model:2".into(), correction_source: None },
+        AgentEngineEvent::ToolCallCompleted { step: 2, call: ChatToolCall { call_id: "authorize".into(), name: "request_user_input".into(),
+            arguments: StrictJsonValue(json!({"question":question.question,"remaining_work":question.remaining_work})), provider_metadata: None } },
+        AgentEngineEvent::UserInputRequested { step: 2, request: question },
+        AgentEngineEvent::ToolCompleted { step: 2, runtime_hold: None, result: AgentToolResult::text("authorize".into(), crate::user_input_request::ACK, false) },
+        AgentEngineEvent::TurnWaiting { model_steps: 2, request_id: Some("authorize".into()), reason: nomifun_agent_contracts::AgentWaitReason::UserInput },
+    ]
+}
+
+#[test]
+fn missing_original_live_owner_terminal_cannot_republish_old_authorization_question() {
+    let result = reconcile_execution_tail(&checkpoint(), 1, &interrupted_live_wait(), &BTreeSet::from(["launch".into()]), &BTreeMap::new(), &Default::default());
+    assert!(matches!(result, Err(AgentEngineError::ReplayContract(reason)) if reason.contains("original live wait owner has no reaped terminal")));
+}
+
+#[test]
+fn original_owner_terminal_before_crash_explicitly_retires_wait_without_inventing_answer() {
+    let mut tail = interrupted_live_wait();
+    tail.push(AgentEngineEvent::OwnedProcessObserved { model_steps: 2, observation: crate::AgentOwnedProcessObservation {
+        process_id: "owned".into(), poll: nomifun_engine_core::EngineProcessPoll::TimedOut {
+            output: nomifun_engine_core::EngineProcessOutput { text: "expired".into(), next_cursor: 7, retained_bytes: 7,
+                dropped_bytes: 0, source_encoding: "utf-8".into(), decode_errors: 0 },
+            cleanup: nomifun_engine_core::EngineCleanupReport { interrupt_attempted: true, terminate_attempted: false,
+                force_kill_attempted: false, reaped: true, elapsed_ms: 1, errors: Vec::new() },
+        },
+    } });
+    let result = reconcile_execution_tail(&checkpoint(), 1, &tail, &BTreeSet::from(["launch".into()]), &BTreeMap::new(), &Default::default()).unwrap();
+    assert!(result.checkpoint.pending_user_input.is_none());
+    assert!(result.checkpoint.work.running_processes.is_empty());
+    assert_eq!(result.checkpoint.work.failed_commands, 1);
+    assert!(result.observations.iter().any(|event| matches!(event, AgentEngineEvent::TurnWaitResolved { model_steps: 2 })));
+    assert!(!result.observations.iter().any(|event| matches!(event, AgentEngineEvent::SteeringInputs { .. } | AgentEngineEvent::TurnInputRequired { .. })));
+    tail.extend(result.observations);
+    assert!(crate::user_input_request::recorded_pending(&tail).unwrap().is_none());
+}
+
+#[test]
+fn real_tool_progress_after_end_review_restores_the_same_review_phase_as_live_execution() {
+    let mut cp = checkpoint();
+    cp.completion_review = crate::AgentCompletionReviewState { phase: crate::AgentExecutionPhase::EndIntentReview,
+        input_revision: 1, ..Default::default() };
+    let tail = vec![started(), proposal("written"), admitted("written")];
+    let result = reconcile_execution_tail(&cp, 1, &tail, &BTreeSet::from(["written".into()]),
+        &BTreeMap::from([("written".into(), outcome("written"))]), &Default::default()).unwrap();
+    assert_eq!(result.checkpoint.completion_review.phase, crate::AgentExecutionPhase::Execution,
+        "an actual owner result ends declaration-only correction in both live and recovered execution");
 }

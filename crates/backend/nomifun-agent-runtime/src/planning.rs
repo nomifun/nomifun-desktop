@@ -270,9 +270,8 @@ impl AgentPlan {
 
     pub(crate) fn apply_exact_outcome(&mut self,call:&ChatToolCall,result:&AgentToolResult,not_applied:bool)->bool {
         let Some(action)=self.exact_actions.iter_mut().find(|action|action.attempted_call_id.as_deref()==Some(call.call_id.as_ref())&&action.matches_observation(call)) else {return false;};
-        if not_applied {action.attempted_call_id=None;action.settled=false;action.succeeded=false;} else {
+        if not_applied {action.attempted_call_id=None;action.succeeded=false;} else {
             action.succeeded=crate::exact_actions::owner_succeeded(call,result);
-            action.settled=action.succeeded;
         }
         true
     }

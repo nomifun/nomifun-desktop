@@ -105,8 +105,6 @@ const turnStarted = (): IConversationTurnStartedEvent => ({
   runtime: {
     state: 'running',
     can_send_message: false,
-    has_runtime: true,
-    runtime_status: 'running',
     is_processing: true,
     active_turn_id: turnId,
   },
@@ -124,8 +122,6 @@ const turnCompleted = (
   runtime: {
     state: 'idle',
     can_send_message: true,
-    has_runtime: false,
-    runtime_status: 'finished',
     is_processing: false,
   },
   workspace: '',

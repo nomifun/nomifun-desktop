@@ -54,6 +54,21 @@ pub(crate) fn rename_between_noreplace(directory: &Dir, source: &OsStr, destinat
     if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
 }
 
+// Some real Linux mounts (including WSL DrvFS/v9fs) do not implement
+// renameat2 flags. Hard-link publication is also an atomic no-replace operation
+// for a new regular staging inode; it never overwrites an existing entry.
+#[cfg(target_os = "linux")]
+fn link_new_noreplace(directory: &Dir, source: &OsStr, target: &OsStr) -> std::io::Result<()> {
+    let name = |value: &OsStr| CString::new(value.as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "publication name contains NUL"));
+    let source = name(source)?;
+    let target = name(target)?;
+    // SAFETY: the live directory fd and terminated single-component names are valid.
+    if unsafe { libc::linkat(directory.as_raw_fd(), source.as_ptr(), directory.as_raw_fd(), target.as_ptr(), 0) } == 0 {
+        Ok(())
+    } else { Err(std::io::Error::last_os_error()) }
+}
+
 pub(crate) fn publish(
     parent: &PreparedParent,
     data: &[u8],
@@ -143,6 +158,11 @@ fn publish_with_hooks(
             if !matches_metadata(writable, &directory.symlink_metadata(name).map_err(io_error)?).map_err(io_error)? {
                 return Err(conflict("publication target changed identity before replacement"));
             }
+            #[cfg(target_os = "linux")]
+            crate::linux_publication_metadata::copy(writable, &staged).map_err(|error| {
+                crate::path_safety::native_io_error("preserving native publication ownership/ACL/xattrs", error)
+            })?;
+            #[cfg(not(target_os = "linux"))]
             staged.set_permissions(writable.metadata().map_err(io_error)?.permissions()).map_err(io_error)?;
             #[cfg(target_os = "macos")]
             crate::service::copy_macos_publication_metadata(writable, &staged).map_err(|error| {
@@ -152,7 +172,28 @@ fn publish_with_hooks(
             })?;
             directory.rename(temporary, directory, name).map_err(io_error)?;
         } else {
-            rename_noreplace(directory, temporary, name).map_err(|error| {
+            let renamed = rename_noreplace(directory, temporary, name);
+            #[cfg(target_os = "linux")]
+            let renamed = match renamed {
+                Err(error) if matches!(error.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)) => {
+                    link_new_noreplace(directory, temporary, name).map_err(|error| {
+                        if error.kind() == std::io::ErrorKind::AlreadyExists {
+                            conflict("new publication target appeared before commit")
+                        } else { io_error(error) }
+                    })?;
+                    // A destination now exists even if temporary cleanup fails.
+                    // Preserve that actual effect and never repeat publication.
+                    published = true;
+                    parent.verify()?;
+                    if !matches_named(&identity, directory, temporary).map_err(io_error)? {
+                        return Err(conflict("linked staging name changed before cleanup; retain the foreign entry"));
+                    }
+                    directory.remove_file(temporary).map_err(io_error)?;
+                    Ok(())
+                }
+                result => result,
+            };
+            renamed.map_err(|error| {
                 if error.kind() == std::io::ErrorKind::AlreadyExists {
                     conflict("new publication target appeared before commit")
                 } else { io_error(error) }
@@ -223,6 +264,113 @@ mod tests {
             observed.as_mut_ptr().cast(), observed.len(), 0, 0) };
         assert_eq!(count, value.len() as isize);
         assert_eq!(&observed[..value.len()], value);
+        assert_eq!(fs::read(target).unwrap(), b"patched");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_link_publication_never_overwrites_an_existing_entry() {
+        let fixture = tempfile::tempdir().unwrap();
+        fs::write(fixture.path().join("source"), b"new").unwrap();
+        fs::write(fixture.path().join("existing"), b"retain").unwrap();
+        let directory = Dir::open_ambient_dir(fixture.path(), cap_std::ambient_authority()).unwrap();
+        let error = link_new_noreplace(&directory, OsStr::new("source"), OsStr::new("existing")).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(fixture.path().join("existing")).unwrap(), b"retain");
+        assert_eq!(fs::read(fixture.path().join("source")).unwrap(), b"new");
+        link_new_noreplace(&directory, OsStr::new("source"), OsStr::new("published")).unwrap();
+        directory.remove_file("source").unwrap();
+        assert!(!fixture.path().join("source").exists());
+        assert_eq!(fs::read(fixture.path().join("published")).unwrap(), b"new");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_fixture_acl() -> Vec<u8> {
+        let mut acl = 2u32.to_le_bytes().to_vec();
+        for (tag, permissions, identity) in [
+            (1u16, 6u16, u32::MAX), (2, 4, 65534), (4, 0, u32::MAX),
+            (16, 4, u32::MAX), (32, 0, u32::MAX),
+        ] {
+            acl.extend(tag.to_le_bytes());
+            acl.extend(permissions.to_le_bytes());
+            acl.extend(identity.to_le_bytes());
+        }
+        acl
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_anchored_replacement_preserves_acl_xattr_and_identity() {
+        use std::os::unix::fs::MetadataExt;
+        let fixture = tempfile::tempdir().unwrap();
+        let target = fixture.path().join("target");
+        fs::write(&target, b"original").unwrap();
+        let original = File::open(&target).unwrap();
+        let user_name = CString::new("user.nomifun.publication-test").unwrap();
+        let acl_name = CString::new("system.posix_acl_access").unwrap();
+        let value = b"owned metadata";
+        // Linux POSIX ACL v2: owner rw, named uid 65534 r, group none,
+        // mask r and other none. No external ACL utility is required.
+        let acl = linux_fixture_acl();
+        // SAFETY: all fds/names/buffers are live and refer only to this fixture.
+        assert_eq!(unsafe { libc::fsetxattr(original.as_raw_fd(), user_name.as_ptr(),
+            value.as_ptr().cast(), value.len(), 0) }, 0);
+        assert_eq!(unsafe { libc::fsetxattr(original.as_raw_fd(), acl_name.as_ptr(),
+            acl.as_ptr().cast(), acl.len(), 0) }, 0);
+        let before = original.metadata().unwrap();
+        let parent = crate::workspace_write::prepare_global_parent(&target).unwrap();
+        publish(&parent, b"patched", PublicationSource::Matching(b"original")).unwrap();
+        let replacement = File::open(&target).unwrap();
+        let after = replacement.metadata().unwrap();
+        assert_eq!((after.uid(), after.gid(), after.mode()), (before.uid(), before.gid(), before.mode()));
+        for (name, expected) in [(user_name, value.as_slice()), (acl_name, acl.as_slice())] {
+            let mut observed = [0u8; 128];
+            let count = unsafe { libc::fgetxattr(replacement.as_raw_fd(), name.as_ptr(),
+                observed.as_mut_ptr().cast(), observed.len()) };
+            assert_eq!(count, expected.len() as isize, "{}: {}", name.to_string_lossy(), std::io::Error::last_os_error());
+            assert_eq!(&observed[..expected.len()], expected);
+        }
+        assert_eq!(fs::read(target).unwrap(), b"patched");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_replacement_does_not_inherit_a_new_parent_default_acl() {
+        let fixture = tempfile::tempdir().unwrap();
+        let target = fixture.path().join("target");
+        fs::write(&target, b"original").unwrap();
+        let directory = File::open(fixture.path()).unwrap();
+        let name = CString::new("system.posix_acl_default").unwrap();
+        let acl = linux_fixture_acl();
+        // SAFETY: this directory, descriptor and ACL buffer belong to the fixture.
+        assert_eq!(unsafe { libc::fsetxattr(directory.as_raw_fd(), name.as_ptr(),
+            acl.as_ptr().cast(), acl.len(), 0) }, 0);
+        let prepared = crate::workspace_write::prepare_global_parent(&target).unwrap();
+        publish(&prepared, b"patched", PublicationSource::Matching(b"original")).unwrap();
+        let replacement = File::open(&target).unwrap();
+        let name = CString::new("system.posix_acl_access").unwrap();
+        let count = unsafe { libc::fgetxattr(replacement.as_raw_fd(), name.as_ptr(), std::ptr::null_mut(), 0) };
+        assert_eq!(count, -1, "the old inode had no extended access ACL");
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ENODATA));
+        assert_eq!(fs::read(target).unwrap(), b"patched");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires root for an isolated foreign-owner inode fixture; not a product-authentication test"]
+    fn linux_administrator_replacement_preserves_foreign_owner_and_group() {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(unsafe { libc::geteuid() }, 0, "run only as root with a fresh private fixture");
+        let fixture = tempfile::tempdir().unwrap();
+        let target = fixture.path().join("target");
+        fs::write(&target, b"original").unwrap();
+        let original = File::open(&target).unwrap();
+        assert_eq!(unsafe { libc::fchown(original.as_raw_fd(), 65534, 65534) }, 0);
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        let prepared = crate::workspace_write::prepare_global_parent(&target).unwrap();
+        publish(&prepared, b"patched", PublicationSource::Matching(b"original")).unwrap();
+        let after = fs::metadata(&target).unwrap();
+        assert_eq!((after.uid(), after.gid(), after.mode() & 0o7777), (65534, 65534, 0o640));
         assert_eq!(fs::read(target).unwrap(), b"patched");
     }
 
