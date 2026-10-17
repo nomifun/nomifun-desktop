@@ -1,8 +1,10 @@
 # Windows 接续任务：默认可信的全局操作系统能力
 
-将本文件全文作为新会话的任务要求执行。先识别当前 Windows checkout 和实际环境，核实源码后持续完成实现及原生验收；不要停在方案报告，也不要再次等待产品方案确认。交接齐全、源码存在、编译通过和完整产品验收是不同事实，不能互相代替。
+本文件记录当前 Windows 合同与交付边界。接续时先核实实际 checkout、环境及最新回执，按新增任务选择检查；不要重复执行已经完成的业务，也不要重放未结算操作。源码、编译、原生验收和正式签名发行是不同事实。
 
-本轮接续只修复两个发布阻塞：显式 native 文件动作的跨项目持久冲突围栏，以及 Windows UAC 取消在管理员只读/指令预检中的 typed 错误链。`925` 及下文既有原生结果属于上一批来源，不能证明本轮新修复已经构建或验收。本轮已正常合并 main `737c6046`，merge 为 `22094a49be31a911a7a4ec2c0d5527b14887954f`；新的源码冻结、测试、App/NSIS 与 Git 回执按[验证记录](../validation/global-os-windows-2026-10-17.zh.md)消费。
+本轮两个发布阻塞已修复并取得新构建原生证据：显式 native 文件动作的跨项目持久冲突围栏，以及 Windows UAC 取消在管理员只读/指令预检中的 typed 错误链。生产冻结为 `53da7b1cf5d5bb9eca6fd3ed255625de7d3a2199`、tree `860cd8804a50311d3b601971eabc3beb1ba332ea`，包含普通合并 main 至 `ba107fa011ddc8cf92d68033504a6bdbf4f774df`。debug `a78a41e7…`、release/NSIS b69b、实际安装版 `72d9e82d…` 各有独立完整摘要、业务和退出回执；后续验收器/文档提交不冒充另一次产品构建。完整结果及最终 Git 交付按[验证记录](../validation/global-os-windows-2026-10-17.zh.md)和同一个 [PR26](https://github.com/nomifun/nomifun-desktop/pull/26) 核对。
+
+原数据根的 Desktop230/UNC336、原 pending1、owner/JWT 与旧故障资料完整保留。新 App 的两个项目均在新增修改 Effect 前受到 legacy 围栏拒绝；管理员允许/等待及真实 raw1223 取消已分别验证。取消专用脚本的原两份 FAILED 保留：一次实际点击允许，另一次命中了验证器的失败 Tips/checkpoint/digest 假设；后者通过同一原 Session 的独立 GET 补证核实，没有重提 Turn 或认证。独立正向夹具的65项文件/进程/UNC/Browser业务及实际安装版业务通过，均不追认旧 pending。媒体、其他管理员账号矩阵与正式签名不在这些证据内；候选未签名，日常0.8.4未替换。
 
 用户于2026-10-18明确选定简化边界：保留 NomiFun 自己准入的显式文件 Action 持久冲突围栏，接受用户或其他程序并发编辑文件、链接和 staging 名称的外部竞争风险，由用户协调。这替代先前要求抵御任意外部并发的严格对象一致保证；不增加权限模式、确认流程或文件系统拦截设施。已有部分效果、unknown、cleanup 与禁止自动重放保持，旧失败和未结算事实不改。原生 source-link 干预的同卷移动、跨卷 metadata 变化已实测并保留，不能把它们写成“外部目标未受影响”。
 
@@ -22,11 +24,11 @@ workspace 只承担默认目录、项目归属、watcher 和 VCS 语义；不能
 
 优先通过 Git 取得包含当前 Windows 实现、测试、构建资产和文档的完整交付。先检查 HEAD、diff 与全部必要新增源码，不重复应用历史快照，不只复制 tracked diff。遇到无关改动保留它，另建合适的干净 checkout；不得 `reset/clean` 或覆盖其他写入者。历史 source-review 的 BASE、摘要和旧恢复操作保留在 Git 历史；本文件不再提供旧 patch 恢复步骤，不更改历史 BASE、不猜新摘要、不混用导出批次。若实际交付需要 bundle，须由交付者冻结完整源码并提供当批实际清单与摘要，不能用旧基线强套当前 checkout。
 
-本轮 Windows 实现始于 `1b9c317ecaf5a5b7f70de382defbaf6214849fff`。第一批生产冻结 `91410efd5dd3227104b783bf794591254c014d82` 的完整交付已保存并普通推送为0590；随后在 `codex/windows-global-os` 普通合并 main `2c6b1df36fc5f42b08c8dc296c77b49954ce467d`，merge为 `b014415383db324dde21fbf9307f0ada4dd82f9a`。仅三份生成合同冲突，使用合并后的正式generator再生并检查。当前生产冻结为 `925e775a1c070fbbef75d8c2db0bbb5c27ce97e3`、tree `55a42d1b26a70c28faf9b11e4709c1f7ea72f36f`，包含main至2c6及实际UI准备owner/计时器修复；后续验证驱动、文档与最终推送以实际Git回执为准。不rebase、force或覆盖main。
+Windows 实现的历史起点为 `1b9c317ecaf5a5b7f70de382defbaf6214849fff`；91410、925及其变体属于此前交付来源，具体合并、首次失败和原生结果保留在验证记录及 Git 历史，不再作为当前构建输入。当前生产冻结以本文件开头的53da为准；不 rebase、force 或覆盖共享历史。
 
-本轮当前925实现与原生验收已完成：8dbc debug/component21dc的UNC16、管理员8、missing-default Minimal12、Browser13及新等待/取消3项通过；完整源码检查、876项Rust、14项App、480项UI检查通过。925的b4唯一变体官方NSIS构建、canonical安装/卸载六步，以及实际安装NSS executable的正常setup/login、Minimal12、正常退出和独立卸载/真实SQLite保留均通过。debug15、安装版7项exact owned进程全部gone，新WgkGMz快照absent、自有Vite停止；最后日常nomifun://已指回核实的0.8.4，当前7dd0eb2c修复回执双视图读回成立。首次失败与修后结果见[Windows最新记录](../validation/global-os-windows-2026-10-17.zh.md)，第一批91410/d22/439/f65仅是历史来源。原34d pending1/336事实与BoHTo0仍保留，不重放或代填owner核实；媒体、正式签名、额外账号硬件矩阵及跨项目持久目标围栏仍按下文边界承接。
+925的876项Rust、14项App、480项UI及旧8dbc/b4安装周期仅证明当时来源，不计入53da的新二进制结果。本轮9e9b的完整 Host98与最终53da的 App13、scheduler2、UI/边界、原生及安装证据分别列于验证记录，不混成一次完整重跑。原34d pending1/336事实与BoHTo0仍保留，不重放或代填owner核实；跨项目围栏本轮已修复，外部并发边界仍按用户明确决定执行。
 
-完整源码交付为 [PR26](https://github.com/nomifun/nomifun-desktop/pull/26)，最终提交/普通推送按实际Git回执核对，不把生产锚925与后续validation/docs提交混为同一build。补验期间main后继至737c6046；只读merge-tree实际0/无冲突，但该robot后继生产提交未纳入925原生构建。不得为追逐移动main而借旧binary宣称新源码已验收。
+完整源码继续通过同一个PR26交付，最终提交、普通推送及合并以实际Git回执为准。737c的robot变化与ba107fa的委派取消变化均已普通合入当前53da，并补足取消用例与完整检查。最终合并若仅增加本轮验收器/文档，明确记录该差异；若再引入产品变化，须针对实际来源补验，不借旧binary宣称新源码已验收。
 
 开始前执行并保留结果：
 
@@ -112,8 +114,8 @@ Terminal合法leading-space cwd与recursive entry scope中的命名指令链接�
 
 ## 接续执行与检查
 
-1. 对照当前Git、925生产冻结及Windows验证记录的最新回执，核实实际executable、组件身份、验证驱动和最终交付commit。实现、源码检查、App原生及NSIS结果分别消费，不沿用旧构建摘要，不把历史候选称作当前最终产物；保留历史失败、数据集和owner事实。
-2. 本轮默认App升级使用原标记私有data root/JWT及Desktop230/UNC336双守卫，不重新setup/login或新建数据集绕pending；独立NSIS安装后bootstrap才创建其自己的新标记数据根并正常WebView2 setup/login。两者均核对port公告/PID/token与实际caller，再用`global-os-native.mjs`公开默认`chat.minimal`/`assistant.general`场景；不手补grant/resources。本机scripted provider不代表联网模型推理。
+1. 对照当前Git、53da生产冻结及Windows验证记录的最新回执，核实实际executable、组件身份、验证驱动和最终交付commit。实现、源码检查、App原生及NSIS结果分别消费，不沿用旧构建摘要，不把历史候选称作当前最终产物；保留历史失败、数据集和owner事实。
+2. 原数据根继续使用原owner/JWT及Desktop230/UNC336双守卫，不重新setup/login或新建数据集解决旧pending。独立positive和NSIS安装版回归各用明确标记的新数据根并正常WebView2 setup/login，单独标记来源；其成功不证明旧pending已解决。均核对port公告/PID/token与实际caller，再用`global-os-native.mjs`公开默认`chat.minimal`/`assistant.general`场景；不手补grant/resources。本机scripted provider不代表联网模型推理。
 3. 先运行无需新账号/设备/联网安装的普通链，再按条件运行管理员、系统任务、Browser、桌面、installer独立场景。失败先查原canonical结算；仅在已结算允许的原链新Turn准确cleanup，不重跑未知业务。保留命令、首次失败、修后结果、原生readback与cleanup。
 4. installer唯一variant先readonly prepare；canonical安装/卸载已完成且pending/unknown=0、唯一对象不存在后，再独立bootstrap周期，不并行installer。NSIS uninstaller的`_?=<exact root>`是最后无引号raw tail，现役固定ProcessStartInfo原生调用同步等待真实PID；一般argv引号或外层exit0不能证明嵌套卸载完成。
 5. 只操作本轮唯一夹具，保留日常App/注册/工具/配置及其他数据集。foreground/锁屏/授权不足准确交回用户，不造权限开关；媒体按用户选择保持未覆盖。

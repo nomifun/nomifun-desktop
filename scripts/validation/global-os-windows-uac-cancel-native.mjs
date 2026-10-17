@@ -39,17 +39,65 @@ function canonicalSlot(record, pointer, kind, expected, session) {
   assert.equal(reference.payload_id, `shared-tool:${session}:${kind === 'tool_arguments' ? 'arguments' : 'output'}:${reference.digest}`);
 }
 
+/** Failed canonical summaries are exposed as compact error Tips, not status rows. */
+export function windowsUacFailureMessage(history, {session, accepted}) {
+  assert.notEqual(history?.success, false);
+  const page = history?.data ?? history;
+  assert(Array.isArray(page?.items), 'Expected the public canonical message-history items');
+  // StoredMessageMapper also requires object content; JSON-looking strings are
+  // not another persisted-message format or authority to invent typed fields.
+  return one(page.items.filter(message => message.conversation_id === session
+    && message.type === 'tips' && message.status === 'error'
+    && message.content && typeof message.content === 'object' && !Array.isArray(message.content)
+    && message.content.type === 'error' && message.content.turn_id === accepted.message_id), 'public API failed Turn error');
+}
+
+/** Derive the exact Rust carrier for serde_json's two supported map profiles. */
+export function windowsUacCarrierPresentations(diagnostic) {
+  // SystemExecutionFailure declaration order and typed_owner_error_result's
+  // json! field order. preserve_order is enabled in the actual Tauri build;
+  // the BTreeMap profile is used by isolated Runtime/library builds.
+  const fields = ['code','message','kind','raw_os_error','user_code_not_started','cleanup_proven'];
+  assert.deepEqual(Object.keys(diagnostic).sort(), [...fields].sort());
+  const native = Object.fromEntries(fields.map(field => [field, diagnostic[field]]));
+  const value = {code:native.code,message:native.message,details:{system_execution_error:native}};
+  return [['serde_json_preserve_order', JSON.stringify(value)], ['serde_json_btree', stable(value)]]
+    .map(([serializer, carrier]) => ({serializer, carrier, notice:`Repository instruction body omitted from durable history (${Buffer.byteLength(carrier)} UTF-8 bytes, sha256:${hash(carrier)}). Re-read current rules through the authorized workspace tool; this digest grants no authority.`}));
+}
+
+function instructionFailureSlot(record, diagnostic, session) {
+  const candidates = windowsUacCarrierPresentations(diagnostic).flatMap(value => [
+    {...value,presentation:'typed_carrier',output:[{type:'text',text:value.carrier}]},
+    {...value,presentation:'instruction_digest_notice',output:[{type:'text',text:value.notice}]},
+  ]);
+  const envelope = record.payload?.value, actual = envelope?.event?.result?.output;
+  let selected;
+  if (actual !== null && actual !== undefined) selected = one(candidates.filter(value => stable(value.output) === stable(actual)), 'exact original instruction failure or its privacy digest');
+  else {
+    const ref = one(envelope?._canonical_shared_content?.references?.filter(value => value.pointer === '/event/result/output') ?? [], 'shared instruction failure slot');
+    selected = one(candidates.filter(value => hash(stable(value.output)) === ref.digest), 'exact shared instruction failure presentation');
+  }
+  canonicalSlot(record, '/event/result/output', 'tool_output', selected.output, session);
+  return {serializer:selected.serializer,presentation:selected.presentation,carrier_bytes:Buffer.byteLength(selected.carrier),carrier_sha256:hash(selected.carrier)};
+}
+
 /** Only typed canonical facts establish cancellation and zero mutation. */
 export function windowsUacCancellationProof({ events, session, accepted, execution, summary, call, markerAbsent }) {
   assert.equal(markerAbsent, true, 'The unique proposed mutation marker must remain absent');
   assert(events.every(event => event.agent_session_id === session));
   assert.equal(execution.operation_id, accepted.operation_id); assert.equal(execution.state, 'failed');
   assert.equal(execution.pending_effects, 0); assert.equal(execution.unknown_effects, 0);
-  assert.equal(execution.producer_lease_live, false); assert.equal(execution.checkpoint_retained, false);
+  assert.equal(execution.producer_lease_live, false); assert.equal(typeof execution.checkpoint_retained, 'boolean');
   assert.equal(execution.automatic_replay_authorized, false);
   const current = events.filter(event => event.correlation_id === accepted.operation_id);
   const records = current.filter(event => event.kind === 'runtime/progress-recorded')
     .map(record => ({ record, seq: record.seq, event: record.payload?.value?.event }));
+  if (execution.checkpoint_retained) {
+    const checkpoint = one(records.filter(row => row.seq === execution.checkpoint_seq && row.event?.event === 'execution_checkpoint_saved'), 'retained diagnostic checkpoint');
+    assert(Number.isSafeInteger(execution.checkpoint_revision) && execution.checkpoint_revision > 0);
+    assert.match(execution.checkpoint_digest, /^[a-f0-9]{64}$/);
+    assert.equal(checkpoint.event.revision, execution.checkpoint_revision); assert.equal(checkpoint.event.digest, execution.checkpoint_digest);
+  } else assert(execution.checkpoint_seq == null && execution.checkpoint_digest == null);
   const started = one(current.filter(event => event.kind === 'turn/started'), 'canonical Turn start');
   assert.equal(started.payload?.value?.source_message_id, accepted.message_id);
   const terminal = one(current.filter(event => ['turn/failed', 'turn/completed', 'turn/cancelled'].includes(event.kind)), 'canonical terminal');
@@ -84,17 +132,19 @@ export function windowsUacCancellationProof({ events, session, accepted, executi
   assert.equal(acquisition.event.call.name, 'read_file'); assert.equal(acquisition.event.call.arguments.format, 'instruction_scope');
   const preflight = one(records.filter(row => row.event?.event === 'tool_completed' && row.event.result?.call_id === acquisition.event.call.call_id), 'preflight failure');
   assert.equal(preflight.event.result.is_error, true);
-  const carrier = stable({ code: diagnostic.code, message: diagnostic.message, details: { system_execution_error: diagnostic } });
-  canonicalSlot(preflight.record, '/event/result/output', 'tool_output', [{ type: 'text', text: carrier }], session);
+  const preflightPresentation = instructionFailureSlot(preflight.record, diagnostic, session);
   assert(proposal.seq < acquisition.seq && preflight.seq < cleanup.seq);
   assert.equal(records.filter(row => row.seq > preflight.seq && row.event?.event === 'model_step_started').length, 0, 'No model retry follows authentication cancellation');
   assert.equal(dispatched.filter(row => row.seq > preflight.seq).length, 0, 'No ordinary fallback or sibling read follows the native failure');
-  assert.equal(summary?.content?.turn_summary, true); assert.equal(summary.content.turn_id, accepted.message_id); assert.equal(summary.content.turn_state, 'failed');
+  assert.equal(summary?.conversation_id, session); assert.equal(summary.type, 'tips'); assert.equal(summary.status, 'error');
+  assert.equal(summary.content?.type, 'error'); assert.equal(summary.content.turn_id, accepted.message_id);
+  assert.equal(summary.content.turn_outcome?.kind, 'failed');
   assert.deepEqual(summary.content.error?.systemExecutionError, diagnostic); assert.equal(summary.content.error.code, error.code);
   return { code: error.code, native: diagnostic, proposal_seq: proposal.seq, preflight_seq: acquisition.seq,
     preflight_result_seq: preflight.seq, cleanup_seq: cleanup.seq, terminal_seq: terminal.seq,
     mutation_effect_count: 0, user_mutation_dispatch_count: 0, administrator_preflight_count: 1,
-    internal_read_dispatch_count: dispatched.length, marker_absent: true, automatic_replay_authorized: false };
+    internal_read_dispatch_count: dispatched.length, marker_absent: true, automatic_replay_authorized: false,
+    diagnostic_checkpoint_retained:execution.checkpoint_retained,preflight_presentation:preflightPresentation };
 }
 
 export function windowsUacCancelOptions(argv) {
@@ -212,7 +262,8 @@ export async function runWindowsUacCancellation(options) {
     }
     assert(final && proposal, 'Native authentication/terminal cleanup was not proven before the deadline');
     const events = await eventsFor(), history = await api('GET', `/api/agent-sessions/${session}/message-history?page=1&page_size=100`);
-    const summary = one(history.items.filter(message => message.content?.turn_summary === true && message.content.turn_id === accepted.message_id), 'public API Turn summary');
+    report.execution = final.execution; report.events = events; report.history = history;
+    const summary = windowsUacFailureMessage(history, {session, accepted});
     report.execution = final.execution; report.events = events; report.summary = summary;
     report.proof = windowsUacCancellationProof({events,session,accepted,execution:final.execution,summary,call:proposal,markerAbsent:await absent(marker)});
     assert.deepEqual(final.session.session.agent_binding, before.session.agent_binding); assert.deepEqual(final.session.session.owner_ref, before.session.owner_ref);

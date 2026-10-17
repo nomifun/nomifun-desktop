@@ -166,9 +166,20 @@ export function assertWindowsDesktopPreservationSource({source,preserved,preserv
   assert.deepEqual(prior.canonical_preservation,expected,'The previous upgrade must have verified this exact canonical Session preservation');
   return{kind:'verified_prior_upgrade',app_pid:source.app_pid,original_guard_app_pid:preserved.app_pid,source_exe_sha256:source.exe_sha256};
 }
+export function assertWindowsPriorAppExited(source,observation) {
+  assert.equal(observation.pid,source.app_pid);assert(['running','exited','absent'].includes(observation.state));
+  if(observation.state!=='running')return observation;
+  const original=source.actual_app_identity?.native_process;
+  assert.equal(original?.pid,source.app_pid,'A reused PID requires the original exact native App identity');
+  assert.match(original.creation_filetime,/^[1-9][0-9]+$/);assert.match(observation.creation_filetime,/^[1-9][0-9]+$/);
+  assert.notEqual(observation.creation_filetime,original.creation_filetime,'The exact prior App must have exited before same-dataset restart');
+  // PID reuse proves only that the original generation is gone. The old
+  // retained-HANDLE exit receipt remains the separate source of its exit code.
+  return{...observation,pid_reused:true,expected_prior_creation_filetime:original.creation_filetime,prior_app_running:false};
+}
 export async function restartWindowsAcceptanceFixture({fixtureReport,upgradeExe,preservedSessionReport,additionalSessionReport,buildLabel}) {
   const source=JSON.parse(await readFile(fixtureReport,'utf8'));
-  assert.equal(source.schema,'nomifun.windows-global-os-fixture.v1');assert.equal(source.status,'ready');const priorProcess=windowsProcessObservation(source.app_pid);assert.notEqual(priorProcess.state,'running','The exact prior App must have exited before same-dataset restart');
+  assert.equal(source.schema,'nomifun.windows-global-os-fixture.v1');assert.equal(source.status,'ready');const priorProcess=assertWindowsPriorAppExited(source,windowsProcessObservation(source.app_pid));
   assert.match(basename(source.parent),/^nomifun-global-os-owner-[0-9a-f-]{36}$/);assert.equal(source.native_data_root,join(source.parent,'native-data'));assert.equal(source.token_file,join(source.parent,'owner-jwt'));
   for(const path of [source.parent,source.native_data_root])await assertWindowsPrivatePath(path);
   assert.equal(await readFile(join(source.parent,'.nomifun-global-os-fixture'),'utf8'),'nomifun-global-os-native-acceptance-fixture.v1\n');
@@ -217,7 +228,7 @@ export async function restartWindowsAcceptanceFixture({fixtureReport,upgradeExe,
 }
 export async function verifyExistingWindowsUpgrade({fixtureReport}){
   const sourceBytes=await readFile(fixtureReport),source=JSON.parse(sourceBytes);assert.equal(source.schema,'nomifun.windows-global-os-fixture.v1');assert.equal(source.status,'failed');assert(source.upgrade&&source.restart_of);assert.equal(source.owner_jwt_reused,true);
-  const original=JSON.parse(await readFile(source.restart_of,'utf8'));assert.equal(original.status,'ready');assert.equal(original.app_pid,source.prior_app_pid);assert.equal(source.native_data_root,original.native_data_root);assert.equal(source.token_file,original.token_file);assert.equal(source.parent,original.parent);assert(windowsProcessGone(original.app_pid));assert.equal(await executableDigest(source.exe),source.exe_sha256);assert.equal(source.exe_sha256,source.upgrade.new_exe_sha256);
+  const original=JSON.parse(await readFile(source.restart_of,'utf8'));assert.equal(original.status,'ready');assert.equal(original.app_pid,source.prior_app_pid);assert.equal(source.native_data_root,original.native_data_root);assert.equal(source.token_file,original.token_file);assert.equal(source.parent,original.parent);assertWindowsPriorAppExited(original,windowsProcessObservation(original.app_pid));assert.equal(await executableDigest(source.exe),source.exe_sha256);assert.equal(source.exe_sha256,source.upgrade.new_exe_sha256);
   for(const path of [source.parent,source.native_data_root])await assertWindowsPrivatePath(path);assert.equal(await readFile(join(source.parent,'.nomifun-global-os-fixture'),'utf8'),'nomifun-global-os-native-acceptance-fixture.v1\n');
   const token=(await readWindowsOwnedFixtureBytes(source.token_file,4096)).toString('utf8').trim(),preservedBytes=await readFile(source.upgrade.preserved_session_report);assert.equal(createHash('sha256').update(preservedBytes).digest('hex'),source.upgrade.preserved_session_report_sha256);const preserved=JSON.parse(preservedBytes);
   const announcement=JSON.parse((await readWindowsOwnedFixtureBytes(join(source.native_data_root,'port.json'),4096)).toString('utf8'));assert.equal(announcement.pid,source.app_pid);assert.equal(announcement.port,Number(new URL(source.base_url).port));
