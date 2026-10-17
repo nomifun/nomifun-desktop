@@ -93,6 +93,9 @@ pub enum JobStatus {
     Error,
     Skipped,
     Missed,
+    #[serde(rename = "input_required")]
+    InputRequired,
+    Cancelled,
 }
 
 impl JobStatus {
@@ -102,6 +105,8 @@ impl JobStatus {
             Self::Error => "error",
             Self::Skipped => "skipped",
             Self::Missed => "missed",
+            Self::InputRequired => "input_required",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -114,6 +119,8 @@ impl FromStr for JobStatus {
             "error" => Ok(Self::Error),
             "skipped" => Ok(Self::Skipped),
             "missed" => Ok(Self::Missed),
+            "input_required" => Ok(Self::InputRequired),
+            "cancelled" => Ok(Self::Cancelled),
             other => Err(CronError::InvalidJobStatus(other.to_owned())),
         }
     }
@@ -712,6 +719,8 @@ mod tests {
         assert_eq!(JobStatus::from_str("error").unwrap(), JobStatus::Error);
         assert_eq!(JobStatus::from_str("skipped").unwrap(), JobStatus::Skipped);
         assert_eq!(JobStatus::from_str("missed").unwrap(), JobStatus::Missed);
+        assert_eq!(JobStatus::from_str("input_required").unwrap(), JobStatus::InputRequired);
+        assert_eq!(JobStatus::from_str("cancelled").unwrap(), JobStatus::Cancelled);
     }
 
     #[test]
@@ -727,6 +736,8 @@ mod tests {
             JobStatus::Error,
             JobStatus::Skipped,
             JobStatus::Missed,
+            JobStatus::InputRequired,
+            JobStatus::Cancelled,
         ] {
             assert_eq!(JobStatus::from_str(s.as_str()).unwrap(), s);
         }

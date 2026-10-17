@@ -30,9 +30,9 @@ const noteId = parseMessageId('019f0000-0000-7000-8000-000000000917');
 const request = { request_id: 'ask:choose-path', question: 'Which directory should I use?', remaining_work: 'Write and verify the report.' };
 const questionText = `${request.question}\n\n${request.remaining_work}`;
 const idle = { id: conversationId, status: 'finished', runtime: { state: 'idle', can_send_message: true,
-  is_processing: false, has_runtime: false } } as TChatConversation;
+  is_processing: false, } } as TChatConversation;
 const busy = (turn = root) => ({ ...idle, status: 'running', runtime: { state: 'running', can_send_message: false,
-  is_processing: true, has_runtime: true, active_turn_id: turn } }) as TChatConversation;
+  is_processing: true, active_turn_id: turn } }) as TChatConversation;
 const accepted = (turn = root, extra: Partial<IUserMessageCreatedEvent> = {}): IUserMessageCreatedEvent => ({
   conversation_id: conversationId, msg_id: turn, content: 'Question', position: 'right', status: 'finish', created_at: 100, ...extra,
 });

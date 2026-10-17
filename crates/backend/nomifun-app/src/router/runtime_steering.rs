@@ -14,6 +14,7 @@ use nomifun_common::AppError;
 use super::{ActiveTurn, ConversationRuntimeHost, error};
 
 pub(super) struct Inbox {
+    changed: std::sync::Arc<tokio::sync::Notify>,
     open: bool,
     generation: Option<u64>,
     seen: BTreeMap<String, AgentSteeringInput>,
@@ -27,6 +28,7 @@ pub(super) struct Inbox {
 impl Default for Inbox {
     fn default() -> Self {
         Self {
+            changed: std::sync::Arc::new(tokio::sync::Notify::new()),
             open: false,
             generation: None,
             seen: BTreeMap::new(),
@@ -380,6 +382,7 @@ impl ConversationRuntimeHost {
             .seen
             .insert(input.receipt_operation_id.clone(), recorded);
         turn.steering.pending.push(input);
+        turn.steering.changed.notify_waiters();
         if turn.voice_control.is_some()&&facts.event_payloads.get(steering.event_id.as_ref()).and_then(|payload|payload.get("voice_model_step_supersede")).and_then(serde_json::Value::as_bool)==Some(true) {
             turn.steering.immediate_receipts.insert(steering.event_id.as_ref().to_owned());
             if let Some(port)=&turn.voice_control{port.notify();}
@@ -496,5 +499,41 @@ impl AgentInputPort for HostPort {
             .ok_or_else(|| engine_error("no active turn"))?;
         admitted(turn, &host, causality)?;
         Ok(!turn.steering.pending.is_empty())
+    }
+}
+
+#[async_trait]
+impl nomifun_agent_runtime::AgentWaitPort for HostPort {
+    async fn wait(&self, causality: &ChatCausality, request: &nomifun_agent_runtime::AgentWaitRequest,
+        cancellation: tokio_util::sync::CancellationToken)
+        -> Result<nomifun_agent_runtime::AgentWaitWake, AgentEngineError> {
+        let host = self.0.upgrade().ok_or_else(|| engine_error("Session host has shut down"))?;
+        let (changed, operation) = {
+            let active = host.active.lock().await;
+            let turn = active.as_ref().ok_or_else(|| engine_error("wait has no active Turn"))?;
+            admitted(turn, &host, causality)?;
+            turn.journal.verify_execution_lease().await.map_err(engine_error)?;
+            (turn.steering.changed.clone(), turn.operation.clone())
+        };
+        if cancellation.is_cancelled() { return Err(AgentEngineError::Cancelled); }
+        host.resources.yield_browser_for_input(&operation, &cancellation).await
+            .map_err(|_| AgentEngineError::WaitOwnerUnavailable)?;
+        loop {
+            // Enable the notification before checking the durable receipt-backed
+            // inbox; input accepted on either side of this boundary cannot vanish.
+            let notified = changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if cancellation.is_cancelled() { return Err(AgentEngineError::Cancelled); }
+            if self.has_pending(causality).await? { return Ok(nomifun_agent_runtime::AgentWaitWake::InputsAvailable); }
+            tokio::select! { biased;
+                _ = cancellation.cancelled() => return Err(AgentEngineError::Cancelled),
+                _ = &mut notified => {},
+                observed = host.resources.wait_processes(&operation, &request.processes, cancellation.clone()), if !request.processes.is_empty() => {
+                    return observed.map(nomifun_agent_runtime::AgentWaitWake::ProcessesChanged)
+                        .map_err(|_| AgentEngineError::WaitOwnerUnavailable);
+                },
+            }
+        }
     }
 }

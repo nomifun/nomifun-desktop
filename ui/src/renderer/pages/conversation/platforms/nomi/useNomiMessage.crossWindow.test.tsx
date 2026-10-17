@@ -52,11 +52,9 @@ function mockConversationBroadcasts() {
     type: 'nomi',
     status: running.has(conversation_id) ? 'running' : 'finished',
     runtime: running.has(conversation_id) ? {
-      state: 'running', is_processing: true, can_send_message: false, has_runtime: true,
-      active_turn_id: turnId, processing_started_at: 1000,
+      state: 'running', is_processing: true, can_send_message: false, active_turn_id: turnId, processing_started_at: 1000,
     } : {
-      state: 'idle', is_processing: false, can_send_message: true, has_runtime: false,
-    },
+      state: 'idle', is_processing: false, can_send_message: true, },
   } as TChatConversation));
 
   return {
@@ -67,8 +65,7 @@ function mockConversationBroadcasts() {
       for (const listener of starts) listener({
         conversation_id: id, turn_id: turnId, status: 'running', state: 'ai_generating', detail: '',
         can_send_message: false,
-        runtime: { state: 'running', is_processing: true, can_send_message: false, has_runtime: true,
-          active_turn_id: turnId, processing_started_at: 1000 },
+        runtime: { state: 'running', is_processing: true, can_send_message: false, active_turn_id: turnId, processing_started_at: 1000 },
       });
     },
   };

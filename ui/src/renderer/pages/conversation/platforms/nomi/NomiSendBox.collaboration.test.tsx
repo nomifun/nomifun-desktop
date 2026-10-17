@@ -82,7 +82,7 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); mock.restore(); configService.reset(); sessionStorage.clear(); });
 
-function mount(options: { compact?: boolean; busy?: boolean; linkedBusy?: boolean; paused?: boolean } = {}) {
+function mount(options: { compact?: boolean; busy?: boolean; linkedBusy?: boolean; paused?: boolean; waiting?: boolean } = {}) {
   const pausedTurnId = parseMessageId(uuidv7());
   const conversation = { id: parseConversationId(uuidv7()), name: 'General', type: 'nomi', session_purpose: 'conversation', status: 'finished',
     created_at: 1, modified_at: 1, model, extra: { workspace: '/project' } } as TChatConversation;
@@ -97,10 +97,12 @@ function mount(options: { compact?: boolean; busy?: boolean; linkedBusy?: boolea
     spyOn(executionContext, 'useExecutionSafe').mockReturnValue({ conversationId: conversation.id, executionId,
       detail: { execution: { execution_id: executionId, status: 'running' } } } as never);
   }
-  const renderComposer = (busy = options.busy ?? false) => <MemoryRouter><I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), fallback: { providers: [] }, shouldRetryOnError: false }}>
+  const renderComposer = (busy = options.busy ?? options.waiting ?? false) => <MemoryRouter><I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), fallback: { providers: [] }, shouldRetryOnError: false }}>
     <PreviewProvider persistNamespace={browserStorageKey('collaboration-test', 'conversation', conversation.id)} subscribeGlobalOpen={false}>
       <MessageListProvider><NomiSendBox conversation_id={conversation.id} modelSelection={modelSelection}
-        turnActivity={{ ...activity, running: busy, pauseNotice: options.paused
+        turnActivity={{ ...activity, running: busy, waitingNotice: options.waiting ? {
+          turnId: pausedTurnId, canSteer: true, outcome: { kind: 'waiting', wait_seq: 41, request_id: 'authorize', reason: 'user_input' },
+        } : null, pauseNotice: options.paused
           ? { turnId: pausedTurnId, reason: 'EXECUTION_TOTAL_MODEL_BUDGET', cleanupProven: true, pausedAt: 123 } : null }}
         creationEnabled={false} collaborationEnabled compactProductComposer={options.compact} /></MessageListProvider>
     </PreviewProvider></SWRConfig></I18nextProvider></MemoryRouter>;
@@ -305,6 +307,21 @@ test('a paused turn keeps its draft editable and a quiet cancellation action whi
   fireEvent.click(cancel);
   await waitFor(() => expect(stop).toHaveBeenCalledTimes(1));
   expect(stop).toHaveBeenCalledWith({ conversation_id: composer.conversation.id, expected_turn_id: composer.pausedTurnId });
+});
+
+test('replying to parked work steers its current Turn without starting a collaboration or queueing a new Turn', async () => {
+  const steer = spyOn(ipcBridge.conversation.steer, 'invoke').mockResolvedValue({ msg_id: parseMessageId(uuidv7()),
+    replayed: false, completed: false, result_ok: null, result_text: null, result_error: null,
+    result_error_code: null, result_error_retryable: null });
+  const composer = mount({ waiting: true });
+  await composer.submit('The browser authorization is complete');
+  await waitFor(() => expect(steer).toHaveBeenCalledTimes(1));
+  expect(steer.mock.calls[0][0].conversation_id).toBe(composer.conversation.id);
+  expect(steer.mock.calls[0][0].expected_wait).toEqual({ turn_id: composer.pausedTurnId, wait_seq: 41 });
+  expect(composer.send).not.toHaveBeenCalled();
+  expect(composer.create).not.toHaveBeenCalled();
+  expect(composer.fromTemplate).not.toHaveBeenCalled();
+  await waitFor(() => expect(composer.input.value).toBe(''));
 });
 
 test('a linked active collaboration cannot be replaced by a new admission from an idle chat', async () => {

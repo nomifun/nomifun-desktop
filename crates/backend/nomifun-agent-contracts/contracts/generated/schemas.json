@@ -3691,6 +3691,17 @@
     "type": "object"
   },
   "agent_turn_outcome": {
+    "$defs": {
+      "AgentWaitReason": {
+        "description": "Why an active Turn has parked its model while its owner retains execution.",
+        "enum": [
+          "user_input",
+          "external_resource",
+          "intervention_required"
+        ],
+        "type": "string"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "oneOf": [
       {
@@ -3743,6 +3754,37 @@
         "required": [
           "kind",
           "request_id"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Nonterminal: the exact Turn still owns its live resources and input.",
+        "properties": {
+          "kind": {
+            "const": "waiting",
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/AgentWaitReason"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "wait_seq": {
+            "description": "Identity of this exact waiting episode, derived from its Event.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "wait_seq",
+          "reason"
         ],
         "type": "object"
       },

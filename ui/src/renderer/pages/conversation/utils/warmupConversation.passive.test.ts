@@ -19,8 +19,6 @@ const snapshot = (
     runtime: {
       state: isProcessing ? 'running' : 'idle',
       can_send_message: !isProcessing,
-      has_runtime: isProcessing,
-      runtime_status: status,
       is_processing: isProcessing,
     },
   }) as TChatConversation;

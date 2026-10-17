@@ -179,6 +179,11 @@ impl EngineProcessSession {
     pub fn cursor(&self) -> u64 {
         self.cursor.offset()
     }
+
+    /// The original owner's lifecycle only; no stdout reader or I/O authority.
+    pub fn terminal_changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        self.terminal.as_ref().map(ProcessTerminalWitness::subscribe)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1265,7 +1270,8 @@ mod tests {
 
         let mut zsh = EngineProcessRequest::pipe("/bin/zsh");
         zsh.args = vec![
-            "-lc".to_owned(),
+            // Shell semantics must not depend on the test user's dotfiles.
+            "-flc".to_owned(),
             "printf 'zsh:%s' \"$ZSH_VERSION\"".to_owned(),
         ];
         let zsh = owner

@@ -79,7 +79,7 @@ function setup(f: ReturnType<typeof fixture>, initial: TMessage[], readOnly = fa
   spyOn(ipcBridge.conversation.turnCompleted, 'on').mockImplementation(listener => {
     completionListeners.add(listener); return () => completionListeners.delete(listener);
   });
-  const idle = { state: 'idle', can_send_message: true, has_runtime: false, is_processing: false } as const;
+  const idle = { state: 'idle', can_send_message: true, is_processing: false } as const;
   const authority = { id: f.session, type: 'nomi', status: 'finished', extra: { workspace: '' }, runtime: idle } as TChatConversation;
   spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue(authority);
   spyOn(ipcBridge.database.getConversationMessages, 'invoke').mockImplementation(async () => {

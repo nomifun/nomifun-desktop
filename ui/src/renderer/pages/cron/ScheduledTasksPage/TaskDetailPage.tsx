@@ -38,6 +38,8 @@ const RUN_STATUS_CLASS_NAMES: Record<ICronJobRunStatus, string> = {
   error: 'bg-danger-light-1 text-danger-6',
   skipped: 'bg-warning-1 text-warning-7',
   missed: 'bg-warning-1 text-warning-7',
+  input_required: 'bg-warning-1 text-warning-7',
+  cancelled: 'bg-fill-1 text-3',
 };
 
 const TaskDetailPage: React.FC = () => {

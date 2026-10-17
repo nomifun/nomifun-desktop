@@ -35,7 +35,7 @@ import {
   type TauriDownloadUpdateProgress,
   type TauriUpdatePackageStatus,
 } from './tauriShell';
-import { installUpdateWithPreflight } from './tauriUpdateInstall';
+import { installUpdateWithPreflight, type UpdaterInstallContext } from './tauriUpdateInstall';
 
 interface TauriUpdate {
   version: string;
@@ -151,6 +151,20 @@ export async function tauriUpdatePackageSnapshot(): Promise<TauriUpdatePackageSt
   if (!isTauriRuntime()) return null;
   try {
     return await tauriUpdatePackageStatus();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The native install context, so the update check can refuse a download this
+ * process could never install. Fails OPEN (null): this is only a UI hint — the
+ * install path re-queries the context and fails closed there.
+ */
+export async function tauriUpdaterInstallContextSnapshot(): Promise<UpdaterInstallContext | null> {
+  if (!isTauriRuntime()) return null;
+  try {
+    return await tauriGetUpdaterInstallContext();
   } catch {
     return null;
   }

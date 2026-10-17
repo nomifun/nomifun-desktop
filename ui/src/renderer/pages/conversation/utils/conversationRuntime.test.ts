@@ -24,10 +24,10 @@ describe('conversation runtime authority', () => {
   });
   test('pause presentation requires the exact nonprocessing owner and never grants idle authority', () => {
     const snapshot = {
-      status: 'running', extra: { workspace: '/fixture', execution_phase: 'paused', execution_pause: {
+      status: 'running', extra: { workspace: '/fixture', execution_pause: {
         reason: 'EXECUTION_MODEL_PROVIDER_UNAVAILABLE', cleanup_proven: true, paused_at_ms: 123,
       } },
-      runtime: { state: 'idle', has_runtime: false, is_processing: false, can_send_message: false, active_turn_id: activeTurnId },
+      runtime: { state: 'paused', is_processing: false, can_send_message: false, active_turn_id: activeTurnId },
     } as unknown as TChatConversation;
     expect(getConversationPauseNotice(snapshot)).toEqual({ turnId: activeTurnId,
       reason: 'EXECUTION_MODEL_PROVIDER_UNAVAILABLE', cleanupProven: true, pausedAt: 123,
@@ -37,7 +37,6 @@ describe('conversation runtime authority', () => {
     expect(isConversationBindingBlocked(snapshot)).toBe(true);
     for (const change of [
       { status: 'finished' },
-      { extra: { ...snapshot.extra, execution_phase: 'running' } },
       ...[{ is_processing: true }, { active_turn_id: undefined }, { can_send_message: true }, { state: 'running' }]
         .map(runtime => ({ runtime: { ...snapshot.runtime, ...runtime } })),
     ]) expect(getConversationPauseNotice({ ...snapshot, ...change } as TChatConversation)).toBeNull();
@@ -49,13 +48,12 @@ describe('conversation runtime authority', () => {
 
   test('paused diagnostics capture the active frozen binding and ignore renderer selection metadata', () => {
     const snapshot = {
-      status: 'running', extra: { workspace: '/fixture/Archive ', execution_phase: 'paused',
-        official_template_key: 'assistant.general', agent_name: 'Forged extra name',
+      status: 'running', extra: { workspace: '/fixture/Archive ', official_template_key: 'assistant.general', agent_name: 'Forged extra name',
         execution_pause: { reason: 'EXECUTION_MODEL_AUTHENTICATION_FAILED', cleanup_proven: true, paused_at_ms: 123 },
       },
       model: { use_model: 'later-renderer-model' },
       agent_snapshot: { preset_name: 'Admitted Agent', resolved_model: { model: 'admitted-model' } },
-      runtime: { state: 'idle', is_processing: false, can_send_message: false, active_turn_id: activeTurnId },
+      runtime: { state: 'paused', is_processing: false, can_send_message: false, active_turn_id: activeTurnId },
     } as unknown as TChatConversation;
     expect(getConversationPauseNotice(snapshot)?.error).toEqual({ message: '',
       agentLabel: 'Admitted Agent', modelName: 'admitted-model',
@@ -100,11 +98,24 @@ describe('conversation runtime authority', () => {
     expect(isConversationProcessing(exact)).toBe(true);
   });
 
+  test('parked work retains exact ownership and blocks queue admission while accepting a reply', () => {
+    const waiting = { status: 'running', runtime: { state: 'waiting', is_processing: false,
+      can_send_message: false, active_turn_id: activeTurnId,
+      turn_outcome: { kind: 'waiting', wait_seq: 41, request_id: 'authorize', reason: 'user_input' },
+    } } as TChatConversation;
+    expect(getConversationActivity(waiting)).toBe('waiting');
+    expect(getConversationRuntimeAuthority(waiting)).toBe('processing');
+    expect(isConversationBindingBlocked(waiting)).toBe(true);
+    expect(getConversationPauseNotice(waiting)).toBeNull();
+    expect(getConversationActivity({ ...waiting, runtime: { ...waiting.runtime!, active_turn_id: undefined } })).toBeUndefined();
+    expect(getConversationActivity({ ...waiting, runtime: { ...waiting.runtime!, turn_outcome: undefined } })).toBeUndefined();
+  });
+
   test('a paused canonical turn never grants idle authority to the command queue', () => {
     const snapshot = {
-      status: 'running', extra: { execution_phase: 'paused' },
-      runtime: { state: 'running', has_runtime: true, is_processing: false, can_send_message: false, active_turn_id: activeTurnId },
-    } satisfies Pick<TChatConversation, 'status' | 'runtime'> & { extra: { execution_phase: 'paused' } };
+      status: 'running', extra: { workspace: '' },
+      runtime: { state: 'running', is_processing: false, can_send_message: false, active_turn_id: activeTurnId },
+    } satisfies Pick<TChatConversation, 'status' | 'runtime'> & { extra: { workspace: '' } };
     expect(getConversationRuntimeAuthority(snapshot)).toBe('unknown');
     expect(isConversationProcessing(snapshot)).toBe(false);
   });

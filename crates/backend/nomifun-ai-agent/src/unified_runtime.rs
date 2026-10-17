@@ -37,11 +37,6 @@ pub trait UnifiedRuntimeHost: Send + Sync {
     /// This is not a request to replace an active or paused Turn.
     fn requires_turn_boundary_recycle(&self) -> bool { false }
 
-    /// Validate a completed proposal against Host-owned delivery facts before
-    /// the lifecycle SDK records success. It can only narrow completion.
-    async fn completion_gate(
-        &self, _message: &SendMessageData,
-    ) -> Result<Option<EngineTurnTerminal>, AppError> { Ok(None) }
     async fn recoverable_preparation_step(&self, _message:&SendMessageData) -> Result<Option<u16>,AppError> { Ok(None) }
     async fn suspend_after_cleanup_failure(&self, _message: &SendMessageData) -> Result<bool,AppError> { Ok(false) }
     fn supports_execution_checkpoints(&self) -> bool { false }
@@ -251,7 +246,8 @@ impl TurnProjection {
         let projected = match event {
             // The host has committed the full plan. Re-read the canonical
             // snapshot, including lifecycle and reset state, for presentation.
-            AgentEngineEvent::PlanUpdated { .. } => Some(EngineProgress::TaskPlanChanged),
+            AgentEngineEvent::PlanUpdated { .. } | AgentEngineEvent::TurnWaiting { .. }
+                | AgentEngineEvent::TurnWaitResolved { .. } => Some(EngineProgress::TaskPlanChanged),
             AgentEngineEvent::TurnStarted { .. } | AgentEngineEvent::ExecutionResumed { .. } => Some(EngineProgress::Started),
             AgentEngineEvent::OutputTextDelta { step, text } | AgentEngineEvent::CompletionDelivered { step, text } => {
                 Some(EngineProgress::Text(TextEventData { content: text, step: Some(step) }))
@@ -393,23 +389,17 @@ impl EngineSessionDriver for UnifiedSessionDriver {
         let pending = projection.terminal.lock().unwrap_or_else(|e| e.into_inner()).take();
         match execution {
             Ok(result) => {
-                let mut outcome = EngineTurnOutcome {
+                let outcome = EngineTurnOutcome {
                     model_steps: result.model_steps,
                     terminal: match result.terminal {
                         AgentTurnTerminal::Completed { finish_reason } => EngineTurnTerminal::Completed { finish_reason },
                         AgentTurnTerminal::InputRequired { request } => EngineTurnTerminal::InputRequired { request },
                         AgentTurnTerminal::Cancelled => EngineTurnTerminal::Cancelled,
                         AgentTurnTerminal::Paused { reason } => EngineTurnTerminal::Paused { reason },
-                        AgentTurnTerminal::Failed { message } => EngineTurnTerminal::Failed { message, failure: None },
                     },
                 };
                 if pending.as_ref() != Some(&runtime_terminal(&outcome)) {
                     return Err(AppError::Conflict("Nomi result and terminal event disagree or terminal is absent".into()));
-                }
-                if matches!(outcome.terminal, EngineTurnTerminal::Completed { .. }) {
-                    if let Some(terminal) = self.host.completion_gate(message).await? {
-                        outcome.terminal = terminal;
-                    }
                 }
                 Ok(outcome)
             }
@@ -423,6 +413,10 @@ impl EngineSessionDriver for UnifiedSessionDriver {
                 };
                 Ok(EngineTurnOutcome { model_steps, terminal: EngineTurnTerminal::Failed { message, failure: None } })
             }
+            Err(AgentEngineError::WaitOwnerUnavailable) => Ok(EngineTurnOutcome {
+                model_steps:projection.last_model_step.load(std::sync::atomic::Ordering::Acquire),
+                terminal:EngineTurnTerminal::Paused {reason:"EXECUTION_WAIT_OWNER_UNAVAILABLE".into()},
+            }),
             Err(error @ (AgentEngineError::Model { .. } | AgentEngineError::ModelStreamEndedWithoutTerminal | AgentEngineError::InvalidModelEvent(_))) => {
                 // The model failure ends this Turn only after the existing
                 // cleanup and canonical receipt barriers. Completed effects
@@ -657,8 +651,6 @@ mod tests {
     struct Host {
         recycle_completed_turns: AtomicBool,
         prepared_inputs: Mutex<Vec<String>>,
-        block_completion: AtomicBool,
-        completion_checks: AtomicUsize,
         allow_user_input: AtomicBool,
         fail_terminal_record: AtomicBool,
         fail_record: AtomicBool,
@@ -681,8 +673,6 @@ mod tests {
             Arc::new(Self {
                 recycle_completed_turns: AtomicBool::new(false),
                 prepared_inputs: Mutex::new(Vec::new()),
-                block_completion: AtomicBool::new(false),
-                completion_checks: AtomicUsize::new(0),
                 allow_user_input: AtomicBool::new(false),
                 fail_terminal_record: AtomicBool::new(false),
                 fail_record: AtomicBool::new(false),
@@ -706,12 +696,6 @@ mod tests {
     impl UnifiedRuntimeHost for Host {
         fn requires_turn_boundary_recycle(&self) -> bool {
             self.recycle_completed_turns.load(Ordering::Acquire)
-        }
-        async fn completion_gate(&self, _message: &SendMessageData) -> Result<Option<EngineTurnTerminal>,AppError> {
-            self.completion_checks.fetch_add(1, Ordering::SeqCst);
-            Ok(self.block_completion.load(Ordering::Acquire).then(|| EngineTurnTerminal::Paused {
-                reason:"PLUGIN_DELIVERY_REQUIRED".into(),
-            }))
         }
         fn capability_activation_snapshot(
             &self,
@@ -917,7 +901,6 @@ mod tests {
 
     fn input_request_runtime(host: Arc<Host>) -> UnifiedAgentRuntime {
         host.allow_user_input.store(true, Ordering::Release);
-        host.block_completion.store(true, Ordering::Release);
         static WORKSPACE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         let workspace = WORKSPACE.get_or_init(|| tempfile::tempdir().unwrap());
         // This SDK-only host has no filesystem or Knowledge owner to lease.
@@ -971,7 +954,6 @@ mod tests {
         assert_eq!(recorded.iter().filter(|event| matches!(event, AgentEngineEvent::TurnInputRequired { .. })).count(), 1);
         assert!(!recorded.iter().any(|event| matches!(event, AgentEngineEvent::TurnCompleted { .. } | AgentEngineEvent::CompletionReview { .. })));
         drop(recorded);
-        assert_eq!(host.completion_checks.load(Ordering::Acquire), 0);
         assert_eq!(runtime.status(), Some(ConversationStatus::Finished));
         assert!(runtime.requires_turn_boundary_recycle(), "recorded InputRequired closes this Turn before the next input admission");
         runtime.kill_and_wait(None).await.unwrap();
@@ -994,7 +976,6 @@ mod tests {
             assert!(!runtime.is_transport_healthy());
             assert!(!runtime.requires_turn_boundary_recycle(), "unconfirmed cleanup or terminal receipt cannot permit a normal boundary recycle");
             assert!(runtime.send_message(message()).await.is_err());
-            assert_eq!(host.completion_checks.load(Ordering::Acquire), 0);
             host.fail_cleanup.store(false, Ordering::Release);
             host.fail_terminal_record.store(false, Ordering::Release);
             runtime.kill_and_wait(None).await.unwrap();
@@ -1481,25 +1462,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_delivery_obligation_cannot_be_satisfied_by_final_model_text() {
-        let host=Host::new();
-        host.block_completion.store(true,Ordering::Release);
-        let runtime=runtime(host.clone(),model(false,false));
-        let mut events=runtime.subscribe();
-        runtime.send_message(message()).await.unwrap();
-        assert!(matches!(terminal(&mut events).await,AgentStreamEvent::Finish(data)
-            if data.stop_reason==Some(TurnStopReason::Paused)));
-        runtime.cancel().await.unwrap();
-        let recorded=host.events.lock().unwrap();
-        assert!(!recorded.iter().any(|event|matches!(event,AgentEngineEvent::TurnCompleted {..})));
-        assert!(recorded.iter().any(|event|matches!(event,
-            AgentEngineEvent::TurnPaused {reason,..} if reason=="PLUGIN_DELIVERY_REQUIRED")));
-        assert_eq!(host.cleanup_turns.load(Ordering::Acquire),1);
-        drop(recorded);
-        runtime.kill_and_wait(None).await.unwrap();
-    }
-
-    #[tokio::test]
     async fn text_turn_publishes_terminal_after_owner_cleanup_and_teardown_is_idempotent() {
         let host = Host::new();
         let runtime = runtime(host.clone(), model(false, false));
@@ -1594,7 +1556,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_turn_boundary_recycle_preserves_active_and_paused_turns() {
+    async fn host_turn_boundary_recycle_preserves_active_turns() {
         let host = Host::new();
         host.recycle_completed_turns.store(true, Ordering::Release);
         let pending_model = model(true, false);
@@ -1608,17 +1570,6 @@ mod tests {
         assert!(running_runtime.requires_turn_boundary_recycle());
         running_runtime.kill_and_wait(None).await.unwrap();
 
-        let host = Host::new();
-        host.recycle_completed_turns.store(true, Ordering::Release);
-        host.block_completion.store(true, Ordering::Release);
-        let paused = runtime(host, model(false, false));
-        let mut events = paused.subscribe();
-        paused.send_message(message()).await.unwrap();
-        assert!(matches!(terminal(&mut events).await, AgentStreamEvent::Finish(data)
-            if data.stop_reason == Some(TurnStopReason::Paused)));
-        assert_eq!(paused.status(), Some(ConversationStatus::Finished));
-        assert!(!paused.requires_turn_boundary_recycle(), "a paused accepted operation must retain its resume boundary");
-        paused.kill_and_wait(None).await.unwrap();
     }
 
     #[tokio::test]

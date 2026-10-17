@@ -21,6 +21,9 @@
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --component-smoke --report .tmp-component-smoke.json
  * The component smoke defaults to step-5-preview and checks a real managed
  * OfficeCLI launch followed by an ordinary turn in the same Session.
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --resource-wait-smoke
+ * The resource wait smoke runs an isolated managed Node authorization helper,
+ * verifies zero model polling during waiting, then verifies authorization and cancellation.
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --input-handoff-smoke
  * The input handoff smoke defaults to step-5-preview. It requires an existing
  * dev component selected by NOMIFUN_OFFICECLI_PATH or an embedded OfficeCLI
@@ -86,6 +89,7 @@ const MODEL_TEST_NAME = 'nomi_core_selected_model_reaches_live_stepfun';
 const FILE_TEST_NAME = 'nomi_core_workspace_file_reaches_live_stepfun';
 const COMPONENT_TEST_NAME = 'nomi_core_managed_component_reaches_live_stepfun';
 const INPUT_HANDOFF_TEST_NAME = 'nomi_core_user_input_handoff_reaches_live_stepfun';
+const RESOURCE_WAIT_TEST_NAME = 'nomi_core_resource_wait_reaches_live_stepfun';
 const COMPONENT_EVIDENCE = 'NOMIFUN_LIVE_COMPONENT_EVIDENCE ';
 const REASONING_TEST_NAME = 'nomi_core_reasoning_lifecycle_reaches_live_stepfun';
 const CODING_TEST_NAME = 'nomi_core_official_coding_agent_reaches_live_stepfun';
@@ -116,6 +120,7 @@ const modelSmoke = process.argv.includes('--model-smoke');
 const fileSmoke = process.argv.includes('--file-smoke');
 const componentSmoke = process.argv.includes('--component-smoke');
 const inputHandoffSmoke = process.argv.includes('--input-handoff-smoke');
+const resourceWaitSmoke = process.argv.includes('--resource-wait-smoke');
 const reasoningSmoke = process.argv.includes('--reasoning-smoke');
 const reasoningNavigation = process.argv.includes('--reasoning-navigation');
 const codingSmoke = process.argv.includes('--coding-smoke');
@@ -133,13 +138,13 @@ const artifactIndex = process.argv.indexOf('--artifact-dir');
 const artifactDir = artifactIndex >= 0 && process.argv[artifactIndex + 1] ? resolve(process.argv[artifactIndex + 1]) : null;
 const reportIndex = process.argv.indexOf('--report');
 const reportPath = reportIndex >= 0 && process.argv[reportIndex + 1] ? resolve(process.argv[reportIndex + 1]) : null;
-const selectedSmokeTest = appWorkspaceUiFixture ? APP_WORKSPACE_UI_TEST_NAME : appHostingSmoke ? APP_HOSTING_TEST_NAME : reasoningSmoke ? REASONING_TEST_NAME : idmmSmoke ? IDMM_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : componentSmoke ? COMPONENT_TEST_NAME : inputHandoffSmoke ? INPUT_HANDOFF_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
-const selectedSmokeMode = appWorkspaceUiFixture ? 'app_workspace_ui_host' : appHostingSmoke ? 'app_workspace_generation' : reasoningSmoke ? 'reasoning_lifecycle' : idmmSmoke ? 'idmm' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : componentSmoke ? 'managed_component' : inputHandoffSmoke ? 'user_input_handoff' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model';
+const selectedSmokeTest = appWorkspaceUiFixture ? APP_WORKSPACE_UI_TEST_NAME : appHostingSmoke ? APP_HOSTING_TEST_NAME : reasoningSmoke ? REASONING_TEST_NAME : idmmSmoke ? IDMM_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : componentSmoke ? COMPONENT_TEST_NAME : resourceWaitSmoke ? RESOURCE_WAIT_TEST_NAME : inputHandoffSmoke ? INPUT_HANDOFF_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
+const selectedSmokeMode = appWorkspaceUiFixture ? 'app_workspace_ui_host' : appHostingSmoke ? 'app_workspace_generation' : reasoningSmoke ? 'reasoning_lifecycle' : idmmSmoke ? 'idmm' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : componentSmoke ? 'managed_component' : resourceWaitSmoke ? 'resource_wait' : inputHandoffSmoke ? 'user_input_handoff' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model';
 const retainNativeFixture = process.argv.includes('--retain-native-fixture');
 const globalDeadline = Date.now() + GLOBAL_TIMEOUT_MS;
 
 function selectedSmokeModel(value) {
-  return value ?? (componentSmoke || inputHandoffSmoke ? 'step-5-preview' : DEFAULT_MODEL);
+  return value ?? (componentSmoke || inputHandoffSmoke || resourceWaitSmoke ? 'step-5-preview' : DEFAULT_MODEL);
 }
 
 function cargoFailureCode(stderr) {
@@ -614,7 +619,7 @@ function managedComponentEvidence(stderr) {
 
 async function main() {
   const userArgs = process.argv.slice(2);
-  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--file-smoke', '--component-smoke', '--input-handoff-smoke', '--reasoning-smoke', '--reasoning-navigation', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--idmm-smoke', '--retain-native-fixture', '--app-hosting-smoke', '--app-hosting-browser-hold', '--app-workspace-ui-fixture'];
+  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--file-smoke', '--component-smoke', '--input-handoff-smoke', '--resource-wait-smoke', '--reasoning-smoke', '--reasoning-navigation', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--idmm-smoke', '--retain-native-fixture', '--app-hosting-smoke', '--app-hosting-browser-hold', '--app-workspace-ui-fixture'];
   if (userArgs.some((arg, index) => {
     if (arg === '--report') return (!idmmSmoke && !appHostingSmoke && !componentSmoke) || !userArgs[index + 1] || userArgs[index + 1].startsWith('--');
     if (index > 0 && userArgs[index - 1] === '--report') return false;
@@ -630,7 +635,7 @@ async function main() {
     process.exitCode = 2;
     return;
   }
-  if (([browser, browserGui, modelSmoke, fileSmoke, componentSmoke, inputHandoffSmoke, reasoningSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, companionSmoke, creativeSmoke, beforeToolSmoke, idmmSmoke, appHostingSmoke, appWorkspaceUiFixture].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke) || (reasoningNavigation && !reasoningSmoke) || (appHostingBrowserHold && !appHostingSmoke)) {
+  if (([browser, browserGui, modelSmoke, fileSmoke, componentSmoke, inputHandoffSmoke, resourceWaitSmoke, reasoningSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, companionSmoke, creativeSmoke, beforeToolSmoke, idmmSmoke, appHostingSmoke, appWorkspaceUiFixture].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke) || (reasoningNavigation && !reasoningSmoke) || (appHostingBrowserHold && !appHostingSmoke)) {
     emitFailure('live_smoke_status=not_run', 'RUNNER_MODE_SELECTION_INVALID', 400);
     process.exitCode = 2;
     return;
@@ -695,6 +700,7 @@ async function main() {
       'nomifun-app',
       '--test',
       TEST_TARGET,
+      ...(resourceWaitSmoke ? ['--no-default-features'] : []),
       ...(generalDesktopSmoke ? ['--features', 'browser-use,computer-use'] : []),
       '--no-run',
       '--message-format=json-render-diagnostics',
@@ -1209,10 +1215,12 @@ function runSelfTest() {
     throw new Error('model allowlist self-test failed');
   }
   if (!ALLOWED_MODELS.has('step-5-preview')) throw new Error('model allowlist self-test failed');
-  if (selectedSmokeModel(undefined) !== (componentSmoke || inputHandoffSmoke ? 'step-5-preview' : DEFAULT_MODEL)
+  if (selectedSmokeModel(undefined) !== (componentSmoke || inputHandoffSmoke || resourceWaitSmoke ? 'step-5-preview' : DEFAULT_MODEL)
       || selectedSmokeModel(DEFAULT_MODEL) !== DEFAULT_MODEL || selectedSmokeModel('step-5-preview') !== 'step-5-preview'
       || inputHandoffSmoke && (selectedSmokeTest !== INPUT_HANDOFF_TEST_NAME || selectedSmokeMode !== 'user_input_handoff'
-        || !selectedTestPassed(`test ${INPUT_HANDOFF_TEST_NAME} ... ok\n`, selectedSmokeTest))) {
+        || !selectedTestPassed(`test ${INPUT_HANDOFF_TEST_NAME} ... ok\n`, selectedSmokeTest))
+      || resourceWaitSmoke && (selectedSmokeTest !== RESOURCE_WAIT_TEST_NAME || selectedSmokeMode !== 'resource_wait'
+        || !selectedTestPassed(`test ${RESOURCE_WAIT_TEST_NAME} ... ok\n`, selectedSmokeTest))) {
     throw new Error('input handoff selection and model default self-test failed');
   }
   const scrubbed = environmentWithoutCredential({

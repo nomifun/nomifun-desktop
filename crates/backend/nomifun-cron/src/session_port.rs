@@ -119,8 +119,8 @@ pub struct CronSessionCronBindingRequest {
     pub cron_job_id: String,
 }
 
-/// Stable terminal receipt owned by the Cron boundary.  The consumer never
-/// needs the Conversation repository row or runtime handle.
+/// Exact operation receipt owned by the Cron boundary, including nonterminal
+/// suspension. Consumers never need a Conversation row or runtime handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CronTurnDelivery {
     pub message_id: String,
@@ -137,29 +137,37 @@ pub struct CronTurnDelivery {
 
 impl CronTurnDelivery {
     /// A closed execution is not necessarily a delivered scheduled result.
-    /// Missing/paused facts stay quarantined; a question or unavailable result
-    /// is explicit attention, never permission to replay the original effects.
-    pub(crate) fn terminal_result(&self) -> Option<Result<(), String>> {
+    /// Waiting and paused facts remain nonterminal; missing facts fail closed.
+    /// A closed question requires human input and never authorizes replay.
+    pub(crate) fn disposition(&self) -> Option<CronTurnDisposition> {
         use nomifun_agent_contracts::AgentTurnOutcome;
-        if !self.completed { return None; }
         let outcome = self.turn_outcome.as_ref()?;
+        if matches!(outcome, AgentTurnOutcome::Waiting { .. }) {
+            return self.completed.then(|| CronTurnDisposition::Failed(
+                "A completed scheduled Turn cannot retain a waiting disposition".into()));
+        }
+        if !self.completed { return None; }
         let failure = || self.result_error.clone().or_else(|| self.result_text.clone())
             .unwrap_or_else(|| "The scheduled Agent turn ended without a successful public delivery".into());
         match outcome {
-            AgentTurnOutcome::InputRequired { request_id } => Some(Err(match &self.user_input_request {
+            AgentTurnOutcome::InputRequired { request_id } => Some(match &self.user_input_request {
                 Some(request) if request.request_id.as_ref() == request_id && request.validate().is_ok() =>
-                    format!("CRON_USER_INPUT_REQUIRED: {}", request.question),
-                _ => "The scheduled Agent input handoff has no matching canonical question".into(),
-            })),
+                    CronTurnDisposition::InputRequired,
+                _ => CronTurnDisposition::Failed("The scheduled Agent input handoff has no matching canonical question".into()),
+            }),
             AgentTurnOutcome::Answered { .. } if self.user_input_request.is_none() =>
-                self.result_ok.map(|ok| if ok { Ok(()) } else { Err(failure()) }),
-            AgentTurnOutcome::Unavailable => Some(Err(
+                self.result_ok.map(|ok| if ok { CronTurnDisposition::Delivered } else { CronTurnDisposition::Failed(failure()) }),
+            AgentTurnOutcome::Unavailable => Some(CronTurnDisposition::Failed(
                 "The scheduled Agent turn closed without a public answer or input handoff; its effects will not be replayed".into())),
             AgentTurnOutcome::Paused { .. } => None,
-            _ => Some(Err(failure())),
+            AgentTurnOutcome::Cancelled { .. } => Some(CronTurnDisposition::Cancelled),
+            _ => Some(CronTurnDisposition::Failed(failure())),
         }
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CronTurnDisposition { Delivered, InputRequired, Cancelled, Failed(String) }
 
 /// Result of the host-owned preparation gate.
 ///
@@ -177,6 +185,7 @@ pub struct CronPreparedTurnDelivery {
 pub enum CronTurnReceiptState {
     Missing,
     Accepted { message_id: String },
+    Suspended(CronTurnDelivery),
     Completed(CronTurnDelivery),
 }
 
@@ -270,5 +279,55 @@ pub trait CronSessionPort: Send + Sync {
         _notice_kind: &str,
     ) -> Result<(), AppError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use std::sync::{Mutex, atomic::{AtomicUsize, Ordering}};
+
+    /// Receipt consumers must never turn observation into execution.
+    pub(crate) struct ReceiptOnlySessions {
+        pub receipt: Mutex<CronTurnReceiptState>,
+        pub reads: AtomicUsize,
+        pub transient_failures: AtomicUsize,
+    }
+    impl ReceiptOnlySessions {
+        pub fn new(receipt: CronTurnReceiptState) -> Self {
+            Self { receipt: Mutex::new(receipt), reads: AtomicUsize::new(0), transient_failures: AtomicUsize::new(0) }
+        }
+    }
+    #[async_trait]
+    impl CronSessionPort for ReceiptOnlySessions {
+        async fn read_turn_receipt(&self, _: &CronTurnReceiptQuery) -> Result<CronTurnReceiptState, AppError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            if self.transient_failures.fetch_update(Ordering::SeqCst, Ordering::SeqCst,
+                |remaining| (remaining > 0).then(|| remaining - 1)).is_ok() {
+                return Err(AppError::Internal("transient receipt query interruption".into()));
+            }
+            Ok(self.receipt.lock().unwrap().clone())
+        }
+        async fn reconcile_turn_receipt(&self, _: &CronTurnReconciliationRequest) -> Result<CronTurnReconciliation, AppError> {
+            Ok(CronTurnReconciliation::LiveExactOwnerWait)
+        }
+        async fn get_session(&self, _: &CronSessionLookup) -> Result<CronSessionProjection, AppError> {
+            panic!("receipt observation cannot prepare a Session")
+        }
+        async fn list_conversation_responses_for_cron(&self, _: &CronScheduledSessionLookup) -> Result<Vec<ConversationResponse>, AppError> {
+            panic!("receipt observation cannot discover another Session")
+        }
+        async fn bind_cron_relation(&self, _: &CronSessionCronBindingRequest) -> Result<(), AppError> {
+            panic!("receipt observation cannot bind another Session")
+        }
+        async fn create_idempotent(&self, _: &str, _: CreateConversationRequest, _: CronSessionAgentBinding, _: &str) -> Result<CronSessionHandle, AppError> {
+            panic!("receipt observation cannot create a Session")
+        }
+        async fn prepare_runtime_and_send(&self, _: CronRuntimePreparationRequest) -> Result<CronPreparedTurnDelivery, AppError> {
+            panic!("receipt observation cannot prepare or send another Turn")
+        }
+        async fn delivery_result(&self, _: &CronTurnDeliveryQuery) -> Result<Option<CronTurnDelivery>, AppError> {
+            panic!("receipt observation only reads its exact durable receipt")
+        }
     }
 }

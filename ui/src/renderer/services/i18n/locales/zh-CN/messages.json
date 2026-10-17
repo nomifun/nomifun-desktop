@@ -147,13 +147,19 @@
   "planTodoList": "待办列表",
   "planProgress": "{{done}}/{{total}}",
   "planBlocked": "受阻",
+  "planWaiting": "等待中",
+  "waitingReasons": {
+    "user_input": "等待你操作",
+    "external_resource": "等待外部资源",
+    "intervention_required": "需要你说明下一步"
+  },
   "planPaused": "已暂停",
   "planNeedsReplan": "计划待更新",
   "planPending": "待处理",
   "planInProgress": "进行中",
   "planCompleted": "已完成",
   "planStopped": "已停止",
-  "planFailed": "执行失败",
+  "planFailed": "本轮执行失败",
   "fileChanges": "文件变更",
   "fileChangesCount": "{{count}} 个文件变更",
   "turnDeliverables": {

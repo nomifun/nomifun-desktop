@@ -243,6 +243,7 @@ const NomiSendBox: React.FC<{
     running,
     hasHydratedRunningState,
     pauseNotice,
+    waitingNotice,
     tokenUsage,
     setActiveMsgId,
     markTurnAccepted,
@@ -642,6 +643,7 @@ const NomiSendBox: React.FC<{
   const onSendHandler = async (message: string) => {
     if (submissionDisabledRef.current || preparingSubmissionRef.current || collaborationSubmittingRef.current) throw new Error(t('common.processing'));
     const filesToSend = collectSelectedFiles(uploadFile, atPath);
+    if (!canSendFiles(filesToSend)) return;
     if (creation?.draft.mode) {
       if (creationSubmittingRef.current) throw new Error('任务正在提交');
       if (!generation.ready || creation.preparing) throw new Error('请先选择可用的生成模型');
@@ -670,6 +672,13 @@ const NomiSendBox: React.FC<{
         reportRequestFailure(error, 'CONVERSATION_CREATION_FAILED');
         throw error;
       } finally { creationSubmittingRef.current = false; setCreationSubmitting(false); }
+      return;
+    }
+    if (waitingNotice) {
+      if (!waitingNotice.canSteer) throw new Error(t('common.processing'));
+      await executeSteer({ input: message, files: filesToSend });
+      clearFiles();
+      emitter.emit('nomi.selected.file.clear');
       return;
     }
     const collaborationConfig = composerCollaborationEnabled ? collaboration.config : undefined;
@@ -707,7 +716,6 @@ const NomiSendBox: React.FC<{
       }
       return;
     }
-    if (!canSendFiles(filesToSend)) return;
     if (
       shouldEnqueueConversationCommand({
         enabled: true,
@@ -817,6 +825,8 @@ const NomiSendBox: React.FC<{
           conversation_id,
           files,
           idempotency_key: uuidv7(),
+          ...(waitingNotice ? { expected_wait: { turn_id: waitingNotice.turnId,
+            wait_seq: waitingNotice.outcome.wait_seq } } : {}),
         });
         msg_id = res.msg_id;
         const disposition = classifyPublicMessageDelivery(res);
@@ -868,6 +878,7 @@ const NomiSendBox: React.FC<{
       setActiveMsgId,
       t,
       workspacePath,
+      waitingNotice,
     ]
   );
 
@@ -1052,7 +1063,7 @@ const NomiSendBox: React.FC<{
         loading={isCreating ? creationSubmitting : isBusy}
         paused={Boolean(pauseNotice)}
         disabled={submissionDisabled || preparingSubmission || collaborationSubmitting || initialSubmissionPending}
-        submitDisabled={Boolean(pauseNotice) || (isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing || !sessionCapabilities.state || sessionCapabilities.saving || sessionCapabilities.loading || composerCollaborationEnabled && !collaboration.ready)}
+        submitDisabled={Boolean(pauseNotice || waitingNotice && !waitingNotice.canSteer) || (isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing || !sessionCapabilities.state || sessionCapabilities.saving || sessionCapabilities.loading || composerCollaborationEnabled && !collaboration.ready)}
         preserveDraftUntilAccepted
         skipChatWarmup={isCreating}
         placeholder={
@@ -1129,7 +1140,7 @@ const NomiSendBox: React.FC<{
         />}
         onSend={onSendHandler}
         onSteer={onSteerHandler}
-        steerAvailable={!isCreating}
+        steerAvailable={!isCreating && (!waitingNotice || waitingNotice.canSteer)}
         onEditResubmit={isCreating ? undefined : handleEditResubmit}
         allowSendWhileLoading={!isCreating}
       />

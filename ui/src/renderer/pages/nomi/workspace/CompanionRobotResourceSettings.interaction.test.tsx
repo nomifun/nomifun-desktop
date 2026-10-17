@@ -33,7 +33,7 @@ const conversationId = parseConversationId('019b0000-0000-7000-8000-000000000023
 const providerId = parseProviderId('019b0000-0000-7000-8000-000000000021');
 const idle = { id: conversationId, type: 'nomi', status: 'pending', extra: { workspace: '', companion_id: companionId, companion_role: 'robot' },
   model: { id: providerId, use_model: 'model-a' },
-  runtime: { state: 'idle', is_processing: false, can_send_message: true, has_runtime: false },
+  runtime: { state: 'idle', is_processing: false, can_send_message: true, },
 } as TChatConversation;
 const options: ProductAgentOptions = { selection: { kind: 'template', template_key: 'companion.robot' }, needs_model: false, options: [] };
 const workspaceRoot = 'C:\\Companion\\existing-workspace';
@@ -187,7 +187,7 @@ test('a newer capability revision during apply requires review before dispatchin
 
 test.each(['running', 'paused'])('active and paused turns block robot selection and apply (%s)', async (phase) => {
   const { save } = install();
-  const conversation = { ...idle, status: 'running', extra: { ...idle.extra, execution_phase: phase },
+  const conversation = { ...idle, status: 'running', extra: { ...idle.extra, },
     runtime: { ...idle.runtime, active_turn_id: 'turn', is_processing: phase === 'running' } } as TChatConversation;
   const view = mount(conversation);
   await waitFor(() => expect(view.container.querySelector('.arco-select-disabled')).not.toBeNull());

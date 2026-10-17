@@ -20,7 +20,7 @@ import type { TauriUpdatePackageState } from '@/common/adapter/tauriShell';
  * slot fixes both, because a re-check can always run and always lands on the
  * truth.
  */
-export type DerivedUpdateStatus = 'available' | 'downloading' | 'downloaded';
+export type DerivedUpdateStatus = 'available' | 'downloading' | 'downloaded' | 'installBlocked';
 
 /** Compare release versions tolerantly: trim, and ignore a display `v` prefix. */
 function sameVersion(a: string | null | undefined, b: string | null | undefined): boolean {
@@ -40,7 +40,12 @@ export function deriveUpdateStatus(input: {
   slotState?: TauriUpdatePackageState | null;
   /** Version the native slot is busy with, for any active state. */
   slotVersion?: string | null;
+  /** False when the native preflight refuses to replace this process; null/undefined means unknown. */
+  autoInstallSupported?: boolean | null;
 }): DerivedUpdateStatus {
+  // A refused install context overrides everything else: nothing this process
+  // retains — downloaded bytes included — can ever be installed by it.
+  if (input.autoInstallSupported === false) return 'installBlocked';
   // A download already running for this release owns the screen: never offer to
   // start it again, and never hide it behind an "available" affordance.
   if (input.slotState === 'downloading' && sameVersion(input.availableVersion, input.slotVersion)) {

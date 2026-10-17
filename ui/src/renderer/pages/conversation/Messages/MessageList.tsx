@@ -1031,7 +1031,7 @@ const MessageList: React.FC<{
     hideScrollButton,
   } = useAutoScroll({
     messages: list,
-    itemCount: displayList.length + (pauseError ? 1 : 0),
+    itemCount: displayList.length + (pauseError ? 1 : 0) + (conversationContext?.executionWait ? 1 : 0),
     followTurn: followedTurn ? { id: followedTurn.msg_id, running: followedTurn.running } : undefined,
   });
   const handleColumnRef = useConversationColumnRef(handleContentRef);
@@ -1483,6 +1483,10 @@ const MessageList: React.FC<{
               <div className='h-10px' />
               {renderedRows}
               {pauseError && <div className='mt-6px' data-testid='conversation-pause-error'><MessageTips message={pauseError} /></div>}
+              {conversationContext?.executionWait && <div role='note' data-testid='conversation-waiting-notice'
+                className='mt-6px bg-message-tips rd-8px px-12px py-10px text-t-secondary text-13px'>
+                {t(`messages.waitingReasons.${conversationContext.executionWait.outcome.reason}`)}
+              </div>}
               <div className='h-20px' />
             </div>
           </NomiScrollArea>

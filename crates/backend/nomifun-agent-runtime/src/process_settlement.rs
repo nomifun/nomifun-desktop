@@ -40,6 +40,19 @@ fn input_read(binding: &AgentToolBinding) -> bool {
 }
 
 impl ProcessSettlement {
+    pub(super) fn wait_request(&self, running: &BTreeSet<String>) -> crate::AgentWaitRequest {
+        crate::AgentWaitRequest { processes: running.iter().map(|id| crate::AgentWaitProcess {
+            process_id: id.clone(), output_cursor: self.observations.get(id).map_or(0, |observation| observation.cursor),
+        }).collect() }
+    }
+
+    pub(super) fn observe_owner(&mut self, observation: &crate::AgentOwnedProcessObservation) {
+        if let Some(owned) = self.observations.get_mut(&observation.process_id) {
+            if let Some(cursor) = observation.output_cursor() { owned.cursor = owned.cursor.max(cursor); }
+            owned.reaped |= observation.reaped();
+        }
+    }
+
     pub(super) fn is_active(&self) -> bool { self.boundary.is_some() }
 
     pub(super) fn clear_boundary(&mut self) {
@@ -80,7 +93,7 @@ impl ProcessSettlement {
 
     pub(super) fn context(&self) -> Option<String> {
         let boundary = self.boundary.as_ref()?;
-        Some(format!("The execution window is awaiting a quiescent checkpoint for these original owned processes: {}. Continue only their authorized stdin, EOF, poll or cancellation, or the authorized read_file needed for their input. update_plan may account for accepted steering. Do not launch a process, start unrelated work, declare completion or repeat settled effects. No budget or process deadline is renewed; the original cumulative limits and cancellation still apply.",
+        Some(format!("The execution window is awaiting a quiescent checkpoint for these original owned processes: {}. Continue only their authorized stdin, EOF, poll or cancellation, or the authorized read_file needed for their input. request_user_input may park this same turn for a required user action while the original owner remains live. update_plan may account for accepted steering. Do not launch a process, start unrelated work, declare completion or repeat settled effects. No budget or process deadline is renewed; the original cumulative limits and cancellation still apply.",
             serde_json::to_string(&boundary.processes).expect("process IDs serialize")))
     }
 
@@ -100,7 +113,7 @@ impl ProcessSettlement {
 
     pub(super) fn constrain_tools(&self, tools: &mut Vec<ChatToolDefinition>, choice: &mut ChatToolChoice, plan: &AgentToolPlan) {
         if self.is_active() {
-            tools.retain(|tool| tool.name == crate::planning::TOOL_NAME
+            tools.retain(|tool| tool.name == crate::planning::TOOL_NAME || tool.name == crate::user_input_request::TOOL_NAME
                 || plan.binding(&tool.name).is_some_and(|binding| process_control(binding) || input_read(binding)));
             if matches!(choice, ChatToolChoice::Specific { name } if !tools.iter().any(|tool| tool.name == *name)) {
                 // This is called only for Execution, never a locked report
@@ -113,7 +126,7 @@ impl ProcessSettlement {
 
     pub(super) fn allows_batch(&self, calls: &[ChatToolCall], plan: &AgentToolPlan) -> bool {
         let Some(boundary) = &self.boundary else { return true; };
-        calls.iter().all(|call| call.name == crate::planning::TOOL_NAME || plan.binding(&call.name).is_some_and(|binding|
+        calls.iter().all(|call| call.name == crate::planning::TOOL_NAME || call.name == crate::user_input_request::TOOL_NAME || plan.binding(&call.name).is_some_and(|binding|
             input_read(binding) || (process_control(binding) && call.arguments.0.get("process_id")
                 .and_then(serde_json::Value::as_str).is_some_and(|id| boundary.processes.contains(id)))))
     }

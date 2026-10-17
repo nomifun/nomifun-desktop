@@ -298,7 +298,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let outcome_binding_path = root.join("../../../ui/src/common/protocolBindings/AgentTurnOutcome.ts");
     let outcome_binding = AgentTurnOutcome::export_to_string(&ts_rs::Config::default())?
         .replace("\r\n", "\n").replace('\r', "\n");
-    let outcome_binding = format!("{}\n", outcome_binding.trim_end());
+    let outcome_binding = format!("{}\n", outcome_binding.lines().map(str::trim_end).collect::<Vec<_>>().join("\n"));
     if mode == "write" {
         fs::create_dir_all(&generated)?;
         write_json(&seed_path, &seed)?;

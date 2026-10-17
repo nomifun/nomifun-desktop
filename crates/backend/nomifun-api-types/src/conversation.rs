@@ -119,21 +119,29 @@ pub struct SendMessageResponse {
     pub result_error_retryable: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationRuntimeStateKind {
     Idle,
     Starting,
     Running,
+    Waiting,
+    Paused,
+    Reconciliation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConversationRuntimeSummary {
     pub state: ConversationRuntimeStateKind,
     pub can_send_message: bool,
-    pub has_runtime: bool,
-    pub runtime_status: Option<ConversationStatus>,
+    /// Steering continues the exact owner; it never admits another Turn.
+    #[serde(default)]
+    pub can_steer: bool,
     pub is_processing: bool,
+    /// Public disposition of the exact active Turn. Waiting retains execution
+    /// ownership; it does not authorize a new Turn or prove task completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_outcome: Option<nomifun_agent_contracts::AgentTurnOutcome>,
     /// Stable public identity of the exact process-local turn admission.
     ///
     /// This is lifecycle authority, not a display timestamp: clients must

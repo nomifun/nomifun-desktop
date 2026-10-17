@@ -130,6 +130,9 @@ pub struct SessionObservation {
     pub events: Vec<SessionEventRecord>,
     pub messages: Vec<MessageProjection>,
     pub next_cursor: SessionEventCursor,
+    /// Exact active Turn result, read in the same snapshot as head and page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_turn_outcome: Option<nomifun_agent_contracts::AgentTurnOutcome>,
 }
 
 /// One owner-scoped row for the Session list projection.  The UI-facing

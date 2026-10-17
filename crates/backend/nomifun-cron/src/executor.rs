@@ -60,6 +60,9 @@ fn background_reconciliation_error_is_retryable(error: &AppError) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionResult {
     Success { conversation_id: String },
+    /// This invocation normally handed control to a person in its Session.
+    InputRequired { conversation_id: String },
+    Cancelled { conversation_id: String },
     Retrying { attempt: i64 },
     Skipped,
     Error { message: String },
@@ -312,6 +315,15 @@ impl JobExecutor {
                 idempotency_key: cron_turn_key(run_id),
             })
             .await
+    }
+
+    /// Reattach only the receipt consumer for an already-admitted invocation.
+    /// This path never prepares a Runtime, submits input or replays tools.
+    pub(crate) async fn observe_reserved_turn(&self, job: &CronJob, run_id: &str, conversation_id: &str) -> ExecutionResult {
+        match self.await_durable_turn_completion(job, run_id, conversation_id, &cron_turn_key(run_id)).await {
+            Ok(delivery) => replayed_delivery_result(run_id, conversation_id, delivery),
+            Err(error) => ExecutionResult::Quarantined { message: error.to_string() },
+        }
     }
 
     /// Reconcile an accepted exact Cron turn without ever granting resend
@@ -904,66 +916,61 @@ impl JobExecutor {
         turn_key: &str,
         timeout: Duration,
     ) -> Result<CronTurnDelivery, AppError> {
-        let wait = async {
+        let mut deadline = tokio::time::Instant::now() + timeout;
+        let mut observed_at = tokio::time::Instant::now();
+        let mut suspended = false;
         let mut consecutive_probe_failures = 0_u64;
         loop {
-            match self
-                .sessions
-                .read_turn_receipt(&CronTurnReceiptQuery {
-                    owner_id: job.user_id.clone(),
-                    agent_session_id: conversation_id.into(),
-                    idempotency_key: turn_key.to_owned(),
-                })
-                .await
-            {
+            let query = CronTurnReceiptQuery {
+                owner_id: job.user_id.clone(), agent_session_id: conversation_id.into(),
+                idempotency_key: turn_key.to_owned(),
+            };
+            let receipt = tokio::time::timeout(DURABLE_RECEIPT_PROBE_TIMEOUT,
+                self.sessions.read_turn_receipt(&query)).await.unwrap_or_else(|_| Err(AppError::Timeout(
+                    format!("cron run {run_id} exact receipt query exceeded its deadline"))));
+            let now = tokio::time::Instant::now();
+            if suspended { deadline += now.saturating_duration_since(observed_at); }
+            observed_at = now;
+            match receipt {
+                Ok(CronTurnReceiptState::Suspended(delivery)) => {
+                    if delivery.completed || !matches!(delivery.turn_outcome,
+                        Some(nomifun_agent_contracts::AgentTurnOutcome::Waiting { .. }
+                            | nomifun_agent_contracts::AgentTurnOutcome::Paused { .. })) {
+                        return Err(AppError::Conflict("Cron suspended receipt has no exact nonterminal disposition".into()));
+                    }
+                    suspended = true;
+                    consecutive_probe_failures = 0;
+                }
                 Ok(CronTurnReceiptState::Completed(delivery)) => {
                     if !delivery.completed {
                         return Err(AppError::Conflict(format!(
-                            "cron run {run_id} received a completed turn state without terminal delivery proof"
-                        )));
+                            "cron run {run_id} received a completed turn state without terminal delivery proof")));
                     }
                     return Ok(delivery);
                 }
                 Ok(CronTurnReceiptState::Accepted { .. }) => {
+                    suspended = false;
                     consecutive_probe_failures = 0;
                 }
                 Ok(CronTurnReceiptState::Missing) => {
-                    // Once admission has returned an accepted receipt, its
-                    // disappearance is loss of the exact operation authority,
-                    // not evidence that the model became idle or finished.
                     return Err(AppError::Conflict(format!(
-                        "cron run {run_id} lost its accepted exact durable turn receipt"
-                    )));
+                        "cron run {run_id} lost its accepted exact durable turn receipt")));
                 }
                 Err(error) if background_reconciliation_error_is_retryable(&error) => {
-                    consecutive_probe_failures =
-                        consecutive_probe_failures.saturating_add(1);
-                    if consecutive_probe_failures == 1
-                        || consecutive_probe_failures.is_multiple_of(100)
-                    {
-                        warn!(
-                            job_id = %job.cron_job_id,
-                            run_id,
-                            conversation_id,
-                            consecutive_probe_failures,
-                            error = %error,
-                            "Failed to re-read accepted Cron turn receipt; retaining the Cron run as non-terminal"
-                        );
+                    consecutive_probe_failures = consecutive_probe_failures.saturating_add(1);
+                    if consecutive_probe_failures == 1 || consecutive_probe_failures.is_multiple_of(100) {
+                        warn!(job_id = %job.cron_job_id, run_id, conversation_id, consecutive_probe_failures,
+                            error = %error, "Failed to re-read the exact Cron receipt; retaining its reservation");
                     }
                 }
                 Err(error) => return Err(error),
             }
-
+            if !suspended && now >= deadline {
+                return Err(AppError::Timeout(format!(
+                    "cron run {run_id} exceeded its durable turn receipt deadline of {} seconds; terminal outcome remains unknown and the run must be reviewed",
+                    timeout.as_secs())));
+            }
             tokio::time::sleep(DURABLE_RECEIPT_POLL_INTERVAL).await;
-        }
-        };
-        match tokio::time::timeout(timeout, wait).await {
-            Ok(result) => result,
-            Err(_) => Err(AppError::Timeout(format!(
-                "cron run {run_id} exceeded its durable turn receipt deadline of {} seconds; \
-                 terminal outcome remains unknown and the run must be reviewed",
-                timeout.as_secs()
-            ))),
         }
     }
 
@@ -1149,11 +1156,13 @@ fn replayed_delivery_result(
             ),
         };
     }
-    match delivery.terminal_result() {
-        Some(Ok(())) => ExecutionResult::Success {
+    match delivery.disposition() {
+        Some(crate::session_port::CronTurnDisposition::Delivered) => ExecutionResult::Success {
             conversation_id: conversation_id.to_owned(),
         },
-        Some(Err(message)) => ExecutionResult::Error { message },
+        Some(crate::session_port::CronTurnDisposition::Failed(message)) => ExecutionResult::Error { message },
+        Some(crate::session_port::CronTurnDisposition::Cancelled) => ExecutionResult::Cancelled { conversation_id: conversation_id.to_owned() },
+        Some(crate::session_port::CronTurnDisposition::InputRequired) => ExecutionResult::InputRequired { conversation_id: conversation_id.to_owned() },
         None => ExecutionResult::Quarantined {
             message: format!(
                 "cron run {run_id} completed without an exact durable terminal result"
@@ -1289,7 +1298,7 @@ mod model_only_binding_tests {
     const OWNER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000102";
     const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000103";
 
-    fn job(execution_mode: ExecutionMode) -> CronJob {
+    pub(super) fn job(execution_mode: ExecutionMode) -> CronJob {
         CronJob {
             cron_job_id: JOB_ID.to_owned(),
             user_id: OWNER_ID.to_owned(),
@@ -1365,19 +1374,53 @@ mod public_delivery_tests {
             result_error:None,result_error_code:None,result_error_retryable:Some(false) }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn original_receipt_worker_survives_wait_and_pause_past_its_execution_deadline() {
+        use crate::session_port::test_support::ReceiptOnlySessions;
+        use std::sync::atomic::Ordering;
+        for outcome in [AgentTurnOutcome::Waiting { wait_seq: 41, request_id: None,
+            reason: nomifun_agent_contracts::AgentWaitReason::ExternalResource }, AgentTurnOutcome::Paused { message_ids: vec![] }] {
+            let mut active = delivery(outcome);
+            active.completed = false;
+            active.result_ok = None;
+            let sessions = Arc::new(ReceiptOnlySessions::new(CronTurnReceiptState::Suspended(active)));
+            let executor = JobExecutor::new(Arc::from("owner"), sessions.clone(), Arc::new(CronBusyGuard::new()), PathBuf::new());
+            let job = super::model_only_binding_tests::job(ExecutionMode::Existing);
+            let wait = executor.await_durable_turn_completion_timed(&job, "original-run", "session", "exact-key", Duration::from_millis(5));
+            tokio::pin!(wait);
+            tokio::select! {
+                result = &mut wait => panic!("nonterminal wait must retain its original consumer: {result:?}"),
+                _ = tokio::time::sleep(Duration::from_secs(10)) => {},
+            }
+            sessions.transient_failures.store(50, Ordering::SeqCst);
+            tokio::select! {
+                result = &mut wait => panic!("a transient receipt error cannot release a confirmed suspension: {result:?}"),
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {},
+            }
+            sessions.transient_failures.store(0, Ordering::SeqCst);
+            let cancelled = delivery(AgentTurnOutcome::Cancelled { message_ids: vec![] });
+            *sessions.receipt.lock().unwrap() = CronTurnReceiptState::Completed(cancelled.clone());
+            let observed = tokio::time::timeout(Duration::from_secs(1), &mut wait).await.unwrap().unwrap();
+            assert_eq!(observed, cancelled);
+            assert!(sessions.reads.load(Ordering::SeqCst) > 2);
+            assert!(matches!(replayed_delivery_result("original-run", "session", observed), ExecutionResult::Cancelled { .. }));
+        }
+    }
+
     #[test]
     fn scheduled_input_handoff_and_missing_public_result_cannot_become_success() {
         let mut question=delivery(AgentTurnOutcome::InputRequired {request_id:"ask-name".into()});
         question.user_input_request=Some(AgentUserInputRequest {request_id:"ask-name".into(),
             question:"请提供姓名。".into(),remaining_work:"生成 PPT。".into()});
         assert!(matches!(replayed_delivery_result("run","session",question.clone()),
-            ExecutionResult::Error {message} if message.contains("CRON_USER_INPUT_REQUIRED") && message.contains("请提供姓名")));
+            ExecutionResult::InputRequired {conversation_id} if conversation_id == "session"));
         question.user_input_request.as_mut().unwrap().request_id="different-question".into();
         assert!(matches!(replayed_delivery_result("run","session",question),ExecutionResult::Error {..}));
-        for outcome in [AgentTurnOutcome::Unavailable,AgentTurnOutcome::Silent {},AgentTurnOutcome::Failed {message_ids:vec![]},
-            AgentTurnOutcome::Cancelled {message_ids:vec![]}] {
+        for outcome in [AgentTurnOutcome::Unavailable,AgentTurnOutcome::Silent {},AgentTurnOutcome::Failed {message_ids:vec![]}] {
             assert!(matches!(replayed_delivery_result("run","session",delivery(outcome)),ExecutionResult::Error {..}));
         }
+        assert!(matches!(replayed_delivery_result("run","session",delivery(AgentTurnOutcome::Cancelled {message_ids:vec![]})),
+            ExecutionResult::Cancelled {conversation_id} if conversation_id == "session"));
         assert!(matches!(replayed_delivery_result("run","session",delivery(AgentTurnOutcome::Paused {message_ids:vec![]})),ExecutionResult::Quarantined {..}));
         assert!(matches!(replayed_delivery_result("run","session",delivery(AgentTurnOutcome::Answered {message_ids:vec!["answer".into()]})),ExecutionResult::Success {..}));
     }

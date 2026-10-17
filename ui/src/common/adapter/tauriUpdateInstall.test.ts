@@ -7,6 +7,7 @@
 import { describe, expect, spyOn, test } from 'bun:test';
 import {
   AUTO_INSTALL_UNSUPPORTED_ERROR,
+  AutoInstallUnsupportedError,
   INSTALL_NOT_ATTEMPTED_ERROR,
   installUpdateWithPreflight,
   isInstallNotAttempted,
@@ -45,10 +46,11 @@ describe('installUpdateWithPreflight', () => {
 
   test('unsafe context never installs, reports a fatal failure, or relaunches', async () => {
     const calls: string[] = [];
+    const refused: UpdaterInstallContext = { ...safe, autoInstallSupported: false, reason: 'mounted_volume' };
     const result = installUpdateWithPreflight({
       getContext: async () => {
         calls.push('getContext');
-        return { ...safe, autoInstallSupported: false, reason: 'mounted_volume' };
+        return refused;
       },
       showFailure: async () => void calls.push('showFailure'),
       install: async () => void calls.push('install'),
@@ -58,14 +60,18 @@ describe('installUpdateWithPreflight', () => {
       },
     });
 
-    let errorMessage = '';
+    let thrown: unknown;
     try {
       await result;
     } catch (error) {
-      errorMessage = error instanceof Error ? error.message : String(error);
+      thrown = error;
     }
 
-    expect(errorMessage).toBe(`${AUTO_INSTALL_UNSUPPORTED_ERROR}:mounted_volume`);
+    // The typed error must carry the refusing context so the UI can name the
+    // cause and the running path; the marker string stays as the logged message.
+    expect(thrown).toBeInstanceOf(AutoInstallUnsupportedError);
+    expect((thrown as AutoInstallUnsupportedError).context).toBe(refused);
+    expect((thrown as Error).message).toBe(`${AUTO_INSTALL_UNSUPPORTED_ERROR}:mounted_volume`);
     expect(calls).toEqual(['getContext']);
   });
 

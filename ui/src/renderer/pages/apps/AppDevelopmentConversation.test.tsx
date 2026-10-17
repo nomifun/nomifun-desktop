@@ -592,8 +592,8 @@ test.each([true, false])('an active sibling project Session blocks manual files 
   spyOn(appHosting.get, 'invoke').mockResolvedValue(app);
   spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue(conversation);
   const sibling = { ...conversation, id: OTHER_SESSION, name: 'Working sibling', status: 'running' as const,
-    extra: { ...conversation.extra, ...(processing ? {} : { execution_phase: 'paused' }) },
-    runtime: { state: processing ? 'running' as const : 'idle' as const, is_processing: processing, can_send_message: false, has_runtime: true, active_turn_id: parseMessageId('0190f5fe-7c00-7a00-8000-000000000305') } };
+    extra: conversation.extra,
+    runtime: { state: processing ? 'running' as const : 'idle' as const, is_processing: processing, can_send_message: false, active_turn_id: parseMessageId('0190f5fe-7c00-7a00-8000-000000000305') } };
   spyOn(appHosting.developmentSessions, 'invoke').mockResolvedValue({ items: [{ conversation: sibling, editable_in_app: true, archived: false }, { conversation, editable_in_app: true, archived: false }],
     total: 2, owned_session_count: 2, has_more: false, next_cursor: null, project_directory: app.directory, current_session_id: SESSION });
   const view = render(<MemoryRouter initialEntries={[`/apps/owned-app?session=${SESSION}`]}><I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), shouldRetryOnError: false }}><Routes>

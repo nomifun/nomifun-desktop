@@ -224,7 +224,7 @@ canonical context floor 读取上下文，不引入 Runtime 私有清空状态�
 清空命令的幂等身份保存在原 Event 链。伙伴自动摘要以窗口身份去重，Cron 以确切运行身份去重；
 Cron 在同一个 Session 操作围栏中先读取原 Turn receipt，已准入重投直接认原输入，禁止再次
 清空或停止后继 Runtime。只有尚未准入的新运行执行清空并提交输入，清空成功后准入失败的
-重试仍复用原事件，不重复移动 context floor。UI/API contract version 36 要求用户清空携带
+重试仍复用原事件，不重复移动 context floor。UI/API contract version 37 要求用户清空携带
 明确的幂等键，并拒绝仍依赖退役命令发现、旁路提问及命令消息类型的旧前端。
 快捷命令目录属于产品输入行为，不能从 Runtime 或 Skill 正文发现权限；Skill 继续使用冻结
 Snapshot 与 typed `inject_skills` 链路。同一目标中未修改命令草稿的失败重试沿用原动作键，
@@ -239,27 +239,54 @@ receipt 的重试中核对原事实、当前绑定和上下文边界，模型或
 
 ### 用户输入交接
 
-普通会话使用 Runtime 的 `request_user_input` 控制声明问题与剩余工作，问题身份来自确切
-工具调用，宿主校验同一 owner、Session 和活动 Turn。问题是需要用户参与的正常交接，
-不构成答案、授权或任务完成证明。`report_completion` 继续负责真实任务交付的证据审核；
-两种意图共享原终态输入围栏、资源清理和一次 canonical 终态提交，不新增等待状态或问答表。
+普通会话使用 Runtime 的 `request_user_input` 控制声明问题与剩余工作，问题身份来自确切工具
+调用，宿主校验同一 owner、Session 和活动 Turn。问题是正常交接，不构成答案、授权或任务完成
+证明。`report_completion` 继续负责真实交付证据。宿主根据原资源 owner 的真实状态选择闭轮
+交接或者保留原 Turn 的正常等待；模型不能授予资源保活、授权或恢复权。等待只追加原 typed
+Runtime Event/Payload，不新增等待表、问答表、任务状态副本或恢复账本。
 
-已启用任务记账而结束意图不明确时，现役有界审核允许声明完成或交接用户输入；正式报告审核、
-失败停止与未知效果围栏不能通过提问逃逸。已提交问题保存在原 typed Runtime Event 和现役
-checkpoint；恢复只继续原交接结算，不重问、重跑工具或携带旧进程句柄。已准入回复先走原
-steering；回合关闭后的回复在同 Session 开启新 Turn。上下文只从原 canonical 事实读取问题
-及尚未交付的要求，剩余工作说明不能扩大用户授权或充当效果证据。
+没有需要保活的原资源时，原终态输入围栏、清理证明及终态提交后，以带 `user_input_request`
+的普通 `turn/completed` 正常交还输入。已准入回复先走原 steering；闭轮后的回复在同 Session
+开启新 Turn。原 typed 问题与未完成要求进入 canonical 上下文，剩余工作说明不能扩大授权。
+静止 checkpoint 只恢复原交接结算，不重问、重跑工具或携带旧进程句柄。
 
-清理证明和终态提交后，交接以带 `user_input_request` 的普通 `turn/completed` 保存；这只表示
-本轮正常交还输入。实时与历史共用正常问题提示，界面不从正文猜测、制造空闲或重写旧失败。
-AgentExecution 的 canonical 输出、恢复、采纳与调度消费同一 typed 交接，不能把有正文的
-闭合回合当作 Step 完成。AskUser 仍须校验精确活动 Link、Attempt、策略和原 Turn 回执；
-自动决策及 Cron 不因普通提问获得人工授权。没有真实回复时不轮询模型，也不自动重放效果。
+浏览器授权等需要原进程存活的交互进入同一 Turn 的宿主等待。模型停止采样，Runtime 不返回
+终态；原 owner 保持执行租约、资源、取消权及原进程期限。公开状态引用原问题 request ID。
+宿主先登记输入及原资源通知，再检查持久输入和资源 cursor，避免检查与睡眠间丢失已接受回复。
+真实用户输入、原资源变化、到期或取消使等待重新结算。观察来自同一资源 owner，不伪造
+`poll_process` 调用或工具证据。等待不计模型步骤、失败工具或无进展窗口，也不重置原预算。
+用户声称已授权不代替真实授权回执，超时保留原命令尝试事实与仍需处理的工作。
+
+供应商一次 stop 只结束一次模型响应。统一停止决策根据真实计划、完成报告和资源状态决定
+继续纠正、宿主等待、原生暂停或完成；计划未完成本身不产生失败。计划、完成报告或结束意图的
+纠正耗尽时记录需要人工介入，保留真实命令与工具失败计数，不从正文猜测用户答案。有资源时
+保留原 owner；原资源退出不授予额外纠正次数，资源静止后才原生暂停。原 owner 延后软窗口后
+保留已确认 checkpoint 和 canonical tail，暂停不续预算，也不伪造新的 checkpoint 提交回执。
+真实故障、失败停止策略、未知效果及 Patch recovery 仍按原生围栏结算，不能借等待声明逃逸。
+
+AgentExecution、Cron、IDMM 和普通界面消费同一 typed 交接。确切的人工输入交接在 AskUser
+和 Automatic 策略下都进入原有 WaitingInput 人工处理边界，不能将 Automatic 不能代答的
+问题转成任务失败；人工回复仍校验精确活动 Link、Attempt、原问题与 Turn 回执，保留现役
+用户准入和 native 授权围栏。自动策略不制造真人授权，也不替人回答。没有真实回复或资源变化时不轮询模型，
+不自动重放效果。Cron 的闭轮输入交接结算为现有运行记录的 `input_required` 非故障终态，
+消费本次触发且不增加重试，不留下永久 reserved；确切取消结算为 `cancelled`，清除故障提示，
+不转成失败或重试。领域取消与直接取消原关联 Session 沿同一 canonical 取消事实收敛；
+仍在原 Turn 等待资源时保持非终态。
+Cron 原后台收据消费者贯穿等待及暂停，冻结已剩余的观察时限，直到原确切 Turn 结算。
+重启从原 reservation 与 active-runs 围栏重挂只读收据消费者，不新建 invocation、Turn 或账本，
+不重新 prepare/send；终态继续通过原 CAS 只结算一次并恢复正常调度。
+宿主重启后不能以等待事件证明进程存活；原 owner 无法验证时进入恢复或对账，
+不恢复旧 live handle，也不自动重启命令。
+
+等待回复携带 `expected_wait` 的确切 Turn 来源及原等待事件 `wait_seq`。问题身份仍只从原等待
+事实引用，不复制为客户端执行权限。原 steering writer 在同一
+事务校验当前等待与单次消费；迟到的旧提示、同 Turn 已换的问题或竞争窗口不能给后继执行投递
+回答。重复提交只返回原已接受回执，不能通过省略或更换 guard 重放；普通 steering 仍走同一 writer。
 
 ### 回合公开结果
 
 Turn 生命周期与用户任务是否交付分开表达。共享 `AgentTurnOutcome` 从精确 Turn 的已提交
-Event/Payload 只读派生，包含 `answered`、`input_required`、`failed`、`cancelled`、`paused` 和
+Event/Payload 只读派生，包含 `answered`、`input_required`、`waiting`、`failed`、`cancelled`、`paused` 和
 `unavailable`，以及有明确无回复意图的 `silent`。它不新增结果表、完成账本或 checkpoint，也不改变原生清理、取消与终态提交顺序。
 `answered` 只引用该 Turn 最终有效模型步骤中完整封口的非空公共消息，以及有明确截断续写关系
 的前段；终态步骤与 typed Runtime 事实共同证明其归属，不能从较早进度回退寻找答案。思考、工具
@@ -267,10 +294,15 @@ Event/Payload 只读派生，包含 `answered`、`input_required`、`failed`、`
 仍来自唯一 typed request，不复制进助手正文。`unavailable` 如实表达已关闭历史缺少可证明的
 公开结果，不回填内容、不重跑模型或效果。`answered` 本身不证明用户的整个任务已完成。
 
+`waiting` 是精确活动 Turn 的非终态，由尚未解除的 typed 等待事件派生，保留原 Operation 与
+执行权。REST、实时通知、计划栏和领域消费者共享同一结果合同。计划表达步骤进度，等待和暂停
+单独展示，不把 Turn 故障扩散成全部待办失败。等待回复走原 steering，普通新 Turn 和队列不能
+抢占；IDMM 不把正常等待当模型停滞，Cron 与 Execution 不把人工参与当失败重试或已交付。
+
 历史查询和终态后的实时投影共用同一结果 reducer、确切消息身份与 Turn 归属。界面按结果引用
 展示公共内容，过程折叠只处理过程条目，不再根据最后一条助手消息、到达顺序或显示时间猜最终
 回答。空消息封口不成为公开结果；请求用户信息必须在折叠过程外显示，并允许后续输入创建新
-Turn。UI/API contract version 36 阻止旧界面把结构化结果继续当成通用文字提示消费。
+Turn。UI/API contract version 37 阻止旧界面把结构化结果继续当成通用文字提示消费。
 
 部分历史页在同一数据库快照中附带其涉及 Turn 的结果摘要，不占原始分页窗口；下一页游标只由
 原始窗口决定，界面直接使用服务端 `next_cursor`。迟到的暂停快照不能覆盖已提交终态。正式领域
@@ -303,7 +335,7 @@ Execution、Cron 和 IDMM 消费同一结果类别，再由领域自身判断任
 checkpoint，只有收到提交回执才续段。空轮询、轮询参数变化和规则读取不延长无进展保护；
 真实预算不足、未知效果、取消或无法取得 checkpoint 回执仍沿原安全路径停止。
 
-界面从现有 canonical 投影共用派生空闲、执行中和已暂停的判断，不新增持久状态。
+界面从现有 canonical 投影共用派生空闲、执行中、正常等待和已暂停的判断，不新增持久状态。
 暂停保留原 Turn 和输入阻断，以无执行动画的“结束本回合”操作提交确切 Turn 取消，
 取得释放回执后才恢复输入。公开暂停原因保留已知的执行、恢复及清理机器码，并受
 原 Operation 和观察 cursor 限定；私有描述仍不公开，也不从原因码补造清理证明。
@@ -489,7 +521,10 @@ managed Agent wrapper 借用用户的同一真实页面，attached Chrome 工具
 
 Turn 预备只冻结 Browser 授权，不锁 managed 浏览器；首次真实调用才取得当前 Workspace 的原生输入锁与 guard，
 并持续占用至本 Turn 结束。单次工具完成、普通工具失败、模型思考及后续无关工具均不释放所有权。
-settle 在保留硬件输入锁的情况下排空原生操作；只有 exact Turn 终态已持久化且 finish 成功后才 final release。
+settle 在保留硬件输入锁的情况下排空原生操作；正常终态结算在 exact Turn 终态已持久化且 finish 成功后 final release。
+同 Turn 的正式人工等待是另一明确交接边界：原 Store 在 settle 前后均复核 exact owner、活动 Operation、
+已提交 `waiting` 与无 pending/unknown Effect 后，只释放 Browser 控制权，CLI 等其他原资源继续受原 owner 管理。
+后续 Browser 调用重新沿冻结授权取得 lazy admission 和新观察，旧观察不能复用；普通模型 stop 不授权释放锁。
 结算失败、原生清理不确定、终态写入或 finish 失败继续保留门禁，由原 Turn 恢复路径处理。
 用户 API 按实际 coordinator 门禁准入，不从 Session 的 running/paused、模型正文或已配置的 Browser 权限推导占用。
 未真实调用 managed 浏览器的 Turn，包括普通聊天、文件任务、attached Chrome 及后台渲染，保持用户浏览器可用。
@@ -606,7 +641,7 @@ Agent 工作台的默认模型是可空的预设配置。选择器读取已启�
 
 过程说明与最终回答共用 `ConversationProse` 和 Session 范围内的临时展示游标。消息仍按原零延时批次接收并保存完整正文，复制、结果归属、取消和 Runtime 忙碌状态不等待展示动画。实时入口显式标记可平滑呈现的来源，展示层按画面帧合并更新并沿同一 canonical source/range 共享进度；历史读取不创建新的实时资格，过程转为公共回答也不重播。已解析的 Markdown 树在同一展示正文版本内复用，只揭示已到达的字符与完整语法范围，代码块和块级公式保持完整已接收内容的稳定展示，其他 Markdown 消费者保持默认渲染。游标不持久化、不追加另一份正文；替换、撤回、取消、暂停、会话切换及减少动态效果继续沿现有边界立即收敛。
 
-工具展示保留原 capability/action、调用名、已有路径、操作标签和真实状态。现有 ToolCall 产品投影只传递这些展示元数据及必要的 typed 结果状态，不携带文件正文、检索片段、写入内容、patch、stdin、内联脚本或原始工具输出；实时、历史和会话导出使用同一边界。处理区沿用原操作行，不新增路径汇总、文件卡或交互，也不为已无详情的行保留空展开。模型使用的 canonical 参数和结果不受产品投影裁剪影响。状态提取在正文裁剪前完成，进程退出、未启动、超时、检索受限、系统权限、知识写回及真实媒体结果继续使用原业务提示；不从任意原始 JSON 在前端补造状态。失效的 `content_mode` 不再是查询参数，知识写入不再接受业务忽略的 `title`。UI/API contract version 36 要求新旧前后端匹配，旧界面不能从已退役正文推断状态。
+工具展示保留原 capability/action、调用名、已有路径、操作标签和真实状态。现有 ToolCall 产品投影只传递这些展示元数据及必要的 typed 结果状态，不携带文件正文、检索片段、写入内容、patch、stdin、内联脚本或原始工具输出；实时、历史和会话导出使用同一边界。处理区沿用原操作行，不新增路径汇总、文件卡或交互，也不为已无详情的行保留空展开。模型使用的 canonical 参数和结果不受产品投影裁剪影响。状态提取在正文裁剪前完成，进程退出、未启动、超时、检索受限、系统权限、知识写回及真实媒体结果继续使用原业务提示；不从任意原始 JSON 在前端补造状态。失效的 `content_mode` 不再是查询参数，知识写入不再接受业务忽略的 `title`。UI/API contract version 37 要求新旧前后端匹配，旧界面不能从已退役正文推断状态。
 
 `ToolCompleted.runtime_hold` 只说明该调用在进入 owner 端口前被 Runtime 拦住及其有限原因；`ToolStarted` 仍只是 write-ahead 准入意图。查找能力、未执行、领域失败、用户取消和未知 Effect 不互换；旧结果缺少 typed 原因时保持未分类，不从英文文案或当前配置反推。取消后没有 Runtime 完成事件时仍读取原宿主结算。展示规则不参与授权、完成审核、计量或重放决策。新提交完成报告使用 v5 公共格式，不自动向交付正文追加失败次数汇总；实际计量和完成审核保持原值，当前代已保存的旧格式仍按原精确文本验证，不改写历史。
 

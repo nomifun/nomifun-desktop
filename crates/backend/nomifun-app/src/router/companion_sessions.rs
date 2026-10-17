@@ -90,7 +90,7 @@ mod tests {
             remote_binding_provenance: None, parent_session_id: None, fork_base_payload_id: None, next_seq: 1 };
         SessionObservation { session, head: nomifun_agent_session::SessionHeadProjection { session_id: session_id.clone(),
             status: "ready".into(), active_turn_id: None, active_set_generation: 0, last_seq: 0, unread_count: 0 },
-            events: vec![], messages: vec![], next_cursor: SessionEventCursor { agent_session_id: session_id, seq: 0 } }
+            events: vec![], messages: vec![], next_cursor: SessionEventCursor { agent_session_id: session_id, seq: 0 }, active_turn_outcome:None }
     }
 
     #[test]
@@ -290,7 +290,7 @@ impl NomiCoreSessionOwner {
             let opening = self.canonical.store().read_events(&session_id, None, 1).await.map_err(agent_session_store_error)?;
             let head = self.canonical.store().head(&session_id).await.map_err(agent_session_store_error)?;
             let observation = SessionObservation { session, head, events: opening.events,
-                messages: Vec::new(), next_cursor: opening.next_cursor };
+                messages: Vec::new(), next_cursor: opening.next_cursor, active_turn_outcome: None };
             if !canonical_companion_origin(owner_id, &observation)?.is_some_and(|scope| scope.companion_id == companion_id) {
                 return Err(AppError::Forbidden("Companion membership has no exact canonical opening authority".into()));
             }

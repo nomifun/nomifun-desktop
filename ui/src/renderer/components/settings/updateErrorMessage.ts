@@ -4,22 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { UpdaterInstallReason } from '@/common/adapter/tauriUpdateInstall';
+
 export type UpdateErrorMessageKey =
   | 'update.releaseFeedUnavailable'
-  | 'update.crossDeviceInstallUnsupported'
   | 'update.packageNoLongerReady'
   | 'update.checkFailed';
 
 export function getUpdateErrorMessageKey(message: unknown): UpdateErrorMessageKey {
   const normalized = String(message ?? '').toLowerCase();
-  if (
-    normalized.includes('nomifun_updater_auto_install_unsupported') ||
-    normalized.includes('cross-device link') ||
-    normalized.includes('crosses devices') ||
-    normalized.includes('os error 18')
-  ) {
-    return 'update.crossDeviceInstallUnsupported';
-  }
   // The native side refused an install it never started, because it no longer
   // holds the package for that version. The recovery is to download again — the
   // generic fallback below used to tell the user the CHECK had failed, which
@@ -38,4 +31,23 @@ export function getUpdateErrorMessageKey(message: unknown): UpdateErrorMessageKe
     return 'update.releaseFeedUnavailable';
   }
   return 'update.checkFailed';
+}
+
+export type UpdateInstallBlockMessageKey =
+  | 'update.installBlockedMountedVolume'
+  | 'update.installBlockedTranslocation'
+  | 'update.installBlockedCrossDevice'
+  | 'update.installBlockedMetadataUnavailable'
+  | 'update.installBlockedBundleNotFound';
+
+const INSTALL_BLOCK_MESSAGE_KEYS: Record<UpdaterInstallReason, UpdateInstallBlockMessageKey> = {
+  mounted_volume: 'update.installBlockedMountedVolume',
+  app_translocation: 'update.installBlockedTranslocation',
+  cross_device: 'update.installBlockedCrossDevice',
+  metadata_unavailable: 'update.installBlockedMetadataUnavailable',
+  app_bundle_not_found: 'update.installBlockedBundleNotFound',
+};
+
+export function getInstallBlockMessageKey(reason: UpdaterInstallReason | null): UpdateInstallBlockMessageKey {
+  return INSTALL_BLOCK_MESSAGE_KEYS[reason ?? 'metadata_unavailable'];
 }

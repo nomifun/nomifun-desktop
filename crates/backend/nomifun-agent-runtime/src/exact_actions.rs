@@ -5,7 +5,7 @@ use nomifun_agent_contracts::digest_bytes;
 use nomifun_chat_model_broker::{ChatMessage, ChatToolCall};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentExactAction {
     pub id: String,
@@ -24,9 +24,42 @@ pub struct AgentExactAction {
     #[serde(default, skip_serializing_if="Option::is_none")]
     pub attempted_call_id: Option<String>,
     #[serde(default)]
-    pub settled: bool,
-    #[serde(default)]
     pub succeeded: bool,
+}
+
+// Current-generation canonical PlanUpdated facts can contain the former
+// redundant flag. Validate and discard it only at this read boundary; new
+// execution state and serialization have one success fact.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExactActionWire {
+    id: String,
+    source: crate::AgentInputCitation,
+    tool: String,
+    fields: BTreeMap<String, String>,
+    #[serde(default)] stdin_sha256: Option<String>,
+    #[serde(default)] receiver_ref: Option<String>,
+    #[serde(default)] receiver_digest: Option<String>,
+    #[serde(default)] receiver_closed: bool,
+    #[serde(default)] attempted_call_id: Option<String>,
+    #[serde(default)] succeeded: bool,
+    #[serde(default, deserialize_with = "read_legacy_settled")] settled: Option<bool>,
+}
+
+fn read_legacy_settled<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
+    bool::deserialize(deserializer).map(Some)
+}
+
+impl<'de> Deserialize<'de> for AgentExactAction {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = ExactActionWire::deserialize(deserializer)?;
+        if wire.settled.is_some_and(|settled| settled != wire.succeeded) {
+            return Err(serde::de::Error::custom("historical exact action settled flag differs from its success fact"));
+        }
+        Ok(Self { id: wire.id, source: wire.source, tool: wire.tool, fields: wire.fields,
+            stdin_sha256: wire.stdin_sha256, receiver_ref: wire.receiver_ref, receiver_digest: wire.receiver_digest,
+            receiver_closed: wire.receiver_closed, attempted_call_id: wire.attempted_call_id, succeeded: wire.succeeded })
+    }
 }
 
 #[derive(Deserialize)]
@@ -90,7 +123,7 @@ impl ExactActionInput {
         let fields=object.iter().filter(|(key,_)|self.tool!="write_process_stdin"||!matches!(key.as_str(),"input"|"append_newline"))
             .map(|(key,value)|Ok((key.clone(),sha(value)?))).collect::<Result<_,String>>()?;
         Ok(AgentExactAction {id:self.id,source:self.source,tool:self.tool,fields,stdin_sha256,receiver_ref:self.receiver_ref,
-            receiver_digest:None,receiver_closed:false,attempted_call_id:None,settled:false,succeeded:false})
+            receiver_digest:None,receiver_closed:false,attempted_call_id:None,succeeded:false})
     }
 }
 
@@ -178,6 +211,23 @@ mod tests {
             tool:tool.into(),expected_arguments:args,receiver_ref:None}.compile(&[crate::context_lifecycle::text_message(ChatRole::User,"Exact requested bytes".into())]).unwrap()
     }
     fn call(name:&str,args:serde_json::Value)->ChatToolCall {ChatToolCall {call_id:"proposed".into(),name:name.into(),arguments:StrictJsonValue(args),provider_metadata:None}}
+    #[test]
+    fn current_generation_plan_history_reads_former_settled_without_writing_it() {
+        let mut exact = action("write_file", serde_json::json!({"path":"a","content":"value"}));
+        exact.succeeded = true;
+        exact.attempted_call_id = Some("written-once".into());
+        let plan = crate::AgentPlan { revision: 1, exact_actions: vec![exact], ..Default::default() };
+        let mut old = serde_json::to_value(crate::AgentEngineEvent::PlanUpdated { plan }).unwrap();
+        old["plan"]["exact_actions"][0]["settled"] = serde_json::json!(true);
+        let decoded: crate::AgentEngineEvent = serde_json::from_value(old.clone()).unwrap();
+        let new = serde_json::to_value(decoded).unwrap();
+        assert!(new["plan"]["exact_actions"][0].get("settled").is_none());
+        old["plan"]["exact_actions"][0]["settled"] = serde_json::json!(false);
+        assert!(serde_json::from_value::<crate::AgentEngineEvent>(old.clone()).is_err());
+        old["plan"]["exact_actions"][0]["settled"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<crate::AgentEngineEvent>(old).is_err());
+    }
+
     #[test]
     fn effective_stdin_bytes_accept_both_exact_forms_not_double_lf() {
         let input=action("write_process_stdin",serde_json::json!({"input":"你好 MAC-B\n"}));

@@ -5,14 +5,14 @@ import { emitter } from '@/renderer/utils/emitter';
 import { useTranslation } from 'react-i18next';
 import { MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT } from '../typography';
 
-/** Historical input handoff. It does not pause a Session or resume the old Turn. */
+/** Exact canonical question, shared by a parked Turn and a closed handoff. */
 export const UserInputRequestNote = ({ message }: { message: IMessageTips }) => {
   const { t } = useTranslation();
   const context = useConversationContextSafe();
   const request = message.content.user_input_request;
   if (!request) return null;
   const canFocus = context?.conversation_id === message.conversation_id && context.readOnly !== true
-    && context.hideSendBox !== true && context.isProcessing !== true;
+    && context.hideSendBox !== true && (context.isProcessing !== true || context.executionWait?.turnId === message.turn_id);
   return <div role='note' aria-label={t('conversation.userInputRequest.title')}
     data-testid='user-input-request-note' data-request-id={request.request_id}
     className='bg-message-tips rd-8px px-12px py-10px flex flex-col gap-8px'>

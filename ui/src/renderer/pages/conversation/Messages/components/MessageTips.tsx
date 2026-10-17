@@ -125,6 +125,9 @@ const MessageTips: React.FC<{ message: IMessageTips; compactError?: boolean }> =
   </div>;
 
   const displayContent = json ? '' : content;
+  if (message.content.execution_pause) return <ConversationErrorNote tone='notice'
+    error={message.content.error} feedback={false} turnId={message.turn_id}
+    sessionId={message.conversation_id} timestamp={message.created_at} />;
   if (type !== 'error' && message.content.user_input_request) return <UserInputRequestNote message={message} />;
   if (message.content.idmm_notice) return <IdmmDecisionNotice message={message} />;
   if (transition) {

@@ -42,6 +42,23 @@ describe('canonical public Turn result boundary', () => {
     expect(live.content).toEqual(history.content);
   });
 
+  test('waiting is typed and cannot overwrite a committed terminal result', () => {
+    const waiting = { kind: 'waiting', wait_seq: 41, request_id: 'authorize', reason: 'user_input' } as const;
+    expect(normalizeAgentTurnOutcome(waiting)).toEqual(waiting);
+    expect(normalizeAgentTurnOutcome({ ...waiting, reason: 'unknown' })).toBeUndefined();
+    expect(normalizeAgentTurnOutcome({ ...waiting, request_id: '' })).toBeUndefined();
+    for (const waitSeq of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, undefined]) {
+      expect(normalizeAgentTurnOutcome({ ...waiting, wait_seq: waitSeq })).toBeUndefined();
+    }
+    expect(mergeAgentTurnOutcome(waiting, { ...waiting, wait_seq: 40 })).toEqual(waiting);
+    expect(mergeAgentTurnOutcome(waiting, { ...waiting, wait_seq: 42 })).toEqual({ ...waiting, wait_seq: 42 });
+    const closed = { kind: 'answered', message_ids: [message] } as const;
+    expect(mergeAgentTurnOutcome({ ...closed, message_ids: [message] }, waiting)).toEqual(closed);
+    expect(mergeAgentTurnOutcome(waiting, { ...closed, message_ids: [message] })).toEqual(closed);
+    expect(mergeAgentTurnOutcome({ kind: 'silent' }, waiting)).toEqual({ kind: 'silent' });
+    expect(mergeAgentTurnOutcome(waiting, { kind: 'silent' })).toEqual({ kind: 'silent' });
+  });
+
   test('late process/raw transport frames cannot retract a committed result receipt', () => {
     const receipt = normalizeAgentStatusContent({ backend: 'nomi', status: 'prepared', turn_summary: true,
       turn_state: 'completed', turn_outcome: { kind: 'answered', message_ids: [message] } });

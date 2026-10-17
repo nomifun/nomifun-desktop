@@ -81,6 +81,11 @@ pub enum AgentEngineError {
     #[error("Nomi process owner failed: {0}")]
     Process(String),
 
+    /// A parked Turn lost its original resource observation boundary. This
+    /// requires owner reconciliation, never a fabricated result or task failure.
+    #[error("the original wait resource owner is unavailable")]
+    WaitOwnerUnavailable,
+
     #[error("Agent Runtime tool invocation failed: {0}")]
     ToolInvocation(String),
 

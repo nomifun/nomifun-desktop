@@ -116,6 +116,26 @@ pub struct AgentWorkStatus {
 }
 
 impl AgentWorkStatus {
+    /// The original host owner can finish while the model is parked. Record
+    /// that command outcome once without inventing a tool call or evidence ID.
+    pub(crate) fn observe_owned_process(&mut self, observation: &crate::AgentOwnedProcessObservation) -> Result<(), crate::AgentEngineError> {
+        observation.validate()?;
+        if !self.running_processes.contains(&observation.process_id) {
+            return Err(crate::AgentEngineError::InvalidContract("wait observation targets a process outside this turn's live owner set".into()));
+        }
+        if observation.reaped() {
+            self.running_processes.remove(&observation.process_id);
+            if self.observed_processes.insert(observation.process_id.clone()) {
+                if matches!(&observation.poll, nomifun_engine_core::EngineProcessPoll::Exited { exit_code: Some(0), .. }) {
+                    self.successful_commands = self.successful_commands.saturating_add(1);
+                } else {
+                    self.failed_commands = self.failed_commands.saturating_add(1);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Engine-local gate/failure propagation, before the tool port was called.
     /// This is not an observed command or a potential workspace mutation.
     pub(crate) fn observe_deferred(&mut self) {
@@ -236,9 +256,9 @@ impl AgentWorkStatus {
                 } else if self.running_processes.len() < 64 {
                     self.running_processes.insert(id.to_owned());
                 }
-                if self.observed_processes.contains(id) || self.observed_processes.len() >= 64 {
-                    return;
-                }
+                let already_counted = self.observed_processes.contains(id);
+                if already_counted && self.recent_commands.iter().any(|command| command.process_id == id)
+                    || !already_counted && self.observed_processes.len() >= 64 { return; }
                 self.observed_processes.insert(id.to_owned());
                 let exit_code = value
                     .get("exit_code")
@@ -253,9 +273,9 @@ impl AgentWorkStatus {
                         provenance.current_epoch == Some(self.workspace_observation_epoch)
                             && provenance.omitted_interactions == 0
                     });
-                if state == "exited" && exit_code == Some(0) && cleanup_proven && !result.is_error {
+                if !already_counted && state == "exited" && exit_code == Some(0) && cleanup_proven && !result.is_error {
                     self.successful_commands = self.successful_commands.saturating_add(1);
-                } else if !(matches!(operation, "cancel" | "poll")
+                } else if !already_counted && !(matches!(operation, "cancel" | "poll")
                     && state == "cancelled"
                     && cleanup_proven
                     && !result.is_error)

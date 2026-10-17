@@ -190,22 +190,6 @@ async fn silent_robot_policy_is_opt_in_and_unexposed_control_cannot_dispatch_a_p
             && !request.input.instructions.iter().any(|text| text.contains(crate::silent_completion::INSTRUCTIONS))));
 }
 
-#[derive(Debug)]
-struct SilentSettlement(crate::AgentCompletionCheck);
-#[async_trait]
-impl crate::AgentCompletionCheckPort for SilentSettlement {
-    async fn check(&self, _: &ChatCausality) -> Result<crate::AgentCompletionCheck, AgentEngineError> { Ok(self.0.clone()) }
-}
-
-#[tokio::test]
-async fn silent_robot_host_pause_cannot_publish_silent_completion() {
-    let model = silent_model(vec![silent_batch(&[("stand", "robot_motion"), ("finish", crate::silent_completion::TOOL_NAME)])]);
-    let journal = Arc::new(SettlementJournal::default());
-    input_session(model, Arc::new(SilentRobotTools::default()), journal.clone()).run_turn(silent_request()
-        .with_completion_check_port(Arc::new(SilentSettlement(crate::AgentCompletionCheck::HostPause)))).await.unwrap();
-    assert!(silent_markers(&journal).is_empty());
-}
-
 #[tokio::test]
 async fn silent_robot_terminal_steering_keeps_turn_open_and_does_not_replay_the_action() {
     let model = silent_model(vec![silent_batch(&[("stand", "robot_motion"), ("finish", crate::silent_completion::TOOL_NAME)]),
@@ -291,6 +275,21 @@ async fn silent_robot_open_plan_cannot_be_closed_by_a_no_reply_declaration() {
     let tools = Arc::new(SilentRobotTools::default());
     let journal = Arc::new(SettlementJournal::default());
     assert!(input_session(model, tools.clone(), journal.clone()).run_turn(silent_request()).await.is_err());
+    assert!(tools.calls.lock().unwrap().is_empty());
+    assert!(silent_markers(&journal).is_empty());
+}
+
+#[tokio::test]
+async fn silent_robot_unfinished_plan_pauses_without_publishing_silent_success() {
+    let model = silent_model(vec![plan_step("in_progress", "inspect"),
+        silent_batch(&[("stand", "robot_motion"), ("finish", crate::silent_completion::TOOL_NAME)]),
+        text_step("The remaining plan still needs intervention."),
+        text_step("The plan has not been completed."),
+        text_step("must not sample again")]);
+    let tools = Arc::new(SilentRobotTools::default());
+    let journal = Arc::new(SettlementJournal::default());
+    let result = input_session(model, tools.clone(), journal.clone()).run_turn(silent_request()).await.unwrap();
+    assert!(matches!(result.terminal, AgentTurnTerminal::Paused { .. }));
     assert!(tools.calls.lock().unwrap().is_empty());
     assert!(silent_markers(&journal).is_empty());
 }

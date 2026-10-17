@@ -6,7 +6,7 @@ import { OFFICIAL_PRESET_KEYS, type OfficialPresetKey } from '@/common/types/age
 export type ConversationRuntimeAuthority = 'idle' | 'processing' | 'unknown';
 
 type ActivitySnapshot = Pick<TChatConversation, 'runtime' | 'status'> & Partial<Pick<TChatConversation, 'extra'>>;
-export type ConversationActivity = 'idle' | 'running' | 'paused';
+export type ConversationActivity = 'idle' | 'running' | 'waiting' | 'paused';
 
 /** Presentation derived from the existing canonical projection, never a second
  * lifecycle. Undefined means the snapshot has not established activity. */
@@ -14,11 +14,11 @@ export const getConversationActivity = (conversation?: ActivitySnapshot | null):
   if (!conversation) return undefined;
   if (conversation.status === 'finished') return 'idle';
   const runtime = conversation.runtime;
+  if (runtime?.state === 'waiting') return runtime.active_turn_id && runtime.is_processing === false
+    && runtime.can_send_message === false && runtime.turn_outcome?.kind === 'waiting' ? 'waiting' : undefined;
+  if (runtime?.state === 'paused' || runtime?.state === 'reconciliation') return runtime.active_turn_id && runtime.is_processing === false
+    && runtime.can_send_message === false ? 'paused' : undefined;
   if (conversation.status === 'running') {
-    if (conversation.extra?.execution_phase === 'paused') {
-      return runtime?.state === 'idle' && runtime.is_processing === false
-        && runtime.can_send_message === false && runtime.active_turn_id ? 'paused' : undefined;
-    }
     if (runtime?.is_processing === true && runtime.active_turn_id) return 'running';
     return undefined;
   }
@@ -62,7 +62,8 @@ export const getConversationPauseNotice = (
     : undefined;
   return {
     turnId: runtime.active_turn_id,
-    reason: typeof pause?.reason === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(pause.reason) ? pause.reason : undefined,
+    reason: runtime.state === 'reconciliation' ? 'NATIVE_RECOVERY_RECONCILIATION_REQUIRED'
+      : typeof pause?.reason === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(pause.reason) ? pause.reason : undefined,
     cleanupProven: pause?.cleanup_proven === true,
     pausedAt: typeof pause?.paused_at_ms === 'number' && Number.isFinite(pause.paused_at_ms) && pause.paused_at_ms > 0
       ? pause.paused_at_ms : undefined,
@@ -72,6 +73,13 @@ export const getConversationPauseNotice = (
 
 export type ConversationPauseNotice = NonNullable<ReturnType<typeof getConversationPauseNotice>>;
 
+export const getConversationWaitingNotice = (conversation?: ActivitySnapshot | null) => {
+  const runtime = conversation?.runtime;
+  if (getConversationActivity(conversation) !== 'waiting' || !runtime?.active_turn_id || runtime.turn_outcome?.kind !== 'waiting') return null;
+  return { turnId: runtime.active_turn_id, outcome: runtime.turn_outcome, canSteer: runtime.can_steer === true };
+};
+export type ConversationWaitingNotice = NonNullable<ReturnType<typeof getConversationWaitingNotice>>;
+
 export const getConversationRuntimeAuthority = (
   conversation?: Pick<TChatConversation, 'runtime' | 'status'> | null
 ): ConversationRuntimeAuthority => {
@@ -79,7 +87,7 @@ export const getConversationRuntimeAuthority = (
 
   const activity = getConversationActivity(conversation);
   // The queue's existing authority contract deliberately excludes suspension.
-  return activity === 'running' ? 'processing' : activity === 'idle' ? 'idle' : 'unknown';
+  return activity === 'running' || activity === 'waiting' ? 'processing' : activity === 'idle' ? 'idle' : 'unknown';
 };
 
 export const isConversationProcessing = (conversation?: Pick<TChatConversation, 'runtime' | 'status'> | null) => {

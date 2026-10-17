@@ -23,7 +23,7 @@ test('verified hydration and turn.started publish exact identity and stopping cl
   for (const name of ['responseStream', 'turnCompleted', 'turnPaused', 'userCreated', 'messageAnnotated'] as const) {
     spyOn(ipcBridge.conversation[name], 'on').mockImplementation(() => () => {});
   }
-  const runtime = { state: 'running' as const, is_processing: true, can_send_message: false, has_runtime: true, active_turn_id: turnId, processing_started_at: 1000 };
+  const runtime = { state: 'running' as const, is_processing: true, can_send_message: false, active_turn_id: turnId, processing_started_at: 1000 };
   const get = spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ id: conversationId, type: 'nomi', status: 'running', runtime } as TChatConversation);
   const hook = renderHook(() => useNomiMessage(conversationId), { wrapper });
   await waitFor(() => expect(hook.result.current.hasHydratedRunningState).toBe(true));
@@ -65,8 +65,7 @@ test('a full chat remount recovers the same canonical start without resetting it
     spyOn(ipcBridge.conversation[name], 'on').mockImplementation(() => () => {});
   }
   const snapshot = { id: conversationId, type: 'nomi', status: 'running', runtime: {
-    state: 'running', is_processing: true, can_send_message: false, has_runtime: true,
-    active_turn_id: turnId, processing_started_at: 1000,
+    state: 'running', is_processing: true, can_send_message: false, active_turn_id: turnId, processing_started_at: 1000,
   } } as TChatConversation;
   const get = spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue(snapshot);
   const first = renderHook(() => useNomiMessage(conversationId), { wrapper });

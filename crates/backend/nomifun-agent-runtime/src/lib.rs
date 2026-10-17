@@ -26,8 +26,6 @@ pub use completion::{AgentCompletionCriterion, AgentCompletionObservation, Agent
 mod delivery_review;
 mod completion_review;
 pub use completion_review::{AgentCompletionReviewState, AgentExecutionPhase};
-mod completion_check;
-pub use completion_check::{AgentCompletionCheck, AgentCompletionCheckPort};
 mod context;
 mod context_resources;
 mod remote_resources;
@@ -66,6 +64,9 @@ pub use planning::{AgentPlan, AgentPlanStatus, AgentPlanStep};
 #[cfg(test)]
 mod test_support;
 mod stream_limits;
+mod wait;
+pub use wait::{AgentWaitPort, AgentWaitProcess, AgentWaitRequest, AgentWaitWake, AgentOwnedProcessObservation};
+mod stop_resolution;
 mod steering;
 pub use steering::{AgentInputPort, AgentSteeringInput};
 #[path = "user_input.rs"]
