@@ -818,13 +818,11 @@ impl NomiCoreSessionOwner {
         }
         workspace
             .map(|workspace| {
-                // Creation already froze an existing canonical directory into
-                // this exact owner/binding. Its later absence must not block
-                // independent absolute file targets or an explicit process cwd.
-                super::nomi_core_wave2::canonical_workspace_root(
-                    std::path::Path::new(&workspace),
-                )
-                .map(|path| path.to_string_lossy().into_owned())
+                // Creation froze an existing canonical directory into this
+                // owner/binding. Its later absence does not block independent
+                // absolute targets; the shared proof preserves its anchor.
+                nomifun_knowledge::resolve_unbound_workspace_anchor(std::path::Path::new(&workspace))
+                    .map(|path| nomifun_common::paths::simplified(&path).to_string_lossy().into_owned())
             })
             .transpose()
     }

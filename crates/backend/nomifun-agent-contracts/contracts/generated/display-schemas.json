@@ -247,5 +247,53 @@
     ],
     "title": "RuntimeToolHoldReason",
     "type": "string"
+  },
+  "system_execution_failure": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "The original native system owner failure. Optional facts remain unknown\nwhen that owner did not report them; cleanup does not prove non-dispatch.",
+    "properties": {
+      "cleanup_proven": {
+        "default": null,
+        "type": [
+          "boolean",
+          "null"
+        ]
+      },
+      "code": {
+        "type": "string"
+      },
+      "kind": {
+        "default": null,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "message": {
+        "type": "string"
+      },
+      "raw_os_error": {
+        "default": null,
+        "format": "int32",
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "user_code_not_started": {
+        "default": null,
+        "type": [
+          "boolean",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "code",
+      "message"
+    ],
+    "title": "SystemExecutionFailure",
+    "type": "object"
   }
 }

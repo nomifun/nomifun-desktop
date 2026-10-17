@@ -83,6 +83,10 @@ flowchart LR
 
 Turn 与 Effect 索引只保留生命周期及精确 `terminal_event_id`，不镜像终态正文；读取在原事务内验证起止事件、归属、状态和索引边界后解析原 Payload。Payload 只保存数据库中的非空内容，不声明未实现的对象目录。前向迁移只删除这些冗余列，物理替换 Payload 表时逐字节保留已有内容、身份及事件引用；无法读取的对象模式数据拒绝迁移。原 baseline 和已提交迁移 checksum 不变，不转换退役 Agent 数据，也不清除现役 Session。
 
+Windows 显式 native 文件修改的目标证明保存在原 Effect started 的 typed `native_mutation_targets`，不增加目标表或第二账本。Windows Store 在原写事务内读取并验证 pending/unknown 的原 Event/Payload，再原子检查跨项目、Session 与执行身份的物理重叠及提交准入；结算不能替换或给旧事实倒填目标。实际执行持有同一次捕获的 native pins，数据库事务不跨 I/O。原 owner、project/resource、Snapshot 和幂等身份继续校验。publication 与动态目录采用明确的原生卷保守范围，普通 Entry 比较对象与命名空间；缺失充分旧证明时拒绝无法证明不相交的新文件修改，不读取当前磁盘重建过去。其他平台保留原文件 owner 和项目围栏，本次不声明 Unix mount 目标证明。精确范围和 opaque process 边界见[全局操作系统能力](global-os-capabilities.zh.md)。
+
+该围栏按用户明确选择的合作式并发边界协调 NomiFun 已准入的显式文件 Action，不证明其他程序或用户同时编辑文件、链接与 staging 名称时的全局目标冻结。外部竞争由用户协调；发现实际变化或不完整结果仍保留原部分效果、unknown 与清理证明，不自动重放、不回填旧事实。不能把这个范围说成任意 process/shell 的完整文件 footprint。
+
 应用工作区的内置应用 Agent 复用普通 coding、Skill、MCP 和 typed resources；个人 Agent 也可明确选入同一应用开发能力。托管工具直接调用 UI 同一命令与进程 owner，不建立专属计划、预览资格、交付证明或 checkpoint。空闲会话的 Agent、资源、知识库与扩展选择走同一 canonical binding transition，仍受活动 Turn、Remote、Attempt、未知效果与原生 checkpoint 校验约束。应用工作区固定模板的产品要求不允许借重开入口替换已有 binding。当前会话效果和产物继续读取精确 Turn 的 typed canonical event/payload，不从工具提示或网页状态补造成功。
 
 ### 回合完成后的知识回写
@@ -616,6 +620,8 @@ Agent transition 的展示 `reference` 保持严格的 typed Payload，不混入
 解析 Operation 后调用精确取消；迟到的旧回合取消不影响后继回合。
 
 错误终态的诊断信息从本 Turn 已准入的 Agent、模型和工作区捕获，随同原始 detail 保存在既有 canonical 终态 payload 中。任务未完成的具体原因由后端生成 typed `taskIncompleteReason`，renderer 不从 detail 文字猜测原因。实时错误与历史投影读取同一终态信息；缺少历史诊断字段时不借用会话当前选择补造上下文。面向用户的原因和建议与折叠的技术细节分层展示。
+
+系统认证与执行设施的故障沿原 `AgentTurnFailure::SystemExecution` 及 `systemExecutionError` 进入同一失败终态和 API/renderer；code、kind、raw OS error、未启动及清理证据均取真实 typed 来源，可选未知值不补造。预检认证取消是 failed Turn，仍等待原 owner cleanup；不等于用户 Stop、binding 缺失或执行成功。派发后的 transport unknown 不降级为未执行取消，也不授予自动重试。旧错误事件与失败报告保持原样。
 
 模型请求的细分原因与请求证据使用同一个 `ModelFailureDiagnostic`，从调用层经过 Broker、typed failure 和既有终态进入 `providerDiagnostic`；不从英文文案、消息投影或未知错误正文重建分类。明确的上游机器码优先于笼统状态；401、403、404、429 等单独不足以证明 Key 过期、模型权限、错误 API 路径或余额耗尽时，提示保留不确定范围。记录脱敏的实际请求地址、服务商与模型、协议及认证方式、HTTP 状态、上游码/类型/参数、请求 ID 和等待提示；任意响应正文、凭证和认证头值不进入诊断。安全的本地传输原因可作为技术详情，诊断不改变重试、权限或终态规则。故障切换后的请求身份与会话所选模型分别展示；账号外链只使用与已记录服务商身份相符的可信配置。
 

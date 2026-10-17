@@ -732,7 +732,7 @@ async fn resolve_managed_program(
     // Explicit shell text stays shell text; the owner selects the platform shell.
     // Its child environment still receives newly prepared runtimes and user tools.
     if request.shell_script.is_some() {
-        request.env = nomifun_runtime::process_environment(&env).map_err(|cause| runtime_resolution_error(&cause))?
+        request.env = nomifun_runtime::process_environment_for(nomifun_runtime::ProcessEnvironmentTarget::platform_shell(), &env).map_err(|cause| runtime_resolution_error(&cause))?
             .into_iter().collect();
         return Ok(());
     }

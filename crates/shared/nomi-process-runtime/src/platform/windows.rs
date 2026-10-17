@@ -7,14 +7,17 @@ pub fn windows_conpty_close_metrics() -> Result<Option<WindowsConPtyCloseMetrics
     conpty::windows_conpty_close_metrics()
 }
 mod handles;
+mod scripts;
 
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     ffi::{OsStr, OsString, c_void},
-    io,
-    mem,
-    os::windows::ffi::{OsStrExt, OsStringExt},
+    io, mem,
+    os::windows::{
+        ffi::{OsStrExt, OsStringExt},
+        process::CommandExt,
+    },
     path::{Path, PathBuf},
     ptr,
     sync::{
@@ -29,9 +32,9 @@ use async_trait::async_trait;
 use tokio::sync::watch;
 use windows_sys::Win32::{
     Foundation::{
-        DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_BROKEN_PIPE,
-        ERROR_INVALID_PARAMETER, ERROR_NO_DATA, FILETIME, HANDLE, HANDLE_FLAG_INHERIT,
-        WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT, SetHandleInformation,
+        DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_BROKEN_PIPE, ERROR_INVALID_PARAMETER,
+        ERROR_NO_DATA, FILETIME, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_FAILED,
+        WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     Globalization::{CSTR_GREATER_THAN, CSTR_LESS_THAN, CompareStringOrdinal},
     Security::SECURITY_ATTRIBUTES,
@@ -42,36 +45,35 @@ use windows_sys::Win32::{
             TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
         },
         JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            IsProcessInJob,
-            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_BASIC_PROCESS_ID_LIST,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
-            JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation,
-            QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
+            AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+            JOBOBJECT_BASIC_PROCESS_ID_LIST, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList,
+            JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+            TerminateJobObject,
         },
         Pipes::CreatePipe,
         SystemInformation::GetWindowsDirectoryW,
         Threading::{
-            CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
-            CreateProcessW, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
-            GetProcessId, GetProcessTimes, OpenProcess, OpenThread, PROCESS_INFORMATION,
-            PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
-            PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, QueryFullProcessImageNameW, ResumeThread,
-            STARTF_USESTDHANDLES, STARTUPINFOEXW, THREAD_SUSPEND_RESUME, TerminateProcess,
-            WaitForSingleObject,
+            CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+            EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess, GetProcessId,
+            GetProcessTimes, OpenProcess, OpenThread, PROCESS_INFORMATION, PROCESS_NAME_WIN32,
+            PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_SYNCHRONIZE,
+            PROCESS_TERMINATE, QueryFullProcessImageNameW, ResumeThread, STARTF_USESTDHANDLES,
+            STARTUPINFOEXW, THREAD_SUSPEND_RESUME, TerminateProcess, WaitForSingleObject,
         },
     },
 };
 
-use self::handles::{OwnedHandle, ProcThreadAttributeList};
 use self::conpty::{PreparedConPty, PseudoConsoleControl};
-use super::{ExitFact, PlatformProcess, SpawnedPlatformProcess};
+use self::handles::{OwnedHandle, ProcThreadAttributeList};
 use super::poller::{
     LifecyclePoll, LifecyclePollJob, PlatformLifecyclePermit, platform_lifecycle_poller,
 };
+use super::{ExitFact, PlatformProcess, SpawnedPlatformProcess};
 use crate::{
-    CleanupReport, CommandSpec, ProcessError, NormalizedProcessRequest, OutputBuffer,
-    OutputStream, ProcessSnapshot, ProcessState, ShellKind, SpawnFailure,
+    CleanupReport, CommandSpec, NormalizedProcessRequest, OutputBuffer, OutputStream, ProcessError,
+    ProcessSnapshot, ProcessState, ShellKind, SpawnFailure,
 };
 
 const READ_BUFFER_BYTES: usize = 8 * 1024;
@@ -607,8 +609,13 @@ pub(super) async fn spawn_pipe(
     cancellation: Arc<StartCancellation>,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
     spawn_inner_with_cancellation(
-        request, output, Arc::new(SystemWin32), SpawnTransport::Pipe, Some(cancellation),
-    ).await
+        request,
+        output,
+        Arc::new(SystemWin32),
+        SpawnTransport::Pipe,
+        Some(cancellation),
+    )
+    .await
 }
 
 #[derive(Clone)]
@@ -670,17 +677,16 @@ impl ChildProcessCleanup {
             CLEANUP_TIMEOUT + CLEANUP_TIMEOUT + Duration::from_secs(1),
             wait,
         )
-            .await
-            .map_err(|_| io::Error::new(
+        .await
+        .map_err(|_| {
+            io::Error::new(
                 io::ErrorKind::TimedOut,
                 "child-process Job cleanup proof timed out",
-            ))?
+            )
+        })?
     }
 
-    pub(crate) async fn shutdown(
-        &self,
-        child: &mut tokio::process::Child,
-    ) -> io::Result<()> {
+    pub(crate) async fn shutdown(&self, child: &mut tokio::process::Child) -> io::Result<()> {
         let Some(process) = self.process.as_ref() else {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -700,12 +706,9 @@ pub(crate) fn spawn_child_process(
     hand_off: bool,
 ) -> io::Result<(tokio::process::Child, ChildProcessCleanup)> {
     if hand_off {
-        return command.spawn().map(|child| {
-            (
-                child,
-                ChildProcessCleanup { process: None },
-            )
-        });
+        return command
+            .spawn()
+            .map(|child| (child, ChildProcessCleanup { process: None }));
     }
 
     // Reserve cleanup authority before CreateProcess can create a physical
@@ -837,11 +840,7 @@ pub(crate) fn spawn_child_process(
         completion,
         shutdown_requested: AtomicBool::new(false),
     });
-    if let Err(error) = register_child_process_job(
-        pid,
-        Arc::clone(&process),
-        platform_permit,
-    ) {
+    if let Err(error) = register_child_process_job(pid, Arc::clone(&process), platform_permit) {
         let _ = process.job.close_for_kill();
         let _ = unsafe { WaitForSingleObject(process.process.as_raw(), 5_000) };
         return Err(error);
@@ -925,7 +924,9 @@ fn retain_failed_windows_child_spawn(
             ));
         }
         if let Err(termination_error) = job.terminate() {
-            diagnostics.push(format!("terminate suspended process Job: {termination_error}"));
+            diagnostics.push(format!(
+                "terminate suspended process Job: {termination_error}"
+            ));
         }
         if let Err(snapshot_error) = job.retain_current_members() {
             diagnostics.push(format!(
@@ -959,7 +960,9 @@ fn retain_failed_windows_child_spawn(
             }
         }
         Err(poller_error) => {
-            diagnostics.push(format!("platform cleanup poller unavailable: {poller_error}"));
+            diagnostics.push(format!(
+                "platform cleanup poller unavailable: {poller_error}"
+            ));
             std::mem::forget(debt);
         }
     }
@@ -1078,9 +1081,7 @@ impl LifecyclePollJob for WindowsChildSpawnFailurePoller {
     }
 }
 
-pub(crate) async fn kill_process_tree(
-    child: &mut tokio::process::Child,
-) -> io::Result<()> {
+pub(crate) async fn kill_process_tree(child: &mut tokio::process::Child) -> io::Result<()> {
     let Some(pid) = child.id() else {
         return child.wait().await.map(|_| ());
     };
@@ -1102,11 +1103,10 @@ pub(crate) async fn kill_process_tree(
 /// fails, retry it once before closing the kill-on-close Job so a transient
 /// failure can still produce a complete post-request member snapshot.
 fn request_child_process_job_shutdown(process: &ChildProcessJob) {
-    process.shutdown_requested.store(true, AtomicOrdering::Release);
-    if let Err(error) = process
-        .job
-        .capture_pre_termination_members_with_retry()
-    {
+    process
+        .shutdown_requested
+        .store(true, AtomicOrdering::Release);
+    if let Err(error) = process.job.capture_pre_termination_members_with_retry() {
         tracing::warn!(%error, "could not capture child-process Job members before termination");
     }
     match process.job.terminate() {
@@ -1122,10 +1122,7 @@ fn request_child_process_job_shutdown(process: &ChildProcessJob) {
             // retry. Reusing the original idempotent capture here would leave
             // members created after the first snapshot outside the retained
             // interval proof.
-            if let Err(snapshot_error) = process
-                .job
-                .refresh_pre_termination_members_with_retry()
-            {
+            if let Err(snapshot_error) = process.job.refresh_pre_termination_members_with_retry() {
                 tracing::warn!(
                     %snapshot_error,
                     "could not capture child-process Job members before termination retry"
@@ -1292,7 +1289,12 @@ impl LifecyclePollJob for ChildProcessJobPoller {
     fn poll(&mut self, now: Instant) -> LifecyclePoll {
         match handle_is_signaled(self.process.process.as_raw()) {
             Ok(true) => LifecyclePoll::Blocking,
-            Ok(false) if self.process.shutdown_requested.load(AtomicOrdering::Acquire) => {
+            Ok(false)
+                if self
+                    .process
+                    .shutdown_requested
+                    .load(AtomicOrdering::Acquire) =>
+            {
                 LifecyclePoll::Blocking
             }
             Ok(false) => LifecyclePoll::Pending {
@@ -1370,18 +1372,14 @@ fn reap_child_process_job(process: &ChildProcessJob) -> io::Result<()> {
         // Snapshot first, but issue termination regardless of snapshot/query
         // failure. The retained pre-termination handles are the exact proof;
         // the post-request merge covers the narrow snapshot-to-kill interval.
-        let snapshot_result = process
-            .job
-            .capture_pre_termination_members_with_retry();
+        let snapshot_result = process.job.capture_pre_termination_members_with_retry();
         let termination_result = process.job.terminate();
         let supplemental_snapshot_result = process.job.retain_current_members();
         snapshot_result?;
         termination_result?;
         supplemental_snapshot_result?;
         process.job.wait_empty_until(cleanup_deadline)?;
-        process
-            .job
-            .wait_retained_members_until(cleanup_deadline)?;
+        process.job.wait_retained_members_until(cleanup_deadline)?;
         process.job.close_proven_empty()
     });
     match result {
@@ -1542,8 +1540,7 @@ fn resume_child_process_primary_thread(pid: u32) -> io::Result<()> {
     // SAFETY: a successful snapshot call returns a fresh owned handle.
     let snapshot = unsafe { OwnedHandle::from_raw(snapshot)? };
     let mut entry = THREADENTRY32 {
-        dwSize: u32::try_from(mem::size_of::<THREADENTRY32>())
-            .expect("THREADENTRY32 fits in u32"),
+        dwSize: u32::try_from(mem::size_of::<THREADENTRY32>()).expect("THREADENTRY32 fits in u32"),
         ..THREADENTRY32::default()
     };
     // SAFETY: snapshot is live and entry is writable storage with dwSize set.
@@ -1552,9 +1549,7 @@ fn resume_child_process_primary_thread(pid: u32) -> io::Result<()> {
     }
     let mut only_thread = None;
     loop {
-        if entry.th32OwnerProcessID == pid
-            && only_thread.replace(entry.th32ThreadID).is_some()
-        {
+        if entry.th32OwnerProcessID == pid && only_thread.replace(entry.th32ThreadID).is_some() {
             return Err(io::Error::other(format!(
                 "suspended child-process PID {pid} exposed more than one thread before resume"
             )));
@@ -1621,13 +1616,7 @@ async fn spawn_pty_inner(
     cols: u16,
     rows: u16,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
-    spawn_inner(
-        request,
-        output,
-        api,
-        SpawnTransport::Pty { cols, rows },
-    )
-    .await
+    spawn_inner(request, output, api, SpawnTransport::Pty { cols, rows }).await
 }
 
 #[cfg(test)]
@@ -1648,21 +1637,20 @@ async fn spawn_inner_with_cancellation(
     external_cancellation: Option<Arc<StartCancellation>>,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
     let prepared = PreparedCommand::new(&request)?;
-    let setup_timeout = request
-        .policy
-        .deadline
-        .map(|deadline| deadline.saturating_duration_since(Instant::now()))
-        .unwrap_or(SETUP_TIMEOUT)
-        .min(SETUP_TIMEOUT);
-    if setup_timeout.is_zero() {
+    // Preserve the caller's absolute deadline. Rebuilding it from a remaining
+    // duration and a second `now` would extend it if this thread was preempted
+    // between those clock reads.
+    let setup_started = Instant::now();
+    let setup_deadline = setup_started
+        .checked_add(SETUP_TIMEOUT)
+        .ok_or_else(|| invalid_command("Windows setup deadline overflowed"))?;
+    let deadline = request.policy.deadline.map_or(setup_deadline, |deadline| deadline.min(setup_deadline));
+    if deadline <= setup_started {
         return Err(spawn_failed(io::Error::new(
             io::ErrorKind::TimedOut,
             "process deadline elapsed before Windows ownership setup",
         )));
     }
-    let deadline = Instant::now()
-        .checked_add(setup_timeout)
-        .ok_or_else(|| invalid_command("Windows setup deadline overflowed"))?;
     let runtime = tokio::runtime::Handle::current();
     let platform_permit = platform_lifecycle_poller()
         .map_err(spawn_failed)?
@@ -1692,15 +1680,14 @@ async fn spawn_inner_with_cancellation(
     )
     .await
     {
-        Ok(joined) => joined
-            .map_err(|error| {
-                start_lost(
-                    "windows_spawn_worker_failed",
-                    format!("Windows spawn transaction failed to join: {error}"),
-                    None,
-                    CleanupReport::default(),
-                )
-            })??,
+        Ok(joined) => joined.map_err(|error| {
+            start_lost(
+                "windows_spawn_worker_failed",
+                format!("Windows spawn transaction failed to join: {error}"),
+                None,
+                CleanupReport::default(),
+            )
+        })??,
         Err(_) => {
             cancellation.cancel();
             match transaction.await {
@@ -1718,9 +1705,9 @@ async fn spawn_inner_with_cancellation(
                         ..CleanupReport::default()
                     };
                     if let Err(error) = owner.force_kill().await {
-                        cleanup
-                            .errors
-                            .push(format!("terminate process Job after start timeout: {error}"));
+                        cleanup.errors.push(format!(
+                            "terminate process Job after start timeout: {error}"
+                        ));
                     }
                     let cleanup_deadline = Instant::now()
                         .checked_add(CLEANUP_TIMEOUT)
@@ -1923,9 +1910,7 @@ fn spawn_transaction(
         0 => {
             transaction.phase = SpawnPhase::Resumed;
             return Err(transaction.into_failure(
-                io::Error::other(
-                    "ResumeThread reported an already-running primary thread",
-                ),
+                io::Error::other("ResumeThread reported an already-running primary thread"),
                 deadline,
             ));
         }
@@ -2060,8 +2045,7 @@ impl LifecyclePollJob for WindowsLifecyclePollerJob {
             }
             Err(error) => {
                 let kind = error.kind();
-                let mut message =
-                    lifecycle_failure_message(error, &self.process, &self.job);
+                let mut message = lifecycle_failure_message(error, &self.process, &self.job);
                 if let Some(pseudoconsole) = failure_pseudoconsole {
                     let close_deadline = Instant::now()
                         .checked_add(conpty::CLOSE_TIMEOUT)
@@ -2259,11 +2243,7 @@ struct SpawnTransaction {
 }
 
 impl SpawnTransaction {
-    fn new(
-        job: Arc<JobControl>,
-        io: PreparedIo,
-        platform_permit: PlatformLifecyclePermit,
-    ) -> Self {
+    fn new(job: Arc<JobControl>, io: PreparedIo, platform_permit: PlatformLifecyclePermit) -> Self {
         Self {
             pid: None,
             process: None,
@@ -2276,10 +2256,7 @@ impl SpawnTransaction {
         }
     }
 
-    fn configure_attributes(
-        &mut self,
-        attributes: &mut ProcThreadAttributeList,
-    ) -> io::Result<()> {
+    fn configure_attributes(&mut self, attributes: &mut ProcThreadAttributeList) -> io::Result<()> {
         self.io
             .as_ref()
             .expect("transport I/O is owned")
@@ -2330,9 +2307,7 @@ impl SpawnTransaction {
     }
 
     fn pseudoconsole_control(&self) -> Option<Arc<PseudoConsoleControl>> {
-        self.io
-            .as_ref()
-            .and_then(PreparedIo::pseudoconsole_control)
+        self.io.as_ref().and_then(PreparedIo::pseudoconsole_control)
     }
 
     fn into_failure(mut self, error: io::Error, setup_deadline: Instant) -> ProcessError {
@@ -2405,7 +2380,8 @@ impl SpawnTransaction {
             } else {
                 // SAFETY: process is the exact suspended process created by
                 // this transaction. No user instruction has run.
-                if unsafe { TerminateProcess(process.as_raw(), TERMINATED_BY_HOST_EXIT_CODE) } == 0 {
+                if unsafe { TerminateProcess(process.as_raw(), TERMINATED_BY_HOST_EXIT_CODE) } == 0
+                {
                     let error = io::Error::last_os_error();
                     if !handle_is_signaled(process.as_raw()).unwrap_or(false) {
                         cleanup
@@ -2530,10 +2506,7 @@ impl PreparedIo {
         }
     }
 
-    fn configure_attributes(
-        &self,
-        attributes: &mut ProcThreadAttributeList,
-    ) -> io::Result<()> {
+    fn configure_attributes(&self, attributes: &mut ProcThreadAttributeList) -> io::Result<()> {
         match self {
             Self::Pipe {
                 child_stdin,
@@ -2633,12 +2606,7 @@ impl PreparedIo {
                 (
                     stdin,
                     vec![
-                        start_reader(
-                            runtime,
-                            stdout,
-                            OutputStream::Stdout,
-                            Arc::clone(&output),
-                        ),
+                        start_reader(runtime, stdout, OutputStream::Stdout, Arc::clone(&output)),
                         start_reader(runtime, stderr, OutputStream::Stderr, output),
                     ],
                     None,
@@ -2653,7 +2621,12 @@ impl PreparedIo {
                 let output_handle = pty_output.take().expect("ConPTY output is owned");
                 (
                     input,
-                    vec![start_reader(runtime, output_handle, OutputStream::Pty, output)],
+                    vec![start_reader(
+                        runtime,
+                        output_handle,
+                        OutputStream::Pty,
+                        output,
+                    )],
                     Some(Arc::clone(control)),
                 )
             }
@@ -2796,16 +2769,7 @@ fn process_identity_from_handle(handle: HANDLE) -> io::Result<WindowsProcessIden
     let mut user = FILETIME::default();
     // SAFETY: every FILETIME pointer is writable and the exact process handle
     // remains live for the complete query.
-    if unsafe {
-        GetProcessTimes(
-            handle,
-            &mut creation,
-            &mut exit,
-            &mut kernel,
-            &mut user,
-        )
-    } == 0
-    {
+    if unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
         return Err(io::Error::last_os_error());
     }
     let platform_start_key =
@@ -2817,8 +2781,7 @@ fn process_identity_from_handle(handle: HANDLE) -> io::Result<WindowsProcessIden
             "process creation FILETIME is invalid",
         ));
     }
-    let start_time_epoch_seconds =
-        (platform_start_key - WINDOWS_TO_UNIX_EPOCH_100NS) / 10_000_000;
+    let start_time_epoch_seconds = (platform_start_key - WINDOWS_TO_UNIX_EPOCH_100NS) / 10_000_000;
 
     let mut image = vec![0_u16; 32_768];
     let mut image_len = image.len() as u32;
@@ -3265,10 +3228,7 @@ fn open_verified_job_member(job: HANDLE, pid: u32) -> io::Result<Option<OwnedHan
 
 fn query_job_process_ids(job: HANDLE) -> io::Result<Vec<u32>> {
     const INITIAL_PROCESS_SLOTS: usize = 16;
-    let process_id_offset = std::mem::offset_of!(
-        JOBOBJECT_BASIC_PROCESS_ID_LIST,
-        ProcessIdList
-    );
+    let process_id_offset = std::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList);
     let mut slots = INITIAL_PROCESS_SLOTS;
     loop {
         let byte_len = process_id_offset
@@ -3294,8 +3254,7 @@ fn query_job_process_ids(job: HANDLE) -> io::Result<Vec<u32>> {
             )
         } != 0
         {
-            let list =
-                unsafe { &*(buffer.as_ptr().cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>()) };
+            let list = unsafe { &*(buffer.as_ptr().cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>()) };
             let count = usize::try_from(list.NumberOfProcessIdsInList)
                 .map_err(|_| io::Error::other("process Job member count overflow"))?;
             if count > slots {
@@ -3304,9 +3263,7 @@ fn query_job_process_ids(job: HANDLE) -> io::Result<Vec<u32>> {
             }
             // SAFETY: QueryInformationJobObject reported `count <= slots`
             // initialized entries in the flexible ProcessIdList tail.
-            let ids = unsafe {
-                std::slice::from_raw_parts(list.ProcessIdList.as_ptr(), count)
-            };
+            let ids = unsafe { std::slice::from_raw_parts(list.ProcessIdList.as_ptr(), count) };
             return ids
                 .iter()
                 .map(|pid| {
@@ -3329,10 +3286,7 @@ fn query_job_process_ids(job: HANDLE) -> io::Result<Vec<u32>> {
     }
 }
 
-fn wait_process_handles_until(
-    processes: &[OwnedHandle],
-    deadline: Instant,
-) -> io::Result<()> {
+fn wait_process_handles_until(processes: &[OwnedHandle], deadline: Instant) -> io::Result<()> {
     for process in processes {
         wait_handle_until(process.as_raw(), deadline)?;
     }
@@ -3463,11 +3417,7 @@ fn run_lifecycle(
     })
 }
 
-fn lifecycle_failure_message(
-    error: io::Error,
-    process: &OwnedHandle,
-    job: &JobControl,
-) -> String {
+fn lifecycle_failure_message(error: io::Error, process: &OwnedHandle, job: &JobControl) -> String {
     let deadline = Instant::now()
         .checked_add(CLEANUP_TIMEOUT)
         .unwrap_or_else(Instant::now);
@@ -3532,10 +3482,7 @@ fn finish_readers(readers: Vec<ReaderCompletion>, caller_deadline: Instant) -> i
     }
 }
 
-fn drain_pty_readers_after_close(
-    readers: Vec<ReaderCompletion>,
-    caller_deadline: Instant,
-) {
+fn drain_pty_readers_after_close(readers: Vec<ReaderCompletion>, caller_deadline: Instant) {
     let deadline = caller_deadline.min(
         Instant::now()
             .checked_add(POST_EXIT_READER_DRAIN)
@@ -3595,8 +3542,8 @@ impl PlatformProcess for WindowsOwner {
                 .as_raw();
             write_all(handle, &bytes)
         })
-            .await
-            .map_err(|error| io::Error::other(format!("stdin writer task failed: {error}")))?
+        .await
+        .map_err(|error| io::Error::other(format!("stdin writer task failed: {error}")))?
     }
 
     async fn close_stdin(&self) -> io::Result<()> {
@@ -3803,16 +3750,134 @@ struct PreparedCommand {
     environment: Vec<u16>,
 }
 
+/// Raw-stdio adapters such as MCP retain their existing child lifecycle owner
+/// while sharing exactly the same script encoding as ProcessSupervisor.
+pub(crate) fn script_launcher(program: &OsStr) -> io::Result<Option<OsString>> {
+    match scripts::script_kind(program) {
+        Some(scripts::ScriptKind::Batch) => windows_directory()
+            .map(|directory| Some(directory.join("System32").join("cmd.exe").into_os_string())),
+        Some(scripts::ScriptKind::PowerShell) => powershell_executable().map(Some),
+        None => Ok(None),
+    }
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
+}
+
+pub(crate) fn configure_script_child(
+    command: &mut tokio::process::Command,
+    program: &OsStr,
+    args: &[OsString],
+) -> io::Result<()> {
+    let cwd = command
+        .as_std()
+        .get_current_dir()
+        .map(Path::to_owned)
+        .map_or_else(std::env::current_dir, Ok)?;
+    let path = Path::new(program);
+    let path = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        cwd.join(path)
+    };
+    let program = crate::request::canonicalize_compatible(&path)
+        .unwrap_or(path)
+        .into_os_string();
+    match scripts::script_kind(&program) {
+        Some(scripts::ScriptKind::Batch) => {
+            scripts::validate_batch_cwd(&cwd)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            let line = scripts::batch_command_line(command.as_std().get_program(), &program, args)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            // The standard builder owns argv[0]. Pass the remaining cmd source
+            // as one already-encoded string rather than applying CRT quoting.
+            let mut prefix = Vec::new();
+            append_quoted(command.as_std().get_program(), &mut prefix)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            let raw = OsString::from_wide(&line[prefix.len() + 1..line.len() - 1]);
+            command.as_std_mut().raw_arg(raw);
+        }
+        Some(scripts::ScriptKind::PowerShell) => {
+            command.args(
+                scripts::powershell_arguments(&program, args)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?,
+            );
+        }
+        None => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Windows script identity changed before launch",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn configure_powershell_child_environment(
+    command: &mut tokio::process::Command,
+    inherit_environment: bool,
+) -> io::Result<()> {
+    if !inherit_environment { return Ok(()); }
+    let program = Path::new(command.as_std().get_program());
+    let program = if program.is_absolute() {
+        program.to_owned()
+    } else {
+        let cwd = command
+            .as_std()
+            .get_current_dir()
+            .map(Path::to_owned)
+            .map_or_else(std::env::current_dir, Ok)?;
+        cwd.join(program)
+    };
+    // Inspect the final application and child cwd, including implicit PS1's
+    // trusted launcher. Explicit env/envs or env_remove always retains priority.
+    if is_system_powershell(program.as_os_str())
+        && !command.as_std().get_envs().any(|(key, _)| {
+            compare_os_case_insensitive(key, OsStr::new("PSModulePath")) == Ordering::Equal
+        })
+    {
+        if let Some(ambient) = std::env::var_os("PSModulePath") {
+            command.env("PSModulePath", crate::windows_powershell_module_path(&ambient)?);
+        }
+    }
+    Ok(())
+}
+
 impl PreparedCommand {
     fn new(request: &NormalizedProcessRequest) -> Result<Self, ProcessError> {
         let (program, args) = command_argv(&request.command)?;
-        let application_program = resolve_program_on_path(&program, &request.env);
+        let resolved_program = resolve_program_on_path(&program, &request.env, &request.cwd);
+        // Script adaptation belongs to the process owner, so Pipe, ConPTY,
+        // Agent, MCP, Terminal and system runners all use the same argv rules.
+        // An explicitly selected shell keeps its existing source semantics.
+        let (application_program, command_line) =
+            if matches!(&request.command, CommandSpec::Program { .. })
+                && let Some(kind) = scripts::script_kind(&resolved_program)
+            {
+                match kind {
+                    scripts::ScriptKind::Batch => {
+                        scripts::validate_batch_cwd(&request.cwd)?;
+                        let cmd = windows_directory()?
+                            .join("System32")
+                            .join("cmd.exe")
+                            .into_os_string();
+                        let line = scripts::batch_command_line(&cmd, &resolved_program, &args)?;
+                        (cmd, line)
+                    }
+                    scripts::ScriptKind::PowerShell => {
+                        let powershell = powershell_executable()?;
+                        let arguments = scripts::powershell_arguments(&resolved_program, &args)?;
+                        let line = encode_command_line(&powershell, &arguments)?;
+                        (powershell, line)
+                    }
+                }
+            } else {
+                let line = if is_system_program(&resolved_program, Path::new("cmd.exe")) {
+                    encode_cmd_command_line(&program, &args)?
+                } else {
+                    encode_command_line(&program, &args)?
+                };
+                (resolved_program, line)
+            };
         let application = encode_nul_terminated(&application_program, "program")?;
-        let command_line = if is_system_program(&application_program, Path::new("cmd.exe")) {
-            encode_cmd_command_line(&program, &args)?
-        } else {
-            encode_command_line(&program, &args)?
-        };
         let cwd = encode_nul_terminated(request.cwd.as_os_str(), "working directory").map_err(
             |error| ProcessError::InvalidWorkingDirectory {
                 path: request.cwd.clone(),
@@ -3823,11 +3888,21 @@ impl PreparedCommand {
             // A host launched from PowerShell 7 inherits its module search path.
             // Windows PowerShell 5.1 then selects incompatible modules ahead of
             // its own, so ordinary cmdlets such as Get-FileHash cannot autoload.
-            // Let 5.1 construct its native defaults; explicit caller overrides
-            // retain their existing semantics.
-            encode_environment_from(std::env::vars_os().filter(|(key, _)| {
-                compare_os_case_insensitive(key, OsStr::new("PSModulePath")) != Ordering::Equal
-            }), &request.env)?
+            // Select its trusted system modules first while preserving every
+            // inherited custom directory. Explicit caller values, including
+            // empty, retain their exact contents and existing semantics.
+            let explicit = request.env.keys().any(|key| {
+                compare_os_case_insensitive(key, OsStr::new("PSModulePath")) == Ordering::Equal
+            });
+            let inherited = std::env::vars_os().map(|(key, value)| {
+                let value = if !explicit
+                    && compare_os_case_insensitive(&key, OsStr::new("PSModulePath")) == Ordering::Equal
+                {
+                    crate::windows_powershell_module_path(&value)?
+                } else { value };
+                Ok((key, value))
+            }).collect::<io::Result<Vec<_>>>().map_err(spawn_failed)?;
+            encode_environment_from(inherited, &request.env)?
         } else {
             encode_environment(&request.env)?
         };
@@ -3841,33 +3916,49 @@ impl PreparedCommand {
 }
 
 /// With a non-null lpApplicationName, CreateProcessW does not search PATH for
-/// a bare command. Resolve only native executable names from the effective
-/// child PATH. Never search the current directory or interpret .cmd/.bat via
-/// a shell; explicit paths keep their existing direct-launch semantics.
+/// a bare command. Resolve from the effective child PATH, including Windows
+/// script shims. Relative paths and PATH entries belong to the child's cwd.
 fn resolve_program_on_path(
     program: &OsStr,
     overrides: &std::collections::BTreeMap<OsString, OsString>,
+    cwd: &Path,
 ) -> OsString {
     let units = program.encode_wide().collect::<Vec<_>>();
-    if units.iter().any(|unit| matches!(*unit, value if value == b'\\' as u16
-        || value == b'/' as u16 || value == b':' as u16)) {
-        return program.to_os_string();
+    if units.iter().any(|unit| {
+        matches!(*unit, value if value == b'\\' as u16
+        || value == b'/' as u16 || value == b':' as u16)
+    }) {
+        let path = Path::new(program);
+        let path = if path.is_absolute() {
+            path.to_owned()
+        } else {
+            cwd.join(path)
+        };
+        return crate::request::canonicalize_compatible(&path)
+            .unwrap_or(path)
+            .into_os_string();
     }
-    let path = Path::new(program);
-    let explicit_extension = path.extension().is_some();
-    let effective_path = overrides.iter()
+    let effective_path = overrides
+        .iter()
         .find(|(key, _)| compare_os_case_insensitive(key, OsStr::new("PATH")) == Ordering::Equal)
         .map(|(_, value)| value.clone())
         .or_else(|| std::env::var_os("PATH"));
-    let Some(effective_path) = effective_path else { return program.to_os_string() };
+    let Some(effective_path) = effective_path else {
+        return program.to_os_string();
+    };
     for directory in std::env::split_paths(&effective_path) {
-        if !directory.is_absolute() { continue; }
-        let base = directory.join(program);
-        let candidates = if explicit_extension {
-            vec![base]
+        let directory = if directory.is_absolute() {
+            directory
         } else {
-            vec![base.with_extension("exe"), base.with_extension("com"), base]
+            cwd.join(directory)
         };
+        // Use the same discovery contract as runtime preparation, including
+        // PATHEXT and the established package-manager script fallback order.
+        let candidates = program
+            .to_str()
+            .and_then(|name| crate::resolve_command_in(name, &directory))
+            .into_iter()
+            .collect::<Vec<_>>();
         for candidate in candidates {
             if candidate.is_file() {
                 // `canonicalize` alone returns a \\?\ disk path on Windows.
@@ -3896,8 +3987,6 @@ fn command_argv(spec: &CommandSpec) -> Result<(OsString, Vec<OsString>), Process
                 OsString::from("-NoLogo"),
                 OsString::from("-NoProfile"),
                 OsString::from("-NonInteractive"),
-                OsString::from("-ExecutionPolicy"),
-                OsString::from("Bypass"),
                 OsString::from("-Command"),
                 OsString::from(powershell_payload(script)),
             ],
@@ -3911,8 +4000,6 @@ fn command_argv(spec: &CommandSpec) -> Result<(OsString, Vec<OsString>), Process
                 OsString::from("-NoLogo"),
                 OsString::from("-NoProfile"),
                 OsString::from("-NonInteractive"),
-                OsString::from("-ExecutionPolicy"),
-                OsString::from("Bypass"),
                 OsString::from("-Command"),
                 OsString::from(script),
             ],
@@ -3936,14 +4023,17 @@ fn powershell_executable() -> Result<OsString, ProcessError> {
         return Err(ProcessError::SpawnFailed {
             failure: SpawnFailure {
                 code: "powershell_unavailable".to_owned(),
-                message: format!("trusted Windows PowerShell executable is unavailable: {}", executable.display()),
+                message: format!(
+                    "trusted Windows PowerShell executable is unavailable: {}",
+                    executable.display()
+                ),
             },
         });
     }
     Ok(executable.into_os_string())
 }
 
-fn windows_directory() -> Result<std::path::PathBuf, ProcessError> {
+pub(crate) fn windows_directory() -> Result<std::path::PathBuf, ProcessError> {
     let mut buffer = vec![0_u16; 32_768];
     // SAFETY: `buffer` is writable for its declared length and the API writes a
     // NUL-terminated Windows directory path or returns zero on failure.
@@ -3971,16 +4061,31 @@ fn is_system_powershell(program: &OsStr) -> bool {
     is_system_program(program, Path::new("WindowsPowerShell/v1.0/powershell.exe"))
 }
 
+pub(crate) fn program_uses_windows_powershell(program: &OsStr) -> bool {
+    matches!(
+        scripts::script_kind(program),
+        Some(scripts::ScriptKind::PowerShell)
+    ) || is_system_powershell(program)
+}
+
 fn is_system_program(program: &OsStr, relative: &Path) -> bool {
     if !Path::new(program).file_name().is_some_and(|name| {
-        relative.file_name().is_some_and(|expected| compare_os_case_insensitive(name, expected) == Ordering::Equal)
+        relative
+            .file_name()
+            .is_some_and(|expected| compare_os_case_insensitive(name, expected) == Ordering::Equal)
     }) {
         return false;
     }
-    let Ok(directory) = windows_directory() else { return false };
+    let Ok(directory) = windows_directory() else {
+        return false;
+    };
     let trusted = directory.join("System32").join(relative);
-    let Ok(actual) = crate::request::canonicalize_compatible(Path::new(program)) else { return false };
-    let Ok(expected) = crate::request::canonicalize_compatible(&trusted) else { return false };
+    let Ok(actual) = crate::request::canonicalize_compatible(Path::new(program)) else {
+        return false;
+    };
+    let Ok(expected) = crate::request::canonicalize_compatible(&trusted) else {
+        return false;
+    };
     compare_os_case_insensitive(actual.as_os_str(), expected.as_os_str()) == Ordering::Equal
 }
 
@@ -4017,10 +4122,14 @@ fn encode_cmd_command_line(program: &OsStr, args: &[OsString]) -> Result<Vec<u16
     // cmd /c and /k parse a command string rather than CRT argv. Preserve the
     // caller's one script argument literally inside the required outer quotes.
     // https://doc.rust-lang.org/std/os/windows/process/trait.CommandExt.html#tymethod.raw_arg
-    let Some(mode) = args.iter().position(|arg| {
-        compare_os_case_insensitive(arg, OsStr::new("/c")) == Ordering::Equal
-            || compare_os_case_insensitive(arg, OsStr::new("/k")) == Ordering::Equal
-    }).filter(|index| *index + 2 == args.len()) else {
+    let Some(mode) = args
+        .iter()
+        .position(|arg| {
+            compare_os_case_insensitive(arg, OsStr::new("/c")) == Ordering::Equal
+                || compare_os_case_insensitive(arg, OsStr::new("/k")) == Ordering::Equal
+        })
+        .filter(|index| *index + 2 == args.len())
+    else {
         return encode_command_line(program, args);
     };
     let mut command_line = Vec::new();
@@ -4030,7 +4139,11 @@ fn encode_cmd_command_line(program: &OsStr, args: &[OsString]) -> Result<Vec<u16
         append_quoted(arg, &mut command_line)?;
     }
     let script = args[mode + 1].encode_wide().collect::<Vec<_>>();
-    if script.contains(&0) { return Err(invalid_command("Windows command-line arguments cannot contain NUL")); }
+    if script.contains(&0) {
+        return Err(invalid_command(
+            "Windows command-line arguments cannot contain NUL",
+        ));
+    }
     command_line.extend_from_slice(&[b' ' as u16, b'"' as u16]);
     command_line.extend_from_slice(&script);
     command_line.push(b'"' as u16);
@@ -4127,9 +4240,16 @@ fn encode_environment_from(
 ) -> Result<Vec<u16>, ProcessError> {
     let mut entries = Vec::<EnvironmentEntry>::new();
     for (key, value) in inherited {
-        let has_override = |name: &str| overrides.keys().any(|key| compare_os_case_insensitive(key, OsStr::new(name)) == Ordering::Equal);
-        let matches_key = |name: &str| compare_os_case_insensitive(&key, OsStr::new(name)) == Ordering::Equal;
-        let shadowed_locale = (matches_key("LC_ALL") && (has_override("LANG") || has_override("LC_CTYPE")) && !has_override("LC_ALL"))
+        let has_override = |name: &str| {
+            overrides
+                .keys()
+                .any(|key| compare_os_case_insensitive(key, OsStr::new(name)) == Ordering::Equal)
+        };
+        let matches_key =
+            |name: &str| compare_os_case_insensitive(&key, OsStr::new(name)) == Ordering::Equal;
+        let shadowed_locale = (matches_key("LC_ALL")
+            && (has_override("LANG") || has_override("LC_CTYPE"))
+            && !has_override("LC_ALL"))
             || (matches_key("LC_CTYPE") && has_override("LANG") && !has_override("LC_CTYPE"));
         if application_internal_environment(&key) || shadowed_locale {
             continue;
@@ -4197,9 +4317,7 @@ fn validate_environment_override(key: &OsStr, value: &OsStr) -> Result<(), Proce
         ));
     }
     if value.encode_wide().any(|unit| unit == 0) {
-        return Err(invalid_command(
-            "environment values cannot contain NUL",
-        ));
+        return Err(invalid_command("environment values cannot contain NUL"));
     }
     Ok(())
 }
@@ -4218,7 +4336,7 @@ fn append_environment_component(
     Ok(())
 }
 
-fn compare_os_case_insensitive(left: &OsStr, right: &OsStr) -> Ordering {
+pub(crate) fn compare_os_case_insensitive(left: &OsStr, right: &OsStr) -> Ordering {
     let left = left.encode_wide().collect::<Vec<_>>();
     let right = right.encode_wide().collect::<Vec<_>>();
     let Some(left_len) = i32::try_from(left.len()).ok() else {
@@ -4228,15 +4346,7 @@ fn compare_os_case_insensitive(left: &OsStr, right: &OsStr) -> Ordering {
         return left.cmp(&right);
     };
     // SAFETY: the explicit lengths bound both readable UTF-16 buffers.
-    match unsafe {
-        CompareStringOrdinal(
-            left.as_ptr(),
-            left_len,
-            right.as_ptr(),
-            right_len,
-            1,
-        )
-    } {
+    match unsafe { CompareStringOrdinal(left.as_ptr(), left_len, right.as_ptr(), right_len, 1) } {
         CSTR_LESS_THAN => Ordering::Less,
         CSTR_GREATER_THAN => Ordering::Greater,
         _ => Ordering::Equal,
@@ -4345,7 +4455,8 @@ mod tests {
 
     #[test]
     fn job_member_verification_rejects_an_opened_process_outside_the_job() {
-        let job = JobControl::new(create_process_job().expect("empty process Job should be created"));
+        let job =
+            JobControl::new(create_process_job().expect("empty process Job should be created"));
         let job_handle = job
             .raw_handle()
             .expect("new process Job should retain its handle");
@@ -4361,7 +4472,8 @@ mod tests {
 
     #[test]
     fn termination_retry_refreshes_an_already_complete_pre_snapshot() {
-        let job = JobControl::new(create_process_job().expect("empty process Job should be created"));
+        let job =
+            JobControl::new(create_process_job().expect("empty process Job should be created"));
         job.capture_pre_termination_members()
             .expect("initial exact-member snapshot should complete");
         job.inject_member_snapshot_failures(1);
@@ -4402,7 +4514,9 @@ mod tests {
         ];
 
         for (index, (fault, expected_message)) in cases.into_iter().enumerate() {
-            let marker = temporary.path().join(format!("must-not-run-{index}.marker"));
+            let marker = temporary
+                .path()
+                .join(format!("must-not-run-{index}.marker"));
             let mut command = tokio::process::Command::new(command_shell());
             command
                 .args([
@@ -4417,8 +4531,7 @@ mod tests {
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
-            let admitted_before =
-                crate::platform::poller::platform_lifecycle_metrics().admitted;
+            let admitted_before = crate::platform::poller::platform_lifecycle_metrics().admitted;
             let completion = inject_test_child_spawn_fault(fault);
 
             let error = match spawn_child_process(command, false) {
@@ -4443,15 +4556,13 @@ mod tests {
                 "{fault:?} did not reach exact direct-child/Job cleanup proof"
             );
             let release_deadline = Instant::now() + Duration::from_secs(1);
-            while crate::platform::poller::platform_lifecycle_metrics().admitted
-                > admitted_before
+            while crate::platform::poller::platform_lifecycle_metrics().admitted > admitted_before
                 && Instant::now() < release_deadline
             {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
             assert!(
-                crate::platform::poller::platform_lifecycle_metrics().admitted
-                    <= admitted_before,
+                crate::platform::poller::platform_lifecycle_metrics().admitted <= admitted_before,
                 "{fault:?} retained its lifecycle slot after exact cleanup"
             );
             assert!(
@@ -4771,7 +4882,6 @@ mod tests {
     struct AuditFacade {
         events: Mutex<Vec<SpawnAuditEvent>>,
         fail_assignment: bool,
-        assignment_delay: Duration,
         created: Mutex<Option<CreatedProcess>>,
     }
 
@@ -4785,7 +4895,6 @@ mod tests {
             Self {
                 events: Mutex::new(Vec::new()),
                 fail_assignment: true,
-                assignment_delay: Duration::ZERO,
                 created: Mutex::new(None),
             }
         }
@@ -4794,15 +4903,7 @@ mod tests {
             Self {
                 events: Mutex::new(Vec::new()),
                 fail_assignment: false,
-                assignment_delay: Duration::ZERO,
                 created: Mutex::new(None),
-            }
-        }
-
-        fn delayed_assignment(delay: Duration) -> Self {
-            Self {
-                assignment_delay: delay,
-                ..Self::successful()
             }
         }
 
@@ -4821,7 +4922,7 @@ mod tests {
                 .map(|created| created.pid)
         }
 
-    fn created_process_is_signaled(&self) -> io::Result<bool> {
+        fn created_process_is_signaled(&self) -> io::Result<bool> {
             let created = self
                 .created
                 .lock()
@@ -4848,12 +4949,7 @@ mod tests {
     }
 
     impl Win32Facade for AuditFacade {
-        fn process_created(
-            &self,
-            pid: u32,
-            process: HANDLE,
-            _thread: HANDLE,
-        ) -> io::Result<()> {
+        fn process_created(&self, pid: u32, process: HANDLE, _thread: HANDLE) -> io::Result<()> {
             let process = duplicate_non_inheritable(process)?;
             self.events
                 .lock()
@@ -4872,9 +4968,6 @@ mod tests {
                 .lock()
                 .map_err(|_| io::Error::other("spawn audit event mutex is poisoned"))?
                 .push(SpawnAuditEvent::Assigned);
-            if !self.assignment_delay.is_zero() {
-                std::thread::sleep(self.assignment_delay);
-            }
             if self.fail_assignment {
                 Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -4949,7 +5042,7 @@ mod tests {
     async fn setup_deadline_during_assignment_never_resumes_or_restarts_the_timeout() {
         let temporary = TempDir::new().expect("temporary marker directory should be created");
         let marker = temporary.path().join("deadline-must-not-exist.marker");
-        let facade = Arc::new(AuditFacade::delayed_assignment(Duration::from_millis(200)));
+        let facade = Arc::new(PausedAssignFacade::with_native_assignment());
         let mut request = program_request(
             command_shell(),
             &[
@@ -4958,14 +5051,22 @@ mod tests {
                 OsString::from(format!(">\"{}\" echo resumed", marker.display())),
             ],
         );
-        request.policy.deadline = Some(Instant::now() + Duration::from_millis(50));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        request.policy.deadline = Some(deadline);
         let started_at = Instant::now();
-        let result = spawn_pipe_inner(
-            request,
-            Arc::new(OutputBuffer::new(4096)),
-            facade.clone(),
-        )
-        .await;
+        let start = tokio::spawn(spawn_pipe_inner(request, Arc::new(OutputBuffer::new(4096)), facade.clone()));
+        // Rendezvous with the actual assignment phase, then hold that exact
+        // suspended child until the original absolute deadline has elapsed.
+        // A short relative sleep used to conflate a valid pre-create timeout
+        // under scheduler load with an illegal ResumeThread call.
+        let entered = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), facade.wait_until_assign_entered()).await.is_ok();
+        if entered {
+            while Instant::now() < deadline {
+                tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+            }
+        }
+        facade.release_assignment();
+        let result = start.await.expect("the owned spawn task should join");
         let elapsed = started_at.elapsed();
 
         let error = match result {
@@ -4976,13 +5077,14 @@ mod tests {
             panic!("suspended pre-resume timeout must be a proven SpawnFailed: {error:?}");
         };
         assert_eq!(failure.code, "spawn_failed");
-        assert!(
-            facade.events() == [SpawnAuditEvent::Created, SpawnAuditEvent::Assigned],
-            "ResumeThread must never run after the shared deadline"
-        );
+        let events = facade.events();
+        assert!(!events.contains(&SpawnAuditEvent::Resumed), "ResumeThread ran after the shared deadline: {events:?}");
         assert!(!marker.exists(), "the suspended child executed user code");
+        assert!(entered, "the assignment-expiry fixture did not reach assignment before its deadline; events={events:?}");
+        assert_eq!(events, [SpawnAuditEvent::Created, SpawnAuditEvent::Assigned], "the fixture must prove expiry during actual assignment");
         assert!(
             facade
+                .audit
                 .created_process_is_signaled()
                 .expect("the exact process liveness probe should succeed"),
             "the suspended child was not reaped before SpawnFailed returned"
@@ -4991,6 +5093,24 @@ mod tests {
             elapsed < SETUP_TIMEOUT,
             "setup received another full timeout after the shared deadline: {elapsed:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial(windows_process_runtime)]
+    async fn deadline_elapsed_before_setup_never_creates_or_resumes_a_child() {
+        let temporary = TempDir::new().expect("temporary marker directory should be created");
+        let marker = temporary.path().join("expired-before-create.marker");
+        let facade = Arc::new(AuditFacade::successful());
+        let mut request = program_request(command_shell(), &[
+            OsString::from("/D"), OsString::from("/C"), OsString::from(format!(">\"{}\" echo resumed", marker.display())),
+        ]);
+        request.policy.deadline = Some(Instant::now() - Duration::from_millis(1));
+        let result = spawn_pipe_inner(request, Arc::new(OutputBuffer::new(4096)), facade.clone()).await;
+        assert!(matches!(result, Err(ProcessError::SpawnFailed { .. })));
+        let events = facade.events();
+        assert!(!events.contains(&SpawnAuditEvent::Resumed), "expired setup resumed a child: {events:?}");
+        assert!(events.is_empty(), "a deadline that already elapsed must not create a child: {events:?}");
+        assert!(facade.created_pid().is_none()); assert!(!marker.exists());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5026,7 +5146,10 @@ mod tests {
             facade.events(),
             vec![SpawnAuditEvent::Created, SpawnAuditEvent::Assigned]
         );
-        assert!(!marker.exists(), "suspended ConPTY child executed user code");
+        assert!(
+            !marker.exists(),
+            "suspended ConPTY child executed user code"
+        );
         assert!(
             facade
                 .created_process_is_signaled()
@@ -5183,11 +5306,8 @@ mod tests {
         .expect("stdin sink should start");
         let owner = spawned.owner.clone();
         let write_owner = owner.clone();
-        let write = tokio::spawn(async move {
-            write_owner
-                .write(&vec![b'x'; 32 * 1024 * 1024])
-                .await
-        });
+        let write =
+            tokio::spawn(async move { write_owner.write(&vec![b'x'; 32 * 1024 * 1024]).await });
 
         tokio::time::sleep(Duration::from_millis(20)).await;
         write.abort();
@@ -5294,11 +5414,13 @@ mod tests {
         assert_eq!(quoted(r#"a\"b"#), r#""a\\\"b""#);
         assert_eq!(quoted(r#"ends with \"#), r#""ends with \\""#);
         assert_eq!(
-            decode_wide(&encode_command_line(
-                OsStr::new(r"C:\Program Files\helper.exe"),
-                &[OsString::from(r#"a\"b"#), OsString::from("")],
-            )
-            .expect("valid command line should encode")),
+            decode_wide(
+                &encode_command_line(
+                    OsStr::new(r"C:\Program Files\helper.exe"),
+                    &[OsString::from(r#"a\"b"#), OsString::from("")],
+                )
+                .expect("valid command line should encode")
+            ),
             r#""C:\Program Files\helper.exe" "a\\\"b" """#
         );
     }
@@ -5313,7 +5435,59 @@ mod tests {
         .expect("trusted PowerShell should resolve");
 
         assert_eq!(args.last(), Some(&OsString::from(script)));
-        assert!(!args.last().unwrap().to_string_lossy().contains("ErrorActionPreference"));
+        assert!(
+            !args
+                .last()
+                .unwrap()
+                .to_string_lossy()
+                .contains("ErrorActionPreference")
+        );
+    }
+
+    #[test]
+    fn shared_powershell_shells_do_not_override_execution_policy() {
+        for shell in [ShellKind::PowerShell, ShellKind::PowerShellLiteral] {
+            let (_, args) = command_argv(&CommandSpec::Shell {
+                shell,
+                script: "[Console]::Write('literal')".into(),
+            }).unwrap();
+            assert!(!args.iter().any(|arg| {
+                let arg = arg.to_string_lossy();
+                arg.eq_ignore_ascii_case("-ExecutionPolicy") || arg.eq_ignore_ascii_case("Bypass")
+            }), "{shell:?}: {args:?}");
+        }
+        let explicit = vec![OsString::from("-ExecutionPolicy"), OsString::from("RemoteSigned")];
+        let (_, args) = command_argv(&CommandSpec::Program {
+            program: powershell_executable().unwrap(), args: explicit.clone(),
+        }).unwrap();
+        assert_eq!(args, explicit);
+    }
+
+    #[test]
+    fn windows_powershell_environment_respects_disabled_inheritance_and_explicit_values() {
+        let program = powershell_executable().unwrap();
+        let mut cleared = tokio::process::Command::new(&program);
+        cleared.env_clear();
+        configure_powershell_child_environment(&mut cleared, false).unwrap();
+        assert_eq!(cleared.as_std().get_envs().count(), 0);
+        let mut inherited = tokio::process::Command::new(&program);
+        configure_powershell_child_environment(&mut inherited, true).unwrap();
+        let prepared_once = inherited.as_std().get_envs().map(|(key,value)|
+            (key.to_owned(), value.map(OsStr::to_owned))).collect::<Vec<_>>();
+        configure_powershell_child_environment(&mut inherited, true).unwrap();
+        assert_eq!(prepared_once, inherited.as_std().get_envs().map(|(key,value)|
+            (key.to_owned(), value.map(OsStr::to_owned))).collect::<Vec<_>>());
+        for explicit in [Some(OsStr::new("")), Some(OsStr::new("parent custom module;unchanged")), None] {
+            let mut command = tokio::process::Command::new(&program);
+            if let Some(explicit) = explicit { command.env("pSmOdUlEpAtH", explicit); }
+            else { command.env_remove("PSModulePath"); }
+            let before = command.as_std().get_envs().map(|(key,value)|
+                (key.to_owned(), value.map(OsStr::to_owned))).collect::<Vec<_>>();
+            configure_powershell_child_environment(&mut command, true).unwrap();
+            let after = command.as_std().get_envs().map(|(key,value)|
+                (key.to_owned(), value.map(OsStr::to_owned))).collect::<Vec<_>>();
+            assert_eq!(before, after);
+        }
     }
 
     #[test]
@@ -5340,19 +5514,42 @@ mod tests {
     }
 
     #[test]
-    fn bare_program_resolves_only_native_executables_on_effective_path() {
+    fn bare_program_resolves_executables_and_scripts_on_effective_path() {
         let directory = tempfile::tempdir().unwrap();
         let executable = directory.path().join("fixture.exe");
         std::fs::write(&executable, b"").unwrap();
         let overrides = BTreeMap::from([(
-            OsString::from("Path"), directory.path().as_os_str().to_os_string(),
+            OsString::from("Path"),
+            directory.path().as_os_str().to_os_string(),
         )]);
         let expected = crate::request::canonicalize_compatible(&executable)
-            .unwrap().into_os_string();
-        assert_eq!(resolve_program_on_path(OsStr::new("fixture"), &overrides), expected);
-        assert_eq!(resolve_program_on_path(OsStr::new("fixture.exe"), &overrides), expected);
-        assert_eq!(resolve_program_on_path(OsStr::new("missing"), &overrides), OsString::from("missing"));
-        assert_eq!(resolve_program_on_path(executable.as_os_str(), &overrides), executable.as_os_str());
+            .unwrap()
+            .into_os_string();
+        assert_eq!(
+            resolve_program_on_path(OsStr::new("fixture"), &overrides, directory.path()),
+            expected
+        );
+        assert_eq!(
+            resolve_program_on_path(OsStr::new("fixture.exe"), &overrides, directory.path()),
+            expected
+        );
+        assert_eq!(
+            resolve_program_on_path(OsStr::new("missing"), &overrides, directory.path()),
+            OsString::from("missing")
+        );
+        assert_eq!(
+            resolve_program_on_path(executable.as_os_str(), &overrides, directory.path()),
+            executable.as_os_str()
+        );
+        let script = directory.path().join("shim.cmd");
+        std::fs::write(&script, b"@echo off\r\n").unwrap();
+        let expected = crate::request::canonicalize_compatible(&script)
+            .unwrap()
+            .into_os_string();
+        assert_eq!(
+            resolve_program_on_path(OsStr::new("shim"), &overrides, directory.path()),
+            expected
+        );
     }
 
     #[test]
@@ -5377,11 +5574,17 @@ mod tests {
     fn environment_preserves_inherited_user_runtime_configuration() {
         let inherited = vec![
             (OsString::from("PATH"), OsString::from("user-tools")),
-            (OsString::from("NODE_OPTIONS"), OsString::from("--no-warnings")),
+            (
+                OsString::from("NODE_OPTIONS"),
+                OsString::from("--no-warnings"),
+            ),
             (OsString::from("CLAUDECODE"), OsString::from("1")),
         ];
         let block = encode_environment_from(inherited, &BTreeMap::new()).unwrap();
-        assert_eq!(environment_entries(&block), vec!["NODE_OPTIONS=--no-warnings", "PATH=user-tools"]);
+        assert_eq!(
+            environment_entries(&block),
+            vec!["NODE_OPTIONS=--no-warnings", "PATH=user-tools"]
+        );
     }
 
     #[test]
@@ -5389,7 +5592,10 @@ mod tests {
         for key in ["NODE_OPTIONS", "node_options", "Ld_PrElOaD"] {
             let overrides = BTreeMap::from([(OsString::from(key), OsString::from("user-value"))]);
             let block = encode_environment_from(Vec::new(), &overrides).unwrap();
-            assert_eq!(environment_entries(&block), vec![format!("{key}=user-value")]);
+            assert_eq!(
+                environment_entries(&block),
+                vec![format!("{key}=user-value")]
+            );
         }
     }
 
@@ -5405,7 +5611,6 @@ mod tests {
             env: BTreeMap::new(),
             transport: Transport::Pipe,
             policy: ProcessPolicy::default(),
-
         }
     }
 
@@ -5439,6 +5644,7 @@ mod tests {
 
     struct PausedAssignFacade {
         audit: AuditFacade,
+        native_assignment: bool,
         entered: tokio::sync::Notify,
         release: (Mutex<bool>, std::sync::Condvar),
     }
@@ -5447,10 +5653,13 @@ mod tests {
         fn new() -> Self {
             Self {
                 audit: AuditFacade::successful(),
+                native_assignment: false,
                 entered: tokio::sync::Notify::new(),
                 release: (Mutex::new(false), std::sync::Condvar::new()),
             }
         }
+
+        fn with_native_assignment() -> Self { Self { native_assignment: true, ..Self::new() } }
 
         async fn wait_until_assign_entered(&self) {
             self.entered.notified().await;
@@ -5476,16 +5685,11 @@ mod tests {
     }
 
     impl Win32Facade for PausedAssignFacade {
-        fn process_created(
-            &self,
-            pid: u32,
-            process: HANDLE,
-            thread: HANDLE,
-        ) -> io::Result<()> {
+        fn process_created(&self, pid: u32, process: HANDLE, thread: HANDLE) -> io::Result<()> {
             self.audit.process_created(pid, process, thread)
         }
 
-        fn assign_process_to_job(&self, _job: HANDLE, _process: HANDLE) -> io::Result<()> {
+        fn assign_process_to_job(&self, job: HANDLE, process: HANDLE) -> io::Result<()> {
             self.entered.notify_one();
             let (released, condition) = &self.release;
             let mut released = released
@@ -5501,7 +5705,7 @@ mod tests {
                 .lock()
                 .map_err(|_| io::Error::other("spawn audit event mutex is poisoned"))?
                 .push(SpawnAuditEvent::Assigned);
-            Ok(())
+            if self.native_assignment { SystemWin32.assign_process_to_job(job, process) } else { Ok(()) }
         }
 
         fn resume_thread(&self, thread: HANDLE) -> io::Result<u32> {

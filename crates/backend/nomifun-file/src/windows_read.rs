@@ -21,7 +21,7 @@ pub(crate) struct ReadRoot {
 }
 
 fn io_error(error: std::io::Error) -> AppError {
-    AppError::BadRequest(format!("Workspace file read failed: {error}"))
+    crate::native_acquisition::native_read_io_error("reading native Windows file", error)
 }
 
 fn changed() -> AppError {

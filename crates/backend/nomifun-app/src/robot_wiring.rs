@@ -1184,6 +1184,7 @@ mod tests {
         let error = |ownership, retryable| {
             AgentStreamEvent::Error(nomifun_api_types::AgentStreamErrorData {
                 provider_diagnostic: None,
+                system_execution_error: None,
                 message: "boom".to_owned(),
                 code: None,
                 ownership,

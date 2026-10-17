@@ -36,6 +36,10 @@ pub mod watch_service;
 pub mod workspace_listing;
 mod vcs_stage;
 mod workspace_write;
+#[cfg(windows)]
+mod native_mutation;
+#[cfg(windows)]
+pub use native_mutation::{NativeMutationRequest, PreparedNativeMutation};
 mod workspace_observation;
 mod workspace_read_dir;
 mod zip_source;
@@ -56,6 +60,8 @@ mod windows_directory;
 mod windows_cleanup;
 #[cfg(windows)]
 mod windows_create;
+#[cfg(windows)]
+mod windows_stream;
 #[cfg(windows)]
 mod windows_delete;
 #[cfg(all(test, windows))]
@@ -86,4 +92,4 @@ pub use watch_service::FileWatchService;
 pub use workspace_listing::{MAX_DIR_DEPTH, list_workspace_level};
 pub use vcs_stage::{WorkspaceVcsStageOwner, vcs_stage_outcome_unknown};
 
-pub use native_acquisition::native_file_acquisition_error;
+pub use native_acquisition::{native_file_acquisition_error, native_file_failure_error};

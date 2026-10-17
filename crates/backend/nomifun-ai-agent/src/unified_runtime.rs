@@ -112,7 +112,15 @@ pub trait UnifiedRuntimeHost: Send + Sync {
 }
 
 fn contract_error(error: AgentEngineError) -> AppError {
+    if let Some(failure) = system_turn_failure(&error) { return AppError::SystemExecution(failure); }
     match error {
+        AgentEngineError::CapabilityKernel { code, message, details: Some(details) }
+            if details.get("system_execution_error").is_some() => {
+                match serde_json::from_value::<nomifun_agent_contracts::SystemExecutionFailure>(details["system_execution_error"].clone()) {
+                    Ok(failure) if failure.validate() && failure.code == code => AppError::SystemExecution(failure),
+                    _ => AppError::Internal(format!("Nomi runtime received an inconsistent native failure: {message}")),
+                }
+            }
         error @ (AgentEngineError::Model { .. }
         | AgentEngineError::ModelStreamEndedWithoutTerminal
         | AgentEngineError::InvalidModelEvent(_)) => {
@@ -488,6 +496,12 @@ impl EngineSessionDriver for UnifiedSessionDriver {
                 Ok(EngineTurnOutcome { model_steps:projection.last_model_step.load(std::sync::atomic::Ordering::Acquire),
                     terminal:EngineTurnTerminal::Failed { message, failure: Some(failure) } })
             }
+            Err(error) if system_turn_failure(&error).is_some() => {
+                let diagnostic = system_turn_failure(&error).expect("checked typed native failure");
+                Ok(EngineTurnOutcome { model_steps: projection.last_model_step.load(std::sync::atomic::Ordering::Acquire),
+                    terminal: EngineTurnTerminal::Failed { message: diagnostic.message.clone(),
+                        failure: Some(nomifun_agent_runtime::AgentTurnFailure::SystemExecution { diagnostic }) } })
+            }
             Err(error) => Err(contract_error(error)),
         }
     }
@@ -517,6 +531,20 @@ impl EngineSessionDriver for UnifiedSessionDriver {
         Ok(())
     }
     async fn cleanup_session(&self) -> Result<(), AppError> { self.host.cleanup_session().await }
+}
+
+fn system_turn_failure(error: &AgentEngineError) -> Option<nomifun_agent_contracts::SystemExecutionFailure> {
+    let AgentEngineError::CapabilityKernel { code, message, details } = error else { return None; };
+    if let Some(failure) = details.as_ref().and_then(|details| details.get("system_execution_error"))
+        .and_then(|value| serde_json::from_value::<nomifun_agent_contracts::SystemExecutionFailure>(value.clone()).ok())
+        .filter(|failure| failure.validate() && failure.code == *code) { return Some(failure); }
+    // The outer typed transport classification remains unknown even if a
+    // partial, mismatched worker cause claims pre-dispatch cancellation.
+    if matches!(code.as_str(), "SYSTEM_READ_RESULT_UNKNOWN" | "SYSTEM_EXECUTION_RESULT_UNKNOWN" | "system_result_unknown") {
+        return Some(nomifun_agent_contracts::SystemExecutionFailure::from_owner(code.clone(), message.clone(),
+            details.as_ref().unwrap_or(&serde_json::Value::Null)));
+    }
+    None
 }
 
 fn model_turn_failure(error: AgentEngineError) -> (String, nomifun_agent_runtime::AgentTurnFailure) {
@@ -656,6 +684,22 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn partial_cancelled_details_cannot_downgrade_an_unknown_outer_owner_failure() {
+        let diagnostic = nomifun_agent_contracts::SystemExecutionFailure::from_owner("SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED".into(), "partial diagnostic".into(),
+            &serde_json::json!({"raw_os_error":1223,"user_code_not_started":true,"cleanup_proven":true}));
+        let error = AgentEngineError::CapabilityKernel { code:"SYSTEM_READ_RESULT_UNKNOWN".into(), message:"original incomplete reply".into(),
+            details:Some(serde_json::json!({"system_execution_error":diagnostic})) };
+        let failure = system_turn_failure(&error).expect("the original transport remains typed unknown");
+        assert_eq!(failure.code, "SYSTEM_READ_RESULT_UNKNOWN");
+        assert_eq!(failure.message, "original incomplete reply");
+        assert_eq!(failure.raw_os_error, None);
+        assert_eq!(failure.user_code_not_started, None);
+        assert_eq!(failure.cleanup_proven, None);
+        let message_only = AgentEngineError::CapabilityKernel { code:"SYSTEM_READ_RESULT_UNKNOWN".into(), message:"raw_os_error=1223 authentication cancelled".into(), details:None };
+        assert_eq!(system_turn_failure(&message_only).unwrap().raw_os_error, None);
+    }
+
     fn options() -> AgentRuntimeBuildOptions {
         static WORKSPACE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         let workspace = WORKSPACE
@@ -712,6 +756,7 @@ mod tests {
     }
 
     struct Host {
+        tool_plan: Mutex<AgentToolPlan>,
         recycle_completed_turns: AtomicBool,
         prepared_inputs: Mutex<Vec<String>>,
         allow_user_input: AtomicBool,
@@ -736,6 +781,7 @@ mod tests {
     impl Host {
         fn new() -> Arc<Self> {
             Arc::new(Self {
+                tool_plan: Mutex::new(AgentToolPlan::default()),
                 recycle_completed_turns: AtomicBool::new(false),
                 prepared_inputs: Mutex::new(Vec::new()),
                 allow_user_input: AtomicBool::new(false),
@@ -831,7 +877,7 @@ mod tests {
                         metadata: Default::default(),
                     },
                 },
-                AgentToolPlan::default(),
+                self.tool_plan.lock().unwrap().clone(),
                 PrincipalRef {
                     principal_kind: "user".to_owned(),
                     principal_id: OWNER.to_owned(),
@@ -1145,6 +1191,56 @@ mod tests {
             assert!(!host.events.lock().unwrap().iter().any(|event| matches!(event, AgentEngineEvent::TurnPaused { .. })));
             assert_eq!(runtime.status(), Some(ConversationStatus::Finished));
             assert!(runtime.is_transport_healthy());
+            runtime.kill_and_wait(None).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn native_preflight_failure_reaches_failed_turn_and_api_after_cleanup_with_original_typed_facts() {
+        use nomifun_agent_runtime::{AgentEffectClass, AgentToolBinding};
+        use nomifun_chat_model_broker::ChatToolDefinition;
+        struct FailedOwner { diagnostic: nomifun_agent_contracts::SystemExecutionFailure, calls: AtomicUsize }
+        #[async_trait]
+        impl AgentToolInvoker for FailedOwner {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+                assert_eq!(invocation.binding.action_id.as_ref(), "workspace.files/read");
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(AgentEngineError::CapabilityKernel { code:self.diagnostic.code.clone(), message:self.diagnostic.message.clone(),
+                    details:Some(serde_json::json!({"system_execution_error":self.diagnostic})) })
+            }
+        }
+        for (code, facts) in [
+            ("SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED", serde_json::json!({"raw_os_error":1223,"kind":"Uncategorized","user_code_not_started":true,"cleanup_proven":true})),
+            ("SYSTEM_READ_RESULT_UNKNOWN", serde_json::json!({"user_code_not_started":false,"cleanup_proven":false})),
+        ] {
+            let diagnostic = nomifun_agent_contracts::SystemExecutionFailure::from_owner(code.into(), "original native owner failure".into(), &facts);
+            let host = Host::new();
+            let definition = ChatToolDefinition { name:"read_file".into(), description:"native preflight fixture".into(),
+                input_schema:nomifun_agent_contracts::StrictJsonValue(serde_json::json!({"type":"object","properties":{"execution_identity":{"enum":["current_user","administrator"]}}})), deferred:false };
+            let schema_digest = nomifun_engine_core::input_schema_digest(&definition.input_schema).unwrap();
+            *host.tool_plan.lock().unwrap() = AgentToolPlan::new([AgentToolBinding {
+                model_name:"read_file".into(), definition, schema_digest,
+                canonical_input_schema_ref:"schema://workspace.files/read/input".into(), capability_contract_digest:DigestHex::from("c".repeat(64)),
+                capability_id:"workspace.files".into(), action_id:"workspace.files/read".into(), resource_binding_ids:BTreeSet::new(),
+                effect_class:AgentEffectClass::ReadOnly, parallel_safe:true,
+            }]).unwrap();
+            let owner = Arc::new(FailedOwner { diagnostic:diagnostic.clone(), calls:AtomicUsize::new(0) });
+            let runtime = UnifiedAgentRuntime::new(&options(), engine(), binding(), model(false, true), owner.clone(), host.clone()).unwrap();
+            let mut stream = runtime.subscribe();
+            runtime.send_message(message()).await.unwrap();
+            let AgentStreamEvent::Error(failure) = terminal(&mut stream).await else { panic!("authentication cancellation is a failed Turn, not user cancellation or success"); };
+            assert_eq!(serde_json::to_value(failure.code).unwrap(), code);
+            assert_eq!(failure.system_execution_error, Some(diagnostic.clone()));
+            assert_eq!(failure.retryable, Some(false));
+            assert_eq!(owner.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(host.cleanup_turns.load(Ordering::SeqCst), 1);
+            let recorded = host.events.lock().unwrap();
+            assert!(recorded.iter().any(|event| matches!(event, AgentEngineEvent::ToolCompleted { result, .. } if result.is_error
+                && serde_json::from_str::<serde_json::Value>(&result.output_text()).is_ok_and(|value| value["details"]["system_execution_error"] == serde_json::to_value(&diagnostic).unwrap()))));
+            assert!(recorded.iter().any(|event| matches!(event, AgentEngineEvent::TurnFailed { failure:Some(nomifun_agent_runtime::AgentTurnFailure::SystemExecution { diagnostic:actual }), .. } if actual == &diagnostic)));
+            assert!(!recorded.iter().any(|event| matches!(event, AgentEngineEvent::TurnCancelled { .. } | AgentEngineEvent::TurnCompleted { .. })));
+            drop(recorded);
+            assert_eq!(runtime.status(), Some(ConversationStatus::Finished));
             runtime.kill_and_wait(None).await.unwrap();
         }
     }

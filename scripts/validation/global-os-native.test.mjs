@@ -1,5 +1,50 @@
 import { expect, test } from 'bun:test';
-import { nativeAdministratorInstructionContext, nativeAdministratorInstructionProof, nativeCompletionArguments } from './global-os-native.mjs';
+import { createHash } from 'node:crypto';
+import { nativeAdministratorInstructionContext, nativeAdministratorInstructionProof, nativeCompletionArguments, nativeCompletionContract, nativeCanonicalPathReconsideration,nativeInstructionDeferral,nativeComputerNoEffectAdmission,nativeRetainedSessionPreservation,nativeInstallerPhases,nativeStableAnnouncementSnapshot,nativeCompletionPlanControl,nativeSmbControlOptions } from './global-os-native.mjs';
+import {resolve} from 'node:path';
+
+test('SMB primitive control has explicit original evidence and same private App identity without borrowing source continuation',()=>{
+  const options={scenario:'smb-disposition-control',platform:'win32',preservedUncReport:resolve('own-failed-unc.json'),nativeDataRoot:resolve('private/native-data')};
+  expect(()=>nativeSmbControlOptions(options)).not.toThrow();
+  for(const change of [{preservedUncReport:undefined},{preservedUncReport:'relative'},{nativeDataRoot:undefined},{nativeDataRoot:'relative'},{platform:'darwin'},{administrator:true},{continueSession:'source'},{missingDefault:true},{protectedUserDirectory:true},{retainServiceForAppExit:true},{desktopBackgroundFocus:true},{installerReport:'artifact'}])expect(()=>nativeSmbControlOptions({...options,...change})).toThrow();
+  expect(()=>nativeSmbControlOptions({...options,scenario:'unc'})).toThrow();
+  expect(()=>nativeSmbControlOptions({scenario:'files-process',platform:'win32'})).not.toThrow();
+});
+
+test('completion plan control follows only the current same-Turn canonical stale plan and preserves requirements/errors',()=>{
+  const event=(seq,needs_replan)=>({seq,event_id:`plan-${seq}`,agent_session_id:'session',correlation_id:'turn',kind:'runtime/progress-recorded',payload:{value:{event:{event:'plan_updated',plan:{revision:seq,needs_replan}}}}}),input={tools:[{function:{name:'update_plan'}}],events:[event(1,false),event(2,true)],operationId:'turn',sessionId:'session'};
+  const control=nativeCompletionPlanControl(input);expect(control.canonical_plan_event_id).toBe('plan-2');expect(control.arguments.plan[0].status).toBe('completed');expect(control.arguments.requirements).toBeUndefined();expect(control.arguments.observed_tool_error_count).toBeUndefined();
+  expect(nativeCompletionPlanControl({...input,events:[...input.events,event(3,false)]})).toBeUndefined();expect(nativeCompletionPlanControl({...input,sessionId:'foreign'})).toBeUndefined();expect(nativeCompletionPlanControl({...input,operationId:'foreign'})).toBeUndefined();expect(()=>nativeCompletionPlanControl({...input,tools:[]})).toThrow();
+});
+
+test('atomic public port announcement replacement retries only fully revalidated snapshots within a strict bound',async()=>{
+  let calls=0;const changed=()=>Object.assign(new Error('Identity changed'),{code:'NATIVE_FIXTURE_METADATA_CHANGED'});
+  expect(await nativeStableAnnouncementSnapshot(async()=>{if(++calls===1)throw changed();return 'stable verified bytes';})).toBe('stable verified bytes');expect(calls).toBe(2);
+  calls=0;await expect(nativeStableAnnouncementSnapshot(async()=>{calls++;throw changed();})).rejects.toThrow('Identity changed');expect(calls).toBe(3);
+  calls=0;await expect(nativeStableAnnouncementSnapshot(async()=>{calls++;throw new Error('Private ACL denied');})).rejects.toThrow('Private ACL denied');expect(calls).toBe(1);
+});
+
+test('canonical installer phases preserve explicit installation then same-Session uninstallation business steps',()=>{
+  const install={id:'installer-install',name:'exec_command'},uninstall={id:'installer-uninstall',name:'exec_command'},input={steps:[install,uninstall],phases:[{role:'installer-install',prompt:'Install only this unique fixture.',steps:[install]},{role:'installer-uninstall',prompt:'Uninstall only this unique fixture.',steps:[uninstall]}]};
+  expect(nativeInstallerPhases(input)).toBe(input.phases);
+  for(const change of [value=>{value.phases.reverse();},value=>{value.phases[1].steps=[];},value=>{value.phases[1].steps[0].id=value.phases[0].steps[0].id;},value=>{value.phases[0].prompt='';},value=>{value.steps.pop();},value=>{value.phases.pop();}]){const invalid=structuredClone(input);change(invalid);expect(()=>nativeInstallerPhases(invalid)).toThrow();}
+});
+
+test('retained-task restart preserves exact original canonical prefix, owner and frozen resources without accepting a replacement Session',()=>{
+  const before={session:{agent_session_id:'original',owner_ref:{principal_id:'owner'},agent_binding:{typed_resource_bindings:[{resource_kind:'workspace',resource_id:'original-root'}]}},head:{last_seq:2}},after=structuredClone(before);
+  const eventsBefore=[{agent_session_id:'original',seq:1,kind:'session/opening',payload:{value:'original'}},{agent_session_id:'original',seq:2,kind:'turn/completed',payload:{payload_id:'canonical-payload',digest:'original-digest'}}],eventsAfter=[...structuredClone(eventsBefore),{agent_session_id:'original',seq:3,kind:'session/agent-binding-changed',payload:{value:'normal-contract-evolution'}}];
+  const input={before,after,eventsBefore,eventsAfter};expect(nativeRetainedSessionPreservation(input).original_canonical_prefix_unchanged).toBe(true);
+  for(const change of [value=>{value.after.session.agent_session_id='replacement';},value=>{value.after.session.owner_ref.principal_id='different-owner';},value=>{value.after.session.agent_binding.typed_resource_bindings.push({resource_kind:'computer',resource_id:'manually-added'});},value=>{value.eventsAfter[1].payload.payload_id='replacement-payload';},value=>{value.eventsAfter[0].agent_session_id='foreign';},value=>{value.eventsBefore.pop();}]){const invalid=structuredClone(input);change(invalid);expect(()=>nativeRetainedSessionPreservation(invalid)).toThrow();}
+});
+
+test('high-integrity route admission requires exact canonical typed no-effect failure and never consumes unknown/provider failure',()=>{
+  const sessionId='session',operationId='turn',callId='route-probe',callArguments={action:'focus_window',window_id:123,expected_generation:10},raw='[tool error]\nComputer observation is stale';
+  const event=(seq,kind,value,correlation_id=operationId)=>({agent_session_id:sessionId,seq,kind,correlation_id,payload:{storage:'inline_json',value}});
+  const effect={effect_id:'effect',operation_id:`${operationId}:tool:${callId}`,owner_domain:'computer',action_id:'computer/input',input_digest:'a'.repeat(64),resource_key:'computer:original'};
+  const events=[event(1,'runtime/progress-recorded',{event:{event:'tool_call_completed',step:1,call:{call_id:callId,name:'computer_input',arguments:callArguments}}}),event(2,'effect/started',effect,'effect'),event(3,'effect/failed',{...effect,error:{code:'ROLE_HOST_STALE_OBSERVATION_GENERATION'}},'effect'),event(4,'runtime/progress-recorded',{event:{event:'tool_completed',step:1,result:{call_id:callId,is_error:true,output:[{type:'text',text:'Computer observation is stale'}]}}})];
+  const input={raw,callId,callArguments,events,operationId,sessionId};expect(nativeComputerNoEffectAdmission(input).native_input_not_applied).toBe(true);
+  for(const change of [value=>{value.events[2].kind='effect/uncertain';},value=>{value.events[2].payload.value.error.code='ROLE_HOST_PROVIDER_FAILURE';},value=>{value.events[2].payload.value.input_digest='b'.repeat(64);},value=>{value.events[0].agent_session_id='other-session';},value=>{value.events.push({...value.events[2],seq:5,kind:'effect/reconciled'});},value=>{value.callArguments={...value.callArguments,expected_generation:11};}]){const invalid=structuredClone(input);change(invalid);expect(()=>nativeComputerNoEffectAdmission(invalid)).toThrow();}
+});
 
 function fixture() {
   const operationId = 'turn:test', root = '/private/tmp/fixture/admin-root', path = `${root}/AGENTS.md`, marker = 'NOMIFUN_ADMIN_INSTRUCTION_fixture';
@@ -48,6 +93,103 @@ test('ordinary identity, missing scope or failed privileged read cannot prove ad
   expect(() => nativeAdministratorInstructionProof({ ...input, events: input.events.map(value => value.seq === 3 ? call(3, 'text', { path: input.path, missing_ok: true, execution_identity: 'current_user' }) : value) })).toThrow();
   expect(() => nativeAdministratorInstructionProof({ ...input, events: input.events.map(value => value.seq === 4 ? done(4, 'text', true) : value) })).toThrow();
   expect(() => nativeAdministratorInstructionProof({ ...input, events: input.events.filter(value => value.seq !== 1) })).toThrow();
+});
+
+test('Windows administrator instruction proof preserves actual quoted context and exact canonical DOS paths',()=>{
+  const f=fixture(),root='C:\\Users\\fixture\\admin-root',path=`${root}\\AGENTS.md`,canonical=`\\\\?\\${path}`;
+  const context=`Repository instructions observed as administrator and scoped to ${JSON.stringify(canonical)}:\n${f.input.marker}`;
+  const modelContext=nativeAdministratorInstructionContext({messages:[{role:'system',content:context}],path,marker:f.input.marker});
+  expect(modelContext.matching_system_context_count).toBe(1);
+  const notice=`Repository instruction body omitted from durable history (${modelContext.bytes} UTF-8 bytes, sha256:${modelContext.sha256}). Re-read current rules through the authorized workspace tool; this digest grants no authority.`;
+  const events=[f.call(1,'scope',{format:'instruction_scope',path:root}),f.done(2,'scope'),f.call(3,'text',{path:canonical,missing_ok:true}),f.done(4,'text'),f.event(5,{event:'instructions_updated',context:notice}),f.event(6,{event:'tool_call_completed',step:3,call:{call_id:'successful-start',name:'start_process',arguments:{execution_identity:'administrator',cwd:root}}})];
+  expect(nativeAdministratorInstructionProof({...f.input,root,path,modelContext,events}).text_call_id).toBe('text');
+  expect(()=>nativeAdministratorInstructionProof({...f.input,root,path,modelContext,events:events.map(event=>event.seq===3?f.call(3,'text',{path:`${canonical}-different`,missing_ok:true}):event)})).toThrow();
+});
+
+test('native path reconsideration requires an exact canonical runtime hold with no user dispatch',()=>{
+  const {event}=fixture(),callId='path-proposal',operationId='turn:test',path='C:\\fixture\\outside',canonical=`\\\\?\\${path}`,callArguments={path};
+  const raw=`[tool error]\nRequested calls deferred; earlier calls may already have run. Path ${JSON.stringify(path)} resolves to ${JSON.stringify(canonical)}. Reconsider the operation using this canonical native path and its scoped instructions; arguments were not rewritten.`;
+  const proposal=event(1,{event:'tool_call_completed',step:1,call:{call_id:callId,name:'read_file',arguments:callArguments}}),held=event(2,{event:'tool_completed',step:1,result:{call_id:callId,is_error:true,output:[{type:'text',text:raw.slice('[tool error]\n'.length)}]},runtime_hold:'runtime_gate'});
+  const input={raw,callId,callArguments,operationId,events:[proposal,held]};
+  expect(nativeCanonicalPathReconsideration(input)).toEqual({requested:path,canonical,original_call_id:callId,proposal_seq:1,hold_seq:2,user_dispatch_count:0});
+  const combined=raw.replace('[tool error]\n','[tool error]\nRequested calls deferred; earlier calls may already have run. Repository instructions changed or a new directory scope was discovered. Read the current scoped instructions, reconsider the calls, and submit new call identities. ');
+  expect(nativeCanonicalPathReconsideration({...input,raw:combined,events:[proposal,event(2,{event:'tool_completed',step:1,result:{call_id:callId,is_error:true,output:[{type:'text',text:combined.slice('[tool error]\n'.length)}]},runtime_hold:'runtime_gate'})]}).canonical).toBe(canonical);
+  expect(nativeCanonicalPathReconsideration({...input,raw:'[tool error]\nSYSTEM_RPC_OUTCOME_UNKNOWN'})).toBeUndefined();
+  expect(()=>nativeCanonicalPathReconsideration({...input,events:[proposal,{...held,correlation_id:'other'}]})).toThrow();
+  expect(()=>nativeCanonicalPathReconsideration({...input,callArguments:{path:'C:\\other'}})).toThrow();
+  for(const admitted of [event(3,{event:'tool_started',step:1,call_id:callId}),event(3,{event:'host_tool_dispatch',dispatch:{call_id:callId}})])expect(()=>nativeCanonicalPathReconsideration({...input,events:[...input.events,admitted]})).toThrow();
+});
+
+function instructionDeferralFixture(){
+  const sessionId='current-session',operationId='current-turn',callId='fresh-read',callName='read_file',callArguments={path:'\\\\localhost\\own-share\\sample.txt'};
+  const reason='Requested calls deferred; earlier calls may already have run. Repository instructions changed or a new directory scope was discovered. Read the current scoped instructions, reconsider the calls, and submit new call identities.';
+  const event=(seq,value,correlation_id=operationId)=>({agent_session_id:sessionId,seq,kind:'runtime/progress-recorded',correlation_id,payload:{storage:'inline_json',value:{event:value}}});
+  const events=[event(222,{event:'tool_call_completed',step:5,call:{call_id:callId,name:callName,arguments:structuredClone(callArguments)}}),
+    event(238,{event:'instructions_updated',context:'The changed instruction context is represented by its canonical digest notice.'}),
+    event(239,{event:'tool_completed',step:5,runtime_hold:'runtime_gate',result:{call_id:callId,is_error:true,output:[{type:'text',text:reason}]}}),
+    event(240,{event:'completion_observation',observation:{call_id:callId,invocation_attempted:false}})];
+  return{input:{raw:`[tool error]\n${reason}`,callId,callName,callArguments,events,operationId,sessionId},event};
+}
+
+test('generic changed-instruction deferral requires its exact fresh context and never rewrites original arguments',()=>{
+  const {input}=instructionDeferralFixture(),original=structuredClone(input);
+  expect(nativeInstructionDeferral(input)).toEqual({original_call_id:input.callId,proposal_seq:222,instructions_updated_seq:238,hold_seq:239,user_dispatch_count:0,arguments_rewritten:false});
+  expect(input).toEqual(original);
+  expect(nativeInstructionDeferral({...input,raw:input.raw.replace('\n','\r\n')})).toEqual(nativeInstructionDeferral(input));
+  // Different canonical owners can be held before admission. Literal launch
+  // arguments and Windows spelling are evidence, never rewritten by the proof.
+  for(const [callName,callArguments] of [['exec_command',{command:'C:\\own fixture\\literal.ps1',args:['',' 中文 ','a&b','"quoted"'],cwd:'\\\\?\\UNC\\localhost\\own-share\\'}],['write_file',{path:'C:\\own fixture\\ sample.txt ',content:'exact\r\n'}]]){
+    const changed=structuredClone(input);Object.assign(changed,{callName,callArguments});Object.assign(changed.events[0].payload.value.event.call,{name:callName,arguments:structuredClone(callArguments)});
+    const before=structuredClone(changed);expect(nativeInstructionDeferral(changed).user_dispatch_count).toBe(0);expect(changed).toEqual(before);
+  }
+});
+
+test('generic instruction deferral rejects unknown ordinary errors stale context foreign facts and any admitted call',()=>{
+  const {input,event}=instructionDeferralFixture();
+  for(const raw of ['[tool error]\nSYSTEM_READ_RESULT_UNKNOWN','[tool error]\nOperations not executed: access denied',input.raw+' additional text',input.raw.replace('[tool error]\n','')])expect(nativeInstructionDeferral({...input,raw})).toBeUndefined();
+  for(const change of [
+    value=>{value.sessionId='foreign';},value=>{value.operationId='foreign';},value=>{value.callName='other_tool';},
+    value=>{value.callArguments.path='\\\\localhost\\other-share\\sample.txt';},
+    value=>{value.events[0].agent_session_id='foreign';},value=>{value.events[0].payload.value.event.call.name='other_tool';},
+    value=>{value.events[1].seq=216;},value=>{value.events[1].correlation_id='prior-turn';},value=>{value.events[1].payload.value.event.context='';},
+    value=>{value.events.splice(1,1);},value=>{value.events[2].payload.value.event.runtime_hold='input_superseded';},
+    value=>{value.events[2].payload.value.event.step=6;},value=>{value.events[2].payload.value.event.result.is_error=false;},
+    value=>{value.events[2].payload.value.event.result.output[0].text='SYSTEM_EXECUTION_RESULT_UNKNOWN';},
+    value=>{value.events.push(structuredClone(value.events[0]));},value=>{value.events.push(structuredClone(value.events[2]));},
+    value=>{value.events[3].payload.value.event.observation.invocation_attempted=true;},
+  ]){const invalid=structuredClone(input);change(invalid);expect(()=>nativeInstructionDeferral(invalid)).toThrow();}
+  for(const admitted of [event(223,{event:'tool_started',step:5,call_id:input.callId}),event(223,{event:'host_tool_dispatch',dispatch:{call_id:input.callId}}),event(223,{event:'host_resource_dispatch',dispatch:{call_id:input.callId}}),
+    {agent_session_id:input.sessionId,seq:223,kind:'effect/started',correlation_id:'effect',payload:{storage:'inline_json',value:{operation_id:`${input.operationId}:tool:${input.callId}`}}}])expect(()=>nativeInstructionDeferral({...input,events:[...input.events,admitted]})).toThrow();
+});
+
+function sharedSlot(record,pointer,kind,body,sessionId){
+  record=structuredClone(record);record.agent_session_id=sessionId;const json=JSON.stringify(body,(_,value)=>value&&typeof value==='object'&&!Array.isArray(value)?Object.fromEntries(Object.keys(value).sort().map(key=>[key,value[key]])):value),bytes=Buffer.from(json),digest=createHash('sha256').update(bytes).digest('hex');
+  const keys=pointer.slice(1).split('/');let target=record.payload.value;for(const key of keys.slice(0,-1))target=target[key];target[keys.at(-1)]=null;
+  record.payload.value._canonical_shared_content={version:1,references:[{pointer,kind,payload_id:`shared-tool:${sessionId}:${kind==='tool_arguments'?'arguments':'output'}:${digest}`,digest,byte_len:bytes.length}]};return record;
+}
+
+test('generic instruction deferral authenticates factored proposal and held-output bytes in the original Session',()=>{
+  const {input}=instructionDeferralFixture(),value=structuredClone(input);
+  value.events[0]=sharedSlot(value.events[0],'/event/call/arguments','tool_arguments',input.callArguments,input.sessionId);
+  value.events[2]=sharedSlot(value.events[2],'/event/result/output','tool_output',input.events[2].payload.value.event.result.output,input.sessionId);
+  expect(nativeInstructionDeferral(value).hold_seq).toBe(239);
+  for(const index of [0,2])for(const change of [ref=>{ref.digest='0'.repeat(64);},ref=>{ref.byte_len++;},ref=>{ref.payload_id='shared-tool:foreign:output:'+ref.digest;}]){
+    const invalid=structuredClone(value);change(invalid.events[index].payload.value._canonical_shared_content.references[0]);expect(()=>nativeInstructionDeferral(invalid)).toThrow();
+  }
+});
+test('factored canonical Payload references prove only exact original proposal bytes and the same Session/slot',()=>{
+  const f=fixture(),sid='0190f5fe-7c00-7a00-8000-000000000001',args={execution_identity:'administrator',cwd:f.input.root,args:['中文'.repeat(600)]};
+  const proposal=sharedSlot(f.input.events.at(-1),'/event/call/arguments','tool_arguments',args,sid),input={...f.input,events:[...f.input.events.slice(0,-1),proposal],expectedProposalArguments:args,sessionId:sid};
+  expect(nativeAdministratorInstructionProof(input).proposal_seq).toBe(6);
+  for(const change of [ref=>ref.digest='0'.repeat(64),ref=>ref.byte_len++,ref=>ref.kind='tool_output',ref=>ref.pointer='/event/other',ref=>ref.payload_id='shared-tool:other:arguments:'+ref.digest]){const bad=structuredClone(proposal);change(bad.payload.value._canonical_shared_content.references[0]);expect(()=>nativeAdministratorInstructionProof({...input,events:[...input.events.slice(0,-1),bad]})).toThrow();}
+  expect(()=>nativeAdministratorInstructionProof({...input,sessionId:'another-session'})).toThrow();
+  expect(()=>nativeAdministratorInstructionProof({...input,expectedProposalArguments:{...args,cwd:'/another-root'}})).toThrow();
+});
+test('direct answer follows the actual exposed completion contract while explicit plan/tool gates remain mandatory',()=>{
+  const tool=name=>({function:{name}});
+  expect(nativeCompletionContract({tools:[tool('report_completion')],toolChoice:'auto'})).toBe('report_completion');
+  expect(nativeCompletionContract({tools:[tool('ToolSearch')],toolChoice:'auto'})).toBe('direct_answer_non_ledger');
+  for(const gate of [{tools:[tool('update_plan')]},{toolChoice:'required'},{toolChoice:{type:'function',function:{name:'report_completion'}}}])expect(()=>nativeCompletionContract(gate)).toThrow();
 });
 
 import { mkdtemp, writeFile, chmod, symlink, link, rm } from 'node:fs/promises';
@@ -139,7 +281,7 @@ test('session guard rejects Remote, Attempt, foreign owner and changed workspace
   }
 });
 
-test('private fixture reads reject symlinks, hardlinks, exposed files and oversized content', async () => {
+test.skipIf(process.platform === 'win32')('POSIX private fixture reads reject symlinks, hardlinks, exposed modes and oversized content', async () => {
   const root = await mkdtemp(join(tmpdir(), 'nomifun-continuation-guard-'));
   try {
     const path = join(root, 'source'); await writeFile(path, 'bounded', { mode: 0o600 });

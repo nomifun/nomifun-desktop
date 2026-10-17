@@ -1,0 +1,20 @@
+import {test,expect} from 'bun:test';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {windowsTaskCleanupSource,windowsTaskCleanupSettlement,windowsTaskIdentityScript} from './global-os-windows-task-cleanup.mjs';
+const fixture=join(tmpdir(),'nomifun-global-os-product-11111111-1111-1111-1111-111111111111'),nonce='22222222-2222-2222-2222-222222222222',root=join(fixture,`system-cases-${nonce}`),taskName=`NomiFun-Global-OS-${nonce}`;
+function source(){return{schema:'nomifun.global-os-native-regression.v2',platform:'win32',status:'failed',scenario:'system',administrator:false,retain_service_for_app_exit:true,fixture,workspace:join(fixture,'workspace'),session_id:'original',accepted:{operation_id:'completed-operation'},execution:{operation_id:'completed-operation',pending_effects:0,unknown_effects:0},system_resources:{root,taskName,target:`\\${taskName}`,registryPath:`Software\\NomiFun\\Acceptance\\${nonce}`,serviceMarker:join(root,'task-marker.json'),task_pid:100},system_phases:Array.from({length:4},()=>({execution:{state:'completed',pending_effects:0,unknown_effects:0},settlement:{events:[{payload:{value:{event:{event:'host_cleanup_proven'}}}}]}}))};}
+test('retained Task cleanup accepts only exact unique completed source and canonical cleanup evidence',()=>{
+  expect(windowsTaskCleanupSource(source()).root).toBe(root);
+  for(const change of [value=>{value.system_resources.root='C:\\Users';},value=>{value.system_resources.taskName='DailyTask';},value=>{value.system_resources.registryPath='Software\\Microsoft';},value=>{value.system_resources.task_pid=0;},value=>{value.system_phases[0].execution.unknown_effects=1;},value=>{value.system_phases[0].settlement.events=[];},value=>{value.system_phases.pop();},value=>{value.execution.unknown_effects=1;},value=>{value.execution.operation_id='different';},value=>{value.retain_service_for_app_exit=false;},value=>{value.scenario='desktop';}]){const value=source();change(value);expect(()=>windowsTaskCleanupSource(value)).toThrow();}
+});
+test('new Task cleanup Turn rejects an active, unknown, checkpointed or different latest operation',()=>{
+  const input=()=>({execution:{state:'completed',turn_state:'completed',operation_id:'original',producer_lease_live:false,checkpoint_retained:false,recovery_blocked:false,pause_requested:false,automatic_replay_authorized:false,pending_effects:0,unknown_effects:0,checkpoint_seq:null,checkpoint_digest:null,pause:null},head:{session_id:'session',status:'ready'},operationId:'original',sessionId:'session'});
+  expect(()=>windowsTaskCleanupSettlement(input())).not.toThrow();
+  for(const change of [value=>{value.execution.unknown_effects=1;},value=>{value.execution.pending_effects=1;},value=>{value.execution.checkpoint_retained=true;},value=>{value.execution.operation_id='a-later-turn';},value=>{value.execution.state='running';},value=>{value.execution.automatic_replay_authorized=true;},value=>{value.head.active_turn_id='active';},value=>{value.head.status='paused';}]){const value=input();change(value);expect(()=>windowsTaskCleanupSettlement(value)).toThrow();}
+});
+test('Task script validates actual account SID and exact definition before stopping only the named UUID',()=>{
+  const pin=windowsTaskCleanupSource(source()),readonly=windowsTaskIdentityScript(pin,'S-1-5-21-1001'),mutate=windowsTaskIdentityScript(pin,'S-1-5-21-1001',{mutate:true});
+  expect(readonly).toContain('.Translate([Security.Principal.SecurityIdentifier]).Value');expect(readonly).toContain('$nativeSid-cne');expect(readonly).toContain('Exact task action mismatch');expect(readonly).not.toContain('.Stop(');expect(readonly).not.toContain('.DeleteTask(');
+  expect(mutate.indexOf('Exact task action mismatch')).toBeLessThan(mutate.indexOf('$t.Stop(0)'));expect(mutate.match(/\$t\.Stop\(0\)/g)).toHaveLength(1);expect(mutate.match(/\.DeleteTask\(/g)).toHaveLength(1);expect(mutate).toContain(`DeleteTask('${taskName}',0)`);expect(mutate).not.toContain('RegisterTask');expect(mutate).not.toContain('.Run(');expect(mutate).not.toContain('DeleteSubKey');
+});

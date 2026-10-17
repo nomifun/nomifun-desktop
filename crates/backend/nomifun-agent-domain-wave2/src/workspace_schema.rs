@@ -27,6 +27,8 @@ pub(super) fn input(action: &str) -> Option<StrictJsonValue> {
                 "execution_identity":{"type":"string", "enum":["current_user", "administrator"], "default":"current_user",
                     "description":"Identity required for this read-only operation, for every read format. Administrator reads use the existing native system execution path; independent privacy permissions still apply. This does not authorize writes or change the Session's frozen tool selection."},
                 "recursive":{"type":"boolean", "default":false},
+                "path_semantics":{"type":"string", "enum":["follow","entry"], "default":"follow",
+                    "description":"Instruction-scope metadata only. Follow resolves the requested entry's target for content operations. Entry resolves its parent and inspects the named entry itself for delete/rename; recursive entry discovery does not follow descendant links."},
                 "missing_ok":{"type":"boolean", "default":false,
                     "description":"Use true when checking an optional file such as AGENTS.md so absence is reported as a normal observation."},
                 "path":path(),
@@ -43,7 +45,7 @@ pub(super) fn input(action: &str) -> Option<StrictJsonValue> {
                  "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]},{"required":["start_line"]},{"required":["line_count"]}]}}},
                 {"if":{"properties":{"format":{"const":"instruction_scope"}},"required":["format"]},
                  "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]},{"required":["expected_sha256"]},{"required":["start_line"]},{"required":["line_count"]}]}},
-                 "else":{"properties":{"recursive":{"const":false}}}}
+                 "else":{"properties":{"recursive":{"const":false}},"not":{"required":["path_semantics"]}}}
             ]
         }),
         "workspace.files/search" => object(
@@ -206,5 +208,23 @@ mod tests {
             "path":"../outside/report.txt", "expected_source":{"kind":"absent"},
             "hunks":[{"old_start":0,"old_lines":0,"new_start":1,"new_lines":1,"lines":[{"kind":"add","text":"created"}]}]
         }]})));
+    }
+
+    #[test]
+    fn entry_metadata_is_explicit_and_only_available_for_instruction_scope() {
+        let schema = input("workspace.files/read").unwrap();
+        let validator = jsonschema::validator_for(&schema.0).unwrap();
+        for identity in ["current_user", "administrator"] {
+            for semantics in ["follow", "entry"] {
+                assert!(validator.is_valid(&json!({"path":"link","format":"instruction_scope",
+                    "recursive":true,"path_semantics":semantics,"execution_identity":identity})));
+            }
+        }
+        for invalid in [
+            json!({"path":"link","path_semantics":"entry"}),
+            json!({"path":"link","format":"text","path_semantics":"follow"}),
+            json!({"path":"link","format":"image","path_semantics":"entry"}),
+            json!({"path":"link","format":"instruction_scope","path_semantics":"unknown"}),
+        ] { assert!(!validator.is_valid(&invalid), "{invalid}"); }
     }
 }

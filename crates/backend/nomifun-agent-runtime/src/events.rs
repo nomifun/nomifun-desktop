@@ -8,8 +8,8 @@ use crate::engine::EngineBinding;
 use crate::error::AgentEngineError;
 use crate::tool::AgentToolResult;
 
-/// Trusted model failure classification and approved diagnostics. Provider
-/// prose never selects a reason or recreates typed facts from public text.
+/// Typed model or native owner failure. Diagnostic prose never selects a
+/// classification or recreates missing execution facts.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentTurnFailure {
@@ -20,6 +20,9 @@ pub enum AgentTurnFailure {
     },
     ModelStreamEndedWithoutTerminal,
     InvalidModelEvent,
+    /// A fatal native preflight failure, preserving owner dispatch and cleanup
+    /// facts without turning OS authentication cancellation into user Stop.
+    SystemExecution { diagnostic: nomifun_agent_contracts::SystemExecutionFailure },
 }
 
 /// An identity-valid native proposal whose completed arguments were rejected.

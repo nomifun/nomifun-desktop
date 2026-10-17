@@ -130,12 +130,86 @@ async fn absolute_file_operations_remain_available_after_default_directory_is_re
     service.write_file_for_agent_session(&scope, &external, b"before").await.unwrap();
     service.apply_patch_for_agent_session(&scope, replacement(&external, "before", "after")).await.unwrap();
     let scope_result = service.instruction_scope_for_agent_session(&scope,
-        nomifun_file::AgentInstructionScopeRequest { path: external.clone(), recursive: false }).await.unwrap();
+        nomifun_file::AgentInstructionScopeRequest { path: external.clone(), recursive: false, path_semantics: Default::default() }).await.unwrap();
     assert_eq!(scope_result.canonical_path, fs::canonicalize(&external).unwrap().to_str().unwrap());
     let search = service.search_text_for_agent_session(&scope, AgentTextSearchRequest { query: "after".into(), path: Some(external.clone()), limit: None }).await.unwrap();
     assert_eq!(search.matches.len(), 1);
     service.remove_entry_for_agent_session(&scope, &external).await.unwrap();
     assert!(!workspace.exists());
+}
+
+#[tokio::test]
+async fn ordinary_read_absence_still_requires_an_existing_native_ancestor() {
+    let fixture = tempfile::tempdir().unwrap();
+    let workspace = fixture.path().join("project");
+    let existing_parent = fixture.path().join("external");
+    fs::create_dir(&workspace).unwrap();
+    fs::create_dir(&existing_parent).unwrap();
+    let target = existing_parent.join("future/deep/absent.txt").to_string_lossy().into_owned();
+    let scope = workspace_binding(nomifun_common::generate_id(), "binding", "project", "owner",
+        [WORKSPACE_READ_OPERATION], &workspace).unwrap();
+    let service = FileService::new(Arc::new(Events::default()), vec![]);
+    assert_eq!(service.read_file_for_agent_session(&scope, &target).await.unwrap(), None);
+    let page = service.read_text_page_for_agent_session(&scope, AgentTextReadRequest {
+        path: target.clone(), offset: 0, limit: 16_384, expected_sha256: None, start_line: None, line_count: None,
+    }).await.unwrap();
+    assert!(page.is_none());
+    for path_semantics in [nomi_native_files::NativePathSemantics::Follow, nomi_native_files::NativePathSemantics::Entry] {
+        let observed = service.instruction_scope_for_agent_session(&scope,
+            nomifun_file::AgentInstructionScopeRequest { path: target.clone(), recursive: false, path_semantics }).await.unwrap();
+        assert_eq!(observed.kind, "missing");
+        assert!(observed.complete);
+    }
+    assert!(!existing_parent.join("future").exists(), "read-only absence must not create ancestors");
+    assert_eq!(fs::read_dir(&existing_parent).unwrap().count(), 0);
+}
+
+#[cfg(windows)]
+fn assert_native_read_lookup_failure(error: nomifun_common::AppError, expected: &std::io::Error) {
+    use nomifun_common::AppError;
+    assert_eq!(expected.kind(), std::io::ErrorKind::NotFound, "native missing-share precondition: {expected}");
+    assert!(expected.raw_os_error().is_some(), "native lookup must supply its actual Windows error");
+    assert_eq!(error.error_code(), "RESOURCE_NOT_FOUND");
+    match &error {
+        AppError::NativeFileAcquisition { code, kind, raw_os_error, source: Some(source), .. } => {
+            assert_eq!(*code, "RESOURCE_NOT_FOUND");
+            assert_eq!(kind.as_deref(), Some("NotFound"));
+            assert_eq!(*raw_os_error, expected.raw_os_error());
+            assert_eq!(source.kind(), expected.kind());
+            assert_eq!(source.raw_os_error(), expected.raw_os_error());
+        }
+        other => panic!("native read root failure lost its typed observation: {other:?}"),
+    }
+    assert!(std::error::Error::source(&error).is_some());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn nonexistent_unc_share_is_a_typed_read_failure_and_never_source_or_scope_absence() {
+    let fixture = tempfile::tempdir().unwrap();
+    let scope = workspace_binding(nomifun_common::generate_id(), "binding", "project", "owner",
+        [WORKSPACE_READ_OPERATION], fixture.path()).unwrap();
+    let service = FileService::new(Arc::new(Events::default()), vec![]);
+    // No share is created, removed or reconfigured. Both native spellings
+    // address a fresh, nonexistent localhost share with no filesystem root.
+    let share = format!("nomifun-missing-read-{}", nomifun_common::generate_id());
+    for root in [format!(r"\\localhost\{share}"), format!(r"\\?\UNC\localhost\{share}")] {
+        let target = format!(r"{root}\future\absent.txt");
+        let expected_text_error = fs::canonicalize(&target).unwrap_err();
+        let error = service.read_file_for_agent_session(&scope, &target).await.err().expect("UNC read must fail");
+        assert_native_read_lookup_failure(error, &expected_text_error);
+        let error = service.read_text_page_for_agent_session(&scope, AgentTextReadRequest {
+            path: target.clone(), offset: 0, limit: 16_384, expected_sha256: None, start_line: None, line_count: None,
+        }).await.err().expect("UNC page must fail before projecting absence");
+        assert_native_read_lookup_failure(error, &expected_text_error);
+        let expected_scope_error = fs::symlink_metadata(&root).unwrap_err();
+        for path_semantics in [nomi_native_files::NativePathSemantics::Follow, nomi_native_files::NativePathSemantics::Entry] {
+            let error = service.instruction_scope_for_agent_session(&scope,
+                nomifun_file::AgentInstructionScopeRequest { path: target.clone(), recursive: false, path_semantics })
+                .await.err().expect("UNC scope must fail instead of claiming kind=missing");
+            assert_native_read_lookup_failure(error, &expected_scope_error);
+        }
+    }
 }
 
 #[tokio::test]

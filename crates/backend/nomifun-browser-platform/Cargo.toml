@@ -21,6 +21,8 @@ tempfile.workspace = true
 dunce.workspace = true
 libc.workspace = true
 uuid.workspace = true
+nomi-native-files.workspace = true
+same-file.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

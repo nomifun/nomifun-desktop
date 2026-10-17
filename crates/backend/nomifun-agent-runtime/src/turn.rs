@@ -3750,10 +3750,14 @@ async fn record_tool_result_with_hold(
         // Only an ordinary owner invocation failure is a model-observable tool
         // result. Structural/host contract failures must terminate the turn;
         // allowing the model to continue would hide a failed enforcement layer.
-        Err(AgentEngineError::CapabilityKernel { code, message }) => {
+        Err(error @ AgentEngineError::CapabilityKernel { .. }) => {
+            if let Some(result) = crate::tool::typed_owner_error_result(call_id.clone(), &error) { result }
+            else {
+            let AgentEngineError::CapabilityKernel { code, message, .. } = &error else { unreachable!() };
             let output = nomifun_engine_core::system_permission_error_carrier(&code, &message)
-                .unwrap_or_else(|| AgentEngineError::CapabilityKernel { code, message }.to_string());
+                .unwrap_or_else(|| error.to_string());
             AgentToolResult::text(call_id.clone(), output, true)
+            }
         }
         Err(error @ AgentEngineError::ToolInvocation(_)) => {
             AgentToolResult::text(call_id.clone(), error.to_string(), true)
@@ -4261,6 +4265,7 @@ mod tests {
                 Err(AgentEngineError::CapabilityKernel {
                     code:"CAPABILITY_UNAVAILABLE".to_owned(),
                     message:message.to_owned(),
+                    details:None,
                 }),
                 &sink,
                 (step+1) as u16,
@@ -4298,7 +4303,7 @@ mod tests {
             "action_id":"computer/observe","operation":"screenshot","permissions":["screen_recording"],
             "execution":"not_executed"}).to_string();
         let (_, result) = record_tool_result("permission-call".into(), Err(AgentEngineError::CapabilityKernel {
-            code: "SYSTEM_PERMISSION_REQUIRED".into(), message: body.clone(),
+            code: "SYSTEM_PERMISSION_REQUIRED".into(), message: body.clone(), details:None,
         }), &sink, 1).await.unwrap();
         assert!(result.is_error);
         assert!(nomifun_engine_core::project_system_permission_required(Some("computer"), Some("computer/observe"),
@@ -4311,6 +4316,29 @@ mod tests {
             &sink, 2).await.unwrap();
         assert!(nomifun_engine_core::project_system_permission_required(Some("computer"), Some("computer/observe"),
             unrelated.is_error, &unrelated.output_text()).is_none());
+    }
+
+    #[tokio::test]
+    async fn typed_native_owner_error_is_preserved_in_the_same_canonical_tool_result() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event); Ok(())
+            }
+        }
+        let details = json!({"native_file_error":{"code":"SYSTEM_ACCESS_DENIED","message":"native root denied","kind":"PermissionDenied","raw_os_error":5}});
+        let sink = Sink::default();
+        let (_, result) = record_tool_result("native-owner-failure".into(), Err(AgentEngineError::CapabilityKernel {
+            code:"ROLE_HOST_NATIVE_FILE_FAILURE".into(), message:"opaque owner message".into(), details:Some(details.clone()),
+        }), &sink, 1).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&result.output_text()).unwrap();
+        assert_eq!(value["details"], details); assert_eq!(value["message"], "opaque owner message");
+        assert_eq!(result.call_id.as_ref(), "native-owner-failure"); assert!(result.is_error);
+        let events = sink.0.lock().unwrap(); assert_eq!(events.len(), 1);
+        let AgentEngineEvent::ToolCompleted { result: persisted, runtime_hold: None, .. } = &events[0] else { panic!("owner error left the canonical tool-result chain") };
+        assert_eq!(persisted, &result);
     }
 
     fn configured_test_budget() -> crate::AgentModelBudget {
@@ -5334,7 +5362,7 @@ mod tests {
             assert!(matches!(path, "." | "README.md" | "a" | "b"));
             json!({"path":path, "canonical_path":if path == "." { "" } else { path },
                 "kind":if path == "." { "directory" } else { "file" },
-                "recursive":args["recursive"], "directories":[""],
+                "recursive":args["recursive"], "path_semantics":args.get("path_semantics").cloned().unwrap_or(json!("follow")), "directories":[""],
                 "complete":true, "incomplete_reasons":[]})
         } else {
             return None;
@@ -7000,6 +7028,114 @@ mod tests {
     #[tokio::test]
     async fn serial_administrator_effect_defers_current_user_read_for_new_instructions() {
         serial_effect_instruction_refresh_case("administrator", "current_user").await;
+    }
+
+    #[tokio::test]
+    async fn settled_namespace_removal_retires_history_but_holds_new_calls_to_that_namespace() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event); Ok(())
+            }
+        }
+        struct Tools {
+            removed: std::sync::atomic::AtomicBool,
+            dispatched: std::sync::Mutex<Vec<String>>,
+            root: String,
+        }
+        #[async_trait]
+        impl AgentToolInvoker for Tools {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+                let args = &invocation.call.arguments.0;
+                let internal = args["missing_ok"] == true || args["format"] == "instruction_scope";
+                if internal {
+                    let path = args["path"].as_str().unwrap();
+                    let affected = std::path::Path::new(path).starts_with(&self.root);
+                    if affected && self.removed.load(Ordering::SeqCst) {
+                        return Err(AgentEngineError::CapabilityKernel {
+                            code:"ROLE_HOST_NATIVE_FILE_FAILURE".into(), message:"The native owner could not acquire the requested scope".into(),
+                            details:Some(json!({"native_file_error":{"code":"RESOURCE_NOT_FOUND","kind":"NotFound","raw_os_error":67,
+                                "message":"the removed fixture namespace is unavailable"}})),
+                        });
+                    }
+                    let value = if args["format"] == "instruction_scope" {
+                        let directory = path == self.root;
+                        json!({"path":path,"canonical_path":if path == "." {""} else {path},
+                            "kind":if path == "." || directory {"directory"} else {"file"},
+                            "recursive":args["recursive"],"path_semantics":args.get("path_semantics").cloned().unwrap_or(json!("follow")),
+                            "directories":[if directory {self.root.clone()} else {crate::agents_md::parent_directory(path)}],
+                            "complete":true,"incomplete_reasons":[]})
+                    } else if std::path::Path::new(path) == std::path::Path::new(&self.root).join("AGENTS.md") {
+                        let content = "RULE_FROM_REMOVED_NAMESPACE";
+                        json!({"path":path,"content":content,"offset":0,"total_bytes":content.len(),"eof":true,"next_offset":null,
+                            "sha256":nomifun_agent_contracts::digest_bytes(content.as_bytes())})
+                    } else { json!({"kind":"workspace_file_absent","path":path}) };
+                    return Ok(AgentToolResult::text(invocation.call.call_id, value.to_string(), false));
+                }
+                self.dispatched.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                if invocation.binding.action_id.as_ref() == "workspace.process/exec" {
+                    self.removed.store(true, Ordering::SeqCst);
+                    return Ok(AgentToolResult::text(invocation.call.call_id, json!({"process_id":"namespace-removal",
+                        "state":"exited","exit_code":0,"cleanup":{"reaped":true},"success":true,"output":{"text":"removed unique namespace"}}).to_string(), false));
+                }
+                assert!(!std::path::Path::new(args["path"].as_str().unwrap()).starts_with(&self.root)
+                    || !self.removed.load(Ordering::SeqCst), "the unavailable target reached business dispatch");
+                Ok(workspace_result(invocation))
+            }
+        }
+        let root = if cfg!(windows) { r"C:\removed-namespace" } else { "/removed-namespace" };
+        let target = std::path::Path::new(root).join("sample.txt").to_str().unwrap().to_owned();
+        let independent = if cfg!(windows) { r"D:\independent.txt" } else { "/independent.txt" };
+        let quote = "Inspect the controlled sample, remove its temporary namespace, then inspect an independent sample.";
+        let replan = |id: &str| {
+            let mut step = plan_step("in_progress", quote);
+            if let Ok(ChatModelEvent::ToolCallCompleted { call }) = &mut step[0] { call.call_id = id.into(); }
+            step
+        };
+        let model = Arc::new(ObservingModel { requests: Default::default(), steps: std::sync::Mutex::new(vec![
+            replan("initial-plan"),
+            control_step("warm-proposal", "read_file", json!({"path":target})),
+            replan("plan-current-rules"),
+            control_step("warm-accepted", "read_file", json!({"path":target})),
+            control_step("remove-once", "exec_command", json!({"command":"controlled-remove-namespace"})),
+            replan("plan-unavailable-observation"),
+            control_step("retired-target-held", "read_file", json!({"path":target})),
+            control_step("independent-accepted", "read_file", json!({"path":independent})),
+            vec![Err(ChatModelError::protocol_violation("controlled end after independent dispatch"))],
+        ]) });
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+        ]).unwrap();
+        let mut initial = request(); initial.input.messages[0].content = vec![ChatContentPart::Text { text: quote.into() }];
+        let tools = Arc::new(Tools { removed: std::sync::atomic::AtomicBool::new(false), dispatched: Default::default(), root: root.into() });
+        let sink = Arc::new(Sink::default());
+        let engine = AgentEngine::new(AgentEngineBuild { build_id: EngineBuildId::from("coding-dev"), build_digest: DigestHex::from("a".repeat(64)) }).unwrap();
+        let result = engine.open_session(binding(), model.clone(), tools.clone(), Some(sink.clone())).unwrap()
+            .run_turn(AgentTurnRequest::new(initial, plan, principal(), 0)).await;
+        assert!(result.is_err(), "the provider deliberately ends only after observing the final request");
+        assert_eq!(*tools.dispatched.lock().unwrap(), ["warm-accepted", "remove-once", "independent-accepted"]);
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 9, "history retirement must reach the next model boundary after the settled effect");
+        assert!(requests[4].input.instructions.iter().any(|text| text.contains("RULE_FROM_REMOVED_NAMESPACE")));
+        let after = &requests[5];
+        assert!(after.input.instructions.iter().any(|text| text.contains("\"status\":\"unavailable\"") && text.contains("raw_os_error")));
+        assert!(!after.input.instructions.iter().any(|text| text.contains("RULE_FROM_REMOVED_NAMESPACE")));
+        let events = sink.0.lock().unwrap();
+        let settled = events.iter().position(|event| matches!(event, AgentEngineEvent::ToolCompleted { result, .. } if result.call_id.as_ref() == "remove-once")).unwrap();
+        let unavailable = events.iter().position(|event| matches!(event, AgentEngineEvent::InstructionsUpdated { context } if context.contains("\"status\":\"unavailable\""))).unwrap();
+        let held = events.iter().position(|event| matches!(event, AgentEngineEvent::ToolCompleted { result, runtime_hold: Some(crate::RuntimeToolHoldReason::RuntimeGate), .. }
+            if result.call_id.as_ref() == "retired-target-held" && result.is_error)).unwrap();
+        assert!(settled < unavailable && unavailable < held);
+        assert!(events.iter().any(|event| matches!(event, AgentEngineEvent::ToolCompleted { result, .. }
+            if result.is_error && result.call_id.as_ref().starts_with("agent-instructions:")
+                && serde_json::from_str::<serde_json::Value>(&result.output_text()).is_ok_and(|value|
+                    value["details"]["native_file_error"]["raw_os_error"] == 67
+                    && value["details"]["native_file_error"]["kind"] == "NotFound"))),
+            "the full typed native error must survive in the original canonical instruction ToolCompleted");
+        assert!(!events.iter().any(|event| matches!(event, AgentEngineEvent::ToolStarted { call_id, .. } if call_id.as_ref() == "retired-target-held")));
     }
 
     #[tokio::test]
@@ -9195,7 +9331,7 @@ mod tests {
                         "observation":{"failed_file":1,"published":[0],"restored":[],
                             "restore_published_unconfirmed":[],"retained_created":[],"skipped_changed_or_unreadable":[0],
                             "rollback_failed":[],"temporary_cleanup_unconfirmed":[]},"recovery":"re-read targets"
-                    }).to_string()})
+                    }).to_string(),details:None})
                 }
                 "workspace.files/read" => {
                     let path=path.unwrap();

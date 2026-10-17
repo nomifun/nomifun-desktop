@@ -1446,6 +1446,18 @@ impl AppServices {
             );
         }
 
+        #[cfg(windows)]
+        if errors.is_empty() {
+            // The application-lifetime UAC runner uses this same executable.
+            // Prove its task shutdown and actual exit before SQLite closes and
+            // an updater or uninstaller may replace the image. This never
+            // starts a runner or requests authentication during shutdown.
+            match tokio::task::spawn_blocking(nomi_system_execution::SystemExecutionClient::unregister).await {
+                Ok(Ok(())) => {},
+                Ok(Err(error)) => errors.push(format!("Windows system runner cleanup failed: {error}")),
+                Err(error) => errors.push(format!("Windows system runner cleanup worker stopped: {error}")),
+            }
+        }
         if errors.is_empty() {
             let companion=self.companion_service.clone();let database=self.database.clone();
             stage.storage_task=Some(tokio::spawn(async move {

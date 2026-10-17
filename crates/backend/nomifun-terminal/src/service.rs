@@ -14,9 +14,6 @@ use nomifun_common::{
     ConversationId, KnowledgeBaseId, LoopbackCapabilityLeaseSet, OnTerminalDelete, TerminalId,
     UserId,
 };
-use nomifun_common::paths::{
-    WorkspaceDirectoryCheck, canonical_existing_workspace_directory,
-};
 use nomifun_db::{
     CreateTerminalParams, ITerminalRepository, TerminalTurnAdmissionClaim,
     TerminalTurnAdmissionKey, TerminalTurnAdmissionRow, TerminalTurnAdmissionScope,
@@ -732,10 +729,17 @@ impl TerminalService {
         let _shutdown_guard = self.enter_operation().await?;
         validate_pty_size(req.cols, req.rows)?;
         if !req.cwd.is_empty() {
-            canonical_existing_workspace_directory(
-                Path::new(&req.cwd),
-                WorkspaceDirectoryCheck::Create,
-            )?;
+            // A terminal cwd is a native process directory, not a project
+            // selector. Preserve its spelling and the existing absolute-path
+            // contract; native lookup decides aliases, links and access.
+            let path = Path::new(&req.cwd);
+            if !path.is_absolute()
+                || !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir())
+            {
+                return Err(nomifun_common::AppError::WorkspaceDirectoryUnavailable(
+                    req.cwd.clone(),
+                ).into());
+            }
         }
         // Verify prerequisite readiness before minting/persisting any terminal
         // row or materializing its workspace knowledge/PTY side effects.
@@ -4204,6 +4208,31 @@ mod tests {
             TerminalError::App(nomifun_common::AppError::WorkspaceDirectoryUnavailable(path))
                 if path == missing.display().to_string()
         ));
+        assert!(repo.rows.lock().unwrap().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn deferred_create_preserves_a_native_leading_space_cwd() {
+        let (svc, events, repo) = service_with_repo();
+        let parent = tempfile::tempdir().unwrap();
+        let cwd = parent.path().join(" leading-space");
+        std::fs::create_dir(&cwd).unwrap();
+        let command = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32").join("cmd.exe");
+        let mut request = req(command.to_str().unwrap(), &["/d", "/q", "/v:off", "/c",
+            "if \"%CD%\"==\"%NOMIFUN_CWD_EXPECTED%\" (echo TERMINAL_NATIVE_CWD_MATCH) else (echo TERMINAL_NATIVE_CWD_MISMATCH)"]);
+        request.env = Some(HashMap::from([("NOMIFUN_CWD_EXPECTED".into(), cwd.to_str().unwrap().into())]));
+        request.defer_spawn = true;
+        request.cwd = cwd.to_str().unwrap().to_owned();
+        let response = svc.create(TEST_USER_ID, request).await.unwrap();
+        let row = repo.get_by_id(response.terminal_id.as_str()).await.unwrap().unwrap();
+        assert_eq!(Path::new(&row.cwd), cwd);
+        assert_eq!(std::fs::canonicalize(&row.cwd).unwrap(), std::fs::canonicalize(&cwd).unwrap());
+        assert!(svc.live.is_empty(), "deferred creation must not start a child");
+        svc.resize(response.terminal_id.as_str(), 80, 24).await.unwrap();
+        let observed = wait_for(|| collect_output(&events).contains("TERMINAL_NATIVE_CWD_MATCH"), 4000).await;
+        svc.delete(response.terminal_id.as_str()).await.unwrap();
+        assert!(observed, "the actual ConPTY child must keep the native leading-space cwd; raw output: {:?}", collect_output(&events));
         assert!(repo.rows.lock().unwrap().is_empty());
     }
 
