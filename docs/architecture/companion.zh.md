@@ -305,6 +305,20 @@ typed `DirectedDelegationResult` 来源，不把报告伪装成人类输入；�
 结果携带精确 Execution/Step/Attempt/Session/Turn 引用。未知效果和不明恢复不自动重放。
 子任务不得递归定向委派产生角色调用环。
 
+伙伴聊天的委派卡与独立 Attempt 查看页都提供确切 Execution 的停止控制，读取该任务
+当前版本提交现役取消命令。返回主对话仅结束查看，主对话 Turn 的停止也不代替已受理
+委派的取消。取消原子结算未完成的 Step/Attempt 并停止调度，原 Session 清理回执继续
+沿现役清理流程核实；已发生或 unknown 的效果不因此改写为未执行。调度器等待持久
+StopTurn/Steer 投递时仍响应取消、宿主关闭与租约失效，未确认投递保留原意图供核查。
+确切 Turn 的取消提交与原生停止通知由现役后台任务管理器持有，等待方退出不丢弃
+已开始的取消操作。子会话清理在原生代际仍活动时保留待处理回执，按原确切 Turn
+重试通知，不以 canonical head 已空作为原生退出证明，也不取消后来启动的代际。
+
+中断恢复的 `runtime_state.review_blocked` 以待核查提示展示，不能进入普通问题回答表单。
+它保留原原因和未知效果围栏，同时允许用户停止该 Execution；普通问题仍通过原确切
+Attempt/Step/Execution 版本提交回答。页面查看旧任务时，停止只针对该旧任务，不借用
+最新任务身份或版本。
+
 历史 Directed graph 和已知回执重放通过 Store 的只读 `committed_tool_call_causation`
 核对已提交工具及 closed Turn 的 typed 事实。该读取不续借 active/native 准入或产生新工具权限。
 
