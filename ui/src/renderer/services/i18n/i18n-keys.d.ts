@@ -5109,6 +5109,8 @@ export type I18nKey =
   | 'nomi.robot.controlTarget'
   | 'nomi.robot.devices'
   | 'nomi.robot.empty'
+  | 'nomi.robot.endpointLoadFailed'
+  | 'nomi.robot.endpointLoading'
   | 'nomi.robot.firmware'
   | 'nomi.robot.hint'
   | 'nomi.robot.inheritHint'

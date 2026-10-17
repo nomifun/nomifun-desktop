@@ -15,6 +15,9 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 
+#[path = "registry_retirement.rs"]
+mod retirement;
+
 /// Subdirectory of the backend data dir holding robot state.
 pub const ROBOT_REL_DIR: &str = "robot";
 /// Registry file name inside [`ROBOT_REL_DIR`].
@@ -233,7 +236,16 @@ impl RobotRegistry {
         tokio::fs::create_dir_all(&dir).await?;
         let path = dir.join(ROBOTS_FILE);
         let robots = match tokio::fs::read(&path).await {
-            Ok(bytes) => serde_json::from_slice::<RegistryFile>(&bytes)?.robots,
+            Ok(bytes) => match serde_json::from_slice::<RegistryFile>(&bytes) {
+                Ok(file) => file.robots,
+                Err(error) => {
+                    if retirement::retire_pre_authorization_registry(&dir, &bytes).await? {
+                        Vec::new()
+                    } else {
+                        return Err(error.into());
+                    }
+                }
+            },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e.into()),
         };
@@ -619,6 +631,150 @@ impl RobotRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pre_authorization_record() -> serde_json::Value {
+        serde_json::json!({
+            "robot_id": "retired-device", "client_id": "retired-client", "name": "Retired robot",
+            "companion_id": "retired-companion", "token_hash": token_sha256_hex("retired-token"),
+            "activation_code": null, "board": "retired-board", "firmware_version": "1.0",
+            "last_seen": null, "created_at": 1
+        })
+    }
+
+    async fn write_registry_fixture(data: &Path, bytes: &[u8]) -> PathBuf {
+        let dir = data.join(ROBOT_REL_DIR);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join(ROBOTS_FILE), bytes).await.unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn exact_retired_registry_is_isolated_without_import_and_survives_two_restarts() {
+        let data = tempfile::tempdir().unwrap();
+        let bytes = format!(" \n{}\n", serde_json::to_string_pretty(&serde_json::json!({"robots": [pre_authorization_record()]})).unwrap()).into_bytes();
+        let dir = write_registry_fixture(data.path(), &bytes).await;
+        let threads = b"opaque retired thread bytes, never parsed\0\xff";
+        let effects = b"current effect receipt bytes must remain untouched";
+        tokio::fs::write(dir.join("threads.json"), threads).await.unwrap();
+        let ledger = dir.join("agent-module-effect-receipts-v2.json");
+        tokio::fs::write(&ledger, effects).await.unwrap();
+        for _ in 0..2 {
+            let registry = RobotRegistry::load(data.path()).await.unwrap();
+            assert!(registry.list().await.is_empty());
+            assert!(registry.resolve_token("retired-token").await.is_none());
+            assert_eq!(tokio::fs::read(dir.join(retirement::RETIRED_DIR).join(ROBOTS_FILE)).await.unwrap(), bytes);
+            assert_eq!(tokio::fs::read(dir.join(retirement::RETIRED_DIR).join("threads.json")).await.unwrap(), threads);
+            assert_eq!(tokio::fs::read(&ledger).await.unwrap(), effects);
+            assert!(!dir.join(ROBOTS_FILE).exists());
+            assert!(!dir.join("threads.json").exists());
+        }
+        let registry = RobotRegistry::load(data.path()).await.unwrap();
+        let (_, token) = registry.upsert_on_report(report("new-device"), 2).await.unwrap();
+        let reloaded = RobotRegistry::load(data.path()).await.unwrap();
+        assert_eq!(reloaded.list().await.len(), 1);
+        assert!(reloaded.resolve_token(&token).await.is_some());
+        assert_eq!(tokio::fs::read(dir.join(retirement::RETIRED_DIR).join(ROBOTS_FILE)).await.unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn complete_current_registry_keeps_pairing_permissions_and_token() {
+        let data = tempfile::tempdir().unwrap();
+        let registry = RobotRegistry::load(data.path()).await.unwrap();
+        let (initial, token) = registry.upsert_on_report(report("current-device"), 1).await.unwrap();
+        registry.claim(initial.activation_code.as_deref().unwrap(), "current-companion").await.unwrap();
+        let mut permissions = RobotPermissions::default();
+        permissions.motion = true;
+        let expected = registry.set_permissions("current-device", permissions).await.unwrap();
+        let dir = data.path().join(ROBOT_REL_DIR);
+        let bytes = tokio::fs::read(dir.join(ROBOTS_FILE)).await.unwrap();
+        tokio::fs::write(dir.join("threads.json"), b"unrelated existing bytes").await.unwrap();
+        for _ in 0..2 {
+            let reloaded = RobotRegistry::load(data.path()).await.unwrap();
+            assert_eq!(reloaded.get("current-device").await.unwrap(), expected);
+            assert_eq!(reloaded.resolve_token(&token).await.unwrap(), expected);
+        }
+        assert_eq!(tokio::fs::read(dir.join(ROBOTS_FILE)).await.unwrap(), bytes);
+        assert!(!dir.join(retirement::RETIRED_DIR).exists());
+        assert!(dir.join("threads.json").exists());
+    }
+
+    #[tokio::test]
+    async fn damaged_partial_mixed_and_unknown_registry_shapes_fail_closed() {
+        let old = pre_authorization_record();
+        let mut partial = old.clone();
+        partial["permissions"] = serde_json::to_value(RobotPermissions::default()).unwrap();
+        let mut revision_only = old.clone();
+        revision_only["authorization_revision"] = serde_json::json!(0);
+        let mut current = partial.clone();
+        current["authorization_revision"] = serde_json::json!(0);
+        let mut wrong_type = old.clone();
+        wrong_type["created_at"] = serde_json::json!("1");
+        let mut missing_old_field = old.clone();
+        missing_old_field.as_object_mut().unwrap().remove("client_id");
+        let mut extra_old_field = old.clone();
+        extra_old_field["unknown"] = serde_json::json!(true);
+        let mut damaged_permissions = current.clone();
+        damaged_permissions["permissions"].as_object_mut().unwrap().remove("motion");
+        let mut variants = vec![b"{not json".to_vec()];
+        for record in [partial, revision_only, wrong_type, missing_old_field, extra_old_field, damaged_permissions] {
+            variants.push(serde_json::to_vec(&serde_json::json!({"robots": [record]})).unwrap());
+        }
+        variants.push(serde_json::to_vec(&serde_json::json!({"robots": [old.clone(), current]})).unwrap());
+        variants.push(serde_json::to_vec(&serde_json::json!({"robots": [old.clone()], "unknown": true})).unwrap());
+        let old_text = serde_json::to_string(&old).unwrap();
+        variants.push(format!("{{\"robots\":[{}]}}", old_text.replacen("{", "{\"robot_id\":\"duplicate\",", 1)).into_bytes());
+        variants.push(format!("{{\"robots\":[{old_text}],\"robots\":[{old_text}]}}").into_bytes());
+        for bytes in variants {
+            let data = tempfile::tempdir().unwrap();
+            let dir = write_registry_fixture(data.path(), &bytes).await;
+            tokio::fs::write(dir.join("threads.json"), b"untouched threads").await.unwrap();
+            assert!(RobotRegistry::load(data.path()).await.is_err());
+            assert_eq!(tokio::fs::read(dir.join(ROBOTS_FILE)).await.unwrap(), bytes);
+            assert_eq!(tokio::fs::read(dir.join("threads.json")).await.unwrap(), b"untouched threads");
+            assert!(!dir.join(retirement::RETIRED_DIR).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn retired_registry_resumes_a_thread_only_move_without_a_startup_ledger() {
+        let data = tempfile::tempdir().unwrap();
+        let bytes = serde_json::to_vec(&serde_json::json!({"robots": [pre_authorization_record()]})).unwrap();
+        let dir = write_registry_fixture(data.path(), &bytes).await;
+        let retired = dir.join(retirement::RETIRED_DIR);
+        tokio::fs::create_dir(&retired).await.unwrap();
+        tokio::fs::write(retired.join("threads.json"), b"already retired threads").await.unwrap();
+        assert!(RobotRegistry::load(data.path()).await.unwrap().list().await.is_empty());
+        assert_eq!(tokio::fs::read(retired.join(ROBOTS_FILE)).await.unwrap(), bytes);
+        assert_eq!(tokio::fs::read(retired.join("threads.json")).await.unwrap(), b"already retired threads");
+    }
+
+    #[tokio::test]
+    async fn retirement_never_overwrites_existing_destinations() {
+        for conflicting_file in [ROBOTS_FILE, "threads.json"] {
+            let data = tempfile::tempdir().unwrap();
+            let bytes = serde_json::to_vec(&serde_json::json!({"robots": [pre_authorization_record()]})).unwrap();
+            let dir = write_registry_fixture(data.path(), &bytes).await;
+            tokio::fs::write(dir.join("threads.json"), b"active old threads").await.unwrap();
+            let retired = dir.join(retirement::RETIRED_DIR);
+            tokio::fs::create_dir(&retired).await.unwrap();
+            tokio::fs::write(retired.join(conflicting_file), b"previous isolated bytes").await.unwrap();
+            assert!(RobotRegistry::load(data.path()).await.is_err());
+            assert_eq!(tokio::fs::read(dir.join(ROBOTS_FILE)).await.unwrap(), bytes);
+            assert_eq!(tokio::fs::read(dir.join("threads.json")).await.unwrap(), b"active old threads");
+            assert_eq!(tokio::fs::read(retired.join(conflicting_file)).await.unwrap(), b"previous isolated bytes");
+        }
+    }
+
+    #[tokio::test]
+    async fn retirement_io_failure_keeps_the_registry_active_and_unloaded() {
+        let data = tempfile::tempdir().unwrap();
+        let bytes = serde_json::to_vec(&serde_json::json!({"robots": [pre_authorization_record()]})).unwrap();
+        let dir = write_registry_fixture(data.path(), &bytes).await;
+        tokio::fs::create_dir(dir.join("threads.json")).await.unwrap();
+        assert!(RobotRegistry::load(data.path()).await.is_err());
+        assert_eq!(tokio::fs::read(dir.join(ROBOTS_FILE)).await.unwrap(), bytes);
+        assert!(!dir.join(retirement::RETIRED_DIR).exists());
+    }
 
     #[test]
     fn continuous_vision_requires_both_camera_and_continuous_permission() {

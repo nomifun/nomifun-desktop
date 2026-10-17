@@ -38,6 +38,13 @@ selection or message text cannot redirect it to another device.
 Device settings show the permissions supported by the connected firmware. Photos, movement and extension tools require their respective permissions. Continuous observation requires an additional permission and remains scoped to the current conversation turn. Revoking permissions, unpairing or disconnecting invalidates earlier device authority. Photos and observations are attached to the originating conversation message.
 
 This version uses a fresh robot data baseline and does not migrate old robot threads, Agent bindings or messages.
+At startup, only the exact retired registry format without device permissions and
+an authorization revision is isolated, byte for byte, with its old thread file in
+`robot/retired-pre-authorization/`. The device list then starts empty; reconnect
+and pair the robot again. Current device bindings and permissions remain intact.
+Damaged or mixed formats and conflicting retirement files still prevent the
+robot service from starting; startup never supplies missing permissions or
+overwrites retired files.
 
 See the [companion architecture and acceptance status](../architecture/companion.zh.md)
 (Chinese) for dual roles, multiple sessions, desktop delegation and shared
