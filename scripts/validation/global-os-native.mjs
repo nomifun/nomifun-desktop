@@ -60,6 +60,28 @@ export function nativeCanonicalPathReconsideration({raw,callId,callArguments,eve
   assert(!records.some(record=>(record.value?.event==='tool_started'&&record.value.call_id===callId)||(['host_tool_dispatch','host_resource_dispatch'].includes(record.value?.event)&&record.value.dispatch?.call_id===callId)),'A dispatched or unknown operation cannot be proposed again');
   return{requested,canonical,original_call_id:callId,proposal_seq:proposal.seq,hold_seq:held.seq,user_dispatch_count:0};
 }
+export function nativeInstructionDeferral({raw,callId,callName,callArguments,events,operationId,sessionId}){
+  const reason='Requested calls deferred; earlier calls may already have run. Repository instructions changed or a new directory scope was discovered. Read the current scoped instructions, reconsider the calls, and submit new call identities.';
+  if(raw!==`[tool error]\n${reason}`&&raw!==`[tool error]\r\n${reason}`)return undefined;
+  assert(events.every(event=>event.agent_session_id===sessionId),'Instruction deferral evidence must belong to the exact current Session');
+  const records=events.filter(event=>event.correlation_id===operationId&&event.kind==='runtime/progress-recorded'&&event.payload?.storage==='inline_json');
+  const proposals=records.filter(event=>event.payload.value.event?.event==='tool_call_completed'&&event.payload.value.event.step>0&&event.payload.value.event.call?.call_id===callId);
+  assert.equal(proposals.length,1,'Instruction deferral requires one exact original provider proposal');
+  const proposal=proposals[0];assert.equal(proposal.payload.value.event.call.name,callName);
+  canonicalSlot(proposal,'/event/call/arguments','tool_arguments',callArguments,sessionId);
+  const completed=records.filter(event=>event.payload.value.event?.event==='tool_completed'&&event.payload.value.event.result?.call_id===callId);
+  assert.equal(completed.length,1,'Instruction deferral requires one exact canonical held result');
+  const held=completed[0],result=held.payload.value.event;
+  assert(held.seq>proposal.seq&&result.step===proposal.payload.value.event.step&&result.runtime_hold==='runtime_gate'&&result.result.is_error===true,'Only the exact pre-dispatch runtime gate permits a fresh instruction proposal');
+  canonicalSlot(held,'/event/result/output','tool_output',[{type:'text',text:reason}],sessionId);
+  const updated=records.findLast(event=>event.seq>proposal.seq&&event.seq<held.seq&&event.payload.value.event?.event==='instructions_updated'&&typeof event.payload.value.event.context==='string'&&event.payload.value.event.context.length>0);
+  assert(updated,'This exact proposal must have published changed instruction context before its runtime hold');
+  assert(!records.some(record=>(record.payload.value.event?.event==='tool_started'&&record.payload.value.event.call_id===callId)||(['host_tool_dispatch','host_resource_dispatch'].includes(record.payload.value.event?.event)&&record.payload.value.event.dispatch?.call_id===callId)),'A dispatched or unknown instruction call cannot be proposed again');
+  assert(!events.some(event=>event.kind==='effect/started'&&event.payload?.value?.operation_id===`${operationId}:tool:${callId}`),'An admitted Effect cannot be accepted as an instruction-only deferral');
+  const observations=records.filter(event=>event.payload.value.event?.event==='completion_observation'&&event.payload.value.event.observation?.call_id===callId);
+  assert(observations.every(event=>event.payload.value.event.observation.invocation_attempted===false),'An attempted invocation cannot be accepted as a pre-dispatch instruction hold');
+  return{original_call_id:callId,proposal_seq:proposal.seq,instructions_updated_seq:updated.seq,hold_seq:held.seq,user_dispatch_count:0,arguments_rewritten:false};
+}
 export function nativeComputerNoEffectAdmission({raw,callId,callArguments,events,operationId,sessionId}){
   assert(raw.startsWith('[tool error]'),'The route admission probe must retain its actual error result');
   assert.equal(callArguments?.action,'focus_window');assert(Number.isSafeInteger(callArguments.window_id)&&callArguments.window_id>0);assert(Number.isSafeInteger(callArguments.expected_generation)&&callArguments.expected_generation>0);
@@ -747,7 +769,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
   await mkdir(allocated, { mode: 0o700 });
   const fixture = await realpath(allocated);
   assert.equal(fixture, allocated);
-  if(scenario==='smb-disposition-control')await windowsCases.initializeWindowsPrivateEmptyFixture(fixture,loginIdentity);
+  if(windows&&['smb-disposition-control','installer'].includes(scenario))await windowsCases.initializeWindowsPrivateEmptyFixture(fixture,loginIdentity);
   const workspace = continuation ? continuation.source.workspace : join(fixture, 'workspace');
   let protectedParent;
   if (protectedUserDirectory) {
@@ -788,7 +810,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
   const runId = randomUUID();
   let processId, nativePid, providerFailure, sessionId = continueSession, accepted, pendingAdmissionOperationId, cursor = 0, sequence = 0, completionAccepted = false, readinessText = '', activeTurnRole = 'main', completionAttempts = 0, currentCompletionMode = 'report_completion', directAnswerCount = 0, missingDefaultFrozen;
   const administratorStartProposalContexts = new Map();
-  const canonicalPathAliases=new Map(),canonicalPathDeferrals=new Map(),proposedArguments=new Map();
+  const canonicalPathAliases=new Map(),preflightDeferrals=new Map(),instructionDeferredArguments=new Map(),proposedArguments=new Map();
   let providerRequestSequence = 0;
   let administratorProcessId, administratorPid, administratorCursor = 0, administratorOutput = '', administratorExitVerified = false;
   const administratorProcessEvidence = { expected_uid: 0, expected_cwd: administratorRoot, expected_login_home: homedir(), identity_and_exit_observations: [] };
@@ -1003,7 +1025,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
               const plain=redirect.canonical.replace(/^\\\\\?\\UNC\\/i,'\\\\').replace(/^\\\\\?\\/,'');
               const defaultCwd=redirect.canonical===''&&redirect.requested===workspace&&proposedArguments.get(id)?.cwd===workspace;
               assert(defaultCwd||(win32.isAbsolute(plain)&&(contained(fixture,plain)||contained(outside,plain)||acceptanceScenario?.allowsCanonicalFixturePath?.(plain)===true)),'A fixture cannot adopt a redirected target outside its own allocated namespaces');
-              const count=(canonicalPathDeferrals.get(step.id)??0)+1;assert(count<=4,'Repeated canonical path changes require inspection');canonicalPathDeferrals.set(step.id,count);
+              const count=(preflightDeferrals.get(step.id)??0)+1;assert(count<=4,'Repeated native preflight changes require inspection');preflightDeferrals.set(step.id,count);
               canonicalPathAliases.set(redirect.requested,defaultCwd?'.':redirect.canonical);checks.push({id,step:step.id,status:'deferred_for_canonical_native_path',...redirect,default_cwd:defaultCwd||undefined});continue;
             }
           }
@@ -1016,6 +1038,14 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
             administratorInstructionEvidence.deferred_call_ids.push(id);
             checks.push({ id, step: step.id, status: 'deferred_for_fresh_instruction_context', instructions_updated_seq: proof.instructions_updated_seq });
             continue; // Keep this real refusal; the next bounded attempt gets a new call identity.
+          }
+          if(windows&&raw.startsWith('[tool error]')){
+            const deferral=nativeInstructionDeferral({raw,callId:id,callName:step.name,callArguments:proposedArguments.get(id),events:await sessionEvents(),operationId:accepted.operation_id,sessionId});
+            if(deferral){
+              const count=(preflightDeferrals.get(step.id)??0)+1;assert(count<=4,'Repeated native preflight changes require inspection');preflightDeferrals.set(step.id,count);
+              instructionDeferredArguments.set(step.id,structuredClone(proposedArguments.get(id)));
+              checks.push({id,step:step.id,status:'deferred_for_fresh_instruction_context',...deferral});continue;
+            }
           }
           if(step.expectedComputerNoEffectAdmission===true){
             const proof=nativeComputerNoEffectAdmission({raw,callId:id,callArguments:proposedArguments.get(id),events:await sessionEvents(),operationId:accepted.operation_id,sessionId});
@@ -1081,9 +1111,12 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
         if (body.tools?.some(tool => tool.function?.name === next.name)) {
           name = next.name;
           const attempt = (attempts.get(next.id) ?? 0) + 1; attempts.set(next.id, attempt);
-          assert(attempt <= (next.maxAttempts ?? 1)+(canonicalPathDeferrals.get(next.id)??0), `${next.id} did not establish its expected native result within the bounded attempts`);
+          assert(attempt <= (next.maxAttempts ?? 1)+(preflightDeferrals.get(next.id)??0), `${next.id} did not establish its expected native result within the bounded attempts`);
           id = nativeRunCallId(runId, `${activeTurnRole === 'main' ? '' : `${activeTurnRole}-`}${next.id}${next.repeatable||attempt>1 ? `-${attempt}` : ''}`);
-          args = reconsideredArguments(typeof next.args === 'function' ? await next.args() : next.args,canonicalPathAliases); callSteps.set(id, next);proposedArguments.set(id,structuredClone(args));
+          if(instructionDeferredArguments.has(next.id)){
+            args=structuredClone(instructionDeferredArguments.get(next.id));instructionDeferredArguments.delete(next.id);
+          }else args = reconsideredArguments(typeof next.args === 'function' ? await next.args() : next.args,canonicalPathAliases);
+          callSteps.set(id, next);proposedArguments.set(id,structuredClone(args));
           if (administrator && next.id === 'admin-process-start') {
             // Observe the request that proposes this exact call. Keep hashes
             // and counts only; a later response cannot supply missing context.

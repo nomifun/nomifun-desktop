@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { nativeAdministratorInstructionContext, nativeAdministratorInstructionProof, nativeCompletionArguments, nativeCompletionContract, nativeCanonicalPathReconsideration,nativeComputerNoEffectAdmission,nativeRetainedSessionPreservation,nativeInstallerPhases,nativeStableAnnouncementSnapshot,nativeCompletionPlanControl,nativeSmbControlOptions } from './global-os-native.mjs';
+import { nativeAdministratorInstructionContext, nativeAdministratorInstructionProof, nativeCompletionArguments, nativeCompletionContract, nativeCanonicalPathReconsideration,nativeInstructionDeferral,nativeComputerNoEffectAdmission,nativeRetainedSessionPreservation,nativeInstallerPhases,nativeStableAnnouncementSnapshot,nativeCompletionPlanControl,nativeSmbControlOptions } from './global-os-native.mjs';
 import {resolve} from 'node:path';
 
 test('SMB primitive control has explicit original evidence and same private App identity without borrowing source continuation',()=>{
@@ -120,11 +120,63 @@ test('native path reconsideration requires an exact canonical runtime hold with 
   for(const admitted of [event(3,{event:'tool_started',step:1,call_id:callId}),event(3,{event:'host_tool_dispatch',dispatch:{call_id:callId}})])expect(()=>nativeCanonicalPathReconsideration({...input,events:[...input.events,admitted]})).toThrow();
 });
 
+function instructionDeferralFixture(){
+  const sessionId='current-session',operationId='current-turn',callId='fresh-read',callName='read_file',callArguments={path:'\\\\localhost\\own-share\\sample.txt'};
+  const reason='Requested calls deferred; earlier calls may already have run. Repository instructions changed or a new directory scope was discovered. Read the current scoped instructions, reconsider the calls, and submit new call identities.';
+  const event=(seq,value,correlation_id=operationId)=>({agent_session_id:sessionId,seq,kind:'runtime/progress-recorded',correlation_id,payload:{storage:'inline_json',value:{event:value}}});
+  const events=[event(222,{event:'tool_call_completed',step:5,call:{call_id:callId,name:callName,arguments:structuredClone(callArguments)}}),
+    event(238,{event:'instructions_updated',context:'The changed instruction context is represented by its canonical digest notice.'}),
+    event(239,{event:'tool_completed',step:5,runtime_hold:'runtime_gate',result:{call_id:callId,is_error:true,output:[{type:'text',text:reason}]}}),
+    event(240,{event:'completion_observation',observation:{call_id:callId,invocation_attempted:false}})];
+  return{input:{raw:`[tool error]\n${reason}`,callId,callName,callArguments,events,operationId,sessionId},event};
+}
+
+test('generic changed-instruction deferral requires its exact fresh context and never rewrites original arguments',()=>{
+  const {input}=instructionDeferralFixture(),original=structuredClone(input);
+  expect(nativeInstructionDeferral(input)).toEqual({original_call_id:input.callId,proposal_seq:222,instructions_updated_seq:238,hold_seq:239,user_dispatch_count:0,arguments_rewritten:false});
+  expect(input).toEqual(original);
+  expect(nativeInstructionDeferral({...input,raw:input.raw.replace('\n','\r\n')})).toEqual(nativeInstructionDeferral(input));
+  // Different canonical owners can be held before admission. Literal launch
+  // arguments and Windows spelling are evidence, never rewritten by the proof.
+  for(const [callName,callArguments] of [['exec_command',{command:'C:\\own fixture\\literal.ps1',args:['',' 中文 ','a&b','"quoted"'],cwd:'\\\\?\\UNC\\localhost\\own-share\\'}],['write_file',{path:'C:\\own fixture\\ sample.txt ',content:'exact\r\n'}]]){
+    const changed=structuredClone(input);Object.assign(changed,{callName,callArguments});Object.assign(changed.events[0].payload.value.event.call,{name:callName,arguments:structuredClone(callArguments)});
+    const before=structuredClone(changed);expect(nativeInstructionDeferral(changed).user_dispatch_count).toBe(0);expect(changed).toEqual(before);
+  }
+});
+
+test('generic instruction deferral rejects unknown ordinary errors stale context foreign facts and any admitted call',()=>{
+  const {input,event}=instructionDeferralFixture();
+  for(const raw of ['[tool error]\nSYSTEM_READ_RESULT_UNKNOWN','[tool error]\nOperations not executed: access denied',input.raw+' additional text',input.raw.replace('[tool error]\n','')])expect(nativeInstructionDeferral({...input,raw})).toBeUndefined();
+  for(const change of [
+    value=>{value.sessionId='foreign';},value=>{value.operationId='foreign';},value=>{value.callName='other_tool';},
+    value=>{value.callArguments.path='\\\\localhost\\other-share\\sample.txt';},
+    value=>{value.events[0].agent_session_id='foreign';},value=>{value.events[0].payload.value.event.call.name='other_tool';},
+    value=>{value.events[1].seq=216;},value=>{value.events[1].correlation_id='prior-turn';},value=>{value.events[1].payload.value.event.context='';},
+    value=>{value.events.splice(1,1);},value=>{value.events[2].payload.value.event.runtime_hold='input_superseded';},
+    value=>{value.events[2].payload.value.event.step=6;},value=>{value.events[2].payload.value.event.result.is_error=false;},
+    value=>{value.events[2].payload.value.event.result.output[0].text='SYSTEM_EXECUTION_RESULT_UNKNOWN';},
+    value=>{value.events.push(structuredClone(value.events[0]));},value=>{value.events.push(structuredClone(value.events[2]));},
+    value=>{value.events[3].payload.value.event.observation.invocation_attempted=true;},
+  ]){const invalid=structuredClone(input);change(invalid);expect(()=>nativeInstructionDeferral(invalid)).toThrow();}
+  for(const admitted of [event(223,{event:'tool_started',step:5,call_id:input.callId}),event(223,{event:'host_tool_dispatch',dispatch:{call_id:input.callId}}),event(223,{event:'host_resource_dispatch',dispatch:{call_id:input.callId}}),
+    {agent_session_id:input.sessionId,seq:223,kind:'effect/started',correlation_id:'effect',payload:{storage:'inline_json',value:{operation_id:`${input.operationId}:tool:${input.callId}`}}}])expect(()=>nativeInstructionDeferral({...input,events:[...input.events,admitted]})).toThrow();
+});
+
 function sharedSlot(record,pointer,kind,body,sessionId){
   record=structuredClone(record);record.agent_session_id=sessionId;const json=JSON.stringify(body,(_,value)=>value&&typeof value==='object'&&!Array.isArray(value)?Object.fromEntries(Object.keys(value).sort().map(key=>[key,value[key]])):value),bytes=Buffer.from(json),digest=createHash('sha256').update(bytes).digest('hex');
   const keys=pointer.slice(1).split('/');let target=record.payload.value;for(const key of keys.slice(0,-1))target=target[key];target[keys.at(-1)]=null;
   record.payload.value._canonical_shared_content={version:1,references:[{pointer,kind,payload_id:`shared-tool:${sessionId}:${kind==='tool_arguments'?'arguments':'output'}:${digest}`,digest,byte_len:bytes.length}]};return record;
 }
+
+test('generic instruction deferral authenticates factored proposal and held-output bytes in the original Session',()=>{
+  const {input}=instructionDeferralFixture(),value=structuredClone(input);
+  value.events[0]=sharedSlot(value.events[0],'/event/call/arguments','tool_arguments',input.callArguments,input.sessionId);
+  value.events[2]=sharedSlot(value.events[2],'/event/result/output','tool_output',input.events[2].payload.value.event.result.output,input.sessionId);
+  expect(nativeInstructionDeferral(value).hold_seq).toBe(239);
+  for(const index of [0,2])for(const change of [ref=>{ref.digest='0'.repeat(64);},ref=>{ref.byte_len++;},ref=>{ref.payload_id='shared-tool:foreign:output:'+ref.digest;}]){
+    const invalid=structuredClone(value);change(invalid.events[index].payload.value._canonical_shared_content.references[0]);expect(()=>nativeInstructionDeferral(invalid)).toThrow();
+  }
+});
 test('factored canonical Payload references prove only exact original proposal bytes and the same Session/slot',()=>{
   const f=fixture(),sid='0190f5fe-7c00-7a00-8000-000000000001',args={execution_identity:'administrator',cwd:f.input.root,args:['中文'.repeat(600)]};
   const proposal=sharedSlot(f.input.events.at(-1),'/event/call/arguments','tool_arguments',args,sid),input={...f.input,events:[...f.input.events.slice(0,-1),proposal],expectedProposalArguments:args,sessionId:sid};

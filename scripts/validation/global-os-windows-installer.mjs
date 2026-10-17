@@ -56,7 +56,58 @@ export function parseRenderedAcceptanceInstaller(text, config) {
   for (const resource of resources) assert(!resource.target.startsWith('/') && !resource.target.includes(':') && resource.target.split('/').every(part => part && part !== '.' && part !== '..') && !resource.target.includes('$'));
   for (const required of ['LICENSE', 'NOTICE', 'component-notices/npm-10.9.4-LICENSE.txt']) assert.equal(resources.filter(entry => entry.target === required).length, 1, `Missing full bundled ${required}`);
   const sourceExe = definition('MAINBINARYSRCPATH'); assert(win32.isAbsolute(sourceExe)); assert.equal(win32.basename(sourceExe).toLowerCase(), `${config.mainBinaryName}.exe`);
-  return { sourceExe, resources, manufacturer: definition('MANUFACTURER'), version: definition('VERSION'), outfile: definition('OUTFILE') };
+  return { sourceExe, resources, manufacturer: definition('MANUFACTURER'), version: definition('VERSION'), arch: definition('ARCH'), outfile: definition('OUTFILE') };
+}
+export function locateRenderedAcceptanceInstallerOutput({ config, rendered, renderedNsi }) {
+  config = validateInstallerAcceptanceConfig(config);
+  const raw_outfile = rendered.outfile;
+  const fullyAbsolute = path => typeof path === 'string' && win32.isAbsolute(path) && !['\\', '/'].includes(win32.parse(path).root) && !path.includes('\0');
+  const withoutTraversal = path => !path.split(/[\\/]/).some(part => part === '.' || part === '..');
+  if (fullyAbsolute(raw_outfile)) {
+    assert(withoutTraversal(raw_outfile), 'The absolute rendered output must not contain path traversal aliases');
+    return { raw_outfile, outfile: raw_outfile, outfile_resolution: { rule: 'absolute_rendered_outfile' } };
+  }
+  assert.equal(raw_outfile, 'nsis-output.exe', 'Only the exact Tauri NSIS temporary output name can be resolved relatively');
+  const cleanAbsolute = path => fullyAbsolute(path) && withoutTraversal(path);
+  assert(cleanAbsolute(renderedNsi) && cleanAbsolute(rendered.sourceExe), 'The rendered NSIS and source executable must use explicit absolute paths without parent aliases');
+  const nsi = win32.normalize(renderedNsi), workingDirectory = win32.dirname(nsi);
+  assert.equal(win32.basename(nsi), 'installer.nsi'); assert.equal(win32.basename(workingDirectory), 'x64');
+  const nsisDirectory = win32.dirname(workingDirectory), releaseDirectory = win32.dirname(nsisDirectory);
+  assert.equal(win32.basename(nsisDirectory), 'nsis'); assert.equal(win32.basename(releaseDirectory), 'release');
+  assert.equal(rendered.arch, 'x64', 'This acceptance locator requires the actual x64 NSIS layout');
+  assert.match(rendered.version, /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/, 'The rendered version must be a filename-safe package version');
+  const source = win32.normalize(rendered.sourceExe);
+  assert.equal(win32.dirname(source).toLowerCase(), releaseDirectory.toLowerCase(), 'The source executable must belong to this exact NSIS release directory');
+  assert.equal(win32.basename(source).toLowerCase(), `${config.mainBinaryName}.exe`);
+  return { raw_outfile, outfile: win32.join(releaseDirectory, 'bundle', 'nsis', `${config.productName}_${rendered.version}_${rendered.arch}-setup.exe`),
+    outfile_resolution: { rule: 'tauri_nsis_project_bundle_output.v1', nsis_working_directory: workingDirectory,
+      source: 'https://github.com/tauri-apps/tauri/blob/499df79be65ef8c0670abc0207cd9e37b55d8491/crates/tauri-bundler/src/bundle/windows/nsis/mod.rs',
+      output_folder_source: 'https://github.com/tauri-apps/tauri/blob/499df79be65ef8c0670abc0207cd9e37b55d8491/crates/tauri-bundler/src/bundle/windows/util.rs' } };
+}
+export function predictUnsignedNsisExecutable({ config, sourceBytes, sourceSignature }) {
+  validateInstallerAcceptanceConfig(config);
+  assert.equal(sourceSignature?.status, 'NotSigned', 'This exact bundle-type prediction supports only an unsigned acceptance executable');
+  assert.equal(sourceSignature.has_signer, false, 'Signed executables require their own packaging verification');
+  assert(Buffer.isBuffer(sourceBytes) && sourceBytes.subarray(0, 2).equals(Buffer.from('MZ')), 'Expected the complete native acceptance executable bytes');
+  const from = Buffer.from('__TAURI_BUNDLE_TYPE_VAR_UNK', 'ascii'), to = Buffer.from('__TAURI_BUNDLE_TYPE_VAR_NSS', 'ascii');
+  const offset = sourceBytes.indexOf(from); assert(offset >= 0, 'The original executable has no exact unpatched Tauri bundle-type token');
+  const patched = createHash('sha256').update(sourceBytes.subarray(0, offset)).update(to).update(sourceBytes.subarray(offset + from.length)).digest('hex');
+  return { source_executable_sha256: digest(sourceBytes), expected_packaged_executable_sha256: patched,
+    bundle_type_patch: { offset, length: from.length, from: from.toString('ascii'), to: to.toString('ascii'), first_match: true, unsigned_only: true,
+      source: 'https://github.com/tauri-apps/tauri/blob/499df79be65ef8c0670abc0207cd9e37b55d8491/crates/tauri-bundler/src/bundle.rs' } };
+}
+async function unsignedNsisExecutableExpectation(sourceExe, config) {
+  const signatures = await observeInstallerSignatures([sourceExe]); assert.equal(signatures.length, 1); assert(samePath(signatures[0].path, sourceExe));
+  const before = await lstat(sourceExe); assert(before.isFile() && !before.isSymbolicLink(), 'Expected the original regular executable');
+  const file = await open(sourceExe, 'r'); let bytes;
+  try {
+    const opened = await file.stat(); assert.equal(opened.ino, before.ino); assert.equal(opened.dev, before.dev);
+    bytes = await file.readFile(); const after = await file.stat(); assert.equal(bytes.length, before.size);
+    assert.equal(after.size, before.size); assert.equal(after.mtimeMs, before.mtimeMs);
+  } finally { await file.close(); }
+  const expected = predictUnsignedNsisExecutable({ config, sourceBytes: bytes, sourceSignature: signatures[0] });
+  assert.equal(await fileDigest(sourceExe), expected.source_executable_sha256, 'The original source executable changed during packaging prediction');
+  return { ...expected, source_authenticode: signatures[0] };
 }
 const elevationProbe = `Add-Type -TypeDefinition @'
 using System; using System.ComponentModel; using System.Runtime.InteropServices;
@@ -103,16 +154,23 @@ async function prepare(configPath, nsiPath) {
   assert.equal(process.platform, 'win32'); const login = await windowsLoginIdentity();
   assert.equal(await fileDigest(join(repository, 'apps/desktop/nsis/installer.nsi')), '646077ad9b18482820aab29237248a2585fbc1944525ff96393ad8c316415311', 'Acceptance must use the current preserved-data NSIS source contract');
   const configFile = await stableText(resolve(configPath)), nsi = await stableText(resolve(nsiPath));
-  const config = validateInstallerAcceptanceConfig(JSON.parse(configFile.text)), rendered = parseRenderedAcceptanceInstaller(nsi.text, JSON.parse(configFile.text));
+  const sourceConfig = JSON.parse(configFile.text), config = validateInstallerAcceptanceConfig(sourceConfig), rendered = parseRenderedAcceptanceInstaller(nsi.text, sourceConfig);
+  Object.assign(rendered, locateRenderedAcceptanceInstallerOutput({ config: sourceConfig, rendered, renderedNsi: nsiPath }));
+  const packagedExecutable = await unsignedNsisExecutableExpectation(rendered.sourceExe, sourceConfig);
   for (const [target, source] of [['LICENSE', 'LICENSE'], ['NOTICE', 'NOTICE'], ['component-notices/npm-10.9.4-LICENSE.txt', 'crates/backend/nomifun-runtime/notices/npm-10.9.4-LICENSE.txt']]) assert.equal(await fileDigest(rendered.resources.find(entry => entry.target === target).source), await fileDigest(join(repository, source)), `Full source notice mismatch: ${target}`);
   const before = await inventory(config, rendered), installRoot = join(before.local_appdata, 'Programs', config.productName), exe = join(installRoot, `${config.mainBinaryName}.exe`);
-  return { config, rendered, login, before, installRoot, exe, config_sha256: configFile.sha256, rendered_nsi_sha256: nsi.sha256 };
+  return { config, rendered, packagedExecutable, login, before, installRoot, exe, config_sha256: configFile.sha256, rendered_nsi_sha256: nsi.sha256 };
 }
 async function installedFiles(state) {
   assert(samePath(await realpath(state.installRoot), state.installRoot), 'Install root must not be a junction');
-  assert.equal(await fileDigest(state.exe), await fileDigest(state.rendered.sourceExe));
+  assert.equal(await fileDigest(state.rendered.sourceExe), state.packagedExecutable.source_executable_sha256);
+  const executableSha256 = await fileDigest(state.exe);
+  assert.equal(executableSha256, state.packagedExecutable.expected_packaged_executable_sha256, 'The installed executable must match the complete exact first-token NSIS prediction');
+  const signatures = await observeInstallerSignatures([state.exe]); assert.equal(signatures.length, 1); assert(samePath(signatures[0].path, state.exe));
+  assert.equal(signatures[0].status, 'NotSigned'); assert.equal(signatures[0].has_signer, false, 'The acceptance prediction cannot mask signed executable changes');
   const resources = []; for (const entry of state.rendered.resources) { const path = join(state.installRoot, ...entry.target.split('/')); const sha256 = await fileDigest(path); assert.equal(sha256, await fileDigest(entry.source), `Installed resource mismatch: ${entry.target}`); resources.push({ target: entry.target, sha256 }); }
-  return { executable_sha256: await fileDigest(state.exe), uninstaller_sha256: await fileDigest(join(state.installRoot, 'uninstall.exe')), resources };
+  assert.equal(await fileDigest(state.exe), executableSha256, 'The installed executable changed during verification');
+  return { executable_sha256: executableSha256, uninstaller_sha256: await fileDigest(join(state.installRoot, 'uninstall.exe')), resources, authenticode: signatures[0] };
 }
 async function withReport(reportRoot, mode, work) {
   await mkdir(reportRoot, { recursive: true }); const path = join(resolve(reportRoot), `windows-installer-${mode}-${randomUUID()}.json`);
@@ -126,7 +184,7 @@ export async function installWindowsAcceptance({ config: configPath, renderedNsi
   return withReport(reportRoot, 'install', async (report, flush) => {
     const state = await prepare(configPath, renderedNsi); const artifact = await realpath(resolve(installer)); assert.equal(artifact.toLowerCase(), resolve(state.rendered.outfile).toLowerCase(), 'Actual installer must match rendered NSIS OUTFILE');
     assert(await absent(state.installRoot), 'A preexisting install root cannot be replaced'); assert(state.before.registry.every(row => row.data === null)); assert(state.before.autostart.filter(row => row.name === state.config.productName).every(row => !row.present)); assert(state.before.shortcuts.every(row => !row.exists)); assert.deepEqual(state.before.image_processes, []);
-    Object.assign(report, { status: 'prepared', config_path: resolve(configPath), config_sha256: state.config_sha256, rendered_nsi: resolve(renderedNsi), rendered_nsi_sha256: state.rendered_nsi_sha256, config: state.config, install_root: state.installRoot, exe: state.exe, login_identity: state.login, installer: artifact, installer_sha256: await fileDigest(artifact), before: state.before, signature_probe_before_dispatch: await observeInstallerSignatures([artifact, state.rendered.sourceExe]) });
+    Object.assign(report, { status: 'prepared', config_path: resolve(configPath), config_sha256: state.config_sha256, rendered_nsi: resolve(renderedNsi), rendered_nsi_sha256: state.rendered_nsi_sha256, raw_outfile: state.rendered.raw_outfile, outfile_resolution: state.rendered.outfile_resolution, ...state.packagedExecutable, config: state.config, install_root: state.installRoot, exe: state.exe, login_identity: state.login, installer: artifact, installer_sha256: await fileDigest(artifact), before: state.before, signature_probe_before_dispatch: await observeInstallerSignatures([artifact, state.rendered.sourceExe]) });
     report.status = 'native_installer_dispatched_result_unknown'; await flush();
     report.native_execution = await runNativeInstaller(artifact); await flush(); verifyNativeExit(report.native_execution);
     assert(samePath(await realpath(state.installRoot), state.installRoot));
@@ -151,14 +209,50 @@ export async function prepareWindowsInstallerArtifact({ config: configPath, rend
     Object.assign(report, { schema: 'nomifun.windows-installer-artifact.v1', status: 'artifact_verified_absent',
       config_path: resolve(configPath), config_sha256: state.config_sha256,
       rendered_nsi: resolve(renderedNsi), rendered_nsi_sha256: state.rendered_nsi_sha256,
+      raw_outfile: state.rendered.raw_outfile, outfile_resolution: state.rendered.outfile_resolution,
       config: sourceConfig, install_root: state.installRoot, exe: state.exe,
       installer: artifact, installer_sha256: await fileDigest(artifact),
-      source_executable_sha256: await fileDigest(state.rendered.sourceExe),
+      ...state.packagedExecutable,
       resources: await Promise.all(state.rendered.resources.map(async entry => ({ target: entry.target, sha256: await fileDigest(entry.source) }))),
       login_identity: state.login, before: state.before,
       signature_probe_before_dispatch: await observeInstallerSignatures([artifact, state.rendered.sourceExe]),
       native_installer_dispatched: false });
   });
+}
+
+export async function inspectWindowsInstalledAcceptance({ artifactReport }) {
+  assert(isAbsolute(artifactReport));
+  const reportSource = await stableText(artifactReport), artifact = JSON.parse(reportSource.text);
+  assert.equal(artifact.schema, 'nomifun.windows-installer-artifact.v1'); assert.equal(artifact.status, 'artifact_verified_absent');
+  assert.equal(artifact.native_installer_dispatched, false);
+  const state = await prepare(artifact.config_path, artifact.rendered_nsi);
+  assert.equal(state.login.administrator, false); assert.equal(state.login.sid, artifact.login_identity.sid);
+  assert.equal(state.config_sha256, artifact.config_sha256); assert.equal(state.rendered_nsi_sha256, artifact.rendered_nsi_sha256);
+  assert(samePath(state.installRoot, artifact.install_root)); assert(samePath(state.exe, artifact.exe));
+  assert(isAbsolute(artifact.installer)); assert(samePath(await realpath(artifact.installer), state.rendered.outfile));
+  assert.equal(await fileDigest(artifact.installer), artifact.installer_sha256);
+  assert.equal(state.packagedExecutable.source_executable_sha256, artifact.source_executable_sha256);
+  if (Object.hasOwn(artifact, 'expected_packaged_executable_sha256')) {
+    assert.equal(state.packagedExecutable.expected_packaged_executable_sha256, artifact.expected_packaged_executable_sha256);
+    assert.deepEqual(state.packagedExecutable.bundle_type_patch, artifact.bundle_type_patch);
+  } else assert(!Object.hasOwn(artifact, 'bundle_type_patch'), 'A partial source prediction cannot authorize an inspection');
+  assert.deepEqual(await Promise.all(state.rendered.resources.map(async entry => ({ target: entry.target, sha256: await fileDigest(entry.source) }))), artifact.resources);
+  validateRegistered(state.before, state.config, state.installRoot, state.exe, state.rendered.manufacturer);
+  assert.deepEqual(state.before.image_processes, [], 'The unique installed acceptance App must be absent before scoped cleanup');
+  assert.deepEqual(state.before.daily, artifact.before.daily, 'Daily registration changed since the original artifact preparation');
+  assert.deepEqual(state.before.autostart, artifact.before.autostart);
+  const files = await installedFiles(state);
+  assert.deepEqual(files.resources, artifact.resources);
+  const signatures = await observeInstallerSignatures([artifact.installer, state.rendered.sourceExe, state.exe, join(state.installRoot, 'uninstall.exe')]);
+  assert.equal(signatures.length, 4);
+  for (const signature of signatures) { assert.equal(signature.status, 'NotSigned'); assert.equal(signature.has_signer, false); }
+  assert.equal(await fileDigest(artifactReport), reportSource.sha256, 'The original artifact report changed during read-only inspection');
+  return { schema: 'nomifun.windows-installed-acceptance-inspection.v1', read_only: true, artifact_report: artifactReport, artifact_report_sha256: reportSource.sha256,
+    config: artifact.config, config_sha256: state.config_sha256, rendered_nsi: artifact.rendered_nsi, rendered_nsi_sha256: state.rendered_nsi_sha256,
+    install_root: state.installRoot, exe: state.exe, login_identity: state.login, before: state.before, artifact_before: artifact.before,
+    source_executable: state.rendered.sourceExe, ...state.packagedExecutable, files, authenticode: signatures,
+    prediction_recorded_in_original_artifact: Object.hasOwn(artifact, 'expected_packaged_executable_sha256'), original_artifact_report_unchanged: true,
+    installer_executions: 0, filesystem_mutations: 0, canonical_mutations: 0 };
 }
 
 export function canonicalUninstallerRawArguments(installRoot, config) {

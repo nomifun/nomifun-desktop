@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
-import { randomUUID } from 'node:crypto';
-import { canonicalInstallerCases, canonicalInstallerExecutionScript, canonicalUninstallerRawArguments, installerExecutionScript, installerInventoryScript, observeInstallerSignatures, parseRenderedAcceptanceInstaller, validateCanonicalInstallerReceipt, validateInstallerAcceptanceConfig, validateInstallerFixtureClose } from './global-os-windows-installer.mjs';
+import { createHash, randomUUID } from 'node:crypto';
+import { canonicalInstallerCases, canonicalInstallerExecutionScript, canonicalUninstallerRawArguments, installerExecutionScript, installerInventoryScript, locateRenderedAcceptanceInstallerOutput, observeInstallerSignatures, parseRenderedAcceptanceInstaller, predictUnsignedNsisExecutable, validateCanonicalInstallerReceipt, validateInstallerAcceptanceConfig, validateInstallerFixtureClose } from './global-os-windows-installer.mjs';
 import { powershell, psLiteral, windowsObservation } from './global-os-windows-cases.mjs';
 import { validateWindowsExitResult, windowsCloseProcessIdentity } from './global-os-windows-process-exit-observer.mjs';
 
@@ -9,7 +9,7 @@ const fixture = () => {
   return { productName: `NomiFun OS Acceptance ${nonce}`, identifier: `com.nomifun.desktop.acceptance.${nonce}`, mainBinaryName: `nomifun-os-acceptance-${nonce}`, plugins: { 'deep-link': { desktop: { schemes: [`nomifun-gos-${nonce}`] } } } };
 };
 const rendered = config => [
-  `!define PRODUCTNAME "${config.productName}"`, `!define BUNDLEID "${config.identifier}"`, `!define MAINBINARYNAME "${config.mainBinaryName}"`, '!define INSTALLMODE "currentUser"', '!define STARTMENUFOLDER ""', '!define MANUFACTURER "NomiFun"', '!define VERSION "0.8.12"', `!define MAINBINARYSRCPATH "C:\\build\\${config.mainBinaryName}.exe"`, '!define OUTFILE "C:\\build\\fixture-setup.exe"',
+  `!define PRODUCTNAME "${config.productName}"`, `!define BUNDLEID "${config.identifier}"`, `!define MAINBINARYNAME "${config.mainBinaryName}"`, '!define INSTALLMODE "currentUser"', '!define STARTMENUFOLDER ""', '!define MANUFACTURER "NomiFun"', '!define VERSION "0.8.12"', '!define ARCH "x64"', `!define MAINBINARYSRCPATH "C:\\build\\${config.mainBinaryName}.exe"`, '!define OUTFILE "C:\\build\\fixture-setup.exe"',
   'RequestExecutionLevel user', 'StrCpy $INSTDIR "$LOCALAPPDATA\\Programs\\${PRODUCTNAME}"', '!insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"', `WriteRegStr SHCTX "Software\\Classes\\\\${config.plugins['deep-link'].desktop.schemes[0]}" "URL Protocol" ""`,
   ...['LICENSE', 'NOTICE', 'component-notices\\npm-10.9.4-LICENSE.txt'].map(target => `File /a "/oname=${target}" "C:\\source\\notice.txt"`),
 ].join('\n');
@@ -23,6 +23,88 @@ test('installer fixture cannot share a product, binary, protocol or identifier w
 test('rendered NSIS checks actual variant identity, all notices, current-user paths and data preservation', () => {
   const config = fixture(), source = rendered(config); expect(parseRenderedAcceptanceInstaller(source.replaceAll('\n', '\r\n'), config).resources).toHaveLength(3);
   for (const changed of [source.replace(config.mainBinaryName, 'nomifun-desktop'), source.replace('currentUser', 'perMachine'), source.replace('LICENSE', 'missing-license'), source + '\nRmDir /r "$LOCALAPPDATA\\NomiFun"', source + '\n{{unrendered}}', source.replace('/oname=NOTICE', '/oname=..\\NOTICE')]) expect(() => parseRenderedAcceptanceInstaller(changed, config)).toThrow();
+});
+
+test('an absolute rendered NSIS output retains its exact supplied path without assuming a bundler layout', () => {
+  const config=fixture(),parsed=parseRenderedAcceptanceInstaller(rendered(config),config);
+  for(const outfile of [String.raw`C:\Explicit output\Acceptance-Setup.EXE`,String.raw`\\server\share\Explicit output\Acceptance-Setup.EXE`]){
+    const result=locateRenderedAcceptanceInstallerOutput({config,rendered:{...parsed,outfile},renderedNsi:String.raw`C:\other location\explicit-installer.nsi`});
+    expect(result).toEqual({raw_outfile:outfile,outfile,outfile_resolution:{rule:'absolute_rendered_outfile'}});
+  }
+  for(const outfile of [String.raw`C:\build\..\Acceptance-Setup.EXE`,String.raw`\\server\share\.\Acceptance-Setup.EXE`])expect(()=>locateRenderedAcceptanceInstallerOutput({config,rendered:{...parsed,outfile}})).toThrow();
+});
+
+function relativeInstallerOutputFixture(){
+  const config=fixture(),release=String.raw`C:\build workspace\target\x86_64-pc-windows-msvc\release`;
+  return{config,rendered:{...parseRenderedAcceptanceInstaller(rendered(config),config),outfile:'nsis-output.exe',sourceExe:`${release}\\${config.mainBinaryName}.exe`},renderedNsi:`${release}\\nsis\\x64\\installer.nsi`,release};
+}
+
+test('the actual Tauri temporary output maps only to its same-release unique final NSIS bundle', () => {
+  const input=relativeInstallerOutputFixture(),before=structuredClone(input),actual=locateRenderedAcceptanceInstallerOutput(input);
+  expect(actual.raw_outfile).toBe('nsis-output.exe');
+  expect(actual.outfile).toBe(`${input.release}\\bundle\\nsis\\${input.config.productName}_0.8.12_x64-setup.exe`);
+  expect(actual.outfile_resolution.rule).toBe('tauri_nsis_project_bundle_output.v1');
+  expect(actual.outfile_resolution.nsis_working_directory).toBe(`${input.release}\\nsis\\x64`);
+  expect(input).toEqual(before);
+  const unc=structuredClone(input);unc.release=String.raw`\\build-host\private-share\repo\target\x86_64-pc-windows-msvc\release`;
+  unc.rendered.sourceExe=`${unc.release}\\${unc.config.mainBinaryName}.exe`;unc.renderedNsi=`${unc.release}\\nsis\\x64\\installer.nsi`;
+  expect(locateRenderedAcceptanceInstallerOutput(unc).outfile).toBe(`${unc.release}\\bundle\\nsis\\${unc.config.productName}_0.8.12_x64-setup.exe`);
+});
+
+test('relative output resolution rejects arbitrary paths traversal wrong architecture source version or variant', () => {
+  for(const outfile of ['setup.exe','.\\nsis-output.exe','..\\nsis-output.exe','sub\\nsis-output.exe','NSIS-output.exe','nsis-output.exe ','C:nsis-output.exe','\\nsis-output.exe','/nsis-output.exe','nsis-output.exe\0']){
+    const input=relativeInstallerOutputFixture();input.rendered.outfile=outfile;expect(()=>locateRenderedAcceptanceInstallerOutput(input)).toThrow();
+  }
+  for(const change of [
+    value=>{value.renderedNsi='nsis\\x64\\installer.nsi';},
+    value=>{value.renderedNsi=value.renderedNsi.replace('installer.nsi','other.nsi');},
+    value=>{value.renderedNsi=value.renderedNsi.replace('\\nsis\\x64\\','\\other\\x64\\');},
+    value=>{value.renderedNsi=value.renderedNsi.replace('\\nsis\\x64\\','\\nsis\\x86\\');},
+    value=>{value.renderedNsi=value.renderedNsi.replace('\\release\\','\\debug\\');},
+    value=>{value.renderedNsi=value.renderedNsi.replace('\\nsis\\','\\unused\\..\\nsis\\');},
+    value=>{value.renderedNsi=value.renderedNsi.replace('\\nsis\\','\\.\\nsis\\');},
+    value=>{value.rendered.sourceExe=`C:\\other\\release\\${value.config.mainBinaryName}.exe`;},
+    value=>{value.rendered.sourceExe=value.rendered.sourceExe.replace('\\release\\','\\release\\unused\\..\\');},
+    value=>{value.rendered.sourceExe=value.rendered.sourceExe.replace(value.config.mainBinaryName,'nomifun-desktop');},
+    value=>{value.rendered.arch='arm64';},value=>{value.rendered.arch=undefined;},
+    value=>{value.rendered.version='0.8.12/../other';},value=>{value.rendered.version='0.8.12\\other';},value=>{value.rendered.version='0.8.12_x64-other';},
+    value=>{value.config.productName='NomiFun';},value=>{value.config.identifier='com.nomifun.desktop';},
+  ]){const input=relativeInstallerOutputFixture();change(input);expect(()=>locateRenderedAcceptanceInstallerOutput(input)).toThrow();}
+});
+
+const executableHash = bytes => createHash('sha256').update(bytes).digest('hex');
+const unsignedSignature = { status: 'NotSigned', has_signer: false };
+test('unsigned NSIS prediction hashes the complete exact first-token replacement and preserves the original source', () => {
+  const config=fixture(),prefix=Buffer.from('MZ\0native header\0'),from=Buffer.from('__TAURI_BUNDLE_TYPE_VAR_UNK'),to=Buffer.from('__TAURI_BUNDLE_TYPE_VAR_NSS'),tail=Buffer.from('\0unchanged native tail\0');
+  const sourceBytes=Buffer.concat([prefix,from,tail]),before=Buffer.from(sourceBytes),expected=Buffer.concat([prefix,to,tail]);
+  const prediction=predictUnsignedNsisExecutable({config,sourceBytes,sourceSignature:unsignedSignature});
+  expect(prediction.source_executable_sha256).toBe(executableHash(sourceBytes));
+  expect(prediction.expected_packaged_executable_sha256).toBe(executableHash(expected));
+  expect(prediction.expected_packaged_executable_sha256).not.toBe(prediction.source_executable_sha256);
+  expect(sourceBytes.equals(before)).toBe(true);expect(prediction.bundle_type_patch.offset).toBe(prefix.length);
+  expect(prediction.bundle_type_patch.length).toBe(27);expect(prediction.bundle_type_patch.first_match).toBe(true);expect(prediction.bundle_type_patch.unsigned_only).toBe(true);
+  // Any other PE byte, omitted patch or different marker produces a different
+  // whole-file digest; no range is masked or ignored during installation.
+  for(const mutate of [bytes=>{bytes[2]^=1;},bytes=>{bytes[bytes.length-1]^=1;},bytes=>{bytes[prefix.length+24]='U'.charCodeAt(0);}]){
+    const changed=Buffer.from(expected);mutate(changed);expect(executableHash(changed)).not.toBe(prediction.expected_packaged_executable_sha256);
+  }
+});
+
+test('multiple unknown bundle markers change only the first exact match and do not mask later token changes', () => {
+  const config=fixture(),prefix=Buffer.from('MZ first '),from=Buffer.from('__TAURI_BUNDLE_TYPE_VAR_UNK'),to=Buffer.from('__TAURI_BUNDLE_TYPE_VAR_NSS'),middle=Buffer.from(' second '),tail=Buffer.from(' tail');
+  const sourceBytes=Buffer.concat([prefix,from,middle,from,tail]);
+  const prediction=predictUnsignedNsisExecutable({config,sourceBytes,sourceSignature:unsignedSignature});
+  expect(prediction.expected_packaged_executable_sha256).toBe(executableHash(Buffer.concat([prefix,to,middle,from,tail])));
+  expect(prediction.expected_packaged_executable_sha256).not.toBe(executableHash(Buffer.concat([prefix,to,middle,to,tail])));
+  expect(prediction.bundle_type_patch.offset).toBe(prefix.length);
+});
+
+test('bundle prediction rejects missing or wrong source tokens signed status and non-acceptance binaries', () => {
+  const config=fixture(),sourceBytes=Buffer.from('MZ __TAURI_BUNDLE_TYPE_VAR_UNK tail');
+  for(const bytes of [Buffer.from('MZ without a marker'),Buffer.from('MZ __TAURI_BUNDLE_TYPE_VAR_unk'),Buffer.from('MZ __TAURI_BUNDLE_TYPE_VAR_NSS'),Buffer.from('text __TAURI_BUNDLE_TYPE_VAR_UNK')])expect(()=>predictUnsignedNsisExecutable({config,sourceBytes:bytes,sourceSignature:unsignedSignature})).toThrow();
+  for(const sourceSignature of [undefined,{status:'Valid',has_signer:true},{status:'UnknownError',has_signer:false},{status:'HashMismatch',has_signer:true},{status:'NotSigned',has_signer:true},{status:'NotSigned'}])expect(()=>predictUnsignedNsisExecutable({config,sourceBytes,sourceSignature})).toThrow();
+  expect(()=>predictUnsignedNsisExecutable({config:{...config,productName:'NomiFun'},sourceBytes,sourceSignature:unsignedSignature})).toThrow();
+  expect(()=>predictUnsignedNsisExecutable({config,sourceBytes:new Uint8Array(sourceBytes),sourceSignature:unsignedSignature})).toThrow();
 });
 test('native installer script contains only silent install and no run, remap, kill or app-data deletion', () => {
   const script = installerExecutionScript(String.raw`C:\fixture with spaces\fixture-setup.exe`);

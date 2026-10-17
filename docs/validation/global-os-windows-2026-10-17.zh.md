@@ -4,7 +4,21 @@
 
 本机为 Windows 10 Pro 22H2 x64、19045.6466；Rust 为 1.99.0，host/installed target 为 `x86_64-pc-windows-msvc`，Bun 1.4.2。真实登录身份为 `DESKTOP-NF7D5NP\muli`、Session 1、普通非 elevated token；USERPROFILE 为 `C:\Users\muli`。原始日志及报告位于本任务可视化目录的 `windows-native/`，JWT、私有数据集、截图、二进制和测试目录不提交。旧 macOS 的签名/原生报告仍属于[原三平台矩阵](global-os-2026-10-16.zh.md)，不计入本机结果。
 
-当前尚未整轮完成。候选 `4b6bb712…` 的真实 UNC patch 在发布后留下备份清理/补偿未确认，原 Session `01a14893-93f7-7a90-b573-bc0b31116207` 的 pending1 围栏及准确 share/文件仍保留，未重放、未清理、未通过关闭 App 或新数据集绕过。`journal_settlement: unconfirmed` 在此分支表示源码主动保留 pending，并非曾向 Store 提交 terminal 而失败。原 cleanup I/O 错误被旧代码丢弃，不能猜测为特定 OS error；当前文件、备份或独立 probe 的状态均不追认原操作结果。用户已在本次 App30552 的真实 UAC 窗口允许；对于原 patch 核实问题，用户回答“不知道”，未产生 owner verification 或 reconciliation。后续修复、原生清理和打包须分别补证，不能把技术取证代写成人类核实。
+## 本轮最终结果
+
+Windows 实现、本机原生回归、独立安装版初始化/业务/退出/卸载和限定测试资源清理已完成。生产源码冻结为 `91410efd5dd3227104b783bf794591254c014d82`，其后仅有验证脚本、测试和文档收尾；完整 Git 交付使用 `codex/windows-global-os`，不改写 main。下列 PASS 均限定于对应来源和报告，不把中间构建的旧结果合并成全平台认证。
+
+| 证据面 | 最终结果 |
+| --- | --- |
+| 源码检查 | 合并生产源码 `bun run check` 退出0；Runtime458通过/0失败/1忽略，定向 knowledge/system/App33通过；最终验证驱动49通过/0失败/1 POSIX跳过、454断言。 |
+| 最终 debug 产品链 | UNC16、管理员8、missing-default Minimal12、Browser13业务全部 completed/answered、pending0/unknown0、cleanup_proven；普通与高完整性桌面、SCM、跨App存续Task等较早证据保留各自binary范围。 |
+| release/NSIS | 官方 `build:win` 构建成功；唯一 unsigned/currentUser变体完成 canonical同Session两Turn安装2步/卸载4步。首次链接配置错误与打包标记验证器失败保留。 |
+| 实际安装版 | NSS executable完成正常初始化和登录、Minimal12业务，通过原产品退出/retained HANDLE实际exit0，再由原生NSIS卸载；唯一目录/登记/shortcut消失，真实数据库完整SHA与sentinel保持。首次准备失败单独保留。 |
+| 最终清理 | debug15和安装版7个exact owned进程均gone；本次lmBztb快照absent，自有Vite停止。只对明确归属空目录作非递归清理；日常nomifun://已指回验证的0.8.4安装。 |
+| 原故障保留 | 旧34d UNC pending1、336事实、文件/备份及旧BoHTo0快照作为有用证据保留；未伪造owner核实、未对账、未重放，不用新成功覆盖。 |
+| 明确边界 | 本机scripted provider不证明真实模型推理；媒体采集依用户选择未覆盖，正式Authenticode/其他账号UAC/额外硬件和卷矩阵未认证。跨项目同一外部目标仍缺持久重叠围栏，原owner/project Store围栏保留。 |
+
+历史候选 `4b6bb712…` 的真实 UNC patch 在发布后留下备份清理/补偿未确认，原 Session `01a14893-93f7-7a90-b573-bc0b31116207` 的 pending1 围栏及准确 share/文件仍保留，未重放、未清理、未通过关闭 App 或新数据集绕过。`journal_settlement: unconfirmed` 在此分支表示源码主动保留 pending，并非曾向 Store 提交 terminal 而失败。原 cleanup I/O 错误被旧代码丢弃，不能猜测为特定 OS error；当前文件、备份或独立 probe 的状态均不追认原操作结果。用户曾在该 App30552 的真实 UAC 窗口允许；对于原 patch 核实问题，用户回答“不知道”，未产生 owner verification 或 reconciliation。修后最终源码、产品回归、正常关闭及安装周期分别见本文后部；修后成功不改变这份历史失败，也不能把技术取证代写成人类核实。
 
 ## 已执行与保留的失败
 
@@ -227,3 +241,73 @@ Browser13业务后的真实快照5aWxzd在该次正常关闭前存在、关闭�
 合并定向验证已完整结束，33通过/0失败：knowledge18、system-execution7、App8（两项missing-default effect-key/plain-verbatim与VCS strictness，加workspace_file_read全6）。App使用相同browser-use,computer-use features单次no-run编译实际退出0、8m15s，随后同exe直接过滤执行，均非0匹配。总回执`windows-merged-targeted-tests-receipt.json` SHA-256 `fb597b32f5db2ba31e94b828d34b3da7be4edbcaeb0651ff413f45668f6279de`，App子回执SHA-256 `f9844107b225eb6d4eedf3e29e94cc2c3767019d28a29c52567472ea0cd6db46`。首红与修后正例保留，没有通过放宽生产来消除测试。最终Windows native App、NSIS与收尾仍以之后实际报告为准。
 
 远端main前进后已停止109批次debug编译（actual1，`windows-debug-build-typed-history.log`），没有将中途exe当最终artifact。此前109冻结及静态/单元结果属于整合前source cut，不套用到当前合并源码。新完整Git merge保存后重新冻结/构建，组件ID取本轮实际产物，不沿用0259或Mac e4身份。
+
+## 合并源码冻结与最终 App 回归
+
+Windows 实现已保存为 `1b9c317ecaf5a5b7f70de382defbaf6214849fff`，随后普通合并 main `d129fa9994cdc408fc2469e23e6115dd2e3be00b`，得到生产源码 anchor `91410efd5dd3227104b783bf794591254c014d82`、tree `5a9b265e423b82bb438ea039dbb9e9eb71ff1635`，分支 `codex/windows-global-os`。构建开始及 debug 产物保存时工作树干净。验收期间远端另前进到 `0ab974b461cc8a74ac9537277d88156c8701f010`，其等待/取消跨消费者改动不在本次生产冻结内；不得将冻结构建说成该后继 main 的原生验收，也不覆盖或重写 main。
+
+`cargo build --locked --offline -p nomifun-desktop --jobs 1` 实际退出0、9m54s。最终 debug App SHA-256 `d22d473bb8cbf3e107e8cb57da9a9553635385783c1efc507b1bda2ab6fdb932`，310366208 bytes；本轮实际组件身份为 `853a949acccee25c5e487c638e3f0b22ba2f119b8b888d406fbafeb5f73fb529`，从 Cargo build output 读取并核实存在于不可变 executable 中。产物保存于仓库外 `accepted-debug-merged-d22d473bb8cb/nomifun-desktop.exe`；回执 `windows-debug-build-merged-final-receipt.json` SHA-256 `386f41d7ab643ffeec89f61f0d3e9adac11eb7a0ffd3254519eabffa6d317db1`。增量缓存 finalize 的 native5 note 被保留；实际构建和链接已完成，不能把缓存复用限制写成构建失败。
+
+原数据根与 JWT 升级得到 App21108、medium8192、Session1，真实 renderer 1280×832/version0.8.12 已挂载；未创建数据集或重新 setup/login。`windows-fixture-upgrade-5bd00074-318f-4b4e-b83e-7d4eb4c3fd00.json` SHA-256 `b06e4ce21c9e0e5c83e5b0a302f617c44fac41c419ce7372dbdb8be903770cf2`，原 Desktop230/UNC336 facts、owner/binding/resources/Snapshot 均按 c215 双守卫保持，原34d pending1 未结算。用户在本轮真实 UAC 窗口允许，不沿用先前 App 的认证回答。
+
+本轮第一次 UNC 报告 `unc-chat.minimal-1792233576034-c2523fd9-0134-4a70-a9d8-49d7994ca81b.json` 保持 FAILED，SHA-256 `7c8155922a081facc732e7bf2a128ab07be2fc31c8c72dda3db682a7ebea7ba4`。原 unc-read 的 proposal222、InstructionsUpdated238、runtime_gate held239 及 invocation_attempted=false 证明调用未派发、无该调用 Effect；驱动此前仅识别旧 Path resolves-to 延期，误拒绝现役通用新 scope 延期。该 Turn 已取消，同 Session 新 cleanup Turn 已真实移除这次唯一 share/root，pending/unknown0，不能再 resume 已清理的业务或重用旧 call。
+
+仅修测试驱动与纯测试：通用延期须精确匹配原 proposal/name/参数与 output 的 canonical slot、同 Session/operation、InstructionsUpdated 和 runtime_gate，并拒绝任何 started/dispatch/Effect/attempted 证据；最多4次，保持原参数、以新 call ID 继续，管理员 marker 专用验证仍优先。38通过/0失败/1个平台跳过、360断言；首次测试对象共享造成的反例夹具红灯保留。`windows-generic-instruction-deferral-driver-fix-receipt.json` SHA-256 `0b07e35a70ee8349decc7dea54744ac4a350da16ccdde705fe34a1d9c03fe659`，另以新 helper 只读复核原报告222→238→239且字节未变。该修复不改变当前 App 的生产输入，也不重建或重启 App。
+
+新唯一夹具的完整 UNC16 已 PASS：`unc-chat.minimal-1792233880432-b6270a0d-be27-409b-9013-99a6caf1b655.json`，SHA-256 `a3a83b0d8b279ff4164c006f58affb99a67f03fcff9672ddfbc18b56a3dc9788`，Session `01a14976-c764-7b80-b750-fd9734b43c0b`，16业务步骤/23检查、completed/answered、pending0/unknown0、cleanup_proven。包括真实 UNC patch/rename/alias/literal script、WinPS provider cwd、删除文件、share removal 与目标物理目录移除；4次真实新 scope 延期分别以 canonical 零派发证明和 fresh ID 完成。宿主最终 rmdir 空默认 workspace 遇 EBUSY，报告保留该 `fixture_cleanup_error`；这不是 UNC share/root 残留，也不能声称空默认夹具已删除，须在正常关闭 App 后另行精确清理。
+
+同一 d22d App 的另外三组业务回归均已完成，原生报告索引为 `windows-final-merged-native-cases-index.json`、SHA-256 `eb4dc3d7846fdcce1abe973489cd2e6de9813744552b985eca174d5aeb382130`。这些是本机 scripted provider 经公开默认 Agent API 驱动的真实 owner/OS 结果，不是联网模型推理证明。
+
+| 本轮最终 debug 场景 | 真实结果及报告身份 |
+| --- | --- |
+| 管理员进程和只读 | PASS，当前实际8业务步骤/10检查（包括 admin-source-read），completed/answered、pending0/unknown0、cleanup_proven，管理员 root absent；`administrator-assistant.general-1792233970078-b361382d-d8c4-42bc-8990-68ef33cfe17a.json` SHA-256 `3feb1b826bd27eabb2bfc594066f48d4bbee72f5886f7df2b596bc3eb508cd90`。空默认 workspace 的 EBUSY 保留，待最后退出后精确清理。 |
+| Minimal/default directory missing | PASS，12命名业务步骤/16检查，completed/answered、pending0/unknown0、cleanup_proven，outside absent且无 fixture_cleanup_error；`files-process-chat.minimal-1792234154399-7225a2c3-5fa6-4c4a-ac68-a683b0820b49.json` SHA-256 `597a5ba3a14fc4badd389f69ad876a52d7dd98dc8399eb034eb1d3a8021f6fe2`。原 Session/owner/binding/resources/Snapshot/grants/data root/App PID/event prefix 全部保持，默认目录持续 absent，未递归删除、重建或另建 dataset。12步骤集合完整；此前“20”包含路径拼写延期检查，不把它改称20业务。 |
+| Browser upload/retained file | PASS，13业务步骤/22检查，completed/answered、pending0/unknown0、cleanup_proven；`browser-assistant.general-1792234220031-86ea1700-c597-4f77-8c79-23f214a02a72.json` SHA-256 `d7826d8c6322f475457e3cbeeb885a0b79a11956f4cdc85bbd35f294dfd97448`。新 lmBztb 快照归属及退出后实际清理另证，不与旧 BoHTo0 残留混用；空默认 workspace EBUSY保留。 |
+
+Browser 首次独立宿主补证因成功升级 ready 漏记顶层 caller 字段而 TypeError，保留 `merged-final-browser-86ea1700-host-supplement-failed.json`，SHA-256 `11753677850f6b345a3b741c6bb096becfb3ab6374882a2e62f2f14e1caf2384`。随后通过原 JWT 对当前 API 真实 GET、port公告与 exact PID/creation/image/medium token 只读核对，新增 `windows-fixture-readonly-caller-18aaec42-5b37-4959-9e5d-b4bfec856a8a.json`、SHA-256 `7b84754b1c655956fd64f5d4229f3024a96f5636d678f990a3fc37d980f4e7f3`。本次 caller observed_at 为10:53:56Z，明确不追称启动时已经记录；spawn/setup/login/effect均0，原5bd ready及Browser报告字节未改。宿主身份回执SHA-256 `412d1ba8505e2e0c8cc525ba597100d575c63c8cf67f6d95effdefaceeb83cb6`，preclose snapshot回执SHA-256 `a53372a0f48796009530b9d804ab90f99be5b067e9f1d4c564f25ed3d1eca9e9`；后续正常close统一绑定这份derived ready。
+
+成功restart/upgrade的fixture脚本已补同一真实GET与exact新PID校验，再写compact caller，不沿用旧值或新setup。现有身份测试11通过/0失败、87断言；`fixture-caller-recording-fix-receipt.json` SHA-256 `455f7211ba4b17b9b0042ef847d076cc3d3b8d290fa0b6a89da009a2b155e226`。本轮生产冻结后的改动仅限验证脚本、测试和文档，不更改当前App生产源码；NSIS和完整退出结论仍须读取其实际后续回执。
+
+## NSIS release 构建的首次链接失败
+
+首次完整 `bun run build:win x64 --config ABS/installer-acceptance-config.json`（exec46864）实际退出1，保留 `windows-installer-build-merged-final.log` 和 exit JSON，没有生成可验收的 NSIS 或派发安装器。根任务额外设置的 `CARGO_NET_OFFLINE=true` 使 ort-sys2.0.0-rc.13 在检查既有分发缓存前直接选择 `link_error_generic`；最终 `OrtGetApiBase` 与占位错误未解析，不能将编译过程或生成的中间对象当成打包通过。
+
+只读核对本机依赖源码后移除该次进程环境变量，保留原正常链接路径，不设置 `ORT_LIB_PATH`、不禁用链接、不伪造库或修改生产源码。该 buildscript 已声明 `rerun-if-env-changed=CARGO_NET_OFFLINE`，true→null 后实际自动重跑；新 output 已包含 `Using prebuilt binaries`、`pyke`、DirectML/DXCORE/DXGI/D3D12 和 static onnxruntime 的真实链接项，无需删除 fingerprint 或全仓 clean。复用同一 Debug 已使用的 MSVC 分发缓存；发行源为依赖清单中的1.28.0，既有目录及本次逐文件摘要不冒充本次独立压缩归档校验。
+
+`ort-offline-release-link-diagnostic.json` SHA-256 `111d97726363da5cd2044a79c85cd66301236adcc1d3e428a16692017fe710d6` 保留源码、cache两文件摘要、原失败和正常 buildscript 输出。纠正后 exec66984 使用仓库默认3个构建 jobs，仍由官方相同 build:win 入口构建同一 UUID variant；诊断写入时仅为 `build_script_recovered_release_build_pending`，不能提前标作 App 链接、NSIS、安装或卸载 PASS。最终结果在后续独立回执记录。
+
+## 最终 release 与真实 NSIS 周期
+
+纠正上述进程环境后，相同官方 `bun run build:win x64 --config ABS/installer-acceptance-config.json` 已实际退出0；release 编译21m22s，makensis 完成。生产输入仍为91410 anchor，期间改动仅为验证脚本、测试和文档，不把整个工作树称为干净。`windows-installer-build-merged-online.log` 与 exit JSON 保留实际结果；产物回执 `windows-release-nsis-build-artifacts.json` SHA-256 `8a3fa84ba89c4c2d2ad99b0f42c7d6c43ae28818517ae1318bdfc85a12c6a275` 同时核对构建输入、组件853a949a、资源和不可变副本。
+
+唯一变体 `NomiFun OS Acceptance 439f698fa737498eb1550807a39bf3f8` 使用独立 product/id/protocol/mainBinary、currentUser 安装。实际 NSIS 为 `target/x86_64-pc-windows-msvc/release/bundle/nsis/NomiFun OS Acceptance 439f698fa737498eb1550807a39bf3f8_0.8.12_x64-setup.exe`，SHA-256 `3e8997f066d6f3e3ac0a12d7de477b76e508aacc6aa3efb53e2175f98383777a`。官方渲染 NSI 的相对 `OutFile "nsis-output.exe"` 在其 `release/nsis/x64` 编译目录生成，成功后才搬到 bundle 路径；验证器依据已安装 Tauri CLI2.11.2 的官方源码和严格目录/版本/架构关系定位，不改 NSI 或借任意文件充当安装器。
+
+首次实际 canonical install 的 NSIS 进程26988 ordinary/elevated=false、exit0/reaped、原 Effect 已成功结算，但旧验证器错误要求安装后 executable 等于打包前 raw executable，报告 `installer-chat.minimal-1792238625713-32c431c3-80da-411d-887b-0a28058c83b5.json` 保持 FAILED，SHA-256 `31ab03f665e390f14cbe6c43541ae25757afa377133556811db102a4e91f1f41`。只读取证确定官方 bundler 会把首次27字节 bundle-type 标记的 UNK 改为 NSS，制作 NSIS 后再恢复 raw executable。逐字节比较仅三个字节不同，严格预测完整文件摘要等于真实安装文件；没有忽略 PE 区域或放宽签名校验。
+
+raw executable SHA-256 为 `38929b00c2ca2df7034f8090cda9c9bd48ea5f813bb6019e0f439386f6dcc6c0`，安装的 NSS executable 为 `3d0665f0c27e8112a44ec01090ffebc536a13395922a65a3ab64af70fdcd2920`。验证器仅允许精确首标记修改、源与安装文件均 NotSigned/无 signer，并比较预测后完整 SHA；首次失败报告不回写。修复回执 `windows-nsis-bundle-type-prediction-fix-receipt.json` SHA-256 `175afd8b03857f39adeaeb66ef3821bfded356ca4e2e03550f7ba9c6e0f29c38`；纯测试13通过/0失败/1平台过滤、129断言，真实 Windows NSI parser/token/inventory 测试另1通过/17断言。
+
+原失败 Session `01a149bf-2f95-7da2-b619-8da896ce978b` 已取消并为 pending0/unknown0。严格只读安装核对后，仅在该 Session 的新 Turn 执行四步准确卸载清理，复用原 provider/冻结 binding/owner/resources，原350事件前缀逐项不变、installer 重装0。`installer-same-session-execute-6bacef5a-3521-4ced-9bc8-a9c490965110.json` SHA-256 `d1eecbea9c3b8a8f68accbb6702e083feac57f8ea2910535ac0708716b39ad6d` 为 PASS/answered/cleanup_proven、pending0/unknown0，唯一安装目录/登记和该次临时副本/sentinel 均 absent。这不是把原 FAILED 改成成功，也不新增恢复账本。
+
+随后新的完整 canonical 安装/卸载周期已 PASS：`installer-chat.minimal-1792240008260-cf4abfe8-3d7c-4797-95ab-637a21abc891.json` SHA-256 `89ca35dccb157caf026f446b07ff98f4547100c9fef77014ec8ac2b962d0cd01`，Session `01a149d4-4846-70c2-91b4-901123903963`。同 Session 两个 Turn 分别完成安装2步和卸载4步，共6业务，均 completed/answered/cleanup_proven、pending0/unknown0。原进程 supervisor 保留原生退出回执；卸载复制到夹具后使用最后的原始 `_?=<exact root>` 同步等待，目录、唯一 registry/shortcut/protocol 与 sentinel 缺失，原数据保留。默认空 workspace 在 App 活跃时 EBUSY 单列，不能将其称为已删。
+
+独立安装后的打包 App bootstrap 属于另一个证据面。`windows-installer-install-a05b55b7-2525-48a5-b8f3-768019e14b91.json` SHA-256 `53864beb2a354e0f8be781bf6891f6dc4c8cbea1cbf9234f2920f7712d5fedc6` 已证明真实 NSIS8748 ordinary、exit0、无信号，实际 KnownFolder 安装位置为 `C:\Users\muli\AppData\Local\Programs\NomiFun OS Acceptance 439f698fa737498eb1550807a39bf3f8`，九项资源完整、安装 NSS 摘要匹配。日常旧版在D盘不代表本次 KnownFolder 也在D盘；独立 App 正常 setup/login、业务 smoke、正常退出和最终卸载另记，不借 canonical cycle 代替。
+
+最终 debug App21108 已通过单次现役产品退出正常结束：`windows-fixture-close-0f0a01eb-954e-4217-a17d-3cc8e393cb68.json` 回执 SHA-256 `af2955bb245b51c093ca3597c3e467eab92914a746ff8999e05c9b38eaf56500`，同 retained HANDLE 的真实 exit0、句柄关闭、observer30892 exit0/reaped。exact creation 为134367071328824857。独立全树15个 exact identities 全部 gone，`windows-process-tree-closed-764d1b92-72b0-4307-9e7f-55caaca951b9.json` 回执 SHA-256 `0b3b15ca56b98fc550abf416ae091ce22059bcc3239b63e7079315e22a71c104`；本次 lmBztb snapshot 从 present-before 到 absent-after，`merged-final-browser-lmBztb-native-teardown.json` 回执 SHA-256 `3a8765606fc26d36dc860842838551b0e88951778c188e2db3cfa5cd03565a7d`。process receipt 的 overall_cleanup_proven=false 为其固定证据范围，未修改该字段，树和 snapshot 分别补证。关闭前双守卫再核对 Desktop230/UNC336 以及原 pending1 不变；旧 BoHTo0 与34d故障证据继续保留。
+
+App21108 关闭后，七份已明确终态/恢复报告对应的14个 workspace/fixture 候选中，12个已证实空且无 reparse 的目录逐个非递归删除，2个已 absent；未扫描或递归清空 Temp，没有修改 DB、证据、34d 或 BoHTo0。`windows-debug-21108-empty-directory-cleanup-735a1f21-7b18-4c61-86a2-fac1854aefb9.json` SHA-256 `d0ebbea92c97b9b2384df85fb63546e1c71a7fc2152b58cd7d02f0d215227502`。自有 Vite exec43912 单次 Ctrl+C 后结束1，独立核对无 Bun/Node Vite 进程和配置5173监听；这是主动停止开发服务，不是 App 失败，`windows-owned-vite-final-stop.json` SHA-256 `27270ef631579bde084b22ecebf0578766a6d9d7c9a09e42b7391dcbf8b4e0e4`。
+
+最终验证脚本三个测试文件合跑实际退出0：`global-os-native.test.mjs`、`global-os-windows-fixture.test.mjs`、`global-os-windows-installer.test.mjs` 共49通过/0失败/1个POSIX跳过、454断言，含真实 Windows parser/token/只读库存。仅覆盖本次驱动变化，不冒充新的全量 Rust 或原生产品回归。
+
+独立安装版首次 fixture 准备报告 `windows-fixture-d0f267b4-c7fb-46e1-a091-5b0ad42834bc.json` 保持 FAILED：真实安装 NSS executable 启动为PID29936，rendererIdentity 的 CDP 操作返回 exception，原驱动仅保存通用错误，未保留明细，不能猜测原因为预算或瞬态。此时尚未执行 setup/login，也未创建 Agent Effect，不重新 spawn。后续同进程只读诊断 `installed-release-29936-readiness-diagnostic.json` SHA-256 `0393d14af983a4fbb1d1cdef0e3e899e896b94e1f24338bc4001d8c5672dd134` 真实证明 `http://tauri.localhost/#/guid`、DOM complete/root已挂载、secure context、1280×832，`plugin:app|version` 返回0.8.12；同DataRoot公告PID与 `/api/auth/status` HTTP200/needs_setup=true 匹配。诊断的 spawn/setup/login/effect 均0，不追认首次准备成功；后续只能在这个原进程和数据根走正常产品初始化。
+
+同一安装进程29936 已完成唯一一次正常 public setup/login，生成新的 ready `windows-fixture-existing-bootstrap-701a6bfd-4527-435f-824b-6a52d41bcb2a.json` SHA-256 `98579c03fa54e5f1e6133851f78a76efdcced10df4165f2d4fda6ef8ce75e59a`。实际 NSS 全摘要、ordinary Medium8192/同登录SID与Session、renderer0.8.12/1280×832、真实 authenticated caller PID29936 一致，额外 spawn/新dataset 均0。原d0f报告 SHA-256 `485732e768c5c0d178ad308df05cc7985a73ecd6842dbfcfa8b231afab2f8dec` 保持原 FAILED，不倒填成功；正常初始化成功仍须随后独立业务与关闭、卸载证明。
+
+真实安装版的 Minimal 文件/进程回归已 PASS：`files-process-chat.minimal-1792240724571-793c0224-4c5a-45d5-9cef-8f93e82b5056.json` SHA-256 `e7bc20078f3f08464b45958ba4a2f55fd33fe8f43f2d7ab0009cb8260b4a326e`，Session `01a149df-2af0-77a0-a6b6-0205cf1a0f02`。12业务/16检查，completed/answered、pending0/unknown0、cleanup_proven，使用安装目录中的NSS executable与嵌入式release UI，不依赖已关闭的Vite。空默认 workspace 在App活跃时 EBUSY 的原观测保留，正常退出后的限定清理另证。
+
+安装版 App29936 也已单次现役产品退出：`windows-fixture-close-76a235cf-e0e3-48bc-a29f-49f49cf4b158.json` SHA-256 `1ac9704b886a07b3477eef36e4234dc576aeb89d3b487251ac6ea5f9808ebbc5`，exact creation134367140636824078、retained HANDLE actual exit0/closed、observer12828 actual0/reaped。独立 exact tree 的7项全部gone，closed33f72fa8回执 SHA-256 `09beddfb268b2a317b40b56896f293a24ded7bd09c3ee9b44959ed74e206c4fb`，未 kill 或靠晚PID查询补造退出码；真实安装目录与新DataRoot保留给随后原生卸载和数据保留核对。
+
+随后独立原生卸载 actual0：`windows-installer-uninstall-be351dac-c1a1-4512-84a6-ce3f00cb0d64.json` SHA-256 `b673bc8f8359d0f7ddd3e48f517488831902f1ea55307e7f670389b0d173f5f3`，status=uninstalled_data_preserved。普通进程16644/elevated=false、`/S`、actual exit0、signals0；限定等待后安装root、全部唯一registry/shortcuts和对应image process消失。真实新DataRoot的SQLite主文件完整SHA-256 `17ef65729b11af9e7dc7c5b86dc0622c661d673f7401f21a4a7366696981cd72` 与sentinel前后相同，日常登记/autostart保持。该标准NSIS `/S` 模式保留首进程退出并观察实际目标消失，不冒称独立持有其自复制卸载child的HANDLE/reap；前述canonical复制品 `_?=` 同步链为另一份更强的进程证明。没有host删除安装root或重试安装/卸载。
+
+安装版烟测的两个空目录也已精确非递归删除：`installed-release-29936-empty-smoke-cleanup-f1c15378-ea61-447b-a98f-aa5b874c1eda.json` SHA-256 `7d867ab34e7b46a0a9c535ed618b0bfe44f9cd56cdbadd1e53d52aba21052551`。两份新旧数据根、JWT及有用证据保留；没有递归清空Temp、禁用系统保护或启动日常App。
+
+最后一次默认测试App退出且卸载库存核对完成后，日常URI修复的只读守卫通过（7a4beb9e报告SHA-256 `8f4b6e3c29e4a6811d9fa15ebfe294cfdd9656f43495b7ced8f45303c4664b43`）；随后 `windows-uri-handler-restoration-f65ea425-32bd-4bf1-8159-84fe18f31dde.json` SHA-256 `22b576731a690069c9651d2ac2c9419bf80d68352166d78de0399b8571464798` 为 applied_and_readback_verified。pin/hash核对当前d22测试副本与日常0.8.4后，只写两个既存默认值，32/64视图读回均指向 `D:\Users\muli\AppData\Local\Programs\NomiFun\nomifun-desktop.exe`；无进程启动、键新增/删除或ACL变化。此为用户已授权的目标修复，不冒充未知历史原值恢复。

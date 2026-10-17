@@ -201,8 +201,10 @@ export async function restartWindowsAcceptanceFixture({fixtureReport,upgradeExe,
     }
     assert.equal(report.status,'ready','Same-owner same-dataset native restart readiness was not proven');
     const target=await waitForRendererTarget(cdpPort,deadline);report.renderer=await rendererIdentity(target);report.actual_app_identity=await actualAppIdentity(child.pid,source.login_identity,exe);assert.equal(await executableDigest(exe),report.exe_sha256,'The immutable acceptance executable changed during native restart');
+    const get=async path=>{const response=await fetch(`${report.base_url}${path}`,{headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(15000)});assert(response.ok);const body=await response.json();assert.notEqual(body.success,false);return body.data??body;};
+    const caller=await get('/api/system/permissions');assert.equal(caller.platform,'windows');assert.equal(caller.process_id,child.pid);
+    report.authenticated_native_caller={platform:caller.platform,process_id:caller.process_id,process_identity_available:true};
     if(preserved){
-      const get=async path=>{const response=await fetch(`${report.base_url}${path}`,{headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(15000)});assert(response.ok);const body=await response.json();return body.data??body;};
       const events=[];let after=0;for(let page=0;page<20;page++){const value=await get(`/api/agent-sessions/${preserved.session_id}/events?after_seq=${after}&limit=500`);events.push(...value.events);if(!value.events.length||value.next_cursor.seq<=after)break;after=value.next_cursor.seq;assert(page<19,'Original Session preservation exceeds bounded pagination');}
       report.upgrade.canonical_preservation=assertWindowsUpgradePreservation({before:preserved,execution:await get(`/api/agent-sessions/${preserved.session_id}/execution`),events});
     }
