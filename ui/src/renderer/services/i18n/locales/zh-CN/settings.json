@@ -343,7 +343,7 @@
     "refresh": "重新检测",
     "desktopOnly": "这里显示的是运行 NomiFun 的电脑权限。当前 WebUI 可以测试本浏览器的麦克风，但宿主权限请在桌面客户端中管理。",
     "loadFailed": "无法读取最新系统权限，请回到桌面客户端后重试。",
-    "restartAfterGrant": "授权后需彻底退出并重新打开 NomiFun 才会生效。",
+    "restartAfterGrant": "授权后请重新检测；若系统要求重启或访问仍未生效，彻底退出并重新打开 NomiFun 后继续任务。",
     "requestAccess": "请求授权",
     "openSystemSettings": "打开系统设置",
     "tabs": {
@@ -359,7 +359,8 @@
       "not_determined": "待授权",
       "restricted": "受系统限制",
       "not_required": "无需授权",
-      "unknown": "使用时检测"
+      "unknown": "使用时检测",
+      "not_granted": "尚未授权"
     },
     "summaryStates": {
       "ready": "已就绪",
@@ -395,7 +396,10 @@
         "location": "仅向当前提出请求的网站提供定位。",
         "notifications": "网站通知按站点批准，不等同于 NomiFun 的任务完成通知。"
       },
-      "agentBoundary": "Agent 运行并持有页面输入时，新的网站权限默认不会被静默批准。停止本轮后，由你在可见页面中处理请求。"
+      "agentBoundary": "Agent 运行并持有页面输入时，新的网站权限默认不会被静默批准。停止本轮后，由你在可见页面中处理请求。",
+      "hostMediaTitle": "宿主媒体许可",
+      "hostMediaDescription": "这里实时检测正在运行的 NomiFun 的系统许可。网站仍需在可见 Browser 面板中获得单独批准；系统已授权不代表设备存在或当前可以采集。",
+      "macosPermissionLimit": "当前 macOS 内嵌浏览器已接通网站摄像头与麦克风请求；网站定位和网站通知的产品许可入口尚未接入。它们不会因打开系统权限而自动可用。"
     },
     "notifications": {
       "title": "系统通知",
@@ -410,7 +414,7 @@
     },
     "files": {
       "title": "文件与受保护目录",
-      "description": "文件能力只使用你选择的工作区、上传文件或系统文件选择器结果。默认不要求“完全磁盘访问”；仅在你确实需要访问受保护目录且系统拒绝时，再由你决定是否在 macOS 中额外开放。"
+      "description": "Agent 可以操作当前登录用户能够访问的本机路径；工作区只提供默认目录。受保护目录或卷由 macOS 按实际操作决定是否授权，完全磁盘访问没有可靠的全局就绪探针；管理员身份也不能代替这项许可。"
     },
     "permissions": {
       "microphone": "麦克风",
@@ -423,6 +427,10 @@
       "location": "定位",
       "notifications": "通知",
       "notificationsDesc": "允许 NomiFun 在任务完成或需要你处理时发送系统通知。"
+    },
+    "automation": {
+      "title": "跨应用自动化",
+      "description": "通过 Apple Events 或 AppleScript 完成请求的跨应用操作。macOS 按 NomiFun 与目标应用分别授权；无法用一个全局开关推断全部应用已就绪。"
     }
   },
   "startOnBoot": "开机启动",
@@ -1017,12 +1025,12 @@
   "mcpAuthenticated": "已认证",
   "mcpDisconnected": "未测试",
   "mcpError": "最近一次测试失败",
-  "mcpErrorNodeCommandNotFound": "未找到命令 {{command}}。请安装 Node.js（包含 npm/npx），重启 Nomi，或把这个 MCP server 改成绝对命令路径。",
-  "mcpErrorBunCommandNotFound": "未找到命令 {{command}}。请安装 Bun（包含 bun/bunx），重启 Nomi，或把这个 MCP server 改成绝对命令路径。",
-  "mcpErrorUvCommandNotFound": "未找到命令 {{command}}。请安装 uv，重启 Nomi，或把这个 MCP server 改成绝对命令路径。",
-  "mcpErrorPythonCommandNotFound": "未找到命令 {{command}}。请安装 Python，重启 Nomi，或把这个 MCP server 改成绝对命令路径。",
-  "mcpErrorDenoCommandNotFound": "未找到命令 {{command}}。请安装 Deno，重启 Nomi，或把这个 MCP server 改成绝对命令路径。",
-  "mcpErrorCommandNotFound": "未找到命令 {{command}}。请安装该命令，或把这个 MCP server 改成绝对命令路径。",
+  "mcpErrorNodeCommandNotFound": "在配置的启动环境中未找到命令 {{command}}。",
+  "mcpErrorBunCommandNotFound": "在配置的启动环境中未找到命令 {{command}}。",
+  "mcpErrorUvCommandNotFound": "在配置的启动环境中未找到命令 {{command}}。",
+  "mcpErrorPythonCommandNotFound": "在配置的启动环境中未找到命令 {{command}}。",
+  "mcpErrorDenoCommandNotFound": "在配置的启动环境中未找到命令 {{command}}。",
+  "mcpErrorCommandNotFound": "在配置的启动环境中未找到命令 {{command}}。",
   "mcpErrorCommandPermissionDenied": "Nomi 无法执行 {{command}}，因为权限被拒绝。",
   "mcpErrorCommandStartFailed": "Nomi 启动 {{command}} 失败。",
   "mcpErrorPackageNotFound": "{{command}} 找不到市场配置指定的软件包。请核对包名、版本和包仓库。",
@@ -1905,12 +1913,6 @@
     "envelopeInvalid": "请粘贴 Console 生成的配对串；无效或过期时需要重新生成。",
     "relayConnect": "连接中继",
     "relayReconnect": "重新连接",
-    "relayDownloadAndConnect": "下载连接组件并连接",
-    "relayDownloadAndReconnect": "下载连接组件并重新连接",
-    "relayRuntimeStatusPending": "正在检查本地连接组件…",
-    "relayDownloadHint": "NomiRelay 需要 nfagent 连接组件，仅用于 Relay 远程连接。组件来自 GitHub 上 nomifun/nomifun-net-infra 的官方发布，只有点击下载按钮后才会下载。",
-    "relayDownloadSource": "查看下载来源",
-    "relayErrorAgentInstallRequired": "连接组件尚未安装，请选择下载后再连接。",
     "relayPause": "暂停跨网访问",
     "relayRemove": "解除中继连接",
     "relayRemoveConfirm": "解除后撤销中继接入并删除本机中继凭据，跨网络访问停止。手机凭据和同网访问保留；移除手机请使用下方设备列表。",

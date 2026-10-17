@@ -15,8 +15,46 @@ use crate::{
     AgentTurnRequest, AgentWorkspaceReader,
 };
 
+/// Identity is part of an instruction observation, never an authorization mode.
+/// Keep it attached to scopes and layers so a privileged read cannot satisfy a
+/// later ordinary-user preflight for the same native path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum InstructionIdentity {
+    #[default]
+    CurrentUser,
+    Administrator,
+}
+
+impl InstructionIdentity {
+    fn from_arguments(arguments: &serde_json::Value) -> Result<Self, AgentEngineError> {
+        arguments.get("execution_identity").map_or(Ok(Self::CurrentUser), |value| {
+            serde_json::from_value(value.clone()).map_err(|_| AgentEngineError::WorkspaceContext(
+                "invalid instruction execution identity".into(),
+            ))
+        })
+    }
+
+    fn label(self) -> &'static str {
+        match self { Self::CurrentUser => "current_user", Self::Administrator => "administrator" }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct InstructionScope {
+    identity: InstructionIdentity,
+    path: String,
+}
+
+impl InstructionScope {
+    fn new(identity: InstructionIdentity, path: impl Into<String>) -> Self {
+        Self { identity, path: path.into() }
+    }
+}
+
 struct InstructionReader<'a> {
     authority: &'a InstructionAuthority,
+    identity: InstructionIdentity,
     tools: &'a dyn AgentToolInvoker,
     sink: &'a dyn AgentEventSink,
     sequence: &'a AtomicU32,
@@ -196,9 +234,15 @@ impl InstructionReader<'_> {
 
     async fn invoke(
         &self,
-        arguments: serde_json::Value,
+        mut arguments: serde_json::Value,
         cancellation: CancellationToken,
     ) -> Result<serde_json::Value, AgentEngineError> {
+        // CurrentUser is the formal wire default. Omitting it also keeps
+        // ordinary reads valid for a frozen strict schema that predates this
+        // optional selector; administrator reads never downgrade that way.
+        if self.identity == InstructionIdentity::Administrator {
+            arguments["execution_identity"] = serde_json::json!(self.identity);
+        }
         if cancellation.is_cancelled() {
             return Err(AgentEngineError::Cancelled);
         }
@@ -211,6 +255,20 @@ impl InstructionReader<'_> {
             return Err(AgentEngineError::WorkspaceContext(
                 "read_file is not bound to workspace.files/read".into(),
             ));
+        }
+        if self.identity == InstructionIdentity::Administrator {
+            let declares_administrator = binding.definition.input_schema.0
+                .pointer("/properties/execution_identity/enum").and_then(serde_json::Value::as_array)
+                .is_some_and(|values| values.iter().any(|value| value == "administrator"));
+            let accepted = declares_administrator && jsonschema::options()
+                .with_retriever(crate::tool_validation::NoExternalSchemaReads)
+                .build(&binding.definition.input_schema.0)
+                .is_ok_and(|validator| validator.is_valid(&arguments));
+            if !accepted {
+                return Err(AgentEngineError::WorkspaceContext(
+                    "the frozen read_file schema does not admit administrator instruction acquisition; a current canonical binding transition is required".into(),
+                ));
+            }
         }
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
         if sequence >= 4096 {
@@ -289,13 +347,13 @@ impl InstructionReader<'_> {
 pub(crate) struct ScopedInstructions {
     authority: InstructionAuthority,
     sequence: AtomicU32,
-    layers: BTreeMap<String, String>,
+    layers: BTreeMap<InstructionScope, String>,
     // Remember inspected scopes even when no file existed. A later command
     // can create a new instruction file in one of these directories.
-    directories: BTreeSet<String>,
+    directories: BTreeSet<InstructionScope>,
     // Canonical roots of recursive inspections, re-scanned after effects so a
     // newly created descendant instruction file cannot remain invisible.
-    recursive_scopes: BTreeSet<String>,
+    recursive_scopes: BTreeSet<InstructionScope>,
     dirty: bool,
     loaded: bool,
 }
@@ -329,6 +387,7 @@ impl ScopedInstructions {
         &self,
         path: &str,
         recursive: bool,
+        identity: InstructionIdentity,
         tools: &dyn AgentToolInvoker,
         sink: &dyn AgentEventSink,
         cancellation: CancellationToken,
@@ -336,6 +395,7 @@ impl ScopedInstructions {
         let requested = if path.is_empty() { "." } else { path };
         let reader = InstructionReader {
             authority: &self.authority,
+            identity,
             tools,
             sink,
             sequence: &self.sequence,
@@ -357,7 +417,7 @@ impl ScopedInstructions {
         if scope.path != requested
             || scope.recursive != recursive
             || !matches!(scope.kind.as_str(), "file" | "directory" | "missing")
-            || crate::agents_md::normalize_workspace_directory(&scope.canonical_path)?
+            || crate::agents_md::normalize_native_instruction_path(&scope.canonical_path)?
                 != scope.canonical_path
         {
             return Err(AgentEngineError::WorkspaceContext(
@@ -372,15 +432,8 @@ impl ScopedInstructions {
                 serde_json::to_string(requested).unwrap_or_default(),
             )));
         }
-        let base = if scope.kind == "directory" {
-            scope.canonical_path.as_str()
-        } else {
-            scope
-                .canonical_path
-                .rsplit_once('/')
-                .map(|(parent, _)| parent)
-                .unwrap_or("")
-        };
+        let base = if scope.kind == "directory" { scope.canonical_path.clone() }
+            else { crate::agents_md::parent_directory(&scope.canonical_path) };
         if scope.directories.is_empty() || scope.directories.len() > 64 {
             return Err(AgentEngineError::WorkspaceContext(
                 "invalid instruction directory count".into(),
@@ -388,9 +441,9 @@ impl ScopedInstructions {
         }
         let mut directories = BTreeSet::new();
         for directory in scope.directories {
-            if crate::agents_md::normalize_workspace_directory(&directory)? != directory
+            if crate::agents_md::normalize_native_instruction_path(&directory)? != directory
                 || (directory != base
-                    && !(recursive && scope.kind == "directory" && in_scope(&directory, base)))
+                    && !(recursive && scope.kind == "directory" && in_scope(&directory, &base)))
                 || !directories.insert(directory)
             {
                 return Err(AgentEngineError::WorkspaceContext(
@@ -398,7 +451,7 @@ impl ScopedInstructions {
                 ));
             }
         }
-        if !directories.contains(base) {
+        if !directories.contains(&base) {
             return Err(AgentEngineError::WorkspaceContext(
                 "instruction scope omitted its base directory".into(),
             ));
@@ -419,7 +472,7 @@ impl ScopedInstructions {
                 active_set_generation: request.active_set_generation,
             },
             sequence: AtomicU32::new(100),
-            directories: BTreeSet::from([String::new()]),
+            directories: BTreeSet::from([InstructionScope::new(InstructionIdentity::CurrentUser, "")]),
             recursive_scopes: BTreeSet::new(),
             // Materialize the bound workspace root before the first model
             // request. Otherwise the first legitimate source read discovers
@@ -443,18 +496,18 @@ impl ScopedInstructions {
         Self::render_layers(&self.layers)
     }
 
-    fn render_layers(layers: &BTreeMap<String, String>) -> String {
+    fn render_layers(layers: &BTreeMap<InstructionScope, String>) -> String {
         if layers.is_empty() {
             return "No repository instruction layers are currently available; no additional permissions are implied.".into();
         }
         let mut layers = layers.iter().collect::<Vec<_>>();
         layers.sort_by(|(left, _), (right, _)| {
-            left.matches('/')
+            left.path.matches('/')
                 .count()
-                .cmp(&right.matches('/').count())
+                .cmp(&right.path.matches('/').count())
                 .then_with(|| left.cmp(right))
         });
-        layers.into_iter().map(|(path, content)| format!("Repository instructions scoped to the directory containing {path} and its descendants (deeper layers take precedence; no permission grant):\n{content}"))
+        layers.into_iter().map(|(path, content)| format!("Repository instructions observed as {} and scoped to the directory containing {} and its descendants (deeper layers take precedence for that identity; no permission grant):\n{content}", path.identity.label(), serde_json::to_string(&path.path).expect("path serializes")))
             .collect::<Vec<_>>().join("\n\n")
     }
 
@@ -476,14 +529,14 @@ impl ScopedInstructions {
         let mut directories = self.directories.clone();
         for path in self.recursive_scopes.clone() {
             let scope = self
-                .discover_scope(&path, true, tools, sink, cancellation.clone())
+                .discover_scope(&path.path, true, path.identity, tools, sink, cancellation.clone())
                 .await?;
-            if scope.canonical_path != path {
+            if scope.canonical_path != path.path {
                 return Err(AgentEngineError::WorkspaceContext(
                     "previously inspected recursive scope changed its canonical path".into(),
                 ));
             }
-            directories.extend(scope.directories);
+            directories.extend(scope.directories.into_iter().map(|directory| InstructionScope::new(path.identity, directory)));
         }
         // Keep previously inspected directories in this refresh too: removed
         // descendant instructions must be read as absent and evicted, not left
@@ -501,12 +554,19 @@ impl ScopedInstructions {
         cancellation: CancellationToken,
     ) -> Result<Option<String>, AgentEngineError> {
         let mut directories = BTreeSet::new();
-        let mut scopes = BTreeMap::<String, bool>::new();
+        let mut scopes = BTreeMap::<InstructionScope, bool>::new();
         for call in calls {
             let Some(binding) = self.authority.tool_plan.binding(&call.name) else {
                 continue;
             };
             let value = &call.arguments.0;
+            // The caller has already validated the complete batch against its
+            // frozen schema. Only actions with the formal identity selector
+            // can request privileged instruction acquisition.
+            let identity = if matches!(binding.action_id.as_ref(),
+                "workspace.files/read" | "workspace.process/exec" | "workspace.process/start") {
+                InstructionIdentity::from_arguments(value)?
+            } else { InstructionIdentity::CurrentUser };
             let mut paths = Vec::new();
             match binding.action_id.as_ref() {
                 "workspace.files/read"
@@ -520,7 +580,7 @@ impl ScopedInstructions {
                                 && value.get("recursive").and_then(|value| value.as_bool())
                                     == Some(true));
                         scopes
-                            .entry(path.to_owned())
+                            .entry(InstructionScope::new(identity, path))
                             .and_modify(|scan| *scan |= recursive)
                             .or_insert(recursive);
                     }
@@ -540,9 +600,14 @@ impl ScopedInstructions {
                     // exact hit scopes before snippets enter the model view.
                     let recursive = binding.action_id.as_ref() == "workspace.vcs/stage";
                     scopes
-                        .entry(path.to_owned())
+                        .entry(InstructionScope::new(identity, path))
                         .and_modify(|scan| *scan |= recursive)
                         .or_insert(recursive);
+                }
+                "workspace.files/rename" => {
+                    for field in ["path", "destination"] {
+                        if let Some(path) = value.get(field).and_then(|value| value.as_str()) { paths.push(path); }
+                    }
                 }
                 "workspace.files/patch" => {
                     if let Some(files) = value.get("files").and_then(|v| v.as_array()) {
@@ -558,23 +623,23 @@ impl ScopedInstructions {
                     // arbitrary paths embedded in shell text are not inferred.
                     if value.get("process_id").is_none() {
                         scopes
-                            .entry(
+                            .entry(InstructionScope::new(identity,
                                 value
                                     .get("cwd")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or(".")
                                     .to_owned(),
-                            )
+                            ))
                             .or_insert(false);
                     }
                 }
                 _ => {}
             }
             for path in paths {
-                if let Err(error) = crate::agents_md::normalize_workspace_directory(path) {
+                if let Err(error) = crate::agents_md::normalize_native_instruction_path(path) {
                     return Ok(Some(format!("Operation not executed: {error}")));
                 }
-                scopes.entry(path.to_owned()).or_insert(false);
+                scopes.entry(InstructionScope::new(identity, path)).or_insert(false);
             }
         }
         if scopes.is_empty() {
@@ -591,12 +656,12 @@ impl ScopedInstructions {
         let mut redirect = None;
         let mut recursive = self.recursive_scopes.clone();
         for (path, scan) in scopes {
-            let normalized = match crate::agents_md::normalize_workspace_directory(&path) {
+            let normalized = match crate::agents_md::normalize_native_instruction_path(&path.path) {
                 Ok(path) => path,
                 Err(error) => return Ok(Some(format!("Operations not executed: {error}"))),
             };
             let scope = match self
-                .discover_scope(&normalized, scan, tools, sink, cancellation.clone())
+                .discover_scope(&normalized, scan, path.identity, tools, sink, cancellation.clone())
                 .await
             {
                 Ok(scope) => scope,
@@ -607,15 +672,15 @@ impl ScopedInstructions {
             };
             if scope.canonical_path != normalized {
                 redirect = Some(format!(
-                    "Requested calls deferred; earlier calls may already have run. Path {} resolves to {}. Reconsider the operation using this canonical workspace path and its scoped instructions; arguments were not rewritten.",
+                    "Requested calls deferred; earlier calls may already have run. Path {} resolves to {}. Reconsider the operation using this canonical native path and its scoped instructions; arguments were not rewritten.",
                     serde_json::to_string(&normalized).unwrap_or_default(),
                     serde_json::to_string(&scope.canonical_path).unwrap_or_default()
                 ));
             }
             if scan {
-                recursive.insert(scope.canonical_path);
+                recursive.insert(InstructionScope::new(path.identity, scope.canonical_path));
             }
-            directories.extend(scope.directories);
+            directories.extend(scope.directories.into_iter().map(|directory| InstructionScope::new(path.identity, directory)));
         }
         if recursive.len() > 64 {
             return Ok(Some(
@@ -704,10 +769,7 @@ impl ScopedInstructions {
             let parents = paths
                 .iter()
                 .map(|path| {
-                    path.rsplit_once('/')
-                        .map(|(parent, _)| parent)
-                        .unwrap_or("")
-                        .to_owned()
+                    InstructionScope::new(InstructionIdentity::CurrentUser, crate::agents_md::parent_directory(path))
                 })
                 .collect::<BTreeSet<_>>();
             if self.directories.union(&parents).count() > 64 {
@@ -717,14 +779,14 @@ impl ScopedInstructions {
             }
             for path in paths {
                 let scope = self
-                    .discover_scope(&path, false, tools, sink, cancellation.clone())
+                    .discover_scope(&path, false, InstructionIdentity::CurrentUser, tools, sink, cancellation.clone())
                     .await?;
                 if scope.canonical_path != path || scope.kind != "file" {
                     return Err(AgentEngineError::WorkspaceContext(
                         "search hit path changed or is no longer a file".into(),
                     ));
                 }
-                directories.extend(scope.directories);
+                directories.extend(scope.directories.into_iter().map(|directory| InstructionScope::new(InstructionIdentity::CurrentUser, directory)));
             }
             self.refresh(directories, tools, sink, cancellation).await
         }
@@ -745,15 +807,15 @@ impl ScopedInstructions {
 
     async fn refresh(
         &mut self,
-        directories: BTreeSet<String>,
+        directories: BTreeSet<InstructionScope>,
         tools: &dyn AgentToolInvoker,
         sink: &dyn AgentEventSink,
         cancellation: CancellationToken,
     ) -> Result<bool, AgentEngineError> {
         let directories = directories
             .into_iter()
-            .map(|directory| crate::agents_md::normalize_workspace_directory(&directory))
-            .collect::<Result<BTreeSet<_>, _>>()?;
+            .map(|directory| Ok(InstructionScope::new(directory.identity, crate::agents_md::normalize_native_instruction_path(&directory.path)?)))
+            .collect::<Result<BTreeSet<_>, AgentEngineError>>()?;
         let known = self
             .directories
             .union(&directories)
@@ -764,53 +826,51 @@ impl ScopedInstructions {
                 "repository instruction discovery budget exhausted".into(),
             ));
         }
-        let reader = RefreshReader {
-            inner: InstructionReader {
-                authority: &self.authority,
-                tools,
-                sink,
-                sequence: &self.sequence,
-            },
-            cached: std::sync::Mutex::new(BTreeMap::new()),
-        };
         let mut next = self.layers.clone();
-        for directory in directories {
-            let context = match crate::load_agents_md(
-                &reader,
-                &directory,
-                AgentsMdPolicy {
-                    max_file_bytes: 16 * 1024,
-                    max_total_bytes: 24 * 1024,
-                    ..Default::default()
+        // Each identity owns its reader/cache for this refresh. Ancestors are
+        // shared only within the same identity, and no cache survives effects.
+        for identity in [InstructionIdentity::CurrentUser, InstructionIdentity::Administrator] {
+            let reader = RefreshReader {
+                inner: InstructionReader {
+                    authority: &self.authority,
+                    identity,
+                    tools,
+                    sink,
+                    sequence: &self.sequence,
                 },
-                cancellation.clone(),
-            )
-            .await
-            {
-                Ok(value) => value,
-                Err(AgentEngineError::Cancelled) => return Err(AgentEngineError::Cancelled),
-                Err(error) => return Err(error),
+                cached: std::sync::Mutex::new(BTreeMap::new()),
             };
-            if !context.warnings.is_empty() {
-                return Err(AgentEngineError::WorkspaceContext(format!(
-                    "required repository instructions could not be read completely: {}",
-                    context.warnings.join("; ")
-                )));
-            }
-            // Remove stale/overridden layers only in the hierarchy just read.
-            next.retain(|path, _| {
-                let parent = path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
-                !(parent.is_empty()
-                    || parent == directory
-                    || directory.starts_with(&format!("{parent}/")))
-            });
-            for layer in context.layers {
-                next.insert(layer.path, layer.content);
+            for directory in directories.iter().filter(|directory| directory.identity == identity) {
+                let context = crate::load_agents_md(
+                    &reader,
+                    &directory.path,
+                    AgentsMdPolicy {
+                        max_file_bytes: 16 * 1024,
+                        max_total_bytes: 24 * 1024,
+                        ..Default::default()
+                    },
+                    cancellation.clone(),
+                ).await?;
+                if !context.warnings.is_empty() {
+                    return Err(AgentEngineError::WorkspaceContext(format!(
+                        "required repository instructions could not be read completely: {}",
+                        context.warnings.join("; ")
+                    )));
+                }
+                // Updating one identity must never evict or replace another
+                // identity's independent instruction observation.
+                next.retain(|path, _| {
+                    let parent = crate::agents_md::parent_directory(&path.path);
+                    path.identity != identity || !in_scope(&directory.path, &parent)
+                });
+                for layer in context.layers {
+                    next.insert(InstructionScope::new(identity, layer.path), layer.content);
+                }
             }
         }
         if next
             .iter()
-            .map(|(path, text)| path.len() + text.len() + 256)
+            .map(|(path, text)| path.path.len() + text.len() + 256)
             .sum::<usize>()
             > 48 * 1024
         {
@@ -835,9 +895,188 @@ impl ScopedInstructions {
 }
 
 fn in_scope(directory: &str, root: &str) -> bool {
-    root.is_empty()
-        || directory == root
-        || directory
-            .strip_prefix(root)
-            .is_some_and(|suffix| suffix.starts_with('/'))
+    crate::agents_md::path_in_scope(directory, root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AgentEffectClass, AgentToolBinding, AgentToolInvocation, AgentToolPlan, AgentToolResult};
+    use nomifun_agent_contracts::{ChatRouteIdentity, DigestHex, ResolvedSnapshotRef};
+    use nomifun_chat_model_broker::{ChatCausality, ChatToolDefinition};
+    use serde_json::{Value, json};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingSink(Mutex<Vec<AgentEngineEvent>>);
+    #[async_trait]
+    impl AgentEventSink for RecordingSink {
+        async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+            self.0.lock().unwrap().push(event);
+            Ok(())
+        }
+    }
+
+    struct IdentityTool {
+        calls: Mutex<Vec<Value>>,
+        content: Mutex<String>,
+        failure: Mutex<Option<&'static str>>,
+    }
+    impl Default for IdentityTool {
+        fn default() -> Self {
+            Self { calls: Mutex::default(), content: Mutex::new("ROOT_INSTRUCTION_A".into()), failure: Mutex::default() }
+        }
+    }
+    #[async_trait]
+    impl AgentToolInvoker for IdentityTool {
+        async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+            assert_eq!(invocation.binding.action_id.as_ref(), "workspace.files/read");
+            let args = &invocation.call.arguments.0;
+            self.calls.lock().unwrap().push(args.clone());
+            let path = args["path"].as_str().unwrap();
+            let identity = InstructionIdentity::from_arguments(args).unwrap();
+            let protected = path.starts_with("/protected/");
+            let value = if args["format"] == "instruction_scope" {
+                let directory = if path == "/protected" { path.to_owned() } else { crate::agents_md::parent_directory(path) };
+                json!({"path":path,"canonical_path":path,"kind":if path == "/protected" {"directory"} else {"file"},
+                    "recursive":args["recursive"],"directories":[directory],"complete":true,"incomplete_reasons":[]})
+            } else if protected && identity == InstructionIdentity::CurrentUser {
+                return Ok(AgentToolResult::text(invocation.call.call_id, "Permission denied (os error 13)", true));
+            } else if path == "/protected/AGENTS.md" {
+                if let Some(error) = *self.failure.lock().unwrap() {
+                    return Ok(AgentToolResult::text(invocation.call.call_id, error, true));
+                }
+                let content = self.content.lock().unwrap().clone();
+                json!({"kind":"workspace_file_text_page","path":path,"content":content,"offset":0,
+                    "total_bytes":content.len(),"eof":true,"next_offset":null,
+                    "sha256":nomifun_agent_contracts::digest_bytes(content.as_bytes())})
+            } else { json!({"kind":"workspace_file_absent","path":path}) };
+            Ok(AgentToolResult::text(invocation.call.call_id, value.to_string(), false))
+        }
+    }
+
+    fn binding(name: &str, action: &str, effect_class: AgentEffectClass) -> AgentToolBinding {
+        let capability = if action.starts_with("workspace.files/") { "workspace.files" } else { "workspace.process" };
+        let definition = ChatToolDefinition { name: name.into(), description: "fixture".into(),
+            input_schema: StrictJsonValue(json!({"type":"object","properties":{"execution_identity":{"enum":["current_user","administrator"]}}})), deferred: false };
+        AgentToolBinding { model_name: name.into(), schema_digest: crate::tool::input_schema_digest(&definition.input_schema).unwrap(),
+            canonical_input_schema_ref: format!("schema://{action}/input").into(), capability_contract_digest: DigestHex::from("c".repeat(64)),
+            definition, capability_id: capability.into(), action_id: action.into(), resource_binding_ids: BTreeSet::new(),
+            effect_class, parallel_safe: matches!(effect_class, AgentEffectClass::ReadOnly) }
+    }
+
+    fn instructions() -> ScopedInstructions {
+        ScopedInstructions {
+            authority: InstructionAuthority {
+                tool_plan: AgentToolPlan::new([
+                    binding("read_file", "workspace.files/read", AgentEffectClass::ReadOnly),
+                    binding("start_process", "workspace.process/start", AgentEffectClass::ManagedEffect),
+                ]).unwrap(),
+                principal: nomifun_agent_contracts::PrincipalRef { principal_kind: "user".into(), principal_id: "owner".into() },
+                causality: ChatCausality { agent_session_id: "session".into(), turn_operation_id: "turn".into(),
+                    causation_event_id: "input".into(), resolved_snapshot_ref: ResolvedSnapshotRef {
+                        snapshot_id: "snapshot".into(), snapshot_digest: DigestHex::from("b".repeat(64)) },
+                    route_identity: ChatRouteIdentity::new("preset@1", "agent_chat", "route".into(), 1), operation_id: "model".into() },
+                active_set_generation: 1,
+            },
+            sequence: AtomicU32::new(100), layers: BTreeMap::new(),
+            directories: BTreeSet::from([InstructionScope::new(InstructionIdentity::CurrentUser, "")]),
+            recursive_scopes: BTreeSet::new(), dirty: true, loaded: false,
+        }
+    }
+    fn call(name: &str, identity: Option<&str>) -> ChatToolCall {
+        let mut arguments = if name == "read_file" { json!({"path":"/protected/file"}) }
+            else { json!({"command":"/bin/sh","cwd":"/protected"}) };
+        if let Some(identity) = identity { arguments["execution_identity"] = identity.into(); }
+        ChatToolCall { call_id: "proposed-call".into(), name: name.into(), arguments: StrictJsonValue(arguments), provider_metadata: None }
+    }
+
+    #[tokio::test]
+    async fn administrator_preflight_reads_and_refreshes_through_its_canonical_identity() {
+        let mut instructions = instructions();
+        let tool = IdentityTool::default(); let sink = RecordingSink::default();
+        instructions.before_model(&tool, &sink, CancellationToken::new()).await.unwrap();
+        assert!(tool.calls.lock().unwrap().iter().all(|args| args.get("execution_identity").is_none()));
+        let admin = call("start_process", Some("administrator"));
+        let deferred = instructions.before_calls(&[admin.clone()], &tool, &sink, CancellationToken::new()).await.unwrap();
+        assert!(deferred.is_some_and(|reason| reason.contains("submit new call identities")));
+        assert!(instructions.context().contains("ROOT_INSTRUCTION_A"));
+        assert!(instructions.context().contains("observed as administrator"));
+        let admin_reads = tool.calls.lock().unwrap().iter().filter(|args| args["execution_identity"] == "administrator").cloned().collect::<Vec<_>>();
+        assert!(admin_reads.iter().any(|args| args["format"] == "instruction_scope" && args["path"] == "/protected"));
+        assert!(admin_reads.iter().any(|args| args["path"] == "/protected/AGENTS.md" && args["missing_ok"] == true));
+        // A fresh call can execute only after the new context is published.
+        assert!(instructions.before_calls(&[admin], &tool, &sink, CancellationToken::new()).await.unwrap().is_none());
+        *tool.content.lock().unwrap() = "ROOT_INSTRUCTION_B".into();
+        instructions.invalidate();
+        assert!(instructions.before_model(&tool, &sink, CancellationToken::new()).await.unwrap());
+        assert!(instructions.context().contains("ROOT_INSTRUCTION_B"));
+        assert!(!instructions.context().contains("ROOT_INSTRUCTION_A"));
+        let events = sink.0.lock().unwrap();
+        assert!(events.iter().any(|event| matches!(event, AgentEngineEvent::ToolCallCompleted { step: 0, call }
+            if call.arguments.0["execution_identity"] == "administrator" && call.arguments.0["path"] == "/protected/AGENTS.md")));
+        assert!(events.iter().any(|event| matches!(event, AgentEngineEvent::InstructionsUpdated { context } if context.contains("ROOT_INSTRUCTION_B"))));
+    }
+
+    #[tokio::test]
+    async fn current_user_cannot_borrow_privileged_scope_or_read_only_cache() {
+        for explicit in [None, Some("current_user")] {
+            let mut instructions = instructions(); let tool = IdentityTool::default(); let sink = RecordingSink::default();
+            let admin = call("read_file", Some("administrator"));
+            assert!(instructions.before_calls(&[admin.clone()], &tool, &sink, CancellationToken::new()).await.unwrap().is_some());
+            assert!(instructions.before_calls(&[admin], &tool, &sink, CancellationToken::new()).await.unwrap().is_none());
+            let previous = instructions.context();
+            let ordinary = call("read_file", explicit);
+            let refusal = instructions.before_calls(&[ordinary], &tool, &sink, CancellationToken::new()).await.unwrap().unwrap();
+            assert!(refusal.contains("Permission denied"));
+            assert_eq!(instructions.context(), previous, "a failed refresh cannot partially replace accepted layers");
+            assert!(tool.calls.lock().unwrap().iter().any(|args| args["path"] == "/protected/AGENTS.md" && args.get("execution_identity").is_none()));
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_identity_batch_keeps_required_ordinary_denial() {
+        let mut instructions = instructions(); let tool = IdentityTool::default(); let sink = RecordingSink::default();
+        let refusal = instructions.before_calls(&[call("read_file", Some("administrator")), call("read_file", Some("current_user"))],
+            &tool, &sink, CancellationToken::new()).await.unwrap().unwrap();
+        assert!(refusal.contains("Permission denied"));
+        assert!(!instructions.has_context(), "failed mixed preflight must not publish a privileged prefix");
+    }
+
+    #[tokio::test]
+    async fn privileged_instruction_errors_and_oversize_remain_fail_closed() {
+        for failure in [Some("file is not valid UTF-8"), Some("Permission denied (os error 13)"), None] {
+            let mut instructions = instructions(); let tool = IdentityTool::default(); let sink = RecordingSink::default();
+            *tool.failure.lock().unwrap() = failure;
+            if failure.is_none() { *tool.content.lock().unwrap() = "x".repeat(16 * 1024 + 1); }
+            let refusal = instructions.before_calls(&[call("start_process", Some("administrator"))], &tool, &sink, CancellationToken::new()).await.unwrap().unwrap();
+            assert!(refusal.contains(failure.unwrap_or("exceeds 16 KiB")));
+            assert!(!instructions.has_context());
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_identity_is_rejected_before_instruction_acquisition() {
+        let mut instructions = instructions(); let tool = IdentityTool::default(); let sink = RecordingSink::default();
+        assert!(instructions.before_calls(&[call("start_process", Some("root"))], &tool, &sink, CancellationToken::new()).await.is_err());
+        assert!(tool.calls.lock().unwrap().is_empty());
+        let mut legacy = self::instructions();
+        let mut bindings = ["read_file", "start_process"].iter().map(|name| legacy.authority.tool_plan.binding(name).unwrap().clone()).collect::<Vec<_>>();
+        let read = bindings.iter_mut().find(|binding| binding.model_name == "read_file").unwrap();
+        read.definition.input_schema = StrictJsonValue(json!({"type":"object","additionalProperties":false,
+            "properties":{"path":{"type":"string"},"format":{"type":"string"},"recursive":{"type":"boolean"},
+                "missing_ok":{"type":"boolean"},"offset":{"type":"integer"},"limit":{"type":"integer"},"expected_sha256":{"type":"string"}}}));
+        read.schema_digest = crate::tool::input_schema_digest(&read.definition.input_schema).unwrap();
+        let old_schema = read.definition.input_schema.0.clone();
+        legacy.authority.tool_plan = AgentToolPlan::new(bindings).unwrap();
+        legacy.before_model(&tool, &sink, CancellationToken::new()).await.unwrap();
+        let ordinary = ChatToolCall { arguments: StrictJsonValue(json!({"path":"plain.txt"})), ..call("read_file", None) };
+        assert!(legacy.before_calls(&[ordinary], &tool, &sink, CancellationToken::new()).await.unwrap().is_none());
+        let validator = jsonschema::validator_for(&old_schema).unwrap();
+        assert!(tool.calls.lock().unwrap().iter().all(|args| validator.is_valid(args) && args.get("execution_identity").is_none()));
+        let count = tool.calls.lock().unwrap().len();
+        let refusal = legacy.before_calls(&[call("start_process", Some("administrator"))], &tool, &sink, CancellationToken::new()).await.unwrap().unwrap();
+        assert!(refusal.contains("frozen read_file schema"));
+        assert_eq!(tool.calls.lock().unwrap().len(), count, "unsupported administrator reads must not dispatch or retry as current_user");
+    }
 }

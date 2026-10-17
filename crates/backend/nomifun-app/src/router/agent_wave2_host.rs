@@ -455,11 +455,20 @@ fn wave2_effect_resource_key(
                     "workspace effect resource has no canonical workspace_root",
                 )
             })?;
-        let canonical_root = std::fs::canonicalize(root).map_err(|error| {
-            Wave2HostPortError::invalid_payload(format!(
+        let canonical_root = match std::fs::canonicalize(root) {
+            Ok(root) => root,
+            Err(error) if context.capability_id.as_ref() == "workspace.files"
+                && error.kind() == std::io::ErrorKind::NotFound
+                && Path::new(root).is_absolute()
+                && !Path::new(root).components().any(|part| matches!(part, std::path::Component::ParentDir)) => {
+                // File access uses native targets; a missing default is still
+                // the same frozen project identity, never a replacement root.
+                PathBuf::from(root)
+            }
+            Err(error) => return Err(Wave2HostPortError::invalid_payload(format!(
                 "workspace effect root could not be resolved: {error}"
-            ))
-        })?;
+            ))),
+        };
         json!({
             "principal_kind": context.principal.principal_kind.as_str(),
             "owner_id": binding.owner_id.as_str(),
@@ -1004,6 +1013,7 @@ impl Wave2ApplicationHost {
                                     "path": params.path,
                                     "written": true,
                                     "created": receipt.created,
+                                    "native_path": receipt.native_path,
                                     "workspace_path": receipt.workspace_path,
                                     "bytes": params.content.len(),
                                     "line_count": params.content.lines().count(),
@@ -1034,6 +1044,36 @@ impl Wave2ApplicationHost {
                                 )
                                 .await?;
                                 Err(owner_error)
+                            }
+                        }
+                    }
+                }
+            }
+            "workspace.files/rename" => {
+                let params: RenameParams = decode(input)?;
+                let binding = workspace_typed_binding(context)?;
+                let effect_input = StrictJsonValue(serde_json::to_value(&params)
+                    .map_err(|error| Wave2HostPortError::invalid_payload(error.to_string()))?);
+                let _write_guard = self.workspace_write_lock.lock().await;
+                match begin_wave2_exclusive_effect(self.effect_store()?, context, binding, &effect_input,
+                    nomifun_agent_session::EffectStrategy::ManagedEffect).await? {
+                    Wave2EffectAdmission::Replay(output) => Ok(output),
+                    Wave2EffectAdmission::Reserved(reservation) => {
+                        match self.files.rename_entry_with_observation_for_agent_session(&scope, &params.path, &params.destination).await {
+                            Ok(receipt) => {
+                                let output = StrictJsonValue(json!({
+                                    "renamed": true, "path": receipt.source, "destination": receipt.destination,
+                                    "source_workspace_path": receipt.source_workspace_path,
+                                    "destination_workspace_path": receipt.destination_workspace_path,
+                                }));
+                                finish_wave2_succeeded_effect(&reservation, action_id, &output).await?;
+                                Ok(output)
+                            }
+                            Err(error) => {
+                                let error = operation_error(capability_id, error);
+                                if error.code == "EFFECT_OUTCOME_UNKNOWN" { return Err(error); }
+                                finish_wave2_failed_effect(&reservation, action_id, &error).await?;
+                                Err(error)
                             }
                         }
                     }
@@ -1124,14 +1164,15 @@ impl Wave2ApplicationHost {
                     Wave2EffectAdmission::Reserved(reservation) => {
                         let result = self
                             .files
-                            .remove_entry_with_observation_for_agent_session(&scope, &params.path)
+                            .remove_entry_with_receipt_for_agent_session(&scope, &params.path)
                             .await;
                         match result {
-                            Ok(workspace_path) => {
+                            Ok(receipt) => {
                                 let output = StrictJsonValue(json!({
                                     "path": params.path,
+                                    "native_path": receipt.native_path,
                                     "deleted": true,
-                                    "workspace_path": workspace_path
+                                    "workspace_path": receipt.workspace_path
                                 }));
                                 finish_wave2_succeeded_effect(
                                     &reservation,
@@ -1589,7 +1630,7 @@ impl Wave2ApplicationHost {
         let path = match path.filter(|path| !path.is_empty() && *path != ".") {
             Some(path) => {
                 let resolved = scope
-                    .resolve_relative_path(path)
+                    .resolve_project_path(path)
                     .map_err(|error| operation_error(&capability_id, error))?;
                 let relative = resolved.strip_prefix(scope.workspace_root()).map_err(|_| {
                     Wave2HostPortError::new(
@@ -1696,7 +1737,7 @@ impl Wave2ApplicationHost {
             ));
         }
         let resolved = scope
-            .resolve_relative_path(path)
+            .resolve_project_path(path)
             .map_err(|error| operation_error(capability_id, error))?;
         let relative = resolved
             .strip_prefix(scope.workspace_root())
@@ -2243,7 +2284,7 @@ async fn run_macos_git_hook(
     hook_name: &str,
     hook_args: Vec<OsString>,
 ) -> Result<(), Wave2HostPortError> {
-    let shell = nomifun_ai_agent::nomi_config::shell::SupervisedShell::standalone_macos_confined(
+    let shell = nomifun_ai_agent::nomi_config::shell::SupervisedShell::standalone(
         plan.repository_root.clone(),
     );
     let mut args = ["hook", "run", "--ignore-missing", hook_name]
@@ -2497,7 +2538,7 @@ async fn run_macos_post_commit_observation(
     plan: &MacosCommitHookPlan,
     commit_id: &str,
 ) -> Value {
-    let shell = nomifun_ai_agent::nomi_config::shell::SupervisedShell::standalone_macos_confined(
+    let shell = nomifun_ai_agent::nomi_config::shell::SupervisedShell::standalone(
         plan.repository_root.clone(),
     );
     let mut observation = match shell
@@ -2687,6 +2728,13 @@ struct WriteParams {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+struct RenameParams {
+    path: String,
+    destination: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct VcsPathParams {
     #[serde(default)]
     path: Option<String>,
@@ -2781,7 +2829,7 @@ impl Wave2ApplicationHost {
                     ),
                 )
             })?;
-        let workspace_root = resolve_allowed_workspace_root(
+        let workspace_root = resolve_bound_project_root(
             &self.configured_workspace_root,
             requested_root,
         )?;
@@ -2794,32 +2842,19 @@ impl Wave2ApplicationHost {
     }
 }
 
-fn resolve_allowed_workspace_root(
+fn resolve_bound_project_root(
     configured_root: &Path,
     requested_root: &str,
 ) -> Result<PathBuf, Wave2HostPortError> {
-    let configured_root = std::fs::canonicalize(configured_root).map_err(|error| {
-        Wave2HostPortError::new(
-            "PRESET_RESOURCE_NOT_BOUND",
-            format!(
-                "configured host workspace root '{}' is unavailable: {error}",
-                configured_root.display()
-            ),
-        )
-    })?;
-    let requested_root = PathBuf::from(requested_root.trim());
+    let configured_root = std::fs::canonicalize(configured_root).unwrap_or_else(|_| configured_root.to_owned());
+    let requested_root = PathBuf::from(requested_root);
     if !requested_root.is_absolute() {
-        return Err(Wave2HostPortError::new(
-            "PRESET_RESOURCE_NOT_BOUND",
-            "workspace_root must be an absolute host-resolved path",
-        ));
+        return Err(Wave2HostPortError::new("PRESET_RESOURCE_NOT_BOUND", "workspace_root must be an absolute host-resolved path"));
     }
-    let requested_root = std::fs::canonicalize(&requested_root).map_err(|error| {
-        Wave2HostPortError::new(
-            "PRESET_RESOURCE_NOT_BOUND",
-            format!("workspace_root is unavailable: {error}"),
-        )
-    })?;
+    let requested_root = std::fs::canonicalize(&requested_root).unwrap_or(requested_root);
+    if requested_root.components().any(|component| matches!(component, std::path::Component::ParentDir)) {
+        return Err(Wave2HostPortError::new("PRESET_RESOURCE_NOT_BOUND", "workspace_root must retain its resolved project identity"));
+    }
     if !requested_root.starts_with(&configured_root) {
         return Err(Wave2HostPortError::new(
             "PRESET_RESOURCE_NOT_BOUND",
@@ -2876,17 +2911,22 @@ fn operation_error(capability_id: &str, error: AppError) -> Wave2HostPortError {
             if nomifun_file::artifact_publication_outcome_unknown(error)
                 || nomifun_file::file_write_outcome_unknown(error)
                 || nomifun_file::file_delete_outcome_unknown(error)
+                || nomifun_file::file_rename_outcome_unknown(error)
                 || nomifun_file::vcs_stage_outcome_unknown(error) =>
         {
             "EFFECT_OUTCOME_UNKNOWN"
         }
+        AppError::NativeSystemAccessDenied { .. } => "SYSTEM_ACCESS_DENIED",
         AppError::BadRequest(_) => "INVALID_PAYLOAD",
         AppError::Forbidden(_) => "PRESET_RESOURCE_NOT_BOUND",
         AppError::NotFound(_) => "RESOURCE_NOT_FOUND",
         AppError::Conflict(_) | AppError::RevisionConflict(_) => "CAPABILITY_UNAVAILABLE",
         _ => "CAPABILITY_EXECUTION_FAILED",
     };
-    Wave2HostPortError::new(code, format!("{capability_id} failed: {error}"))
+    let recovery = if matches!(&error, AppError::NativeSystemAccessDenied { .. }) {
+        " Native OS access controls rejected this operation. Inspect the exact target and original error: administrator execution may resolve an ownership/ACL restriction; TCC, protected volumes and independent system permissions need their own native interaction. Continue only the blocked step through the existing process/system execution path when appropriate. Do not replay an unknown or partially applied effect."
+    } else { "" };
+    Wave2HostPortError::new(code, format!("{capability_id} failed: {error}{recovery}"))
 }
 
 fn vcs_push_error(error: VcsPushError) -> Wave2HostPortError {
@@ -3179,6 +3219,7 @@ mod tests {
             "workspace.files/write"
                 | "workspace.files/patch"
                 | "workspace.files/delete"
+                | "workspace.files/rename"
                 | "workspace.artifacts/publish"
                 | "workspace.vcs/stage"
                 | "workspace.vcs/commit"
@@ -3344,6 +3385,73 @@ mod tests {
             },
         })
         .await
+    }
+
+    #[test]
+    fn native_file_access_denials_keep_system_reason_without_granting_admin_replay() {
+        let error = operation_error("workspace.files", AppError::NativeSystemAccessDenied {
+            operation: "writing isolated target".into(), source: std::io::Error::from_raw_os_error(13),
+        });
+        assert_eq!(error.code, "SYSTEM_ACCESS_DENIED");
+        assert!(error.message.contains("os error 13"));
+        assert!(error.message.contains("TCC"));
+        assert!(error.message.contains("Do not replay"));
+    }
+
+    #[tokio::test]
+    async fn missing_default_directory_preserves_file_effect_identity_and_absolute_access() {
+        let fixture = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(fixture.path()).unwrap();
+        let workspace = base.join("default");
+        std::fs::create_dir(&workspace).unwrap();
+        let host = test_host(&workspace).await;
+        let context = context(&workspace);
+        let binding = workspace_typed_binding(&context).unwrap();
+        let original_key = wave2_effect_resource_key(&context, binding).unwrap();
+        std::fs::remove_dir_all(&workspace).unwrap();
+        assert_eq!(wave2_effect_resource_key(&context, binding).unwrap(), original_key);
+        let external = base.join("absolute.txt");
+        let result = invoke(&host, context, "workspace.files/write", json!({"path":external,"content":"native"})).await.unwrap();
+        assert_eq!(result.0["workspace_path"], Value::Null);
+        assert_eq!(std::fs::read(&external).unwrap(), b"native");
+        assert!(!workspace.exists());
+    }
+
+    #[tokio::test]
+    async fn canonical_file_actions_use_native_external_paths_without_project_events() {
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(16));
+        let mut events = bus.subscribe_user();
+        let host = Wave2ApplicationHost::with_user_events(&workspace, bus, nomifun_file::WorkspaceInventoryCache::default())
+            .with_effect_store(test_effect_store().await);
+        let context = context(&workspace);
+        let written = invoke(&host, context.clone(), "workspace.files/write", json!({"path":"../external/value.txt","content":"before"})).await.unwrap();
+        assert_eq!(written.0["workspace_path"], Value::Null);
+        assert!(Path::new(written.0["native_path"].as_str().unwrap()).is_absolute());
+        let read = invoke(&host, context.clone(), "workspace.files/read", json!({"path":"../external/value.txt"})).await.unwrap();
+        assert_eq!(read.0["content"], "before");
+        assert_eq!(read.0["workspace_path"], Value::Null);
+        let patch = invoke(&host, context.clone(), "workspace.files/patch", json!({"files":[{
+            "path":"../external/value.txt", "expected_source":{"kind":"existing","sha256":nomifun_agent_contracts::digest_bytes(b"before")},
+            "hunks":[{"old_start":1,"old_lines":1,"new_start":1,"new_lines":1,"lines":[{"kind":"remove","text":"before"},{"kind":"add","text":"after"}]}]
+        }]})).await.unwrap();
+        assert_eq!(patch.0["files"][0]["workspace_path"], Value::Null);
+        let rename_input = json!({"path":"../external/value.txt","destination":"../external/renamed.txt"});
+        let renamed = invoke(&host, context.clone(), "workspace.files/rename", rename_input.clone()).await.unwrap();
+        assert_eq!(renamed.0["renamed"], true);
+        assert_eq!(renamed.0["source_workspace_path"], Value::Null);
+        assert_eq!(renamed.0["destination_workspace_path"], Value::Null);
+        let replay = invoke(&host, context.clone(), "workspace.files/rename", rename_input).await.unwrap();
+        assert_eq!(replay, renamed);
+        let search = invoke(&host, context.clone(), "workspace.files/search", json!({"path":"../external","query":"after"})).await.unwrap();
+        assert_eq!(search.0["matches"].as_array().unwrap().len(), 1);
+        assert_eq!(search.0["matches"][0]["path"], renamed.0["destination"]);
+        invoke(&host, context, "workspace.files/delete", json!({"path":"../external"})).await.unwrap();
+        assert!(!fixture.path().join("external").exists());
+        assert!(events.try_recv().is_err(), "external effects cannot become project events");
+        assert_eq!(std::fs::read_dir(&workspace).unwrap().count(), 0);
     }
 
     #[tokio::test]
@@ -4411,7 +4519,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_patch_rejects_traversal_and_read_only_bindings() {
+    async fn workspace_patch_accepts_global_paths_and_rejects_read_only_bindings() {
         let directory = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret.txt"), "secret\n").unwrap();
@@ -4443,13 +4551,13 @@ mod tests {
 
         let mut traversal_context = context(directory.path());
         traversal_context.idempotency_key = IdempotencyKey::from("patch-traversal-key");
-        let traversal_error = invoke(
+        let patched = invoke(
             &host,
             traversal_context,
             "workspace.files/patch",
             json!({
                 "files": [{
-                    "path": format!("../{}", outside.path().join("secret.txt").file_name().unwrap().to_string_lossy()),
+                    "path": outside.path().join("secret.txt"),
                     "hunks": [{
                         "old_start": 1,
                         "old_lines": 1,
@@ -4464,11 +4572,11 @@ mod tests {
             }),
         )
         .await
-        .unwrap_err();
-        assert_eq!(traversal_error.code, "INVALID_PAYLOAD");
+        .unwrap();
+        assert_eq!(patched.0["files"][0]["workspace_path"], Value::Null);
         assert_eq!(
             std::fs::read_to_string(outside.path().join("secret.txt")).unwrap(),
-            "secret\n"
+            "escaped\n"
         );
     }
 
@@ -5791,11 +5899,11 @@ mod tests {
         call.operation_id = OperationId::from("failed-write-uncommitted-terminal-operation");
         ensure_test_effect_context(&store,&call).await;
         let effect_id = wave2_effect_id(&call).unwrap();
-        // The File owner rejects traversal before preparing a publication.
+        // The File owner rejects NUL in a native path before publication.
         // A staged-directory replacement is not a known failure on Unix:
         // retaining its temporary name correctly leaves cleanup uncertain.
         let input = StrictJsonValue(json!({
-            "path":"../outside.txt","content":"must not escape the workspace"
+            "path":"bad\0path","content":"must not write an invalid path"
         }));
         let invoke_host = Arc::clone(&host);
         let invoke_call = call.clone();
@@ -6179,7 +6287,7 @@ mod tests {
         let mut call = context(&workspace);
         call.idempotency_key = IdempotencyKey::from("failed-write-committed-terminal");
         call.operation_id = OperationId::from("failed-write-committed-terminal-operation");
-        let input = json!({"path":"../outside.txt","content":"must not escape the workspace"});
+        let input = json!({"path":"bad\0path","content":"must not write an invalid path"});
         let first = invoke(&host,call.clone(),"workspace.files/write",input.clone()).await.unwrap_err();
         assert_eq!(first.code,"INVALID_PAYLOAD");
         assert_eq!(std::fs::read(&outside_target).unwrap(),b"keep");
@@ -8536,7 +8644,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn vcs_commit_pre_commit_hook_cannot_write_outside_the_bound_workspace() {
+    async fn vcs_commit_pre_commit_hook_uses_the_same_global_login_user_execution() {
         use std::os::unix::fs::PermissionsExt;
 
         let fixture_parent = std::env::var_os("NOMIFUN_RELIABILITY_FIXTURE_PARENT")
@@ -8552,7 +8660,7 @@ mod tests {
         let hook = repository.path().join("hooks/pre-commit");
         std::fs::write(
             &hook,
-            "#!/bin/sh\nif printf escape > ../outside.txt; then\n  printf escaped >&2\n  exit 9\nfi\nprintf confined > hook-ran.txt\n",
+            "#!/bin/sh\nprintf native > ../outside.txt\nprintf completed > hook-ran.txt\n",
         )
         .unwrap();
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -8571,17 +8679,17 @@ mod tests {
             &host,
             context,
             "workspace.vcs/commit",
-            json!({"message": "confined hook"}),
+            json!({"message": "native user hook"}),
         )
         .await
         .unwrap();
 
         assert_eq!(committed.0["committed"], true);
         assert!(workspace.join("hook-ran.txt").exists());
-        assert!(!directory.path().join("outside.txt").exists());
+        assert_eq!(std::fs::read(directory.path().join("outside.txt")).unwrap(), b"native");
         assert_eq!(
             repository.head().unwrap().peel_to_commit().unwrap().message(),
-            Some("confined hook")
+            Some("native user hook")
         );
     }
 

@@ -25,11 +25,11 @@ const blocked: SystemPermissionStatus = {
       requires_restart_after_grant: false, capabilities: ['voice_input'],
     },
     {
-      kind: 'accessibility', state: 'not_determined', can_request: true, can_open_settings: true,
+      kind: 'accessibility', state: 'not_granted', can_request: true, can_open_settings: true,
       requires_restart_after_grant: false, capabilities: ['computer_use'],
     },
     {
-      kind: 'screen_recording', state: 'not_determined', can_request: true, can_open_settings: true,
+      kind: 'screen_recording', state: 'not_granted', can_request: true, can_open_settings: true,
       requires_restart_after_grant: true, capabilities: ['computer_use'],
     },
   ],
@@ -61,11 +61,47 @@ test('Computer Use tab requests the exact grant and opens recovery settings whil
 
   expect(await screen.findByText(settings.capabilityPermissions.permissions.accessibility)).toBeTruthy();
   expect(screen.getByText(settings.capabilityPermissions.permissions.screenRecording)).toBeTruthy();
-  expect(screen.getAllByText(settings.capabilityPermissions.states.not_determined).length).toBe(2);
+  expect(screen.getAllByText(settings.capabilityPermissions.states.not_granted).length).toBe(2);
 
   fireEvent.click(screen.getAllByRole('button', { name: settings.capabilityPermissions.requestAccess })[0]);
   await waitFor(() => expect(ipcBridge.systemPermissions.request.invoke).toHaveBeenCalledWith({ kind: 'accessibility' }));
   await waitFor(() => expect(ipcBridge.systemPermissions.openSettings.invoke).toHaveBeenCalledWith({ kind: 'accessibility' }));
+});
+
+test('host camera permission uses its native request while the website decision stays separate', async () => {
+  const cameraStatus: SystemPermissionStatus = { ...blocked, permissions: [...blocked.permissions, {
+    kind: 'camera', state: 'not_determined', can_request: true, can_open_settings: true,
+    requires_restart_after_grant: false, capabilities: ['browser_use'],
+  }] };
+  const get = spyOn(ipcBridge.systemPermissions.get, 'invoke').mockResolvedValue(cameraStatus);
+  const request = spyOn(ipcBridge.systemPermissions.request, 'invoke').mockResolvedValue(cameraStatus);
+  restores.push(() => get.mockRestore(), () => request.mockRestore());
+  const screen = render(<I18nextProvider i18n={i18n}>
+    <MemoryRouter initialEntries={['/settings/permissions?tab=browser-use']}><CapabilityPermissionsContent /></MemoryRouter>
+  </I18nextProvider>);
+  expect(await screen.findByText(settings.capabilityPermissions.browser.hostMediaTitle)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: settings.capabilityPermissions.requestAccess }));
+  await waitFor(() => expect(request).toHaveBeenCalledWith({ kind: 'camera' }));
+  expect(screen.getByText(settings.capabilityPermissions.browser.websiteDescription)).toBeTruthy();
+  expect(screen.queryByText(settings.capabilityPermissions.permissions.location)).toBeNull();
+  expect(screen.getByText(settings.capabilityPermissions.browser.macosPermissionLimit)).toBeTruthy();
+});
+
+test('unprobeable file, automation and local-network access stays unknown and opens exact recovery settings', async () => {
+  const unknownStatus: SystemPermissionStatus = { ...blocked, permissions: [...blocked.permissions,
+    ...(['full_disk_access', 'automation', 'local_network'] as const).map(kind => ({ kind, state: 'unknown' as const,
+      can_request: false, can_open_settings: true, requires_restart_after_grant: false, capabilities: [] })),
+  ] };
+  const get = spyOn(ipcBridge.systemPermissions.get, 'invoke').mockResolvedValue(unknownStatus);
+  restores.push(() => get.mockRestore());
+  const screen = render(<I18nextProvider i18n={i18n}>
+    <MemoryRouter initialEntries={['/settings/permissions']}><CapabilityPermissionsContent /></MemoryRouter>
+  </I18nextProvider>);
+  expect(await screen.findByText(settings.capabilityPermissions.automation.title)).toBeTruthy();
+  expect(screen.getAllByText(settings.capabilityPermissions.states.unknown)).toHaveLength(3);
+  const buttons = screen.getAllByRole('button', { name: settings.capabilityPermissions.openSystemSettings });
+  fireEvent.click(buttons[2]);
+  await waitFor(() => expect(ipcBridge.systemPermissions.openSettings.invoke).toHaveBeenCalledWith({ kind: 'automation' }));
 });
 
 test('overview keeps Browser permissions on demand and surfaces notification denial', async () => {

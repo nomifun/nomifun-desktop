@@ -25,7 +25,6 @@ import { Alert, Button, Message, Spin } from '@arco-design/web-react';
 import {
   Computer,
   Earth,
-  FolderOpen,
   HeadsetOne,
   Refresh,
   Remind,
@@ -48,7 +47,7 @@ const readyState = (state: SystemPermissionState): boolean =>
 const statusTone = (state: SystemPermissionState): VisualTone => {
   if (readyState(state)) return 'success';
   if (state === 'denied' || state === 'restricted') return 'danger';
-  if (state === 'not_determined') return 'warning';
+  if (state === 'not_determined' || state === 'not_granted') return 'warning';
   return 'neutral';
 };
 
@@ -264,10 +263,15 @@ const CapabilityPermissionsContent: React.FC = () => {
           </VisualStatus>} />)}
       </VisualPanel>
       <VisualPanel title={t('settings.workspace.systemAccess')}>
-        <VisualListRow icon={<Earth theme='outline' size={18} />} title={t('settings.capabilityPermissions.localNetwork.title')} description={t('settings.capabilityPermissions.localNetwork.description')}
-          action={desktopShell && status?.platform === 'macos' && <Button size='small' onClick={() => void openSettings('local_network')}>{t('settings.capabilityPermissions.openSystemSettings')}</Button>} />
-        <VisualListRow icon={<FolderOpen theme='outline' size={18} />} title={t('settings.capabilityPermissions.files.title')} description={t('settings.capabilityPermissions.files.description')}
-          action={desktopShell && status?.platform === 'macos' && <Button size='small' onClick={() => void openSettings('full_disk_access')}>{t('settings.capabilityPermissions.openSystemSettings')}</Button>} />
+        <PermissionRow kind='local_network' entry={systemPermissionEntry(status, 'local_network')}
+          title={t('settings.capabilityPermissions.localNetwork.title')} description={t('settings.capabilityPermissions.localNetwork.description')}
+          actionsEnabled={desktopShell} onOpenSettings={openSettings} />
+        <PermissionRow kind='full_disk_access' entry={systemPermissionEntry(status, 'full_disk_access')}
+          title={t('settings.capabilityPermissions.files.title')} description={t('settings.capabilityPermissions.files.description')}
+          actionsEnabled={desktopShell} onOpenSettings={openSettings} />
+        <PermissionRow kind='automation' entry={systemPermissionEntry(status, 'automation')}
+          title={t('settings.capabilityPermissions.automation.title')} description={t('settings.capabilityPermissions.automation.description')}
+          actionsEnabled={desktopShell} onOpenSettings={openSettings} />
       </VisualPanel>
     </div>
   );
@@ -337,11 +341,20 @@ const CapabilityPermissionsContent: React.FC = () => {
   const browser = (
     <div className='space-y-12px'>
       <Alert type='success' showIcon content={t('settings.capabilityPermissions.browser.baseReady')} />
+      <VisualPanel title={t('settings.capabilityPermissions.browser.hostMediaTitle')}
+        description={t('settings.capabilityPermissions.browser.hostMediaDescription')}>
+        {(['camera', 'microphone'] as const).map(kind => <PermissionRow key={kind} kind={kind}
+          entry={systemPermissionEntry(status, kind)} title={t(`settings.capabilityPermissions.permissions.${kind}`)}
+          description={t('settings.capabilityPermissions.browser.siteKinds.' + kind)}
+          busy={loading} actionsEnabled={desktopShell} onRequest={requestPermission} onOpenSettings={openSettings} />)}
+      </VisualPanel>
       <VisualPanel
         title={t('settings.capabilityPermissions.browser.websiteTitle')}
         description={t('settings.capabilityPermissions.browser.websiteDescription')}
       >
-        {SYSTEM_PERMISSION_AUDIT.browser_use.requestedOnDemand.map((kind) => (
+        {SYSTEM_PERMISSION_AUDIT.browser_use.requestedOnDemand
+          .filter(kind => status?.platform !== 'macos' || kind === 'camera' || kind === 'microphone')
+          .map((kind) => (
           <div key={kind} className='cv-row'>
             <div>
               <div className='flex items-center gap-8px text-14px text-t-primary'>
@@ -360,6 +373,8 @@ const CapabilityPermissionsContent: React.FC = () => {
           </div>
         ))}
       </VisualPanel>
+      {status?.platform === 'macos' && <Alert type='info' showIcon
+        content={t('settings.capabilityPermissions.browser.macosPermissionLimit')} />}
       <VisualPanel title={t('settings.capabilityPermissions.localNetwork.title')}>
         <VisualRow label={t('settings.capabilityPermissions.summaryStates.onDemand')} description={t('settings.capabilityPermissions.localNetwork.browserDescription')}>
           {desktopShell && status?.platform === 'macos' && <Button size='small' onClick={() => void openSettings('local_network')}>{t('settings.capabilityPermissions.openSystemSettings')}</Button>}

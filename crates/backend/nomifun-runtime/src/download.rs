@@ -62,7 +62,7 @@ pub(crate) async fn supply(
 }
 
 fn production_client() -> Result<reqwest::Client, ToolError> {
-    reqwest::Client::builder()
+    nomifun_net::proxy::apply_detected_proxy(reqwest::Client::builder())
         .https_only(true)
         .connect_timeout(Duration::from_secs(20))
         .no_gzip()
@@ -127,6 +127,9 @@ async fn supply_in(
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
+        if entry.file_type()?.is_dir() && name.ends_with(".part") && name.starts_with(".node-extract-") {
+            fs::remove_dir_all(entry.path())?;
+        }
         if entry.file_type()?.is_file()
             && name.ends_with(".part")
             && (name.starts_with(".download-") || name.starts_with(".extract-"))
@@ -134,8 +137,18 @@ async fn supply_in(
             fs::remove_file(entry.path())?;
         }
     }
+    if id == ToolId::Node {
+        let distribution_digest = crate::embed::identity(id).distribution_sha256
+            .ok_or_else(|| ToolError::InvalidAsset("Node distribution build identity is absent".into()))?;
+        if let Some(path) = crate::node_distribution::validated_cached(
+            directory, spec, asset, expected_executable_digest, distribution_digest, cancel,
+        )? {
+            FileExt::unlock(&lock)?;
+            return Ok((path, expected_executable_digest.into()));
+        }
+    }
     let cached_executable = directory.join(&asset.executable);
-    if cancellable_digest(&cached_executable, cancel)
+    if id != ToolId::Node && cancellable_digest(&cached_executable, cancel)
         .ok()
         .as_deref()
         == Some(expected_executable_digest)
@@ -180,6 +193,15 @@ async fn supply_in(
     let cancellation = cancel.clone();
     let expected_executable_digest = expected_executable_digest.to_owned();
     let result = tokio::task::spawn_blocking(move || {
+        if id == ToolId::Node {
+            let distribution_digest = crate::embed::identity(id).distribution_sha256
+                .ok_or_else(|| ToolError::InvalidAsset("Node distribution build identity is absent".into()))?;
+            let path = crate::node_distribution::publish(
+                &directory_owned, &archive_owned, &spec_owned, &asset_owned,
+                &expected_executable_digest, distribution_digest, &cancellation,
+            )?;
+            return Ok((path, expected_executable_digest));
+        }
         let mut raw = tempfile::Builder::new()
             .prefix(".extract-")
             .suffix(".part")

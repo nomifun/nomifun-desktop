@@ -122,7 +122,7 @@
       "http_status": 422
     },
     {
-      "code": "CHAT_MINIMAL_NOT_EXACT_EMPTY",
+      "code": "DEFAULT_LOCAL_OS_CAPABILITIES_INCOMPLETE",
       "version": 1,
       "class": "contract",
       "retry": "new_session_required",

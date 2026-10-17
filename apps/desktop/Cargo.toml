@@ -28,6 +28,7 @@ tokio-util.workspace = true
 uuid.workspace = true
 tempfile.workspace = true
 nomi-process-runtime.workspace = true
+nomi-system-execution.workspace = true
 clap.workspace = true
 
 # `macos-private-api` is required for the transparent nomi companion window on macOS.

@@ -4,13 +4,13 @@
 // error path is cold and the extra stack space is bounded.
 #![allow(clippy::result_large_err)]
 
-mod capability;
 mod command_builder;
 #[cfg(target_os = "macos")]
 #[path = "platform/darwin_application.rs"]
 mod darwin_application;
 #[cfg(target_os = "macos")]
 mod darwin_registered;
+mod environment;
 mod io;
 mod outcome;
 mod platform;
@@ -19,7 +19,8 @@ mod registry;
 mod request;
 mod supervisor;
 
-pub use capability::{CapabilityPolicy, SandboxPolicy};
+pub use environment::is_inherited_application_environment_key;
+
 pub use command_builder::{
     ChildProcessBuilder, ChildProcessCleanup, ManagedChildCleanupMetrics, ManagedChildProcess,
     kill_process_tree, managed_child_cleanup_metrics, merge_process_path, resolve_command_in,

@@ -97,8 +97,7 @@ impl EngineToolInvoker for WorkspaceMediaTools {
             .0
             .get("path")
             .and_then(|value| value.as_str())
-            .ok_or_else(|| error("Image read requires a workspace-relative path"))?
-            .trim()
+            .ok_or_else(|| error("Image read requires a native absolute or Session-relative path"))?
             .to_owned();
         let expected = invocation
             .call

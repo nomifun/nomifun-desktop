@@ -3,7 +3,9 @@
 The current supply contract lives in
 [`nomifun-runtime/components.json`](../../crates/backend/nomifun-runtime/components.json).
 The runtime resolver and explicit preparation APIs live in
-[`nomifun-runtime/src/managed.rs`](../../crates/backend/nomifun-runtime/src/managed.rs).
+[`nomifun-runtime/src/managed.rs`](../../crates/backend/nomifun-runtime/src/managed.rs);
+per-launch environment and command preparation live in
+[`environment.rs`](../../crates/backend/nomifun-runtime/src/environment.rs).
 Build artifacts, managed cache admission, diagnostics, and the bundled Office
 skills share the approved component identities.
 
@@ -12,7 +14,7 @@ skills share the approved component identities.
 | Component | Approved version | Source | Consumer |
 | --- | --- | --- | --- |
 | Bun | 1.3.13 | Fixed `oven-sh/bun` release | Tasks explicitly requiring Bun |
-| Node | 22.22.0 | Fixed `nodejs.org/dist` release | Optional managed artifact; no current Agent/plugin consumer |
+| Node | 22.22.0 | Fixed `nodejs.org/dist` release | Agent, Terminal, MCP and managed component launches; complete Node/npm/npx distribution |
 | OfficeCLI | 1.0.156 | Fixed `iOfficeAI/OfficeCLI` release; npm identity `@officecli/officecli` | Read-only Office previews and document skills |
 
 Versions, platform/architecture assets, URLs, upstream checksum provenance,
@@ -34,10 +36,7 @@ background global npm installation or latest-version upgrade.
 [`notices/manifest.json`](../../crates/backend/nomifun-runtime/notices/manifest.json)
 records component notice provenance and versions. Optional nfagent, ONNX native
 libraries, and browsers retain their domain supply mechanisms; the catalogue
-references those authorities rather than introducing another ledger. Automatic
-NomiRelay restore reuses only an available valid nfagent cache. A missing artifact
-or changed approved version waits for the user to choose to download the connection
-component and connect; ordinary bootstrap or restart does not authorize a download.
+references those authorities rather than introducing another ledger. NomiRelay connection, restart and restore automatically prepare its approved nfagent artifact when needed. Download progress, cancellation, checksum verification and atomic publication remain owned by the relay lifecycle.
 The DIY matting model has an explicit product exception: after first app use, it
 may install silently in the background under the authenticated app runtime. This
 does not block application startup; unavailable or failed model installation keeps
@@ -50,9 +49,7 @@ must remain distinct from successful empty configuration.
 
 The existing-artifact resolver returns `VerifiedTool` with the
 verified absolute executable path, observed version, and executable digest.
-Ordinary resolution admits locally available artifacts only and never starts or
-waits for a Node/Bun download. OfficeCLI extracts its embedded payload locally.
-An explicit user download retrieves the approved platform artifact. Managed supply uses
+Read-only availability and diagnostic resolution admit only local artifacts. Actual launches automatically prepare a missing required approved runtime; OfficeCLI extracts its embedded payload locally. Managed supply uses
 `<data_dir>/runtime`, inter-process locks, bounded temporary files, hash
 verification, and atomic publication. Downloaded executable identity is derived
 from the approved archive rather than trusting a standalone cache stamp.
@@ -66,14 +63,24 @@ admission. OfficeCLI creates a private temporary DOCX and generates HTML.
 File existence and version output alone are insufficient.
 
 Successful admission is reused within the process; failures can be retried.
-Later executable size or modification-time changes fail closed until repaired
-and restarted. The application creates no Bun-as-Node aliases and does not
-modify the system PATH. User-configured Bun and `bunx` commands prefer tools
-already installed on the system. A verified existing managed Bun cache can be
-used as a fallback. Ordinary discovery, command resolution, and diagnostics never
-start or wait for missing-tool downloads. Current Agent/plugin execution has no managed Node
-consumer. App Hosting discovers system or user-configured Node; its installation
-action lets the user open the official Node website and install it themselves.
+Later executable size or modification-time changes fail closed until repaired.
+Node uses its complete official distribution, including npm, npx, modules and launchers.
+The application creates no Bun-as-Node aliases and does not modify the system PATH.
+
+`nomifun-runtime::prepare_process_launch` supplies the shared command and per-launch
+user tool environment for Agent native processes, Terminal and MCP stdio.
+Explicit shell text remains shell text and receives the same composed environment;
+native executables retain literal argv. Each launch combines the caller's environment,
+current durable user CLI directories and verified runtime fallbacks without mutating
+the multi-threaded host environment. Explicit PATH and available user toolchains take
+precedence. The real HOME/USERPROFILE, user npm configuration, proxy and certificate
+settings remain available. Managed npm defaults to durable user tools outside the
+replaceable runtime cache, while an existing user prefix remains authoritative.
+Runtime upgrades and Agent data reset do not own the installed user tools. Hosted applications prepare required Node/Bun from recognized project metadata or their built-in static preset, with custom Node taking priority and cancellation attached to the original operation. Arbitrary shell text is preserved.
+
+Terminal retains its existing Windows PowerShell shim adapter. The Windows native
+Agent/MCP batch-launcher integration still requires implementation and native verification;
+this macOS change does not claim their arbitrary `.cmd`/`.bat` argv contract is complete.
 Process ownership, timeouts, cancellation, and tree cleanup remain in
 `nomi-process-runtime`.
 
@@ -84,13 +91,12 @@ checks. Release ignores these development overrides for managed component
 admission. User command discovery and App Hosting retain their separate system
 and custom-path selection.
 
-For declared OfficeCLI family Skills, `engine_skills::compile` resolves the
-component once and attaches a separate immutable Host context resource with
-status, absolute executable path, version, digest, source, and package identity.
-The compiled body points to its exact `read_context_resource` ID. Frozen source
-bytes, source digest, and capability requirements stay unchanged; executable
-metadata grants no additional process/file permission. Skills read this resource
-rather than guessing cache paths or performing global installations.
+Agent `workspace.process/exec` and `start` accept `component`, ordinary `command`
+or explicit shell `cmd`. A component is prepared inside the original invocation and
+verified again before start; OfficeCLI fixes `OFFICECLI_NO_AUTO_RESIDENT=1`.
+Skill compilation preserves its frozen source and points to the callable component
+contract; it does not cache readiness or executable paths. Only a new operation prepares
+a component. Existing Effect receipts remain authoritative and unknown effects are not replayed.
 
 ## Diagnostics
 
@@ -120,24 +126,20 @@ product component admission.
 ## First preparation and package size
 
 Desktop and Web backend startup do not prepare or download Node. A fresh
-installation can start without managed Node or Bun. Terminal and MCP UIs submit
-the execution request directly. The backend resolves the actual launcher in its
-working directory and child PATH, preferring user tools before valid managed caches.
-Only an explicit missing-Bun response offers a download choice; confirmation
-downloads Bun and retries the captured request. Cancelling neither downloads nor continues execution.
+installation can start without managed Node or Bun. Terminal and MCP UIs submit the execution request once. The owner resolves its
+working directory and child PATH, preferring user tools before verified managed supply.
+A missing necessary runtime is prepared automatically before the requested program starts.
+The UI observes read-only progress; it neither asks for another download approval nor
+replays a launch after preparation. Real preparation failures remain retryable failures.
 Office conversion uses embedded OfficeCLI and needs no Node/Bun download or network.
 
 Owner-authenticated `GET /api/runtime-tools/{tool}/availability` diagnoses local
-components without downloading. It does not replace execution-specific working
-directory, launcher, or environment resolution. `GET /api/runtime-tools/{tool}` observes
-preparation state; `POST /api/runtime-tools/{tool}/prepare` is the explicit user
-download entry point and begins or joins the shared preparation task. Only
-`bun`, `node`, and `officecli` are accepted; callers cannot supply URLs, paths,
-versions, or global cancellation. Concurrent explicit requests share preparation;
-one observer's cancellation does not revoke another consumer. Verified approved
-artifacts are reused offline across releases while their identity is unchanged.
-Missing-tool direct requests return
-`COMPONENT_PREPARATION_REQUIRED` before creating a terminal row or process.
+components without downloading. `GET /api/runtime-tools/{tool}` observes preparation
+state. `POST /api/runtime-tools/{tool}/prepare` explicitly starts or joins the same
+preparation task without introducing a separate permission decision. Only `bun`, `node`
+and `officecli` are accepted; callers cannot provide URLs, paths, versions or global
+cancellation. Shared preparation retains integrity checks, temporary staging and atomic
+publication. Cancelling an observer does not revoke another consumer's preparation.
 
 Only the target architecture is delivered. Raising compression or deleting
 source files does not substitute for excluding Node/Bun blobs from the release

@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 nomi-process-runtime.workspace = true
+nomifun-net.workspace = true
 thiserror.workspace = true
 dirs.workspace = true
 sha2.workspace = true
@@ -18,7 +19,7 @@ tokio.workspace = true
 semver.workspace = true
 tempfile.workspace = true
 dunce.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
 tokio-util = { workspace = true, features = ["rt"] }
 zip.workspace = true
 flate2.workspace = true
@@ -29,7 +30,7 @@ sha2.workspace = true
 hex.workspace = true
 zstd.workspace = true
 zip = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
 dirs.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true

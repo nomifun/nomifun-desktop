@@ -11,6 +11,7 @@ import { runCommand } from './run-macos-dev-runner.mjs';
 import { signMacosAppBundle } from './lib/macos-app-bundle.mjs';
 import { prepareMacosBuildEnvironment, resolveMacosTarget } from './lib/macos-build-environment.mjs';
 import { macosDevelopmentSigningIdentity, macosDevelopmentSigningNotice } from './lib/macos-dev-signing.mjs';
+import { installMacosSystemExecution } from './lib/macos-system-execution.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -94,9 +95,10 @@ export async function freezeBuiltMacosApp(outDir) {
   return receipt;
 }
 
-export async function completeFastMacosApp({ outDir, target = resolveMacosTarget(), environment = process.env, sign = signMacosAppBundle }) {
+export async function completeFastMacosApp({ outDir, target = resolveMacosTarget(), environment = process.env, sign = signMacosAppBundle, installSystemExecution = installMacosSystemExecution }) {
   const identity = macosDevelopmentSigningIdentity(environment);
   const built = await freezeBuiltMacosApp(outDir);
+  await installSystemExecution({ root: ROOT, appPath: built.appPath, target, profile: 'debug', environment });
   // Sign only the immutable verified copy; a watcher may replace the raw
   // Cargo/Tauri outputs while native signing is still in progress.
   await sign({ appPath: built.appPath, target, identity });

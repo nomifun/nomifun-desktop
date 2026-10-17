@@ -11,7 +11,6 @@ use tracing::{info, warn};
 use crate::error::McpError;
 use crate::types::{McpServer, McpServerTransport};
 
-const SPLITTABLE_STDIO_LAUNCHERS: &[&str] = &["npx", "pnpx", "bunx", "uvx", "uv", "node", "python", "python3", "deno"];
 
 /// Publishes persisted configuration as tool data, never as executable engine code.
 /// Implementations must serialize catalog reads with other registry publications.
@@ -95,7 +94,7 @@ impl McpConfigService {
     /// If a server with the same name already exists, it is updated
     /// (transport, description, original_json) rather than creating a duplicate.
     pub async fn add_server(&self, req: CreateMcpServerRequest) -> Result<McpServerResponse, McpError> {
-        let transport = normalize_transport(McpServerTransport::from(req.transport))?;
+        let transport = McpServerTransport::from(req.transport);
         self.upsert_server(
             &req.name,
             req.description.as_deref(),
@@ -133,9 +132,7 @@ impl McpConfigService {
         // Build transport fields if provided
         let transport = req
             .transport
-            .map(McpServerTransport::from)
-            .map(normalize_transport)
-            .transpose()?;
+            .map(McpServerTransport::from);
         let config_json = transport.as_ref().map(McpServerTransport::to_config_json).transpose()?;
 
         let params = UpdateMcpServerParams {
@@ -214,7 +211,7 @@ impl McpConfigService {
                 continue;
             }
 
-            let transport = normalize_transport(McpServerTransport::from(server_req.transport))?;
+            let transport = McpServerTransport::from(server_req.transport);
             let server = self
                 .upsert_server(
                     &server_req.name,
@@ -359,98 +356,6 @@ impl McpConfigService {
         let server = McpServer::from_row(row)?;
         Ok(server.into_response())
     }
-}
-
-fn normalize_transport(transport: McpServerTransport) -> Result<McpServerTransport, McpError> {    match transport {
-        McpServerTransport::Stdio { command, args, env } if args.is_empty() => {
-            let Some((normalized_command, normalized_args)) = split_stdio_command(&command)? else {
-                return Ok(McpServerTransport::Stdio { command, args, env });
-            };
-            Ok(McpServerTransport::Stdio {
-                command: normalized_command,
-                args: normalized_args,
-                env,
-            })
-        }
-        _ => Ok(transport),
-    }
-}
-
-fn split_stdio_command(command: &str) -> Result<Option<(String, Vec<String>)>, McpError> {
-    let trimmed = command.trim();
-    if trimmed.is_empty() || !trimmed.contains(char::is_whitespace) {
-        return Ok(None);
-    }
-
-    let first_token = trimmed
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .trim_matches(&['"', '\''][..]);
-    if !SPLITTABLE_STDIO_LAUNCHERS.contains(&first_token) {
-        return Ok(None);
-    }
-
-    let tokens = shell_split(trimmed).map_err(McpError::InvalidTransport)?;
-    if tokens.len() < 2 {
-        return Ok(None);
-    }
-
-    Ok(Some((tokens[0].clone(), tokens[1..].to_vec())))
-}
-
-fn shell_split(input: &str) -> Result<Vec<String>, String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut chars = input.chars();
-    let mut quote: Option<char> = None;
-    let mut token_started = false;
-
-    while let Some(ch) = chars.next() {
-        match quote {
-            Some(active) => {
-                if ch == active {
-                    quote = None;
-                } else if ch == '\\' && active == '"' {
-                    if let Some(next) = chars.next() {
-                        current.push(next);
-                    }
-                } else {
-                    current.push(ch);
-                }
-            }
-            None => match ch {
-                '"' | '\'' => {
-                    quote = Some(ch);
-                    token_started = true;
-                }
-                '\\' => {
-                    if let Some(next) = chars.next() {
-                        current.push(next);
-                        token_started = true;
-                    }
-                }
-                c if c.is_whitespace() => {
-                    if token_started {
-                        tokens.push(std::mem::take(&mut current));
-                        token_started = false;
-                    }
-                }
-                _ => {
-                    current.push(ch);
-                    token_started = true;
-                }
-            },
-        }
-    }
-
-    if quote.is_some() {
-        return Err("Unterminated quoted command string".to_owned());
-    }
-    if token_started {
-        tokens.push(current);
-    }
-    Ok(tokens)
 }
 
 // ---------------------------------------------------------------------------
@@ -1172,40 +1077,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn add_server_normalizes_shell_style_stdio_command() {
+    async fn structured_stdio_configuration_preserves_literal_executable_and_argv() {
         let svc = make_service();
-        for (input, expected_args) in [
-            (
-                "npx @sentry/mcp-server@latest --organization-slug=demo",
-                vec!["@sentry/mcp-server@latest", "--organization-slug=demo"],
-            ),
-            (r#"npx """#, vec![""]),
-            ("npx ''", vec![""]),
-            (
-                r#"npx  "" script.js '' " " a""b "中文 路径" ""  "#,
-                vec!["", "script.js", "", " ", "ab", "中文 路径", ""],
-            ),
+        for (input, arguments) in [
+            ("npx package", vec![]),
+            (" npx ", vec![]),
+            (" executable\nname ", vec!["".to_owned(), "中文 路径".to_owned(), "$(not shell)".to_owned()]),
         ] {
-            let created = svc
-                .add_server(CreateMcpServerRequest {
-                    name: "sentry".into(),
-                    description: None,
-                    transport: McpTransport::Stdio {
-                        command: input.into(),
-                        args: vec![],
-                        env: HashMap::new(),
-                    },
-                    original_json: None,
-                    builtin: false,
-                })
-                .await
-                .unwrap();
-
+            let created = svc.add_server(CreateMcpServerRequest {
+                name: "literal-stdio".into(), description: None,
+                transport: McpTransport::Stdio { command: input.into(), args: arguments.clone(), env: HashMap::new() },
+                original_json: None, builtin: false,
+            }).await.unwrap();
             match created.transport {
                 McpTransport::Stdio { command, args, .. } => {
-                    assert_eq!(command, "npx");
-                    assert_eq!(args, expected_args, "input: {input}");
-                }
+                    assert_eq!(command, input);
+                    assert_eq!(args, arguments);
+                },
                 _ => panic!("expected stdio transport"),
             }
         }
@@ -1320,7 +1208,7 @@ mod tests {
             success: false, tools: None, error: Some("Install Bun or choose a download".into()),
             code: Some(nomifun_api_types::McpConnectionTestErrorCode::CommandStartFailed),
             details: Some(serde_json::json!({
-                "owner_code": "COMPONENT_PREPARATION_REQUIRED", "component": "bun",
+                "owner_code": "MCP_RUNTIME_UNAVAILABLE",
                 "phase": "runtime_resolution", "runtime": "bun",
             })),
             needs_auth: None, auth_method: None, www_authenticate: None,

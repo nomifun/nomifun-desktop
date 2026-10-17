@@ -150,7 +150,9 @@ impl PresetRevisionCompiler {
 
     /// Resolve today's executable bundled contracts using the Session's saved
     /// provider mounts. The typed evolution proof admits the result before any
-    /// immutable artifact is persisted; user configuration is never refreshed.
+    /// immutable artifact is persisted. The dedicated default-personal-Agent
+    /// product transition can add its ordinary local OS tools; every other
+    /// authorial field and all existing frozen selections stay unchanged.
     pub(crate) fn evolve_session_contract(
         &self,
         owner: &UserId,
@@ -158,11 +160,27 @@ impl PresetRevisionCompiler {
         source_revision: &AgentPresetRevision,
         source_snapshot: &ResolvedSnapshotEnvelope,
         catalog: &CatalogSnapshot,
+        add_default_local_os: bool,
     ) -> Result<(AgentPresetRevision, ResolvedSnapshotEnvelope), ControlPlaneError> {
+        let mut payload = source_revision.payload.clone();
+        if add_default_local_os {
+            if !payload.enabled_capabilities.is_empty() || !payload.skill_bindings.is_empty() {
+                return Err(ControlPlaneError::Wire("default local OS evolution requires the former exact-empty personal Agent".into()));
+            }
+            payload.enabled_capabilities = nomifun_agent_contracts::default_local_os_capability_selections();
+        }
         let (revision, snapshot) = self.compile_session_configuration(
-            owner, preset_id, source_revision.payload.clone(), source_snapshot, catalog,
+            owner, preset_id, payload, source_snapshot, catalog,
             "Session bundled contract evolution",
         )?;
+        if add_default_local_os {
+            nomifun_agent_contracts::validate_default_local_os_evolution(
+                source_revision, source_snapshot, &revision, &snapshot,
+            ).map_err(|violation| ControlPlaneError::canonical(
+                violation.code, axum::http::StatusCode::CONFLICT, violation.message,
+            ))?;
+            return Ok((revision, snapshot));
+        }
         nomifun_agent_contracts::validate_bundled_contract_evolution(
             source_revision, source_snapshot, &revision, &snapshot,
         ).map_err(|violation| ControlPlaneError::canonical(

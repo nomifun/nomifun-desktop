@@ -2,6 +2,7 @@
 pub mod browse;
 mod artifact_store;
 mod agent_instruction_scope;
+mod native_acquisition;
 mod agent_patch_lines;
 mod agent_patch_outcome;
 mod publication_identity;
@@ -13,9 +14,11 @@ pub use artifact_store::{
     artifact_publication_outcome_unknown, is_workspace_owner_component,
 };
 pub use agent_patch_outcome::{AgentPatchFailureObservation, AgentSessionPatchFailure};
-pub use agent_instruction_scope::{AgentInstructionScope, AgentInstructionScopeRequest};
+pub use agent_instruction_scope::{AgentInstructionScope, AgentInstructionScopeRequest, project_agent_instruction_scope, validate_agent_instruction_scope_request};
 mod agent_text_read;
-pub use agent_text_read::{AgentTextReadRequest, AgentTextPage};
+pub use agent_text_read::{
+    AgentTextReadRequest, AgentTextPage, project_agent_text_page, validate_agent_text_read_request,
+};
 mod agent_text_search;
 mod workspace_search_walk;
 pub use agent_text_search::{AgentTextMatch, AgentTextSearchRequest, AgentTextSearchResult};
@@ -67,7 +70,7 @@ pub use routes::{FileRouterState, file_routes};
 pub use service::{
     AgentSessionFilePatch, AgentSessionPatchHunk, AgentSessionPatchLine,
     AgentSessionPatchRequest, AgentSessionPatchResult, AgentSessionPatchFileResult,
-    AgentSessionWriteResult, FileService, WorkspaceInventoryCache, file_delete_outcome_unknown, file_write_outcome_unknown,
+    AgentSessionDeleteResult, AgentSessionRenameResult, AgentSessionWriteResult, FileService, WorkspaceInventoryCache, file_delete_outcome_unknown, file_rename_outcome_unknown, file_write_outcome_unknown,
 };
 pub use snapshot_service::SnapshotService;
 pub use traits::{
@@ -80,3 +83,5 @@ pub use types::{
 pub use watch_service::FileWatchService;
 pub use workspace_listing::{MAX_DIR_DEPTH, list_workspace_level};
 pub use vcs_stage::{WorkspaceVcsStageOwner, vcs_stage_outcome_unknown};
+
+pub use native_acquisition::native_file_acquisition_error;

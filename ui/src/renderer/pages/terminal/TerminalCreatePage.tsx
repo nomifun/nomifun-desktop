@@ -10,8 +10,7 @@ import { Button, Input, Message, Select } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import type { IKnowledgeBase } from '@/common/adapter/ipcBridge';
-import { downloadBunRuntime, formatRuntimePreparation, isBunDownloadRequired, type RuntimeToolSnapshot } from '@/common/adapter/runtimeTools';
-import { useRuntimeDownloadConfirmation } from '@/renderer/hooks/system/useRuntimeDownloadConfirmation';
+import { withRuntimePreparation, formatRuntimePreparation, type RuntimeToolSnapshot } from '@/common/adapter/runtimeTools';
 import { emitter } from '@/renderer/utils/emitter';
 import {
   WorkspaceDirectoryUnavailableError,
@@ -34,7 +33,6 @@ const TerminalCreatePage: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
-  const requestRuntimeDownload = useRuntimeDownloadConfirmation(location.key);
   const [presetId, setPresetId] = useState<TerminalPresetId>('shell');
   const [cwd, setCwd] = useState('');
   const [commandPreview, setCommandPreview] = useState(() =>
@@ -115,23 +113,16 @@ const TerminalCreatePage: React.FC = () => {
         defer_spawn: true,
         knowledge_base_ids: kbIds.length > 0 ? kbIds : undefined,
       };
-      let session: Awaited<ReturnType<typeof ipcBridge.terminal.create.invoke>>;
-      try {
-        // Let the owner resolve the actual command in this launch directory.
-        // Missing runtime errors occur before it creates a row or spawns a PTY.
-        session = await ipcBridge.terminal.create.invoke(request);
-      } catch (error) {
-        if (!isBunDownloadRequired(error)) throw error;
-        if (!isCurrent() || !await requestRuntimeDownload(isCurrent)) return;
-        if (!await downloadBunRuntime({
-          isCurrent,
-          onProgress: (snapshot) => { if (isCurrent()) setPreparation(snapshot); },
-        })) return;
-        if (!isCurrent()) return;
-        setPreparation(null);
-        session = await ipcBridge.terminal.create.invoke(request);
+      const session = await withRuntimePreparation(() => ipcBridge.terminal.create.invoke(request), {
+        isCurrent,
+        onProgress: snapshot => { if (isCurrent()) setPreparation(snapshot); },
+      });
+      if (!isCurrent()) {
+        // This page requests a deferred PTY. A cancelled view owns no running
+        // terminal; remove its late row once the coordinator returns its identity.
+        await ipcBridge.terminal.remove.invoke({ terminal_id: session.terminal_id });
+        return;
       }
-      if (!isCurrent()) return;
       // Remember the launched command for quick reuse — only for the custom preset.
       if (presetId === 'shell') addRecentLaunchCommand(commandPreview);
       emitter.emit('terminal.list.refresh');

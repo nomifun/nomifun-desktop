@@ -26,10 +26,12 @@ impl AgentPatchRecoveryState {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        let normalized = |path: &str| !path.is_empty() && path.len() <= 4096
-            && path == path.trim() && !path.chars().any(char::is_control)
-            && !path.contains(['\\', ':'])
-            && path.split('/').all(|part| !matches!(part, "" | "." | ".."));
+        // Recovery retains the exact observed local path. Resolution belongs
+        // to the live file owner, never to historical/checkpoint decoding.
+        // Native paths may contain spaces, parent segments, drive/UNC prefixes
+        // and legal control characters; only NUL is not an OS path character.
+        let valid_local_path = |path: &str| !path.is_empty() && path.len() <= 4096
+            && !path.contains('\0');
         if !matches!(self.version, 1 | 2)
             || (self.version == 1 && !self.unresolved_targets.is_empty())
             || self.targets.len() > 64 || self.unresolved_targets.len() > 64
@@ -38,8 +40,27 @@ impl AgentPatchRecoveryState {
             || (self.unresolved_targets.is_empty() && self.unresolved_before_input.is_some())
             || self.targets.iter().collect::<BTreeSet<_>>().len() != self.targets.len()
             || self.unresolved_targets.iter().collect::<BTreeSet<_>>().len() != self.unresolved_targets.len()
-            || self.targets.iter().chain(&self.unresolved_targets).any(|path| !normalized(path))
+            || self.targets.iter().chain(&self.unresolved_targets).any(|path| !valid_local_path(path))
         { return Err("Invalid bounded patch recovery state".into()); }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovery_preserves_native_global_targets_without_resolving_history() {
+        let targets = ["../outside/file.txt", "/Volumes/Test/file.txt", r"C:\Users\Test User\报告.txt", r"\\server\share\file.txt", " spaced name "];
+        let state = AgentPatchRecoveryState { targets: targets.iter().map(|path| (*path).to_owned()).collect(), ..Default::default() };
+        state.validate().unwrap();
+        let decoded: AgentPatchRecoveryState = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(decoded, state);
+        for invalid in ["", "bad\0path"] {
+            assert!(AgentPatchRecoveryState { targets: vec![invalid.into()], ..Default::default() }.validate().is_err());
+        }
+        assert!(AgentPatchRecoveryState { targets: vec!["../same".into(), "../same".into()], ..Default::default() }.validate().is_err());
+        assert!(AgentPatchRecoveryState { unresolved_before_input: Some(1), ..Default::default() }.validate().is_err());
     }
 }

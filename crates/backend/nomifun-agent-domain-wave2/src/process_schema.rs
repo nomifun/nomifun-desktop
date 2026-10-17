@@ -16,13 +16,15 @@ fn launch(include_wait: bool) -> StrictJsonValue {
         "cmd":{"type":"string","minLength":1,"maxLength":32768,
             "description":"Explicit shell command/script. Choose exactly one of cmd, command or component; never inferred from their contents."},
         "command":{"type":"string","minLength":1,"maxLength":32768,
-            "description":"User executable name or path only, such as git. Choose exactly one of command, cmd or component. Do not put arguments, pipes or a whole shell command here; use args for each argument."},
+            "description":"User executable or native command launcher name/path only, such as git or npm. Choose exactly one of command, cmd or component. Do not put arguments, pipes or a whole shell command here; use args for each argument."},
         "component":{"type":"string","enum":["officecli","bun","node"],
             "description":"Approved host component ID: officecli, bun or node. The host resolves its verified executable and required environment. Choose exactly one of component, command or cmd; pass each literal argument in args, without shell quoting or expansion."},
         "args":{"type":"array","maxItems":256,"items":{"type":"string","maxLength":65536},
             "description":"Separate literal argument tokens, for example [\"test\",\"tests/unit.test.js\"]. No shell quoting or expansion. Omit when empty; never send null."},
-        "cwd":{"type":"string","maxLength":4096,
-            "description":"Optional workspace-relative directory; omit to use the bound workspace root."},
+        "cwd":{"type":"string","maxLength":4096,"pattern":"^[^\\u0000]*$",
+            "description":"Optional native absolute directory or path relative to the Session default working directory. Omit to use that default; parent traversal, native separators, legal links and mounted directories are supported."},
+        "execution_identity":{"type":"string","enum":["current_user","administrator"],"default":"current_user",
+            "description":"Execution identity required for this operation. Ordinary operations use the real login user. Administrator operations use the platform native authentication and system execution path; independent privacy and desktop permissions still apply."},
         "env":{"type":"object","maxProperties":128,"additionalProperties":{"type":"string","maxLength":65536},
             "description":"Optional string-valued environment overrides. Omit when empty; never send null."},
         "timeout_ms":{"type":"integer","minimum":1,"maximum":600000},
@@ -82,6 +84,23 @@ pub fn process_action_input_schema(action_id: &str) -> Option<StrictJsonValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_directory_and_execution_identity_are_operation_context() {
+        for action in ["workspace.process/exec", "workspace.process/start"] {
+            let schema = process_action_input_schema(action).unwrap();
+            let validator = jsonschema::validator_for(&schema.0).unwrap();
+            for cwd in ["../outside", "/Volumes/Test", r"C:\Users\Test User", r"\\server\share"] {
+                for identity in ["current_user", "administrator"] {
+                    assert!(validator.is_valid(&json!({"command":"program","cwd":cwd,"execution_identity":identity})));
+                }
+            }
+            assert_eq!(schema.0["properties"]["execution_identity"]["default"], "current_user");
+            assert!(!validator.is_valid(&json!({"command":"program","execution_identity":"trusted"})));
+            assert!(!validator.is_valid(&json!({"command":"program","permission_mode":"administrator"})));
+            assert!(!validator.is_valid(&json!({"command":"program","cwd":"bad\0directory"})));
+        }
+    }
 
     #[test]
     fn action_identity_selects_each_closed_process_payload() {

@@ -36,6 +36,7 @@ export function validateComponents(manifest) {
       const key = `${asset.target}/${asset.variant}`;
       if (assets.has(key) || !asset.url.startsWith(prefix) || !/^[a-f0-9]{64}$/.test(asset.sha256)
           || /^0+$/.test(asset.sha256) || !['zip', 'tar.gz', 'raw'].includes(asset.format)
+          || (component.id === 'node' && (asset.format === 'raw' || (asset.target.includes('windows') && !asset.url.endsWith('.zip'))))
           || !/^[a-zA-Z0-9._-]+$/.test(asset.executable)) throw new Error(`Invalid approved asset: ${component.id}/${key}`);
       assets.add(key);
     }
@@ -56,12 +57,13 @@ export function validateExecutionOwners({ managed, hosting, environment }) {
       || !hosting.includes('ChildProcessBuilder::clean_cli(')) {
     throw new Error('Ordinary hosted application commands must use the shared managed process owner');
   }
-  if (!environment.includes('resolve_command_path(name)')
+  if (!environment.includes('process_environment(')
+      || !environment.includes('resolve_command_in(')
       || !environment.includes('ChildProcessBuilder::clean_cli(')
       || !/executable\("node",\s*node_path\)/.test(environment)
       || !/executable\("npm",\s*None\)/.test(environment)
       || !/executable\("bun",\s*None\)/.test(environment)) {
-    throw new Error('Application environment must probe system/custom Node, npm and Bun separately through the shared process owner');
+    throw new Error('Application environment must probe system/custom Node, npm and Bun separately through the shared process owner and per-launch environment');
   }
 }
 

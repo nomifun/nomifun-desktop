@@ -10,12 +10,11 @@ use std::{
 use std::{fs, path::Path};
 
 use nomi_process_runtime::{
-    CapabilityPolicy, CommandSpec, ProcessError, ProcessOutcome, ProcessOwner,
+    CommandSpec, ProcessError, ProcessOutcome, ProcessOwner,
     ProcessPolicy, NormalizedProcessRequest, OutputCursor, OutputStream, PollResult,
     ProcessState, ProcessSupervisor, SupervisorConfig, Transport,
 };
 #[cfg(target_os = "macos")]
-use nomi_process_runtime::SandboxPolicy;
 
 const PTY_COLS: u16 = 80;
 const PTY_ROWS: u16 = 24;
@@ -42,7 +41,6 @@ fn program_request(
             rows: PTY_ROWS,
         },
         policy: ProcessPolicy::default(),
-        capability: CapabilityPolicy::local_owner(cwd),
     }
 }
 
@@ -444,10 +442,7 @@ async fn macos_concurrent_pty_sessions_keep_output_and_cleanup_isolated() {
 #[cfg(target_os = "macos")]
 #[tokio::test]
 #[serial_test::serial(unix_pty_contract)]
-async fn macos_seatbelt_program_pty_blocks_out_of_root_writes() {
-    // Darwin's trusted temporary directories are intentionally writable in
-    // the profile. Keep both fixtures beside the checkout so `outside` really
-    // exercises the declared write-root boundary.
+async fn macos_program_pty_writes_outside_the_default_directory() {
     let fixture_root = std::env::current_dir().expect("current directory");
     let workspace = tempfile::tempdir_in(&fixture_root).expect("workspace");
     let outside = tempfile::tempdir_in(&fixture_root).expect("outside");
@@ -464,24 +459,19 @@ async fn macos_seatbelt_program_pty_blocks_out_of_root_writes() {
             .expect("temporary path should be UTF-8"),
     ]);
     process.cwd = workspace.clone();
-    process.capability = CapabilityPolicy {
-        cwd_roots: vec![workspace.clone()],
-        sandbox: SandboxPolicy::MacSeatbelt {
-            write_roots: vec![workspace],
-        },
-    };
+
 
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = supervisor
         .start(process)
         .await
-        .expect("Seatbelt PTY helper should start");
+        .expect("PTY helper should start");
     let ProcessOutcome::Exited { code, .. } = wait_for_terminal(&supervisor, &handle).await else {
-        panic!("Seatbelt PTY helper must exit");
+        panic!("PTY helper must exit");
     };
 
-    assert_ne!(code, Some(0));
-    assert!(!outside_marker.exists());
+    assert_eq!(code, Some(0));
+    assert!(outside_marker.exists());
 }
 
 #[tokio::test]

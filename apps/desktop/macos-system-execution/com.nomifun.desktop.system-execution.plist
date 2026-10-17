@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.nomifun.desktop.system-execution</string>
+  <key>BundleProgram</key><string>Contents/Library/HelperTools/nomifun-system-execution</string>
+  <key>ProgramArguments</key><array><string>nomifun-system-execution</string><string>--service</string><string>com.nomifun.desktop.system-execution</string></array>
+  <key>MachServices</key><dict><key>com.nomifun.desktop.system-execution</key><true/></dict>
+  <key>RunAtLoad</key><false/>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>ExitTimeOut</key><integer>30</integer>
+</dict></plist>

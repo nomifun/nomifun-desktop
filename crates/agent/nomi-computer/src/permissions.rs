@@ -146,33 +146,33 @@ pub fn accessibility_hint_detailed() -> String {
     )
 }
 
-/// Guidance appended to screen-capture failures. Names the host app (see
-/// [`nomi_a11y::host_app_label`]) and stresses the relaunch, because macOS never
-/// hot-loads Screen Recording into an already-running process.
+/// Guidance appended to screen-capture failures. Recheck the real process
+/// after granting; a macOS-required restart is recovery when access stays stale.
 pub fn screen_capture_hint() -> String {
     if cfg!(target_os = "macos") {
         let app = nomi_a11y::host_app_label();
         format!(
             "If this keeps failing, grant Screen Recording permission to {app} in \
-             System Settings → Privacy & Security → Screen Recording, then COMPLETELY quit and \
-             reopen {app} (a freshly-granted Screen Recording permission only takes effect after \
-             a relaunch)."
+             System Settings → Privacy & Security → Screen Recording, then retry the operation. \
+             If macOS requests a restart or access remains unavailable after granting, completely \
+             quit and reopen {app}, then resume the task."
         )
     } else {
         "Check that a display is connected and the app is allowed to capture the screen.".to_string()
     }
 }
 
-/// Guidance appended to input-synthesis failures. Names the host app and the
-/// relaunch — the generic "this app" otherwise leads a model to send the user
+/// Guidance appended to input-synthesis failures. Names the host app — the
+/// generic "this app" otherwise leads a model to send the user
 /// to grant a terminal/editor rather than the desktop host itself.
 pub fn accessibility_hint() -> String {
     if cfg!(target_os = "macos") {
         let app = nomi_a11y::host_app_label();
         format!(
             "If this keeps failing, grant Accessibility permission to {app} in \
-             System Settings → Privacy & Security → Accessibility, then COMPLETELY quit and reopen \
-             {app}. Computer-use runs inside {app} itself, so grant {app} — not a terminal or editor."
+             System Settings → Privacy & Security → Accessibility, then recheck access and make \
+             a fresh observation before input. Computer-use runs inside {app} itself, so grant \
+             {app}. If the grant remains stale, completely quit and reopen {app}, then resume."
         )
     } else {
         "Check that the app is allowed to control the mouse and keyboard.".to_string()

@@ -59,7 +59,7 @@ pub(super) fn hit_paths(
         None | Some(serde_json::Value::Null) => "",
         Some(value) => value.as_str().ok_or_else(invalid)?,
     };
-    let root = crate::agents_md::normalize_workspace_directory(root)?;
+    crate::agents_md::normalize_native_instruction_path(root)?;
     if query.trim().is_empty()
         || query.len() > 4096
         || query.chars().count() > 1024
@@ -83,13 +83,7 @@ pub(super) fn hit_paths(
     let mut paths = BTreeSet::new();
     for hit in response.matches {
         if hit.path.is_empty()
-            || crate::agents_md::normalize_workspace_directory(&hit.path)? != hit.path
-            || !(root.is_empty()
-                || hit.path == root
-                || hit
-                    .path
-                    .strip_prefix(&root)
-                    .is_some_and(|suffix| suffix.starts_with('/')))
+            || crate::agents_md::normalize_native_instruction_path(&hit.path)? != hit.path
             || hit.line == 0
             || hit.line > 8 * 1024 * 1024 + 1
             || hit.column_bytes == 0

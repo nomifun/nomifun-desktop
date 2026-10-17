@@ -11,7 +11,7 @@ use std::{
 
 #[cfg(unix)]
 use nomi_process_runtime::{
-    CapabilityPolicy, CommandSpec, ProcessOutcome, ProcessOwner, ProcessPolicy,
+    CommandSpec, ProcessOutcome, ProcessOwner, ProcessPolicy,
     NormalizedProcessRequest, ProcessState, ProcessSupervisor, SupervisorConfig, Transport,
 };
 
@@ -284,6 +284,5 @@ fn helper_request(helper: OsString) -> NormalizedProcessRequest {
         env: BTreeMap::new(),
         transport: Transport::Pipe,
         policy: ProcessPolicy::default(),
-        capability: CapabilityPolicy::local_owner(cwd),
     }
 }

@@ -391,14 +391,10 @@ impl EngineToolInvoker for KernelEngineToolInvoker {
 
 fn kernel_error(error: KernelError) -> EngineToolError {
     let code = error.canonical_code().0;
-    if code == crate::SYSTEM_PERMISSION_REQUIRED
-        && let Some(failure) = error.capability_execution_failure()
-    {
-        return EngineToolError::CapabilityKernel { code, message: failure.message.clone() };
-    }
     let message = match code.as_str() {
         "AGENT_EXECUTION_ALREADY_ACTIVE" => "This conversation already has an active AgentExecution. Do not start sibling collaboration calls; put all independent tasks in one agent/delegate request with strategy=parallel and use synthesize=true when a downstream Agent must combine them.".to_owned(),
-        _ => error.to_string(),
+        _ => error.capability_execution_failure().map(|failure| owner_failure_detail(&failure.message, 4096))
+            .unwrap_or_else(|| error.to_string()),
     };
     EngineToolError::CapabilityKernel {
         code,
@@ -406,9 +402,10 @@ fn kernel_error(error: KernelError) -> EngineToolError {
     }
 }
 
-/// Keep host diagnostics private while returning actionable, fixed guidance
-/// for the common process launch failures seen by coding Agents. The raw
-/// command, cwd, environment and owner error never cross the model boundary.
+/// Preserve the admitted owner's real failure and typed code. Credentials are
+/// redacted with the existing shared sanitizer; local paths and OS causes are
+/// necessary task evidence. A launch failure does not prove malformed argv,
+/// administrator identity, an absent privacy grant, or that nothing changed.
 fn kernel_error_for_action(
     error: KernelError,
     is_process: bool,
@@ -432,27 +429,25 @@ fn kernel_error_for_action(
     if is_computer_launch && let Some(failure) = error.capability_execution_failure() {
         return EngineToolError::CapabilityKernel {
             code: error.canonical_code().0,
-            message: computer_launch_feedback(&failure.message).to_owned(),
+            message: format!("{}\n{}", owner_failure_detail(&failure.message, 2048), computer_launch_feedback(&failure.message)),
         };
     }
-    if is_process && error.canonical_code().as_ref() == "CAPABILITY_UNAVAILABLE" {
-        let detail = error.capability_execution_failure()
-            .map(|failure| failure.message.as_str()).unwrap_or_default();
-        let guidance = if detail.contains("process spawn failed") {
-            "Process launch failed. The command field must contain only the executable; put options in args. Example: {\"command\":\"bun\",\"args\":[\"test\",\"tests/example.test.js\"]}. Do not send the whole command line as command. Verify the executable is available. No successful launch was reported; change the request before retrying."
-        } else if detail.contains("invalid working directory") || detail.contains("cwd must be") {
-            "Process cwd is unavailable. Use a normalized workspace-relative directory, then retry with a new call."
-        } else if detail.contains("process controls cannot change launch parameters") {
-            "A process control call cannot change command, args, cwd or env. Use the existing process_id only."
-        } else {
-            "The process owner could not complete this call. Its effects may be uncertain; inspect current state before any changed retry."
-        };
+    if is_process && let Some(failure) = error.capability_execution_failure() {
         return EngineToolError::CapabilityKernel {
-            code: "CAPABILITY_UNAVAILABLE".into(),
-            message: guidance.into(),
+            code: error.canonical_code().0,
+            message: owner_failure_detail(&failure.message, 4096),
         };
     }
     kernel_error(error)
+}
+
+fn owner_failure_detail(detail: &str, limit: usize) -> String {
+    let redacted = nomi_redact::redact_secrets(detail);
+    if redacted.len() <= limit { return redacted.into_owned(); }
+    let suffix = "...[truncated]";
+    let mut boundary = limit.saturating_sub(suffix.len()).min(redacted.len());
+    while !redacted.is_char_boundary(boundary) { boundary -= 1; }
+    format!("{}{suffix}", &redacted[..boundary])
 }
 
 fn computer_launch_feedback(detail: &str) -> &'static str {
@@ -482,22 +477,22 @@ fn settlement_loss_feedback(detail: &str) -> Option<&'static str> {
     None
 }
 
-/// Return bounded repair guidance, never raw host paths or file contents. Patch
-/// publication indices are safe structured owner observations and must survive
-/// the Kernel's otherwise deliberately opaque capability failure projection.
+/// Keep the concrete file failure, exact partial-publication observations and
+/// bounded repair guidance together. The original owner receipt retains the
+/// full result; model feedback redacts credentials without hiding OS causes.
 fn workspace_write_feedback(detail: &str) -> String {
     let report = serde_json::from_str::<serde_json::Value>(detail).ok();
     let cause = report.as_ref().and_then(|value| value["cause"].as_str()).unwrap_or(detail);
     let guidance = if cause.contains("parent") || cause.contains("ancestor") {
-        "Workspace write parent is unavailable or is not a directory. Missing workspace directories are created automatically. Inspect the relative path and existing ancestors for a file/directory conflict or unavailable link; do not retry the same payload or use a shell mkdir workaround."
+        "Local file write parent is unavailable or is not a directory. Missing parent directories are created automatically. Inspect the exact native absolute or Session-default-directory relative path and existing ancestors for a file/directory conflict or unavailable link; do not retry the same payload blindly."
     } else if cause.contains("expected_source") || cause.contains("precondition") || cause.contains("changed") {
         "Patch source changed or its source precondition did not match. Re-read every target and replan using the fresh source digest or observed absence. Do not remove the source guard to force the patch."
     } else if cause.contains("hunk") || cause.contains("line count") || cause.contains("mismatch") {
         "Patch hunk does not match its declared ranges or the current source. old_lines must equal context plus remove lines; new_lines must equal context plus add lines. Re-read the targets, correct the line counts and exact text, then replan before retrying."
     } else {
-        "Workspace file operation failed. Inspect the target with read_file (missing_ok=true for a possibly absent file), check the workspace-relative path and payload, and replan before a changed retry. Failure alone does not prove that no file changed."
+        "Local file operation failed. Inspect the exact native absolute or Session-default-directory relative target with read_file (missing_ok=true for genuine absence) and replan from the actual cause. A system access denial, independent privacy grant and unavailable platform feature require their actual respective paths; administrator identity is not a universal remedy. Failure alone does not prove that no file changed."
     };
-    if let Some(report) = report.filter(|value| value["kind"] == "workspace_patch_failed" && value["version"] == 1) {
+    if let Some(report) = report.as_ref().filter(|value| value["kind"] == "workspace_patch_failed" && value["version"] == 1) {
         let mut observation = serde_json::Map::new();
         let source = &report["observation"];
         if source["failed_file"].is_null() || source["failed_file"].as_u64().is_some_and(|index| index < 64) {
@@ -507,14 +502,14 @@ fn workspace_write_feedback(detail: &str) -> String {
             "skipped_changed_or_unreadable", "rollback_failed", "temporary_cleanup_unconfirmed"] {
             let Some(indices) = source[name].as_array().filter(|indices| indices.len() <= 64
                 && indices.iter().all(|index| index.as_u64().is_some_and(|index| index < 64))) else {
-                return guidance.into();
+                return format!("{}\n{guidance}", owner_failure_detail(cause, 1024));
             };
             observation.insert(name.into(), serde_json::Value::Array(indices.clone()));
         }
         if let Some(value) = source.get("unverified_publications") {
             let Some(indices) = value.as_array().filter(|indices| indices.len() <= 64
                 && indices.iter().all(|index| index.as_u64().is_some_and(|index| index < 64))) else {
-                    return guidance.into();
+                    return format!("{}\n{guidance}", owner_failure_detail(cause, 1024));
                 };
             observation.insert("unverified_publications".into(), serde_json::Value::Array(indices.clone()));
         }
@@ -525,6 +520,7 @@ fn workspace_write_feedback(detail: &str) -> String {
         } else { "" };
         let mut feedback = serde_json::json!({
             "kind":"workspace_patch_failed", "version":1,
+            "cause":owner_failure_detail(cause, 768),
             "journal_settlement": if report["journal_settlement"] == "settled" { "settled" } else { "unconfirmed" },
             "index_base":0, "observed_published_count":published_count, "confirmed_restored_count":restored_count,
             "observation": observation,
@@ -534,9 +530,14 @@ fn workspace_write_feedback(detail: &str) -> String {
             // Keep every bounded index even for the largest owner report.
             feedback["recovery"] = serde_json::json!(format!("{effect_warning}Indices refer to request.files. Re-read current state; do not retry unchanged."));
         }
+        let mut cause_limit = 768;
+        while feedback.to_string().len() > 2048 && cause_limit > 16 {
+            cause_limit /= 2;
+            feedback["cause"] = serde_json::json!(owner_failure_detail(cause, cause_limit));
+        }
         return feedback.to_string();
     }
-    guidance.into()
+    format!("{}\n{guidance}", owner_failure_detail(cause, 1024))
 }
 
 fn validate_snapshot_registry(

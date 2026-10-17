@@ -45,15 +45,10 @@ assets. An explicit `NOMIFUN_WEBUI_DIST` override must match the build identity.
 
 ## Desktop runtime components
 
-Release binaries embed OfficeCLI. Node/Bun are managed components prepared on
-explicit demand; backend startup does not download them. Command resolution
-can reuse a verified existing cache. Application hosting uses system or
-user-configured Node. See [external tools](../architecture/external-tools.md)
+Release binaries embed OfficeCLI. Backend startup does not download Node/Bun. Actual launches automatically prepare a missing required runtime, preferring usable user tools and verified caches. Node supply contains the complete official Node/npm/npx distribution. Agent, Terminal, MCP and hosted application processes share the per-launch user tool environment. See [external tools](../architecture/external-tools.md)
 for admission, cache and offline behavior.
 
-Desktop installers do not bundle NomiRelay's `nfagent`. Restore and restart
-reuse an approved local cache. If it is absent or outdated, the user explicitly
-chooses to download the connection component. The fixed immutable URL and
+Desktop installers do not bundle NomiRelay's `nfagent`. Connect, restore and restart reuse an approved local cache or automatically prepare a missing/current artifact. The fixed immutable URL and
 SHA-256 for each platform are in
 [nfagent-runtime.json](../../apps/desktop/nfagent-runtime.json).
 Downloads are bounded, staged, verified and atomically published.

@@ -7,18 +7,16 @@ use std::{
 };
 
 use nomi_process_runtime::{
-    CapabilityPolicy, CommandSpec, OutputCursor, OutputSnapshot, OutputStream, PollResult,
+    CommandSpec, OutputCursor, OutputSnapshot, OutputStream, PollResult,
     ProcessOutcome, ProcessOwner, ProcessPolicy, ProcessRequest, ProcessSupervisor, ShellKind,
     Transport, normalize_request,
 };
-#[cfg(target_os = "macos")]
-use nomi_process_runtime::SandboxPolicy;
 use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct SupervisedShell {
     supervisor: Arc<ProcessSupervisor>,
-    capability: CapabilityPolicy,
+    default_cwd: PathBuf,
     invocation_id: Uuid,
 }
 
@@ -45,10 +43,10 @@ pub enum SupervisedShellError {
 }
 
 impl SupervisedShell {
-    pub fn new(supervisor: Arc<ProcessSupervisor>, cwd_root: PathBuf) -> Self {
+    pub fn new(supervisor: Arc<ProcessSupervisor>, default_cwd: PathBuf) -> Self {
         Self {
             supervisor,
-            capability: CapabilityPolicy::local_owner(cwd_root),
+            default_cwd,
             invocation_id: Uuid::now_v7(),
         }
     }
@@ -58,21 +56,6 @@ impl SupervisedShell {
             ProcessSupervisor::new(nomi_process_runtime::SupervisorConfig::default()),
             cwd_root,
         )
-    }
-
-    #[cfg(target_os = "macos")]
-    pub fn standalone_macos_confined(cwd_root: PathBuf) -> Self {
-        let supervisor = ProcessSupervisor::new(nomi_process_runtime::SupervisorConfig::default());
-        Self {
-            supervisor,
-            capability: CapabilityPolicy {
-                cwd_roots: vec![cwd_root.clone()],
-                sandbox: SandboxPolicy::MacSeatbelt {
-                    write_roots: vec![cwd_root],
-                },
-            },
-            invocation_id: Uuid::now_v7(),
-        }
     }
 
     /// Execute one shell command under the shared exact process-tree
@@ -139,9 +122,8 @@ impl SupervisedShell {
                 deadline,
                 ..ProcessPolicy::default()
             },
-            capability: self.capability.clone(),
         };
-        let request = normalize_request(request, cwd)?;
+        let request = normalize_request(request, &self.default_cwd)?;
         let handle = self.supervisor.start(request).await?;
 
         let outcome = loop {
@@ -236,6 +218,23 @@ mod tests {
         assert!(output.success, "{}", output.stderr);
         assert!(output.stdout.contains("test-value"));
         assert!(output.stdout.contains("local-file"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervised_shell_resolves_parent_relative_cwd_from_its_default_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let default_cwd = root.path().join("default");
+        let outside = root.path().join("outside 中文");
+        std::fs::create_dir(&default_cwd).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let shell = SupervisedShell::standalone(default_cwd);
+        let output = shell.output_program(
+            OsString::from("/bin/pwd"), Vec::new(), Path::new("../outside 中文"),
+            &HashMap::new(), Some(Duration::from_secs(5)),
+        ).await.unwrap();
+        assert!(output.success, "{output:?}");
+        assert_eq!(Path::new(output.stdout.trim()), outside.canonicalize().unwrap());
     }
 
     #[cfg(unix)]

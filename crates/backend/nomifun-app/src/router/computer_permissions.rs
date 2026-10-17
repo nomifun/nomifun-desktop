@@ -3,12 +3,10 @@
 //! The desktop backend is linked into the NomiFun process. Status probes and
 //! prompts therefore use the exact code identity that macOS TCC evaluates,
 //! instead of a terminal, browser, or helper process guessing on its behalf.
-//! The inventory covers the capability prerequisites this backend can probe
-//! authoritatively: ASR microphone input and Computer Use Accessibility /
-//! Screen Recording. Notification state stays with Tauri's native notification
-//! plugin. Browser website and local-network permissions remain deliberately
-//! on-demand; this module opens the relevant System Settings pane when their
-//! OS-level gate blocks a user-approved operation.
+//! Camera/microphone and Computer grants are probed live. Full Disk Access,
+//! target-specific Apple Events and local-network access have no truthful
+//! process-wide Boolean here: their inventory remains unknown and the actual
+//! operation supplies the result. Notification state stays with Tauri's plugin.
 
 use axum::Json;
 use nomifun_api_types::ApiResponse;
@@ -47,6 +45,10 @@ pub(super) enum SystemPermissionState {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Denied,
     NotDetermined,
+    /// The native API proves the grant is absent but cannot distinguish an
+    /// initial request from a previous denial (AX and screen-capture preflight).
+    #[cfg_attr(not(all(target_os = "macos", feature = "computer-use")), allow(dead_code))]
+    NotGranted,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Restricted,
     #[cfg_attr(any(target_os = "macos", not(feature = "computer-use")), allow(dead_code))]
@@ -68,16 +70,20 @@ pub(super) struct SystemPermissionEntry {
 pub(super) struct SystemPermissionStatus {
     platform: &'static str,
     app_label: String,
+    /// Diagnostic identity of this actual probe process, not a configured
+    /// production identifier or a Terminal's permission state.
+    process_id: u32,
+    app_bundle_identifier: Option<String>,
     permissions: Vec<SystemPermissionEntry>,
 }
 
 #[cfg(target_os = "macos")]
-fn microphone_state() -> SystemPermissionState {
+fn capture_state(camera: bool) -> SystemPermissionState {
     use objc2_av_foundation::{
-        AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio,
+        AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio, AVMediaTypeVideo,
     };
 
-    let Some(media_type) = (unsafe { AVMediaTypeAudio }) else {
+    let Some(media_type) = (unsafe { if camera { AVMediaTypeVideo } else { AVMediaTypeAudio } }) else {
         return SystemPermissionState::Unknown;
     };
     match unsafe { AVCaptureDevice::authorizationStatusForMediaType(media_type) } {
@@ -90,7 +96,7 @@ fn microphone_state() -> SystemPermissionState {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn microphone_state() -> SystemPermissionState {
+fn capture_state(_camera: bool) -> SystemPermissionState {
     // Windows/Linux media capture is owned by the renderer and the OS/browser
     // privacy layer. The settings UI offers a real, user-triggered microphone
     // test there instead of presenting a guessed backend status.
@@ -101,20 +107,8 @@ fn computer_states() -> (SystemPermissionState, SystemPermissionState) {
     #[cfg(all(target_os = "macos", feature = "computer-use"))]
     {
         let status = nomi_computer::permissions::permission_status();
-        let accessibility = if status.accessibility == Some(true) {
-            SystemPermissionState::Granted
-        } else {
-            // AXIsProcessTrusted does not distinguish "never asked" from
-            // "disabled". `not_determined` truthfully means the user still has
-            // an authorization step to complete; the request action registers
-            // the app and opens the exact pane.
-            SystemPermissionState::NotDetermined
-        };
-        let screen_recording = if status.screen_recording == Some(true) {
-            SystemPermissionState::Granted
-        } else {
-            SystemPermissionState::NotDetermined
-        };
+        let accessibility = binary_grant_state(status.accessibility);
+        let screen_recording = binary_grant_state(status.screen_recording);
         (accessibility, screen_recording)
     }
     #[cfg(all(not(target_os = "macos"), feature = "computer-use"))]
@@ -139,14 +133,31 @@ fn computer_states() -> (SystemPermissionState, SystemPermissionState) {
     }
 }
 
+#[cfg(any(all(target_os = "macos", feature = "computer-use"), test))]
+fn binary_grant_state(granted: Option<bool>) -> SystemPermissionState {
+    match granted {
+        Some(true) => SystemPermissionState::Granted,
+        Some(false) => SystemPermissionState::NotGranted,
+        None => SystemPermissionState::Unknown,
+    }
+}
+
 fn current_system_status() -> SystemPermissionStatus {
     let (accessibility, screen_recording) = computer_states();
-    let microphone = microphone_state();
+    let microphone = capture_state(false);
+    let camera = capture_state(true);
     let macos = cfg!(target_os = "macos");
     let computer_use_available = cfg!(feature = "computer-use");
     SystemPermissionStatus {
         platform: PLATFORM,
         app_label: app_label(),
+        process_id: std::process::id(),
+        app_bundle_identifier: {
+            #[cfg(target_os = "macos")]
+            { macos_bundle_identifier() }
+            #[cfg(not(target_os = "macos"))]
+            { None }
+        },
         permissions: vec![
             SystemPermissionEntry {
                 kind: "microphone",
@@ -154,7 +165,15 @@ fn current_system_status() -> SystemPermissionStatus {
                 can_request: macos && microphone == SystemPermissionState::NotDetermined,
                 can_open_settings: macos,
                 requires_restart_after_grant: false,
-                capabilities: &["voice_input"],
+                capabilities: &["voice_input", "browser_use"],
+            },
+            SystemPermissionEntry {
+                kind: "camera",
+                state: camera,
+                can_request: macos && camera == SystemPermissionState::NotDetermined,
+                can_open_settings: macos,
+                requires_restart_after_grant: false,
+                capabilities: &["browser_use"],
             },
             SystemPermissionEntry {
                 kind: "accessibility",
@@ -176,6 +195,35 @@ fn current_system_status() -> SystemPermissionStatus {
                 requires_restart_after_grant: macos && computer_use_available,
                 capabilities: &["computer_use"],
             },
+            SystemPermissionEntry {
+                kind: "full_disk_access",
+                // Do not inspect TCC databases or read unrelated private files
+                // to manufacture a global FDA status. Root is not an FDA grant.
+                state: SystemPermissionState::Unknown,
+                can_request: false,
+                can_open_settings: macos,
+                requires_restart_after_grant: macos,
+                capabilities: &["local_files"],
+            },
+            SystemPermissionEntry {
+                kind: "automation",
+                // Apple Events grants belong to a sender + target + event.
+                // Only the actual cross-app operation can establish its result.
+                state: SystemPermissionState::Unknown,
+                can_request: false,
+                can_open_settings: macos,
+                requires_restart_after_grant: false,
+                capabilities: &["application_automation"],
+            },
+            SystemPermissionEntry {
+                kind: "local_network",
+                // macOS prompts on a real LAN operation, not a global request.
+                state: SystemPermissionState::Unknown,
+                can_request: false,
+                can_open_settings: macos,
+                requires_restart_after_grant: false,
+                capabilities: &["local_connections", "browser_use"],
+            },
         ],
     }
 }
@@ -192,17 +240,17 @@ pub(super) struct PermissionRequestBody {
 }
 
 #[cfg(target_os = "macos")]
-async fn request_microphone_permission() {
+async fn request_capture_permission(camera: bool) {
     use block2::RcBlock;
     use objc2::runtime::Bool;
-    use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeAudio};
+    use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeAudio, AVMediaTypeVideo};
     use std::sync::{Arc, Mutex};
 
     // Keep every Objective-C value in this inner scope. RcBlock and NSString
     // references are deliberately !Send and an Axum handler future must not
     // retain either one across its await point.
     let receiver = {
-        let Some(media_type) = (unsafe { AVMediaTypeAudio }) else {
+        let Some(media_type) = (unsafe { if camera { AVMediaTypeVideo } else { AVMediaTypeAudio } }) else {
             return;
         };
         let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -227,7 +275,7 @@ async fn request_microphone_permission() {
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn request_microphone_permission() {}
+async fn request_capture_permission(_camera: bool) {}
 
 async fn request_computer_kind(kind: &str) {
     #[cfg(feature = "computer-use")]
@@ -252,12 +300,14 @@ async fn request_computer_kind(kind: &str) {
 }
 
 /// POST /api/system/permissions/request — request only the named up-front
-/// permission. Browser website grants are intentionally not accepted here.
+/// permission for this host. Browser website grants are separate from these
+/// native camera/microphone grants and remain owned by the visible page.
 pub(super) async fn request_system_permission(
     Json(body): Json<PermissionRequestBody>,
 ) -> Json<ApiResponse<SystemPermissionStatus>> {
     match body.kind.as_str() {
-        "microphone" => request_microphone_permission().await,
+        "microphone" => request_capture_permission(false).await,
+        "camera" => request_capture_permission(true).await,
         "accessibility" | "screen_recording" => request_computer_kind(&body.kind).await,
         _ => {}
     }
@@ -313,6 +363,7 @@ fn permission_settings_url(kind: &str, bundle_id: Option<&str>) -> String {
         "location" => "Privacy_LocationServices",
         "local_network" => "Privacy_LocalNetwork",
         "full_disk_access" => "Privacy_AllFiles",
+        "automation" => "Privacy_Automation",
         _ => "Privacy",
     };
     format!("x-apple.systempreferences:com.apple.preference.security?{pane}")
@@ -427,11 +478,21 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             kinds,
-            vec!["microphone", "accessibility", "screen_recording"]
+            vec!["microphone", "camera", "accessibility", "screen_recording", "full_disk_access", "automation", "local_network"]
         );
-        assert_eq!(status.permissions[0].capabilities, &["voice_input"]);
-        assert_eq!(status.permissions[1].capabilities, &["computer_use"]);
-        assert_eq!(status.permissions[2].capabilities, &["computer_use"]);
+        assert_eq!(status.permissions[0].capabilities, &["voice_input", "browser_use"]);
+        assert_eq!(status.permissions[1].capabilities, &["browser_use"]);
+        for permission in &status.permissions[4..] {
+            assert_eq!(permission.state, SystemPermissionState::Unknown);
+            assert!(!permission.can_request);
+        }
+    }
+
+    #[test]
+    fn binary_preflight_never_invents_authorization_history() {
+        assert_eq!(binary_grant_state(Some(true)), SystemPermissionState::Granted);
+        assert_eq!(binary_grant_state(Some(false)), SystemPermissionState::NotGranted);
+        assert_eq!(binary_grant_state(None), SystemPermissionState::Unknown);
     }
 
     #[cfg(all(not(target_os = "macos"), feature = "computer-use"))]

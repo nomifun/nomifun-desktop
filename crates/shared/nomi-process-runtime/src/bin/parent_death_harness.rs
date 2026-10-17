@@ -12,7 +12,7 @@ use std::{
 
 #[cfg(any(unix, windows))]
 use nomi_process_runtime::{
-    CapabilityPolicy, CommandSpec, ProcessOwner, ProcessPolicy, NormalizedProcessRequest,
+    CommandSpec, ProcessOwner, ProcessPolicy, NormalizedProcessRequest,
     ProcessSupervisor, SupervisorConfig, Transport,
 };
 
@@ -95,7 +95,6 @@ async fn run() -> io::Result<()> {
         env: BTreeMap::new(),
         transport,
         policy: ProcessPolicy::default(),
-        capability: CapabilityPolicy::local_owner(cwd),
     };
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = supervisor
@@ -235,7 +234,6 @@ async fn run_windows() -> io::Result<()> {
         env: BTreeMap::new(),
         transport: Transport::Pipe,
         policy: ProcessPolicy::default(),
-        capability: CapabilityPolicy::local_owner(cwd),
     };
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = supervisor

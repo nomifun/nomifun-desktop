@@ -370,11 +370,13 @@ fn file_owner_root_hashes(event: &SessionEventRecord, value: &Value) -> Result<O
         roots.insert(observation.workspace_root_sha256);
     } else if event.kind.0 == "effect/succeeded" {
         if !matches!(value.get("action_id").and_then(Value::as_str),
-            Some("workspace.files/write" | "workspace.files/patch" | "workspace.files/delete" | "workspace.artifacts/publish")) {
+            Some("workspace.files/write" | "workspace.files/patch" | "workspace.files/delete" | "workspace.files/rename" | "workspace.artifacts/publish")) {
             return Ok(Some(roots));
         }
         if let Some(result) = value.get("result") {
             roots.extend(result.pointer("/workspace_path/root_sha256").and_then(Value::as_str).map(str::to_owned));
+            roots.extend(result.pointer("/source_workspace_path/root_sha256").and_then(Value::as_str).map(str::to_owned));
+            roots.extend(result.pointer("/destination_workspace_path/root_sha256").and_then(Value::as_str).map(str::to_owned));
             roots.extend(result.get("workspace_root_sha256").and_then(Value::as_str).map(str::to_owned));
             if let Some(files) = result.get("files").and_then(Value::as_array) {
                 roots.extend(files.iter().filter_map(|file| file.pointer("/workspace_path/root_sha256")

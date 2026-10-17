@@ -268,14 +268,14 @@ mod tests {
 
     #[test]
     fn data_is_complete_and_preserves_registered_names_without_a_second_schema() {
-        assert_eq!(tool_model_guides().len(), 19);
+        assert_eq!(tool_model_guides().len(), 20);
         for guide in tool_model_guides() {
             assert!(tool_presentation(&guide.capability_id, &guide.action_id).is_some());
             assert!(guide.examples.iter().all(|example| example.label.starts_with("Syntax only;")));
         }
         assert!(tool_model_guide("workspace.files", "workspace.process/exec").is_none());
         for phrase in ["do not copy paths or environment from Skill", "takes precedence over Skill",
-            "one-shot", "resident session", "start watch", "report its actual failure", "do not install",
+            "one-shot", "resident session", "start watch", "prepared automatically", "cancellation", "actual preparation failure",
             "same-named ambient program", "grants no tools or permissions"] {
             assert!(managed_launch_notice().contains(phrase), "missing managed launch guidance: {phrase}");
         }

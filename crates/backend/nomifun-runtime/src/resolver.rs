@@ -23,7 +23,7 @@ pub fn bun_bin_dir() -> Option<PathBuf> {
         .and_then(|path| path.parent().map(PathBuf::from))
 }
 
-/// Discover user-owned commands first; Bun/bunx can fall back to an existing cache.
+/// Discover user-owned commands first, then an existing verified runtime.
 pub fn resolve_command_path(command: &str) -> Option<PathBuf> {
     if let Some(path) = system_command(command) {
         return Some(path);
@@ -33,6 +33,11 @@ pub fn resolve_command_path(command: &str) -> Option<PathBuf> {
         "bunx" => bun_bin_dir()
             .map(|dir| dir.join(crate::extract::bunx_filename()))
             .filter(|path| path.is_file()),
+        "node" => existing_managed_tool(ToolId::Node).and_then(Result::ok).map(|tool| tool.executable_path),
+        "npm" | "npx" => existing_managed_tool(ToolId::Node).and_then(Result::ok)
+            .and_then(|tool| tool.executable_path.parent().map(|bin| bin.join(if cfg!(windows) {
+                if command == "npm" { "npm.cmd" } else { "npx.cmd" }
+            } else { command }))).filter(|path| path.is_file()),
         _ => None,
     }
 }
@@ -91,11 +96,11 @@ mod tests {
     }
 
     #[test]
-    fn managed_bun_classification_preserves_explicit_paths_and_other_user_tools() {
+    fn managed_runtime_classification_preserves_explicit_paths_and_other_user_tools() {
         assert_eq!(managed_command_tool("bun"), Some(ToolId::Bun));
         assert_eq!(managed_command_tool("bunx"), Some(ToolId::Bun));
+        for command in ["node", "npm", "npx"] { assert_eq!(managed_command_tool(command), Some(ToolId::Node)); }
         for user_program in [
-            "node",
             "officecli",
             "/usr/local/bin/bun",
             "./bun",
@@ -112,7 +117,7 @@ mod tests {
     }
 }
 
-/// Classify only declared bare Bun launchers; paths remain user-owned.
+/// Classify known bare runtime launchers; explicit paths remain user-owned.
 pub fn managed_command_tool(program: &str) -> Option<ToolId> {
     if program.contains(['/', '\\']) {
         return None;
@@ -124,7 +129,9 @@ pub fn managed_command_tool(program: &str) -> Option<ToolId> {
     };
     match normalized.as_str() {
         "bun" | "bunx" => Some(ToolId::Bun),
+        "node" | "npm" | "npx" => Some(ToolId::Node),
         "bun.exe" | "bunx.exe" if cfg!(windows) => Some(ToolId::Bun),
+        "node.exe" | "npm.cmd" | "npx.cmd" if cfg!(windows) => Some(ToolId::Node),
         _ => None,
     }
 }
@@ -135,7 +142,7 @@ pub struct PreparedCommand {
     pub args: Vec<String>,
 }
 
-/// Resolve an existing declared launcher; this never authorizes a runtime download.
+/// Prepare a declared launcher, automatically supplying a missing runtime.
 pub async fn prepare_managed_command(
     program: &str,
     args: &[String],
@@ -147,7 +154,7 @@ pub async fn prepare_managed_command(
     Ok(prepared)
 }
 
-/// Resolve a launch's existing command without blocking the async caller on filesystem I/O.
+/// Resolve a launch's command without blocking the async caller on filesystem I/O.
 /// Explicit local development overrides retain their verified first-use admission.
 pub async fn prepare_managed_command_with_env(
     program: &str,
@@ -164,15 +171,24 @@ pub async fn prepare_managed_command_with_env(
         resolve_cached_managed_command_with_env(
             &local_program, &local_args, &local_env, local_cwd.as_deref(),
         )
-    }).await.map_err(|error| ToolError::Worker(error.to_string()))??;
-    if prepared.is_some() { return Ok(prepared); }
-    if cfg!(debug_assertions) && std::env::var_os(id.override_variable()).is_some() {
-        // This uses the original single supplier and local engine/version checks;
-        // the override branch of that supplier cannot perform a download.
-        let tool = crate::resolve_existing_tool(id).await?;
-        return Ok(Some(bind_managed_command(program, args, tool.executable_path)));
+    }).await.map_err(|error| ToolError::Worker(error.to_string()))?;
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) if crate::managed::cache_repairable(&error) => None,
+        Err(error) => return Err(error),
+    };
+    if let Some(prepared) = prepared {
+        // npm's native launcher may use /usr/bin/env node. Supply that required
+        // runtime when the launch's own environment has no Node.
+        if id == ToolId::Node && is_npm_launcher(program)
+            && command_in_environment("node", env_path(env), cwd)?.is_none()
+        {
+            crate::managed::prepare_managed_tool(ToolId::Node).await?;
+        }
+        return Ok(Some(prepared));
     }
-    Ok(None)
+    let tool = crate::managed::prepare_managed_tool(id).await?;
+    Ok(Some(bind_managed_command(program, args, tool.executable_path)))
 }
 
 /// User commands take priority; fallback requires an existing valid managed cache.
@@ -192,10 +208,14 @@ pub fn resolve_cached_managed_command_with_env(
     env: &HashMap<String, String>,
     cwd: Option<&Path>,
 ) -> Result<Option<PreparedCommand>, ToolError> {
-    let path = env.iter().find(|(key, _)| {
-        if cfg!(windows) { key.eq_ignore_ascii_case("PATH") } else { key.as_str() == "PATH" }
-    }).map(|(_, value)| OsStr::new(value));
+    let path = env_path(env);
     resolve_cached_managed_command_in(program, args, path, cwd)
+}
+
+fn env_path(env: &HashMap<String, String>) -> Option<&OsStr> {
+    env.iter().find(|(key, _)| {
+        if cfg!(windows) { key.eq_ignore_ascii_case("PATH") } else { key.as_str() == "PATH" }
+    }).map(|(_, value)| OsStr::new(value))
 }
 
 fn resolve_cached_managed_command_in(
@@ -211,7 +231,7 @@ fn resolve_cached_managed_command_in(
         return Ok(Some(PreparedCommand { executable_path: path, args: args.to_vec() }));
     }
     // bunx may be absent even when system Bun is installed: preserve `bun x`.
-    if let Some(path) = command_in_environment("bun", path, cwd)? {
+    if id == ToolId::Bun && let Some(path) = command_in_environment("bun", path, cwd)? {
         return Ok(Some(bind_managed_command(program, args, path)));
     }
     let Some(tool) = existing_managed_tool(id) else {
@@ -224,7 +244,7 @@ fn resolve_cached_managed_command_in(
     )))
 }
 
-fn command_in_environment(
+pub(crate) fn command_in_environment(
     command: &str,
     configured_path: Option<&OsStr>,
     cwd: Option<&Path>,
@@ -232,7 +252,8 @@ fn command_in_environment(
     if let Some(path) = configured_path {
         return command_in_search_path(command, path, cwd);
     }
-    if cfg!(debug_assertions) && std::env::var_os(ToolId::Bun.override_variable()).is_some() {
+    if cfg!(debug_assertions) && managed_command_tool(command)
+        .is_some_and(|id| std::env::var_os(id.override_variable()).is_some()) {
         return Ok(None);
     }
     if cwd.is_some() && let Some(path) = std::env::var_os("PATH") {
@@ -269,7 +290,7 @@ fn system_command(command: &str) -> Option<PathBuf> {
     // Explicit development paths keep their established precedence and admission checks.
     if managed_command_tool(command).is_some()
         && cfg!(debug_assertions)
-        && std::env::var_os(ToolId::Bun.override_variable()).is_some()
+        && managed_command_tool(command).is_some_and(|id| std::env::var_os(id.override_variable()).is_some())
     {
         return None;
     }
@@ -299,6 +320,12 @@ fn bind_managed_command(
     executable_path: PathBuf,
 ) -> PreparedCommand {
     let mut prepared = Vec::new();
+    if is_npm_launcher(program) {
+        let bin = executable_path.parent().expect("absolute managed Node executable");
+        let root = if cfg!(windows) { bin.to_path_buf() } else { bin.parent().expect("Node distribution root").join("lib") };
+        let launcher = if program.to_ascii_lowercase().starts_with("npx") { "npx-cli.js" } else { "npm-cli.js" };
+        prepared.push(root.join("node_modules/npm/bin").join(launcher).to_string_lossy().into_owned());
+    }
     if program.eq_ignore_ascii_case("bunx")
         || (cfg!(windows) && program.eq_ignore_ascii_case("bunx.exe"))
     {
@@ -309,4 +336,8 @@ fn bind_managed_command(
         executable_path,
         args: prepared,
     }
+}
+
+fn is_npm_launcher(program: &str) -> bool {
+    matches!(program, "npm" | "npx") || (cfg!(windows) && matches!(program.to_ascii_lowercase().as_str(), "npm.cmd" | "npx.cmd" | "npm" | "npx"))
 }

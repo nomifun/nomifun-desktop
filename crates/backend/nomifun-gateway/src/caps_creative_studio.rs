@@ -173,9 +173,6 @@ fn canvas_operation_error(error: AppError) -> String {
         AppError::Conflict(_) => {
             "Creative Studio Canvas request conflicts with current state".to_owned()
         }
-        AppError::ComponentPreparationRequired(_) => {
-            "A required host component is missing; install it or explicitly choose to download it before retrying the Creative Studio Canvas operation".to_owned()
-        }
         AppError::ComponentUnavailable { .. } => {
             "A required host component is unavailable for the Creative Studio Canvas operation".to_owned()
         }
@@ -198,6 +195,7 @@ fn canvas_operation_error(error: AppError) -> String {
         }
         AppError::Unauthorized(_) => "Creative Studio Canvas access is unauthorized".to_owned(),
         AppError::Forbidden(_) => "Creative Studio Canvas access is forbidden".to_owned(),
+        AppError::NativeSystemAccessDenied { .. } => "Operating system access was denied for the Creative Studio Canvas operation".to_owned(),
         AppError::WorkspacePathEdgeWhitespace(_)
         | AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported(_)
         | AppError::WorkspaceDirectoryUnavailable(_)

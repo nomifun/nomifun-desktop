@@ -136,7 +136,7 @@
     "chat": {
       "minimal": {
         "name": "Minimal",
-        "description": "Base chat with global Skills and MCP selected beside the session composer."
+        "description": "Base chat with local file and process operations, plus global Skills and MCP selected beside the session composer."
       }
     },
     "assistant": {
@@ -656,7 +656,7 @@
     "noModules": "No capability modules are available",
     "noModulesHint": "Refresh the installation catalog or enable a product extension that publishes Agent modules.",
     "firstRunTitle": "Choose your starting point",
-    "firstRunHint": "Minimal provides base chat only, with no Skill, MCP tool, or capability module. You can also start blank and add capabilities one by one.",
+    "firstRunHint": "Minimal includes base chat and local file/process operations by default. Choose Skills, MCP and specialist capabilities for the task.",
     "startMinimal": "Start minimal",
     "startCustom": "Blank custom",
     "emptyWorkbenchTitle": "Create your first Agent",

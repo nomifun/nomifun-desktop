@@ -163,6 +163,7 @@ pub const WORKSPACE_FILES_ACTION_IDS: &[&str] = &[
     "workspace.files/write",
     "workspace.files/patch",
     "workspace.files/delete",
+    "workspace.files/rename",
 ];
 pub const WORKSPACE_VCS_ACTION_IDS: &[&str] = &[
     "workspace.vcs/status",
@@ -409,6 +410,7 @@ pub enum Wave2TypedCapabilityOperation {
     WorkspaceFileWrite { input: StrictJsonValue },
     WorkspaceFilePatch { input: StrictJsonValue },
     WorkspaceFileDelete { input: StrictJsonValue },
+    WorkspaceFileRename { input: StrictJsonValue },
     WorkspaceVcsStatus { input: StrictJsonValue },
     WorkspaceVcsDiff { input: StrictJsonValue },
     WorkspaceVcsStage { input: StrictJsonValue },
@@ -447,7 +449,8 @@ impl Wave2TypedCapabilityOperation {
             | Self::WorkspaceFileSearch { .. }
             | Self::WorkspaceFileWrite { .. }
             | Self::WorkspaceFilePatch { .. }
-            | Self::WorkspaceFileDelete { .. } => WORKSPACE_FILES_MODULE_ID,
+            | Self::WorkspaceFileDelete { .. }
+            | Self::WorkspaceFileRename { .. } => WORKSPACE_FILES_MODULE_ID,
             Self::WorkspaceVcsStatus { .. }
             | Self::WorkspaceVcsDiff { .. }
             | Self::WorkspaceVcsStage { .. }
@@ -487,6 +490,7 @@ impl Wave2TypedCapabilityOperation {
             Self::WorkspaceFileWrite { .. } => "workspace.files/write",
             Self::WorkspaceFilePatch { .. } => "workspace.files/patch",
             Self::WorkspaceFileDelete { .. } => "workspace.files/delete",
+            Self::WorkspaceFileRename { .. } => "workspace.files/rename",
             Self::WorkspaceVcsStatus { .. } => "workspace.vcs/status",
             Self::WorkspaceVcsDiff { .. } => "workspace.vcs/diff",
             Self::WorkspaceVcsStage { .. } => "workspace.vcs/stage",
@@ -526,6 +530,7 @@ impl Wave2TypedCapabilityOperation {
             | Self::WorkspaceFileWrite { input }
             | Self::WorkspaceFilePatch { input }
             | Self::WorkspaceFileDelete { input }
+            | Self::WorkspaceFileRename { input }
             | Self::WorkspaceVcsStatus { input }
             | Self::WorkspaceVcsDiff { input }
             | Self::WorkspaceVcsStage { input }
@@ -915,6 +920,7 @@ const WORKSPACE_FILES_ACTIONS: &[ActionDefinition] = &[
     ActionDefinition::function("workspace.files/write", EffectClass::WriteDurable),
     ActionDefinition::function("workspace.files/patch", EffectClass::WriteReversible),
     ActionDefinition::function("workspace.files/delete", EffectClass::Destructive),
+    ActionDefinition::function("workspace.files/rename", EffectClass::WriteDurable),
 ];
 
 const WORKSPACE_VCS_ACTIONS: &[ActionDefinition] = &[
@@ -1982,6 +1988,9 @@ pub fn typed_operation_for(
         (WORKSPACE_FILES_MODULE_ID, "workspace.files/delete") => {
             Wave2TypedCapabilityOperation::WorkspaceFileDelete { input }
         }
+        (WORKSPACE_FILES_MODULE_ID, "workspace.files/rename") => {
+            Wave2TypedCapabilityOperation::WorkspaceFileRename { input }
+        }
         (WORKSPACE_VCS_MODULE_ID, "workspace.vcs/status") => {
             Wave2TypedCapabilityOperation::WorkspaceVcsStatus { input }
         }
@@ -2110,7 +2119,7 @@ pub fn required_action_resource_operation(
         (WORKSPACE_FILES_MODULE_ID, "workspace.files/read" | "workspace.files/search")
         | (WORKSPACE_VCS_MODULE_ID, "workspace.vcs/status" | "workspace.vcs/diff")
         | (WORKSPACE_ARTIFACTS_MODULE_ID, "workspace.artifacts/read") => Some("read"),
-        (WORKSPACE_FILES_MODULE_ID, "workspace.files/write" | "workspace.files/patch" | "workspace.files/delete")
+        (WORKSPACE_FILES_MODULE_ID, "workspace.files/write" | "workspace.files/patch" | "workspace.files/delete" | "workspace.files/rename")
         | (WORKSPACE_VCS_MODULE_ID, "workspace.vcs/stage" | "workspace.vcs/commit" | "workspace.vcs/push")
         | (WORKSPACE_ARTIFACTS_MODULE_ID, "workspace.artifacts/publish")
         | (SSH_MODULE_ID, "ssh/fs.write") => Some("write"),

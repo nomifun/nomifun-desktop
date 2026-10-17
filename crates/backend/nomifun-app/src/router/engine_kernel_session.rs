@@ -325,13 +325,9 @@ impl EngineKernelSession {
             })
             .transpose()?;
         let workspace_watch_context = if workspace_files_selected && !constraints.restricted() {
-            Some(
-                super::nomi_core_wave2::NomiWorkspaceWatchContext::start(&workspace)?
-                    as Arc<dyn ContextContributor>,
-            )
-        } else {
-            None
-        };
+            super::nomi_core_wave2::NomiWorkspaceWatchContext::start_if_present(&workspace)?
+                .map(|watch| watch as Arc<dyn ContextContributor>)
+        } else { None };
         let route_image_input = snapshot
             .content
             .chat_route_identity

@@ -375,7 +375,7 @@ fn session_extension_selection_keeps_frozen_mount_after_evolution_with_old_expli
     fixture.catalog.role_providers = fixture.registry.role_providers.values().cloned().collect();
     fixture.environment.installation_role_bindings.get_mut(&ROLE.into()).unwrap().selection.role = current_role.clone();
     let compiler = fixture.compiler();
-    let evolved = compiler.evolve_session_contract(&"owner".into(), "evolved-session".into(), &saved.0, &saved.1, &fixture.catalog).unwrap();
+    let evolved = compiler.evolve_session_contract(&"owner".into(), "evolved-session".into(), &saved.0, &saved.1, &fixture.catalog, false).unwrap();
     assert_eq!(evolved.0.payload.system_role_provider_overrides, saved.0.payload.system_role_provider_overrides);
     assert_ne!(current_role, selection.role);
     // Explicit extension selection may reach a Role that was absent from the

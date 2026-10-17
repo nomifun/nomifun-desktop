@@ -43,7 +43,7 @@ fn digest_valid(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 fn mutation_action(action: &str) -> bool {
-    matches!(action, "workspace.files/write" | "workspace.files/patch" | "workspace.files/delete" | "workspace.artifacts/publish")
+    matches!(action, "workspace.files/write" | "workspace.files/patch" | "workspace.files/delete" | "workspace.files/rename" | "workspace.artifacts/publish")
 }
 
 fn file_work_action(action: &str) -> bool {
@@ -100,9 +100,15 @@ struct ToolAdmission { operation_id: String, capability_id: String, action_id: S
 struct WriteReceipt {
     path: String, written: bool, created: bool, workspace_path: Option<WorkspacePathObservation>,
     bytes: u64, sha256: String,
+    #[serde(default)] native_path: Option<String>,
 }
 #[derive(Deserialize)]
-struct DeleteReceipt { path: String, deleted: bool, workspace_path: Option<WorkspacePathObservation> }
+struct DeleteReceipt { path: String, deleted: bool, workspace_path: Option<WorkspacePathObservation>, #[serde(default)] native_path: Option<String> }
+#[derive(Deserialize)]
+struct RenameReceipt {
+    path: String, destination: String, renamed: bool,
+    source_workspace_path: Option<WorkspacePathObservation>, destination_workspace_path: Option<WorkspacePathObservation>,
+}
 #[derive(Clone)]
 struct FileFact {
     root: String, path: String, operation: FileChangeOperation,
@@ -172,7 +178,10 @@ fn receipts(facts: &ChatCausalityFacts) -> Result<ReceiptFacts, AppError> {
             "workspace.files/write" => {
                 let written: WriteReceipt = decode(result)?;
                 if !written.written || written.path.is_empty() { return Err(invalid("unsuccessful write receipt")); }
-                let Some(observation) = written.workspace_path else { collected.complete = false; continue; };
+                let Some(observation) = written.workspace_path else {
+                    if !written.native_path.as_deref().is_some_and(|path| Path::new(path).is_absolute()) { collected.complete = false; }
+                    continue;
+                };
                 collected.files.push(observed_file(observation,
                     if written.created { FileChangeOperation::Create } else { FileChangeOperation::Modify },
                     Some(written.bytes), Some(written.sha256), event.seq)?);
@@ -181,7 +190,10 @@ fn receipts(facts: &ChatCausalityFacts) -> Result<ReceiptFacts, AppError> {
                 let patched: AgentSessionPatchResult = decode(result)?;
                 if patched.file_count != patched.files.len() { return Err(invalid("patch receipt count differs")); }
                 for file in patched.files {
-                    let Some(observation) = file.workspace_path else { collected.complete = false; continue; };
+                    let Some(observation) = file.workspace_path else {
+                        if !Path::new(&file.path).is_absolute() { collected.complete = false; }
+                        continue;
+                    };
                     collected.files.push(observed_file(observation,
                         if file.created { FileChangeOperation::Create } else { FileChangeOperation::Modify },
                         Some(file.bytes_after), file.written_sha256, event.seq)?);
@@ -190,10 +202,27 @@ fn receipts(facts: &ChatCausalityFacts) -> Result<ReceiptFacts, AppError> {
             "workspace.files/delete" => {
                 let deleted: DeleteReceipt = decode(result)?;
                 if !deleted.deleted || deleted.path.is_empty() { return Err(invalid("unsuccessful delete receipt")); }
-                let Some(observation) = deleted.workspace_path else { collected.complete = false; continue; };
+                let Some(observation) = deleted.workspace_path else {
+                    if !deleted.native_path.as_deref().is_some_and(|path| Path::new(path).is_absolute()) { collected.complete = false; }
+                    continue;
+                };
                 let mut file = observed_file(observation, FileChangeOperation::Delete, None, None, event.seq)?;
                 file.proves_entry_absent = true;
                 collected.files.push(file);
+            }
+            "workspace.files/rename" => {
+                let renamed: RenameReceipt = decode(result)?;
+                if !renamed.renamed || !Path::new(&renamed.path).is_absolute() || !Path::new(&renamed.destination).is_absolute() {
+                    return Err(invalid("unsuccessful or non-native rename receipt"));
+                }
+                if let Some(source) = renamed.source_workspace_path {
+                    let mut file = observed_file(source, FileChangeOperation::Delete, None, None, event.seq)?;
+                    file.proves_entry_absent = true;
+                    collected.files.push(file);
+                }
+                if let Some(destination) = renamed.destination_workspace_path {
+                    collected.files.push(observed_file(destination, FileChangeOperation::Create, None, None, event.seq)?);
+                }
             }
             "workspace.artifacts/publish" => {
                 let published: PublishedWorkspaceArtifact = decode(result)?;
@@ -531,6 +560,33 @@ mod tests {
             }));
         }
         fn show(&self) -> TurnFileSummary { presentation(&self.facts, Some(&workspace())).unwrap().summary }
+    }
+
+    #[test]
+    fn native_external_effects_do_not_create_project_file_entries_or_false_coverage_gaps() {
+        let mut f = Fixture::new();
+        let external = std::env::temp_dir().join("external-file.txt").to_string_lossy().into_owned();
+        f.effect("workspace.files/write", json!({"path":external,"native_path":external,"written":true,"created":true,
+            "workspace_path":null,"bytes":6,"sha256":"d".repeat(64)}));
+        f.effect("workspace.files/delete", json!({"path":external,"native_path":external,"deleted":true,"workspace_path":null}));
+        f.effect("workspace.files/rename", json!({"path":external,"destination":format!("{external}.moved"),"renamed":true,
+            "source_workspace_path":null,"destination_workspace_path":null}));
+        f.observe(json!([]), json!([]), true);
+        let summary = f.show();
+        assert!(summary.complete);
+        assert!(summary.files.is_empty());
+        assert!(mutation_paths(&f.facts, &root_hash()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn native_rename_receipts_keep_only_true_project_source_and_destination() {
+        let mut f = Fixture::new();
+        let source = Path::new(&workspace()).join("old.txt").to_string_lossy().into_owned();
+        let destination = Path::new(&workspace()).join("new.txt").to_string_lossy().into_owned();
+        f.effect("workspace.files/rename", json!({"path":source,"destination":destination,"renamed":true,
+            "source_workspace_path":{"root_sha256":root_hash(),"path":"old.txt","case_resolved":true},
+            "destination_workspace_path":{"root_sha256":root_hash(),"path":"new.txt","case_resolved":true}}));
+        assert_eq!(mutation_paths(&f.facts, &root_hash()).unwrap(), vec!["new.txt", "old.txt"]);
     }
 
     #[test]

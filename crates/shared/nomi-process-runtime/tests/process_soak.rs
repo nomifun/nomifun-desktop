@@ -8,7 +8,7 @@ use std::{
 };
 
 use nomi_process_runtime::{
-    CapabilityPolicy, CommandSpec, NormalizedProcessRequest, OutputCursor,
+    CommandSpec, NormalizedProcessRequest, OutputCursor,
     PollResult, ProcessHandle, ProcessOutcome, ProcessOwner, ProcessPolicy,
     ProcessSupervisor, SupervisorConfig, Transport,
 };
@@ -32,7 +32,6 @@ fn helper_request() -> NormalizedProcessRequest {
         env: BTreeMap::new(),
         transport: Transport::Pipe,
         policy: ProcessPolicy::default(),
-        capability: CapabilityPolicy::local_owner(cwd),
     }
 }
 

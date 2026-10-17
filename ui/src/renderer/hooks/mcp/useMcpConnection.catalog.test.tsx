@@ -4,12 +4,11 @@ import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import type { ReactNode } from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
-import { Message, Modal } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
 import { appHosting } from '@/common/adapter/appHostingBridge';
 import { BackendHttpError } from '@/common/adapter/httpBridge';
 import { mcpService } from '@/common/adapter/ipcBridge';
-import { runtimeTools, type RuntimeToolSnapshot } from '@/common/adapter/runtimeTools';
+import { runtimeTools } from '@/common/adapter/runtimeTools';
 import type { IMcpServer } from '@/common/config/storage';
 import { parseMcpServerId } from '@/common/types/ids';
 import { useSessionCapabilityCatalog } from '@/renderer/components/chat/SessionCapabilityPicker/useSessionCapabilityCatalog';
@@ -42,121 +41,31 @@ const deferred = <T,>() => {
 };
 
 const bunServer: IMcpServer = { ...server, transport: { type: 'stdio', command: 'bunx', args: ['server'] } };
-const missingBun = () => new BackendHttpError({
-  method: 'POST', path: '/api/mcp/test-connection', status: 409,
-  body: { code: 'COMPONENT_PREPARATION_REQUIRED', error: 'Bun is required', details: { runtime: 'bun', component: 'bun', phase: 'runtime_resolution' } },
-});
-function downloadChoice() {
-  let confirmation: Parameters<typeof Modal.confirm>[0] | undefined;
-  const close = mock();
-  const confirm = track(spyOn(Modal, 'confirm').mockImplementation((options) => {
-    confirmation = options;
-    return { close, update: mock() };
-  }));
-  for (const method of ['success', 'error', 'loading'] as const) {
-    track(spyOn(Message, method).mockImplementation(() => () => {}));
-  }
-  return { confirm, close, accept: () => confirmation?.onOk?.(), decline: () => confirmation?.onCancel?.() };
-}
-
-test('MCP resolves its own environment and never checks ambient Bun before a successful probe', async () => {
+test('MCP owner prepares its own command without a second download or replay', async () => {
   const prepare = track(spyOn(runtimeTools.prepare, 'invoke'));
-  const testing = track(spyOn(mcpService.testMcpConnection, 'invoke').mockResolvedValue({ success: true, tools: [] }));
-  const choice = downloadChoice();
+  const pending = deferred<ProbeResult>();
+  const testing = track(spyOn(mcpService.testMcpConnection, 'invoke').mockImplementation(() => pending.promise));
+  const changed = mock(); restores.push(subscribeMcpCatalogChanged(changed));
   const configured: IMcpServer = { ...bunServer, transport: { type: 'stdio', command: 'bunx', env: { PATH: '/my/bun/bin' } } };
   const hook = renderHook(() => useMcpConnection(), { wrapper });
-  await act(async () => { await hook.result.current.handleTestMcpConnection(configured); });
+  let probe!: Promise<void>;
+  act(() => { probe = hook.result.current.handleTestMcpConnection(configured, { notify: false }); });
   expect(testing).toHaveBeenCalledWith({ mcp_server_id: configured.mcp_server_id, name: configured.name, transport: configured.transport });
   expect(prepare).not.toHaveBeenCalled();
-  expect(choice.confirm).not.toHaveBeenCalled();
-});
-
-test('a missing Bun offers a download and retries only after the user accepts and it is ready', async () => {
-  const prepared = deferred<RuntimeToolSnapshot>();
-  const prepare = track(spyOn(runtimeTools.prepare, 'invoke').mockImplementation(() => prepared.promise));
-  const testing = track(spyOn(mcpService.testMcpConnection, 'invoke').mockRejectedValueOnce(missingBun()).mockResolvedValue({ success: true, tools: [] }));
-  const changed = mock(); restores.push(subscribeMcpCatalogChanged(changed));
-  const choice = downloadChoice();
-  const hook = renderHook(() => useMcpConnection(), { wrapper });
-  let probe!: Promise<void>;
-  await act(async () => { probe = hook.result.current.handleTestMcpConnection(bunServer); await Promise.resolve(); });
-  expect(testing).toHaveBeenCalledTimes(1);
-  expect(choice.confirm).toHaveBeenCalledTimes(1);
-  expect(prepare).not.toHaveBeenCalled();
   expect(changed).not.toHaveBeenCalled();
-  await act(async () => { await choice.accept(); });
-  expect(prepare).toHaveBeenCalledTimes(1);
+  await act(async () => { pending.resolve({ success: true, tools: [] }); await probe; });
   expect(testing).toHaveBeenCalledTimes(1);
-  await act(async () => { prepared.resolve({ tool: 'bun', version: '1.3.13', revision: 1, phase: 'ready', received_bytes: 0 }); await probe; });
-  expect(testing).toHaveBeenCalledTimes(2);
   expect(changed).toHaveBeenCalledTimes(1);
 });
 
-test('silent save and import probes never offer or download a missing runtime', async () => {
-  const prepare = track(spyOn(runtimeTools.prepare, 'invoke'));
-  const testing = track(spyOn(mcpService.testMcpConnection, 'invoke').mockRejectedValue(missingBun()));
+test('preparation failure preserves the saved MCP catalog and permits retry', async () => {
+  const testing = track(spyOn(mcpService.testMcpConnection, 'invoke').mockRejectedValue(new BackendHttpError({
+    method: 'POST', path: '/api/mcp/test-connection', status: 422,
+    body: { code: 'MCP_COMMAND_START_FAILED', error: 'checksum failed', details: { phase: 'runtime_resolution' } },
+  })));
   const changed = mock(); restores.push(subscribeMcpCatalogChanged(changed));
-  const choice = downloadChoice();
   const hook = renderHook(() => useMcpConnection(), { wrapper });
   await act(async () => { await hook.result.current.handleTestMcpConnection(bunServer, { notify: false }); });
-  expect(testing).toHaveBeenCalledTimes(1);
-  expect(choice.confirm).not.toHaveBeenCalled();
-  expect(prepare).not.toHaveBeenCalled();
-  expect(changed).not.toHaveBeenCalled();
-  expect(hook.result.current.testingServers[server.mcp_server_id]).toBe(false);
-});
-
-test('a Bun command that starts and fails never triggers a runtime download', async () => {
-  const prepare = track(spyOn(runtimeTools.prepare, 'invoke'));
-  track(spyOn(mcpService.testMcpConnection, 'invoke').mockRejectedValue(new BackendHttpError({
-    method: 'POST', path: '/api/mcp/test-connection', status: 422,
-    body: { code: 'MCP_COMMAND_START_FAILED', error: 'process exited', details: { runtime: 'bun', failure_kind: 'process_exited' } },
-  })));
-  const choice = downloadChoice();
-  const hook = renderHook(() => useMcpConnection(), { wrapper });
-  await act(async () => { await hook.result.current.handleTestMcpConnection(bunServer); });
-  expect(choice.confirm).not.toHaveBeenCalled();
-  expect(prepare).not.toHaveBeenCalled();
-});
-
-test('declining a missing runtime never downloads or changes the saved MCP catalog', async () => {
-  const prepare = track(spyOn(runtimeTools.prepare, 'invoke'));
-  const testing = track(spyOn(mcpService.testMcpConnection, 'invoke').mockRejectedValue(missingBun()));
-  const changed = mock(); restores.push(subscribeMcpCatalogChanged(changed));
-  const choice = downloadChoice();
-  const hook = renderHook(() => useMcpConnection(), { wrapper });
-  let probe!: Promise<void>;
-  await act(async () => { probe = hook.result.current.handleTestMcpConnection(bunServer); await Promise.resolve(); });
-  await act(async () => { choice.decline(); await probe; });
-  expect(testing).toHaveBeenCalledTimes(1);
-  expect(prepare).not.toHaveBeenCalled();
-  expect(changed).not.toHaveBeenCalled();
-  expect(hook.result.current.testingServers[server.mcp_server_id]).toBe(false);
-});
-
-test('unmounting closes a pending runtime choice and cannot download on stale acceptance', async () => {
-  const prepare = track(spyOn(runtimeTools.prepare, 'invoke'));
-  track(spyOn(mcpService.testMcpConnection, 'invoke').mockRejectedValue(missingBun()));
-  const choice = downloadChoice();
-  const hook = renderHook(() => useMcpConnection(), { wrapper });
-  let probe!: Promise<void>;
-  await act(async () => { probe = hook.result.current.handleTestMcpConnection(bunServer); await Promise.resolve(); });
-  hook.unmount();
-  await act(async () => { await choice.accept(); await probe; });
-  expect(choice.close).toHaveBeenCalledTimes(1);
-  expect(prepare).not.toHaveBeenCalled();
-});
-
-test('a component failure never becomes a saved MCP connection result', async () => {
-  track(spyOn(runtimeTools.prepare, 'invoke').mockResolvedValue({ tool: 'bun', version: '1.3.13', revision: 1, phase: 'error', received_bytes: 0,
-    error: { code: 'DOWNLOAD_FAILED', message: 'Component download failed', retryable: true } }));
-  const testing = track(spyOn(mcpService.testMcpConnection, 'invoke').mockRejectedValue(missingBun()));
-  const changed = mock(); restores.push(subscribeMcpCatalogChanged(changed));
-  const choice = downloadChoice();
-  const hook = renderHook(() => useMcpConnection(), { wrapper });
-  let probe!: Promise<void>;
-  await act(async () => { probe = hook.result.current.handleTestMcpConnection(bunServer); await Promise.resolve(); });
-  await act(async () => { await choice.accept(); await probe; });
   expect(testing).toHaveBeenCalledTimes(1);
   expect(changed).not.toHaveBeenCalled();
   expect(hook.result.current.testingServers[server.mcp_server_id]).toBe(false);

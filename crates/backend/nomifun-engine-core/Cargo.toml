@@ -9,6 +9,8 @@ description = "Engine-neutral model/tool ports and platform process ownership fo
 [dependencies]
 async-trait.workspace = true
 nomi-process-runtime.workspace = true
+nomi-redact.workspace = true
+nomi-system-execution.workspace = true
 nomifun-agent-contracts.workspace = true
 nomifun-agent-domain-wave2.workspace = true
 nomifun-agent-kernel.workspace = true

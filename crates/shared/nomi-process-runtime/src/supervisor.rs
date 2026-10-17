@@ -500,8 +500,25 @@ impl ProcessSupervisor {
             }
             CommitResult::Retiring(retirement) => {
                 self.start_retirement(retirement.clone());
-                let _ = retirement.wait_outcome().await;
-                Err(ProcessError::SupervisorShuttingDown)
+                let outcome = retirement.wait_outcome().await;
+                let cleanup = match outcome {
+                    ProcessOutcome::Exited { cleanup, .. }
+                    | ProcessOutcome::Cancelled { cleanup, .. }
+                    | ProcessOutcome::TimedOut { cleanup, .. }
+                    | ProcessOutcome::Lost { cleanup, .. } => cleanup,
+                    ProcessOutcome::SpawnFailed(_) => unreachable!("native owner was already spawned"),
+                };
+                // Admission happened before shutdown, so user code may already
+                // have run. Preserve the exact cleanup and terminal snapshot;
+                // SupervisorShuttingDown is reserved for pre-spawn rejection.
+                Err(ProcessError::StartLost {
+                    failure: crate::SpawnFailure {
+                        code: "start_retired_during_shutdown".into(),
+                        message: "spawned process was retired during supervisor shutdown before start delivery".into(),
+                    },
+                    last_known: Some(session.snapshot()),
+                    cleanup,
+                })
             }
         }
     }
@@ -1865,9 +1882,9 @@ mod tests {
         SupervisorConfig, outcome_reaped, start_waiter,
     };
     use crate::{
-        CapabilityPolicy, CleanupReport, CommandSpec, ProcessOwner, ProcessPolicy,
+        CleanupReport, CommandSpec, ProcessOwner, ProcessPolicy,
         ProcessOutcome, NormalizedProcessRequest, OutputBuffer, OutputCursor, OutputSnapshot,
-        OutputStream, PollResult, ProcessState, SandboxPolicy, SessionId, Transport,
+        OutputStream, PollResult, ProcessState, SessionId, Transport,
         platform::{ExitFact, PlatformProcess},
     };
 
@@ -2797,67 +2814,76 @@ mod tests {
     async fn shutdown_waits_for_and_reports_a_reserved_session_that_commits_late() {
         let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
         let request = fake_request(ProcessPolicy {
-            interrupt_grace: Duration::from_millis(10),
-            terminate_grace: Duration::from_millis(10),
-            reap_grace: Duration::from_millis(10),
-            ..ProcessPolicy::default()
+            interrupt_grace: Duration::from_millis(10), terminate_grace: Duration::from_millis(10),
+            reap_grace: Duration::from_millis(10), ..ProcessPolicy::default()
         });
         let owner = request.owner.clone();
-        let policy = request.policy.clone();
-        let fake = Arc::new(FakeOwner::reaps_on(FakeSignal::Interrupt, 130));
-        let output = Arc::new(OutputBuffer::new(policy.output_limit_bytes));
-        let mut reservation = supervisor
-            .registry
-            .begin_test_reservation()
-            .expect("test start should reserve capacity before shutdown");
-
-        let shutdown = tokio::spawn({
-            let supervisor = supervisor.clone();
-            async move { supervisor.shutdown().await }
-        });
-        wait_for_test_condition(|| supervisor.shutdown.started.load(Ordering::Acquire)).await;
+        let fake = Arc::new(FakeOwner::controlled_reap(130));
+        let output = Arc::new(OutputBuffer::new(request.policy.output_limit_bytes));
+        let mut reservation = supervisor.registry.begin_test_reservation().unwrap();
+        let mut shutdown = Box::pin(supervisor.shutdown());
+        // Poll the real shutdown past begin_shutdown before committing the
+        // admitted native owner, without depending on scheduler timing.
+        poll_once_pending(shutdown.as_mut()).await;
         assert_eq!(supervisor.registry.counts(), (0, 0, 1));
-
         let session_id = SessionId::new();
-        let started_at = Instant::now();
-        let (exit, _exit_receiver) = tokio::sync::watch::channel(None);
-        let (lifecycle, _lifecycle_receiver) = tokio::sync::watch::channel(0);
-        let session = Arc::new(Session {
-            process: fake.clone(),
-            output,
-            policy: policy.clone(),
-            started_at,
-            last_activity_at: Mutex::new(started_at),
-            state: Arc::new(Mutex::new(SessionState {
-                process_state: ProcessState::Running,
-                exit_observation: None,
-                terminal: None,
-            })),
-            exit,
-            lifecycle,
-            before_lost_commit: Mutex::new(None),
-        });
-        let commit = supervisor.registry.test_commit(
-            &mut reservation,
-            session_id,
-            owner.clone(),
-            session.clone(),
-            policy.lease,
-            policy.expire_on_idle,
-            started_at,
-        );
-        start_waiter(session);
-        let CommitResult::Retiring(retirement) = commit else {
-            panic!("a post-shutdown reservation commit must retire, never become active");
+        let mut registration = Box::pin(supervisor.register_reserved(request, fake.clone(), output, &mut reservation, session_id));
+        poll_once_pending(registration.as_mut()).await;
+        wait_for_test_condition(|| !fake.signal_calls().is_empty() && fake.wait_call_count() == 1).await;
+        assert_eq!(supervisor.registry.counts(), (0, 1, 0));
+        // Start delivery must wait for the exact owner's real cleanup result.
+        poll_once_pending(registration.as_mut()).await;
+        fake.release_reap();
+        let (started, report) = tokio::join!(registration.as_mut(), shutdown.as_mut());
+        let Err(crate::ProcessError::StartLost { failure, last_known: Some(last_known), cleanup }) = started else {
+            panic!("a spawned shutdown race must retain StartLost, not claim user code never started");
         };
-        supervisor.start_retirement(retirement);
-
-        let report = shutdown.await.expect("shutdown task should join");
+        assert_eq!(failure.code, "start_retired_during_shutdown");
+        assert_eq!(last_known.pid, 4242);
+        assert_eq!(last_known.state, ProcessState::Cancelled);
+        assert!(cleanup.reaped);
         assert_eq!(report.sessions.len(), 1);
         assert_eq!(report.sessions[0].session_id, session_id);
         assert_eq!(report.sessions[0].owner, owner);
-        assert!(outcome_reaped(&report.sessions[0].outcome));
+        let ProcessOutcome::Cancelled { cleanup: reported_cleanup, .. } = &report.sessions[0].outcome else {
+            panic!("shutdown must retain the same actual cancellation outcome");
+        };
+        assert_eq!(&cleanup, reported_cleanup);
         assert_eq!(fake.signal_calls(), vec!["interrupt"]);
+        assert_eq!(fake.wait_call_count(), 1);
+        assert_eq!(supervisor.shutdown().await, report);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_late_registration_preserves_unproven_cleanup() {
+        let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+        let request = fake_request(ProcessPolicy {
+            interrupt_grace: Duration::from_millis(1), terminate_grace: Duration::from_millis(1),
+            reap_grace: Duration::from_millis(1), ..ProcessPolicy::default()
+        });
+        let owner = request.owner.clone();
+        let fake = Arc::new(FakeOwner::pending());
+        let output = Arc::new(OutputBuffer::new(request.policy.output_limit_bytes));
+        let mut reservation = supervisor.registry.begin_test_reservation().unwrap();
+        let mut shutdown = Box::pin(supervisor.shutdown());
+        poll_once_pending(shutdown.as_mut()).await;
+        let session_id = SessionId::new();
+        let (started, report) = tokio::join!(supervisor.register_reserved(request, fake.clone(), output, &mut reservation, session_id), shutdown.as_mut());
+        let Err(crate::ProcessError::StartLost { failure, last_known: Some(last_known), cleanup }) = started else {
+            panic!("an unreaped admitted process must retain an uncertain StartLost receipt");
+        };
+        assert_eq!(failure.code, "start_retired_during_shutdown");
+        assert_eq!(last_known.pid, 4242);
+        assert_eq!(last_known.state, ProcessState::Lost);
+        assert!(!cleanup.reaped);
+        assert!(!cleanup.errors.is_empty());
+        assert_eq!(report.sessions.len(), 1);
+        assert_eq!(report.sessions[0].session_id, session_id);
+        assert_eq!(report.sessions[0].owner, owner);
+        let ProcessOutcome::Lost { cleanup: reported_cleanup, .. } = &report.sessions[0].outcome else {
+            panic!("shutdown must preserve unreaped Lost, not a fabricated clean terminal");
+        };
+        assert_eq!(&cleanup, reported_cleanup);
         assert_eq!(fake.wait_call_count(), 1);
     }
 
@@ -4353,7 +4379,9 @@ mod tests {
             }).await.expect("start and shutdown must settle their original ownership transaction");
             let valid = match started {
                 Ok(handle) => published_before_shutdown && handle.owner == expected_owner && handle.pid == pid,
-                Err(crate::ProcessError::SupervisorShuttingDown) => !published_before_shutdown,
+                Err(crate::ProcessError::StartLost { failure, last_known: Some(last_known), cleanup }) =>
+                    !published_before_shutdown && failure.code == "start_retired_during_shutdown"
+                        && last_known.pid == pid && cleanup.reaped,
                 _ => false,
             };
             (report, valid)
@@ -4551,7 +4579,7 @@ mod tests {
     fn native_start_request(directory: &std::path::Path, marker: &std::path::Path) -> NormalizedProcessRequest {
         let mut request = fake_request(ProcessPolicy::default());
         request.cwd = directory.to_owned();
-        request.capability = CapabilityPolicy::local_owner(directory.to_owned());
+
         #[cfg(windows)]
         {
             let system_root = std::env::var_os("SystemRoot").expect("Windows has SystemRoot");
@@ -4724,10 +4752,7 @@ mod tests {
             env: BTreeMap::new(),
             transport: Transport::Pipe,
             policy,
-            capability: CapabilityPolicy {
-                cwd_roots: vec![cwd],
-                sandbox: SandboxPolicy::UnrestrictedLocalOwner,
-            },
+
         }
     }
 }

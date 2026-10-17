@@ -11,6 +11,10 @@
 
 use xcap::Window;
 
+#[cfg(target_os = "macos")]
+#[path = "macos_self_focus.rs"]
+mod macos_self_focus;
+
 // The click-to-raise focus fallback (and only that) uses synthetic input; on
 // Windows and macOS activate the real window through native APIs.
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -172,6 +176,11 @@ fn focus_window_macos(window_id: u32) -> Result<String, String> {
         let title = window.title().ok().filter(|title| !title.is_empty());
         Ok((pid, bounds, title))
     })?;
+    if u32::try_from(pid).ok() == Some(std::process::id()) {
+        let effect = macos_self_focus::focus(macos_self_focus::SelfWindowTarget { window_id, pid, bounds, title })
+            .map_err(|error| format!("Could not activate current-process macOS window {window_id}: {error}"))?;
+        return Ok(format!("Activated window {window_id} via macOS AppKit. {}", effect.message));
+    }
     let effect = nomi_a11y::focus_named_window(pid, bounds, title)
         .map_err(|e| format!("Could not activate macOS window {window_id}: {e}"))?;
     Ok(format!("Activated window {window_id} via macOS Accessibility. {}", effect.message))

@@ -2,7 +2,7 @@
 //! A digest identifies bytes observed by this read, not a filesystem snapshot
 //! or a write lease. Windows reads pin the authorized directory and verify
 //! the opened file identity before returning a page.
-use std::io::Read;
+use std::path::Path;
 
 use nomifun_common::AppError;
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use crate::path_safety::{validate_path_authority, validate_path_for_write_authority};
 use crate::{AgentSessionWorkspaceBinding, FileService, WORKSPACE_READ_OPERATION};
 
-const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_FILE_BYTES: usize = nomi_native_files::MAX_SOURCE_BYTES;
 const MAX_PAGE_BYTES: usize = 16 * 1024;
 const MAX_JSON_BYTES: usize = 24 * 1024;
 const MAX_TOOL_TEXT_BYTES: usize = 24 * 1024;
@@ -68,6 +68,66 @@ pub struct AgentTextPage {
     pub source_version_pinned: bool,
 }
 
+/// Validate before acquiring bytes, including when the acquisition owner needs
+/// a native administrator context. Projection repeats this check so every
+/// caller retains the same paging contract.
+pub fn validate_agent_text_read_request(request: &AgentTextReadRequest) -> Result<(), AppError> {
+    let by_lines = request.start_line.is_some() || request.line_count.is_some();
+    if request.path.is_empty()
+        || request.path.len() > 4096
+        || request.path.contains('\0')
+        || !(4..=MAX_PAGE_BYTES).contains(&request.limit)
+        || request.offset > MAX_FILE_BYTES
+        || request.start_line.is_some_and(|line| line == 0 || line > MAX_FILE_BYTES + 1)
+        || request.line_count.is_some_and(|lines| !(1..=2000).contains(&lines))
+        || (by_lines && (request.offset != 0 || request.limit != MAX_PAGE_BYTES))
+        || request.expected_sha256.as_ref().is_some_and(|hash| {
+            hash.len() != 64
+                || !hash
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+    {
+        return Err(AppError::BadRequest("Invalid text read: use a native absolute or Session-relative path and either byte offset/limit 4..16384 or start_line/line_count. expected_sha256 optionally pins the current source version.".into()));
+    }
+    Ok(())
+}
+
+/// Project an owner's bounded, versioned native file acquisition through the
+/// canonical text paging rules. The owner supplies bytes, their SHA-256, and
+/// the actual canonical target; this function never opens the source. The
+/// workspace root is used only for optional project-path presentation.
+pub fn project_agent_text_page(
+    mut request: AgentTextReadRequest,
+    bytes: Vec<u8>,
+    sha256: String,
+    workspace_root: &Path,
+    canonical_path: &Path,
+) -> Result<AgentTextPage, AppError> {
+    validate_agent_text_read_request(&request)?;
+    if bytes.len() > MAX_FILE_BYTES {
+        return Err(AppError::BadRequest("Source is not a bounded regular file".into()));
+    }
+    if sha256 != format!("{:x}", Sha256::digest(&bytes)) {
+        return Err(AppError::Internal("Acquired text source digest does not match its bytes".into()));
+    }
+    let text = decode_source_text(bytes)?;
+    if request.expected_sha256.as_ref().is_some_and(|expected| expected != &sha256) {
+        return Err(AppError::Conflict("FILE_CONTENT_CHANGED: discard prior pages and restart at offset 0 without expected_sha256".into()));
+    }
+    if request.start_line.is_some() || request.line_count.is_some() {
+        let line = request.start_line.unwrap_or(1);
+        let start = if line == 1 { 0 } else {
+            text.match_indices('\n').nth(line - 2).map_or(text.len(), |(index, _)| index + 1)
+        };
+        let end = text[start..].match_indices('\n').nth(request.line_count.unwrap_or(200) - 1)
+            .map_or(text.len(), |(index, _)| start + index + 1);
+        request.offset = start;
+        request.limit = (end - start).min(MAX_PAGE_BYTES);
+    }
+    page(request, text, sha256, crate::WorkspacePathObservation::from_canonical(workspace_root, canonical_path))
+}
+
 impl FileService {
     /// Raw bytes for platform-owned decoders, not an engine filesystem bypass.
     /// Authority/path checks are identical to text reads. No persistence or
@@ -79,16 +139,16 @@ impl FileService {
         max_bytes: usize,
     ) -> Result<Option<(Vec<u8>, String)>, AppError> {
         scope.require_operation(WORKSPACE_READ_OPERATION)?;
-        if relative_path.trim().is_empty()
+        if relative_path.is_empty()
             || relative_path.len() > 4096
-            || relative_path.chars().any(char::is_control)
+            || relative_path.contains('\0')
             || max_bytes > MAX_FILE_BYTES
         {
             return Err(AppError::BadRequest(
                 "Invalid bounded workspace byte read".into(),
             ));
         }
-        let path = scope.resolve_relative_path(relative_path)?;
+        let path = scope.resolve_path(relative_path)?;
         let authority = scope.authority();
         tokio::task::spawn_blocking(move || {
             let mut charged_bytes = 0;
@@ -102,54 +162,24 @@ impl FileService {
     pub async fn read_text_page_for_agent_session(
         &self,
         scope: &AgentSessionWorkspaceBinding,
-        mut request: AgentTextReadRequest,
+        request: AgentTextReadRequest,
     ) -> Result<Option<AgentTextPage>, AppError> {
         scope.require_operation(WORKSPACE_READ_OPERATION)?;
-        let by_lines = request.start_line.is_some() || request.line_count.is_some();
-        if request.path.trim().is_empty()
-            || request.path.len() > 4096
-            || request.path.chars().any(char::is_control)
-            || !(4..=MAX_PAGE_BYTES).contains(&request.limit)
-            || request.offset > MAX_FILE_BYTES
-            || request.start_line.is_some_and(|line| line == 0 || line > MAX_FILE_BYTES + 1)
-            || request.line_count.is_some_and(|lines| !(1..=2000).contains(&lines))
-            || (by_lines && (request.offset != 0 || request.limit != MAX_PAGE_BYTES))
-            || request.expected_sha256.as_ref().is_some_and(|hash| {
-                hash.len() != 64
-                    || !hash
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            })
-        {
-            return Err(AppError::BadRequest("Invalid text read: use a relative path and either byte offset/limit 4..16384 or start_line/line_count. expected_sha256 optionally pins the current source version.".into()));
-        }
-        let path = scope.resolve_relative_path(&request.path)?;
+        validate_agent_text_read_request(&request)?;
+        let path = scope.resolve_path(&request.path)?;
         let authority = scope.authority();
         let root = scope.workspace_root().to_path_buf();
         tokio::task::spawn_blocking(move || {
             let mut charged_bytes = 0;
-            let Some((text, digest, canonical)) = read_source_with_path(&path, &authority, MAX_FILE_BYTES, &mut charged_bytes)? else {
+            let Some((bytes, digest, canonical)) = read_source_bytes(&path, &authority, MAX_FILE_BYTES, &mut charged_bytes)? else {
                 return Ok(None);
             };
-            if request.expected_sha256.as_ref().is_some_and(|expected| expected != &digest) {
-                return Err(AppError::Conflict("FILE_CONTENT_CHANGED: discard prior pages and restart at offset 0 without expected_sha256".into()));
-            }
-            if by_lines {
-                let line = request.start_line.unwrap_or(1);
-                let start = if line == 1 { 0 } else {
-                    text.match_indices('\n').nth(line - 2).map_or(text.len(), |(index, _)| index + 1)
-                };
-                let end = text[start..].match_indices('\n').nth(request.line_count.unwrap_or(200) - 1)
-                    .map_or(text.len(), |(index, _)| start + index + 1);
-                request.offset = start;
-                request.limit = (end - start).min(MAX_PAGE_BYTES);
-            }
-            page(request, text, digest, crate::WorkspacePathObservation::from_canonical(&root, &canonical)).map(Some)
+            project_agent_text_page(request, bytes, digest, &root, &canonical).map(Some)
         }).await.map_err(|error| AppError::Internal(format!("text page task failed: {error}")))?
     }
 }
 
-/// Shared confined bounded read. Charge actual bytes even on a partial IO
+/// Shared native bounded read. Charge actual bytes even on a partial IO
 /// failure so a search cannot escape its aggregate read budget via errors.
 pub(crate) fn read_source(
     path: &std::path::Path,
@@ -171,12 +201,16 @@ fn read_source_with_path(
     else {
         return Ok(None);
     };
-    let text = String::from_utf8(bytes).map_err(|_| {
+    let text = decode_source_text(bytes)?;
+    Ok(Some((text, digest, canonical)))
+}
+
+fn decode_source_text(bytes: Vec<u8>) -> Result<String, AppError> {
+    String::from_utf8(bytes).map_err(|_| {
         AppError::BadRequest(
             "Text source is not UTF-8; no lossy binary conversion was performed".into(),
         )
-    })?;
-    Ok(Some((text, digest, canonical)))
+    })
 }
 
 fn read_source_bytes(
@@ -226,43 +260,25 @@ pub(crate) fn read_source_bytes_with_hooks(
         if !before.is_file() || before.len() > max_bytes as u64 {
             return Err(AppError::BadRequest("Source is not a bounded regular file".into()));
         }
-        std::fs::File::open(&canonical).map_err(io_error)
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)] {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+        }
+        options.open(&canonical).map_err(io_error)
     };
     before_open();
-    let file = open()?;
-    let opened = file.metadata().map_err(io_error)?;
-    if !opened.is_file() || opened.len() > max_bytes as u64 {
-        return Err(AppError::BadRequest(
-            "Source is not a bounded regular file".into(),
-        ));
-    }
-    let identity = same_file::Handle::from_file(file.try_clone().map_err(io_error)?).map_err(io_error)?;
-    let mut bytes = Vec::with_capacity((opened.len() as usize).min(max_bytes));
-    let mut bounded = file.take((max_bytes + 1) as u64);
-    let read_result = bounded.read_to_end(&mut bytes);
-    *charged_bytes = charged_bytes.saturating_add(bytes.len());
-    read_result.map_err(io_error)?;
-    after_read();
-    let after = bounded.get_ref().metadata().map_err(io_error)?;
-    let current = open().map_err(|_| AppError::Conflict("FILE_CHANGED_DURING_READ: named source can no longer be verified".into()))?;
-    let current_identity = same_file::Handle::from_file(current).map_err(io_error)?;
-    if bytes.len() > max_bytes
-        || bytes.len() as u64 != opened.len()
-        || opened.len() != after.len()
-        || opened.modified().ok() != after.modified().ok()
-        || identity != current_identity
-        || validate_path_authority(&path.to_string_lossy(), authority)? != canonical
-    {
-        return Err(AppError::Conflict(
-            "FILE_CHANGED_DURING_READ: discard this read and restart".into(),
-        ));
-    }
-    let digest = format!("{:x}", Sha256::digest(&bytes));
-    Ok(Some((bytes, digest, canonical)))
+    let (bytes, sha256) = nomi_native_files::acquire_source_with_adapter(
+        max_bytes, charged_bytes, open, after_read,
+        || Ok(validate_path_authority(&path.to_string_lossy(), authority)? == canonical),
+        crate::native_file_acquisition_error,
+    )?;
+    Ok(Some((bytes, sha256, canonical)))
 }
 
 fn io_error(error: std::io::Error) -> AppError {
-    AppError::BadRequest(format!("Workspace file read failed: {error}"))
+    crate::path_safety::native_io_error("reading native file", error)
 }
 
 fn missing_path_is_confined(path: &std::path::Path, authority: &crate::PathAuthority) -> bool {
@@ -303,7 +319,7 @@ fn page(
     }
     let (start_line, start_column_bytes) = crate::agent_patch_lines::line_position(&text, start);
     let mut result = AgentTextPage {
-        path: request.path.trim().to_owned(),
+        path: request.path,
         workspace_path,
         content: String::new(),
         sha256,
@@ -344,6 +360,197 @@ fn page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn text_request(value: serde_json::Value) -> AgentTextReadRequest {
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn project_bytes(request: AgentTextReadRequest, bytes: &[u8]) -> Result<AgentTextPage, AppError> {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().canonicalize().unwrap().join("not-opened.txt");
+        assert!(!canonical.exists());
+        project_agent_text_page(request, bytes.to_vec(), format!("{:x}", Sha256::digest(bytes)), root.path(), &canonical)
+    }
+
+    #[test]
+    fn shared_request_validation_preserves_native_paths_and_rejects_invalid_paging() {
+        for value in [
+            serde_json::json!({"path":""}),
+            serde_json::json!({"path":"bad\0path"}),
+            serde_json::json!({"path":"x".repeat(4097)}),
+            serde_json::json!({"path":"text", "limit":3}),
+            serde_json::json!({"path":"text", "limit":MAX_PAGE_BYTES + 1}),
+            serde_json::json!({"path":"text", "offset":MAX_FILE_BYTES + 1}),
+            serde_json::json!({"path":"text", "start_line":0}),
+            serde_json::json!({"path":"text", "start_line":MAX_FILE_BYTES + 2}),
+            serde_json::json!({"path":"text", "line_count":0}),
+            serde_json::json!({"path":"text", "line_count":2001}),
+            serde_json::json!({"path":"text", "start_line":1, "offset":1}),
+            serde_json::json!({"path":"text", "line_count":1, "limit":4}),
+            serde_json::json!({"path":"text", "expected_sha256":"a".repeat(63)}),
+            serde_json::json!({"path":"text", "expected_sha256":"A".repeat(64)}),
+            serde_json::json!({"path":"text", "expected_sha256":"g".repeat(64)}),
+        ] {
+            let request = text_request(value);
+            assert!(matches!(validate_agent_text_read_request(&request), Err(AppError::BadRequest(_))), "{request:?}");
+            assert!(matches!(project_bytes(request, b"content"), Err(AppError::BadRequest(_))));
+        }
+        for path in ["../native path/文件", " /native\nname "] {
+            let result = project_bytes(text_request(serde_json::json!({"path":path})), b"content").unwrap();
+            assert_eq!(result.path, path);
+        }
+        assert!(serde_json::from_value::<AgentTextReadRequest>(serde_json::json!({"path":"text", "unknown":true})).is_err());
+    }
+
+    #[test]
+    fn shared_projection_checks_source_budget_digest_utf8_and_version_before_paging() {
+        let request = || text_request(serde_json::json!({"path":"text"}));
+        assert!(matches!(project_bytes(request(), &vec![b'x'; MAX_FILE_BYTES + 1]), Err(AppError::BadRequest(_))));
+        let root = tempfile::tempdir().unwrap();
+        let inconsistent = project_agent_text_page(request(), b"text".to_vec(), "0".repeat(64), root.path(), &root.path().join("text"));
+        assert!(matches!(inconsistent, Err(AppError::Internal(message)) if message.contains("digest")));
+        assert!(matches!(project_bytes(request(), &[0xff, 0xfe]), Err(AppError::BadRequest(message)) if message.contains("not UTF-8")));
+        let stale = text_request(serde_json::json!({"path":"text", "offset":99, "expected_sha256":"0".repeat(64)}));
+        assert!(matches!(project_bytes(stale, b"text"), Err(AppError::Conflict(message)) if message.contains("FILE_CONTENT_CHANGED")));
+        let digest = format!("{:x}", Sha256::digest(b"text"));
+        let pinned = project_bytes(text_request(serde_json::json!({"path":"text", "expected_sha256":digest})), b"text").unwrap();
+        assert!(pinned.source_version_pinned);
+        assert_eq!(pinned.sha256, digest);
+        assert_eq!(pinned.total_bytes, 4);
+    }
+
+    #[test]
+    fn shared_projection_keeps_utf8_boundaries_empty_eof_and_exact_line_selection() {
+        let text = "é🌟tail\r\n第二行\nlast";
+        let result = project_bytes(text_request(serde_json::json!({"path":"text", "offset":2, "limit":5})), text.as_bytes()).unwrap();
+        assert_eq!(result.content, "🌟t");
+        assert_eq!((result.start_line, result.start_column_bytes), (1, 3));
+        assert_eq!(result.next_offset, Some(7));
+        assert!(!result.eof);
+        for offset in [1, text.len() + 1] {
+            assert!(matches!(project_bytes(text_request(serde_json::json!({"path":"text", "offset":offset})), text.as_bytes()), Err(AppError::BadRequest(_))));
+        }
+        let lines = project_bytes(text_request(serde_json::json!({"path":"text", "start_line":2, "line_count":1})), text.as_bytes()).unwrap();
+        assert_eq!(lines.content, "第二行\n");
+        assert_eq!((lines.start_line, lines.start_column_bytes), (2, 1));
+        assert_eq!(lines.next_offset, Some("é🌟tail\r\n第二行\n".len()));
+        assert!(!lines.eof, "line_count ending does not imply source EOF");
+        for bytes in [b"".as_slice(), b"one\n".as_slice()] {
+            let eof = project_bytes(text_request(serde_json::json!({"path":"text", "start_line":99, "line_count":1})), bytes).unwrap();
+            assert!(eof.eof);
+            assert_eq!(eof.offset, bytes.len());
+            assert!(eof.content.is_empty());
+            assert_eq!(eof.next_offset, None);
+        }
+        let long = vec![b'x'; MAX_PAGE_BYTES + 1];
+        let first_line = project_bytes(text_request(serde_json::json!({"path":"text", "line_count":1})), &long).unwrap();
+        assert_eq!(first_line.content.len(), MAX_PAGE_BYTES);
+        assert_eq!(first_line.next_offset, Some(MAX_PAGE_BYTES));
+    }
+
+    #[test]
+    fn shared_projection_bounds_both_json_escape_layers_and_preserves_progress() {
+        let text = "\0\"\\\n💫".repeat(4000);
+        let path = "\\\"".repeat(1500);
+        let mut offset = 0;
+        let mut content = String::new();
+        loop {
+            let page = project_bytes(text_request(serde_json::json!({"path":path, "offset":offset})), text.as_bytes()).unwrap();
+            let json = serde_json::to_string(&page).unwrap();
+            assert!(json.len() <= MAX_JSON_BYTES);
+            assert!(serde_json::to_vec(&json).unwrap().len() <= MAX_TOOL_TEXT_BYTES);
+            content.push_str(&page.content);
+            if page.eof { break; }
+            let next = page.next_offset.unwrap();
+            assert!(next > offset);
+            assert!(text.is_char_boundary(next));
+            offset = next;
+        }
+        assert_eq!(content, text);
+    }
+
+    #[tokio::test]
+    async fn native_and_acquired_byte_pages_have_identical_metadata_without_reopening_source() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("text.txt");
+        let text = "\u{feff}first\r\n中文🌟\nlast";
+        std::fs::write(&source, text).unwrap();
+        let canonical = source.canonicalize().unwrap();
+        let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+        let scope = crate::resource::workspace_binding(nomifun_common::generate_id(), "binding", "workspace", "owner",
+            [WORKSPACE_READ_OPERATION], &root).unwrap();
+        let service = FileService::new(std::sync::Arc::new(NoEvents), vec![]);
+        for value in [
+            serde_json::json!({"path":"text.txt"}),
+            serde_json::json!({"path":"text.txt", "offset":10, "limit":7, "expected_sha256":digest}),
+            serde_json::json!({"path":"text.txt", "start_line":2, "line_count":1}),
+        ] {
+            let normal = service.read_text_page_for_agent_session(&scope, text_request(value.clone())).await.unwrap().unwrap();
+            let projected = project_agent_text_page(text_request(value), text.as_bytes().to_vec(), digest.clone(), &root, &canonical).unwrap();
+            assert_eq!(serde_json::to_value(normal).unwrap(), serde_json::to_value(projected).unwrap());
+        }
+        std::fs::remove_file(&source).unwrap();
+        let retained = project_agent_text_page(text_request(serde_json::json!({"path":"text.txt"})), text.as_bytes().to_vec(), digest.clone(), &root, &canonical).unwrap();
+        assert_eq!(retained.content, text);
+        assert_eq!(retained.workspace_path.unwrap().path, "text.txt");
+        let outside = fixture.path().canonicalize().unwrap().join("outside.txt");
+        let external = project_agent_text_page(text_request(serde_json::json!({"path":"requested-alias"})), text.as_bytes().to_vec(), digest, &root, &outside).unwrap();
+        assert_eq!(external.path, "requested-alias");
+        assert!(external.workspace_path.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_source_adapter_preserves_post_read_authority_errors_and_byte_charges() {
+        use std::{fs, os::unix::fs::symlink};
+        for confined in [false, true] {
+            let fixture = tempfile::tempdir().unwrap();
+            let root = fixture.path().join("workspace");
+            fs::create_dir(&root).unwrap();
+            let source = root.join("source.txt");
+            let outside = fixture.path().join("outside.txt");
+            let alias = root.join("alias.txt");
+            fs::write(&source, b"inside").unwrap();
+            fs::write(&outside, b"outside").unwrap();
+            symlink(&source, &alias).unwrap();
+            let authority = if confined { crate::PathAuthority::Workspace(root) } else { crate::PathAuthority::Unrestricted };
+            let mut charged = 0;
+            let result = read_source_bytes_with_hooks(&alias, &authority, 64, &mut charged, || {}, || {
+                fs::remove_file(&alias).unwrap();
+                symlink(&outside, &alias).unwrap();
+            });
+            if confined {
+                assert!(matches!(result, Err(AppError::Forbidden(_))), "{result:?}");
+            } else {
+                assert!(matches!(result, Err(AppError::Conflict(message)) if message.contains("FILE_CHANGED_DURING_READ")));
+            }
+            assert_eq!(charged, 6, "bytes are charged even when final authority verification fails");
+            assert_eq!(fs::read(&source).unwrap(), b"inside");
+            assert_eq!(fs::read(&outside).unwrap(), b"outside");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn native_utf8_alias_can_read_a_non_utf8_target_without_a_lossy_project_path() {
+        use std::{ffi::OsString, fs, os::unix::{ffi::OsStringExt as _, fs::symlink}};
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join(OsString::from_vec(b"native-\xff.txt".to_vec()));
+        fs::write(&source, b"native bytes").unwrap();
+        symlink(&source, root.path().join("alias.txt")).unwrap();
+        let scope = crate::resource::workspace_binding(nomifun_common::generate_id(), "binding", "workspace", "owner",
+            [WORKSPACE_READ_OPERATION], root.path()).unwrap();
+        let service = FileService::new(std::sync::Arc::new(NoEvents), vec![]);
+        let page = service.read_text_page_for_agent_session(&scope, text_request(serde_json::json!({"path":"alias.txt"}))).await.unwrap().unwrap();
+        assert_eq!(page.path, "alias.txt");
+        assert_eq!(page.content, "native bytes");
+        assert!(page.workspace_path.is_none(), "an unrepresentable project path is never replaced with lossy text");
+        let (bytes, digest) = service.read_bytes_for_agent_session(&scope, "alias.txt", 64).await.unwrap().unwrap();
+        assert_eq!(bytes, b"native bytes");
+        assert_eq!(digest, page.sha256);
+    }
 
     #[cfg(windows)]
     fn race_fixture() -> tempfile::TempDir {
@@ -507,7 +714,7 @@ mod tests {
         std::fs::write(root.path().join("binary.bin"),[0xff,0xfe]).unwrap();
         assert!(service.read_file_for_agent_session(&scope,"binary.bin").await.is_err());
         assert!(service.read_file_for_agent_session(&scope,"missing.txt").await.unwrap().is_none());
-        assert!(service.read_file_for_agent_session(&scope,"../outside.txt").await.is_err());
+        assert!(service.read_file_for_agent_session(&scope,"bad\0path").await.is_err());
     }
 
     #[tokio::test]
@@ -540,7 +747,7 @@ mod tests {
         assert_eq!(fresh.content,"变化");
         assert_ne!(fresh.sha256,bytes.sha256);
         assert!(service.read_text_page_for_agent_session(&scope,request(serde_json::json!({
-            "path":"../escape","offset":7,"limit":6
+            "path":"bad\0path","offset":7,"limit":6
         }))).await.is_err());
     }
 }

@@ -344,6 +344,7 @@ for t in "${TRIPLES[@]}"; do
     echo "❌ Tauri App does not contain this exact desktop build; refusing stale or mismatched output。" >&2
     exit 1
   }
+  bun "$ROOT/scripts/lib/macos-system-execution.mjs" --root "$ROOT" --target "$t" --profile release --app "$app"
   sign_final_app "$app" "$t"
   verify_macos_app "$app" "$t"
   notarize_final_app "$app"

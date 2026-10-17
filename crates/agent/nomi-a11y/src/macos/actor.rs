@@ -533,7 +533,11 @@ unsafe fn walk(
     if let (Some((x, y)), Some((w, h))) = (pos, size) {
         let bounds = Rect { x, y, w, h };
         if valid_window_bounds(&bounds)
-            && (actionable || is_editable_role(role.as_deref()) || secure || name.is_some())
+            // Static displays can expose only AXValue, without a title,
+            // description or action. Secure controls already have value=None
+            // above, before this retention decision is made.
+            && (actionable || is_editable_role(role.as_deref()) || secure || name.is_some()
+                || value.as_deref().is_some_and(|value| !value.trim().is_empty()))
         {
             let mut states = Vec::new();
             if !enabled {
@@ -697,13 +701,15 @@ unsafe fn focused_app() -> Result<AxElem, A11yError> {
         A11yError::Backend("AXUIElementCreateSystemWide returned null".to_string())
     })?;
     let app = copy_elem_attr(sw.ptr(), "AXFocusedApplication").ok_or_else(|| {
+        // A grant may have been withdrawn since the operation's first check.
+        if let Err(error) = require_accessibility_permission() { return error; }
         let app = crate::host_app_label();
-        A11yError::Permission(format!(
-            "No focused application is readable — Accessibility permission is not in effect for \
-             {app}. Grant it in System Settings → Privacy & Security → Accessibility (the entry is \
-             named \"{app}\"), then COMPLETELY quit and reopen {app} — macOS does not apply this \
-             permission to an already-running process. Computer-use runs inside {app} itself, so \
-             do not grant a terminal or editor."
+        // The caller already checked AXIsProcessTrusted. A missing frontmost
+        // app can mean a locked/login desktop or a transient window state; it
+        // does not establish a new TCC denial.
+        A11yError::Backend(format!(
+            "No focused application is readable by {app}. Verify the logged-in desktop is \
+             unlocked and a normal application has focus, then observe again."
         ))
     })?;
     let err = AXUIElementSetMessagingTimeout(app.ptr(), 0.5);
@@ -1079,7 +1085,8 @@ fn require_accessibility_permission() -> Result<(), A11yError> {
     if unsafe { AXIsProcessTrusted() } == 0 {
         return Err(A11yError::Permission(format!(
             "Accessibility permission is not in effect for {}; grant it in System Settings → \
-             Privacy & Security → Accessibility, then quit and reopen the app",
+             Privacy & Security → Accessibility, then recheck access and observe again. If the \
+             grant remains stale, quit and reopen the app and resume the task",
             crate::host_app_label()
         )));
     }
@@ -1157,17 +1164,47 @@ unsafe fn set_bool_attr(el: &AxElem, name: &str, value: bool) -> Result<(), A11y
     if err == 0 { Ok(()) } else { Err(ax_mutation_error(name, err)) }
 }
 
-unsafe fn set_bool_if_settable(el: &AxElem, name: &str) -> Result<(), A11yError> {
+unsafe fn bool_attribute_is_settable(el: &AxElem, name: &str) -> Result<bool, A11yError> {
     let attr = CFString::new(name);
     let mut settable = 0;
     let err = AXUIElementIsAttributeSettable(el.ptr(), attr.as_concrete_TypeRef(), &mut settable);
-    if err == -25205 || (err == 0 && settable == 0) {
-        return Ok(());
+    if matches!(err, -25205 | -25208) || (err == 0 && settable == 0) {
+        return Ok(false);
     }
     if err != 0 {
         return Err(ax_error(&format!("read writability of {name}"), err));
     }
-    set_bool_attr(el, name, true)
+    Ok(true)
+}
+
+fn keyboard_focus_matches(app_frontmost: Option<bool>, selected_window: bool,
+    minimized: Option<bool>, frontmost_pid: Option<i32>, target_pid: i32) -> bool {
+    target_pid > 0 && app_frontmost == Some(true) && selected_window
+        && minimized != Some(true) && frontmost_pid == Some(target_pid)
+}
+
+unsafe fn has_selected_keyboard_focus(app: &AxElem, window: &AxElem, pid: i32) -> bool {
+    let focused = copy_elem_attr(app.ptr(), "AXFocusedWindow");
+    keyboard_focus_matches(copy_bool_attr(app.ptr(), "AXFrontmost"),
+        focused.as_ref().is_some_and(|item| CFEqual(item.ptr(), window.ptr()) != 0),
+        copy_bool_attr(window.ptr(), "AXMinimized"),
+        focused_app().ok().and_then(|item| pid_of(item.ptr())), pid)
+}
+
+unsafe fn wait_for_selected_focus(app: &AxElem, window: &AxElem, pid: i32, budget: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        if has_selected_keyboard_focus(app, window, pid) { return true; }
+        if started.elapsed() >= budget { return false; }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn raise_supported_window(actions: &[String], perform: impl FnOnce() -> i32) -> Result<bool, A11yError> {
+    if !actions.iter().any(|action| action == "AXRaise") { return Ok(false); }
+    let err = perform();
+    if err != 0 { return Err(ax_mutation_error("raise target window", err)); }
+    Ok(true)
 }
 
 unsafe fn activate_window(app: &AxElem, window: &AxElem, pid: i32) -> Result<Effect, A11yError> {
@@ -1175,40 +1212,54 @@ unsafe fn activate_window(app: &AxElem, window: &AxElem, pid: i32) -> Result<Eff
     if err != 0 {
         return Err(ax_error("configure window messaging timeout", err));
     }
-    if copy_bool_attr(window.ptr(), "AXMinimized") == Some(true) {
-        set_bool_attr(window, "AXMinimized", false)?;
+    // LaunchServices and the user may already have focused this exact window.
+    // Do not send an unsupported AXRaise merely to reproduce an observed state.
+    if has_selected_keyboard_focus(app, window, pid) {
+        return Ok(Effect { changed: false, message: format!("the selected window of pid {pid} already has keyboard focus") });
     }
-    let err = perform(window.ptr(), "AXRaise");
-    if err != 0 {
-        return Err(ax_mutation_error("raise target window", err));
-    }
-    set_bool_if_settable(window, "AXMain")?;
-    set_bool_if_settable(window, "AXFocused")?;
-    set_bool_attr(app, "AXFrontmost", true)?;
 
-    // Activation may complete asynchronously. Success requires the actual key
-    // window to equal the selected AX object; AXMain alone is not keyboard focus.
-    let started = Instant::now();
-    loop {
-        let focused = copy_elem_attr(app.ptr(), "AXFocusedWindow");
-        if copy_bool_attr(app.ptr(), "AXFrontmost") == Some(true)
-            && focused.as_ref().is_some_and(|w| CFEqual(w.ptr(), window.ptr()) != 0)
-            && copy_bool_attr(window.ptr(), "AXMinimized") != Some(true)
-            && focused_app().ok().and_then(|a| pid_of(a.ptr())) == Some(pid)
-        {
-            return Ok(Effect {
-                changed: true,
-                message: format!("activated the selected window of pid {pid}"),
-            });
-        }
-        if started.elapsed() >= Duration::from_millis(300) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
+    // Read all provider capabilities before the first UI mutation. A missing
+    // AXRaise is not a reason to abandon AppKit's public application activation.
+    let actions = copy_actions(window.ptr())?;
+    let minimized = copy_bool_attr(window.ptr(), "AXMinimized") == Some(true);
+    if minimized && !bool_attribute_is_settable(window, "AXMinimized")? {
+        return Err(A11yError::Unsupported { capability: "restore minimized window".into(),
+            hint: "The selected window does not expose a writable minimized attribute; no activation was submitted.".into() });
     }
-    Err(A11yError::Backend(format!(
-        "pid {pid} did not give the selected window keyboard focus after activation"
-    )))
+    let set_main = bool_attribute_is_settable(window, "AXMain")?;
+    let set_focused = bool_attribute_is_settable(window, "AXFocused")?;
+    let set_frontmost = bool_attribute_is_settable(app, "AXFrontmost")?;
+    let native_app = objc2::rc::autoreleasepool(|_| {
+        objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+    }).ok_or_else(|| A11yError::NotFound(format!("pid {pid} is not a running native user application")))?;
+    let mut mutated = false;
+    if minimized {
+        set_bool_attr(window, "AXMinimized", false)?;
+        mutated = true;
+    }
+    // NSRunningApplication is documented thread safe. No deprecated
+    // ignoringOtherApps option, scripts, private API or global GUI root is used.
+    let accepted = objc2::rc::autoreleasepool(|_| native_app.activateWithOptions(
+        objc2_app_kit::NSApplicationActivationOptions::empty()));
+    if wait_for_selected_focus(app, window, pid, Duration::from_millis(300)) {
+        return Ok(Effect { changed: true, message: format!("activated the selected window of pid {pid} through AppKit") });
+    }
+    for (element, name, writable) in [(window, "AXMain", set_main), (window, "AXFocused", set_focused), (app, "AXFrontmost", set_frontmost)] {
+        if writable && copy_bool_attr(element.ptr(), name) != Some(true) {
+            set_bool_attr(element, name, true)?;
+            mutated = true;
+        }
+    }
+    if !has_selected_keyboard_focus(app, window, pid) {
+        mutated |= raise_supported_window(&actions, || perform(window.ptr(), "AXRaise"))?;
+    }
+    // An accepted activation request is not completion. The exact selected AX
+    // object, frontmost application PID and live keyboard focus must all agree.
+    if wait_for_selected_focus(app, window, pid, Duration::from_millis(700)) {
+        return Ok(Effect { changed: true, message: format!("activated the exact selected window of pid {pid}") });
+    }
+    let message = format!("pid {pid} did not establish the exact selected window's keyboard focus after native activation; re-observe before deciding another action");
+    Err(if accepted || mutated { A11yError::Uncertain(message) } else { A11yError::Backend(message) })
 }
 
 fn valid_window_bounds(bounds: &Rect) -> bool {
@@ -1440,6 +1491,66 @@ impl ActorHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyboard_focus_requires_the_exact_window_and_frontmost_process() {
+        assert!(keyboard_focus_matches(Some(true), true, Some(false), Some(41), 41));
+        for (frontmost, selected, minimized, actual, target) in [
+            (Some(false), true, Some(false), Some(41), 41),
+            (None, true, Some(false), Some(41), 41),
+            (Some(true), false, Some(false), Some(41), 41),
+            (Some(true), true, Some(true), Some(41), 41),
+            (Some(true), true, Some(false), Some(42), 41),
+            (Some(true), true, Some(false), None, 41),
+            (Some(true), true, Some(false), Some(0), 0),
+        ] {
+            assert!(!keyboard_focus_matches(frontmost, selected, minimized, actual, target));
+        }
+    }
+
+    #[test]
+    fn unsupported_window_raise_is_never_submitted_to_the_native_provider() {
+        let absent = vec!["AXPress".into()];
+        assert!(!raise_supported_window(&absent, || panic!("unsupported AXRaise must not be submitted")).unwrap());
+        let mut calls = 0;
+        assert!(raise_supported_window(&["AXRaise".into()], || { calls += 1; 0 }).unwrap());
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn submitted_raise_error_remains_uncertain_and_never_becomes_no_effect() {
+        for code in [-25204, -25205, -25211] {
+            let mut calls = 0;
+            let result = raise_supported_window(&["AXRaise".into()], || { calls += 1; code });
+            assert_eq!(calls, 1);
+            assert!(matches!(result, Err(A11yError::Uncertain(_))), "native AXError {code} must retain admitted-effect uncertainty");
+        }
+    }
+
+    #[test]
+    fn native_appkit_does_not_invent_an_application_for_kernel_pid() {
+        let absent = std::thread::spawn(move || objc2::rc::autoreleasepool(|_| {
+            // A bare CLI test process need not itself be a registered GUI app.
+            // No activate/hide/terminate call and no user window is touched.
+            objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(0).is_none()
+        })).join().unwrap();
+        assert!(absent);
+    }
+
+    #[test]
+    #[ignore = "requires an explicit owned Calculator PID; read-only native lookup, no activation"]
+    fn native_appkit_owned_calculator_lookup() {
+        let pid = std::env::var("NOMIFUN_A11Y_OWNED_CALCULATOR_PID").expect("explicit owned fixture PID")
+            .parse::<i32>().expect("positive native fixture PID");
+        assert!(pid > 1);
+        let (observed, bundle) = std::thread::spawn(move || objc2::rc::autoreleasepool(|_| {
+            let app = objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+                .expect("the explicitly owned Calculator must still be a running native application");
+            (app.processIdentifier(), app.bundleIdentifier().map(|identifier| identifier.to_string()))
+        })).join().unwrap();
+        assert_eq!(observed, pid);
+        assert_eq!(bundle.as_deref(), Some("com.apple.calculator"));
+    }
 
     fn fake_action_names_reply(names: &[&str]) -> Result<Vec<String>, A11yError> {
         let names: Vec<_> = names.iter().map(|name| CFString::new(name)).collect();
@@ -1766,6 +1877,29 @@ mod tests {
         assert!(!live_entry_matches(
             Some("AXTextField"), Some("Name"), Some("Alice"), Some(&moved), &entry,
         ));
+    }
+
+    #[test]
+    fn value_only_static_display_keeps_content_validation_without_becoming_a_button() {
+        let entry = ElementEntry {
+            r#ref: 3,
+            role: "statictext".to_string(),
+            name: None,
+            value: Some("\u{200e}46\u{200e}".to_string()),
+            states: Vec::new(),
+            bounds: Rect { x: 100.0, y: 200.0, w: 200.0, h: 24.0 },
+            source: Source::A11y,
+        };
+        assert!(live_entry_matches(
+            Some("AXStaticText"), None, entry.value.as_deref(), Some(&entry.bounds), &entry,
+        ));
+        assert!(!live_entry_matches(
+            Some("AXStaticText"), None, Some("\u{200e}146\u{200e}"), Some(&entry.bounds), &entry,
+        ));
+        assert!(!live_entry_matches(
+            Some("AXButton"), None, entry.value.as_deref(), Some(&entry.bounds), &entry,
+        ));
+        assert_eq!(format_entries(&[entry]), "[3] statictext = \"\\u{200e}46\\u{200e}\"\n");
     }
 
     #[test]

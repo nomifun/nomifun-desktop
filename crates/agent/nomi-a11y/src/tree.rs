@@ -81,4 +81,22 @@ mod tests {
     fn format_empty_reports_no_elements() {
         assert!(format_entries(&[]).contains("No interactable elements"));
     }
+
+    #[test]
+    fn value_only_display_keeps_its_value_ref_and_secure_neighbor_redacted() {
+        let bounds = Rect { x: 0.0, y: 0.0, w: 50.0, h: 20.0 };
+        let entries = vec![
+            ElementEntry { r#ref: 1, role: "statictext".to_string(), name: None,
+                value: Some("\u{200e}46\u{200e}".to_string()), states: vec![], bounds, source: Source::A11y },
+            ElementEntry { r#ref: 2, role: "button".to_string(), name: Some("1".to_string()),
+                value: None, states: vec![], bounds, source: Source::A11y },
+            ElementEntry { r#ref: 3, role: "securetextfield".to_string(), name: None,
+                value: None, states: vec!["password".to_string()], bounds, source: Source::A11y },
+        ];
+        assert_eq!(format_entries(&entries), concat!(
+            "[1] statictext = \"\\u{200e}46\\u{200e}\"\n",
+            "[2] button \"1\"\n",
+            "[3] securetextfield [password]\n",
+        ));
+    }
 }

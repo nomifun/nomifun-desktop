@@ -281,6 +281,7 @@ pub struct TerminalService {
     /// begins; the write lock waits for already-admitted operations to finish.
     shutdown_gate: Arc<tokio::sync::RwLock<()>>,
     shutting_down: Arc<std::sync::atomic::AtomicBool>,
+    preparation_interrupt: tokio::sync::watch::Sender<bool>,
     /// Late-wired knowledge service (assembly order: knowledge comes up after
     /// the terminal singleton). `None` means
     /// knowledge features are silently skipped (best-effort contract).
@@ -357,6 +358,7 @@ impl TerminalService {
             lifecycle_slots: Arc::new(DashMap::new()),
             shutdown_gate: Arc::new(tokio::sync::RwLock::new(())),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            preparation_interrupt: tokio::sync::watch::channel(false).0,
             knowledge: Arc::new(std::sync::RwLock::new(None)),
             delete_hooks: Arc::new(std::sync::RwLock::new(Vec::new())),
             supervision_hook: Arc::new(std::sync::RwLock::new(None)),
@@ -373,6 +375,25 @@ impl TerminalService {
             first_input: Arc::new(DashMap::new()),
             knowledge_sync_locks: Arc::new(DashMap::new()),
         }
+    }
+
+    async fn await_preparation<T>(
+        &self,
+        preparation: impl std::future::Future<Output = Result<T, TerminalError>>,
+    ) -> Result<T, TerminalError> {
+        let mut shutdown = self.preparation_interrupt.subscribe();
+        if *shutdown.borrow() { return Err(TerminalError::ShuttingDown); }
+        tokio::select! {
+            biased;
+            _ = shutdown.wait_for(|value| *value) => Err(TerminalError::ShuttingDown),
+            result = preparation => result,
+        }
+    }
+
+    async fn prepare_command(
+        &self, command: &str, args: &[String], env: Option<&HashMap<String, String>>, cwd: &Path,
+    ) -> Result<nomifun_runtime::PreparedProcessLaunch, TerminalError> {
+        self.await_preparation(crate::types::resolve_command_for_spawn(command, args, env, Some(cwd))).await
     }
 
     async fn enter_operation(
@@ -718,7 +739,7 @@ impl TerminalService {
         }
         // Verify prerequisite readiness before minting/persisting any terminal
         // row or materializing its workspace knowledge/PTY side effects.
-        crate::types::resolve_command_for_spawn(&req.command, &req.args, req.env.as_ref(), Some(Path::new(&req.cwd))).await?;
+        self.prepare_command(&req.command, &req.args, req.env.as_ref(), Path::new(&req.cwd)).await?;
         let name = req
             .name
             .clone()
@@ -845,7 +866,9 @@ impl TerminalService {
         knowledge_scope: TerminalKnowledgeScope,
         backend: Option<&str>,
     ) -> Result<(), TerminalError> {
-        let (program, resolved_args) = crate::types::resolve_command_for_spawn(command, args, env.as_ref(), Some(Path::new(cwd))).await?;
+        let prepared = self.prepare_command(command, args, env.as_ref(), Path::new(cwd)).await?;
+        let program = prepared.program;
+        let resolved_args = prepared.args;
         #[cfg(all(test, windows))]
         let program = resolve_windows_test_program(&program);
         // Mint the PTY generation before issuing child capabilities so their
@@ -884,7 +907,7 @@ impl TerminalService {
         // directly, backend ownership metadata must never become a child
         // process environment variable.
         let mut env: HashMap<String, String> =
-            strip_internal_terminal_env(env).unwrap_or_default();
+            strip_internal_terminal_env(Some(prepared.environment)).unwrap_or_default();
         // Describe the xterm.js emulator the PTY talks to (TERM/COLORTERM), so a
         // Finder/launchd-launched macOS app —which inherits no TERM —still gets
         // color + correct backspace rendering. Defaults only; explicit env wins.
@@ -2505,7 +2528,7 @@ impl TerminalService {
         let args = crate::types::parse_args(&row.args);
         if matches!(target, RelaunchTarget::Stored) {
             let env = process_env_from_persisted(row.env.as_deref());
-            crate::types::resolve_command_for_spawn(&row.command, &args, env.as_ref(), Some(Path::new(&row.cwd))).await?;
+            self.prepare_command(&row.command, &args, env.as_ref(), Path::new(&row.cwd)).await?;
         }
 
         // Re-sync knowledge mounts + README on every relaunch. Binding
@@ -2712,11 +2735,13 @@ impl TerminalService {
     pub async fn shutdown_cleanup(&self) -> Result<u64, TerminalError> {
         self.shutting_down
             .store(true, std::sync::atomic::Ordering::Release);
+        self.preparation_interrupt.send_replace(true);
         let _shutdown_guard = self.shutdown_gate.clone().write_owned().await;
         // A concurrent cleanup may have reset the flag after its own DB failure
         // while this caller waited for the writer. Re-publish our intent now.
         self.shutting_down
             .store(true, std::sync::atomic::Ordering::Release);
+        self.preparation_interrupt.send_replace(true);
 
         let mut lifecycle_slots: Vec<_> = self
             .lifecycle_slots
@@ -2736,6 +2761,7 @@ impl TerminalService {
             Err(error) => {
                 self.shutting_down
                     .store(false, std::sync::atomic::Ordering::Release);
+                self.preparation_interrupt.send_replace(false);
                 return Err(error.into());
             }
         };
@@ -2754,6 +2780,7 @@ impl TerminalService {
             if let Err(error) = handle.kill().await {
                 self.shutting_down
                     .store(false, std::sync::atomic::Ordering::Release);
+                self.preparation_interrupt.send_replace(false);
                 warn!(
                     terminal_id = id,
                     error = %error,
@@ -2770,6 +2797,7 @@ impl TerminalService {
             Err(error) => {
                 self.shutting_down
                     .store(false, std::sync::atomic::Ordering::Release);
+                self.preparation_interrupt.send_replace(false);
                 return Err(error.into());
             }
         };
@@ -4105,66 +4133,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn existing_bun_or_missing_runtime_is_decided_before_terminal_effects() {
-        let before = nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun);
-        let (svc, events, repo) = service_with_repo();
-        let mut request = req("bun", &["-e", "process.stdout.write('unexpected')"]);
-        request.defer_spawn = true;
-        let available = nomifun_runtime::resolve_cached_managed_command_with_env(
-            "bun", &[], &HashMap::new(), Some(Path::new(&request.cwd)),
-        ).unwrap().is_some();
-        if available {
-            let response = svc.create(TEST_USER_ID, request).await.unwrap();
-            assert_eq!(response.command, "bun");
-            assert_eq!(repo.rows.lock().unwrap().len(), 1);
-        } else {
-            let error = svc.create(TEST_USER_ID, request).await.unwrap_err();
-            let app: nomifun_common::AppError = error.into();
-            assert_eq!(app.status_code(), axum::http::StatusCode::CONFLICT);
-            assert_eq!(app.error_code(), "COMPONENT_PREPARATION_REQUIRED");
-            assert!(repo.rows.lock().unwrap().is_empty());
-            assert!(events.events.lock().unwrap().is_empty());
-        }
+    async fn shutdown_interrupts_preparation_before_any_terminal_effect() {
+        let (svc, _events, repo) = service_with_repo();
+        let pending_service = svc.clone();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let observer = entered.notified();
+        let ready = entered.clone();
+        let preparation = tokio::spawn(async move {
+            let _guard = pending_service.enter_operation().await?;
+            ready.notify_one();
+            pending_service.await_preparation(std::future::pending::<Result<(), TerminalError>>()).await
+        });
+        observer.await;
+        tokio::time::timeout(Duration::from_secs(1), svc.shutdown_cleanup()).await.unwrap().unwrap();
+        assert!(matches!(preparation.await.unwrap(), Err(TerminalError::ShuttingDown)));
+        assert!(repo.rows.lock().unwrap().is_empty());
         assert!(svc.live.is_empty());
-        assert_eq!(
-            nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun),
-            before
-        );
     }
 
     #[tokio::test]
-    #[ignore = "opt-in native managed Bun preparation and PTY smoke"]
-    async fn prepared_bun_starts_a_terminal_after_required_component_gate() {
+    async fn deferred_create_uses_explicit_tool_environment_before_terminal_effects() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join(if cfg!(windows) { "bun.exe" } else { "bun" });
+        std::fs::write(&executable, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let before = nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun);
+        let (svc, _events, repo) = service_with_repo();
+        let mut request = req("bun", &["--version"]);
+        request.defer_spawn = true;
+        request.env = Some(HashMap::from([("PATH".into(), root.path().to_string_lossy().into_owned())]));
+        let response = svc.create(TEST_USER_ID, request).await.unwrap();
+        assert_eq!(response.command, "bun");
+        assert_eq!(repo.rows.lock().unwrap().len(), 1);
+        assert!(svc.live.is_empty());
+        assert_eq!(nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun), before);
+    }
+
+    #[tokio::test]
+    #[ignore = "opt-in native managed Bun automatic preparation and PTY smoke"]
+    async fn missing_bun_is_automatically_prepared_before_terminal_start() {
         let root = tempfile::tempdir().unwrap();
         nomifun_runtime::init(root.path());
         let (svc, events, repo) = service_with_repo();
-        let script = "process.stdout.write('managed-bun-ready'); setInterval(()=>{},1000)";
-        let request = req("bun", &["-e", script]);
-        if nomifun_runtime::resolve_cached_managed_command_with_env(
-            "bun", &[], &HashMap::new(), Some(Path::new(&request.cwd)),
-        ).unwrap().is_none() {
-            let error: nomifun_common::AppError = svc.create(TEST_USER_ID, request.clone()).await.unwrap_err().into();
-            assert_eq!(error.error_code(), "COMPONENT_PREPARATION_REQUIRED");
-            assert!(repo.rows.lock().unwrap().is_empty());
-            let mut progress = nomifun_runtime::subscribe_tool_preparation(nomifun_runtime::ToolId::Bun);
-            nomifun_runtime::begin_tool_preparation(nomifun_runtime::ToolId::Bun);
-            tokio::time::timeout(Duration::from_secs(180), async {
-                loop {
-                    let snapshot = progress.borrow().clone();
-                    if matches!(snapshot.phase, nomifun_runtime::ToolPreparationPhase::Ready | nomifun_runtime::ToolPreparationPhase::Error) {
-                        assert_eq!(snapshot.phase, nomifun_runtime::ToolPreparationPhase::Ready, "{snapshot:?}");
-                        break;
-                    }
-                    progress.changed().await.unwrap();
-                }
-            }).await.expect("explicit Bun download must finish");
-        }
+        let request = req("bun", &["-e", "process.stdout.write('managed-bun-ready'); setInterval(()=>{},1000)"]);
         let response = svc.create(TEST_USER_ID, request).await.unwrap();
         assert!(svc.live.contains_key(response.terminal_id.as_str()));
         assert_eq!(repo.rows.lock().unwrap().len(), 1);
         let observed = wait_for(|| collect_output(&events).contains("managed-bun-ready"), 4000).await;
         svc.kill(response.terminal_id.as_str()).await.unwrap();
-        assert!(observed, "prepared Bun must execute the PTY script and deliver output");
+        assert!(observed);
         assert!(svc.live.is_empty());
     }
 
@@ -6541,7 +6561,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_gate_waits_for_activation_and_rejects_late_create() {
+    async fn shutdown_waits_for_admitted_activation_then_prevents_program_start() {
         let (svc, _bc, repo) = service_with_repo();
         let mut r = req("cat", &[]);
         r.defer_spawn = true;
@@ -6580,7 +6600,8 @@ mod tests {
         );
 
         gate.release.notify_one();
-        resize.await.unwrap().unwrap();
+        assert!(matches!(resize.await.unwrap(), Err(TerminalError::ShuttingDown)));
+        assert!(!svc.live.contains_key(id.as_str()), "shutdown must not start a new program after preparation was interrupted");
         assert_eq!(shutdown.await.unwrap().unwrap(), 1);
         assert!(svc.live.is_empty());
         assert!(svc.lifecycle_slots.is_empty());

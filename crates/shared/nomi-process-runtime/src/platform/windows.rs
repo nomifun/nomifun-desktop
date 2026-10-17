@@ -71,7 +71,7 @@ use super::poller::{
 };
 use crate::{
     CleanupReport, CommandSpec, ProcessError, NormalizedProcessRequest, OutputBuffer,
-    OutputStream, ProcessSnapshot, ProcessState, SandboxPolicy, ShellKind, SpawnFailure,
+    OutputStream, ProcessSnapshot, ProcessState, ShellKind, SpawnFailure,
 };
 
 const READ_BUFFER_BYTES: usize = 8 * 1024;
@@ -1647,7 +1647,6 @@ async fn spawn_inner_with_cancellation(
     transport: SpawnTransport,
     external_cancellation: Option<Arc<StartCancellation>>,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
-    enforce_sandbox(&request)?;
     let prepared = PreparedCommand::new(&request)?;
     let setup_timeout = request
         .policy
@@ -4128,7 +4127,11 @@ fn encode_environment_from(
 ) -> Result<Vec<u16>, ProcessError> {
     let mut entries = Vec::<EnvironmentEntry>::new();
     for (key, value) in inherited {
-        if dangerous_inherited_environment(&key) {
+        let has_override = |name: &str| overrides.keys().any(|key| compare_os_case_insensitive(key, OsStr::new(name)) == Ordering::Equal);
+        let matches_key = |name: &str| compare_os_case_insensitive(&key, OsStr::new(name)) == Ordering::Equal;
+        let shadowed_locale = (matches_key("LC_ALL") && (has_override("LANG") || has_override("LC_CTYPE")) && !has_override("LC_ALL"))
+            || (matches_key("LC_CTYPE") && has_override("LANG") && !has_override("LC_CTYPE"));
+        if application_internal_environment(&key) || shadowed_locale {
             continue;
         }
         if let Some(entry) = entries
@@ -4144,11 +4147,6 @@ fn encode_environment_from(
 
     for (key, value) in overrides {
         validate_environment_override(key, value)?;
-        if dangerous_inherited_environment(key) {
-            return Err(invalid_command(format!(
-                "environment override {key:?} is forbidden at process boundary"
-            )));
-        }
         if let Some(entry) = entries
             .iter_mut()
             .find(|entry| compare_os_case_insensitive(&entry.key, key) == Ordering::Equal)
@@ -4181,23 +4179,8 @@ fn encode_environment_from(
     Ok(block)
 }
 
-fn dangerous_inherited_environment(key: &OsStr) -> bool {
-    [
-        "DYLD_INSERT_LIBRARIES",
-        "DYLD_LIBRARY_PATH",
-        "DYLD_FRAMEWORK_PATH",
-        "LD_PRELOAD",
-        "LD_LIBRARY_PATH",
-        "LD_AUDIT",
-        "NODE_OPTIONS",
-        "NODE_INSPECT",
-        "NODE_DEBUG",
-        "CLAUDECODE",
-    ]
-    .iter()
-    .any(|candidate| {
-        compare_os_case_insensitive(key, OsStr::new(candidate)) == Ordering::Equal
-    })
+fn application_internal_environment(key: &OsStr) -> bool {
+    crate::is_inherited_application_environment_key(key)
 }
 
 fn validate_environment_override(key: &OsStr, value: &OsStr) -> Result<(), ProcessError> {
@@ -4275,20 +4258,6 @@ fn encode_nul_terminated(value: &OsStr, label: &'static str) -> Result<Vec<u16>,
     Ok(encoded)
 }
 
-fn enforce_sandbox(request: &NormalizedProcessRequest) -> Result<(), ProcessError> {
-    match &request.capability.sandbox {
-        SandboxPolicy::UnrestrictedLocalOwner => Ok(()),
-        SandboxPolicy::DenySpawn => Err(ProcessError::CapabilityDenied {
-            path: request.cwd.clone(),
-            reason: "process is denied by the sandbox policy".to_owned(),
-        }),
-        SandboxPolicy::MacSeatbelt { .. } => Err(ProcessError::CapabilityDenied {
-            path: request.cwd.clone(),
-            reason: "macOS Seatbelt cannot authorize Windows process".to_owned(),
-        }),
-    }
-}
-
 fn invalid_command(reason: impl Into<String>) -> ProcessError {
     ProcessError::InvalidCommand {
         reason: reason.into(),
@@ -4335,7 +4304,7 @@ mod tests {
     use windows_sys::Win32::Foundation::HANDLE;
 
     use super::*;
-    use crate::{CapabilityPolicy, ProcessOwner, ProcessPolicy, Transport};
+    use crate::{ProcessOwner, ProcessPolicy, Transport};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum SpawnAuditEvent {
@@ -5405,36 +5374,22 @@ mod tests {
     }
 
     #[test]
-    fn environment_strips_inherited_loader_and_node_injection_variables() {
+    fn environment_preserves_inherited_user_runtime_configuration() {
         let inherited = vec![
-            (OsString::from("PATH"), OsString::from("safe")),
-            (
-                OsString::from("NODE_OPTIONS"),
-                OsString::from("--require malicious.js"),
-            ),
-            (
-                OsString::from("dyld_insert_libraries"),
-                OsString::from("malicious.dll"),
-            ),
+            (OsString::from("PATH"), OsString::from("user-tools")),
+            (OsString::from("NODE_OPTIONS"), OsString::from("--no-warnings")),
+            (OsString::from("CLAUDECODE"), OsString::from("1")),
         ];
-        let block = encode_environment_from(inherited, &BTreeMap::new())
-            .expect("safe inherited environment should encode");
-
-        assert_eq!(environment_entries(&block), vec!["PATH=safe"]);
+        let block = encode_environment_from(inherited, &BTreeMap::new()).unwrap();
+        assert_eq!(environment_entries(&block), vec!["NODE_OPTIONS=--no-warnings", "PATH=user-tools"]);
     }
 
     #[test]
-    fn environment_rejects_case_insensitive_dangerous_overrides() {
+    fn environment_preserves_explicit_task_runtime_variables() {
         for key in ["NODE_OPTIONS", "node_options", "Ld_PrElOaD"] {
-            let overrides = BTreeMap::from([(
-                OsString::from(key),
-                OsString::from("malicious"),
-            )]);
-            assert!(matches!(
-                encode_environment_from(Vec::new(), &overrides),
-                Err(ProcessError::InvalidCommand { reason })
-                    if reason.contains("forbidden at process boundary")
-            ));
+            let overrides = BTreeMap::from([(OsString::from(key), OsString::from("user-value"))]);
+            let block = encode_environment_from(Vec::new(), &overrides).unwrap();
+            assert_eq!(environment_entries(&block), vec![format!("{key}=user-value")]);
         }
     }
 
@@ -5450,7 +5405,7 @@ mod tests {
             env: BTreeMap::new(),
             transport: Transport::Pipe,
             policy: ProcessPolicy::default(),
-            capability: CapabilityPolicy::local_owner(cwd),
+
         }
     }
 

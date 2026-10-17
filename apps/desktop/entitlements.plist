@@ -8,5 +8,9 @@
   <true/>
   <key>com.apple.security.device.camera</key>
   <true/>
+  <!-- The default Agent may invoke AppleScript/native Apple Events through
+       its normal process tools. macOS still asks for each target application. -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
 </dict>
 </plist>

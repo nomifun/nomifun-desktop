@@ -3,7 +3,9 @@
 本文描述当前实现。组件清单是
 [`nomifun-runtime/components.json`](../../crates/backend/nomifun-runtime/components.json)，
 本地解析与显式准备 API 位于
-[`nomifun-runtime/src/managed.rs`](../../crates/backend/nomifun-runtime/src/managed.rs)。
+[`nomifun-runtime/src/managed.rs`](../../crates/backend/nomifun-runtime/src/managed.rs)，
+每次启动的命令与工具环境位于
+[`environment.rs`](../../crates/backend/nomifun-runtime/src/environment.rs)。
 构建制品、受管缓存准入、诊断与内置 Office 技能使用同一批准组件身份。
 
 ## 组件归属与交付
@@ -11,7 +13,7 @@
 | 组件 | 批准版本 | 来源 | 使用者 |
 | --- | --- | --- | --- |
 | Bun | 1.3.13 | `oven-sh/bun` 的固定 release | 显式要求 Bun 的任务 |
-| Node | 22.22.0 | `nodejs.org/dist` 的固定 release | 可选受管制品；当前 Agent／插件没有消费者 |
+| Node | 22.22.0 | `nodejs.org/dist` 的固定 release | Agent、Terminal、MCP 与组件调用；完整 Node/npm/npx 发行目录 |
 | OfficeCLI | 1.0.156 | `iOfficeAI/OfficeCLI` 的固定 release；官方 npm 身份为 `@officecli/officecli` | Office 只读预览与文档技能 |
 
 表中版本来自组件清单。清单同时记录目标平台、架构、下载地址、上游摘要来源、
@@ -31,8 +33,7 @@ Docker 构建镜像的标签与 digest 也在组件清单中固定。
 [`notices/manifest.json`](../../crates/backend/nomifun-runtime/notices/manifest.json)
 声明，随组件交付。可选 `nfagent`、ONNX 原生库与浏览器保持各自的领域供应机制，
 清单中的 `domain_components` 指向各自的权威来源，不建立第二套下载账本。
-NomiRelay 自动恢复只复用有效的既有 nfagent 缓存；制品缺失或批准版本变化时，
-等待用户明确选择“下载连接组件并连接”，普通 bootstrap 或 restart 不授予下载权限。
+NomiRelay 的连接、重启与恢复在需要时自动准备批准的 nfagent，保留真实进度、取消、摘要校验与原子发布。
 DIY 抠图模型是已确认的产品例外：App 首次使用后，可由已认证的 App runtime
 在后台静默安装，不阻塞应用启动；模型缺失或安装失败时保留快速抠图后备。
 抠图模型继续使用自己的供应机制，不加入受管工具清单。
@@ -41,9 +42,8 @@ DIY 抠图模型是已确认的产品例外：App 首次使用后，可由已认
 ## 供应、身份与执行环境
 
 既有制品解析入口返回 `VerifiedTool`，包含已验证的绝对路径、实际版本与可执行
-文件摘要。普通解析只准入本地可用制品，不发起或等待 Node/Bun 下载。
-OfficeCLI 从内嵌载荷本地解压；
-只有明确的用户下载请求才获取批准的平台制品。受管供应使用
+文件摘要。只读可用性与诊断只检查本地制品；实际启动缺少必需运行时时自动准备批准的平台制品。
+OfficeCLI 从内嵌载荷本地解压。受管供应使用
 `<data_dir>/runtime`、进程间锁、有界临时文件、摘要验证和原子发布。
 下载组件的可执行摘要由已校验的批准制品导出，不单独信任缓存 stamp。独立库调用未初始化数据根时使用平台缓存目录。
 不要猜测某台机器的路径；读取 resolver 返回值或诊断的 `executable` 字段。
@@ -53,13 +53,19 @@ Bun 必须报告 Bun 引擎。将 Bun 命名为 `node`，或让它报告兼容�
 都不能通过 Node 准入。OfficeCLI 在私有临时目录创建 DOCX 并生成 HTML，确认
 所需协议；单独的 `--version` 或文件存在不足以证明它可用。
 
-成功准入在进程内复用；失败可重试。组件准入后出现尺寸或修改时间变化会拒绝
-继续使用，修复后重启。应用不创建 Bun-as-Node 别名，不修改系统 PATH。
-用户配置的 Bun 和 `bunx` 命令优先使用系统已安装工具，有效的既有受管 Bun
-缓存可作为后备。普通发现、命令解析与诊断不发起或等待缺失工具下载。当前 Agent／插件
-执行没有受管 Node 消费者。应用托管发现系统或用户指定的 Node；安装操作由
-用户选择打开 Node 官网自行安装。
-子进程启动、取消、超时和进程树回收继续由 `nomi-process-runtime` 管理。
+成功准入在进程内复用，失败可重试。准入后可执行文件尺寸或修改时间变化会拒绝继续使用。
+Node 使用完整官方发行目录，包含 npm、npx、模块和启动器；不创建 Bun-as-Node 别名，也不修改系统 PATH。
+
+`nomifun-runtime::prepare_process_launch` 是 Agent 原生进程、Terminal 与 MCP stdio 共用的
+命令准备和每次启动环境入口。明确 Shell 文本保留 Shell 语义并取得同一环境，原生程序保留 literal argv。
+每次启动组合调用方环境、当前持久用户 CLI 目录与已验证运行时，不改写多线程宿主的全局环境。
+显式 PATH 与已有可用工具链优先，保留真实 HOME/USERPROFILE、npm 配置、代理与证书配置。
+受管 npm 缺省安装到独立于可替换运行时缓存的持久用户工具目录，用户原有 prefix 仍优先。
+运行时升级与 Agent 数据清理不拥有这些已安装工具。托管应用按已识别项目元数据或内建静态预设备齐必需 Node/Bun，自定义 Node 优先，准备等待接入原操作取消；任意 Shell 文本不被改写。
+
+Terminal 保留现有 Windows PowerShell shim 适配。Windows Agent/MCP 的通用 `.cmd`/`.bat`
+启动和参数保真仍待平台实现与原生验证，不能将本次 macOS 共享改造当成该项通过。
+启动、取消、超时和进程树回收继续由 `nomi-process-runtime` 管理。
 
 Debug 构建允许显式绝对路径覆盖：`NOMIFUN_BUN_PATH`、`NOMIFUN_NODE_PATH`、
 `NOMIFUN_OFFICECLI_PATH`。路径会 canonicalize，仍必须通过引擎、能力和清单内
@@ -102,19 +108,16 @@ JSON 中的 `observations` 包含 `ready` / `unavailable`、
 ## 首次准备与包体积
 
 桌面和 Web 后端启动不准备或下载 Node。全新安装无需受管 Node/Bun 即可启动。
-终端和 MCP 界面直接提交执行请求，由后端按实际启动目录、命令及子进程 `PATH`
-优先解析用户工具，再检查有效的既有受管缓存。只有明确返回缺少 Bun 时，界面才
-提供下载选择；用户确认后下载并重试原请求。取消选择不会下载或继续执行。
+终端和 MCP 界面只提交一次执行请求，后端按实际启动目录、命令和子进程 PATH 优先解析用户工具，
+缺少必需运行时时在原调用内自动准备，程序启动前完成验证。界面只读观察进度，不增加下载确认，
+也不在准备后重放可能已经产生效果的启动请求。真实准备失败保留原因并允许重试。
 Office 转换使用内嵌 OfficeCLI，不需要 Node/Bun 下载或网络访问。
 
-`GET /api/runtime-tools/{tool}/availability` 用于本地组件诊断，不触发下载；它不替代
-具体执行请求的工作目录、启动器与环境解析。
-`GET /api/runtime-tools/{tool}` 观察准备状态，`POST /api/runtime-tools/{tool}/prepare`
-是明确的用户下载入口，开始或加入同一准备任务；接口复用实例 owner 鉴权。
-只接受 `bun`、`node`、`officecli`，不接受调用方 URL、路径、版本或全局取消。
-并发显式请求共享准备，单个观察者取消不撤销其他消费者。批准组件身份未变时，
-跨应用更新复用缓存并可离线使用。缺失工具的直接请求返回 `COMPONENT_PREPARATION_REQUIRED`，
-不会先创建终端行或进程。
+`GET /api/runtime-tools/{tool}/availability` 只做本地诊断，不触发下载；
+`GET /api/runtime-tools/{tool}` 只读观察准备状态；`POST /api/runtime-tools/{tool}/prepare`
+开始或加入同一准备任务，不代表另一层权限决策，接口复用实例 owner 鉴权。
+只接受 bun、node、officecli，不接受调用方 URL、路径、版本或全局取消。
+共用准备保留下载完整性、临时解包和原子发布；单个观察者取消不撤销其他消费者的准备。
 
 只供应当前目标架构。提高压缩率、删除源文件不能代替从发行载荷移除 Node/Bun。
 体积验收须使用同一 release profile 和压缩格式实际构建 App、DMG 对比，不能把

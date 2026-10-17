@@ -1123,11 +1123,7 @@ fn windows_shim_fallback_in(_command: &str, _directory: &Path) -> Option<PathBuf
 }
 
 fn strip_process_environment(command: &mut Command) {
-    command
-        .env_remove("NODE_OPTIONS")
-        .env_remove("NODE_INSPECT")
-        .env_remove("NODE_DEBUG")
-        .env_remove("CLAUDECODE");
+    command.env_remove("CLAUDECODE");
 }
 
 #[cfg(unix)]
@@ -1253,12 +1249,12 @@ mod tests {
     }
 
     #[test]
-    fn clean_builder_strips_polluting_environment() {
+    fn clean_builder_preserves_user_runtime_configuration() {
         #[cfg(unix)]
         {
             let builder = ChildProcessBuilder::clean_cli("example");
             let debug = format!("{builder}");
-            assert!(debug.contains("-u NODE_OPTIONS"));
+            assert!(!debug.contains("-u NODE_OPTIONS"));
             assert!(debug.contains("-u CLAUDECODE"));
             assert!(debug.contains("NO_COLOR=\"1\""));
             assert!(debug.contains("TERM=\"dumb\""));

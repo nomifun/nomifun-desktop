@@ -114,8 +114,9 @@ impl PatchRecovery {
             || binding.action_id.as_ref() != "workspace.files/write"
         { return; }
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&result.output_text()) else { return; };
-        let Some(path) = value.get("workspace_path").and_then(|path| path.get("path"))
-            .and_then(serde_json::Value::as_str).and_then(normalize) else { return; };
+        let Some(path) = value.get("path").and_then(serde_json::Value::as_str).and_then(normalize)
+            .or_else(|| value.get("workspace_path").and_then(|path| path.get("path"))
+                .and_then(serde_json::Value::as_str).and_then(normalize)) else { return; };
         self.unresolved.remove(&path);
         self.pending.remove(&path);
         if self.unresolved.is_empty() {
@@ -325,6 +326,8 @@ impl PatchRecovery {
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PatchFailureOutcome {
+    #[serde(default)]
+    cause: Option<String>,
     kind: String,
     version: u8,
     journal_settlement: String,
@@ -368,6 +371,7 @@ impl PatchFailureOutcome {
             || self.journal_settlement != "settled" || self.index_base.is_some_and(|base| base != 0)
             || self.observed_published_count.is_some_and(|count| count != self.observation.published.len())
             || self.confirmed_restored_count.is_some_and(|count| count != self.observation.restored.len())
+            || self.cause.as_ref().is_some_and(|cause| cause.len() > 4096)
             || self.recovery.len() > 4096
         { return None; }
         let groups = [
@@ -396,10 +400,10 @@ impl PatchFailureOutcome {
 }
 
 fn normalize(path: &str) -> Option<String> {
-    if path.is_empty() || path.len() > 4096 || path.chars().any(char::is_control) {
+    if path.is_empty() || path.len() > 4096 || path.contains('\0') {
         return None;
     }
-    crate::agents_md::normalize_workspace_directory(path)
+    crate::agents_md::normalize_native_instruction_path(path)
         .ok()
         .filter(|path| !path.is_empty())
 }
@@ -496,6 +500,23 @@ mod tests {
         recovery.persist(&sink).await.unwrap();
         recovery.persist(&sink).await.unwrap();
         assert_eq!(sink.0.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn bounded_original_cause_preserves_complete_patch_recovery_indices() {
+        let mut report = serde_json::to_value(serde_json::json!({
+            "kind":"workspace_patch_failed","version":1,"journal_settlement":"settled",
+            "cause":"SYSTEM_ACCESS_DENIED: original operating system error",
+            "observation":{"failed_file":1,"published":[0],"restored":[0],
+                "restore_published_unconfirmed":[],"retained_created":[],"skipped_changed_or_unreadable":[],
+                "rollback_failed":[],"temporary_cleanup_unconfirmed":[]},
+            "recovery":"re-read every original target"
+        })).unwrap();
+        let outcome: PatchFailureOutcome = serde_json::from_value(report.clone()).unwrap();
+        assert_eq!(outcome.unresolved_indices(2), Some(BTreeSet::from([0, 1])));
+        report["cause"] = serde_json::json!("x".repeat(4097));
+        let oversized: PatchFailureOutcome = serde_json::from_value(report).unwrap();
+        assert!(oversized.unresolved_indices(2).is_none());
     }
 
     #[test]

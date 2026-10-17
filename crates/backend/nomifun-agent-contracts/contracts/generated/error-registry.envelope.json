@@ -124,7 +124,7 @@
         "http_status": 422
       },
       {
-        "code": "CHAT_MINIMAL_NOT_EXACT_EMPTY",
+        "code": "DEFAULT_LOCAL_OS_CAPABILITIES_INCOMPLETE",
         "version": 1,
         "class": "contract",
         "retry": "new_session_required",
@@ -309,5 +309,5 @@
       }
     ]
   },
-  "payload_digest": "fe64ac21087f7c86594f0c9ccd1158e3b97616288e3d0cf295d376276f99d62c"
+  "payload_digest": "ff3b5f493e1074300216596660500c204008de331b172965b241a5d2b69a59a6"
 }

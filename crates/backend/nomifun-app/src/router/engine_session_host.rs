@@ -1012,16 +1012,16 @@ impl EngineSessionHost {
         if !workspace.is_absolute() {
             return Err(conflict("runtime workspace is not an absolute host path"));
         }
-        let workspace = dunce::canonicalize(&workspace)
-            .map_err(|_| conflict("runtime workspace is unavailable"))?;
+        let workspace = super::nomi_core_wave2::canonical_workspace_root(&workspace)
+            .map_err(|error| conflict(&format!("runtime default directory cannot be resolved: {error}")))?;
         if let Some(persisted_workspace) = response
             .extra
             .get("workspace")
             .and_then(serde_json::Value::as_str)
             .filter(|workspace| !workspace.trim().is_empty())
         {
-            let persisted_workspace = dunce::canonicalize(persisted_workspace)
-                .map_err(|_| conflict("persisted workspace is unavailable"))?;
+            let persisted_workspace = super::nomi_core_wave2::canonical_workspace_root(std::path::Path::new(persisted_workspace))
+                .map_err(|error| conflict(&format!("persisted default directory cannot be resolved: {error}")))?;
             if persisted_workspace != workspace {
                 return Err(conflict(
                     "runtime workspace differs from the canonical Session projection",

@@ -6,20 +6,20 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
+use std::path::PathBuf;
 #[cfg(windows)]
 use std::path::Path;
-use std::path::PathBuf;
+#[cfg(windows)]
+use nomi_process_runtime::ShellKind;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nomi_process_runtime::{
-    CapabilityPolicy, CleanupReport, CommandSpec, OutputCursor, OutputObserver, OutputStream,
+    CleanupReport, CommandSpec, OutputCursor, OutputObserver, OutputStream,
     ProcessHandle, ProcessOutcome, ProcessOwner, ProcessPolicy, ProcessRequest,
     ProcessSupervisor, SupervisorConfig, Transport, normalize_request,
 };
-#[cfg(windows)]
-use nomi_process_runtime::ShellKind;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -99,12 +99,6 @@ impl PtyHandle {
         } else {
             PathBuf::from(&params.cwd)
         };
-        let capability_root = if requested_cwd.is_absolute() {
-            requested_cwd.clone()
-        } else {
-            session_cwd.join(&requested_cwd)
-        };
-
         let scrollback = Arc::new(Mutex::new(Vec::<u8>::new()));
         let dirty = Arc::new(AtomicBool::new(false));
         let (out_tx, _) = broadcast::channel::<Vec<u8>>(OUTPUT_BROADCAST_CAP);
@@ -140,7 +134,7 @@ impl PtyHandle {
         // backend shuts down. A lease would race the reaper after long sleep.
         policy.expire_on_idle = false;
 
-        let command = command_with_locale_precedence(params.program, params.args, &params.env);
+        let command = terminal_command(params.program, params.args);
         let request = ProcessRequest {
             owner: ProcessOwner::new(Uuid::now_v7(), Uuid::now_v7()),
             command,
@@ -155,7 +149,6 @@ impl PtyHandle {
                 rows: params.rows,
             },
             policy,
-            capability: CapabilityPolicy::local_owner(capability_root),
         };
         let request = normalize_request(request, &session_cwd)
             .map_err(|error| TerminalError::Spawn(error.to_string()))?;
@@ -356,45 +349,7 @@ impl PtyHandle {
     }
 }
 
-fn command_with_locale_precedence(
-    program: String,
-    args: Vec<String>,
-    env: &HashMap<String, String>,
-) -> CommandSpec {
-    #[cfg(not(unix))]
-    let _ = env;
-
-    #[cfg(unix)]
-    {
-        // Process requests inherit the backend environment. Preserve the old
-        // terminal contract where a session-level LC_CTYPE/LANG override is not
-        // silently shadowed by a stronger inherited locale category. `env`
-        // execs the requested program in place, so PID/session ownership stays
-        // with the runtime watchdog.
-        let removals: &[&str] = if env.contains_key("LC_ALL") {
-            &[]
-        } else if env.contains_key("LC_CTYPE") {
-            &["LC_ALL"]
-        } else if env.contains_key("LANG") {
-            &["LC_ALL", "LC_CTYPE"]
-        } else {
-            &[]
-        };
-        if !removals.is_empty() {
-            let mut wrapped = Vec::with_capacity(removals.len() * 2 + 1 + args.len());
-            for key in removals {
-                wrapped.push(OsString::from("-u"));
-                wrapped.push(OsString::from(key));
-            }
-            wrapped.push(OsString::from(program));
-            wrapped.extend(args.into_iter().map(OsString::from));
-            return CommandSpec::Program {
-                program: OsString::from("/usr/bin/env"),
-                args: wrapped,
-            };
-        }
-    }
-
+fn terminal_command(program: String, args: Vec<String>) -> CommandSpec {
     #[cfg(windows)]
     if Path::new(&program)
         .extension()
@@ -542,41 +497,11 @@ mod tests {
         assert_eq!(&data[data.len() - 4..], b"TAIL");
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn explicit_character_locale_removes_stronger_inherited_categories() {
-        let command = command_with_locale_precedence(
-            "sh".to_owned(),
-            vec!["-l".to_owned()],
-            &HashMap::from([("LANG".to_owned(), "en_US.UTF-8".to_owned())]),
-        );
-        let CommandSpec::Program { program, args } = command else {
-            panic!("locale wrapper must remain a direct program request");
-        };
-        assert_eq!(program, OsString::from("/usr/bin/env"));
-        assert_eq!(
-            args,
-            [
-                "-u",
-                "LC_ALL",
-                "-u",
-                "LC_CTYPE",
-                "sh",
-                "-l",
-            ]
-            .into_iter()
-            .map(OsString::from)
-            .collect::<Vec<_>>()
-        );
-    }
-
     #[test]
     fn powershell_script_shim_invocation_quotes_every_token_as_data() {
         assert_eq!(
-            powershell_script_invocation(
-                r"C:\Agent's Tools\runner.cmd",
-                &["a'b".to_owned(), String::new(), "$(Get-Item env:PATH)".to_owned()]
-            ),
+            powershell_script_invocation(r"C:\Agent's Tools\runner.cmd",
+                &["a'b".to_owned(), String::new(), "$(Get-Item env:PATH)".to_owned()]),
             r"& 'C:\Agent''s Tools\runner.cmd' 'a''b' '' '$(Get-Item env:PATH)'"
         );
     }

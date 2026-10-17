@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { SystemPermissionStatus } from '@/common/adapter/ipcBridge';
+import type { SystemPermissionStatus, SystemPermissionState } from '@/common/adapter/ipcBridge';
 import {
   SYSTEM_PERMISSION_AUDIT,
   capabilityPermissionsHref,
@@ -8,7 +8,7 @@ import {
   missingComputerPermissionKinds,
 } from './systemPermissionModel';
 
-const status = (accessibility: 'granted' | 'not_determined', screen: 'granted' | 'not_determined'): SystemPermissionStatus => ({
+const status = (accessibility: SystemPermissionState, screen: SystemPermissionState): SystemPermissionStatus => ({
   platform: 'macos',
   app_label: 'NomiFun',
   permissions: [
@@ -42,8 +42,10 @@ describe('system permission product model', () => {
       'notifications',
     ]);
     expect(SYSTEM_PERMISSION_AUDIT.local_connections.requestedOnDemand).toEqual(['local_network']);
-    expect(SYSTEM_PERMISSION_AUDIT.workspace_files.requiredBeforeUse).toEqual([]);
-    expect(SYSTEM_PERMISSION_AUDIT.workspace_files.optionalRecovery).toEqual(['full_disk_access']);
+    expect(SYSTEM_PERMISSION_AUDIT.local_files.requiredBeforeUse).toEqual([]);
+    expect(SYSTEM_PERMISSION_AUDIT.local_files.optionalRecovery).toEqual(['full_disk_access']);
+    expect(SYSTEM_PERMISSION_AUDIT.application_automation.requiredBeforeUse).toEqual([]);
+    expect(SYSTEM_PERMISSION_AUDIT.application_automation.requestedOnDemand).toEqual(['automation']);
   });
 
   test('derives only the Computer permissions required by frozen actions', () => {
@@ -62,6 +64,8 @@ describe('system permission product model', () => {
     expect(computerPermissionsReady(status('not_determined', 'granted'), ['computer/launch'])).toBe(true);
     expect(missingComputerPermissionKinds(status('not_determined', 'granted'), [])).toEqual(['accessibility']);
     expect(missingComputerPermissionKinds(status('granted', 'not_determined'), ['computer/observe'])).toEqual(['screen_recording']);
+    expect(missingComputerPermissionKinds(status('not_granted', 'granted'), ['computer/input'])).toEqual(['accessibility']);
+    expect(computerPermissionsReady(status('unknown', 'granted'), ['computer/input'])).toBe(false);
   });
 
   test('builds direct HashRouter recovery links for contextual prompts', () => {

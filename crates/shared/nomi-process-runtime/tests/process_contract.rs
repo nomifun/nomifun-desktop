@@ -13,12 +13,11 @@ use std::{
 use std::io;
 
 use nomi_process_runtime::{
-    CapabilityPolicy, CommandSpec, ProcessError, ProcessOutcome, ProcessOwner,
+    CommandSpec, ProcessError, ProcessOutcome, ProcessOwner,
     ProcessPolicy, NormalizedProcessRequest, OutputCursor, PollResult, ProcessSupervisor,
     SupervisorConfig, Transport,
 };
 #[cfg(target_os = "macos")]
-use nomi_process_runtime::SandboxPolicy;
 #[cfg(any(windows, target_os = "macos"))]
 use nomi_process_runtime::ShellKind;
 
@@ -48,7 +47,6 @@ fn request(program: impl Into<OsString>, args: impl IntoIterator<Item = OsString
         env: BTreeMap::new(),
         transport: Transport::Pipe,
         policy: ProcessPolicy::default(),
-        capability: CapabilityPolicy::local_owner(cwd),
     }
 }
 
@@ -237,7 +235,7 @@ async fn elapsed_process_deadline_rejects_start_before_user_code_runs() {
         ],
     );
     process.cwd = directory.path().canonicalize().expect("canonical cwd");
-    process.capability = CapabilityPolicy::local_owner(process.cwd.clone());
+
     process.policy.deadline = Some(Instant::now());
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
 
@@ -263,7 +261,7 @@ async fn running_deadline_preserves_partial_file_effect_and_reports_reaped_timeo
         "60000",
     ]);
     process.cwd = directory.path().canonicalize().expect("canonical cwd");
-    process.capability = CapabilityPolicy::local_owner(process.cwd.clone());
+
     process.policy.deadline = Some(Instant::now() + Duration::from_secs(1));
     process.policy.interrupt_grace = Duration::from_millis(50);
     process.policy.terminate_grace = Duration::from_millis(50);
@@ -319,7 +317,7 @@ async fn concurrent_starts_reserve_capacity_before_spawn_and_release_after_clean
                 "60000",
             ]);
             process.cwd = directory.path().canonicalize().expect("canonical cwd");
-            process.capability = CapabilityPolicy::local_owner(process.cwd.clone());
+
             process.policy.interrupt_grace = Duration::from_millis(10);
             process.policy.terminate_grace = Duration::from_millis(20);
             process.policy.reap_grace = Duration::from_millis(500);
@@ -387,7 +385,7 @@ async fn concurrent_starts_reserve_capacity_before_spawn_and_release_after_clean
         "60000",
     ]);
     reuse.cwd = directory.path().canonicalize().expect("canonical cwd");
-    reuse.capability = CapabilityPolicy::local_owner(reuse.cwd.clone());
+
     reuse.policy.interrupt_grace = Duration::from_millis(10);
     reuse.policy.terminate_grace = Duration::from_millis(20);
     reuse.policy.reap_grace = Duration::from_millis(500);
@@ -502,7 +500,7 @@ async fn macos_preserves_unicode_executable_path_argv_environment_and_cwd() {
         ],
     );
     process.cwd = cwd.clone();
-    process.capability = CapabilityPolicy::local_owner(cwd.clone());
+
     process.env.insert(env_key, env_value.clone());
 
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
@@ -548,7 +546,7 @@ async fn macos_posix_shell_preserves_literal_environment_and_exit_status() {
 #[cfg(target_os = "macos")]
 #[tokio::test]
 #[serial_test::serial(unix_process_contract)]
-async fn macos_seatbelt_bare_program_keeps_requested_path_and_literal_spaces() {
+async fn macos_bare_program_keeps_requested_path_and_literal_spaces() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = tempfile::tempdir().expect("isolated executable fixture");
     let cwd = fixture.path().canonicalize().expect("canonical workspace");
@@ -567,8 +565,7 @@ async fn macos_seatbelt_bare_program_keeps_requested_path_and_literal_spaces() {
         let mut process = request(name, [OsString::from("exit"), OsString::from("7")]);
         process.cwd = cwd.clone();
         process.env.insert("PATH".into(), path);
-        process.capability = CapabilityPolicy { cwd_roots: vec![cwd.clone()],
-            sandbox: SandboxPolicy::MacSeatbelt { write_roots: vec![cwd.clone()] } };
+
         let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
         let handle = supervisor.start(process).await.expect("literal spaced name must retain execvp semantics");
         let ProcessOutcome::Exited { code, cleanup, .. } = wait_for_terminal(&supervisor, &handle).await else {
@@ -582,10 +579,7 @@ async fn macos_seatbelt_bare_program_keeps_requested_path_and_literal_spaces() {
 #[cfg(target_os = "macos")]
 #[tokio::test]
 #[serial_test::serial(unix_process_contract)]
-async fn macos_seatbelt_program_pipe_allows_only_declared_write_roots() {
-    // Darwin's trusted temporary directories are intentionally writable in
-    // the profile. Keep both fixtures beside the checkout so `outside` really
-    // exercises the declared write-root boundary.
+async fn macos_program_pipe_writes_outside_the_default_directory() {
     let fixture_root = std::env::current_dir().expect("current directory");
     let workspace = tempfile::tempdir_in(&fixture_root).expect("workspace");
     let outside = tempfile::tempdir_in(&fixture_root).expect("outside");
@@ -602,21 +596,16 @@ async fn macos_seatbelt_program_pipe_allows_only_declared_write_roots() {
         ],
     );
     allowed.cwd = workspace.clone();
-    allowed.capability = CapabilityPolicy {
-        cwd_roots: vec![workspace.clone()],
-        sandbox: SandboxPolicy::MacSeatbelt {
-            write_roots: vec![workspace.clone()],
-        },
-    };
+
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = supervisor
         .start(allowed)
         .await
-        .expect("in-root sandboxed program should start");
+        .expect("program should start");
     let ProcessOutcome::Exited { code, output, .. } = wait_for_terminal(&supervisor, &handle).await else {
-        panic!("in-root sandboxed program must exit");
+        panic!("program must exit");
     };
-    assert_eq!(code, Some(0), "sandbox output: {}", output.text());
+    assert_eq!(code, Some(0), "program output: {}", output.text());
     assert!(inside_marker.exists());
 
     let mut denied = request(
@@ -627,57 +616,31 @@ async fn macos_seatbelt_program_pipe_allows_only_declared_write_roots() {
         ],
     );
     denied.cwd = workspace.clone();
-    denied.capability = CapabilityPolicy {
-        cwd_roots: vec![workspace.clone()],
-        sandbox: SandboxPolicy::MacSeatbelt {
-            write_roots: vec![workspace],
-        },
-    };
+
     let handle = supervisor
         .start(denied)
         .await
-        .expect("Seatbelt denial is reported by the sandboxed program");
+        .expect("out-of-directory program should start");
     let ProcessOutcome::Exited { code, .. } = wait_for_terminal(&supervisor, &handle).await else {
-        panic!("denied sandboxed program must exit");
+        panic!("program must exit");
     };
-    assert_ne!(code, Some(0));
-    assert!(!outside_marker.exists());
+    assert_eq!(code, Some(0));
+    assert!(outside_marker.exists());
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 #[tokio::test]
 #[serial_test::serial(unix_process_contract)]
-async fn macos_seatbelt_rejects_tmpdir_override_before_user_code_runs() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    let workspace = workspace.path().canonicalize().expect("canonical workspace");
-    let marker = workspace.join("must-not-run.marker");
-    let mut process = request(
-        helper_binary(),
-        [
-            OsString::from("write-file"),
-            marker.as_os_str().to_owned(),
-        ],
-    );
-    process.cwd = workspace.clone();
-    process.env.insert(
-        OsString::from("TMPDIR"),
-        OsString::from("/tmp/untrusted-override"),
-    );
-    process.capability = CapabilityPolicy {
-        cwd_roots: vec![workspace.clone()],
-        sandbox: SandboxPolicy::MacSeatbelt {
-            write_roots: vec![workspace],
-        },
-    };
-
+async fn explicit_tmpdir_and_runtime_options_are_available_to_the_program() {
+    let mut process = request("/bin/sh", ["-c", "printf '%s|%s' \"$TMPDIR\" \"$NODE_OPTIONS\""].map(OsString::from));
+    process.env.insert("TMPDIR".into(), "/tmp/user-selected".into());
+    process.env.insert("NODE_OPTIONS".into(), "--no-warnings".into());
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
-    let error = supervisor
-        .start(process)
-        .await
-        .expect_err("untrusted TMPDIR override must fail before process");
-
-    assert_eq!(error.code(), "invalid_command");
-    assert!(!marker.exists());
+    let handle = supervisor.start(process).await.expect("explicit environment should start");
+    let ProcessOutcome::Exited { code, output, cleanup, .. } = wait_for_terminal(&supervisor, &handle).await else { panic!("environment probe must exit"); };
+    assert_eq!(code, Some(0));
+    assert_eq!(output.text(), "/tmp/user-selected|--no-warnings");
+    assert!(cleanup.reaped);
 }
 
 #[tokio::test]
@@ -1168,7 +1131,7 @@ async fn windows_preserves_complex_unicode_argv_environment_and_cwd() {
         ],
     );
     process.cwd = cwd.clone();
-    process.capability = CapabilityPolicy::local_owner(cwd.clone());
+
     process
         .env
         .insert(OsString::from("nomifun_windows_env_case"), env_value.clone());
@@ -1226,7 +1189,7 @@ process.stderr.write(error.subarray(12));
         let workspace = tempfile::tempdir().expect("isolated mixed-encoding cwd");
         let mut process = request("bun", [OsString::from("-e"), script.into()]);
         process.cwd = workspace.path().canonicalize().unwrap();
-        process.capability = CapabilityPolicy::local_owner(process.cwd.clone());
+
         process.policy.output_limit_bytes = limit;
         process.policy.deadline = Some(Instant::now() + Duration::from_secs(10));
         let observed = Arc::new(Mutex::new(Vec::<(OutputStream, Vec<u8>)>::new()));
@@ -1354,7 +1317,7 @@ async fn windows_program_powershell_initializes_under_managed_owner() {
             .map(OsString::from),
         );
         process.cwd = workspace.path().to_path_buf();
-        process.capability = CapabilityPolicy::local_owner(workspace.path().to_path_buf());
+
         let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
         let handle = supervisor
             .start(process)
@@ -1386,7 +1349,7 @@ async fn windows_shell_reports_full_cwd_and_explicit_hidden_flags() {
         let mut process = request(helper_binary(), Vec::<OsString>::new());
         process.command = CommandSpec::Shell { shell:ShellKind::PowerShell, script:script.into() };
         process.cwd = workspace.path().to_path_buf();
-        process.capability = CapabilityPolicy::local_owner(workspace.path().to_path_buf());
+
         let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
         let handle = supervisor.start(process).await.unwrap();
         let ProcessOutcome::Exited { code, output, .. } = wait_for_terminal(&supervisor, &handle).await else {
@@ -1424,7 +1387,7 @@ async fn windows_utf8_file_read_and_literal_search_preserve_text_and_errors() {
         let mut process = request(helper_binary(),Vec::<OsString>::new());
         process.command=CommandSpec::Shell { shell:ShellKind::PowerShell,script:script.into() };
         process.cwd=workspace.path().to_path_buf();
-        process.capability=CapabilityPolicy::local_owner(workspace.path().to_path_buf());
+
         let supervisor=ProcessSupervisor::new(SupervisorConfig::default());
         let handle=supervisor.start(process).await.unwrap();
         let ProcessOutcome::Exited { code,output,.. } = wait_for_terminal(&supervisor,&handle).await else {
@@ -1450,7 +1413,7 @@ async fn windows_cmd_c_preserves_a_quoted_workspace_path() {
     fs::write(&file, content).unwrap();
     let mut process = request("cmd.exe", ["/d", "/c", "type \"资料 空格\\样本.txt\""].map(OsString::from));
     process.cwd = workspace.path().to_path_buf();
-    process.capability = CapabilityPolicy::local_owner(workspace.path().to_path_buf());
+
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = supervisor.start(process).await.expect("cmd starts");
     let outcome = wait_for_terminal(&supervisor, &handle).await;
@@ -1470,7 +1433,7 @@ async fn windows_powershell_autoloads_hash_cmdlet_under_managed_owner() {
     let script = "$ErrorActionPreference = 'Stop'; (Get-FileHash -LiteralPath 'normal.txt' -Algorithm SHA256).Hash";
     let mut process = request("powershell.exe", ["-NoProfile", "-Command", script].map(OsString::from));
     process.cwd = workspace.path().to_path_buf();
-    process.capability = CapabilityPolicy::local_owner(workspace.path().to_path_buf());
+
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = supervisor.start(process).await.expect("hash command starts");
     let outcome = wait_for_terminal(&supervisor, &handle).await;

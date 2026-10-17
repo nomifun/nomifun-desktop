@@ -5319,6 +5319,8 @@ dependencies = [
  "atspi",
  "core-foundation 0.10.1",
  "core-graphics",
+ "objc2",
+ "objc2-app-kit",
  "serde",
  "thiserror 2.0.19",
  "tokio",
@@ -5382,6 +5384,7 @@ dependencies = [
  "nomi-config",
  "nomi-types",
  "objc2",
+ "objc2-app-kit",
  "open",
  "serde",
  "serde_json",
@@ -5412,6 +5415,21 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "nomi-native-files"
+version = "0.8.11"
+dependencies = [
+ "base64 0.22.1",
+ "cap-std",
+ "libc",
+ "same-file",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -5483,6 +5501,21 @@ dependencies = [
  "tokio-util",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "nomi-system-execution"
+version = "0.8.11"
+dependencies = [
+ "nomi-native-files",
+ "nomi-process-runtime",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -5768,8 +5801,10 @@ dependencies = [
  "junction",
  "nomi-browser-engine",
  "nomi-computer",
+ "nomi-native-files",
  "nomi-process-runtime",
  "nomi-redact",
+ "nomi-system-execution",
  "nomi-types",
  "nomifun-agent-contracts",
  "nomifun-agent-control-plane",
@@ -5860,6 +5895,7 @@ dependencies = [
  "junction",
  "nomi-process-runtime",
  "nomi-redact",
+ "nomifun-runtime",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -6208,6 +6244,7 @@ dependencies = [
  "mime_guess",
  "nomi-browser-engine",
  "nomi-process-runtime",
+ "nomi-system-execution",
  "nomifun-app",
  "nomifun-browser-macos",
  "nomifun-browser-platform",
@@ -6255,6 +6292,8 @@ dependencies = [
  "async-trait",
  "jsonschema",
  "nomi-process-runtime",
+ "nomi-redact",
+ "nomi-system-execution",
  "nomifun-agent-contracts",
  "nomifun-agent-domain-wave2",
  "nomifun-agent-kernel",
@@ -6287,6 +6326,7 @@ dependencies = [
  "libc",
  "log",
  "mime_guess",
+ "nomi-native-files",
  "nomifun-api-types",
  "nomifun-auth",
  "nomifun-common",
@@ -6422,6 +6462,7 @@ dependencies = [
  "base64 0.22.1",
  "dirs 6.0.0",
  "nomi-process-runtime",
+ "nomi-redact",
  "nomifun-api-types",
  "nomifun-common",
  "nomifun-db",
@@ -6622,6 +6663,7 @@ dependencies = [
  "hex",
  "libc",
  "nomi-process-runtime",
+ "nomifun-net",
  "reqwest 0.12.28",
  "semver",
  "serde",
@@ -8616,6 +8658,7 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",

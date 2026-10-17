@@ -8,7 +8,7 @@ use std::{
 };
 
 use nomi_process_runtime::{
-    CapabilityPolicy, CommandSpec, ProcessError, ProcessHandle, ProcessOutcome,
+    CommandSpec, ProcessError, ProcessHandle, ProcessOutcome,
     ProcessOwner, ProcessPolicy, NormalizedProcessRequest, OutputCursor, PollResult,
     ProcessState, ProcessSupervisor, SessionId, SupervisorConfig, Transport,
 };
@@ -46,7 +46,6 @@ fn helper_request(
             reap_grace: SHORT_GRACE,
             ..ProcessPolicy::default()
         },
-        capability: CapabilityPolicy::local_owner(cwd),
     }
 }
 
@@ -724,10 +723,8 @@ async fn shutdown_wakes_long_poll_and_reaps_active_process() {
         ],
         Duration::from_secs(30),
     );
-    // The optional evidence root is the helper's workspace, not an ambient
-    // write grant. Bind both cwd and the sole capability root to that directory.
+    // Use the requested evidence directory as the helper's working directory.
     request.cwd = directory.clone();
-    request.capability = CapabilityPolicy::local_owner(directory);
     // Use the product stop contract, rather than the surrounding lease tests'
     // 75 ms total cleanup allowance, when proving a native shutdown boundary.
     let default_stop = ProcessPolicy::default();

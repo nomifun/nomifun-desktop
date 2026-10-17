@@ -1,4 +1,4 @@
-//! System runtimes are preferred; managed downloads require an explicit preparation request.
+//! System runtimes are preferred; required managed runtimes prepare on demand.
 use crate::progress::{ToolPreparationFailure, ToolPreparationPhase, ToolPreparationSnapshot};
 use crate::{cache, embed, extract};
 use nomi_process_runtime::ChildProcessBuilder;
@@ -73,13 +73,15 @@ pub struct PreparedComponentLaunch {
     pub environment: HashMap<String, String>,
     id: ToolId,
     fingerprint: FileFingerprint,
+    distribution: Option<crate::node_distribution::DistributionFingerprint>,
 }
 
 impl PreparedComponentLaunch {
     /// Recheck the prepared executable at the host's final spawn boundary.
     /// This observes local metadata only; it never probes or prepares a tool.
     pub fn validate_for_start(&self) -> Result<(), ToolError> {
-        validate_fingerprint(self.id, &self.tool.executable_path, &self.fingerprint)
+        validate_fingerprint(self.id, &self.tool.executable_path, &self.fingerprint)?;
+        validate_distribution(self.id, self.distribution.as_ref())
     }
 }
 
@@ -121,9 +123,9 @@ pub enum ToolError {
     Io(#[from] std::io::Error),
     #[error("{tool} identity or capability verification failed: {reason}")]
     Verification { tool: &'static str, reason: String },
-    #[error("{tool} component changed after admission; restart after repairing the component")]
+    #[error("{tool} component changed after preparation; prepare it again before execution")]
     Changed { tool: &'static str },
-    #[error("COMPONENT_PREPARATION_REQUIRED: install a system runtime or explicitly choose to download the managed component")]
+    #[error("required component is not prepared")]
     NotPrepared,
     #[error("component preparation was cancelled")]
     Cancelled,
@@ -144,6 +146,7 @@ pub enum ToolError {
 struct Admitted {
     tool: VerifiedTool,
     fingerprint: FileFingerprint,
+    distribution: Option<crate::node_distribution::DistributionFingerprint>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -190,7 +193,7 @@ struct PreparationAttempt {
 }
 
 struct ToolSlot {
-    admitted: OnceLock<Admitted>,
+    admitted: Mutex<Option<Arc<Admitted>>>,
     active: Mutex<Option<Arc<PreparationAttempt>>>,
     progress: watch::Sender<ToolPreparationSnapshot>,
 }
@@ -217,7 +220,7 @@ fn slot(id: ToolId) -> &'static ToolSlot {
             error: None,
         });
         ToolSlot {
-            admitted: OnceLock::new(),
+            admitted: Mutex::new(None),
             active: Mutex::new(None),
             progress,
         }
@@ -240,7 +243,7 @@ pub fn subscribe_tool_preparation(id: ToolId) -> watch::Receiver<ToolPreparation
     slot(id).progress.subscribe()
 }
 
-/// Explicit user download entry point. Each attempt authorizes only this preparation.
+/// Begin or retry the shared preparation producer; callers also prepare on demand.
 pub fn begin_tool_preparation(id: ToolId) -> ToolPreparationSnapshot {
     // This acknowledgment performs no filesystem work, even for a warm cache.
     // Fingerprint checks happen in the same supplier worker before Ready.
@@ -250,15 +253,14 @@ pub fn begin_tool_preparation(id: ToolId) -> ToolPreparationSnapshot {
     tool_preparation_snapshot(id)
 }
 
-/// Resolve an existing runtime, without granting download authority.
+/// Resolve an existing runtime or wait for an already-running preparation.
 /// User-installed Node/Bun take precedence over managed caches and are not pinned.
 pub async fn resolve_tool(id: ToolId) -> Result<VerifiedTool, ToolError> {
     match resolve_existing_tool(id).await {
         Err(ToolError::NotPrepared) => {}
         result => return result,
     }
-    // Existing waiters can observe an explicit request without granting new
-    // download authority to an ordinary caller.
+    // Read-only callers can observe a running producer without starting one.
     let active = slot(id).active.lock()
         .map_err(|_| ToolError::Worker("component controller lock poisoned".into()))?
         .as_ref().map(Arc::clone);
@@ -268,7 +270,7 @@ pub async fn resolve_tool(id: ToolId) -> Result<VerifiedTool, ToolError> {
     }
 }
 
-/// Check local availability without waiting for an explicit runtime download.
+/// Check local availability without starting or waiting for runtime preparation.
 /// Local development overrides and the embedded Office tool still verify their capability.
 pub async fn resolve_existing_tool(id: ToolId) -> Result<VerifiedTool, ToolError> {
     let external = matches!(id, ToolId::Bun | ToolId::Node);
@@ -288,17 +290,31 @@ pub async fn resolve_existing_tool(id: ToolId) -> Result<VerifiedTool, ToolError
     await_attempt(start_attempt(id, false)?).await
 }
 
-/// Prepare an explicit component target without authorizing downloads or
-/// changing user-owned command discovery. Reject environment conflicts before
+/// Prepare a component target, supplying a missing runtime automatically.
+/// Reject environment conflicts before
 /// admitting or probing the component; no supplied environment value is logged.
 pub async fn prepare_component_launch(
     id: ToolId,
     env: &HashMap<String, String>,
+    cwd: &Path,
 ) -> Result<PreparedComponentLaunch, ToolError> {
     let environment = component_environment(id, env)?;
-    let tool = resolve_existing_tool(id).await?;
+    let path = env.iter().find(|(key, _)| if cfg!(windows) { key.eq_ignore_ascii_case("PATH") } else { key.as_str() == "PATH" })
+        .map(|(_, path)| std::ffi::OsStr::new(path));
+    let tool = if matches!(id, ToolId::Node | ToolId::Bun)
+        && !(cfg!(debug_assertions) && std::env::var_os(id.override_variable()).is_some())
+    {
+        match crate::resolver::command_in_environment(id.as_str(), path, Some(cwd))? {
+            Some(path) => verify_system_tool(id, path).await?,
+            None => prepare_managed_tool(id).await?,
+        }
+    } else { prepare_tool(id).await? };
+    let cwd = cwd.to_owned();
+    let environment = tokio::task::spawn_blocking(move || crate::environment::process_environment_in(&environment, Some(&cwd)))
+        .await.map_err(|error| ToolError::Worker(error.to_string()))??;
     let fingerprint = prepared_component_fingerprint(id, &tool).await?;
-    Ok(PreparedComponentLaunch { tool, environment, id, fingerprint })
+    let distribution = distribution_fingerprint(id, &tool.executable_path)?;
+    Ok(PreparedComponentLaunch { tool, environment, id, fingerprint, distribution })
 }
 
 async fn prepared_component_fingerprint(id: ToolId, tool: &VerifiedTool) -> Result<FileFingerprint, ToolError> {
@@ -351,7 +367,22 @@ async fn await_attempt(attempt: Arc<PreparationAttempt>) -> Result<VerifiedTool,
 }
 
 pub async fn prepare_tool(id: ToolId) -> Result<VerifiedTool, ToolError> {
-    resolve_tool(id).await
+    match resolve_existing_tool(id).await {
+        Err(ToolError::NotPrepared) => prepare_managed_tool(id).await,
+        Err(error) if cache_repairable(&error) => prepare_managed_tool(id).await,
+        result => result,
+    }
+}
+
+/// Use only after the launch's own command discovery found no user runtime.
+/// This intentionally does not search a different, inherited host PATH.
+pub(crate) async fn prepare_managed_tool(id: ToolId) -> Result<VerifiedTool, ToolError> {
+    await_attempt(start_attempt(id, true)?).await
+}
+
+pub(crate) fn cache_repairable(error: &ToolError) -> bool {
+    matches!(error, ToolError::Changed { .. } | ToolError::InvalidAsset(_))
+        || matches!(error, ToolError::Io(error) if error.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// Global cancellation is reserved for the host exiting; observers/consumer timeouts
@@ -503,7 +534,7 @@ fn preparation_failure(error: &ToolError) -> ToolPreparationFailure {
         ),
         ToolError::Changed { .. } => (
             "COMPONENT_CHANGED",
-            "The prepared executable changed. Repair it and restart the application.",
+            "The prepared component changed. Prepare it again before execution.",
             false,
         ),
         ToolError::Cleanup(_) => (
@@ -512,8 +543,8 @@ fn preparation_failure(error: &ToolError) -> ToolPreparationFailure {
             false,
         ),
         ToolError::NotPrepared => (
-            "COMPONENT_PREPARATION_REQUIRED",
-            "Install a system runtime or choose to download the managed component.",
+            "COMPONENT_NOT_PREPARED",
+            "The required component has not been prepared.",
             true,
         ),
         ToolError::Unavailable { .. } => (
@@ -544,9 +575,14 @@ async fn admit_tool(id: ToolId, cancel: &CancellationToken, allow_download: bool
         return Err(ToolError::Cancelled);
     }
     if let Some(tool) = cached_tool(id) {
-        return tool;
+        match tool {
+            Ok(tool) => return Ok(tool),
+            Err(error) if cache_repairable(&error) => {},
+            Err(error) => return Err(error),
+        }
     }
     let (path, expected_version, digest) = supply_tool(id, cancel, allow_download).await?;
+    let distribution = distribution_fingerprint(id, &path)?;
     report_progress(id, ToolPreparationPhase::Verifying, 0, None);
     let version = verify(id, &path, expected_version.as_deref(), cancel).await?;
     let before_hash = fingerprint(&path)?;
@@ -555,6 +591,7 @@ async fn admit_tool(id: ToolId, cancel: &CancellationToken, allow_download: bool
     if after != digest || fingerprint != before_hash {
         return Err(ToolError::Changed { tool: id.as_str() });
     }
+    validate_distribution(id, distribution.as_ref())?;
     if cancel.is_cancelled() {
         return Err(ToolError::Cancelled);
     }
@@ -566,12 +603,10 @@ async fn admit_tool(id: ToolId, cancel: &CancellationToken, allow_download: bool
             source: ToolSource::Managed,
         },
         fingerprint,
+        distribution,
     };
     let tool = admitted.tool.clone();
-    slot(id)
-        .admitted
-        .set(admitted)
-        .map_err(|_| ToolError::Worker("component committed twice".into()))?;
+    record_admission(id, admitted)?;
     Ok(tool)
 }
 
@@ -581,10 +616,13 @@ pub(crate) fn cached_tool(id: ToolId) -> Option<Result<VerifiedTool, ToolError>>
     if let Err(error) = cached_admission_permit(id)? {
         return Some(Err(error));
     }
-    let admitted = slot(id).admitted.get()?;
+    let admitted = match slot(id).admitted.lock() {
+        Ok(admitted) => admitted.as_ref().map(Arc::clone)?,
+        Err(_) => return Some(Err(ToolError::Worker("component admission lock poisoned".into()))),
+    };
     // Filesystem work runs without the preparation-control guard, so begin/cancel
     // remain independent of a slow volume. Recheck the in-memory fence afterward.
-    let validated = validate_admission(id, admitted);
+    let validated = validate_admission(id, &admitted);
     if let Err(error) = cached_admission_permit(id)? {
         return Some(Err(error));
     }
@@ -624,6 +662,33 @@ pub(crate) fn published_tool(id: ToolId) -> Option<Result<VerifiedTool, ToolErro
     ) else {
         return Some(Err(ToolError::InvalidAsset("no approved platform asset".into())));
     };
+    if id == ToolId::Node {
+        let executable = crate::node_distribution::executable_path(&directory, asset);
+        let distribution = crate::node_distribution::fingerprint(&executable).ok();
+        return match crate::node_distribution::validated_cached(
+            &directory, &spec, asset, identity.sha256,
+            identity.distribution_sha256.expect("Node distribution build identity"),
+            &CancellationToken::new(),
+        ) {
+            Ok(Some(path)) => Some((|| {
+                let distribution = distribution.ok_or(ToolError::Changed { tool: id.as_str() })?;
+                validate_distribution(id, Some(&distribution))?;
+                let tool = VerifiedTool {
+                    executable_path: dunce::canonicalize(path)?,
+                    version: identity.version.into(),
+                    digest: identity.sha256.into(),
+                    source: ToolSource::Managed,
+                };
+                let admitted = Admitted { fingerprint: fingerprint(&tool.executable_path)?, tool: tool.clone(), distribution: Some(distribution) };
+                // Cache the read-only admission in memory so every subsequent
+                // spawn checks metadata instead of hashing the full runtime.
+                record_admission(id, admitted)?;
+                Ok(tool)
+            })()),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
+        };
+    }
     let provenance = provenance_bytes(&spec, asset, identity.sha256);
     let mut files = vec![crate::notices::PublicationFile {
         filename: "PROVENANCE.json",
@@ -643,7 +708,7 @@ pub(crate) fn published_tool(id: ToolId) -> Option<Result<VerifiedTool, ToolErro
         id == ToolId::Bun, &files,
     ) {
         return Some(Err(ToolError::InvalidAsset(
-            "the existing runtime cache failed integrity verification; choose explicit preparation to repair it".into(),
+            "the existing runtime cache failed integrity verification".into(),
         )));
     }
     if fingerprint(&executable).ok().as_ref() != Some(&before) {
@@ -700,7 +765,29 @@ fn cached_admission_permit(id: ToolId) -> Option<Result<(), ToolError>> {
 
 fn validate_admission(id: ToolId, admitted: &Admitted) -> Result<VerifiedTool, ToolError> {
     validate_fingerprint(id, &admitted.tool.executable_path, &admitted.fingerprint)?;
+    validate_distribution(id, admitted.distribution.as_ref())?;
     Ok(admitted.tool.clone())
+}
+
+fn record_admission(id: ToolId, admitted: Admitted) -> Result<(), ToolError> {
+    let mut current = slot(id).admitted.lock()
+        .map_err(|_| ToolError::Worker("component admission lock poisoned".into()))?;
+    *current = Some(Arc::new(admitted));
+    Ok(())
+}
+
+fn distribution_fingerprint(id: ToolId, path: &Path) -> Result<Option<crate::node_distribution::DistributionFingerprint>, ToolError> {
+    if id == ToolId::Node && is_managed_path(path) {
+        return crate::node_distribution::fingerprint(path).map(Some);
+    }
+    Ok(None)
+}
+
+fn validate_distribution(id: ToolId, fingerprint: Option<&crate::node_distribution::DistributionFingerprint>) -> Result<(), ToolError> {
+    if let Some(fingerprint) = fingerprint && !fingerprint.validate()? {
+        return Err(ToolError::Changed { tool: id.as_str() });
+    }
+    Ok(())
 }
 
 fn validate_fingerprint(id: ToolId, path: &Path, expected: &FileFingerprint) -> Result<(), ToolError> {
@@ -1098,7 +1185,7 @@ mod tests {
         let value = "request-private-environment-value";
         for variable in ["OFFICECLI_NO_AUTO_RESIDENT", "OFFICECLI_SKIP_UPDATE"] {
             let env = HashMap::from([(variable.into(), value.into())]);
-            let error = prepare_component_launch(ToolId::OfficeCli, &env).await.unwrap_err();
+            let error = prepare_component_launch(ToolId::OfficeCli, &env, Path::new(".")).await.unwrap_err();
             assert!(matches!(error, ToolError::EnvironmentConflict {
                 tool: "officecli", variable: rejected,
             } if rejected == variable));
@@ -1124,6 +1211,7 @@ mod tests {
                 ("OFFICECLI_SKIP_UPDATE".into(), "1".into()),
                 ("PRIVATE_ENVIRONMENT".into(), "private-environment-value".into())]),
             id: ToolId::OfficeCli, fingerprint: expected,
+            distribution: None,
         };
         let debug = format!("{launch:?}");
         assert!(!debug.contains("OFFICECLI_NO_AUTO_RESIDENT"));
@@ -1153,6 +1241,34 @@ mod tests {
             Err(ToolError::Changed { tool: "officecli" })));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn component_relative_path_uses_each_launch_cwd_instead_of_the_host_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let temporary = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(temporary.path()).unwrap();
+        let environment = HashMap::from([("PATH".into(), "./bin:/usr/bin:/bin".into())]);
+        for project in ["first-project", "second-project"] {
+            let cwd = root.join(project);
+            std::fs::create_dir_all(cwd.join("bin")).unwrap();
+            for id in [ToolId::Node, ToolId::Bun] {
+                let path = cwd.join("bin").join(id.as_str());
+                let identity = if id == ToolId::Node {
+                    serde_json::json!({"name":"node","node":"22.22.0","execPath":path})
+                } else {
+                    serde_json::json!({"name":"node","node":"24.3.0","bun":"1.3.13","execPath":path})
+                };
+                std::fs::write(&path, format!("#!/bin/sh\nprintf '%s' '{}'\n", identity)).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+                let prepared = prepare_component_launch(id, &environment, &cwd).await.unwrap();
+                assert_eq!(prepared.tool.source, ToolSource::System);
+                assert_eq!(prepared.tool.executable_path, path);
+                assert_eq!(std::env::split_paths(&prepared.environment["PATH"]).next(), Some(PathBuf::from("./bin")));
+                prepared.validate_for_start().unwrap();
+            }
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn external_runtime_discovery_is_local_and_prefers_unpinned_system_engines() {
         const CHILD_MODE: &str = "NOMIFUN_EXISTING_RUNTIME_TEST_MODE";
@@ -1163,25 +1279,22 @@ mod tests {
             if mode == "missing" {
                 for id in [ToolId::Node, ToolId::Bun] {
                     assert!(matches!(resolve_tool(id).await, Err(ToolError::NotPrepared)));
-                    assert!(matches!(prepare_tool(id).await, Err(ToolError::NotPrepared)));
-                    assert!(matches!(prepare_component_launch(id, &HashMap::new()).await,
-                        Err(ToolError::NotPrepared)));
+                    assert!(matches!(resolve_existing_tool(id).await, Err(ToolError::NotPrepared)));
                     assert_eq!(tool_preparation_snapshot(id).phase, ToolPreparationPhase::Idle);
                     assert!(slot(id).active.lock().unwrap().is_none());
                 }
                 let office_before = tool_preparation_snapshot(ToolId::OfficeCli);
                 for variable in ["OFFICECLI_NO_AUTO_RESIDENT", "OFFICECLI_SKIP_UPDATE"] {
                     let conflict = HashMap::from([(variable.into(), "0".into())]);
-                    assert!(matches!(prepare_component_launch(ToolId::OfficeCli, &conflict).await,
+                    assert!(matches!(prepare_component_launch(ToolId::OfficeCli, &conflict, &directory).await,
                         Err(ToolError::EnvironmentConflict { .. })));
                     assert_eq!(tool_preparation_snapshot(ToolId::OfficeCli), office_before);
                     assert!(slot(ToolId::OfficeCli).active.lock().unwrap().is_none());
                 }
-                assert!(matches!(crate::prepare_managed_command("bun", &[]).await,
-                    Err(ToolError::NotPrepared)));
                 assert!(crate::resolve_cached_managed_command("bunx", &[]).unwrap().is_none());
                 assert!(!directory.join("runtime").exists());
-                // A consumer must not wait for a download authorized by a different request.
+                // Read-only status never waits for an active preparation. A
+                // launch joins the producer and remains cancellable by its owner.
                 *slot(ToolId::Bun).active.lock().unwrap() = Some(Arc::new(PreparationAttempt {
                     cancel: CancellationToken::new(),
                     result: OnceLock::new(),
@@ -1189,11 +1302,10 @@ mod tests {
                 }));
                 assert!(matches!(tokio::time::timeout(Duration::from_millis(100),
                     resolve_existing_tool(ToolId::Bun)).await.unwrap(), Err(ToolError::NotPrepared)));
-                assert!(matches!(tokio::time::timeout(Duration::from_millis(100),
-                    crate::prepare_managed_command("bun", &[])).await.unwrap(), Err(ToolError::NotPrepared)));
-                assert!(matches!(tokio::time::timeout(Duration::from_millis(100),
-                    prepare_component_launch(ToolId::Bun, &HashMap::new())).await.unwrap(),
-                    Err(ToolError::NotPrepared)));
+                assert!(tokio::time::timeout(Duration::from_millis(100),
+                    crate::prepare_managed_command("bun", &[])).await.is_err());
+                assert!(tokio::time::timeout(Duration::from_millis(100),
+                    prepare_component_launch(ToolId::Bun, &HashMap::new(), &directory)).await.is_err());
                 *slot(ToolId::Bun).active.lock().unwrap() = None;
                 let identity = embed::identity(ToolId::Bun);
                 let corrupt = crate::runtime_root().unwrap().join(format!(
@@ -1236,11 +1348,12 @@ mod tests {
                 assert_eq!(tool.version, version);
                 assert_eq!(tool.digest.len(), 64);
                 assert!(tool.executable_path.starts_with(&directory));
-                let env = HashMap::from([("PATH".into(), "explicit-child-path".into()),
+                let env = HashMap::from([("PATH".into(), directory.to_string_lossy().into_owned()),
                     ("USER_FLAG".into(), "keep".into())]);
-                let launch = prepare_component_launch(id, &env).await.unwrap();
-                assert_eq!(launch.tool, tool, "explicit targets retain the supplier's system-first policy");
-                assert_eq!(launch.environment, env);
+                let launch = prepare_component_launch(id, &env, &directory).await.unwrap();
+                assert_eq!(launch.tool, tool, "explicit targets retain the launch's system-first policy");
+                assert_eq!(launch.environment.get("USER_FLAG"), env.get("USER_FLAG"));
+                assert_eq!(std::env::split_paths(&launch.environment["PATH"]).next(), Some(directory.clone()));
                 assert_eq!(tool_preparation_snapshot(id).phase, ToolPreparationPhase::Idle);
             }
             let args = vec!["fixture-package".to_string()];
@@ -1481,6 +1594,7 @@ mod tests {
         std::fs::write(&path, b"approved").unwrap();
         let admitted = Admitted {
             fingerprint: fingerprint(&path).unwrap(),
+            distribution: None,
             tool: VerifiedTool {
                 executable_path: path.clone(),
                 version: "22.22.0".into(),

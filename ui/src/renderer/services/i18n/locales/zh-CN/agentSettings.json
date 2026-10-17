@@ -136,7 +136,7 @@
     "chat": {
       "minimal": {
         "name": "最简",
-        "description": "保留基础对话；可在会话输入框旁选择全局技能与 MCP。"
+        "description": "基础对话与本机文件、进程操作；可在会话输入框旁选择全局技能与 MCP。"
       }
     },
     "assistant": {
@@ -656,7 +656,7 @@
     "noModules": "当前没有可用的能力模块",
     "noModulesHint": "请刷新安装目录，或启用会发布 Agent 模块的产品扩展。",
     "firstRunTitle": "选择起点",
-    "firstRunHint": "“最简”只提供基础对话，不绑定 Skill、MCP 或能力模块；也可以创建空白配置后逐项添加。",
+    "firstRunHint": "“最简”默认提供基础对话及本机文件、进程操作，无需切换权限模式；Skill、MCP 和专门能力按任务选择。",
     "startMinimal": "从最简开始",
     "startCustom": "空白自定义",
     "emptyWorkbenchTitle": "创建第一个 Agent",

@@ -505,8 +505,8 @@ mod tests {
     }
 
     #[test]
-    fn all_nineteen_guides_render_formal_schemas_and_valid_examples_without_constraint_copies() {
-        assert_eq!(tool_model_guides().len(),19);
+    fn all_guides_render_formal_schemas_and_valid_examples_without_constraint_copies() {
+        assert_eq!(tool_model_guides().len(),20);
         for host_os in ["windows","macos","linux"] {
             let mut names=BTreeSet::new();
             let mut actions=BTreeSet::new();
@@ -549,18 +549,30 @@ mod tests {
             json!({"path":".","format":"instruction_scope","recursive":false,"missing_ok":false}),
             json!({"path":"file.txt","recursive":false,"start_line":2,"line_count":10}),
             json!({"path":"image.png","format":"image","recursive":false,"missing_ok":false}),
+            json!({"path":"   "}),
+            json!({"path":"protected","format":"instruction_scope","execution_identity":"administrator"}),
+            json!({"path":"protected/AGENTS.md","execution_identity":"administrator","offset":0,"limit":128}),
+            json!({"path":"protected/image.png","format":"image","execution_identity":"administrator"}),
         ] {assert!(validator.is_valid(&input),"{input}");}
         for input in [
             json!({"path":".","format":"instruction_scope","missing_ok":true}),
             json!({"path":"file.txt","recursive":true}),
             json!({"path":"image.png","format":"image","start_line":1}),
-            json!({"path":"file.txt","start_line":1,"offset":0}),json!({"path":"   "}),
+            json!({"path":"file.txt","start_line":1,"offset":0}),
+            json!({"path":""}),json!({"path":"invalid\u{0000}path"}),
+            json!({"path":"file.txt","execution_identity":"root"}),
+            json!({"path":"protected","format":"instruction_scope","execution_identity":"administrator","missing_ok":true}),
         ] {assert!(!validator.is_valid(&input),"{input}");}
         assert!(read.description.contains("sha256 always identifies the entire source"));
         assert!(read.description.contains("call read_file alone on its directory"));
         assert!(read.description.contains("source reads with fresh call IDs"));
         assert!(read.description.contains("never use the default text format for AGENTS.md"));
         assert!(read.input_schema.0["properties"]["expected_sha256"]["description"].as_str().unwrap().contains("whole-source"));
+        assert_eq!(read.input_schema.0["properties"]["execution_identity"]["default"], "current_user");
+        assert!(read.input_schema.0["properties"]["execution_identity"]["description"].as_str().unwrap().contains("every format"));
+        let binding = &tools.iter().find(|tool| tool.definition.name == "read_file").unwrap();
+        assert_eq!(binding.capability_id.as_ref(), "workspace.files");
+        assert_eq!(binding.action_id.as_ref(), "workspace.files/read");
     }
 
     #[test]
@@ -642,16 +654,28 @@ mod tests {
     #[test]
     fn rendered_workspace_paths_do_not_invent_a_conversation_or_project_prefix() {
         let tools=guided_workspace_exposures(std::env::consts::OS);
-        for name in ["read_file","write_file","delete_path","git_stage","publish_artifact"] {
+        for name in ["read_file","write_file","delete_path"] {
             let schema=&tools.iter().find(|tool|tool.definition.name==name).unwrap().definition.input_schema.0;
             let path=schema["properties"]["path"]["description"].as_str().unwrap();
-            assert!(path.contains("without prepending a project or conversation display name"),"{name}: root provenance lost");
+            assert!(path.contains("native absolute path"),"{name}: local absolute paths lost");
+            assert!(path.contains("relative to the Session default working directory"),"{name}: default-directory provenance lost");
+            assert!(path.contains("Do not prepend project or conversation display names"),"{name}: root provenance lost");
+        }
+        // Project business identity remains exact even though local file and
+        // process access no longer stops at that project's root.
+        for name in ["git_stage","publish_artifact"] {
+            let schema=&tools.iter().find(|tool|tool.definition.name==name).unwrap().definition.input_schema.0;
+            let path=schema["properties"]["path"]["description"].as_str().unwrap();
+            assert!(path.contains("without prepending a project or conversation display name"),"{name}: project provenance lost");
         }
         let search=&tools.iter().find(|tool|tool.definition.name=="search_files").unwrap().definition.input_schema.0;
-        assert!(search["properties"]["path"]["description"].as_str().unwrap().contains("do not substitute its parent directory"));
+        assert!(search["properties"]["path"]["description"].as_str().unwrap().contains("Session default working directory"));
         for name in ["exec_command","start_process"] {
             let schema=&tools.iter().find(|tool|tool.definition.name==name).unwrap().definition.input_schema.0;
-            assert!(schema["properties"]["cwd"]["description"].as_str().unwrap().contains("admitted workspace context owns the actual root"));
+            let cwd=schema["properties"]["cwd"]["description"].as_str().unwrap();
+            assert!(cwd.contains("Native absolute directory"),"{name}: absolute cwd guidance lost");
+            assert!(cwd.contains("relative to the Session default working directory"),"{name}: default cwd provenance lost");
+            assert!(cwd.contains("not a local access boundary"),"{name}: obsolete cwd restriction returned");
         }
     }
 
@@ -718,7 +742,7 @@ mod tests {
                 selected,&["workspace","process_session"]);
             let active=nomifun_agent_kernel::SessionCapabilityState::new(&snapshot).snapshot().unwrap();
             let plan=compile(&snapshot,&active,&registry,&UnselectedSchemas,&UnselectedSchemas,&BTreeSet::new()).await.unwrap();
-            assert_eq!(plan.len(),if selected.len()==4 {19} else {1});
+            assert_eq!(plan.len(),if selected.len()==4 {20} else {1});
             for definition in plan.model_definitions() {
                 let binding=plan.binding(&definition.name).unwrap();
                 let cap=registry.capability(&binding.capability_id).unwrap();

@@ -410,8 +410,8 @@ nomifun-web[12345]: listening on 127.0.0.1:8787 (auth: enabled)
 |---|---|---|
 | `glibc` + `ca-certificates` | 是 | sqlite 是静态链接的，TLS 使用 rustls —— **不需要 openssl，不需要 libsqlite**。 |
 | OfficeCLI | Release 内嵌 | 批准制品本地解压到受管缓存；Office 预览无需下载 Node/Bun。 |
-| Bun／`bunx` | 按用户命令需要 | 优先使用系统工具，有效的既有受管 Bun 缓存可后备；缺失时由用户明确选择下载。 |
-| Node | 按应用托管需要 | 使用系统或用户指定的 Node；当前 Agent／插件执行没有受管 Node 消费者。 |
+| Bun／`bunx` | 按用户命令需要 | 优先使用有效用户工具与受管缓存；实际启动缺少必需组件时自动准备批准制品。 |
+| Node/npm/npx | 按命令需要 | Agent、Terminal、MCP 共用自动准备与每次启动环境；保留用户工具链，受管供应使用完整官方发行目录。Linux 专属原生产品验收仍须在对应环境执行。 |
 | `npm` / `npx` 等用户工具 | 按配置需要 | 用户配置的 MCP stdio 命令使用；Docker 的独立 Node/npm 镜像来源固定在组件清单中。Office 预览不安装全局 npm 包。 |
 | Python 3 + PyYAML | 推荐 | 支持 Agent 的 Python 脚本模式和随附的 Python 内置技能。Docker 镜像里已包含。 |
 | `git` | 推荐 | 技能发现和一些内置工具会使用。 |

@@ -74,19 +74,21 @@ impl FileService {
             || request
                 .path
                 .as_ref()
-                .is_some_and(|path| path.len() > 4096 || path.chars().any(char::is_control))
+                .is_some_and(|path| path.len() > 4096 || path.contains('\0'))
         {
-            return Err(AppError::BadRequest("Search requires a nonempty single-line literal query (at most 1024 characters / 4096 bytes), a relative path and limit 1..200".into()));
+            return Err(AppError::BadRequest("Search requires a nonempty single-line literal query (at most 1024 characters / 4096 bytes), a native absolute or Session-relative path and limit 1..200".into()));
         }
-        // Directory search accepts the conventional workspace-root spelling.
-        // Do not broaden the shared file/mutation resolver (e.g. delete '.').
+        // An omitted path or "." selects the Session default directory.
         let relative = match request.path.as_deref() { None | Some(".") => "", Some(path) => path };
-        let target = scope.resolve_relative_path(relative)?;
+        let target = scope.resolve_path(relative)?;
         let authority = scope.authority();
         let root = scope.workspace_root().to_owned();
         tokio::task::spawn_blocking(move || {
-            let root = crate::path_safety::validate_path_authority(&root.to_string_lossy(), &authority)?;
+            let root = std::fs::canonicalize(&root).unwrap_or(root);
             let target = crate::path_safety::validate_path_authority(&target.to_string_lossy(), &authority)?;
+            let walk_root = if target.starts_with(&root) { root.clone() }
+                else if target.is_dir() { target.clone() }
+                else { target.parent().unwrap_or(&target).to_owned() };
             let mut result = AgentTextSearchResult {
                 query: request.query, matches: Vec::new(), truncated: false,
                 incomplete_reasons: BTreeSet::new(), files_scanned: 0, files_skipped: 0,
@@ -96,7 +98,7 @@ impl FileService {
             let started = Instant::now();
             let mut attempted_files = 0usize;
             before_walk();
-            let mut walker = crate::workspace_search_walk::SearchWalk::new(&root, &target, authority.clone(), started, &mut result.incomplete_reasons, before_directory)?;
+            let mut walker = crate::workspace_search_walk::SearchWalk::new(&walk_root, &target, authority.clone(), started, &mut result.incomplete_reasons, before_directory)?;
             while let Some(entry) = walker.next(&mut result.source_bytes_read, &mut result.incomplete_reasons) {
                 if attempted_files >= 2048 || started.elapsed() >= Duration::from_secs(5) {
                     result.incomplete_reasons.insert("scan_budget".into());
@@ -118,11 +120,10 @@ impl FileService {
                 attempted_files += 1;
                 let remaining = MAX_SOURCE_BYTES.saturating_sub(result.source_bytes_read);
                 if remaining <= 1 { result.incomplete_reasons.insert("source_byte_budget".into()); break; }
-                let Some(path) = entry.path().strip_prefix(&root).ok().and_then(|path| path.to_str()) else {
+                let Ok(path) = crate::path_safety::session_path_label(&root, entry.path()) else {
                     result.files_skipped += 1; result.incomplete_reasons.insert("unrepresentable_path".into()); continue;
                 };
-                let path = path.replace('\\', "/");
-                if path.len() > 4096 || path.chars().any(char::is_control) {
+                if path.len() > 4096 || path.contains('\0') {
                     result.files_skipped += 1; result.incomplete_reasons.insert("unrepresentable_path".into()); continue;
                 }
                 let source = crate::agent_text_read::read_source(entry.path(), &authority,

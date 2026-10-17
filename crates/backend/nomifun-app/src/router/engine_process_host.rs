@@ -13,7 +13,7 @@ use futures_util::FutureExt;
 use nomifun_agent_contracts::StrictJsonValue;
 use nomifun_agent_domain_wave2::Wave2HostPortError;
 use nomifun_engine_core::{
-    EngineProcessPoll, EngineProcessRequest, EngineProcessSession, EngineProcessTransport,
+    EngineExecutionIdentity, EngineProcessPoll, EngineProcessRequest, EngineProcessSession, EngineProcessStartError, EngineProcessTransport,
     MAX_PTY_DIMENSION, ManagedEngineProcessOwner,
 };
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 const MAX_STDIN_WRITE_BYTES: usize = 1024 * 1024;
-const COMPONENT_PREPARATION_WAIT: Duration = Duration::from_secs(60);
+const COMPONENT_PREPARATION_WAIT: Duration = Duration::from_secs(11 * 60);
 
 fn error(value: impl std::fmt::Display) -> Wave2HostPortError {
     Wave2HostPortError::new("CAPABILITY_UNAVAILABLE", value.to_string())
@@ -51,7 +51,7 @@ fn component_resolution_error(id: nomifun_runtime::ToolId, cause: &nomifun_runti
     use nomifun_runtime::ToolError;
     let code = match cause {
         ToolError::Shared(cause) => return component_resolution_error(id, cause),
-        ToolError::NotPrepared => "COMPONENT_PREPARATION_REQUIRED",
+        ToolError::NotPrepared => "COMPONENT_UNAVAILABLE",
         ToolError::Unavailable { .. } => "COMPONENT_UNAVAILABLE",
         ToolError::EnvironmentConflict { .. } => "COMPONENT_ENVIRONMENT_CONFLICT",
         ToolError::Verification { .. } => "COMPONENT_VERIFICATION_FAILED",
@@ -106,6 +106,8 @@ struct Params {
     #[serde(default)]
     env: BTreeMap<String, String>,
     timeout_ms: Option<u64>,
+    #[serde(default)]
+    execution_identity: EngineExecutionIdentity,
     process_id: Option<String>,
     input: Option<String>,
     append_newline: Option<bool>,
@@ -271,6 +273,7 @@ impl EngineProcessScope {
         request.args = params.args.clone();
         request.cwd = params.cwd.clone();
         request.env = params.env.clone();
+        request.execution_identity = params.execution_identity;
         request.timeout_ms = params.timeout_ms.unwrap_or(30_000);
         request.transport = if params.tty {
             EngineProcessTransport::Pty { cols: params.cols.unwrap_or(120), rows: params.rows.unwrap_or(40) }
@@ -286,13 +289,14 @@ impl EngineProcessScope {
             )));
         }
         let environment = params.env.iter().map(|(key, value)| (key.clone(), value.clone())).collect();
+        let cwd = self.workspace_root().join(params.cwd.as_deref().unwrap_or("."));
         let preparation = tokio::select! {
             biased;
             _ = self.cancellation.cancelled() => return Ok(PreparedWave2Invocation::Return(component_not_started(
                 name, "CANCELLED", "Component preparation cancelled before the requested program started.",
             ))),
             result = tokio::time::timeout(COMPONENT_PREPARATION_WAIT,
-                nomifun_runtime::prepare_component_launch(component, &environment)) => result,
+                nomifun_runtime::prepare_component_launch(component, &environment, &cwd)) => result,
         };
         let prepared = match preparation {
             Ok(Ok(prepared)) => prepared,
@@ -454,6 +458,7 @@ impl EngineProcessScope {
             }};
             request.cwd = params.cwd;
             if component.is_none() { request.env = params.env; }
+            request.execution_identity = params.execution_identity;
             request.timeout_ms = params.timeout_ms.unwrap_or(30_000);
             request.output_limit_bytes = 256 * 1024;
             request.transport = if params.tty {
@@ -467,9 +472,7 @@ impl EngineProcessScope {
             // Obvious input errors are rejected before the uncertain spawn
             // window. Errors returned by the owner may still require repair.
             request.validate().map_err(error)?;
-            if component.is_none() {
-                resolve_managed_program(&mut request, &self.cancellation, self.workspace_root()).await?;
-            }
+            resolve_managed_program(&mut request, &self.cancellation, self.workspace_root()).await?;
             state.unregistered_start = true;
             let session = match self
                 .owner
@@ -477,22 +480,7 @@ impl EngineProcessScope {
                 .await
             {
                 Ok(session) => session,
-                Err(failure) => {
-                    state.unregistered_start = !failure.no_live_process_proven;
-                    if failure.user_code_not_started {
-                        return Ok(StrictJsonValue(serde_json::json!({
-                            "schema":"nomifun.process-start-observation.v1", "state":"not_started",
-                            "success":false, "user_code_started":false,
-                            "code":"PROCESS_NOT_STARTED",
-                            "message":"The requested executable did not start. For an ordinary executable, use command for the executable name or path only, with separate literal tokens in an args JSON array, and omit cmd. The owner never splits command or evaluates it as shell text. Use cmd only when shell syntax is required; then omit command and args. Check the executable and workspace-relative cwd, then correct this request. Process capability remains available; this failed launch did not invalidate earlier file/check observations."
-                        })));
-                    }
-                    return Err(if failure.no_live_process_proven {
-                        error(failure.error)
-                    } else {
-                        outcome_unknown(failure.error)
-                    });
-                }
+                Err(failure) => return process_start_failure(&mut state.unregistered_start, failure),
             };
             let id = session.session_id();
             // No await between owned spawn and registration in the scope.
@@ -511,6 +499,7 @@ impl EngineProcessScope {
                 || !params.args.is_empty()
                 || params.cwd.is_some()
                 || !params.env.is_empty()
+                || params.execution_identity != EngineExecutionIdentity::CurrentUser
                 || params.timeout_ms.is_some()
                 || params.tty
             {
@@ -536,7 +525,7 @@ impl EngineProcessScope {
             // A deadline can settle in the owner between model steps. Read its
             // frozen terminal before attempting input; do not consume running
             // output or turn a missing/uncertain owner into a successful stop.
-            if let Some(poll) = self.owner.terminal_if_ready(&mut entry.session).map_err(outcome_unknown)? {
+            if let Some(poll) = self.owner.terminal_observation_if_ready(&mut entry.session, self.cancellation.clone()).await.map_err(outcome_unknown)? {
                 if !cleanup_is_proven(&poll) { return Err(outcome_unknown("the original owner terminal has no proven cleanup receipt")); }
                 entry.terminal = Some(poll.clone());
                 return with_component_identity(rejected_terminal_control(&id, &poll, params.operation), entry.component_identity.as_ref());
@@ -676,48 +665,63 @@ fn rejected_terminal_control(id: &str, poll: &EngineProcessPoll, operation: Oper
     Ok(output)
 }
 
-/// Resolve system Bun or an existing verified download before entering the
-/// uncertain process-start window. Missing components require a user choice;
-/// an Agent execution request never starts their download.
+/// Prepare each launch with the same command discovery and user tool environment
+/// as Terminal and MCP, before entering the uncertain process-start window.
 async fn resolve_managed_program(
     request: &mut EngineProcessRequest,
     cancellation: &CancellationToken,
     workspace_root: &Path,
 ) -> Result<(), Wave2HostPortError> {
-    if request.shell_script.is_some() || nomifun_runtime::managed_command_tool(&request.command).is_none() {
-        return Ok(());
-    }
     if cancellation.is_cancelled() {
-        return Err(Wave2HostPortError::new("CANCELLED", "Process resolution cancelled before user code started"));
+        return Err(Wave2HostPortError::new("CANCELLED", "Process preparation cancelled before user code started"));
     }
     let env = request.env.iter().map(|(name, value)| (name.clone(), value.clone())).collect();
+    // Explicit shell text stays shell text; the owner selects the platform shell.
+    // Its child environment still receives newly prepared runtimes and user tools.
+    if request.shell_script.is_some() {
+        request.env = nomifun_runtime::process_environment(&env).map_err(|cause| runtime_resolution_error(&cause))?
+            .into_iter().collect();
+        return Ok(());
+    }
     let cwd = workspace_root.join(request.cwd.as_deref().unwrap_or("."));
     let prepared = tokio::select! {
         biased;
-        _ = cancellation.cancelled() => return Err(Wave2HostPortError::new("CANCELLED", "Process resolution cancelled before user code started")),
-        result = nomifun_runtime::prepare_managed_command_with_env(&request.command, &request.args, &env, Some(&cwd)) => result.map_err(|cause| runtime_resolution_error(&cause))?,
+        _ = cancellation.cancelled() => return Err(Wave2HostPortError::new("CANCELLED", "Process preparation cancelled before user code started")),
+        result = nomifun_runtime::prepare_process_launch(&request.command, &request.args, &cwd, &env) => result.map_err(|cause| runtime_resolution_error(&cause))?,
     };
     if cancellation.is_cancelled() {
-        return Err(Wave2HostPortError::new("CANCELLED", "Process resolution cancelled before user code started"));
+        return Err(Wave2HostPortError::new("CANCELLED", "Process preparation cancelled before user code started"));
     }
-    let prepared = prepared.ok_or_else(|| runtime_resolution_error(&nomifun_runtime::ToolError::NotPrepared))?;
-    request.command = prepared.executable_path.to_str().ok_or_else(|| error("Bun path cannot be represented by the process protocol"))?.to_owned();
+    request.command = prepared.program;
     request.args = prepared.args;
+    request.env = prepared.environment.into_iter().collect();
     request.validate().map_err(error)
 }
 
 fn runtime_resolution_error(cause: &nomifun_runtime::ToolError) -> Wave2HostPortError {
-    // Ordinary command discovery keeps its existing response contract.
     match cause {
         nomifun_runtime::ToolError::Shared(cause) => runtime_resolution_error(cause),
-        nomifun_runtime::ToolError::NotPrepared | nomifun_runtime::ToolError::Unavailable { .. } => {
-            Wave2HostPortError::new(
-                "COMPONENT_PREPARATION_REQUIRED",
-                "Bun is unavailable. Install Bun on the system or choose to download it in NomiFun, then retry.",
-            )
-        }
-        cause => Wave2HostPortError::new("COMPONENT_UNAVAILABLE", cause.to_string()),
+        nomifun_runtime::ToolError::Cancelled => Wave2HostPortError::new("CANCELLED", cause.to_string()),
+        cause => Wave2HostPortError::new("COMPONENT_UNAVAILABLE", nomi_redact::redact_secrets_owned(cause.to_string())),
     }
+}
+
+fn process_start_failure(
+    unregistered_start: &mut bool,
+    failure: EngineProcessStartError,
+) -> Result<StrictJsonValue, Wave2HostPortError> {
+    *unregistered_start = !failure.no_live_process_proven;
+    if failure.user_code_not_started {
+        return Ok(StrictJsonValue(serde_json::json!({
+            "schema":"nomifun.process-start-observation.v1", "state":"not_started",
+            "success":false, "user_code_started":false, "code":"PROCESS_NOT_STARTED",
+            "message":nomi_redact::redact_secrets_owned(failure.error.to_string()),
+            "guidance":"Use command with separate literal args for native executables; use cmd for explicit shell syntax. Check the executable path, cwd and the operating system error before deciding how to recover."
+        })));
+    }
+    // Reaping the native tree proves cleanup only. Without a real terminal
+    // result, a start-lost program may already have changed the system.
+    Err(outcome_unknown(failure.error))
 }
 
 async fn reconcile_unregistered_start(
@@ -769,7 +773,9 @@ mod tests {
         for mut request in [EngineProcessRequest::shell("bun test"), EngineProcessRequest::pipe("/user/tools/bun"), EngineProcessRequest::pipe("bun test")] {
             let original = request.clone();
             resolve_managed_program(&mut request, &CancellationToken::new(), Path::new(".")).await.unwrap();
-            assert_eq!(request, original);
+            assert_eq!(request.command, original.command);
+            assert_eq!(request.args, original.args);
+            assert_eq!(request.shell_script, original.shell_script);
         }
     }
 
@@ -786,12 +792,24 @@ mod tests {
     }
 
     #[test]
-    fn missing_runtime_is_a_user_choice_before_process_start() {
+    fn reaped_start_failure_retains_unknown_effect_when_user_code_may_have_run() {
+        for reaped in [true, false] {
+            let mut state = ProcessState::default();
+            let result = process_start_failure(&mut state.unregistered_start, EngineProcessStartError {
+                error: nomifun_engine_core::EngineProcessError::Process("owner lost its startup result after user code may have run".into()),
+                no_live_process_proven: reaped, user_code_not_started: false,
+            }).unwrap_err();
+            assert_eq!(result.code, "EFFECT_OUTCOME_UNKNOWN");
+            assert_eq!(state.unregistered_start, !reaped);
+            assert_eq!(state.is_quiescent(), reaped, "cleanup and effect outcome are independent facts");
+        }
+    }
+
+    #[test]
+    fn runtime_failure_keeps_the_preparation_reason() {
         let failure = runtime_resolution_error(&nomifun_runtime::ToolError::NotPrepared);
-        assert_eq!(failure.code, "COMPONENT_PREPARATION_REQUIRED");
-        assert!(failure.message.contains("Install Bun"));
-        let shared = nomifun_runtime::ToolError::Shared(std::sync::Arc::new(nomifun_runtime::ToolError::NotPrepared));
-        assert_eq!(runtime_resolution_error(&shared).code, "COMPONENT_PREPARATION_REQUIRED");
+        assert_eq!(failure.code, "COMPONENT_UNAVAILABLE");
+        assert!(!failure.message.contains("choose to download"));
     }
 
     #[tokio::test]
@@ -817,7 +835,12 @@ mod tests {
         assert_eq!(std::fs::canonicalize(&request.command).unwrap(), std::fs::canonicalize(bun).unwrap());
         assert_eq!(request.args, vec!["user-script.js"]);
         assert_eq!(request.cwd.as_deref(), Some("child"));
-        assert_eq!(request.env, original_env);
+        for (key, value) in original_env {
+            if key.eq_ignore_ascii_case("PATH") {
+                let actual = request.env.iter().find(|(name, _)| name.eq_ignore_ascii_case("PATH")).unwrap().1;
+                assert_eq!(std::env::split_paths(actual).next(), std::env::split_paths(&value).next(), "explicit user command precedence must remain first");
+            } else { assert_eq!(request.env.get(&key), Some(&value)); }
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -836,9 +859,8 @@ mod tests {
             assert_eq!(rejected["user_code_started"], false);
             assert!(scope.state.lock().await.is_quiescent());
             let message = rejected["message"].as_str().unwrap();
-            assert!(message.contains("For an ordinary executable, use command"));
-            assert!(message.contains("never splits command"));
-            assert!(message.contains("Use cmd only when shell syntax is required"));
+            assert!(!message.is_empty());
+            assert!(rejected["guidance"].as_str().unwrap().contains("literal args"));
         }
 
         let corrected = scope.invoke(StrictJsonValue(serde_json::json!({
@@ -873,7 +895,7 @@ mod tests {
                     let mut state = scope.state.lock().await;
                     let entry = state.sessions.get_mut(id).unwrap();
                     let cursor=entry.session.cursor();
-                    let ready=scope.owner.terminal_if_ready(&mut entry.session).unwrap().is_some();
+                    let ready=scope.owner.terminal_observation_if_ready(&mut entry.session, scope.cancellation.clone()).await.unwrap().is_some();
                     assert_eq!(entry.session.cursor(),cursor,"terminal inspection must not consume output");
                     if ready { break; }
                 }
@@ -1072,7 +1094,7 @@ mod tests {
                     let entry = state.sessions.get_mut(id).unwrap();
                     assert!(entry.terminal.is_none(), "scope has not observed a terminal yet");
                     let cursor = entry.session.cursor();
-                    let ready = scope.owner.terminal_if_ready(&mut entry.session).unwrap().is_some();
+                    let ready = scope.owner.terminal_observation_if_ready(&mut entry.session, scope.cancellation.clone()).await.unwrap().is_some();
                     assert_eq!(entry.session.cursor(), cursor, "lookup must not consume output");
                     ready
                 };
@@ -1265,6 +1287,7 @@ mod tests {
             cwd: None,
             env: BTreeMap::new(),
             timeout_ms: None,
+            execution_identity: EngineExecutionIdentity::CurrentUser,
             process_id: Some("process-1".to_owned()),
             input: Some("x".repeat(bytes)),
             append_newline,

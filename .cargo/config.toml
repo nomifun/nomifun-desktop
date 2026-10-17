@@ -47,4 +47,9 @@ build-dir = "{workspace-root}/build.noindex"
 # `tauri build`, CI — so the failure cannot regress on a machine that forgets it.
 [env]
 RUST_MIN_STACK = "134217728"
+# Match the desktop's supported native baseline for every Cargo consumer,
+# including Rust unit/integration binaries. Swift's ABI-stable system runtime
+# uses deployment-version-dependent install names; Rust's older default would
+# otherwise link a back-deployment @rpath runtime even for macOS 14-only code.
+MACOSX_DEPLOYMENT_TARGET = "14.0"
 

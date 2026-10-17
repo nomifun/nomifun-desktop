@@ -202,6 +202,30 @@ pub fn validate_bundled_contract_evolution(
     Ok(())
 }
 
+/// Retire the host-owned default personal Agent's former exact-empty surface.
+/// The Session owner separately proves that this is that official default,
+/// then commits a normal idle binding transition. The only new roots are the
+/// published local file/process tools; every other authored field stays exact.
+pub fn validate_default_local_os_evolution(
+    source_revision: &AgentPresetRevision,
+    source: &ResolvedSnapshotEnvelope,
+    target_revision: &AgentPresetRevision,
+    target: &ResolvedSnapshotEnvelope,
+) -> Result<(), PresetContractViolation> {
+    if !source_revision.payload.enabled_capabilities.is_empty()
+        || !source_revision.payload.skill_bindings.is_empty()
+    {
+        return Err(rejected("default local OS evolution requires the former exact-empty contract"));
+    }
+    let mut expected = source_revision.payload.clone();
+    expected.enabled_capabilities = crate::default_local_os_capability_selections();
+    if target_revision.payload != expected {
+        return Err(rejected("default local OS evolution may only add the complete published file/process tools"));
+    }
+    let roots = BTreeSet::from([CapabilityId::from("workspace.files"), CapabilityId::from("workspace.process")]);
+    validate_session_extension_derivation(source_revision, source, target_revision, target, &roots, &BTreeSet::new())
+}
+
 /// Prove one explicit Session extension selection against its final compiled
 /// plan. The owner supplies the authorized direct roots; an extension's name
 /// alone never grants authority to replace a core dependency. Retained host
@@ -443,6 +467,18 @@ fn validate_capability_evolution(
     normalized.resolved_source.source_digest = source.resolved_source.source_digest.clone();
     normalized.display_name = source.display_name.clone();
     normalized.description = source.description.clone();
+    // A newly published descriptor does not grant an existing Session that
+    // Action. Keep its exact allowlist and omit only new, ungranted metadata
+    // from the authority comparison. Selected Actions remain strictly frozen.
+    for action in &normalized.actions {
+        if !source.actions.iter().any(|original| original.action_id == action.action_id)
+            && target.action_allowlist.contains(&action.action_id)
+        {
+            return Err(rejected("contract evolution introduced a granted action"));
+        }
+    }
+    normalized.actions.retain(|action| source.actions.iter()
+        .any(|original| original.action_id == action.action_id));
     for action in &mut normalized.actions {
         let original = source.actions.iter().find(|value| value.action_id == action.action_id)
             .ok_or_else(|| rejected("contract evolution introduced an action"))?;
@@ -468,4 +504,59 @@ fn validate_capability_evolution(
         return Err(rejected(format!("capability {} changed authority, effects, resources, dependencies or provenance", source.capability.id.as_ref())));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ActionId, CapabilityActionDescriptor, CapabilityRef, ContributionId, ContributionLock,
+        DigestHex, EffectClass, PackageRef, PluginSourceMetadata, ToolPresentationKind};
+
+    fn descriptor(id: &str) -> CapabilityActionDescriptor {
+        CapabilityActionDescriptor {
+            action_id: id.into(), input_schema: format!("schema://{id}/input").into(),
+            output_schema: format!("schema://{id}/output").into(), effect_class: EffectClass::WriteReversible,
+            presentation: ToolPresentationKind::FunctionTool, required_resource_operations: None,
+        }
+    }
+
+    fn source() -> ResolvedCapability {
+        ResolvedCapability {
+            consumption: Default::default(), dependency_refs: Vec::new(),
+            capability: CapabilityRef { id: "workspace.files".into() },
+            source_package: PackageRef { id: "nomifun.workspace-execution".into(), version: "1.0.0".into() },
+            contribution_id: ContributionId::from("capability:workspace.files"),
+            contribution_lock: ContributionLock {
+                source_kind: ContributionSourceKind::PlatformBuiltin,
+                source_identity: "nomifun.workspace-execution".into(), mount_id: None, mcp_binding_id: None,
+                contribution_id: "capability:workspace.files".into(), contract_digest: "a".repeat(64).into(),
+            },
+            resolved_mount_id: None,
+            resolved_source: PluginSourceMetadata {
+                source_kind: PluginSourceKind::Bundled, source_identity: "nomifun.workspace-execution".into(),
+                source_digest: Some("b".repeat(64).into()),
+            },
+            target_artifact_digest: "b".repeat(64).into(), schema_digest: DigestHex::from("a".repeat(64)),
+            dependency_path: vec!["workspace.files".into()], required_runtime_features: BTreeSet::new(),
+            display_name: None, description: None,
+            actions: vec![descriptor("workspace.files/write")], required_resource_kinds: BTreeSet::new(),
+            action_allowlist: BTreeSet::from([ActionId::from("workspace.files/write")]),
+        }
+    }
+
+    #[test]
+    fn bundled_new_action_metadata_does_not_change_existing_session_grants() {
+        let source = source();
+        let mut target = source.clone();
+        target.actions.push(descriptor("workspace.files/rename"));
+        assert!(validate_capability_evolution(&source, &target).is_ok(),
+            "new ungranted metadata must not block existing file Sessions");
+        target.action_allowlist.insert("workspace.files/rename".into());
+        assert!(validate_capability_evolution(&source, &target).is_err(),
+            "a new descriptor cannot silently authorize a new Action");
+        target.action_allowlist.remove(&ActionId::from("workspace.files/rename"));
+        target.actions[0].effect_class = EffectClass::Destructive;
+        assert!(validate_capability_evolution(&source, &target).is_err(),
+            "existing Action authority remains exact");
+    }
 }

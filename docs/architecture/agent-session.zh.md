@@ -133,11 +133,17 @@ Action schema 和实际组装结果。Runtime 只消费现役 ToolPlan，不依�
 中未进入生产的 0 上限搬回准入。延迟展示的组件入口短提示读取同一份新说明数据，且只从
 确切授权 ToolPlan 的实际组件字段产生，不改变原可见性预算或授权集合。
 
+### 默认全局本机能力
+
+现役 canonical 文件和进程工具不以 workspace 限制本机路径或写入。workspace 保留默认目录、项目观察、VCS、应用归属和产物身份；外部写入不伪造为项目相对变更。默认个人聊天具备文件和进程动作，当前代旧官方 exact-empty 配置在原空闲契约演进/CAS边界通过精确 `default_local_os_evolution` 补齐，历史与旧Snapshot不改写，活动/暂停、Remote/Attempt、未知效果和checkpoint边界仍生效。用户明确裁剪及子任务工具裁剪不由本机权限合同替代。
+
+普通操作以当前登录用户执行；需要系统身份时，现役 process 工具的 `execution_identity=administrator` 使用原生系统组件，复用相同效果及进程生命周期。它不是用户权限模式，不授予TCC或交互桌面。管理员认证、系统独立许可、缺失环境与工程未实现分别表达，未知部分效果不得盲重放。完整执行与环境合同见[全局操作系统能力](global-os-capabilities.zh.md)。
+
 ### 受管组件调用
 
 `workspace.process/exec` 与 `start` 的启动目标由 `component`、`command`、`cmd` 三选一。
-`component` 只选择批准的 OfficeCLI、Bun 或 Node，宿主复用现有组件供应器取得已验证程序并落实固定环境。
-普通程序和 Shell 保留原命令解析、工作目录与环境语义，不根据技能名或脚本文字自动改成受管调用。
+`component` 只选择正式发布的 OfficeCLI、Bun 或 Node，宿主复用现有组件供应器自动准备已验证程序，并按每次启动组合用户工具环境。状态查询只读，缺失依赖不增加下载确认。
+普通程序保留 executable + literal argv，明确 Shell 调用保留 shell 语义；cwd 可为本机绝对路径或相对 Session 默认目录。默认目录不充当访问上限，不根据技能名或脚本文字自动改成受管调用。
 现役工具目录中的短 Host 说明直接给出可调用的组件入口；Skill 编译只投影冻结内容，不准备 Office
 或缓存 ready、物理路径和环境快照。技能说明、组件目录与入口展示均不授予新的 Action 或资源权限。
 
@@ -348,7 +354,7 @@ Store 在同一事务中更新当前 binding 并保留必要的历史引用；�
 
 | 预设 | 默认能力边界 |
 | --- | --- |
-| `chat.minimal` | 保持零模块、零 Action；普通文字对话不因本次补齐而获得工具权限。 |
+| `chat.minimal` | 默认本机文件与进程能力；相对路径按 Session 默认工作目录，绝对本机路径正常使用，无额外工作区写沙箱。 |
 | `assistant.general` | 通用文件、进程、版本管理、产物、项目记忆、网页研究、计划任务、浏览器、桌面操作、媒体、素材和 Office，以及 SSH、知识库和会话管理。 |
 | `coding.codex` | 文件、版本管理、进程、产物、项目记忆、研究、协作、SSH、知识库和会话管理；保留 headless Runtime 要求，不依赖浏览器或桌面控制。 |
 | `app.developer` | 完整 Coding 基线加应用托管十个动作；应用目录固定为工作区，普通多会话与运行设置共用原 owner。其他预设不默认选择应用托管。 |

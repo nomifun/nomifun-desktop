@@ -10,16 +10,13 @@ use cap_std::fs::Dir;
 use nomifun_common::AppError;
 
 use crate::path_safety::{
-    has_traversal, is_unsafe_path_segment, reject_workspace_owner_canonical_path,
     validate_path_for_write_authority, PathAuthority,
 };
 
-pub(crate) fn validate_target(path: &Path, root: &Path) -> Result<PathBuf, AppError> {
-    if has_traversal(&path.to_string_lossy()) || path.file_name().is_none() {
-        return Err(AppError::BadRequest("invalid workspace write path".into()));
+pub(crate) fn validate_global_target(path: &Path) -> Result<PathBuf, AppError> {
+    if path.as_os_str().is_empty() || path.to_string_lossy().contains('\0') || path.file_name().is_none() {
+        return Err(AppError::BadRequest("invalid native write path".into()));
     }
-    let root = std::fs::canonicalize(root)
-        .map_err(|error| AppError::BadRequest(format!("cannot resolve workspace root: {error}")))?;
     let mut missing = Vec::new();
     let mut probe = path;
     let mut target = loop {
@@ -28,9 +25,8 @@ pub(crate) fn validate_target(path: &Path, root: &Path) -> Result<PathBuf, AppEr
                 // An existing dangling link must fail, not look like a missing
                 // directory that we can safely create underneath.
                 let canonical = std::fs::canonicalize(probe).map_err(|error| {
-                    AppError::BadRequest(format!("cannot resolve workspace write ancestor: {error}"))
+                    crate::path_safety::native_io_error("resolving native write ancestor", error)
                 })?;
-                reject_workspace_owner_canonical_path(&root, &canonical)?;
                 if !missing.is_empty() && !canonical.is_dir() {
                     return Err(AppError::BadRequest("workspace write parent is not a directory".into()));
                 }
@@ -40,7 +36,7 @@ pub(crate) fn validate_target(path: &Path, root: &Path) -> Result<PathBuf, AppEr
                 let name = probe.file_name().ok_or_else(|| {
                     AppError::BadRequest("workspace write path has no existing ancestor".into())
                 })?;
-                if name.to_str().is_none_or(is_unsafe_path_segment) {
+                if name.to_str().is_none_or(crate::path_safety::is_invalid_native_name) {
                     return Err(AppError::BadRequest("invalid workspace write path component".into()));
                 }
                 missing.push(name.to_owned());
@@ -48,15 +44,12 @@ pub(crate) fn validate_target(path: &Path, root: &Path) -> Result<PathBuf, AppEr
                     AppError::BadRequest("workspace write path has no parent".into())
                 })?;
             }
-            Err(error) => return Err(AppError::BadRequest(format!(
-                "cannot inspect workspace write ancestor: {error}"
-            ))),
+            Err(error) => return Err(crate::path_safety::native_io_error("inspecting native write ancestor", error)),
         }
     };
     for name in missing.into_iter().rev() {
         target.push(name);
     }
-    reject_workspace_owner_canonical_path(&root, &target)?;
     Ok(target)
 }
 
@@ -92,20 +85,26 @@ impl PreparedParent {
     }
 }
 
-/// Create only within the bound workspace, relative to pinned directories.
-pub(crate) fn prepare_parent(path: &Path, root: &Path) -> Result<PreparedParent, AppError> {
-    let target = validate_target(path, root)?;
-    let root = std::fs::canonicalize(root)
-        .map_err(|error| AppError::BadRequest(format!("cannot resolve workspace root: {error}")))?;
+/// Pin the closest existing real parent, creating missing children relative
+/// to its handle. This is a publication guard, not an allowlist or sandbox.
+pub(crate) fn prepare_global_parent(path: &Path) -> Result<PreparedParent, AppError> {
+    let target = validate_global_target(path)?;
+    let parent = target.parent().ok_or_else(|| AppError::BadRequest("write path has no parent".into()))?;
+    let root = parent.ancestors().find(|path| path.is_dir())
+        .ok_or_else(|| AppError::BadRequest("write path has no existing directory ancestor".into()))?.to_owned();
+    prepare_target_parent(target, root)
+}
+
+fn prepare_target_parent(target: PathBuf, root: PathBuf) -> Result<PreparedParent, AppError> {
     let parent = target.parent().ok_or_else(|| AppError::BadRequest("write path has no parent".into()))?;
     let relative = parent.strip_prefix(&root)
-        .map_err(|_| AppError::Forbidden("workspace write parent is outside the bound resource".into()))?;
+        .map_err(|_| AppError::Conflict("native write parent no longer matches its prepared ancestor".into()))?;
     #[cfg(all(not(windows), not(unix)))]
     let mut dir = Dir::open_ambient_dir(&root, ambient_authority())
-        .map_err(|error| AppError::BadRequest(format!("cannot open workspace root: {error}")))?;
+        .map_err(|error| crate::path_safety::native_io_error("opening native write parent", error))?;
     #[cfg(unix)]
     let mut dir = crate::unix_directory::open_search(None, &root)
-        .map_err(|error| AppError::BadRequest(format!("cannot open workspace root: {error}")))?;
+        .map_err(|error| crate::path_safety::native_io_error("opening native write parent", error))?;
     #[cfg(unix)]
     let root_directory = dir.try_clone().map_err(|error| AppError::BadRequest(format!("cannot retain workspace root: {error}")))?;
     #[cfg(unix)]
@@ -140,7 +139,7 @@ pub(crate) fn prepare_parent(path: &Path, root: &Path) -> Result<PreparedParent,
                 if let Err(error) = creation_parent.create_dir(name)
                     && error.kind() != std::io::ErrorKind::AlreadyExists
                 {
-                    return Err(AppError::BadRequest(format!("cannot create workspace write parent: {error}")));
+                    return Err(crate::path_safety::native_io_error("creating native write parent", error));
                 }
                 open_child(&creation_parent).map_err(|error| {
                     AppError::Forbidden(format!("cannot open workspace write parent without following links: {error}"))
@@ -168,7 +167,7 @@ pub(crate) fn prepare_parent(path: &Path, root: &Path) -> Result<PreparedParent,
         guard
     };
     let canonical = validate_path_for_write_authority(
-        &target.to_string_lossy(), &PathAuthority::Workspace(root.clone()),
+        &target.to_string_lossy(), &PathAuthority::Unrestricted,
     )?;
     if canonical != target {
         return Err(AppError::Conflict("workspace write target changed identity before publication".into()));
@@ -310,7 +309,7 @@ mod tests {
         fs::create_dir_all(&parent).unwrap();
         fs::create_dir(&outside).unwrap();
         fs::write(outside.join("sentinel"), b"outside").unwrap();
-        let prepared = prepare_parent(&parent.join("new.txt"), &root).unwrap();
+        let prepared = prepare_global_parent(&parent.join("new.txt")).unwrap();
         let guard = fs::read_dir(&parent).unwrap().next().unwrap().unwrap().path();
         assert_eq!(fs::metadata(&guard).unwrap().len(), 0);
         assert!(matches!(fs::remove_file(&guard).unwrap_err().raw_os_error(), Some(5 | 32)));

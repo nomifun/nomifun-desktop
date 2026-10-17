@@ -14,6 +14,7 @@
   {"action_id":"workspace.files/write","capability_id":"workspace.files","name":"write_file","titles":{"zh-CN":"写入文件","en-US":"Write file"},"target_fields":["path"],"receipt_action":"edit_files"},
   {"action_id":"workspace.files/patch","capability_id":"workspace.files","name":"apply_patch","titles":{"zh-CN":"编辑文件","en-US":"Edit files"},"target_fields":["files.0.path"],"receipt_action":"edit_files"},
   {"action_id":"workspace.files/delete","capability_id":"workspace.files","name":"delete_path","titles":{"zh-CN":"删除文件","en-US":"Delete files"},"target_fields":["path"],"receipt_action":"edit_files"},
+  {"action_id":"workspace.files/rename","capability_id":"workspace.files","name":"rename_path","titles":{"zh-CN":"重命名文件","en-US":"Rename files"},"target_fields":["path","destination"],"receipt_action":"edit_files"},
   {"action_id":"workspace.vcs/status","capability_id":"workspace.vcs","name":"git_status","titles":{"zh-CN":"查看 Git 状态","en-US":"Check Git status"},"target_fields":[]},
   {"action_id":"workspace.vcs/diff","capability_id":"workspace.vcs","name":"git_diff","titles":{"zh-CN":"查看代码差异","en-US":"Read code diff"},"target_fields":["path"]},
   {"action_id":"workspace.vcs/stage","capability_id":"workspace.vcs","name":"git_stage","titles":{"zh-CN":"暂存代码变更","en-US":"Stage changes"},"target_fields":["path"]},

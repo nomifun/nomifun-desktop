@@ -2,6 +2,19 @@ use std::path::{Component, Path, PathBuf};
 
 use nomifun_common::AppError;
 
+/// Keep native access denials distinct from payload and product authority
+/// errors. The source retains the actual OS error, without guessing a remedy.
+pub(crate) fn native_io_error(operation: impl Into<String>, error: std::io::Error) -> AppError {
+    let operation = operation.into();
+    match error.kind() {
+        std::io::ErrorKind::PermissionDenied => AppError::NativeSystemAccessDenied { operation, source: error },
+        std::io::ErrorKind::NotFound => AppError::NotFound(format!("{operation}: {error}")),
+        std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotADirectory
+            | std::io::ErrorKind::IsADirectory | std::io::ErrorKind::AlreadyExists => AppError::BadRequest(format!("{operation}: {error}")),
+        _ => AppError::Internal(format!("{operation}: {error}")),
+    }
+}
+
 /// Canonicalize `path` and verify it falls within one of the `allowed_roots`.
 ///
 /// This prevents path traversal attacks (e.g. `../../etc/passwd`) by:
@@ -109,6 +122,30 @@ pub fn validate_path_for_write(path: &str, allowed_roots: &[&Path]) -> Result<Pa
     }
 }
 
+/// Resolve a directory entry without following the final link. Deletion and
+/// rename operate on this entry; content operations resolve the link target.
+pub(crate) fn canonical_entry(path: &Path) -> Result<PathBuf, AppError> {
+    let name = path.file_name().ok_or_else(|| AppError::BadRequest("operation requires a named file or directory entry".into()))?;
+    let parent = path.parent().ok_or_else(|| AppError::BadRequest("entry has no parent".into()))?;
+    let parent = std::fs::canonicalize(parent).map_err(|error| native_io_error("resolving entry parent", error))?;
+    let entry = parent.join(name);
+    std::fs::symlink_metadata(&entry).map_err(|error| native_io_error("inspecting directory entry", error))?;
+    Ok(entry)
+}
+
+pub(crate) fn session_path_label(root: &Path, path: &Path) -> Result<String, AppError> {
+    let label = path.strip_prefix(root).unwrap_or(path);
+    label.to_str().map(str::to_owned).ok_or_else(|| AppError::BadRequest("path is not valid UTF-8".into()))
+}
+
+/// Compare actual native targets. Common ancestry is a comparison context,
+/// never filesystem authority; independent volumes remain independent paths.
+pub(crate) fn global_patch_targets_overlap(left: &Path, right: &Path) -> Result<bool, AppError> {
+    if left.starts_with(right) || right.starts_with(left) { return Ok(true); }
+    let Some(root) = left.ancestors().find(|ancestor| right.starts_with(ancestor) && ancestor.exists()) else { return Ok(false); };
+    patch_targets_overlap(root, left, right)
+}
+
 /// Compare already validated, canonical-root-relative patch targets before
 /// creating directories or publishing any file. Windows case sensitivity is a
 /// property of each parent directory, including newly inherited directories.
@@ -132,19 +169,19 @@ pub(crate) fn patch_targets_overlap(
                 AppError::Forbidden("patch target is outside the bound workspace".to_owned())
             })
         };
-        let root_path = CString::new(root.as_os_str().as_bytes()).map_err(|_| {
-            AppError::BadRequest("workspace root contains a NUL byte".to_owned())
-        })?;
-        // SAFETY: root_path is a live NUL-terminated path. _PC_CASE_SENSITIVE
-        // returns the filesystem comparison mode without mutating the volume.
-        let case_sensitive = unsafe { libc::pathconf(root_path.as_ptr(), libc::_PC_CASE_SENSITIVE) };
-        if case_sensitive < 0 {
-            return Err(AppError::Conflict(format!(
-                "cannot determine macOS volume case sensitivity for '{}': {}",
-                root.display(),
-                std::io::Error::last_os_error()
-            )));
-        }
+        let case_sensitive = |parent: &Path| -> Result<bool, AppError> {
+            // Newly created directories inherit their actual volume's rules.
+            // Query each compared parent so a mounted case-sensitive volume
+            // is not compared using the project/default volume's behavior.
+            let parent = parent.ancestors().find(|parent| parent.is_dir())
+                .ok_or_else(|| AppError::Conflict("patch parent disappeared during comparison".into()))?;
+            let native = CString::new(parent.as_os_str().as_bytes()).map_err(|_| AppError::BadRequest("patch parent contains a NUL byte".into()))?;
+            // SAFETY: native is a live NUL-terminated path; this only queries
+            // the filesystem's native case-sensitivity property.
+            let mode = unsafe { libc::pathconf(native.as_ptr(), libc::_PC_CASE_SENSITIVE) };
+            if mode < 0 { return Err(native_io_error(format!("querying macOS volume comparison rules for '{}'", parent.display()), std::io::Error::last_os_error())); }
+            Ok(mode != 0)
+        };
         let component_key = |component: Component<'_>| -> Result<String, AppError> {
             let Component::Normal(name) = component else {
                 return Err(AppError::BadRequest(
@@ -160,17 +197,20 @@ pub(crate) fn patch_targets_overlap(
         let right = relative(right)?;
         let mut left = left.components();
         let mut right = right.components();
+        let mut parent = root.to_path_buf();
         loop {
             match (left.next(), right.next()) {
                 (Some(a), Some(b)) => {
+                    let next_parent = parent.join(a.as_os_str());
                     let a = component_key(a)?;
                     let b = component_key(b)?;
-                    let equal = if case_sensitive == 0 {
+                    let equal = if !case_sensitive(&parent)? {
                         macos_case_fold_equal(&a, &b)?
                     } else {
                         a == b
                     };
                     if !equal { return Ok(false); }
+                    parent = next_parent;
                 }
                 // Equality or either normalized path being an ancestor is an overlap.
                 (None, _) | (_, None) => return Ok(true),
@@ -340,6 +380,14 @@ pub fn has_traversal(path: &str) -> bool {
             .any(|component| matches!(component, Component::ParentDir))
 }
 
+/// Native entry validation does not impose Windows spelling rules on Unix.
+pub(crate) fn is_invalid_native_name(name: &str) -> bool {
+    #[cfg(windows)]
+    { is_unsafe_path_segment(name) }
+    #[cfg(not(windows))]
+    { name.is_empty() || matches!(name, "." | "..") || name.contains(['/', '\0']) }
+}
+
 /// Reject a *single* path segment (a new file name, an id used as a directory)
 /// that would not stay a segment once joined onto a parent.
 ///
@@ -412,27 +460,19 @@ fn is_windows_reserved_device_name(name: &str) -> bool {
         })
 }
 
-/// The filesystem authority a single file operation runs under, resolved
-/// per-call from the caller's **trust surface** (see the gateway
-/// `CallerCtx::surface`): a trusted local desktop session (the machine owner
-/// driving their own agent) gets [`PathAuthority::Unrestricted`] — the OS
-/// user's own permissions are the only boundary; external channel / remote
-/// sessions get [`PathAuthority::Confined`] to their session workspace.
-///
-/// File access uses a single, surface-scoped model. Traversal / NUL bytes are
-/// rejected in BOTH modes — `Unrestricted` removes root *containment*, not path
-/// hygiene.
+/// Native file operations use OS access controls. Canonical Agent tools use
+/// `Unrestricted`; confined authorities remain for explicit product operations
+/// such as export sources, project inventories and app-owned storage.
 #[derive(Debug, Clone)]
 pub enum PathAuthority {
     /// No sandbox-root containment: the OS user's own filesystem permissions
-    /// are the boundary. For the trusted local owner (desktop surface).
+    /// are the boundary. Canonical Agent file operations use this authority.
     Unrestricted,
-    /// The path must resolve within one of these roots (the historical
-    /// `allowed_roots` behaviour). For untrusted / external surfaces, or the
-    /// default the UI/file-routes pass (`allowed_roots ∪ workspace`).
+    /// Explicit product operations such as export sources may have a bounded
+    /// set of real roots. This does not define canonical Agent file scope.
     Confined(Vec<PathBuf>),
-    /// Agent workspace authority with the platform-owned `.nomifun` subtree
-    /// excluded even when a symlink/junction aliases it under another name.
+    /// Project inventory/observation authority excludes the platform-owned
+    /// `.nomifun` subtree even when a link aliases it under another name.
     Workspace(PathBuf),
 }
 
@@ -485,7 +525,7 @@ pub(crate) fn validate_workspace_candidate(path: &Path, root: &Path) -> Result<(
 pub fn validate_path_authority(path: &str, authority: &PathAuthority) -> Result<PathBuf, AppError> {
     match authority {
         PathAuthority::Unrestricted => std::fs::canonicalize(path)
-            .map_err(|e| AppError::BadRequest(format!("cannot resolve path '{}': {}", path, e))),
+            .map_err(|error| native_io_error(format!("resolving native path '{path}'"), error)),
         PathAuthority::Confined(roots) => {
             let refs: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
             validate_path(path, &refs)
@@ -523,9 +563,11 @@ pub fn validate_path_for_write_authority(
             // `Unrestricted` drops root containment, not path hygiene: a
             // drive-relative name would still silently relocate the write off
             // the parent the caller named.
-            reject_unsafe_file_name(path, file_name)?;
+            if file_name.to_str().is_none_or(is_invalid_native_name) {
+                return Err(AppError::BadRequest("native write target has an invalid file name".into()));
+            }
             let canonical_parent = std::fs::canonicalize(parent)
-                .map_err(|e| AppError::BadRequest(format!("cannot resolve parent of '{}': {}", path, e)))?;
+                .map_err(|error| native_io_error(format!("resolving parent of native write target '{path}'"), error))?;
             Ok(canonical_parent.join(file_name))
         }
         PathAuthority::Confined(roots) => {

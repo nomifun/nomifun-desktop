@@ -105,40 +105,27 @@ pub fn resolve_command(command: &str, args: &[String]) -> (String, Vec<String>) 
     (resolve_program(&program), resolved_args)
 }
 
-/// Actual terminal launches prefer a user-installed Bun and can reuse an
-/// existing verified download. Missing runtimes are rejected before terminal
-/// effects; launching never starts or waits for a component download.
+/// All terminal launches use the shared per-launch command and user tool environment.
+/// Missing supported runtimes are prepared before any terminal row or PTY effect.
 pub(crate) async fn resolve_command_for_spawn(
     command: &str,
     args: &[String],
     env: Option<&HashMap<String, String>>,
     cwd: Option<&Path>,
-) -> Result<(String, Vec<String>), crate::error::TerminalError> {
-    #[cfg(unix)]
-    if command == SHELL_SENTINEL {
-        // GUI launchers need not export SHELL. Use the same account resolver
-        // as startup PATH discovery, and reject an invalid explicit override
-        // before it can be replaced by a bare-name PATH search.
+) -> Result<nomifun_runtime::PreparedProcessLaunch, crate::error::TerminalError> {
+    let (program, args) = if command == SHELL_SENTINEL {
+        #[cfg(unix)]
         nomifun_runtime::resolve_login_shell().map_err(|error| {
             nomifun_common::AppError::BadRequest(format!("cannot resolve terminal login shell: {error}"))
         })?;
-    }
-    if nomifun_runtime::managed_command_tool(command).is_some() {
-        let default_env = HashMap::new();
-        let prepared = nomifun_runtime::prepare_managed_command_with_env(command, args, env.unwrap_or(&default_env), cwd).await
-            .map_err(|error| nomifun_common::AppError::ComponentUnavailable {
-                component: "bun".into(), reason: error.to_string(),
-            })?;
-        let prepared = require_bun_command(prepared)?;
-        return Ok((prepared.executable_path.to_string_lossy().into_owned(), prepared.args));
-    }
-    Ok(resolve_command(command, args))
-}
-
-fn require_bun_command(
-    prepared: Option<nomifun_runtime::PreparedCommand>,
-) -> Result<nomifun_runtime::PreparedCommand, crate::error::TerminalError> {
-    prepared.ok_or_else(|| nomifun_common::AppError::ComponentPreparationRequired("bun".into()).into())
+        resolve_command(command, args)
+    } else {
+        (command.to_owned(), args.to_vec())
+    };
+    let current = std::env::current_dir()?;
+    let cwd = cwd.filter(|path| !path.as_os_str().is_empty()).unwrap_or(&current);
+    nomifun_runtime::prepare_process_launch(&program, &args, cwd, &env.cloned().unwrap_or_default())
+        .await.map_err(|error| crate::error::TerminalError::Spawn(format!("prepare terminal command {program}: {error}")))
 }
 
 /// Resolve a bare command name to its absolute executable path so the PTY
@@ -275,20 +262,9 @@ mod tests {
     async fn user_supplied_paths_are_not_download_requests() {
         let source = "/configured/private/runtime";
         let arguments = vec!["user-script.js".to_owned()];
-        let (program, args) = resolve_command_for_spawn(source, &arguments, None, None).await.unwrap();
-        assert_eq!(program, source);
-        assert_eq!(args, arguments);
-    }
-
-    #[test]
-    fn missing_bun_requires_a_user_choice_without_a_spawn() {
-        let error: nomifun_common::AppError = require_bun_command(None).unwrap_err().into();
-        assert_eq!(error.error_code(), "COMPONENT_PREPARATION_REQUIRED");
-        let existing = nomifun_runtime::PreparedCommand {
-            executable_path: "/user/system/bun".into(),
-            args: vec!["x".into(), "server".into()],
-        };
-        assert_eq!(require_bun_command(Some(existing.clone())).unwrap(), existing);
+        let launch = resolve_command_for_spawn(source, &arguments, None, None).await.unwrap();
+        assert_eq!(launch.program, source);
+        assert_eq!(launch.args, arguments);
     }
 
     #[tokio::test]
@@ -309,9 +285,9 @@ mod tests {
             if cfg!(windows) { "PaTh" } else { "PATH" }.to_owned(), "../tools".to_owned(),
         )]);
         let args = vec!["user-script.js".into()];
-        let (program, actual_args) = resolve_command_for_spawn("bun", &args, Some(&env), Some(&child)).await.unwrap();
-        assert_eq!(std::fs::canonicalize(program).unwrap(), std::fs::canonicalize(bun).unwrap());
-        assert_eq!(actual_args, args);
+        let launch = resolve_command_for_spawn("bun", &args, Some(&env), Some(&child)).await.unwrap();
+        assert_eq!(std::fs::canonicalize(launch.program).unwrap(), std::fs::canonicalize(bun).unwrap());
+        assert_eq!(launch.args, args);
     }
 
     #[test]

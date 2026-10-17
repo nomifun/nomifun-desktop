@@ -228,12 +228,6 @@ pub struct ToolsConfig {
     pub max_recent_images: usize,
     #[serde(default)]
     pub computer: ComputerConfig,
-    /// Opt-in (default empty = off): restrict Write/Edit/ApplyPatch to writes
-    /// within this directory. Accidental/buggy out-of-root writes are rejected.
-    /// NOT a security sandbox (the agent has Bash) — that needs OS-level
-    /// confinement; this is a guardrail (§3.6 write-root containment).
-    #[serde(default)]
-    pub write_root: String,
     /// Opt-in (default empty = off): language servers for the experimental `Lsp`
     /// code-navigation tool. Each entry maps file extensions to a server
     /// command. The tool is registered only when this is non-empty.
@@ -244,11 +238,6 @@ pub struct ToolsConfig {
     /// runaway multi-agent spend (§3.4 shared token budget).
     #[serde(default)]
     pub delegation_token_budget: Option<u64>,
-    /// Opt-in (default off): request macOS Seatbelt write containment for Bash
-    /// and child-agent execution. The request fails closed on unsupported
-    /// platforms rather than silently running unrestricted (§3.6).
-    #[serde(default)]
-    pub bash_sandbox: bool,
     /// 非空时：bootstrap 注册完全部工具后只保留 provider-visible 名字在此列表内的。
     /// MCP 工具必须填写稳定 canonical `mcp__...__<hash>` 名，裸原始 tool 名不授权；
     /// 可用 `nomi_mcp::tool_proxy::canonical_mcp_display_name` 统一生成。
@@ -280,10 +269,8 @@ impl Default for ToolsConfig {
         Self {
             max_recent_images: default_max_recent_images(),
             computer: ComputerConfig::default(),
-            write_root: String::new(),
             lsp_servers: Vec::new(),
             delegation_token_budget: None,
-            bash_sandbox: false,
             builtin_allowlist: Vec::new(),
             enforce_builtin_allowlist: false,
             deferred_allowlist: Vec::new(),
@@ -878,7 +865,7 @@ Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(toml::Table::new()),
 
 /// Merge explicit file fields before deserialization fills in defaults.
 /// Ordinary scalars/arrays override; the existing additive policies below are
-/// intentionally retained (notably sandbox and tool authorization settings).
+/// intentionally retained for tool selection and computer availability.
 fn merge_config_files(mut global: toml::Table, project: toml::Table) -> anyhow::Result<ConfigFile> {
     merge_config_tables(&mut global, project, &[]);
     global.try_into().context("failed to deserialize merged config")
@@ -901,9 +888,8 @@ fn merge_config_tables(global: &mut toml::Table, project: toml::Table, path: &[&
             }
             (["tools", "lsp_servers"],
                 Some(Value::Array(base)), Value::Array(overlay)) => base.extend(overlay),
-            (["tools", "bash_sandbox"] | ["tools", "computer", "enabled"],
+            (["tools", "computer", "enabled"],
                 Some(Value::Boolean(base)), Value::Boolean(overlay)) => *base |= overlay,
-            (["tools", "write_root"], Some(_), Value::String(overlay)) if overlay.is_empty() => {}
             (["tools", "builtin_allowlist"], Some(_), Value::Array(overlay)) if overlay.is_empty() => {}
             (_, Some(Value::Table(base)), Value::Table(overlay)) => {
                 merge_config_tables(base, overlay, &field);

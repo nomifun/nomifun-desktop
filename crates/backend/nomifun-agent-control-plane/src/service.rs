@@ -1263,8 +1263,15 @@ impl AgentControlPlane {
         let (source_revision, source_snapshot) = self.load_binding_artifacts(owner, &current).await?;
         let preset_id = AgentPresetId::from(Uuid::now_v7().to_string());
         let catalog = self.catalog.snapshot()?;
+        let source = self.owned_preset(owner, source_revision.reference.preset_id.as_ref()).await?;
+        // Only the host-owned default personal Agent's retired exact-empty
+        // contract receives the new ordinary local OS tools. A custom Agent or
+        // a deliberately trimmed task does not gain inferred authority.
+        let add_default_local_os = owned_official_key(&source) == Some(OfficialPresetKey::ChatMinimal)
+            && source_revision.payload.enabled_capabilities.is_empty()
+            && source_revision.payload.skill_bindings.is_empty();
         let (revision, snapshot) = self.compiler.evolve_session_contract(
-            owner, preset_id.clone(), &source_revision, &source_snapshot, &catalog,
+            owner, preset_id.clone(), &source_revision, &source_snapshot, &catalog, add_default_local_os,
         )?;
         if revision.payload == source_revision.payload
             && same_non_model_revision_contract(&revision, &source_revision)
@@ -1279,7 +1286,6 @@ impl AgentControlPlane {
             )
         })?;
 
-        let source = self.owned_preset(owner, source_revision.reference.preset_id.as_ref()).await?;
         // Repeated preparation and concurrent consumers share immutable
         // artifacts, but each Session still commits its own canonical event.
         for existing in self.store.list_presets(owner).await? {
@@ -2866,7 +2872,7 @@ fn not_found(subject: &str) -> ControlPlaneError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
         CatalogSnapshot, InMemoryControlPlaneStore, OfficialTemplateCatalog,
@@ -2911,13 +2917,10 @@ mod tests {
         )
     }
 
-    fn test_control_plane(
+    pub(crate) fn test_control_plane(
         store: Arc<InMemoryControlPlaneStore>,
     ) -> AgentControlPlane {
-        let catalog = Arc::new(StaticCatalogProvider::new(Default::default()));
-        let templates = OfficialTemplateCatalog::load().unwrap();
-        let compiler = test_compiler();
-        AgentControlPlane::new(store, catalog, templates, compiler)
+        template_control_plane(store, OfficialPresetKey::ChatMinimal, false)
     }
 
     fn chat_route_with(
@@ -3695,15 +3698,7 @@ mod tests {
     #[tokio::test]
     async fn create_from_template_commits_initial_revision_and_does_not_persist_template_key() {
         let store = Arc::new(InMemoryControlPlaneStore::new());
-        let catalog = Arc::new(StaticCatalogProvider::new(Default::default()));
-        let templates = OfficialTemplateCatalog::load().unwrap();
-        let compiler = test_compiler();
-        let control_plane = AgentControlPlane::new(
-            store.clone(),
-            catalog,
-            templates,
-            compiler,
-        );
+        let control_plane = test_control_plane(store.clone());
         let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
 
         let created = control_plane
@@ -4466,6 +4461,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retired_empty_default_gains_local_os_tools_through_immutable_evolution() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let control = test_control_plane(store.clone());
+        // Author the old current-generation empty contract through the normal
+        // store, then assign the host-owned default's existing exact identity.
+        let preset_id = official_preset_id(&owner, OfficialPresetKey::ChatMinimal);
+        let created = control.create_configuration_with_initial_revision(
+            &owner, preset_id.clone(), "chat.minimal".into(), None,
+            empty_document(), Some(OfficialPresetKey::ChatMinimal), true, None,
+        ).await.unwrap();
+        let current = control.resolve_agent_session_binding(&owner, &created.preset.preset_id).await.unwrap();
+        let (_, source_revision, source_snapshot) = control.saved_binding_artifacts(&owner, &current).await.unwrap();
+        assert!(source_revision.payload.enabled_capabilities.is_empty());
+        let next = control.resolve_agent_session_contract_evolution(&owner, &current).await.unwrap();
+        let (_, revision, snapshot) = control.saved_binding_artifacts(&owner, &next).await.unwrap();
+        assert_eq!(next.binding_version, current.binding_version + 1);
+        assert_eq!(revision.payload.enabled_capabilities, nomifun_agent_contracts::default_local_os_capability_selections());
+        assert!(snapshot.content.capability_allowlist.contains(&CapabilityId::from("workspace.files")));
+        assert!(snapshot.content.capability_allowlist.contains(&CapabilityId::from("workspace.process")));
+        assert_eq!(control.resolve_agent_session_contract_evolution(&owner, &next).await.unwrap(), next);
+        assert_eq!(store.get_revision(&source_revision.reference).await.unwrap().unwrap(), source_revision);
+        assert_eq!(store.get_snapshot(&source_revision.reference).await.unwrap().unwrap(), source_snapshot);
+
+        let custom = control.create_preset(&owner, CreateAgentPresetRequest {
+            display_name: "chat.minimal".into(), description: None,
+            document: Some(empty_document()), fork_from_revision: None,
+        }).await.unwrap();
+        let custom = control.resolve_agent_session_binding(&owner, &custom.preset.preset_id).await.unwrap();
+        assert_eq!(control.resolve_agent_session_contract_evolution(&owner, &custom).await.unwrap(), custom,
+            "a matching name does not grant the official default's product transition");
+    }
+
+    #[tokio::test]
     async fn session_contract_evolution_preserves_configuration_and_requires_an_explicit_history_boundary() {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
@@ -5077,15 +5106,7 @@ mod tests {
     #[tokio::test]
     async fn session_binding_is_owner_scoped_and_freezes_current_stable_snapshot() {
         let store = Arc::new(InMemoryControlPlaneStore::new());
-        let catalog = Arc::new(StaticCatalogProvider::new(Default::default()));
-        let templates = OfficialTemplateCatalog::load().unwrap();
-        let compiler = test_compiler();
-        let control_plane = AgentControlPlane::new(
-            store.clone(),
-            catalog,
-            templates,
-            compiler,
-        );
+        let control_plane = test_control_plane(store.clone());
         let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
         let other_owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000002");
         let created = control_plane
@@ -5212,15 +5233,7 @@ mod tests {
     #[tokio::test]
     async fn get_remote_binding_returns_only_the_authenticated_owners_binding() {
         let store = Arc::new(InMemoryControlPlaneStore::new());
-        let catalog = Arc::new(StaticCatalogProvider::new(Default::default()));
-        let templates = OfficialTemplateCatalog::load().unwrap();
-        let compiler = test_compiler();
-        let control_plane = AgentControlPlane::new(
-            store.clone(),
-            catalog,
-            templates,
-            compiler,
-        );
+        let control_plane = test_control_plane(store.clone());
         let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
         let other_owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000002");
         let binding_id = RemoteBindingId::from("remote-binding-1");
@@ -5291,15 +5304,7 @@ mod tests {
     #[tokio::test]
     async fn revision_impact_is_owner_scoped_read_only_and_lists_bound_consumers() {
         let store = Arc::new(InMemoryControlPlaneStore::new());
-        let catalog = Arc::new(StaticCatalogProvider::new(Default::default()));
-        let templates = OfficialTemplateCatalog::load().unwrap();
-        let compiler = test_compiler();
-        let control_plane = AgentControlPlane::new(
-            store.clone(),
-            catalog,
-            templates,
-            compiler,
-        )
+        let control_plane = test_control_plane(store.clone())
         .with_revision_impact_catalog_provider(Arc::new(
             StaticRevisionImpactCatalogProvider::new(Vec::new()),
         ));

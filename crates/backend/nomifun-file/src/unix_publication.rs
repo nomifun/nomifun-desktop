@@ -11,7 +11,7 @@ use nomifun_common::AppError;
 use crate::{agent_patch_outcome::PatchPublicationFailure, publication_identity::{self, PublicationIdentity}, service::PublicationSource, workspace_write::PreparedParent};
 
 fn conflict(message: &str) -> AppError { AppError::Conflict(message.into()) }
-fn io_error(error: std::io::Error) -> AppError { AppError::Internal(format!("workspace publication failed: {error}")) }
+fn io_error(error: std::io::Error) -> AppError { crate::path_safety::native_io_error("publishing native file", error) }
 
 fn matches_named(identity: &PublicationIdentity, directory: &Dir, name: &OsStr) -> std::io::Result<bool> {
     let opened = identity.metadata()?;
@@ -31,7 +31,11 @@ fn matches_bytes(file: &mut File, expected: &[u8]) -> std::io::Result<bool> {
     Ok(bytes == expected)
 }
 
-fn rename_noreplace(directory: &Dir, source: &OsStr, target: &OsStr) -> std::io::Result<()> {
+pub(crate) fn rename_noreplace(directory: &Dir, source: &OsStr, target: &OsStr) -> std::io::Result<()> {
+    rename_between_noreplace(directory, source, directory, target)
+}
+
+pub(crate) fn rename_between_noreplace(directory: &Dir, source: &OsStr, destination: &Dir, target: &OsStr) -> std::io::Result<()> {
     let name = |value: &OsStr| CString::new(value.as_bytes())
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "publication name contains NUL"));
     let source = name(source)?;
@@ -40,10 +44,10 @@ fn rename_noreplace(directory: &Dir, source: &OsStr, target: &OsStr) -> std::io:
     // names remain live. The syscall never resolves an ambient ancestor.
     #[cfg(target_os = "macos")]
     let result = unsafe { libc::renameatx_np(directory.as_raw_fd(), source.as_ptr(),
-        directory.as_raw_fd(), target.as_ptr(), libc::RENAME_EXCL) };
+        destination.as_raw_fd(), target.as_ptr(), libc::RENAME_EXCL) };
     #[cfg(target_os = "linux")]
     let result = unsafe { libc::syscall(libc::SYS_renameat2, directory.as_raw_fd(), source.as_ptr(),
-        directory.as_raw_fd(), target.as_ptr(), libc::RENAME_NOREPLACE) };
+        destination.as_raw_fd(), target.as_ptr(), libc::RENAME_NOREPLACE) };
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "atomic relative publication is unavailable"));
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -102,7 +106,7 @@ fn publish_with_hooks(
             options.write(true).follow(FollowSymlinks::No);
             let writable = directory.open_with(name, &options).map_err(|error| {
                 if error.kind() == std::io::ErrorKind::PermissionDenied {
-                    AppError::Forbidden(format!("workspace publication target is not writable: {error}"))
+                    crate::path_safety::native_io_error("writing native publication target", error)
                 } else { io_error(error) }
             })?.into_std();
             if !matches_metadata(&writable, metadata).map_err(io_error)? {
@@ -143,7 +147,7 @@ fn publish_with_hooks(
             #[cfg(target_os = "macos")]
             crate::service::copy_macos_publication_metadata(writable, &staged).map_err(|error| {
                 if error.kind() == std::io::ErrorKind::PermissionDenied {
-                    AppError::Forbidden(format!("cannot preserve workspace publication ACL/xattrs: {error}"))
+                    crate::path_safety::native_io_error("preserving publication ACL/xattrs", error)
                 } else { io_error(error) }
             })?;
             directory.rename(temporary, directory, name).map_err(io_error)?;
@@ -188,7 +192,7 @@ mod tests {
         fs::create_dir(&parent).unwrap();
         let target = parent.join("target");
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o300)).unwrap();
-        let result = crate::workspace_write::prepare_parent(&target, fixture.path())
+        let result = crate::workspace_write::prepare_global_parent(&target)
             .map_err(PatchPublicationFailure::from)
             .and_then(|prepared| publish(&prepared, b"durable", PublicationSource::Absent));
         let listing_was_denied = fs::read_dir(&parent).is_err();
@@ -211,7 +215,7 @@ mod tests {
         // temporary fixture; no ambient or user-file metadata is inspected.
         assert_eq!(unsafe { libc::fsetxattr(original.as_raw_fd(), name.as_ptr(),
             value.as_ptr().cast(), value.len(), 0, 0) }, 0);
-        let parent = crate::workspace_write::prepare_parent(&target, fixture.path()).unwrap();
+        let parent = crate::workspace_write::prepare_global_parent(&target).unwrap();
         publish(&parent, b"patched", PublicationSource::Matching(b"original")).unwrap();
         let replacement = File::open(&target).unwrap();
         let mut observed = [0u8; 64];
@@ -238,7 +242,7 @@ mod tests {
                     fs::write(parent.join("target"), b"original").unwrap();
                     fs::write(outside.join("target"), b"original").unwrap();
                 }
-                let prepared = crate::workspace_write::prepare_parent(&parent.join("target"), &root).unwrap();
+                let prepared = crate::workspace_write::prepare_global_parent(&parent.join("target")).unwrap();
                 let replace = || { fs::rename(&parent, &retained).unwrap(); symlink(&outside, &parent).unwrap(); };
                 if !after_staging { replace(); }
                 let result = publish_with_hooks(&prepared, b"patched", source, || if after_staging { replace(); }, || {}, || Ok(()));
@@ -259,18 +263,18 @@ mod tests {
         let target = fixture.path().join("target");
         fs::write(&target, b"original").unwrap();
         fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
-        let parent = crate::workspace_write::prepare_parent(&target, fixture.path()).unwrap();
+        let parent = crate::workspace_write::prepare_global_parent(&target).unwrap();
         publish(&parent, b"patched", PublicationSource::Matching(b"original")).unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"patched");
         assert_eq!(fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o640);
         fs::set_permissions(&target, fs::Permissions::from_mode(0o400)).unwrap();
         let result = publish(&parent, b"blocked", PublicationSource::Existing);
         if unsafe { libc::geteuid() } != 0 {
-            assert!(matches!(result.unwrap_err().error, AppError::Forbidden(_)));
+            assert!(matches!(result.unwrap_err().error, AppError::NativeSystemAccessDenied { .. }));
             assert_eq!(fs::read(&target).unwrap(), b"patched");
         }
         let new_target = fixture.path().join("new-target");
-        let parent = crate::workspace_write::prepare_parent(&new_target, fixture.path()).unwrap();
+        let parent = crate::workspace_write::prepare_global_parent(&new_target).unwrap();
         let result = publish_with_hooks(&parent, b"owned", PublicationSource::Absent, || {},
             || fs::write(&new_target, b"concurrent").unwrap(), || Ok(()));
         assert!(result.is_err());

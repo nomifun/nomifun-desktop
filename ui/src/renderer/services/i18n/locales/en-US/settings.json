@@ -343,7 +343,7 @@
     "refresh": "Re-check",
     "desktopOnly": "These are permissions for the computer running NomiFun. This WebUI can test its own browser microphone, but host permissions must be managed in the desktop app.",
     "loadFailed": "The latest system permission state could not be read. Return to the desktop app and try again.",
-    "restartAfterGrant": "Completely quit and reopen NomiFun after granting this permission.",
+    "restartAfterGrant": "Re-check after granting. If macOS requests a restart or access remains unavailable, completely quit and reopen NomiFun, then resume the task.",
     "requestAccess": "Request access",
     "openSystemSettings": "Open System Settings",
     "tabs": {
@@ -359,7 +359,8 @@
       "not_determined": "Needs access",
       "restricted": "System restricted",
       "not_required": "Not required",
-      "unknown": "Checked on use"
+      "unknown": "Checked on use",
+      "not_granted": "Not granted"
     },
     "summaryStates": {
       "ready": "Ready",
@@ -395,7 +396,10 @@
         "location": "Shares location only with the website currently making the request.",
         "notifications": "Website notifications are approved per site and are separate from NomiFun task-completion notifications."
       },
-      "agentBoundary": "While an Agent owns page input, new website permissions are never silently approved. Stop the run, then handle the request in the visible page."
+      "agentBoundary": "While an Agent owns page input, new website permissions are never silently approved. Stop the run, then handle the request in the visible page.",
+      "hostMediaTitle": "Host media access",
+      "hostMediaDescription": "Live system access for the running NomiFun app. Websites still need separate approval in the visible Browser panel. An OS grant does not prove a device exists or can capture now.",
+      "macosPermissionLimit": "The current macOS embedded browser handles website camera and microphone requests. Product permission handling for website location and notifications is not connected yet; enabling system access alone does not make these features available."
     },
     "notifications": {
       "title": "System Notifications",
@@ -410,7 +414,7 @@
     },
     "files": {
       "title": "Files and protected folders",
-      "description": "File capabilities use only a workspace, upload, or system file-picker result that you selected. Full Disk Access is not requested by default; consider it only when you intentionally need a protected folder and macOS denies that exact access."
+      "description": "The Agent can use local paths accessible to the signed-in user; the workspace provides only a default directory. macOS decides protected folder and volume access for each operation. Full Disk Access has no reliable global readiness probe, and administrator identity does not replace this grant."
     },
     "permissions": {
       "microphone": "Microphone",
@@ -423,6 +427,10 @@
       "location": "Location",
       "notifications": "Notifications",
       "notificationsDesc": "Lets NomiFun deliver system alerts when work completes or needs your attention."
+    },
+    "automation": {
+      "title": "Cross-app automation",
+      "description": "Uses Apple Events or AppleScript for requested cross-app tasks. macOS grants access for NomiFun and each target app separately; a global switch cannot prove that every target is ready."
     }
   },
   "startOnBoot": "Start on Boot",
@@ -1017,12 +1025,12 @@
   "mcpAuthenticated": "Authenticated",
   "mcpDisconnected": "Not tested",
   "mcpError": "Last test failed",
-  "mcpErrorNodeCommandNotFound": "Command {{command}} was not found. Install Node.js (which includes npm/npx), restart Nomi, or configure this MCP server to use an absolute command path.",
-  "mcpErrorBunCommandNotFound": "Command {{command}} was not found. Install Bun (which includes bun/bunx), restart Nomi, or configure this MCP server to use an absolute command path.",
-  "mcpErrorUvCommandNotFound": "Command {{command}} was not found. Install uv, restart Nomi, or configure this MCP server to use an absolute command path.",
-  "mcpErrorPythonCommandNotFound": "Command {{command}} was not found. Install Python, restart Nomi, or configure this MCP server to use an absolute command path.",
-  "mcpErrorDenoCommandNotFound": "Command {{command}} was not found. Install Deno, restart Nomi, or configure this MCP server to use an absolute command path.",
-  "mcpErrorCommandNotFound": "Command {{command}} was not found. Install it or configure this MCP server to use an absolute command path.",
+  "mcpErrorNodeCommandNotFound": "Command {{command}} was not found in the configured launch environment.",
+  "mcpErrorBunCommandNotFound": "Command {{command}} was not found in the configured launch environment.",
+  "mcpErrorUvCommandNotFound": "Command {{command}} was not found in the configured launch environment.",
+  "mcpErrorPythonCommandNotFound": "Command {{command}} was not found in the configured launch environment.",
+  "mcpErrorDenoCommandNotFound": "Command {{command}} was not found in the configured launch environment.",
+  "mcpErrorCommandNotFound": "Command {{command}} was not found in the configured launch environment.",
   "mcpErrorCommandPermissionDenied": "Nomi cannot execute {{command}} because permission was denied.",
   "mcpErrorCommandStartFailed": "Nomi failed to start {{command}}.",
   "mcpErrorPackageNotFound": "{{command}} could not find the package named by this market configuration. Verify the package name, version, and registry.",
@@ -1905,12 +1913,6 @@
     "envelopeInvalid": "Paste a code from Relay Console. Generate a new one if it is invalid or expired.",
     "relayConnect": "Connect relay",
     "relayReconnect": "Reconnect",
-    "relayDownloadAndConnect": "Download connection component and connect",
-    "relayDownloadAndReconnect": "Download connection component and reconnect",
-    "relayRuntimeStatusPending": "Checking the local connection component…",
-    "relayDownloadHint": "NomiRelay needs the nfagent connection component, used only for Relay remote connections. It comes from the official nomifun/nomifun-net-infra releases on GitHub and downloads only when you choose the download button.",
-    "relayDownloadSource": "View download source",
-    "relayErrorAgentInstallRequired": "The connection component is not installed. Choose to download it before connecting.",
     "relayPause": "Pause cross-network access",
     "relayRemove": "Disconnect relay",
     "relayRemoveConfirm": "This revokes relay enrollment and deletes its local credentials, stopping cross-network access. Phone credentials and same-network access remain. Remove phones separately below.",

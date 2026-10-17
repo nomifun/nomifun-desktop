@@ -19,14 +19,15 @@ export type PermissionCapabilityId =
   | 'browser_use'
   | 'notifications'
   | 'local_connections'
-  | 'workspace_files';
+  | 'local_files'
+  | 'application_automation';
 
 /**
  * Product-wide permission audit. An empty `requiredBeforeUse` is deliberate:
  * it means the capability must not be blocked behind an unrelated blanket OS
  * grant. Browser media is a visible, per-site decision; protected files are a
- * user-selected path decision and never justify asking everyone for Full Disk
- * Access up front.
+ * operation-specific OS decision. Full Disk Access and Automation have no
+ * process-wide readiness probe and must never be presented as already granted.
  */
 export const SYSTEM_PERMISSION_AUDIT: Readonly<Record<PermissionCapabilityId, {
   requiredBeforeUse: readonly SystemPermissionKind[];
@@ -58,10 +59,15 @@ export const SYSTEM_PERMISSION_AUDIT: Readonly<Record<PermissionCapabilityId, {
     requestedOnDemand: ['local_network'],
     optionalRecovery: [],
   },
-  workspace_files: {
+  local_files: {
     requiredBeforeUse: [],
     requestedOnDemand: [],
     optionalRecovery: ['full_disk_access'],
+  },
+  application_automation: {
+    requiredBeforeUse: [],
+    requestedOnDemand: ['automation'],
+    optionalRecovery: [],
   },
 };
 

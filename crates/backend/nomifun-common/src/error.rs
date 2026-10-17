@@ -20,6 +20,15 @@ pub enum AppError {
     #[error("Forbidden: {0}")]
     Forbidden(String),
 
+    /// Native access control refusal. It can be an ACL, TCC, protected volume
+    /// or another OS boundary; it does not imply that root is the remedy.
+    #[error("System access denied while {operation}: {source}")]
+    NativeSystemAccessDenied {
+        operation: String,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("Conflict: {0}")]
     Conflict(String),
 
@@ -29,9 +38,6 @@ pub enum AppError {
         message: String,
         details: Option<Value>,
     },
-
-    #[error("Component {0} is missing. Install it on the system or explicitly choose to download it, then retry.")]
-    ComponentPreparationRequired(String),
 
     #[error("Component {component} is unavailable: {reason}")]
     ComponentUnavailable { component: String, reason: String },
@@ -117,10 +123,9 @@ impl AppError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
-            Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::Forbidden(_) | Self::NativeSystemAccessDenied { .. } => StatusCode::FORBIDDEN,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::SessionContractEvolutionRejected { .. } => StatusCode::CONFLICT,
-            Self::ComponentPreparationRequired(_) => StatusCode::CONFLICT,
             Self::ComponentUnavailable { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::SessionConfigurationChanged(_) => StatusCode::CONFLICT,
             Self::RevisionConflict(_) => StatusCode::CONFLICT,
@@ -147,6 +152,7 @@ impl AppError {
             Self::NotFound(_) => "NOT_FOUND",
             Self::BadRequest(_) => "BAD_REQUEST",
             Self::Unauthorized(_) => "UNAUTHORIZED",
+            Self::NativeSystemAccessDenied { .. } => "SYSTEM_ACCESS_DENIED",
             Self::Forbidden(message) => {
                 if message.contains("outside the allowed sandbox") {
                     "PATH_OUTSIDE_SANDBOX"
@@ -156,7 +162,6 @@ impl AppError {
             }
             Self::Conflict(_) => "CONFLICT",
             Self::SessionContractEvolutionRejected { .. } => "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED",
-            Self::ComponentPreparationRequired(_) => "COMPONENT_PREPARATION_REQUIRED",
             Self::ComponentUnavailable { .. } => "COMPONENT_UNAVAILABLE",
             Self::SessionConfigurationChanged(_) => "NOMIFUN_SESSION_CONFIGURATION_CHANGED",
             Self::RevisionConflict(_) => "REVISION_CONFLICT",
@@ -189,6 +194,11 @@ impl AppError {
     /// context in addition to the top-level error code.
     pub fn error_details(&self) -> Option<Value> {
         match self {
+            Self::NativeSystemAccessDenied { operation, source } => Some(json!({
+                "operation": operation,
+                "io_kind": format!("{:?}", source.kind()),
+                "os_error": source.raw_os_error(),
+            })),
             Self::KnowledgeExportDestinationInvalid(_) | Self::KnowledgeExportDestinationExists(_) => {
                 Some(json!({ "field": "dest_path", "operation": "knowledge.export" }))
             }
@@ -210,9 +220,6 @@ impl AppError {
             }
             Self::ProviderInUse(details) => Some(json!({ "usages": details.usages })),
             Self::SessionContractEvolutionRejected { details, .. } => details.clone(),
-            Self::ComponentPreparationRequired(component) => {
-                Some(json!({ "component": component, "phase": "runtime_preparation" }))
-            }
             Self::ComponentUnavailable { component, .. } => {
                 Some(json!({ "component": component, "phase": "runtime_resolution" }))
             }
@@ -338,17 +345,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn component_preparation_required_has_a_typed_conflict_response() {
-        let response = AppError::ComponentPreparationRequired("bun".into()).into_response();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        let body = to_bytes(response.into_body(), 4096).await.unwrap();
-        let body: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["code"], "COMPONENT_PREPARATION_REQUIRED");
-        assert_eq!(body["details"]["component"], "bun");
-        assert_eq!(body["details"]["phase"], "runtime_preparation");
-    }
-
-    #[tokio::test]
     async fn knowledge_export_destination_errors_have_typed_responses() {
         for (error, status, code) in [
             (
@@ -408,6 +404,17 @@ mod tests {
         assert_eq!(body["code"], "KNOWLEDGE_EXPORT_ACCESS_DENIED");
         assert_eq!(body["details"]["os_error"], 5);
         assert_eq!(body["details"]["stage"], "finalize_file");
+    }
+
+    #[test]
+    fn native_access_denial_keeps_original_os_error_and_does_not_imply_admin_recovery() {
+        let error = AppError::NativeSystemAccessDenied {
+            operation: "reading test target".into(), source: std::io::Error::from_raw_os_error(13),
+        };
+        assert_eq!(error.status_code(), StatusCode::FORBIDDEN);
+        assert_eq!(error.error_code(), "SYSTEM_ACCESS_DENIED");
+        assert_eq!(error.error_details().unwrap()["os_error"], 13);
+        assert!(std::error::Error::source(&error).is_some());
     }
 
     #[test]

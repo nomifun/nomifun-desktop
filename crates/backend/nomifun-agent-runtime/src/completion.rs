@@ -272,8 +272,8 @@ fn retain_short_read_text(
         || binding.effect_class!=crate::AgentEffectClass::ReadOnly
         || !matches!(call.arguments.0.get("format").and_then(serde_json::Value::as_str),None|Some("text"))
     { return; }
-    let requested=call.arguments.0["path"].as_str().and_then(|path| crate::agents_md::normalize_workspace_directory(path).ok());
-    let returned=value["path"].as_str().and_then(|path| crate::agents_md::normalize_workspace_directory(path).ok());
+    let requested=call.arguments.0["path"].as_str().and_then(|path| crate::agents_md::normalize_native_instruction_path(path).ok());
+    let returned=value["path"].as_str().and_then(|path| crate::agents_md::normalize_native_instruction_path(path).ok());
     if requested.is_none() || requested!=returned { return; }
     let (Some(content),Some(offset),Some(total),Some(eof))=(value["content"].as_str(),value["offset"].as_u64(),
         value["total_bytes"].as_u64(),value["eof"].as_bool()) else { return; };
@@ -332,7 +332,8 @@ impl WorkspacePathObservation {
         let value: Self = serde_json::from_value(value.clone()).ok()?;
         if !valid_sha256(&value.root_sha256)
             || value.path.is_empty() || value.path.len() > 4096 || value.path.chars().any(char::is_control)
-            || crate::agents_md::normalize_workspace_directory(&value.path).ok().as_deref() != Some(value.path.as_str())
+            || std::path::Path::new(&value.path).is_absolute() || value.path.contains(['\\', ':'])
+            || value.path.split('/').any(|part| part.is_empty() || matches!(part, "." | ".."))
         { return None; }
         Some(value)
     }
@@ -926,6 +927,10 @@ impl CompletionTracker {
         {
             let targets: Option<Vec<WorkspacePathObservation>> = match binding.action_id.as_ref() {
                 "workspace.files/write" | "workspace.files/delete" => owner_path.clone().map(|path| vec![path]),
+                "workspace.files/rename" => owner_result.as_ref().and_then(|value| {
+                    Some(vec![WorkspacePathObservation::parse(&value["source_workspace_path"])?,
+                        WorkspacePathObservation::parse(&value["destination_workspace_path"])?])
+                }),
                 "workspace.files/patch" => owner_result.as_ref().and_then(|value| value["files"].as_array())
                     .filter(|files| call.arguments.0["files"].as_array().is_some_and(|requested| requested.len() == files.len()))
                     .and_then(|files| files.iter().map(|file| WorkspacePathObservation::parse(&file["workspace_path"])).collect()),
@@ -1021,7 +1026,7 @@ impl CompletionTracker {
                 && matches!(binding.action_id.as_ref(), "workspace.files/read" | "workspace.files/write")
                 && call.arguments.0.get("format").and_then(serde_json::Value::as_str) != Some("instruction_scope"))
                 .then(|| call.arguments.0.get("path").and_then(serde_json::Value::as_str)
-                    .and_then(|path| crate::agents_md::normalize_workspace_directory(path).ok()))
+                    .and_then(|path| crate::agents_md::normalize_native_instruction_path(path).ok()))
                 .flatten(),
             workspace_epoch: work.workspace_observation_epoch,
             invocation_attempted,
@@ -1463,7 +1468,7 @@ impl CompletionTracker {
                     .as_array_mut().ok_or("evidence_call_ids must be an array")?;
                 for path in paths {
                     let path = path.as_str().ok_or("evidence_paths entries must be strings")?;
-                    let normalized = crate::agents_md::normalize_workspace_directory(path.strip_prefix("./").unwrap_or(path)).map_err(|error| error.to_string())?;
+                    let normalized = crate::agents_md::normalize_native_instruction_path(path.strip_prefix("./").unwrap_or(path)).map_err(|error| error.to_string())?;
                     let observation = self.observations.iter().rev().find(|item|
                         item.path.as_deref() == Some(&normalized) && self.is_usable(item, work.workspace_observation_epoch))
                         .ok_or_else(|| format!("No current successful observation for workspace path {}. Read it if authorized, or mark the claim unverified.", serde_json::to_string(path).unwrap_or_default()))?;

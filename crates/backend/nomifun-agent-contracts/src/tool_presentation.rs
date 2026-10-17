@@ -110,6 +110,15 @@ mod tests {
     }
 
     #[test]
+    fn native_read_identity_retains_the_existing_read_only_presentation() {
+        let read = tool_presentation("workspace.files", "workspace.files/read").unwrap();
+        assert_eq!(read.name, "read_file");
+        assert_eq!(read.target_fields, ["path"]);
+        assert_eq!(read.receipt_action.as_deref(), Some("read_files"));
+        assert!(tool_presentations().iter().all(|tool| !tool.name.contains("administrator")));
+    }
+
+    #[test]
     fn external_aliases_preserve_actions_and_disambiguate_sanitized_origins() {
         let name = namespaced_tool_name("mcp", &"server".repeat(40), "search_documents", b"exact-a");
         assert!(name.len() <= 64);

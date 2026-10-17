@@ -243,8 +243,8 @@ impl UnixReadRoot {
     // consumes a search capability and refuses newly introduced links.
     fn for_target(target: &Path, authority: &PathAuthority) -> Result<Self, AppError> {
         let path = match authority {
-            PathAuthority::Unrestricted => target.parent().filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or(target).to_path_buf(),
+            PathAuthority::Unrestricted => target.parent().unwrap_or(target).ancestors()
+                .find(|parent| parent.is_dir()).ok_or_else(unix_changed)?.to_path_buf(),
             PathAuthority::Workspace(root) => std::fs::canonicalize(root).map_err(|_| unix_changed())?,
             PathAuthority::Confined(roots) => roots.iter().filter_map(|root| std::fs::canonicalize(root).ok())
                 .filter(|root| target.starts_with(root)).max_by_key(|root| root.components().count())
@@ -256,7 +256,8 @@ impl UnixReadRoot {
         if matches!(authority, PathAuthority::Workspace(_)) {
             crate::path_safety::reject_workspace_owner_canonical_path(&path, target)?;
         }
-        let directory = crate::unix_directory::open_search(None, &path).map_err(|_| unix_changed())?;
+        let directory = crate::unix_directory::open_search(None, &path)
+            .map_err(|error| crate::path_safety::native_io_error("opening native metadata directory", error))?;
         let root = Self { directory, path };
         root.verify()?;
         Ok(root)

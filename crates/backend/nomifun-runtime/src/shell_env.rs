@@ -92,7 +92,7 @@ fn merge_process_path(
         .unwrap_or_default()
 }
 
-fn platform_extra_bins() -> Vec<PathBuf> {
+pub(crate) fn platform_extra_bins() -> Vec<PathBuf> {
     let home = dirs::home_dir();
     let home = home.as_deref();
     let mut out = platform_extra_bins_at(home);

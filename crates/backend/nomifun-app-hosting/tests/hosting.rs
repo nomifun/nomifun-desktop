@@ -665,3 +665,36 @@ async fn foreground_exit_during_local_listen_wait_is_preserved_as_startup_failur
     assert!(failed.pid.is_none());
     host.shutdown().await.unwrap();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn application_launch_uses_shared_environment_and_explicit_path_without_runtime_downloads() {
+    use std::os::unix::fs::PermissionsExt;
+    let temporary = TempDir::new().unwrap();
+    let source = temporary.path().join("source");
+    write(&source, "readme.txt", "isolated fixture");
+    let tools = temporary.path().join("user tools 中文");
+    let observed = temporary.path().join("actual-environment");
+    write(&tools, "fixture-app", "#!/bin/sh\nprintf '%s\n' \"$CUSTOM_VALUE\" \"$NOMIFUN_USER_SETTING\" \"$PATH\" > \"$OBSERVED_ENV\"\nexec /bin/sleep 30\n");
+    fs::set_permissions(tools.join("fixture-app"), fs::Permissions::from_mode(0o755)).unwrap();
+    let host = owner(&temporary.path().join("hosting")).await;
+    let mut app = host.import(&source, Some("environment fixture".into()), ImportKind::Source).await.unwrap();
+    app.settings.install_command = None;
+    app.settings.build_command = None;
+    app.settings.start_command = Some("fixture-app".into());
+    app.settings.web_url = None;
+    app.settings.environment.insert("PATH".into(), tools.to_string_lossy().into_owned());
+    app.settings.environment.insert("CUSTOM_VALUE".into(), "space 中文 'quote'".into());
+    app.settings.environment.insert("NOMIFUN_USER_SETTING".into(), "explicit-user-value".into());
+    app.settings.environment.insert("OBSERVED_ENV".into(), observed.to_string_lossy().into_owned());
+    host.update(&app.id, app.name.clone(), app.settings.clone()).await.unwrap();
+    let running = host.operate(&app.id, AppOperation::Start).await.unwrap();
+    assert_eq!(running.state, AppState::Running);
+    wait_for(&observed).await;
+    let actual = fs::read_to_string(&observed).unwrap();
+    let values = actual.lines().collect::<Vec<_>>();
+    assert_eq!(values[0], "space 中文 'quote'");
+    assert_eq!(values[1], "explicit-user-value");
+    assert!(values[2].starts_with(&tools.to_string_lossy().to_string()));
+    host.delete(&app.id).await.unwrap();
+}

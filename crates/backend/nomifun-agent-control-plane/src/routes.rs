@@ -362,20 +362,13 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::{
-        ControlPlaneStore, InMemoryControlPlaneStore, OfficialTemplateCatalog,
-        PresetRevisionCompiler, StaticCatalogProvider, StoredPreset,
+        ControlPlaneStore, InMemoryControlPlaneStore, StoredPreset,
     };
 
     fn test_control_plane(
         store: Arc<InMemoryControlPlaneStore>,
     ) -> Arc<AgentControlPlane> {
-        let templates = OfficialTemplateCatalog::load().unwrap();
-        Arc::new(AgentControlPlane::new(
-            store,
-            Arc::new(StaticCatalogProvider::new(Default::default())),
-            templates.clone(),
-            PresetRevisionCompiler::new(),
-        ))
+        Arc::new(crate::service::tests::test_control_plane(store))
     }
 
     #[test]
@@ -482,7 +475,12 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        for key in ["capabilities", "skills", "mcp_tools", "roles"] {
+        let capabilities = value["data"]["capabilities"].as_array().unwrap();
+        assert_eq!(capabilities.iter().map(|entry| entry["capability"]["id"].as_str().unwrap()).collect::<Vec<_>>(),
+            ["workspace.files", "workspace.process"]);
+        assert_eq!(capabilities[0]["action_count"], 6);
+        assert_eq!(capabilities[1]["action_count"], 7);
+        for key in ["skills", "mcp_tools", "roles"] {
             assert_eq!(value["data"][key], serde_json::json!([]));
         }
     }

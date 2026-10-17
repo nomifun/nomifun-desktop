@@ -28,7 +28,11 @@ impl WorkspacePathObservation {
             _ => None,
         }).collect::<Option<Vec<_>>>()?;
         let path = components.join("/");
-        if path.is_empty() || path.len() > 4096 { return None; }
+        // Global native paths can name entries that project presentation
+        // cannot represent (or that belong to the platform's own subtree).
+        // Keep their native receipt without inventing a portable project path.
+        if path.is_empty() || path.len() > 4096 || path.chars().any(char::is_control)
+            || crate::artifact_store::normalized_workspace_relative(&path, false).is_err() { return None; }
         Some(Self {
             root_sha256: canonical_root_sha256(&root)?,
             path,

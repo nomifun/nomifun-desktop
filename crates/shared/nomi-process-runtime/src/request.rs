@@ -14,7 +14,6 @@ use uuid::Uuid;
 pub const MAX_PTY_DIMENSION: u16 = i16::MAX as u16;
 
 use crate::{
-    CapabilityPolicy,
     outcome::{CleanupReport, ProcessSnapshot, SessionId, SpawnFailure},
 };
 
@@ -26,7 +25,6 @@ pub struct ProcessRequest {
     pub env: BTreeMap<OsString, OsString>,
     pub transport: Transport,
     pub policy: ProcessPolicy,
-    pub capability: CapabilityPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,15 +107,12 @@ pub struct NormalizedProcessRequest {
     pub env: BTreeMap<OsString, OsString>,
     pub transport: Transport,
     pub policy: ProcessPolicy,
-    pub capability: CapabilityPolicy,
 }
 
 #[derive(Debug, Error)]
 pub enum ProcessError {
     #[error("invalid working directory {path:?}: {reason}")]
     InvalidWorkingDirectory { path: PathBuf, reason: String },
-    #[error("process capability denied for {path:?}: {reason}")]
-    CapabilityDenied { path: PathBuf, reason: String },
     #[error("invalid command: {reason}")]
     InvalidCommand { reason: String },
     #[error("invalid transport: {reason}")]
@@ -153,7 +148,6 @@ impl ProcessError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::InvalidWorkingDirectory { .. } => "invalid_working_directory",
-            Self::CapabilityDenied { .. } => "capability_denied",
             Self::InvalidCommand { .. } => "invalid_command",
             Self::InvalidTransport { .. } => "invalid_transport",
             Self::SessionNotFound { .. } => "session_not_found",
@@ -191,23 +185,6 @@ pub fn normalize_request(
         });
     }
 
-    let mut canonical_roots = Vec::with_capacity(request.capability.cwd_roots.len());
-    for root in &request.capability.cwd_roots {
-        let canonical_root = canonicalize_compatible(root).map_err(|error| {
-            ProcessError::CapabilityDenied {
-                path: cwd.clone(),
-                reason: format!("could not resolve capability root {root:?}: {error}"),
-            }
-        })?;
-        canonical_roots.push(canonical_root);
-    }
-    if !canonical_roots.iter().any(|root| cwd.starts_with(root)) {
-        return Err(ProcessError::CapabilityDenied {
-            path: cwd,
-            reason: "working directory is outside the allowed roots".to_owned(),
-        });
-    }
-
     if matches!(
         request.transport,
         Transport::Pty {
@@ -237,9 +214,6 @@ pub fn normalize_request(
         CommandSpec::Program { .. } | CommandSpec::Shell { .. } => {}
     }
 
-    let mut capability = request.capability;
-    capability.cwd_roots = canonical_roots;
-
     Ok(NormalizedProcessRequest {
         owner: request.owner,
         command: request.command,
@@ -247,7 +221,6 @@ pub fn normalize_request(
         env: request.env,
         transport: request.transport,
         policy: request.policy,
-        capability,
     })
 }
 

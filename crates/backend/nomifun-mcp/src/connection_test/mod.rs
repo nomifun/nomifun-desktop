@@ -24,7 +24,7 @@ pub(crate) fn is_local_runtime_failure(result: &McpConnectionTestResult) -> bool
         result.details.as_ref()
             .and_then(|details| details.get("owner_code"))
             .and_then(serde_json::Value::as_str),
-        Some("COMPONENT_PREPARATION_REQUIRED" | "MCP_RUNTIME_UNAVAILABLE" | "MCP_RUNTIME_RESOLUTION_TIMEOUT")
+        Some("MCP_RUNTIME_UNAVAILABLE" | "MCP_RUNTIME_RESOLUTION_TIMEOUT")
     )
 }
 
@@ -169,10 +169,6 @@ impl McpConnectionTestService {
                         McpConnectionTestErrorCode::Timeout,
                         Some("runtime_resolution_timeout"),
                     ),
-                    "COMPONENT_PREPARATION_REQUIRED" => (
-                        McpConnectionTestErrorCode::CommandStartFailed,
-                        Some("dependency_missing"),
-                    ),
                     "MCP_RUNTIME_UNAVAILABLE" => (
                         McpConnectionTestErrorCode::CommandStartFailed,
                         Some("runtime_unavailable"),
@@ -216,11 +212,9 @@ impl McpConnectionTestService {
                 if let Some(failure_kind) = failure_kind {
                     details["failure_kind"] = serde_json::json!(failure_kind);
                 }
-                if matches!(error.code(), "COMPONENT_PREPARATION_REQUIRED" | "MCP_RUNTIME_UNAVAILABLE" | "MCP_RUNTIME_RESOLUTION_TIMEOUT") {
+                if matches!(error.code(), "MCP_RUNTIME_UNAVAILABLE" | "MCP_RUNTIME_RESOLUTION_TIMEOUT") {
                     details["phase"] = serde_json::json!("runtime_resolution");
-                    details["component"] = serde_json::json!("bun");
-                    let retryable = error.code() != "MCP_RUNTIME_UNAVAILABLE";
-                    details["retryable"] = serde_json::json!(retryable);
+                    details["retryable"] = serde_json::json!(true);
                 }
                 if code == McpConnectionTestErrorCode::Timeout {
                     details["timeout_seconds"] = serde_json::json!(timeout.as_secs());
@@ -360,31 +354,19 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn bun_connection_test_resolves_existing_runtime_without_a_download() {
-        let available = nomifun_runtime::resolve_cached_managed_command("bun", &[]).unwrap().is_some();
-        let before = nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun);
+    async fn explicit_missing_executable_retains_native_spawn_reason() {
         let service = McpConnectionTestService::new(reqwest::Client::new());
-        let result = service.test_connection("unprepared", &McpServerTransport::Stdio {
-            command: "bun".into(), args: vec!["nonexistent.js".into()], env: HashMap::new()
+        let result = service.test_connection("missing", &McpServerTransport::Stdio {
+            command: "/nomifun-nonexistent-test-executable".into(), args: vec![], env: HashMap::new()
         }).await;
         assert!(!result.success);
-        let details = result.details.unwrap();
-        if available {
-            assert_ne!(details["owner_code"], "COMPONENT_PREPARATION_REQUIRED");
-        } else {
-            assert_eq!(details["owner_code"], "COMPONENT_PREPARATION_REQUIRED");
-            assert_eq!(details["phase"], "runtime_resolution");
-        }
-        assert_eq!(
-            nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun),
-            before
-        );
+        assert!(result.error.unwrap().contains("No such file"));
     }
 
     #[test]
     fn only_local_runtime_errors_are_excluded_from_connection_facts() {
         let mut result = error_result(McpConnectionTestErrorCode::CommandStartFailed,
-            "missing".into(), Some(serde_json::json!({"owner_code":"COMPONENT_PREPARATION_REQUIRED"})));
+            "missing".into(), Some(serde_json::json!({"owner_code":"MCP_RUNTIME_UNAVAILABLE"})));
         assert!(is_local_runtime_failure(&result));
         result.details = Some(serde_json::json!({"owner_code":"MCP_PROCESS_EXITED", "phase":"runtime_resolution"}));
         assert!(!is_local_runtime_failure(&result));

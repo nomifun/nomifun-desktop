@@ -87,7 +87,7 @@ impl<F: FnMut(&Path)> SearchWalk<F> {
             };
             self.entries_seen += 1;
             let path = entry.path();
-            if path.strip_prefix(&self.root).ok().and_then(|path| path.components().next())
+            if self.mode == WalkMode::Inventory && path.strip_prefix(&self.root).ok().and_then(|path| path.components().next())
                 .is_none_or(|part| crate::artifact_store::is_workspace_owner_component(part.as_os_str())) { continue; }
             let kind = match entry.file_type() {
                 Ok(kind) => kind,

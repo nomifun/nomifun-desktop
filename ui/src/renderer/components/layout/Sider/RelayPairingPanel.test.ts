@@ -36,7 +36,7 @@ describe('Relay pairing UI contract', () => {
     const source = readSource('RelayPairingPanel.tsx');
 
     expect(source.includes('window.setInterval')).toBe(true);
-    expect(source.includes("runAction('restart', runtimeMissing)")).toBe(true);
+    expect(source.includes("runAction('restart')")).toBe(true);
     expect(source.includes("runAction('disconnect')")).toBe(true);
     expect(source.includes("runAction('stop')")).toBe(true);
     expect(source.includes('Modal.confirm')).toBe(true);

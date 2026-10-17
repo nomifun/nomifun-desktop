@@ -261,6 +261,27 @@ export async function signMacosAppBundle({ appPath, identity = '-', target = pro
     macosCodeSigningArguments(path, identity, { application, entitlementsPath }));
   const frameworks = join(app, 'Contents/Frameworks');
   if (await stat(frameworks).catch(error => { if (error.code === 'ENOENT') return null; throw error; })) await signMachO(frameworks, sign);
+  const systemHelper = join(app, 'Contents/Library/HelperTools/nomifun-system-execution');
+  if (await stat(systemHelper).catch(error => { if (error.code === 'ENOENT') return null; throw error; })) {
+    const helperArchitecture = await run('lipo', ['-archs', systemHelper], true);
+    if (helperArchitecture !== architecture) throw new Error(`expected ${architecture} administrator service, received ${helperArchitecture}`);
+    const bundlePlist = JSON.parse(await run('/usr/bin/plutil', ['-convert', 'json', '-o', '-', join(app, 'Contents/Info.plist')], true));
+    const serviceIdentifier = `${bundlePlist.CFBundleIdentifier}.system-execution`;
+    const launchDaemon = join(app, `Contents/Library/LaunchDaemons/${serviceIdentifier}.plist`);
+    await requireFile(launchDaemon, 'native administrator service registration');
+    await run('/usr/bin/plutil', ['-lint', launchDaemon]);
+    const daemon = JSON.parse(await run('/usr/bin/plutil', ['-convert', 'json', '-o', '-', launchDaemon], true));
+    if (daemon.Label !== serviceIdentifier || daemon.BundleProgram !== 'Contents/Library/HelperTools/nomifun-system-execution'
+      || JSON.stringify(daemon.ProgramArguments) !== JSON.stringify(['nomifun-system-execution', '--service', serviceIdentifier])
+      || Object.keys(daemon.MachServices ?? {}).length !== 1 || daemon.MachServices[serviceIdentifier] !== true) {
+      throw new Error('native administrator service label, executable and authenticated Mach service do not match the application identity');
+    }
+    // The XPC peers require this exact identifier and the containing App's Team
+    // ID. The helper has no GUI/TCC entitlements and never runs the renderer.
+    await run('codesign', ['--force', '--options', 'runtime', ...(identity === '-' ? [] : ['--timestamp']),
+      '--identifier', 'com.nomifun.desktop.system-execution', '--sign', identity, systemHelper]);
+    await run('codesign', ['--verify', '--strict', systemHelper]);
+  }
   await run('/usr/bin/plutil', ['-convert', 'xml1', join(app, 'Contents/Info.plist')]);
   await sign(app, true);
   await run('codesign', ['--verify', '--deep', '--strict', app]);

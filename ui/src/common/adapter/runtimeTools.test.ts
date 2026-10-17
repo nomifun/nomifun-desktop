@@ -1,64 +1,62 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
-import { BackendHttpError } from './httpBridge';
-import { downloadBunRuntime, isBunDownloadRequired, runtimeTools, type RuntimeToolSnapshot } from './runtimeTools';
+import { withRuntimePreparation, runtimeTools, type RuntimeToolSnapshot } from './runtimeTools';
 
 const restores: Array<() => void> = [];
 const spy = <T extends { mockRestore(): void }>(value: T): T => {
   restores.push(() => value.mockRestore()); return value;
 };
 afterEach(() => { while (restores.length) restores.pop()!(); });
-const snapshot = (phase: RuntimeToolSnapshot['phase'], revision = 1): RuntimeToolSnapshot => ({
-  tool: 'bun', version: '1.3.13', revision, phase, received_bytes: 0,
-});
-test('only the typed missing Bun component error can offer a runtime download', () => {
-  const backendError = (code: string, details: unknown) => new BackendHttpError({
-    method: 'POST', path: '/api/terminals', status: 409,
-    body: { code, error: 'runtime error', details },
-  });
-  expect(isBunDownloadRequired(backendError('COMPONENT_PREPARATION_REQUIRED', { component: 'bun' }))).toBe(true);
-  for (const error of [
-    new Error('COMPONENT_PREPARATION_REQUIRED'),
-    { code: 'COMPONENT_PREPARATION_REQUIRED', details: { component: 'bun' } },
-    backendError('COMPONENT_UNAVAILABLE', { component: 'bun' }),
-    backendError('MCP_COMMAND_START_FAILED', { component: 'bun' }),
-    backendError('COMPONENT_PREPARATION_REQUIRED', { component: 'node' }),
-    backendError('COMPONENT_PREPARATION_REQUIRED', { runtime: 'bun' }),
-    backendError('COMPONENT_PREPARATION_REQUIRED', null),
-    backendError('COMPONENT_PREPARATION_REQUIRED', [{ component: 'bun' }]),
-  ]) expect(isBunDownloadRequired(error)).toBe(false);
-});
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+const pause = () => new Promise<void>(resolve => setTimeout(resolve, 15));
 
-test('an explicitly chosen download reports real progress and settles only after ready', async () => {
-  const begin = spy(spyOn(runtimeTools.prepare, 'invoke').mockResolvedValue({ ...snapshot('downloading'), received_bytes: 100, total_bytes: 200 }));
-  const status = spy(spyOn(runtimeTools.status, 'invoke').mockResolvedValue(snapshot('ready', 2)));
+test('progress observation is read only and never replays the original launch', async () => {
+  const prepare = spy(spyOn(runtimeTools.prepare, 'invoke'));
+  spy(spyOn(runtimeTools.status, 'invoke').mockImplementation(async ({ tool }) => ({
+    tool, version: 'fixture', revision: 1, phase: 'downloading', received_bytes: 100,
+  })));
+  const launched = deferred<string>();
+  let launches = 0;
   const progress: RuntimeToolSnapshot[] = [];
-  const pending = downloadBunRuntime({ isCurrent: () => true, onProgress: (value) => progress.push(value) });
-  expect(await pending).toBe(true);
-  expect(begin).toHaveBeenCalledTimes(1);
-  expect(progress[0]?.received_bytes).toBe(100);
-  expect(status).toHaveBeenCalledTimes(1);
+  const operation = withRuntimePreparation(() => { launches += 1; return launched.promise; }, {
+    isCurrent: () => true, onProgress: snapshot => progress.push(snapshot), pollIntervalMs: 1,
+  });
+  await pause();
+  expect(progress.length).toBeGreaterThan(0);
+  expect(prepare).not.toHaveBeenCalled();
+  launched.resolve('actual-result');
+  expect(await operation).toBe('actual-result');
+  expect(launches).toBe(1);
 });
 
-test('a detached operation cannot start its chosen download', async () => {
-  const begin = spy(spyOn(runtimeTools.prepare, 'invoke'));
-  expect(await downloadBunRuntime({ isCurrent: () => false })).toBe(false);
-  expect(begin).not.toHaveBeenCalled();
-});
-
-test('a detached launch cannot continue after its chosen download completes', async () => {
-  let finish!: (value: RuntimeToolSnapshot) => void;
-  const begin = spy(spyOn(runtimeTools.prepare, 'invoke').mockImplementation(() => new Promise((resolve) => { finish = resolve; })));
+test('leaving stops progress while preserving the real owner result', async () => {
+  spy(spyOn(runtimeTools.status, 'invoke').mockResolvedValue({
+    tool: 'bun', version: 'fixture', revision: 1, phase: 'downloading', received_bytes: 100,
+  }));
   let current = true;
-  const pending = downloadBunRuntime({ isCurrent: () => current });
-  expect(begin).toHaveBeenCalledTimes(1);
+  const launched = deferred<string>();
+  const progress: RuntimeToolSnapshot[] = [];
+  const operation = withRuntimePreparation(() => launched.promise, {
+    isCurrent: () => current, onProgress: snapshot => progress.push(snapshot), pollIntervalMs: 1,
+  });
   current = false;
-  finish(snapshot('ready'));
-  expect(await pending).toBe(false);
+  await pause();
+  expect(progress).toHaveLength(0);
+  launched.resolve('completed');
+  expect(await operation).toBe('completed');
 });
 
-test('wrong downloaded component identity and supplier failures stop the dependent operation', async () => {
-  const begin = spy(spyOn(runtimeTools.prepare, 'invoke').mockResolvedValue({ ...snapshot('ready'), tool: 'node' }));
-  await expect(downloadBunRuntime({ isCurrent: () => true })).rejects.toThrow('Invalid');
-  begin.mockResolvedValue({ ...snapshot('error'), error: { code: 'DOWNLOAD_FAILED', message: 'Component download failed', retryable: true } });
-  await expect(downloadBunRuntime({ isCurrent: () => true })).rejects.toThrow('Component download failed');
+test('status failure never hides the original launch error', async () => {
+  spy(spyOn(runtimeTools.status, 'invoke').mockRejectedValue(new Error('status offline')));
+  const launched = deferred<string>();
+  const operation = withRuntimePreparation(() => launched.promise, {
+    isCurrent: () => true, onProgress: () => {}, pollIntervalMs: 1,
+  });
+  await pause();
+  launched.reject(new Error('actual spawn failure'));
+  await expect(operation).rejects.toThrow('actual spawn failure');
 });

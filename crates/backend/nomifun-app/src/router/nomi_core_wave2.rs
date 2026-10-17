@@ -268,11 +268,16 @@ pub(crate) fn canonical_workspace_root(root: &Path) -> Result<PathBuf, AppError>
             "Nomi Wave 2 workspace root is not absolute".to_owned(),
         ));
     }
-    let canonical = dunce::canonicalize(root).map_err(|error| {
-        AppError::Conflict(format!(
-            "Nomi Wave 2 workspace cannot be canonicalized: {error}"
-        ))
-    })?;
+    let canonical = match dunce::canonicalize(root) {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            && !root.components().any(|part| matches!(part, std::path::Component::ParentDir)) => {
+            // This host-validated frozen default is still an identity anchor.
+            // Native absolute file/cwd targets do not depend on its existence.
+            return Ok(root.to_owned());
+        }
+        Err(error) => return Err(AppError::Conflict(format!("Nomi Wave 2 workspace cannot be canonicalized: {error}"))),
+    };
     if !canonical.is_dir() {
         return Err(AppError::Conflict(
             "Nomi Wave 2 workspace is not a directory".to_owned(),
@@ -706,7 +711,9 @@ impl Wave2HostPort for NomiCoreWave2Host {
                     .ok_or_else(|| Wave2HostPortError::unavailable("no admitted Runtime process turn for this exact authority"))?;
                 // The process runtime uses native canonical paths (including
                 // Windows extended prefixes); compare like representations.
-                let native_root = std::fs::canonicalize(&root).map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?;
+                let native_root = std::fs::canonicalize(&root).or_else(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound { Ok(root.clone()) } else { Err(error) }
+                }).map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?;
                 if scope.workspace_root() != native_root.as_path() { return Err(Wave2HostPortError::unavailable("process workspace authority changed")); }
                 let owner_input = process_owner_input(request.context.action_id.as_ref(), input)?;
                 if request.context.action_id.as_ref() == "workspace.process/poll" {
@@ -1024,6 +1031,17 @@ pub(crate) struct NomiWorkspaceWatchContext {
 }
 
 impl NomiWorkspaceWatchContext {
+    /// A missing default has no project observation source. Keep its global
+    /// tools available without creating a directory or claiming an empty watch.
+    pub(crate) fn start_if_present(root: impl AsRef<Path>) -> Result<Option<Arc<Self>>, AppError> {
+        match std::fs::metadata(root.as_ref()) {
+            Ok(metadata) if metadata.is_dir() => Self::start(root).map(Some),
+            Ok(_) => Err(AppError::Conflict("Session default workspace is not a directory".into())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(AppError::Conflict(format!("Session workspace observation is unavailable: {error}"))),
+        }
+    }
+
     pub(crate) fn start(root: impl AsRef<Path>) -> Result<Arc<Self>, AppError> {
         let root = canonical_workspace_root(root.as_ref())?;
         let queue = Arc::new(Mutex::new(WatchQueue::default()));
@@ -1641,6 +1659,36 @@ mod tests {
             .err()
             .expect("a missing workspace must not produce an active watcher");
         assert!(error.to_string().contains("workspace"));
+    }
+
+    #[test]
+    fn missing_default_retains_file_and_process_resources_without_a_fake_watcher() {
+        let fixture = tempfile::tempdir().unwrap();
+        let missing = dunce::canonicalize(fixture.path()).unwrap().join("removed-default");
+        let session = session_id();
+        let principal = principal();
+        let authority = authority(&principal);
+        let workspace = session_workspace_binding(missing.to_str().unwrap(), &principal, &session, &authority).unwrap();
+        assert_eq!(workspace.binding_id, authority.binding_id);
+        assert_eq!(workspace.resource_id, authority.resource_id);
+        assert_eq!(exact_session_workspace_root(&session, &principal.principal_id, &[workspace.clone()]).unwrap(), missing);
+        for action in nomifun_agent_domain_wave2::WORKSPACE_FILES_ACTION_IDS {
+            let required = nomifun_agent_domain_wave2::required_action_resource_operation(&"workspace.files".into(), &(*action).into()).unwrap();
+            assert!(workspace.operations.contains(required), "missing default must not remove {action}");
+        }
+        let mut process = authority;
+        process.resource_kind = "process_session".into();
+        process.resource_id = "managed-process-session".into();
+        process.operations = BTreeSet::from(["execute".into()]);
+        let process = session_process_binding(missing.to_str().unwrap(), &principal, &session, &process).unwrap();
+        assert_eq!(process.typed_parameters[WORKSPACE_ROOT_PARAMETER], missing.to_str().unwrap());
+        assert!(NomiWorkspaceWatchContext::start_if_present(&missing).unwrap().is_none());
+        assert!(!missing.exists());
+        assert!(canonical_workspace_root(&fixture.path().join("absent/../other")).is_err());
+        let file = fixture.path().join("file-default");
+        std::fs::write(&file, b"file").unwrap();
+        assert!(canonical_workspace_root(&file).is_err());
+        assert!(NomiWorkspaceWatchContext::start_if_present(&file).is_err());
     }
 
     #[test]

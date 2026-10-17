@@ -13,6 +13,7 @@ import { inspectMacosAppBundle, signMacosAppBundle } from './lib/macos-app-bundl
 import { prepareMacosBuildEnvironment, resolveMacosTarget } from './lib/macos-build-environment.mjs';
 import { acquireMacosDevGeneration } from './lib/macos-dev-supervisor.mjs';
 import { macosDevelopmentSigningIdentity, macosDevelopmentSealArguments } from './lib/macos-dev-signing.mjs';
+import { buildMacosSystemExecution } from './lib/macos-system-execution.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -258,7 +259,8 @@ export async function main(args = process.argv.slice(2)) {
     const artifacts = await runCargoArtifacts([...plan.build, '--example', 'macos_application_controller'],
       ['nomifun-desktop', 'macos_application_controller'], { cwd, environment: compiler.environment });
     const hostPath = artifacts['nomifun-desktop'];
-    const program = await ensureMacosDevelopmentBundle({ hostPath, target: compiler.target, bundleFiles: compiler.bundleFiles });
+    const systemFiles = await buildMacosSystemExecution({ root: ROOT, target: compiler.target, profile: plan.profile, bundleIdentifier: 'com.nomifun.desktop.dev', environment: compiler.environment });
+    const program = await ensureMacosDevelopmentBundle({ hostPath, target: compiler.target, bundleFiles: { ...compiler.bundleFiles, ...systemFiles } });
     const controllerProgram = await freezeMacosDevelopmentController(artifacts.macos_application_controller);
     console.error(`[dev] native app: ${dirname(dirname(dirname(program)))}`);
     const result = await generation.launch({ program, controllerProgram, args: macosDevelopmentApplicationArguments(plan.application), environment: process.env, cwd });

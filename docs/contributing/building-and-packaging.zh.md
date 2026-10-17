@@ -42,13 +42,14 @@ Docker、反向代理、volume 和原生 systemd 操作集中在
 
 ## 桌面运行时组件
 
-发布 binary 内嵌 OfficeCLI。Node/Bun 属于明确按需准备的受管组件；
-后端启动不下载它们。命令解析可复用已验证缓存。
-应用托管使用系统或用户配置的 Node。准入、缓存及离线行为见
+发布 binary 内嵌 OfficeCLI。实际任务缺少必需的 Node/Bun 时，现役供应器自动准备
+批准的组件，不要求额外下载确认；只读状态和后端启动不触发下载。Node 使用完整官方
+Node/npm/npx 发行目录。命令解析可复用已验证缓存，后续新进程立即取得最新工具环境。
+应用托管保留系统或用户配置的 Node。准入、缓存及离线行为见
 [外部工具](../architecture/external-tools.zh.md)。
 
-桌面安装包不内嵌 NomiRelay 的 `nfagent`，恢复连接和重启只复用批准的本地缓存。
-缺失或版本变化时，用户明确选择下载连接组件。
+桌面安装包不内嵌 NomiRelay 的 `nfagent`；连接、恢复和重启在需要时自动准备批准的
+连接组件，保留进度、真实失败、重试和取消。只读状态查询不准备组件。
 每个平台固定的不可变 URL 和 SHA-256 在
 [nfagent-runtime.json](../../apps/desktop/nfagent-runtime.json)。
 下载有大小上限，先写暂存文件，验证后原子发布。
@@ -79,6 +80,18 @@ macOS 使用系统 WKWebView，支持原生 arm64 和 Intel 包，拒绝 Univers
 包校验检查解包字节、权限和符号链接，并拒绝打包浏览器 runtime。
 Intel ONNX 资源和许可证仍为必要项。
 
+App 的 [Info.plist](../../apps/desktop/Info.plist) 与
+[entitlements.plist](../../apps/desktop/entitlements.plist) 是开发签名和正式签名共用的
+宿主权限声明：音频输入、摄像头及 Apple Events 使用现有原生路径；本地网络带有用途说明。
+它们不替用户批准 TCC，也不表示麦克风、摄像头或登录桌面必然存在。
+
+管理员执行组件由正式 bundle 携带，并通过原生 ServiceManagement 注册；其程序、launchd
+plist、Mach service 和签名身份必须一致。helper 与 App 使用同一 Apple 签发的团队身份，
+不能用临时 ad-hoc 签名冒充管理员执行可用。系统进程提供管理员执行，Computer、Browser 和
+媒体仍在原登录用户的桌面宿主运行。组件注册、升级和卸载必须验证系统原生状态；一般进程提权
+不替代完全磁盘访问、辅助功能或网站设备许可。完整边界见
+[系统许可与执行身份](../architecture/system-permissions.zh.md)。
+
 `bun run build:updater` 使用已提交的
 [updater overlay](../../apps/desktop/tauri.updater.conf.json)。
 CrabNebula Cloud 是主分发源，GitHub Releases 是回退源。发布前阅读发布手册。
@@ -88,4 +101,6 @@ CrabNebula Cloud 是主分发源，GitHub Releases 是回退源。发布前阅�
 运行相关打包测试，并在目标系统构建。冒烟检查启动、本地鉴权及受影响的运行时组件。
 公开 macOS 产物验证 `codesign`、`spctl` 和 `xcrun stapler`；
 Web 部署通过实际反向代理验证首次设置/登录、`/health` 和 WebSocket。
-记录无法运行的平台检查。
+记录无法运行的平台检查。命令测试、签名检查和原生产品验收分别记录；不能把 Terminal
+的许可、临时测试 App 或安装器退出码当成正式 NomiFun App/helper 全部就绪。首次授权、拒绝、
+撤回、重新授权和必要重启后的任务继续应使用可回滚测试用户或隔离机器验证。

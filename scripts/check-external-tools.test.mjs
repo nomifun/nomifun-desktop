@@ -23,6 +23,12 @@ describe('managed external tool contract', () => {
     const floating = manifest(); floating.build_images.node = 'node:22';
     expect(() => validateComponents(floating)).toThrow('digest');
   });
+  test('Node always supplies the official complete archive including npm and npx', () => {
+    const value = manifest();
+    const windows = value.components.find(entry => entry.id === 'node').assets.find(entry => entry.target.includes('windows'));
+    windows.format = 'raw'; windows.url = windows.url.replace(/node-v[^/]+\.zip$/, 'win-x64/node.exe');
+    expect(() => validateComponents(value)).toThrow('asset');
+  });
   const executionOwners = () => ({
     managed: readFileSync(new URL('../crates/backend/nomifun-runtime/src/managed.rs', import.meta.url), 'utf8').split(/#\[cfg\(test\)\]\s*mod\s+tests/)[0],
     hosting: readFileSync(new URL('../crates/backend/nomifun-app-hosting/src/owner.rs', import.meta.url), 'utf8'),
@@ -42,6 +48,11 @@ describe('managed external tool contract', () => {
     const sources = executionOwners();
     sources.environment = sources.environment.replace('executable("npm", None)', 'executable("bun", None)');
     expect(() => validateExecutionOwners(sources)).toThrow('probe system/custom Node, npm and Bun separately');
+  });
+  test('requires application detection to use the common current process environment', () => {
+    const sources = executionOwners();
+    sources.environment = sources.environment.replaceAll('process_environment(', 'private_environment(');
+    expect(() => validateExecutionOwners(sources)).toThrow('per-launch environment');
   });
   const officeGuidance = () => ({
     instructions: readFileSync(new URL('../crates/backend/nomifun-skill-library/assets/builtin-skills/officecli/references/runtime.md', import.meta.url), 'utf8'),

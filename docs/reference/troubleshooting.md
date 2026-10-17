@@ -65,21 +65,17 @@ nomicore tool-doctor
 ```
 
 Run diagnostics under the same user, PATH and data root as the application.
-Install missing third-party CLIs or correct PATH, then restart.
+Correct the configured command or PATH when a third-party CLI is unavailable; subsequent launches resolve the updated tool environment.
 `tool-doctor` reads the component catalogue. `tool-doctor --verify` explicitly
 extracts/probes available components without opening the database or downloading
 Node/Bun. The Web host executable does not expose these subcommands; build the
 diagnostic binary with `cargo build --release -p nomifun-app --bin nomicore`.
 
-Release builds embed OfficeCLI. Commands prefer system Bun/`bunx`, then a
-verified existing managed cache; missing components need the user's download
-choice. Application hosting uses system or configured Node.
+Release builds embed OfficeCLI. Required Node/npm/npx or Bun/`bunx` commands prefer usable user tools, then automatically prepare approved managed supply when needed. Agent, Terminal and MCP use the same per-launch environment; hosted application processes use that environment too.
 For systemd, verify service-account cache read/execute permissions and set
 `SHELL` if required. See [external tools](../architecture/external-tools.md).
 
-NomiRelay restore/restart also reuse approved local `nfagent` bytes.
-A missing or changed component requires the user's explicit download choice;
-an offline `NOMIFUN_NFAGENT_PATH` override still needs the manifest's hash.
+NomiRelay connect, restore and restart reuse approved local `nfagent` bytes or automatically prepare the current approved artifact. Progress, retry and cancellation remain available; an offline `NOMIFUN_NFAGENT_PATH` override still needs the manifest's hash.
 
 ## Office preview
 

@@ -231,6 +231,24 @@ fn find_single_project(root: &Path, start: &Path) -> Result<PathBuf, AppError> {
     candidates.pop().ok_or_else(|| AppError::Invalid("no runnable project was found; create index.html or configure a foreground command".into()))
 }
 
+/// Runtime requirements come from recognized project metadata and the host's
+/// own static preset, never by rewriting or guessing arbitrary shell text.
+pub(crate) fn required_project_runtime(project: &Path, settings: &AppSettings) -> Option<&'static str> {
+    if settings.node_path.as_deref().is_some_and(|path| !path.trim().is_empty()) { return None; }
+    if settings.start_command.as_deref() == Some("node \".nomifun-static-server.cjs\"") {
+        return Some("node");
+    }
+    for filename in ["server.js", "server.mjs", "server.cjs", "index.js"] {
+        if project.join(filename).is_file() && settings.start_command.as_deref() == Some(format!("node {filename}").as_str()) {
+            return Some("node");
+        }
+    }
+    if project.join("package.json").is_file() {
+        return Some(if project.join("bun.lock").exists() || project.join("bun.lockb").exists() { "bun" } else { "node" });
+    }
+    None
+}
+
 fn detect_project_settings(project: &Path, kind: ImportKind, port_hint: Option<&str>) -> Result<AppSettings, AppError> {
     let mut settings = AppSettings::default();
     let package_path = project.join("package.json");
@@ -449,10 +467,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn runtime_preparation_uses_project_metadata_and_preserves_custom_node_selection() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut settings = AppSettings::default();
+        assert_eq!(required_project_runtime(temporary.path(), &settings), None);
+        settings.start_command = Some("echo node npm bun".into());
+        assert_eq!(required_project_runtime(temporary.path(), &settings), None);
+        settings.start_command = Some("node \".nomifun-static-server.cjs\"".into());
+        assert_eq!(required_project_runtime(temporary.path(), &settings), Some("node"));
+        settings.start_command = None;
+        fs::write(temporary.path().join("package.json"), "{}").unwrap();
+        assert_eq!(required_project_runtime(temporary.path(), &settings), Some("node"));
+        fs::write(temporary.path().join("bun.lock"), "fixture").unwrap();
+        assert_eq!(required_project_runtime(temporary.path(), &settings), Some("bun"));
+        settings.node_path = Some("/explicit/user/node".into());
+        assert_eq!(required_project_runtime(temporary.path(), &settings), None);
+    }
+
+    #[test]
     fn detected_vite_preview_and_static_use_share_one_real_port_contract() {
         let temporary = tempfile::tempdir().unwrap();
         fs::write(temporary.path().join("package.json"), r#"{"scripts":{"dev":"vite","build":"vite build"}}"#).unwrap();
-        let settings = detect_settings(temporary.path(), ImportKind::Source).unwrap();
+        let root = dunce::canonicalize(temporary.path()).unwrap();
+        let settings = detect_settings(&root, ImportKind::Source).unwrap();
         let port = &settings.environment["PORT"];
         assert_eq!(settings.web_url.as_deref(), Some(format!("http://127.0.0.1:{port}").as_str()));
         assert!(settings.preview_command.as_ref().unwrap().contains(&format!("--port {port} --strictPort")));

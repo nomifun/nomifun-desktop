@@ -852,7 +852,7 @@ async fn rejects_existing_ads_without_exposing_stream_bytes() {
 }
 
 #[test]
-fn rejects_unc_device_absolute_and_drive_relative_input_before_root_resolution() {
+fn project_identity_paths_reject_nonportable_native_inputs_before_root_resolution() {
     let root = tempfile::tempdir().unwrap();
     // An absent root makes filesystem resolution observable without touching
     // a network share or a device. Rejection must come from input validation.
@@ -864,7 +864,7 @@ fn rejects_unc_device_absolute_and_drive_relative_input_before_root_resolution()
         "CON", "NUL.txt", "sub/COM¹.log", "sub/LPT³", "sub./file", "sub /file",
         "file:stream", "sub/file::$DATA", "sub/a?b", "sub/a\u{1}b",
     ] {
-        let error = scope.resolve_relative_path(path).unwrap_err().to_string();
+        let error = scope.resolve_project_path(path).unwrap_err().to_string();
         assert!(error.contains("workspace path"), "{path:?}: {error}");
         assert!(!error.contains("cannot resolve"), "input reached filesystem: {path:?}: {error}");
     }
@@ -892,15 +892,14 @@ async fn deleting_a_junction_never_recurses_into_its_in_root_target() {
     fs::write(real.join("keep.txt"), b"keep").unwrap();
     junction::create(&real, root.path().join("alias")).unwrap();
     let (service, scope, events) = owner(root.path());
-    let result = service.remove_entry_for_agent_session(&scope, "alias").await;
-    assert!(result.is_err(), "junction deletion must explicitly reject: {result:?}");
+    service.remove_entry_for_agent_session(&scope, "alias").await.unwrap();
     assert_eq!(fs::read(real.join("keep.txt")).unwrap(), b"keep");
-    assert!(junction::exists(root.path().join("alias")).unwrap());
-    assert!(events.0.lock().unwrap().is_empty());
+    assert!(!root.path().join("alias").exists());
+    assert_eq!(events.0.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn deleting_workspace_root_is_rejected_even_with_delete_authority() {
+async fn empty_deletion_target_is_rejected_even_with_delete_authority() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("keep.txt"), b"keep").unwrap();
     let (service, scope, events) = owner(root.path());
@@ -910,23 +909,25 @@ async fn deleting_workspace_root_is_rejected_even_with_delete_authority() {
 }
 
 #[tokio::test]
-async fn outside_junction_rejects_file_actions_and_parent_deletion_only_removes_the_link() {
+async fn outside_junction_supports_native_content_actions_and_deletion_only_removes_the_link() {
     let root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     fs::write(outside.path().join("keep.txt"), b"keep").unwrap();
     fs::create_dir(root.path().join("parent")).unwrap();
     junction::create(outside.path(), root.path().join("parent/escape")).unwrap();
     let (service, scope, events) = owner(root.path());
-    assert!(service.read_bytes_for_agent_session(&scope, "parent/escape/keep.txt", 1024).await.is_err());
-    assert!(service.write_file_for_agent_session(&scope, "parent/escape/keep.txt", b"wrong").await.is_err());
-    assert!(service.apply_patch_for_agent_session(&scope,
-        replacement("parent/escape/keep.txt", "keep", "wrong")).await.is_err());
-    assert!(service.remove_entry_for_agent_session(&scope, "parent/escape").await.is_err());
-    assert!(events.0.lock().unwrap().is_empty());
+    assert_eq!(service.read_bytes_for_agent_session(&scope, "parent/escape/keep.txt", 1024).await.unwrap().unwrap().0, b"keep");
+    service.write_file_for_agent_session(&scope, "parent/escape/keep.txt", b"written").await.unwrap();
+    let patched = service.apply_patch_for_agent_session(&scope,
+        replacement("parent/escape/keep.txt", "written", "patched")).await.unwrap();
+    assert!(patched.files[0].workspace_path.is_none());
+    assert!(events.0.lock().unwrap().is_empty(), "external content changes must not become project events");
+    service.remove_entry_for_agent_session(&scope, "parent/escape").await.unwrap();
+    assert!(!root.path().join("parent/escape").exists());
     service.remove_entry_for_agent_session(&scope, "parent").await.unwrap();
     assert!(!root.path().join("parent").exists());
-    assert_eq!(fs::read(outside.path().join("keep.txt")).unwrap(), b"keep");
-    assert_eq!(events.0.lock().unwrap().len(), 1);
+    assert_eq!(fs::read(outside.path().join("keep.txt")).unwrap(), b"patched");
+    assert_eq!(events.0.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]

@@ -151,17 +151,17 @@
         {
           "target": "x86_64-pc-windows-msvc",
           "variant": "default",
-          "url": "https://nodejs.org/dist/v22.22.0/win-x64/node.exe",
-          "sha256": "bae898add4643fcf890a83ad8ae56e20dce7e781cab161a53991ceba70c99ffb",
-          "format": "raw",
+          "url": "https://nodejs.org/dist/v22.22.0/node-v22.22.0-win-x64.zip",
+          "sha256": "c97fa376d2becdc8863fcd3ca2dd9a83a9f3468ee7ccf7a6d076ec66a645c77a",
+          "format": "zip",
           "executable": "node.exe"
         },
         {
           "target": "aarch64-pc-windows-msvc",
           "variant": "default",
-          "url": "https://nodejs.org/dist/v22.22.0/win-arm64/node.exe",
-          "sha256": "fd44256121597d6a3707f4c7730b4e3733eacb5a95cc78a099f601d7e7f8290d",
-          "format": "raw",
+          "url": "https://nodejs.org/dist/v22.22.0/node-v22.22.0-win-arm64.zip",
+          "sha256": "5b44fd410df7b4cd0a1891a05a7b606f8fb7d8786a94997b996a372e82478d7a",
+          "format": "zip",
           "executable": "node.exe"
         }
       ],

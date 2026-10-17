@@ -102,7 +102,7 @@ impl McpOwner {
         let deadline = Instant::now() + self.timeout;
         let mut session = match &request.server.transport {
             McpServerTransport::Stdio { command, args, env } => McpSession::from_stdio(
-                stdio::StdioTransport::launch(command, args, env, deadline).await?,
+                stdio::StdioTransport::launch(command, args, env, self.timeout).await?,
             ),
             McpServerTransport::Http { url, headers }
             | McpServerTransport::Sse { url, headers } => {
@@ -130,6 +130,7 @@ impl McpOwner {
             }
         };
         let local_started = session.stdio.is_some();
+        let deadline = if local_started { Instant::now() + self.timeout } else { deadline };
         let outcome = timeout_at(deadline, async {
             session.initialize().await?;
             let (result, failure) = match session.observe_resource(&request).await? {

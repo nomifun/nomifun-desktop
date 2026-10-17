@@ -144,9 +144,6 @@
     "extracting": "Preparing {{tool}}: extracting",
     "verifying": "Preparing {{tool}}: verifying",
     "ready": "{{tool}} is ready",
-    "failed": "{{tool}} preparation failed",
-    "downloadTitle": "{{tool}} is required for this command",
-    "downloadHint": "No usable {{tool}} was found on this host. You can install it yourself and retry, or let NomiFun download it and continue. The download starts only when you choose it.",
-    "downloadAction": "Download {{tool}}"
+    "failed": "{{tool}} preparation failed"
   }
 }

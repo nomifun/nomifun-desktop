@@ -150,7 +150,9 @@ Agent 必须重新观察结果。网站要求真实用户激活时由用户按�
 
 ## 文件选择与下载
 
-Windows 的可选 `browser.upload` 只授权已观察的可见标准 file input，或由当前页真实原生 chooser 事件产生的输入；`browser.act` 本身不授予本地文件访问。路径必须位于已授权工作区，通过目录句柄与 no-follow 打开拒绝逃逸、链接、junction、目录和特殊文件。宿主保留名称、字节和修改时间的快照；单次最多 16 文件/64 MiB，每 Runtime 保留最多 128 文件/256 MiB，直到真实原生关闭后释放。工具返回或页面重置不能使仍被网页持有的 File 对象失效。
+macOS Agent 上传仍为已批准 WKWebView 功能降级中的明确 `UnsupportedAction`。这是实现缺口，不是系统权限拒绝；人工文件选择走自己的原生路径。
+
+Windows 的可选 `browser.upload` 只消费已观察的可见标准 file input，或由当前页真实原生 chooser 事件产生的输入；实际调用继续校验已冻结的上传 Action。全局文件来源改造尚未完成：`engine_browser_tools.rs` 仍把 Session 默认 workspace 交给 `BrowserUploadScope`，其 `root: Dir`、`relative_components` 与 no-follow walk 拒绝本机绝对路径、`..`、链接及 junction。这是待 Windows 设计、实现、编译及原生验证的应用限制，不是新产品合同，也不表示操作系统不支持。[Windows 接续任务](../handoffs/global-os-windows.zh.md)要求支持 Session 默认目录相对路径、本机绝对路径、合法链接、UNC 与跨卷来源，并验证目录句柄并发替换、ACL、来源身份和读取前后 metadata；regular-file 类型检查、取消和快照保留必须继续可靠。宿主继续保留名称、字节和修改时间的快照；单次最多 16 文件/64 MiB，每 Runtime 保留最多 128 文件/256 MiB，直到真实原生关闭后释放。工具返回或页面重置不能使仍被网页持有的 File 对象失效。
 
 WebView2 通过 `DOM.setFileInputFiles` 交付，不伪造 input/change；空列表拒绝。Frame/document/Session/当前请求身份先于交付校验，新 iframe 首段脚本前安装 chooser 策略。未知路由、策略失败或失效观察不授予文件权。目录上传、File System Access、Agent 下载/沙箱发布及完整异常退出回收仍须独立交付与验收。
 

@@ -28,6 +28,10 @@ use crate::permissions;
 #[path = "macos_pointer.rs"]
 mod macos_pointer;
 
+#[cfg(target_os = "macos")]
+#[path = "macos_keymap.rs"]
+mod macos_keymap;
+
 const INPUT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Pause between press and release (and between repeated clicks) so target
@@ -498,6 +502,11 @@ pub async fn type_text(text: String) -> Result<(), String> {
 /// Press a key combo: press front-to-back, release back-to-front.
 pub async fn key_combo(keys: Vec<enigo::Key>) -> Result<(), String> {
     with_enigo(move |enigo| {
+        // Resolve before recording or submitting any press, on this existing
+        // main-queue native input path. The same resolved keys are released by
+        // the unchanged guard; text input and named modifiers are unaffected.
+        #[cfg(target_os = "macos")]
+        let keys = macos_keymap::resolve_ascii_keys(keys)?;
         let mut pressed = PressedInputGuard::new(enigo);
         for key in &keys {
             pressed.press_key(*key)?;

@@ -1,14 +1,14 @@
 //! Local MCP byte transport. Protocol traffic does not grant platform tools;
 //! process placement, tree cleanup and inherited environment remain host-owned.
 use std::collections::{BTreeSet, HashMap};
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
-use nomi_process_runtime::{ChildProcessBuilder, ManagedChildProcess, resolve_command_in};
+use nomi_process_runtime::{ChildProcessBuilder, ManagedChildProcess};
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
@@ -33,8 +33,8 @@ pub(crate) async fn discover(
     env: &HashMap<String, String>,
     budget: Duration,
 ) -> Result<serde_json::Value, McpOwnerError> {
+    let transport = StdioTransport::launch(command, args, env, budget).await?;
     let deadline = Instant::now() + budget;
-    let transport = StdioTransport::launch(command, args, env, deadline).await?;
     let mut session = McpSession::from_stdio(transport);
     let outcome = timeout_at(deadline, async {
         session.initialize().await?;
@@ -77,13 +77,16 @@ impl StdioTransport {
         command: &str,
         args: &[String],
         env: &HashMap<String, String>,
-        deadline: Instant,
+        budget: Duration,
     ) -> Result<Self, McpOwnerError> {
         validate_config(command, args, env)?;
-        let (command, args) = timeout_at(deadline, resolve_managed_stdio_command(command, args, env))
-            .await
-            .map_err(|_| McpOwnerError::new("MCP_RUNTIME_RESOLUTION_TIMEOUT", "Local Bun resolution timed out before the MCP process was started"))??;
-        let configured_env = env.clone();
+        let cwd = std::env::current_dir().map_err(|cause| McpOwnerError::new(
+            "MCP_PROCESS_START_FAILED", format!("MCP launch directory could not be read: {cause}")))?;
+        let prepared = timeout(Duration::from_secs(11 * 60),
+            nomifun_runtime::prepare_process_launch(command, args, &cwd, env))
+            .await.map_err(|_| McpOwnerError::new("MCP_RUNTIME_RESOLUTION_TIMEOUT", "Command environment preparation timed out before the MCP process started"))?
+            .map_err(|cause| runtime_resolution_error(&cause))?;
+        let deadline = Instant::now() + budget;
         // Resolution and platform spawn can block. If the waiter is cancelled
         // or times out, the task's result is dropped and ManagedChildProcess
         // still owns cleanup. A startup timeout is never a no-effect proof.
@@ -91,13 +94,12 @@ impl StdioTransport {
             if Instant::now() >= deadline {
                 return Err(startup_timeout());
             }
-            let child_env = child_environment(&configured_env);
-            let program = resolve_program(&command, &child_env)?;
-            let mut builder = ChildProcessBuilder::new(program);
+            let mut builder = ChildProcessBuilder::new(prepared.program);
             builder
                 .env_clear()
-                .envs(child_env)
-                .args(args)
+                .envs(prepared.environment)
+                .args(prepared.args)
+                .current_dir(cwd)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 // stderr is diagnostic-only and is drained into bounded,
@@ -113,7 +115,7 @@ impl StdioTransport {
                     std::io::ErrorKind::PermissionDenied => "MCP_COMMAND_PERMISSION_DENIED",
                     _ => "MCP_PROCESS_START_FAILED",
                 };
-                McpOwnerError::new(code, "MCP configured stdio process could not be started")
+                McpOwnerError::new(code, nomi_redact::redact_secrets_owned(format!("MCP configured stdio process could not be started: {error}")))
             })?;
             let stdin = process.child_mut().stdin.take().ok_or_else(|| {
                 McpOwnerError::protocol_failed("MCP process stdin is unavailable")
@@ -457,8 +459,7 @@ fn validate_config(
     env: &HashMap<String, String>,
 ) -> Result<(), McpOwnerError> {
     if command.is_empty()
-        || command.trim() != command
-        || command.chars().any(char::is_control)
+        || command.contains('\0')
         || args.len() > 256
         || env.len() > 128
         || args.iter().any(|value| value.contains('\0'))
@@ -495,130 +496,12 @@ fn validate_config(
     Ok(())
 }
 
-fn child_environment(configured: &HashMap<String, String>) -> HashMap<OsString, OsString> {
-    // No inherited API tokens, node injections or private platform variables.
-    // Proxy variables come from explicit server config or the shared system-
-    // proxy detector, which also suppresses stale loopback proxies. This is
-    // essential for first-run npx/uvx downloads launched by a desktop process.
-    #[cfg(windows)]
-    const INHERIT: &[&str] = &[
-        "PATH",
-        "PATHEXT",
-        "SYSTEMROOT",
-        "WINDIR",
-        "COMSPEC",
-        "TEMP",
-        "TMP",
-        "USERPROFILE",
-        "HOMEDRIVE",
-        "HOMEPATH",
-        "APPDATA",
-        "LOCALAPPDATA",
-        "PROGRAMDATA",
-        "PROGRAMFILES",
-        "PROGRAMFILES(X86)",
-    ];
-    #[cfg(not(windows))]
-    const INHERIT: &[&str] = &[
-        "PATH",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "SHELL",
-        "LANG",
-        "LC_ALL",
-        "TMPDIR",
-        "TZ",
-        "__CF_USER_TEXT_ENCODING",
-    ];
-    let mut env: HashMap<OsString, OsString> = INHERIT
-        .iter()
-        .filter_map(|key| std::env::var_os(*key).map(|value| (OsString::from(*key), value)))
-        .collect();
-    for (name, value) in
-        nomifun_net::proxy::isolated_child_proxy_env(configured.keys().map(String::as_str))
-    {
-        env.insert(OsString::from(name), OsString::from(value));
-    }
-    for (name, value) in configured {
-        if cfg!(windows) {
-            env.retain(|key, _| !key.to_string_lossy().eq_ignore_ascii_case(name));
-        }
-        env.insert(OsString::from(name), OsString::from(value));
-    }
-    env
-}
-
-async fn resolve_managed_stdio_command(
-    command: &str,
-    args: &[String],
-    env: &HashMap<String, String>,
-) -> Result<(String, Vec<String>), McpOwnerError> {
-    if nomifun_runtime::managed_command_tool(command).is_none() {
-        return Ok((command.to_owned(), args.to_vec()));
-    }
-    // Preserve the server's child PATH. If it excludes Bun, an ambient host
-    // installation must not silently replace that explicit choice.
-    let prepared = nomifun_runtime::prepare_managed_command_with_env(command, args, env, None).await
-        .map_err(|cause| runtime_resolution_error(&cause))?
-        .ok_or_else(|| runtime_resolution_error(&nomifun_runtime::ToolError::NotPrepared))?;
-    Ok((
-        prepared.executable_path.to_string_lossy().into_owned(),
-        prepared.args,
-    ))
-}
-
 fn runtime_resolution_error(cause: &nomifun_runtime::ToolError) -> McpOwnerError {
     match cause {
         nomifun_runtime::ToolError::Shared(cause) => runtime_resolution_error(cause),
-        nomifun_runtime::ToolError::NotPrepared | nomifun_runtime::ToolError::Unavailable { .. } => {
-            McpOwnerError::new(
-                "COMPONENT_PREPARATION_REQUIRED",
-                "Bun is unavailable. Install Bun on the system or choose to download it in NomiFun, then retry this MCP connection.",
-            )
-        }
-        cause => McpOwnerError::new("MCP_RUNTIME_UNAVAILABLE", format!("The existing Bun runtime is unavailable: {cause}")),
+        cause => McpOwnerError::new("MCP_RUNTIME_UNAVAILABLE",
+            nomi_redact::redact_secrets_owned(format!("MCP command environment could not be prepared: {cause}"))),
     }
-}
-
-fn resolve_program(
-    command: &str,
-    env: &HashMap<OsString, OsString>,
-) -> Result<PathBuf, McpOwnerError> {
-    let path = Path::new(command);
-    // Pin a supplied relative path before creating the child. Do not turn a
-    // configured argv array into a shell command or infer a Session workspace.
-    if path.is_absolute() || command.contains('/') || command.contains('\\') {
-        return std::path::absolute(path)
-            .map_err(|_| McpOwnerError::invalid_binding("MCP command path could not be resolved"));
-    }
-    let search = env
-        .iter()
-        .find(|(key, _)| {
-            if cfg!(windows) {
-                key.to_string_lossy().eq_ignore_ascii_case("PATH")
-            } else {
-                key.as_os_str() == std::ffi::OsStr::new("PATH")
-            }
-        })
-        .map(|(_, value)| value)
-        .ok_or_else(|| {
-            McpOwnerError::invalid_binding(
-                "MCP bare command requires an explicit or inherited PATH",
-            )
-        })?;
-    for directory in std::env::split_paths(search) {
-        let directory = std::path::absolute(directory).map_err(|_| {
-            McpOwnerError::invalid_binding("MCP search directory could not be resolved")
-        })?;
-        if let Some(program) = resolve_command_in(command, &directory) {
-            return Ok(program);
-        }
-    }
-    Err(McpOwnerError::new(
-        "MCP_COMMAND_NOT_FOUND",
-        "MCP configured command was not found in the child PATH",
-    ))
 }
 
 #[cfg(test)]
@@ -629,12 +512,12 @@ mod tests {
     async fn runtime_resolution_does_not_replace_explicit_user_stdio_paths() {
         let command = "/user/chosen/bun";
         let args = vec!["server.js".to_owned()];
-        let (actual, arguments) =
-            resolve_managed_stdio_command(command, &args, &HashMap::new())
+        let launch =
+            nomifun_runtime::prepare_process_launch(command, &args, Path::new("."), &HashMap::new())
                 .await
                 .unwrap();
-        assert_eq!(actual, command);
-        assert_eq!(arguments, args);
+        assert_eq!(launch.program, command);
+        assert_eq!(launch.args, args);
     }
 
     #[tokio::test]
@@ -651,21 +534,60 @@ mod tests {
         let env = HashMap::from([("PATH".to_owned(), root.path().to_string_lossy().into_owned())]);
         let args = vec!["server.js".into()];
         for (command, expected_args) in [("bun", args.clone()), ("bunx", vec!["x".into(), "server.js".into()])] {
-            let (actual, actual_args) = resolve_managed_stdio_command(
-                command, &args, &env,
+            let launch = nomifun_runtime::prepare_process_launch(
+                command, &args, root.path(), &env,
             ).await.unwrap();
-            assert_eq!(Path::new(&actual), program);
-            assert_eq!(actual_args, expected_args);
+            assert_eq!(Path::new(&launch.program), program);
+            assert_eq!(launch.args, expected_args);
         }
         assert_eq!(nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun), before);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_native_argv_preserves_empty_unicode_quotes_and_metacharacters() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let program = root.path().join(" MCP fixture 中文\n ");
+        let marker = root.path().join("must-not-exist");
+        std::fs::write(&program, r#"#!/bin/sh
+[ "$#" = 4 ] || exit 91
+[ -z "$1" ] || exit 92
+[ "$2" = '中文 space' ] || exit 93
+[ "$3" = "quote'\"" ] || exit 94
+[ "$4" = "$EXPECTED_LITERAL" ] || exit 95
+while IFS= read -r line; do
+  case "$line" in
+    *'"id":1'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"argv-fixture","version":"1"}}}' ;;
+    *'"id":2'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}'; exit 0 ;;
+  esac
+done
+"#).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let literal = format!("$(touch '{}'); & | >", marker.display());
+        let environment = HashMap::from([("EXPECTED_LITERAL".into(), literal.clone())]);
+        let catalog = discover(program.to_str().unwrap(), &["".into(), "中文 space".into(), "quote'\"".into(), literal],
+            &environment, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(catalog["tools"], serde_json::json!([]));
+        assert!(!marker.exists(), "native argv must never become shell code");
+    }
+
     #[test]
-    fn missing_stdio_runtime_has_a_user_choice_error() {
+    fn native_executable_names_preserve_literal_whitespace_and_line_breaks() {
+        for command in [" ", "  executable  ", "line\nbreak", "path/ trailing "] {
+            validate_config(command, &[], &HashMap::new()).unwrap();
+        }
+        for command in ["", "name\0suffix"] {
+            assert!(validate_config(command, &[], &HashMap::new()).is_err());
+        }
+    }
+
+    #[test]
+    fn runtime_preparation_failure_preserves_its_real_reason() {
         let missing = nomifun_runtime::ToolError::Shared(Arc::new(nomifun_runtime::ToolError::NotPrepared));
         let error = runtime_resolution_error(&missing);
-        assert_eq!(error.code(), "COMPONENT_PREPARATION_REQUIRED");
-        assert!(error.message().contains("Install Bun"));
+        assert_eq!(error.code(), "MCP_RUNTIME_UNAVAILABLE");
+        assert!(error.message().contains("could not be prepared"));
     }
 
     #[test]
@@ -698,30 +620,4 @@ mod tests {
         assert_eq!(diagnostics.failure_kind(), None);
     }
 
-    #[test]
-    fn isolated_child_environment_uses_shared_proxy_policy() {
-        let configured = HashMap::new();
-        let expected = nomifun_net::proxy::isolated_child_proxy_env(std::iter::empty());
-        let actual = child_environment(&configured);
-
-        for (name, value) in expected {
-            assert_eq!(
-                actual.get(&OsString::from(name)),
-                Some(&OsString::from(value))
-            );
-        }
-
-        let configured = HashMap::from([(
-            "HTTP_PROXY".to_owned(),
-            "http://configured.invalid:8080".to_owned(),
-        )]);
-        let actual = child_environment(&configured);
-        let configured_proxy = actual.iter().find(|(name, _)| {
-            name.to_string_lossy().eq_ignore_ascii_case("HTTP_PROXY")
-        });
-        assert_eq!(
-            configured_proxy.map(|(_, value)| value),
-            Some(&OsString::from("http://configured.invalid:8080"))
-        );
-    }
 }

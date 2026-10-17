@@ -425,8 +425,8 @@ nomifun-web[12345]: listening on 127.0.0.1:8787 (auth: enabled)
 |---|---|---|
 | `glibc` + `ca-certificates` | Yes | sqlite is statically linked, TLS uses rustls — **no openssl, no libsqlite needed**. |
 | OfficeCLI | Embedded in release | Approved artifact extracts locally to managed cache; Office preview needs no Node/Bun download. |
-| Bun / `bunx` | As needed by user commands | System tools take priority; verified existing managed Bun cache is a fallback. Missing components require an explicit user download choice. |
-| Node | As needed by App Hosting | Uses system or user-configured Node; current Agent/plugin execution has no managed Node consumer. |
+| Bun / `bunx` | As needed by user commands | Usable user tools and verified caches take priority; actual launches automatically prepare a missing required approved component. |
+| Node/npm/npx | As required by commands | Agent, Terminal and MCP share automatic preparation and the per-launch environment. User toolchains take priority; managed supply contains the complete official distribution. Linux-specific native product acceptance still requires the target environment. |
 | User tools such as `npm` / `npx` | As configured | Needed by user-defined MCP stdio commands; Docker Node/npm image provenance is fixed in the component manifest. Office preview does not install global npm packages. |
 | Python 3 + PyYAML | Recommended | Enables the Agent's Python script mode and bundled Python-based skills. Already inside the Docker image. |
 | `git` | Recommended | Skill discovery and a few built-in tools. |

@@ -318,14 +318,17 @@ mod tests {
     }
 
     #[test]
-    fn process_launch_failure_uses_fixed_model_guidance_without_host_details() {
+    fn process_launch_failure_preserves_real_os_cause_and_redacts_credentials() {
         let error = KernelError::capability_execution_failed(
             "CAPABILITY_UNAVAILABLE",
-            "process spawn failed: secret=NEVER_EMIT and private cwd",
+            "process spawn failed: Permission denied (os error 13); executable=/tmp/native tool; cwd=/Volumes/Test; secret=NEVER_EMIT",
         );
         let mapped = kernel_error_for_action(error, true, false, false).to_string();
-        assert!(mapped.contains("command field must contain only the executable"));
-        assert!(mapped.contains("\"args\":[\"test\""));
+        assert!(mapped.contains("Permission denied (os error 13)"));
+        assert!(mapped.contains("executable=/tmp/native tool"));
+        assert!(mapped.contains("cwd=/Volumes/Test"));
+        assert!(!mapped.contains("command field must contain only"));
+        assert!(mapped.contains("[REDACTED_SECRET]"));
         assert!(!mapped.contains("NEVER_EMIT"));
 
         let unrelated = kernel_error_for_action(
@@ -341,14 +344,29 @@ mod tests {
     }
 
     #[test]
-    fn file_failure_explains_repair_without_disclosing_host_diagnostics() {
+    fn system_identity_privacy_and_platform_failure_codes_keep_the_owner_fact() {
+        for (code, detail) in [
+            ("SYSTEM_EXECUTION_NOT_AVAILABLE", "Administrator execution is not implemented on this platform"),
+            ("SYSTEM_EXECUTION_APPROVAL_REQUIRED", "The operating system requires native administrator approval"),
+            (crate::SYSTEM_PERMISSION_REQUIRED, r#"{"kind":"system-permission-required.v1","permissions":["accessibility"],"status":"not_executed"}"#),
+        ] {
+            let mapped = kernel_error_for_action(KernelError::capability_execution_failed(code, detail), true, false, false);
+            let EngineToolError::CapabilityKernel { code: actual, message } = mapped else { panic!("changed typed failure") };
+            assert_eq!(actual, code);
+            assert_eq!(message, detail);
+        }
+    }
+
+    #[test]
+    fn file_failure_preserves_native_cause_and_gives_global_path_repair() {
         let detail = "workspace.files failed: cannot resolve parent of PRIVATE_PATH: secret=NEVER_EMIT";
         let mapped = kernel_error_for_action(
             KernelError::capability_execution_failed("INVALID_PAYLOAD", detail), false, true, false,
         ).to_string();
         assert!(mapped.contains("parent is unavailable"));
         assert!(mapped.contains("created automatically"));
-        assert!(!mapped.contains("PRIVATE_PATH"));
+        assert!(mapped.contains("PRIVATE_PATH"));
+        assert!(mapped.contains("native absolute or Session-default-directory relative"));
         assert!(!mapped.contains("NEVER_EMIT"));
         let unrelated = kernel_error_for_action(
             KernelError::capability_execution_failed("INVALID_PAYLOAD", detail), false, false, false,
@@ -372,7 +390,7 @@ mod tests {
         assert!(message.contains("target path does not exist"), "{message}");
         assert!(message.contains("Do not guess"), "{message}");
         assert!(message.contains("No successful launch"), "{message}");
-        assert!(!message.contains("PRIVATE_PATH"));
+        assert!(message.contains("PRIVATE_PATH"));
         assert!(!message.contains("NEVER_EMIT"));
     }
 
@@ -454,7 +472,7 @@ mod tests {
     fn patch_failure_feedback_reports_partial_effect_counts_and_unverified_indices() {
         let detail = json!({
             "kind":"workspace_patch_failed", "version":1, "journal_settlement":"settled",
-            "cause":"cannot open replacement target: PRIVATE_PATH SECRET_CONTENT",
+            "cause":"cannot open replacement target /Volumes/Test/report.txt: Permission denied (os error 13); token=NEVER_EMIT",
             "observation":{
                 "failed_file":1, "published":[0], "unverified_publications":[0], "restored":[],
                 "restore_published_unconfirmed":[], "retained_created":[], "skipped_changed_or_unreadable":[0],
@@ -468,7 +486,9 @@ mod tests {
         assert_eq!(parsed["index_base"], 0);
         assert_eq!(parsed["observation"]["unverified_publications"], json!([0]));
         assert!(parsed["recovery"].as_str().unwrap().contains("Do not report that no files changed"));
-        assert!(!result.contains("PRIVATE_PATH") && !result.contains("SECRET_CONTENT"));
+        assert!(parsed["cause"].as_str().unwrap().contains("Permission denied (os error 13)"));
+        assert!(parsed["cause"].as_str().unwrap().contains("/Volumes/Test/report.txt"));
+        assert!(!result.contains("NEVER_EMIT"));
     }
 
     #[test]
@@ -502,10 +522,10 @@ mod tests {
     }
 
     #[test]
-    fn patch_failure_preserves_bounded_publication_receipt_and_sanitizes_cause() {
+    fn patch_failure_preserves_bounded_publication_receipt_and_real_redacted_cause() {
         let detail = json!({
             "kind":"workspace_patch_failed", "version":1, "journal_settlement":"settled",
-            "cause":"patch hunk line count mismatch: PRIVATE_PATH SECRET_CONTENT",
+            "cause":"patch hunk line count mismatch: /tmp/exact-source.txt; secret=SECRET_CONTENT",
             "observation":{
                 "failed_file":1, "published":[0], "restored":[], "restore_published_unconfirmed":[],
                 "retained_created":[0], "skipped_changed_or_unreadable":[], "rollback_failed":[],
@@ -518,13 +538,15 @@ mod tests {
         assert_eq!(parsed["observation"]["retained_created"], json!([0]));
         assert_eq!(parsed["observation"]["failed_file"], 1);
         assert!(parsed["recovery"].as_str().unwrap().contains("old_lines"));
-        for secret in ["PRIVATE_PATH", "SECRET_CONTENT", "NEVER_EMIT", "UNTRUSTED_ADVICE"] {
+        assert!(parsed["cause"].as_str().unwrap().contains("/tmp/exact-source.txt"));
+        for secret in ["SECRET_CONTENT", "NEVER_EMIT", "UNTRUSTED_ADVICE"] {
             assert!(!result.contains(secret));
         }
         let mut malformed = detail;
-        malformed["observation"]["published"] = json!(["PRIVATE_PATH"]);
+        malformed["observation"]["published"] = json!(["PRIVATE_INDEX_VALUE"]);
         let result = workspace_write_feedback(&malformed.to_string());
-        assert!(!result.contains("PRIVATE_PATH"));
+        assert!(!result.contains("PRIVATE_INDEX_VALUE"));
+        assert!(result.contains("/tmp/exact-source.txt"));
         assert!(result.contains("hunk"));
     }
 

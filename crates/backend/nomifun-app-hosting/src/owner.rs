@@ -1,10 +1,10 @@
-use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, sync::{Arc, Mutex as StdMutex, RwLock, atomic::{AtomicBool, Ordering}}, time::Duration};
+use std::{collections::{BTreeMap, HashMap}, fs, path::{Path, PathBuf}, sync::{Arc, Mutex as StdMutex, RwLock, atomic::{AtomicBool, Ordering}}, time::Duration};
 use nomi_process_runtime::{ChildProcessBuilder, ManagedChildProcess, ExactProcessIdentity, OrphanTerminationOutcome, capture_child_identity, terminate_verified_orphan, merge_process_path};
 use serde::{Deserialize, Serialize};
 use tokio::{io::{AsyncRead, AsyncReadExt}, sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use crate::{AppDetails, AppError, AppMetadata, AppOperation, AppRecord, AppSettings, AppSettingsPatch, AppState, ImportKind, LocalConnection};
-use crate::files::{complete_execution_settings, contained_directory, copy_import, detect_settings, ensure_no_links, relative_path, prepare_static_preset, standard_static_web_url};
+use crate::files::{complete_execution_settings, required_project_runtime, contained_directory, copy_import, detect_settings, ensure_no_links, relative_path, prepare_static_preset, standard_static_web_url};
 
 const OUTPUT_LIMIT: usize = 32 * 1024;
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -716,7 +716,7 @@ impl HostingOwner {
         let selected = selected.ok_or_else(|| AppError::Invalid("configure a foreground start command before running this application".into()))?;
         if cancellation.is_cancelled() { return Err(AppError::Cancelled); }
         self.set_operation(slot, if preview { "starting_preview" } else { "starting" }).await?;
-        let running = self.spawn(slot, selected, true).await?;
+        let running = self.spawn(slot, selected, true, cancellation).await?;
         // Catch immediate launcher exits and port conflicts truthfully. A live
         // process is an observation, not a business-health assertion.
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -748,7 +748,7 @@ impl HostingOwner {
         let Some(selected) = selected else { return Ok(()); };
         if cancellation.is_cancelled() { return Err(AppError::Cancelled); }
         self.set_operation(slot, step).await?;
-        let running = self.spawn(slot, selected, false).await?;
+        let running = self.spawn(slot, selected, false, cancellation).await?;
         let outcome = {
             let mut process = running.process.lock().await;
             tokio::select! {
@@ -771,7 +771,7 @@ impl HostingOwner {
         self.persist_data(&data)
     }
 
-    async fn spawn(&self, slot: &Arc<AppSlot>, selected: &str, inject_connection: bool) -> Result<Arc<Running>, AppError> {
+    async fn spawn(&self, slot: &Arc<AppSlot>, selected: &str, inject_connection: bool, cancellation: &CancellationToken) -> Result<Arc<Running>, AppError> {
         let record = slot.data.lock().await.record.clone();
         self.ensure_owned_path(&record.directory)?;
         // Preparation can change the current filesystem. Recheck the existing
@@ -779,22 +779,48 @@ impl HostingOwner {
         // the next command or the static preset against a replaced directory.
         validate_settings(&record.directory, &record.settings)?;
         let directory = contained_directory(&record.directory, &record.settings.project_directory)?;
-        let mut builder = shell_command(selected);
-        builder.current_dir(directory).envs(&record.settings.environment);
-        // Do not inherit a Host ambient credential into installation/build.
-        for key in ["NOMIFUN_HOST_URL", "NOMIFUN_LOCAL_TRUST", "NOMIFUN_AGENT_BINDING_ID"] { builder.env_remove(key); }
-        if let Some(path) = record.settings.node_path.as_deref().filter(|p| !p.trim().is_empty()) {
+        let mut configured: HashMap<String, String> = record.settings.environment.iter().map(|(key, value)| (key.clone(), value.clone())).collect();
+        let custom_node = record.settings.node_path.as_deref().filter(|path| !path.trim().is_empty()).map(|path| {
             let node = dunce::canonicalize(path).map_err(|error| AppError::Invalid(format!("custom Node executable is unavailable: {error}")))?;
             if !node.is_file() { return Err(AppError::Invalid("custom Node path is not a file".into())); }
+            Ok(node)
+        }).transpose()?;
+        if let Some(node) = &custom_node {
             let parent = node.parent().ok_or_else(|| AppError::Invalid("custom Node path has no directory".into()))?;
-            let existing = std::env::var_os("PATH").unwrap_or_default();
-            builder.env("PATH", merge_process_path([parent.as_os_str(), existing.as_os_str()])?);
-            // An explicitly named binary need not be called node(.exe).
-            // Exact custom executable replacement is applied by shell_command.
+            let existing = configured.iter().find(|(key, _)| if cfg!(windows) { key.eq_ignore_ascii_case("PATH") } else { key.as_str() == "PATH" }).map(|(_, value)| value.clone());
+            let existing = match existing {
+                Some(value) => value,
+                None => nomifun_runtime::process_environment(&HashMap::new()).map_err(|cause| AppError::Command(cause.to_string()))?
+                    .remove("PATH").unwrap_or_default(),
+            };
+            let path = merge_process_path([parent.as_os_str(), std::ffi::OsStr::new(&existing)])?;
+            configured.retain(|key, _| if cfg!(windows) { !key.eq_ignore_ascii_case("PATH") } else { key != "PATH" });
+            configured.insert("PATH".into(), path.to_string_lossy().into_owned());
+        }
+        let preparation = async {
+            if let Some(runtime) = required_project_runtime(&directory, &record.settings) {
+                nomifun_runtime::prepare_process_launch(runtime, &[], &directory, &configured).await?;
+            }
+            // Preserve the existing explicit shell contract, using the same
+            // cwd-aware environment preparation as native Agent/Terminal/MCP.
+            nomifun_runtime::prepare_process_launch(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }, &[], &directory, &configured).await
+        };
+        let prepared = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(AppError::Cancelled),
+            result = tokio::time::timeout(PREPARATION_TIMEOUT, preparation) => result
+                .map_err(|_| AppError::Command("application runtime preparation timed out before its command started".into()))?
+                .map_err(|cause| AppError::Command(format!("could not prepare application environment: {cause}")))?,
+        };
+        if cancellation.is_cancelled() { return Err(AppError::Cancelled); }
+        let environment = prepared.environment;
+        let mut builder = shell_command(selected);
+        builder.current_dir(&directory).envs(&environment);
+        for key in ["NOMIFUN_HOST_URL", "NOMIFUN_LOCAL_TRUST", "NOMIFUN_AGENT_BINDING_ID"] { builder.env_remove(key); }
+        if let Some(node) = custom_node {
             if selected.trim_start().starts_with("node ") {
-                builder = custom_node_command(&node, selected.trim_start().strip_prefix("node ").unwrap(), &record.settings.environment)?;
-                builder.current_dir(contained_directory(&record.directory, &record.settings.project_directory)?);
-                builder.env("PATH", merge_process_path([parent.as_os_str(), existing.as_os_str()])?);
+                builder = custom_node_command(&node, selected.trim_start().strip_prefix("node ").unwrap(), &BTreeMap::new())?;
+                builder.envs(&environment).env("NOMIFUN_SELECTED_NODE", &node).current_dir(&directory);
                 for key in ["NOMIFUN_HOST_URL", "NOMIFUN_LOCAL_TRUST", "NOMIFUN_AGENT_BINDING_ID"] { builder.env_remove(key); }
             }
         }
@@ -1089,7 +1115,9 @@ pub(crate) fn validate_settings(root: &Path, settings: &AppSettings) -> Result<(
         }
     }
     for key in settings.environment.keys() {
-        if key.is_empty() || key.contains(['=', '\0']) || key.to_uppercase().starts_with("NOMIFUN_") {
+        if key.is_empty() || key.contains(['=', '\0']) || matches!(key.to_uppercase().as_str(),
+            "NOMIFUN_HOST_URL" | "NOMIFUN_LOCAL_TRUST" | "NOMIFUN_AGENT_BINDING_ID"
+            | "NOMIFUN_HOSTING_COMMAND" | "NOMIFUN_SELECTED_NODE" | "NOMIFUN_STATIC_ROOT" | "NOMIFUN_VERSION_COMMAND") {
             return Err(AppError::Invalid(format!("environment variable is reserved or invalid: {key}")));
         }
     }
@@ -1103,6 +1131,7 @@ fn shell_command(selected: &str) -> ChildProcessBuilder {
     #[cfg(windows)]
     {
         let mut builder = ChildProcessBuilder::clean_cli("cmd.exe");
+        builder.env_clear();
         // Rust's normal argv quoting inserts backslashes before quotes; cmd
         // treats those as literal characters. Expand one environment argument
         // so user command quoting reaches cmd unchanged.
@@ -1113,6 +1142,7 @@ fn shell_command(selected: &str) -> ChildProcessBuilder {
     #[cfg(not(windows))]
     {
         let mut builder = ChildProcessBuilder::clean_cli("/bin/sh");
+        builder.env_clear();
         builder.args(["-c", selected]);
         builder
     }

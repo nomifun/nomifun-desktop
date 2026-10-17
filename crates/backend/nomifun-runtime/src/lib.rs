@@ -1,12 +1,16 @@
 //! Manifest-approved product tool supply and platform command discovery.
-//! Existing user runtimes take priority; managed downloads start only by explicit request.
+//! Existing user runtimes take priority; missing required runtimes are prepared on demand.
 
 mod cache;
 mod download;
 mod embed;
+mod environment;
 mod extract;
 mod managed;
 mod notices;
+mod node_distribution;
+#[path = "../node_distribution_contract.rs"]
+mod node_distribution_contract;
 mod progress;
 mod resolver;
 mod shell_env;
@@ -14,6 +18,7 @@ mod shell_env;
 mod login_shell;
 
 pub use cache::{init, runtime_root};
+pub use environment::{PreparedProcessLaunch, prepare_process_launch, process_environment, user_cli_root};
 pub use managed::{
     PreparedComponentLaunch, ToolError, ToolId, ToolSource, VerifiedTool,
     begin_tool_preparation, cancel_tool_preparation, component_inventory,
@@ -30,3 +35,6 @@ pub use resolver::{
 pub use shell_env::enhance_process_path;
 #[cfg(unix)]
 pub use login_shell::resolve_login_shell;
+
+#[cfg(all(test, target_os = "macos"))]
+mod node_acceptance;

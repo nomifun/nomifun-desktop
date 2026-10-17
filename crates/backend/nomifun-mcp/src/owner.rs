@@ -397,8 +397,8 @@ impl McpOwner {
             McpServerTransport::Http { url, headers } => (url.clone(), headers.clone(), false),
             McpServerTransport::Sse { url, headers } => (url.clone(), headers.clone(), true),
             McpServerTransport::Stdio { command, args, env } => {
+                let transport = stdio::StdioTransport::launch(command, args, env, self.timeout).await?;
                 let deadline = Instant::now() + self.timeout;
-                let transport = stdio::StdioTransport::launch(command, args, env, deadline).await?;
                 return self.invoke_session(&request, McpSession::from_stdio(transport), deadline).await;
             }
         };

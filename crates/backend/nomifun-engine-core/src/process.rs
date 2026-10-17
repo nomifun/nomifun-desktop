@@ -12,9 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nomi_process_runtime::{
-    CapabilityPolicy, CleanupReport, CommandSpec, EncodingMetadata, NormalizedProcessRequest,
+    CleanupReport, CommandSpec, EncodingMetadata, NormalizedProcessRequest,
     MAX_PTY_DIMENSION, OutputCursor, OutputSnapshot, PollResult, ProcessError, ProcessOutcome,
-    ProcessOwner, ProcessPolicy, ProcessRequest, ProcessSupervisor, ProcessTerminalWitness, SandboxPolicy, SessionId,
+    ProcessOwner, ProcessPolicy, ProcessRequest, ProcessSupervisor, ProcessTerminalWitness, SessionId,
     SupervisorConfig, Transport, ShellKind, normalize_request,
 };
 use serde::{Deserialize, Serialize};
@@ -30,8 +30,20 @@ const MAX_OUTPUT_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_COMMAND_CHARS: usize = 32 * 1024;
 const MAX_ARGUMENTS: usize = 256;
 const MAX_ARGUMENT_CHARS: usize = 64 * 1024;
-const MAX_ENVIRONMENT_ENTRIES: usize = 128;
+// The formal tool schema bounds the caller's overrides to 128 entries. This
+// internal request also carries the per-launch composed login environment.
+const MAX_ENVIRONMENT_ENTRIES: usize = 4096;
 const MAX_POLL_WAIT: Duration = Duration::from_secs(30);
+
+/// The identity needed for this operation. This is an execution context, not
+/// an application permission mode; the operating system owns authentication.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineExecutionIdentity {
+    #[default]
+    CurrentUser,
+    Administrator,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "transport", rename_all = "snake_case", deny_unknown_fields)]
@@ -43,6 +55,8 @@ pub enum EngineProcessTransport {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EngineProcessRequest {
+    #[serde(default)]
+    pub execution_identity: EngineExecutionIdentity,
     #[serde(default)]
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -63,6 +77,7 @@ pub struct EngineProcessRequest {
 impl EngineProcessRequest {
     pub fn pipe(command: impl Into<String>) -> Self {
         Self {
+            execution_identity: EngineExecutionIdentity::CurrentUser,
             command: command.into(),
             shell_script: None,
             args: Vec::new(),
@@ -84,13 +99,12 @@ impl EngineProcessRequest {
                 || script.contains('\0') || script.chars().count() > MAX_COMMAND_CHARS {
                 return Err(EngineProcessError::Process("shell script must be bounded and cannot include program/argv fields".into()));
             }
-        } else if self.command.trim().is_empty()
-            || self.command.trim() != self.command
+        } else if self.command.is_empty()
             || self.command.contains('\0')
             || self.command.chars().count() > MAX_COMMAND_CHARS
         {
             return Err(EngineProcessError::Process(
-                "command must be a bounded executable without edge whitespace or NUL bytes"
+                "command must be a non-empty bounded executable name or path without NUL bytes"
                     .to_owned(),
             ));
         }
@@ -134,9 +148,9 @@ impl EngineProcessRequest {
                 "PTY dimensions must be between 1 and {MAX_PTY_DIMENSION}"
             )));
         }
-        if self.cwd.as_deref().is_some_and(invalid_relative_path) {
+        if self.cwd.as_deref().is_some_and(|cwd| cwd.contains('\0')) {
             return Err(EngineProcessError::Process(
-                "cwd must be a normalized workspace-relative path".to_owned(),
+                "cwd must not contain NUL bytes".to_owned(),
             ));
         }
         Ok(())
@@ -145,11 +159,12 @@ impl EngineProcessRequest {
 
 #[derive(Debug)]
 pub struct EngineProcessSession {
-    terminal: ProcessTerminalWitness,
-    owner: ProcessOwner,
-    session_id: SessionId,
-    pid: u32,
-    cursor: OutputCursor,
+    pub(super) terminal: Option<ProcessTerminalWitness>,
+    pub(super) system: Option<crate::system_process::SystemEngineSession>,
+    pub(super) owner: ProcessOwner,
+    pub(super) session_id: SessionId,
+    pub(super) pid: u32,
+    pub(super) cursor: OutputCursor,
 }
 
 impl EngineProcessSession {
@@ -230,6 +245,7 @@ pub struct ManagedEngineProcessOwner {
     workspace_root: PathBuf,
     supervisor: Arc<ProcessSupervisor>,
     pending_starts: Mutex<HashMap<ProcessOwner, bool>>,
+    system: crate::system_process::SystemEngineOwner,
 }
 
 /// Start failed, with the owner's structured cleanup fact preserved before
@@ -249,21 +265,17 @@ impl ManagedEngineProcessOwner {
         workspace_root: impl AsRef<Path>,
         config: SupervisorConfig,
     ) -> Result<Self, EngineProcessError> {
-        let workspace_root = std::fs::canonicalize(workspace_root.as_ref()).map_err(|error| {
-            EngineProcessError::Process(format!(
-                "workspace root {} is unavailable: {error}",
-                workspace_root.as_ref().display()
-            ))
-        })?;
-        if !workspace_root.is_dir() {
-            return Err(EngineProcessError::Process(
-                "workspace root is not a directory".to_owned(),
-            ));
-        }
+        // Keep the Session's default directory as an anchor even if it was
+        // deleted or is inaccessible. Only the requested actual cwd must
+        // exist; an absolute cwd must not depend on the default's availability.
+        let workspace_root = std::fs::canonicalize(workspace_root.as_ref()).or_else(|_| {
+            std::path::absolute(workspace_root.as_ref())
+        }).map_err(|error| EngineProcessError::Process(format!("default working directory is invalid: {error}")))?;
         Ok(Self {
             workspace_root,
             supervisor: ProcessSupervisor::new(config),
             pending_starts: Mutex::new(HashMap::new()),
+            system: Default::default(),
         })
     }
 
@@ -289,6 +301,9 @@ impl ManagedEngineProcessOwner {
         if cancellation.is_cancelled() {
             return Err(before_spawn(EngineProcessError::Cancelled));
         }
+        if request.execution_identity == EngineExecutionIdentity::Administrator {
+            return self.system.start(request, &self.workspace_root, cancellation).await;
+        }
         let normalized = self.normalized_request(request).map_err(before_spawn)?;
         let native_owner = normalized.owner.clone();
         // Stamp before the first native await. Dropping this adapter future
@@ -304,7 +319,6 @@ impl ManagedEngineProcessOwner {
             .map_err(|cause| {
                 let no_live_process_proven = match &cause {
                     ProcessError::InvalidWorkingDirectory { .. }
-                    | ProcessError::CapabilityDenied { .. }
                     | ProcessError::InvalidCommand { .. }
                     | ProcessError::InvalidTransport { .. }
                     | ProcessError::CapacityExhausted { .. }
@@ -315,7 +329,6 @@ impl ManagedEngineProcessOwner {
                 };
                 let user_code_not_started = matches!(&cause,
                     ProcessError::InvalidWorkingDirectory { .. }
-                    | ProcessError::CapabilityDenied { .. }
                     | ProcessError::InvalidCommand { .. }
                     | ProcessError::InvalidTransport { .. }
                     | ProcessError::CapacityExhausted { .. }
@@ -328,7 +341,8 @@ impl ManagedEngineProcessOwner {
             })?;
         self.pending_starts.lock().expect("process startup tracking is poisoned").remove(&native_owner);
         let session = EngineProcessSession {
-            terminal: handle.terminal_witness(),
+            terminal: Some(handle.terminal_witness()),
+            system: None,
             owner: handle.owner,
             session_id: handle.session_id,
             pid: handle.pid,
@@ -342,10 +356,13 @@ impl ManagedEngineProcessOwner {
     /// Reconcile starts that never produced an adapter handle using their
     /// exact host-generated owners, not an empty handle map or another call.
     pub async fn quiesce_unregistered_starts(&self) -> bool {
-        if self.pending_starts.lock().expect("process startup tracking is poisoned").is_empty() { return false; }
+        let system_proven = self.system.quiesce_unregistered_starts().await;
+        if self.pending_starts.lock().expect("process startup tracking is poisoned").is_empty() {
+            return system_proven.unwrap_or(false);
+        }
         let report = self.supervisor.quiesce().await;
         let mut tracked = self.pending_starts.lock().expect("process startup tracking is poisoned");
-        settle_pending_starts_from_fence(&mut tracked, &report)
+        settle_pending_starts_from_fence(&mut tracked, &report) && system_proven.unwrap_or(true)
     }
 
     pub async fn execute(
@@ -374,6 +391,9 @@ impl ManagedEngineProcessOwner {
         wait: Duration,
         cancellation: CancellationToken,
     ) -> Result<EngineProcessPoll, EngineProcessError> {
+        if session.system.is_some() {
+            return crate::system_process::poll(session, cursor, wait, cancellation).await;
+        }
         if cancellation.is_cancelled() {
             return self.cancel(session).await;
         }
@@ -396,6 +416,19 @@ impl ManagedEngineProcessOwner {
         session: &mut EngineProcessSession,
         cancellation: CancellationToken,
     ) -> Result<EngineProcessPoll, EngineProcessError> {
+        if session.system.is_some() {
+            loop {
+                let cursor = session.cursor();
+                let result = crate::system_process::poll(session, cursor, MAX_POLL_WAIT, cancellation.clone()).await?;
+                if result.is_terminal() {
+                    // Waiting uses the rolling cursor so prior output cannot
+                    // turn every later activity poll into a busy loop. Exec's
+                    // terminal response still includes the complete retained
+                    // output, just like the local supervisor wait contract.
+                    return crate::system_process::poll(session, 0, Duration::ZERO, CancellationToken::new()).await;
+                }
+            }
+        }
         loop {
             if cancellation.is_cancelled() {
                 return self.cancel(session).await;
@@ -430,6 +463,9 @@ impl ManagedEngineProcessOwner {
                 "one stdin write may not exceed 1 MiB".to_owned(),
             ));
         }
+        if let Some(system) = &session.system {
+            return system.control("write", serde_json::json!({"bytes":bytes}), cancellation).await;
+        }
         let write = self
             .supervisor
             .write(&session.owner, &session.session_id, bytes);
@@ -445,17 +481,35 @@ impl ManagedEngineProcessOwner {
         &self,
         session: &mut EngineProcessSession,
     ) -> Result<Option<EngineProcessPoll>, EngineProcessError> {
-        let outcome = session.terminal.terminal(session.cursor);
+        if let Some(system) = &session.system { return Ok(system.terminal.clone()); }
+        let outcome = session.terminal.as_ref().and_then(|terminal| terminal.terminal(session.cursor));
         let cursor = session.cursor;
         let result = outcome.map(|outcome| self.convert_outcome(session, outcome));
         session.cursor = cursor;
         Ok(result)
     }
 
+    /// Read the real native terminal without consuming running output. The
+    /// system transport needs a remote observation when no earlier poll has
+    /// cached the terminal; OS authentication is never a terminal receipt.
+    pub async fn terminal_observation_if_ready(
+        &self,
+        session: &mut EngineProcessSession,
+        cancellation: CancellationToken,
+    ) -> Result<Option<EngineProcessPoll>, EngineProcessError> {
+        if session.system.is_some() {
+            return crate::system_process::terminal_if_ready(session, cancellation).await;
+        }
+        self.terminal_if_ready(session)
+    }
+
     pub async fn close_stdin(
         &self,
         session: &EngineProcessSession,
     ) -> Result<(), EngineProcessError> {
+        if let Some(system) = &session.system {
+            return system.control("close_stdin", serde_json::json!({}), CancellationToken::new()).await;
+        }
         self.supervisor
             .close_stdin(&session.owner, &session.session_id)
             .await
@@ -468,6 +522,9 @@ impl ManagedEngineProcessOwner {
         cols: u16,
         rows: u16,
     ) -> Result<(), EngineProcessError> {
+        if let Some(system) = &session.system {
+            return system.control("resize", serde_json::json!({"cols":cols,"rows":rows}), CancellationToken::new()).await;
+        }
         self.supervisor
             .resize(&session.owner, &session.session_id, cols, rows)
             .await
@@ -478,7 +535,8 @@ impl ManagedEngineProcessOwner {
         &self,
         session: &mut EngineProcessSession,
     ) -> Result<EngineProcessPoll, EngineProcessError> {
-        if let Some(outcome) = session.terminal.terminal(session.cursor)
+        if session.system.is_some() { return crate::system_process::cancel(session).await; }
+        if let Some(outcome) = session.terminal.as_ref().and_then(|terminal| terminal.terminal(session.cursor))
             && matches!(&outcome, ProcessOutcome::Exited { cleanup, .. }
                 | ProcessOutcome::Cancelled { cleanup, .. } | ProcessOutcome::TimedOut { cleanup, .. }
                 | ProcessOutcome::Lost { cleanup, .. } if cleanup.reaped)
@@ -528,10 +586,6 @@ impl ManagedEngineProcessOwner {
                 .collect(),
             transport,
             policy,
-            capability: CapabilityPolicy {
-                cwd_roots: vec![self.workspace_root.clone()],
-                sandbox: workspace_process_sandbox(&self.workspace_root),
-            },
         };
         normalize_request(request, &self.workspace_root).map_err(process_error)
     }
@@ -625,40 +679,6 @@ fn settle_pending_starts_from_fence(pending: &mut HashMap<ProcessOwner, bool>, r
     true
 }
 
-fn invalid_relative_path(value: &str) -> bool {
-    let path = Path::new(value);
-    value.trim().is_empty()
-        || value.trim() != value
-        || value.starts_with('/')
-        || value.starts_with('\\')
-        || value.contains('\\')
-        || value.contains('\0')
-        || path.is_absolute()
-        || path.components().any(|component| {
-            matches!(
-                component,
-                std::path::Component::ParentDir
-                    | std::path::Component::RootDir
-                    | std::path::Component::Prefix(_)
-            )
-        })
-}
-
-fn workspace_process_sandbox(workspace_root: &Path) -> SandboxPolicy {
-    #[cfg(target_os = "macos")]
-    {
-        return SandboxPolicy::MacSeatbelt {
-            write_roots: vec![workspace_root.to_path_buf()],
-        };
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = workspace_root;
-        SandboxPolicy::UnrestrictedLocalOwner
-    }
-}
-
 fn convert_output(output: OutputSnapshot) -> EngineProcessOutput {
     let text = output.text();
     let EncodingMetadata {
@@ -721,7 +741,7 @@ mod tests {
         let mut native = owner.normalized_request(request).unwrap();
         native.policy.lease = Duration::from_secs(2);
         let handle = owner.supervisor.start(native).await.unwrap();
-        let mut session = EngineProcessSession { terminal:handle.terminal_witness(), owner:handle.owner, session_id:handle.session_id, pid:handle.pid, cursor:OutputCursor::START };
+        let mut session = EngineProcessSession { terminal:Some(handle.terminal_witness()), system:None, owner:handle.owner, session_id:handle.session_id, pid:handle.pid, cursor:OutputCursor::START };
         let original = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if let Some(terminal) = owner.terminal_if_ready(&mut session).unwrap() { break terminal; }
@@ -855,6 +875,7 @@ mod tests {
             vec!["-c".to_owned(), "printf coding-engine".to_owned()],
         );
         EngineProcessRequest {
+            execution_identity: EngineExecutionIdentity::CurrentUser,
             command,
             shell_script: None,
             args,
@@ -886,6 +907,7 @@ mod tests {
             ],
         );
         EngineProcessRequest {
+            execution_identity: EngineExecutionIdentity::CurrentUser,
             command,
             shell_script: None,
             args,
@@ -913,6 +935,7 @@ mod tests {
             vec!["-c".to_owned(), "wc -c".to_owned()],
         );
         EngineProcessRequest {
+            execution_identity: EngineExecutionIdentity::CurrentUser,
             command,
             shell_script: None,
             args,
@@ -953,6 +976,7 @@ mod tests {
             vec!["-c".to_owned(), "sleep 30".to_owned()],
         );
         EngineProcessRequest {
+            execution_identity: EngineExecutionIdentity::CurrentUser,
             command,
             shell_script: None,
             args,
@@ -983,6 +1007,7 @@ mod tests {
             ],
         );
         EngineProcessRequest {
+            execution_identity: EngineExecutionIdentity::CurrentUser,
             command,
             shell_script: None,
             args,
@@ -1034,7 +1059,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_escape_is_rejected_before_spawn() {
+    async fn missing_cwd_is_rejected_before_spawn() {
         let directory = tempfile::tempdir().unwrap();
         let owner =
             ManagedEngineProcessOwner::new(directory.path(), SupervisorConfig::default()).unwrap();
@@ -1048,10 +1073,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn managed_owner_seatbelt_denies_writes_outside_the_workspace() {
-        // The trusted Darwin temporary directories are writable by design, so
-        // place both siblings beside the checkout to exercise the declared
-        // workspace write boundary rather than the trusted-temp exception.
+    async fn managed_owner_writes_outside_the_default_directory() {
         let fixture_root = std::env::current_dir().unwrap();
         let workspace = tempfile::tempdir_in(&fixture_root).unwrap();
         let outside = tempfile::tempdir_in(&fixture_root).unwrap();
@@ -1060,7 +1082,7 @@ mod tests {
         let owner =
             ManagedEngineProcessOwner::new(workspace.path(), SupervisorConfig::default()).unwrap();
 
-        for (marker, expected_exit) in [(&inside_marker, Some(0)), (&outside_marker, None)] {
+        for marker in [&inside_marker, &outside_marker] {
             let mut request = EngineProcessRequest::pipe("/usr/bin/touch");
             request.args = vec![marker.to_string_lossy().into_owned()];
             let outcome = owner
@@ -1074,18 +1096,11 @@ mod tests {
                 panic!("touch should settle as an exited process");
             };
             assert!(cleanup.reaped);
-            if let Some(expected_exit) = expected_exit {
-                assert_eq!(exit_code, Some(expected_exit));
-            } else {
-                assert_ne!(exit_code, Some(0));
-            }
+            assert_eq!(exit_code, Some(0));
         }
 
         assert!(inside_marker.exists());
-        assert!(
-            !outside_marker.exists(),
-            "the product process owner must apply the macOS workspace write sandbox"
-        );
+        assert!(outside_marker.exists(), "the default directory is not a write boundary");
     }
 
     #[cfg(target_os = "macos")]
@@ -1134,28 +1149,24 @@ mod tests {
         assert!(!expansion_marker.exists());
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     #[tokio::test]
-    async fn managed_owner_seatbelt_rejects_tmpdir_override_before_user_code() {
-        let fixture_root = std::env::current_dir().unwrap();
-        let workspace = tempfile::tempdir_in(&fixture_root).unwrap();
-        let marker = workspace.path().join("must-not-run.marker");
-        let owner =
-            ManagedEngineProcessOwner::new(workspace.path(), SupervisorConfig::default()).unwrap();
-        let mut request = EngineProcessRequest::pipe("/usr/bin/touch");
-        request.args = vec![marker.to_string_lossy().into_owned()];
-        request
-            .env
-            .insert("TMPDIR".to_owned(), "/tmp/untrusted-override".to_owned());
-
-        let failure = owner
-            .start_with_evidence(request, CancellationToken::new())
-            .await
-            .expect_err("a model-supplied TMPDIR must not bypass the Seatbelt profile");
-
-        assert!(failure.no_live_process_proven);
-        assert!(failure.user_code_not_started);
-        assert!(!marker.exists());
+    async fn managed_owner_accepts_parent_relative_and_absolute_cwd() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let outside = root.path().join("outside 中文");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let owner = ManagedEngineProcessOwner::new(&workspace, SupervisorConfig::default()).unwrap();
+        for cwd in ["../outside 中文".to_owned(), outside.to_string_lossy().into_owned()] {
+            let mut request = EngineProcessRequest::pipe("/bin/pwd");
+            request.cwd = Some(cwd);
+            request.env.insert("TMPDIR".to_owned(), outside.to_string_lossy().into_owned());
+            let EngineProcessPoll::Exited { exit_code, output, cleanup, .. } = owner.execute(request, CancellationToken::new()).await.unwrap() else { panic!("pwd must exit"); };
+            assert_eq!(exit_code, Some(0));
+            assert_eq!(std::path::Path::new(output.text.trim()), outside.canonicalize().unwrap());
+            assert!(cleanup.reaped);
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -1459,5 +1470,41 @@ mod tests {
         assert!(output.retained_bytes <= 256);
         assert!(output.dropped_bytes > 0);
         assert!(output.text.len() <= 256);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn missing_default_directory_does_not_block_an_absolute_cwd() {
+        let directory = tempfile::tempdir().unwrap();
+        let owner = ManagedEngineProcessOwner::new(directory.path().join("deleted-default"), Default::default()).unwrap();
+        let mut request = EngineProcessRequest::pipe("/bin/pwd");
+        request.cwd = Some(directory.path().display().to_string());
+        let outcome = owner.execute(request, CancellationToken::new()).await.unwrap();
+        let EngineProcessPoll::Exited { exit_code, output, cleanup, .. } = outcome else { panic!("absolute cwd should run") };
+        assert_eq!(exit_code, Some(0));
+        assert!(cleanup.reaped);
+        assert_eq!(Path::new(output.text.trim_end()), directory.path().canonicalize().unwrap());
+        let failure = owner.start_with_evidence(EngineProcessRequest::pipe("/bin/pwd"), CancellationToken::new()).await.unwrap_err();
+        assert!(failure.user_code_not_started);
+        assert!(failure.error.to_string().contains("working directory"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn executable_names_with_edge_and_only_spaces_remain_literal() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let owner = ManagedEngineProcessOwner::new(directory.path(), Default::default()).unwrap();
+        for name in [" executable 中文 ", "   "] {
+            let program = directory.path().join(name);
+            std::fs::write(&program, "#!/bin/sh\nprintf 'literal executable'\n").unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let outcome = owner.execute(EngineProcessRequest::pipe(program.display().to_string()), CancellationToken::new()).await.unwrap();
+            let EngineProcessPoll::Exited { exit_code, output, cleanup, .. } = outcome else { panic!("literal executable should run") };
+            assert_eq!(exit_code, Some(0));
+            assert_eq!(output.text, "literal executable");
+            assert!(cleanup.reaped);
+        }
+        assert!(EngineProcessRequest::pipe("   ").validate().is_ok());
     }
 }

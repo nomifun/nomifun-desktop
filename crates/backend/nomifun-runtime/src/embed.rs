@@ -29,6 +29,7 @@ pub(crate) fn embedded(id: ToolId) -> Option<EmbeddedTool> {
 
 #[derive(Clone, Copy)]
 pub(crate) struct ExecutableIdentity {
+    pub distribution_sha256: Option<&'static str>,
     pub sha256: &'static str,
     pub version: &'static str,
     pub executable: &'static str,
@@ -36,8 +37,9 @@ pub(crate) struct ExecutableIdentity {
 
 pub(crate) fn identity(id: ToolId) -> ExecutableIdentity {
     macro_rules! identity {
-        ($module:ident) => {
+        ($module:ident, $distribution:expr) => {
             ExecutableIdentity {
+                distribution_sha256: $distribution,
                 sha256: $module::SHA256,
                 version: $module::VERSION,
                 executable: $module::EXECUTABLE,
@@ -45,8 +47,8 @@ pub(crate) fn identity(id: ToolId) -> ExecutableIdentity {
         };
     }
     match id {
-        ToolId::Bun => identity!(bun),
-        ToolId::Node => identity!(node),
-        ToolId::OfficeCli => identity!(officecli),
+        ToolId::Bun => identity!(bun, bun::DISTRIBUTION_SHA256),
+        ToolId::Node => identity!(node, node::DISTRIBUTION_SHA256),
+        ToolId::OfficeCli => identity!(officecli, None),
     }
 }

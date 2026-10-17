@@ -59,11 +59,16 @@ pub const MAX_AGENT_PATCH_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum bytes in one workspace-relative patch path.
 const MAX_AGENT_PATCH_PATH_BYTES: usize = 4 * 1024;
 
+pub(crate) const FILE_RENAME_OUTCOME_UNKNOWN: &str = "native file rename outcome is unknown";
 pub(crate) const FILE_WRITE_OUTCOME_UNKNOWN: &str = "workspace file publication outcome is unknown";
 pub(crate) const FILE_DELETE_OUTCOME_UNKNOWN: &str = "workspace entry deletion outcome is unknown";
 
 pub fn file_write_outcome_unknown(error: &AppError) -> bool {
     matches!(error, AppError::Internal(message) if message.starts_with(FILE_WRITE_OUTCOME_UNKNOWN))
+}
+
+pub fn file_rename_outcome_unknown(error: &AppError) -> bool {
+    matches!(error, AppError::Internal(message) if message.starts_with(FILE_RENAME_OUTCOME_UNKNOWN))
 }
 
 pub fn file_delete_outcome_unknown(error: &AppError) -> bool {
@@ -133,7 +138,7 @@ pub struct AgentSessionPatchRequest {
     pub files: Vec<AgentSessionFilePatch>,
 }
 
-/// A patch for one workspace-relative file.
+/// A patch for one native absolute or Session-relative file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentSessionFilePatch {
@@ -181,8 +186,8 @@ pub struct AgentSessionPatchResult {
 pub struct AgentSessionPatchFileResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<crate::WorkspacePathObservation>,
-    /// Normalized workspace-relative path; no native absolute path is
-    /// returned to the agent.
+    /// Canonical project-relative label when inside the project; otherwise
+    /// the actual native absolute path, usable by the same file tools.
     pub path: String,
     pub bytes_before: u64,
     pub bytes_after: u64,
@@ -200,8 +205,24 @@ pub struct AgentSessionPatchFileResult {
 #[derive(Debug)]
 pub struct AgentSessionWriteResult {
     pub created: bool,
+    pub native_path: String,
     pub workspace_path: Option<crate::WorkspacePathObservation>,
 }
+
+#[derive(Debug, Serialize)]
+pub struct AgentSessionDeleteResult {
+    pub native_path: String,
+    pub workspace_path: Option<crate::WorkspacePathObservation>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentSessionRenameResult {
+    pub source: String,
+    pub destination: String,
+    pub source_workspace_path: Option<crate::WorkspacePathObservation>,
+    pub destination_workspace_path: Option<crate::WorkspacePathObservation>,
+}
+
 
 #[derive(Default)]
 struct WorkspaceInventory {
@@ -242,12 +263,12 @@ pub struct FileService {
     workspace_files_cache: Arc<DashMap<String, Arc<WorkspaceInventory>>>,
     /// One bounded in-memory lifecycle for active and early-canceled exports.
     zip_requests: crate::zip_cancellation::ZipRequestRegistry,
-    /// Serializes multi-file AgentSession patch commits within this service.
-    /// Individual file operations remain independently usable by the UI, but
-    /// one patch must not interleave with another patch's prepare/commit
-    /// sequence.
-    agent_patch_lock: Arc<tokio::sync::Mutex<()>>,
 }
+
+// Different Sessions may address the same native file from different default
+// directories. Keep canonical file mutations coordinated across FileService
+// instances; this is an in-process operation lock, not a permission ledger.
+static NATIVE_FILE_MUTATIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 impl FileService {
     pub fn new(user_events: Arc<dyn UserEventSink>, allowed_roots: Vec<std::path::PathBuf>) -> Self {
@@ -264,20 +285,18 @@ impl FileService {
             allowed_roots,
             workspace_files_cache: inventory.entries,
             zip_requests: crate::zip_cancellation::ZipRequestRegistry::default(),
-            agent_patch_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
-    /// Read a workspace-relative file through an explicit AgentSession
-    /// resource binding. The host supplies the resolved native workspace root;
-    /// Use the same confined, 8 MiB reader as the Agent text/image tool paths.
+    /// Read a native absolute or Session-relative file through the canonical
+    /// resource owner, using the same bounded reader as text/image tools.
     pub async fn read_file_for_agent_session(
         &self,
         scope: &AgentSessionWorkspaceBinding,
         relative_path: &str,
     ) -> Result<Option<String>, AppError> {
         scope.require_operation(crate::resource::READ_OPERATION)?;
-        let path = scope.resolve_relative_path(relative_path)?;
+        let path = scope.resolve_path(relative_path)?;
         let authority = scope.authority();
         tokio::task::spawn_blocking(move || {
             crate::agent_text_read::read_source(&path,&authority,MAX_AGENT_PATCH_FILE_BYTES,&mut 0)
@@ -300,7 +319,7 @@ impl FileService {
         relative_path: &str,
     ) -> Result<FileMetadata, AppError> {
         scope.require_operation(crate::resource::READ_OPERATION)?;
-        let path = scope.resolve_relative_path(relative_path)?;
+        let path = scope.resolve_path(relative_path)?;
         self.get_file_metadata_impl(&path.to_string_lossy(), &scope.authority())
             .await
     }
@@ -327,14 +346,16 @@ impl FileService {
         if data.len() > MAX_AGENT_PATCH_FILE_BYTES {
             return Err(AppError::BadRequest("workspace write exceeds the 8 MiB byte limit".into()));
         }
-        let path = scope.resolve_relative_path(relative_path)?;
-        let prepared_parent = crate::workspace_write::prepare_parent(&path, scope.workspace_root())?;
+        let _mutation_guard = NATIVE_FILE_MUTATIONS.lock().await;
+        let path = scope.resolve_path(relative_path)?;
+        let prepared_parent = crate::workspace_write::prepare_global_parent(&path)?;
         let path = prepared_parent.as_path().to_path_buf();
         let path_owned = path.clone();
         let data_owned = data.to_vec();
         let result = tokio::task::spawn_blocking(move || {
             // Keep the directory handles alive if this future is cancelled;
             // the blocking owner still must finish publication and cleanup.
+            let _native_guard = _mutation_guard;
             let parent_guard = prepared_parent;
             #[cfg(unix)]
             let existed = {
@@ -367,6 +388,7 @@ impl FileService {
         self.observe_file_publication(scope.owner_id(), &path, data, &scope.workspace_root().to_string_lossy(), &result);
         result.map(|created| AgentSessionWriteResult {
             created,
+            native_path: path.to_string_lossy().into_owned(),
             workspace_path: crate::WorkspacePathObservation::from_canonical(scope.workspace_root(), &path),
         }).map_err(file_write_publication_error)
     }
@@ -384,25 +406,19 @@ impl FileService {
         scope: &AgentSessionWorkspaceBinding,
         relative_path: &str,
     ) -> Result<Option<crate::WorkspacePathObservation>, AppError> {
+        self.remove_entry_with_receipt_for_agent_session(scope, relative_path).await.map(|result| result.workspace_path)
+    }
+
+    pub async fn remove_entry_with_receipt_for_agent_session(
+        &self, scope: &AgentSessionWorkspaceBinding, relative_path: &str,
+    ) -> Result<AgentSessionDeleteResult, AppError> {
         scope.require_operation(crate::resource::DELETE_OPERATION)?;
         if relative_path.is_empty() {
-            return Err(AppError::BadRequest("cannot delete the bound workspace root".into()));
+            return Err(AppError::BadRequest("deletion requires an explicit path".into()));
         }
-        let path = scope.resolve_relative_path(relative_path)?;
-        // Inspect the requested entry before canonicalization. Resolving a
-        // final symlink/junction and deleting its target changes the operation.
-        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
-            let message = format!("cannot inspect workspace deletion target: {error}");
-            if error.kind() == std::io::ErrorKind::NotFound {
-                AppError::NotFound(message)
-            } else {
-                AppError::Internal(message)
-            }
-        })?;
-        if metadata.file_type().is_symlink() {
-            return Err(AppError::Forbidden("workspace deletion does not follow symbolic links or junctions".into()));
-        }
-        let canonical = validate_path_authority(&path.to_string_lossy(), &scope.authority())?;
+        let _mutation_guard = NATIVE_FILE_MUTATIONS.lock().await;
+        let path = scope.resolve_path(relative_path)?;
+        let canonical = crate::path_safety::canonical_entry(&path)?;
         let observation = crate::WorkspacePathObservation::from_canonical(scope.workspace_root(), &canonical);
         let workspace = scope.workspace_root().to_string_lossy();
         self.remove_entry_impl(
@@ -410,21 +426,43 @@ impl FileService {
             &canonical.to_string_lossy(),
             &workspace,
             &scope.authority(),
+            Some(_mutation_guard),
         )
         .await?;
-        Ok(observation)
+        Ok(AgentSessionDeleteResult { native_path: canonical.to_string_lossy().into_owned(), workspace_path: observation })
     }
 
+    /// Move a native entry without overwriting an existing destination. A final
+    /// source link is moved itself; content operations follow it instead.
     pub async fn rename_entry_for_agent_session(
-        &self,
-        scope: &AgentSessionWorkspaceBinding,
-        relative_path: &str,
-        new_name: &str,
+        &self, scope: &AgentSessionWorkspaceBinding, path: &str, destination: &str,
     ) -> Result<String, AppError> {
+        self.rename_entry_with_observation_for_agent_session(scope, path, destination).await.map(|result| result.destination)
+    }
+
+    pub async fn rename_entry_with_observation_for_agent_session(
+        &self, scope: &AgentSessionWorkspaceBinding, path: &str, destination: &str,
+    ) -> Result<AgentSessionRenameResult, AppError> {
         scope.require_operation(crate::resource::WRITE_OPERATION)?;
-        let path = scope.resolve_relative_path(relative_path)?;
-        self.rename_entry_impl(&path.to_string_lossy(), new_name, &scope.authority())
-            .await
+        if path.is_empty() || destination.is_empty() { return Err(AppError::BadRequest("rename requires explicit source and destination paths".into())); }
+        let _mutation_guard = NATIVE_FILE_MUTATIONS.lock().await;
+        let source = crate::path_safety::canonical_entry(&scope.resolve_path(path)?)?;
+        let destination = validate_path_for_write_authority(&scope.resolve_path(destination)?.to_string_lossy(), &scope.authority())?;
+        let is_file = std::fs::symlink_metadata(&source).map_err(|error| crate::path_safety::native_io_error("inspecting native rename source", error))?.is_file();
+        let old_path = source.clone();
+        let new_path = destination.clone();
+        let renamed = tokio::task::spawn_blocking(move || {
+            let _native_guard = _mutation_guard;
+            rename_path_sync(&source, &destination)
+        })
+            .await.map_err(|error| AppError::Internal(format!("{FILE_RENAME_OUTCOME_UNKNOWN}; rename task stopped: {error}; inspect both paths before retry")))?;
+        self.invalidate_caches_for_path(&old_path);
+        self.invalidate_caches_for_path(&new_path);
+        renamed.map(|path| AgentSessionRenameResult {
+            source: old_path.to_string_lossy().into_owned(), destination: path.to_string_lossy().into_owned(),
+            source_workspace_path: is_file.then(|| crate::WorkspacePathObservation::from_canonical(scope.workspace_root(), &old_path)).flatten(),
+            destination_workspace_path: is_file.then(|| crate::WorkspacePathObservation::from_canonical(scope.workspace_root(), &path)).flatten(),
+        })
     }
 
     /// Apply a bounded, typed patch under an AgentSession workspace binding.
@@ -460,17 +498,15 @@ impl FileService {
         request: AgentSessionPatchRequest,
         mut after_publication: impl FnMut(usize),
     ) -> Result<AgentSessionPatchResult, AgentSessionPatchFailure> {
-        let _patch_guard = self.agent_patch_lock.lock().await;
+        let _patch_guard = NATIVE_FILE_MUTATIONS.lock().await;
         scope.require_operation(crate::resource::WRITE_OPERATION)?;
         validate_agent_patch_request_shape(&request)?;
 
         let authority = scope.authority();
-        let workspace_root = std::fs::canonicalize(scope.workspace_root()).map_err(|error| {
-            AppError::BadRequest(format!(
-                "cannot resolve bound workspace '{}': {error}",
-                scope.workspace_root().display()
-            ))
-        })?;
+        // The default directory is only a project label here. A deleted or
+        // inaccessible default must not disable an absolute native target.
+        let workspace_root = std::fs::canonicalize(scope.workspace_root())
+            .unwrap_or_else(|_| scope.workspace_root().to_path_buf());
         let mut prepared = Vec::with_capacity(request.files.len());
         let mut seen_paths: HashSet<PathBuf> = HashSet::with_capacity(request.files.len());
         let mut total_before = 0_u64;
@@ -479,7 +515,7 @@ impl FileService {
         for (index, file_patch) in request.files.iter().enumerate() {
             let (path, existed) = validate_agent_patch_target(scope, &file_patch.path, &authority)?;
             for previous in &seen_paths {
-                if crate::path_safety::patch_targets_overlap(&workspace_root, previous, &path)? {
+                if crate::path_safety::global_patch_targets_overlap(previous, &path)? {
                     return Err(AppError::BadRequest(format!(
                         "agent patch contains duplicate or nested file target '{}'",
                         file_patch.path
@@ -563,12 +599,7 @@ impl FileService {
                 )).into());
             }
 
-            let relative_path = rel_to_api_string(path.strip_prefix(&workspace_root).map_err(|_| {
-                AppError::Forbidden(format!(
-                    "patch target '{}' is outside the bound workspace",
-                    file_patch.path
-                ))
-            })?);
+            let relative_path = crate::path_safety::session_path_label(&workspace_root, &path)?;
 
             prepared.push(PreparedAgentPatchFile {
                 path,
@@ -786,10 +817,7 @@ impl FileService {
                 path
             )).into());
         }
-        let prepared_parent = match authority {
-            PathAuthority::Workspace(root) => Some(crate::workspace_write::prepare_parent(&file.path, root)?),
-            _ => None,
-        };
+        let prepared_parent = Some(crate::workspace_write::prepare_global_parent(&file.path)?);
         let canonical = match &prepared_parent {
             Some(parent) => parent.as_path().to_path_buf(),
             None => validate_path_for_write_authority(&path, authority)?,
@@ -859,6 +887,9 @@ impl FileService {
     fn emit_content_observation(&self, owner_id: &str, canonical: &Path, content: Option<String>, workspace: &str) {
         self.invalidate_caches_for_path(canonical);
         let workspace_path = Path::new(workspace);
+        if !std::fs::canonicalize(workspace_path).is_ok_and(|root| canonical.starts_with(root)) {
+            return;
+        }
         let relative_path = rel_to_api_string(
             canonical
                 .strip_prefix(
@@ -1128,6 +1159,7 @@ impl FileService {
         path: &str,
         workspace: &str,
         authority: &PathAuthority,
+        mutation_guard: Option<tokio::sync::MutexGuard<'static, ()>>,
     ) -> Result<(), AppError> {
         if has_traversal(path) {
             return Err(AppError::BadRequest(format!(
@@ -1136,13 +1168,16 @@ impl FileService {
             )));
         }
 
-        let canonical = validate_path_authority(path, authority)?;
+        let canonical = if matches!(authority, PathAuthority::Unrestricted) {
+            crate::path_safety::canonical_entry(Path::new(path))?
+        } else { validate_path_authority(path, authority)? };
 
         let path_owned = canonical.clone();
         let delete_authority = authority.clone();
-        let removed = tokio::task::spawn_blocking(move || remove_entry_scoped_sync_with_hooks(
-            &path_owned, &delete_authority, || {}, || {},
-        ))
+        let removed = tokio::task::spawn_blocking(move || {
+            let _native_guard = mutation_guard;
+            remove_entry_scoped_sync_with_hooks(&path_owned, &delete_authority, || {}, || {})
+        })
             .await
             .map_err(|e| AppError::Internal(format!(
                 "{FILE_DELETE_OUTCOME_UNKNOWN}; removal task stopped: {e}; inspect the remaining tree before retry"
@@ -1158,6 +1193,9 @@ impl FileService {
         self.invalidate_caches_for_path(&canonical);
 
         let workspace_path = Path::new(workspace);
+        if !std::fs::canonicalize(workspace_path).is_ok_and(|root| canonical.starts_with(root)) {
+            return Ok(());
+        }
         let relative_path = rel_to_api_string(
             canonical
                 .strip_prefix(std::fs::canonicalize(workspace_path).unwrap_or_else(|_| workspace_path.to_path_buf()))
@@ -1254,7 +1292,7 @@ fn validate_agent_patch_request_shape(request: &AgentSessionPatchRequest) -> Res
     let mut total_patch_text = 0_usize;
     for file in &request.files {
         file.expected_source.validate()?;
-        if file.path.trim().is_empty() {
+        if file.path.is_empty() {
             return Err(AppError::BadRequest(
                 "agent patch file path must not be empty".to_owned(),
             ));
@@ -1341,13 +1379,11 @@ fn validate_agent_patch_target(
     relative_path: &str,
     authority: &PathAuthority,
 ) -> Result<(PathBuf, bool), AppError> {
-    let candidate = scope.resolve_relative_path(relative_path)?;
-    let candidate_string = candidate.to_string_lossy();
-    let write_candidate = crate::workspace_write::validate_target(&candidate, scope.workspace_root())?;
+    let candidate = scope.resolve_path(relative_path)?;
+    let write_candidate = crate::workspace_write::validate_global_target(&candidate)?;
 
-    // A final symlink is rejected instead of being followed. The parent was
-    // canonicalized by the write validator, but following a final symlink
-    // would otherwise let a bound write land outside the workspace.
+    // Native content semantics resolve a final link in validate_global_target.
+    // Reject a subsequent link swap of that resolved target before publication.
     match std::fs::symlink_metadata(&write_candidate) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() {
@@ -1362,7 +1398,7 @@ fn validate_agent_patch_target(
                     relative_path
                 )));
             }
-            let canonical = validate_path_authority(&candidate_string, authority)?;
+            let canonical = validate_path_authority(&write_candidate.to_string_lossy(), authority)?;
             Ok((canonical, true))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((write_candidate, false)),
@@ -2662,28 +2698,56 @@ fn remove_entry_sync_with_hook(path: &Path, after_open: impl FnOnce()) -> Result
 
 /// Rename a file or directory synchronously. Returns the new absolute path.
 fn rename_entry_sync(path: &Path, new_name: &str) -> Result<PathBuf, AppError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| AppError::BadRequest(format!("path '{}' has no parent", path.display())))?;
+    let parent = path.parent().ok_or_else(|| AppError::BadRequest("rename entry has no parent".into()))?;
+    rename_path_sync(path, &parent.join(new_name))
+}
 
-    let new_path = parent.join(new_name);
-
-    if new_path.exists() {
-        return Err(AppError::BadRequest(format!(
-            "target '{}' already exists",
-            new_path.display()
-        )));
+fn rename_path_sync(path: &Path, new_path: &Path) -> Result<PathBuf, AppError> {
+    // A dangling destination link is an existing entry too.
+    match std::fs::symlink_metadata(new_path) {
+        Ok(_) => return Err(AppError::BadRequest(format!("target '{}' already exists", new_path.display()))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => return Err(crate::path_safety::native_io_error("inspecting rename destination", error)),
     }
-
-    std::fs::rename(path, &new_path).map_err(|e| {
-        AppError::Internal(format!(
-            "cannot rename '{}' to '{}': {e}",
-            path.display(),
-            new_path.display()
-        ))
-    })?;
-
-    Ok(new_path)
+    #[cfg(unix)]
+    {
+        let pin = |path: &Path| -> Result<crate::workspace_write::PreparedParent, AppError> {
+            let parent = path.parent().ok_or_else(|| AppError::BadRequest("rename entry has no parent".into()))?;
+            crate::workspace_write::prepare_global_parent(&parent.join(format!(".nomifun-rename-{}", nomifun_common::generate_id())))
+        };
+        use std::os::unix::fs::MetadataExt as _;
+        let source_parent = pin(path)?;
+        let destination_parent = pin(new_path)?;
+        source_parent.verify()?;
+        destination_parent.verify()?;
+        let name = |path: &Path| path.file_name().map(std::ffi::OsStr::to_owned)
+            .ok_or_else(|| AppError::BadRequest("rename requires a named entry".into()));
+        let before = source_parent.directory().symlink_metadata(name(path)?)
+            .map_err(|error| crate::path_safety::native_io_error("inspecting pinned rename source", error))?;
+        crate::unix_publication::rename_between_noreplace(source_parent.directory(), &name(path)?, destination_parent.directory(), &name(new_path)?)
+            .map_err(|error| crate::path_safety::native_io_error("renaming native entry", error))?;
+        let after = std::fs::symlink_metadata(new_path).map_err(|error| AppError::Internal(format!("{FILE_RENAME_OUTCOME_UNKNOWN}; cannot verify renamed entry: {error}")))?;
+        use cap_std::fs::MetadataExt as _;
+        if (before.dev(), before.ino()) != (after.dev(), after.ino()) {
+            return Err(AppError::Internal(format!("{FILE_RENAME_OUTCOME_UNKNOWN}; renamed entry identity changed; inspect both paths before retry")));
+        }
+        source_parent.verify().and_then(|()| destination_parent.verify()).map_err(|error| AppError::Internal(format!(
+            "{FILE_RENAME_OUTCOME_UNKNOWN}; rename completed but its namespace changed: {error}; inspect both paths before retry")))?;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+        let source = path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
+        let destination = new_path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
+        // No MOVEFILE_REPLACE_EXISTING: a concurrent destination is retained
+        // by the native atomic rename rather than overwritten after our check.
+        // SAFETY: both NUL-terminated UTF-16 buffers remain live for this call.
+        let moved = unsafe { windows_sys::Win32::Storage::FileSystem::MoveFileExW(source.as_ptr(), destination.as_ptr(), 0) };
+        if moved == 0 { return Err(crate::path_safety::native_io_error("renaming native entry", std::io::Error::last_os_error())); }
+    }
+    #[cfg(all(not(unix), not(windows)))]
+    return Err(AppError::Internal("atomic native rename is unavailable on this host".into()));
+    Ok(new_path.to_owned())
 }
 
 /// Copy a single file, creating parent directories as needed.
@@ -3038,7 +3102,7 @@ impl crate::traits::IFileService for FileService {
     }
 
     async fn remove_entry(&self, owner_id: &str, path: &str, workspace: &str) -> Result<(), AppError> {
-        self.remove_entry_impl(owner_id, path, workspace, &self.base_authority(None))
+        self.remove_entry_impl(owner_id, path, workspace, &self.base_authority(None), None)
             .await
     }
 
@@ -3049,7 +3113,7 @@ impl crate::traits::IFileService for FileService {
         workspace: &str,
         authority: &PathAuthority,
     ) -> Result<(), AppError> {
-        self.remove_entry_impl(owner_id, path, workspace, authority).await
+        self.remove_entry_impl(owner_id, path, workspace, authority, None).await
     }
 
     async fn rename_entry(&self, path: &str, new_name: &str) -> Result<String, AppError> {
@@ -4714,7 +4778,7 @@ mod tests {
             fs::write(inside.join("value.txt"),b"original").unwrap();
             fs::write(outside.join("value.txt"),b"original").unwrap();
         }
-        let prepared=crate::workspace_write::prepare_parent(&inside.join("value.txt"),&root).unwrap();
+        let prepared=crate::workspace_write::prepare_global_parent(&inside.join("value.txt")).unwrap();
         let redirected=match fs::rename(&inside,&retained) {
             Ok(())=>{ junction::create(&outside,&inside).unwrap(); true },
             Err(error)=>{ assert!(matches!(error.raw_os_error(),Some(5 | 32)),"{error:?}"); false },
@@ -4995,7 +5059,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn agent_write_rejects_escape_links_but_preserves_in_root_links() {
+    async fn agent_write_follows_existing_links_and_rejects_dangling_links() {
         let workspace = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let secret = outside.path().join("outside.txt");
@@ -5005,7 +5069,7 @@ mod tests {
         let svc = make_service();
         let scope = patch_scope(workspace.path());
         for (name, target, allowed) in [
-            ("escape", secret.clone(), false),
+            ("escape", secret.clone(), true),
             ("dangling", outside.path().join("new.txt"), false),
             ("local", inside.clone(), true),
         ] {
@@ -5013,7 +5077,7 @@ mod tests {
             let result = svc.write_file_for_agent_session(&scope, name, b"changed").await;
             assert_eq!(result.is_ok(), allowed, "{name}: {result:?}");
         }
-        assert_eq!(fs::read(&secret).unwrap(), b"outside");
+        assert_eq!(fs::read(&secret).unwrap(), b"changed");
         assert!(!outside.path().join("new.txt").exists());
         assert_eq!(fs::read(&inside).unwrap(), b"changed");
         // The trusted local-owner authority still has OS-user access.
@@ -6767,7 +6831,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_search_accepts_root_spellings_without_broadening_mutation_paths() {
+    async fn agent_search_accepts_native_paths_and_root_spellings() {
         let root = tempfile::tempdir().unwrap();
         fs::write(root.path().join("game.html"), "五子棋 needle").unwrap();
         let svc = make_service();
@@ -6779,12 +6843,16 @@ mod tests {
             assert_eq!(result.matches.len(), 1);
             assert_eq!(result.matches[0].path, "game.html");
         }
-        for path in ["..", "../outside", "./game.html", ".nomifun"] {
+        for path in ["bad\0path", "missing-file"] {
             assert!(svc.search_text_for_agent_session(&scope, crate::AgentTextSearchRequest {
                 query: "needle".into(), path: Some(path.into()), limit: None,
             }).await.is_err());
         }
-        assert!(scope.resolve_relative_path(".").is_err());
+        let result = svc.search_text_for_agent_session(&scope, crate::AgentTextSearchRequest {
+            query: "needle".into(), path: Some("./game.html".into()), limit: None,
+        }).await.unwrap();
+        assert_eq!(result.matches.len(), 1);
+        assert!(scope.resolve_path(".").is_ok());
     }
 
     fn nested_creation_patch(path: &str) -> AgentSessionFilePatch {
@@ -6821,12 +6889,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_nested_creation_preserves_invalid_parents_and_workspace_boundaries() {
+    async fn agent_nested_creation_preserves_invalid_parents() {
         let root = tempfile::tempdir().unwrap();
         let svc = make_service();
         let scope = patch_scope(root.path());
         fs::write(root.path().join("existing"), "keep").unwrap();
-        for path in ["existing/nested/index.html", ".nomifun/new/index.html", "../escape/index.html"] {
+        for path in ["existing/nested/index.html", "bad\0path"] {
             assert!(svc.write_file_for_agent_session(&scope, path, b"wrong").await.is_err());
             assert!(svc.apply_patch_for_agent_session(&scope,
                 AgentSessionPatchRequest { files: vec![nested_creation_patch(path)] }).await.is_err());
@@ -6854,7 +6922,7 @@ mod tests {
 
     #[cfg(any(unix, windows))]
     #[tokio::test]
-    async fn agent_nested_creation_rejects_outside_and_owner_aliases() {
+    async fn agent_nested_creation_follows_native_directory_aliases() {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join(".nomifun")).unwrap();
@@ -6862,8 +6930,8 @@ mod tests {
         let svc = make_service();
         let scope = patch_scope(root.path());
         for (alias, destination, allowed) in [
-            ("outside-alias", outside.path().to_path_buf(), false),
-            ("owner-alias", root.path().join(".nomifun"), false),
+            ("outside-alias", outside.path().to_path_buf(), true),
+            ("owner-alias", root.path().join(".nomifun"), true),
             ("inside-alias", root.path().join("inside"), true),
         ] {
             #[cfg(windows)]
@@ -6895,13 +6963,13 @@ mod tests {
         .unwrap()
     }
 
-    async fn assert_owner_alias_is_not_agent_accessible(root: &std::path::Path) {
+    async fn assert_owner_alias_is_native_accessible(root: &std::path::Path) {
         let svc = make_service();
         let scope = patch_scope(root);
         assert!(
             svc.read_file_for_agent_session(&scope, "alias/artifacts/receipt")
                 .await
-                .is_err()
+                .is_ok()
         );
         assert!(
             svc.write_file_for_agent_session(
@@ -6910,9 +6978,9 @@ mod tests {
                 b"attacker",
             )
             .await
-            .is_err()
+            .is_ok()
         );
-        assert!(!root.join(".nomifun/artifacts/replacement").exists());
+        assert!(root.join(".nomifun/artifacts/replacement").exists());
         assert_eq!(
             std::fs::read_to_string(root.join(".nomifun/artifacts/receipt")).unwrap(),
             "owned"
@@ -6921,22 +6989,22 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn agent_file_owner_rejects_symlink_alias_into_nomifun() {
+    async fn agent_native_file_paths_follow_symlink_alias() {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join(".nomifun/artifacts")).unwrap();
         std::fs::write(root.path().join(".nomifun/artifacts/receipt"), "owned").unwrap();
         std::os::unix::fs::symlink(".nomifun", root.path().join("alias")).unwrap();
-        assert_owner_alias_is_not_agent_accessible(root.path()).await;
+        assert_owner_alias_is_native_accessible(root.path()).await;
     }
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn agent_file_owner_rejects_junction_alias_into_nomifun() {
+    async fn agent_native_file_paths_follow_junction_alias() {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join(".nomifun/artifacts")).unwrap();
         std::fs::write(root.path().join(".nomifun/artifacts/receipt"), "owned").unwrap();
         junction::create(root.path().join(".nomifun"), root.path().join("alias")).unwrap();
-        assert_owner_alias_is_not_agent_accessible(root.path()).await;
+        assert_owner_alias_is_native_accessible(root.path()).await;
     }
 
     fn replace_hunk(
@@ -7210,49 +7278,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_patch_rejects_traversal_without_touching_workspace_or_outside() {
-        let workspace = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let outside_file = outside.path().join("outside.txt");
-        fs::write(&outside_file, "secret\n").unwrap();
+    async fn agent_patch_accepts_parent_relative_sibling_target() {
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(fixture.path().join("outside.txt"), "secret\n").unwrap();
         let svc = make_service();
-        let scope = patch_scope(workspace.path());
-
-        let error = svc
-            .apply_patch_for_agent_session(
-                &scope,
-                AgentSessionPatchRequest {
-                    files: vec![AgentSessionFilePatch {
-                        path: format!("../{}", outside_file.file_name().unwrap().to_string_lossy()),
-                        expected_source: Default::default(),
-                        hunks: vec![replace_hunk(
-                            1,
-                            1,
-                            1,
-                            1,
-                            vec![
-                                AgentSessionPatchLine::Remove {
-                                    text: "secret".into(),
-                                },
-                                AgentSessionPatchLine::Add {
-                                    text: "escaped".into(),
-                                },
-                            ],
-                        )],
-                    }],
-                },
-            )
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, AppError::BadRequest(_)));
-        assert_eq!(fs::read_to_string(outside_file).unwrap(), "secret\n");
-        assert_eq!(fs::read_dir(workspace.path()).unwrap().count(), 0);
+        let scope = patch_scope(&workspace);
+        let result = svc.apply_patch_for_agent_session(&scope, AgentSessionPatchRequest {
+            files: vec![AgentSessionFilePatch {
+                path: "../outside.txt".into(), expected_source: Default::default(),
+                hunks: vec![replace_hunk(1, 1, 1, 1, vec![
+                    AgentSessionPatchLine::Remove { text: "secret".into() },
+                    AgentSessionPatchLine::Add { text: "changed".into() },
+                ])],
+            }],
+        }).await.unwrap();
+        assert_eq!(fs::read_to_string(fixture.path().join("outside.txt")).unwrap(), "changed\n");
+        assert!(result.files[0].workspace_path.is_none());
+        assert!(Path::new(&result.files[0].path).is_absolute());
+        assert_eq!(fs::read_dir(workspace).unwrap().count(), 0);
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn agent_patch_rejects_a_final_symlink_target() {
+    async fn agent_patch_follows_final_symlink_and_preserves_the_link() {
         let workspace = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let outside_file = outside.path().join("outside.txt");
@@ -7261,7 +7311,7 @@ mod tests {
         let svc = make_service();
         let scope = patch_scope(workspace.path());
 
-        let error = svc
+        let result = svc
             .apply_patch_for_agent_session(
                 &scope,
                 AgentSessionPatchRequest {
@@ -7282,9 +7332,10 @@ mod tests {
                 },
             )
             .await
-            .unwrap_err();
-        assert!(matches!(error, AppError::Forbidden(_)));
-        assert_eq!(fs::read_to_string(outside_file).unwrap(), "secret\n");
+            .unwrap();
+        assert!(result.files[0].workspace_path.is_none());
+        assert!(fs::symlink_metadata(workspace.path().join("link.txt")).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(outside_file).unwrap(), "escaped\n");
     }
 
     #[tokio::test]

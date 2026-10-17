@@ -6,7 +6,7 @@ async fn component_preparation_rejections_do_not_dispatch_user_processes() {
     for (input, code) in [
         (serde_json::json!({"component":"unknown-component"}), "COMPONENT_NOT_DECLARED"),
         (serde_json::json!({"component":"officecli","env":{"OFFICECLI_NO_AUTO_RESIDENT":"conflicting-value"}}), "COMPONENT_ENVIRONMENT_CONFLICT"),
-        (serde_json::json!({"component":"officecli","cwd":"../outside"}), "INVALID_PAYLOAD"),
+        (serde_json::json!({"component":"officecli","cwd":"invalid\0directory"}), "INVALID_PAYLOAD"),
     ] {
         let observation = scope.invoke(StrictJsonValue(input), code).await.unwrap().0;
         assert_eq!(observation["schema"], "nomifun.process-start-observation.v1");
@@ -25,7 +25,7 @@ async fn component_preparation_rejections_do_not_dispatch_user_processes() {
 #[test]
 fn component_error_classification_does_not_change_ordinary_bun_errors() {
     let unavailable = nomifun_runtime::ToolError::Unavailable { tool:"bun", override_variable:"NOMIFUN_BUN_PATH" };
-    assert_eq!(runtime_resolution_error(&unavailable).code, "COMPONENT_PREPARATION_REQUIRED");
+    assert_eq!(runtime_resolution_error(&unavailable).code, "COMPONENT_UNAVAILABLE");
     assert_eq!(component_resolution_error(nomifun_runtime::ToolId::Bun, &unavailable).code, "COMPONENT_UNAVAILABLE");
     let invalid = nomifun_runtime::ToolError::Verification { tool:"officecli", reason:"api_key=example-private-token".into() };
     let component = component_resolution_error(nomifun_runtime::ToolId::OfficeCli, &invalid);

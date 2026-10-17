@@ -1213,7 +1213,6 @@ async fn relay_pairing_bootstrap(
     manager: tauri::State<'_, Arc<relay_pairing::RelayPairingManager>>,
     server: tauri::State<'_, Arc<DesktopServer>>,
     pairing_envelope: String,
-    allow_runtime_download: Option<bool>,
 ) -> Result<relay_pairing::RelayPairingStatus, String> {
     manager
         .inner()
@@ -1221,7 +1220,6 @@ async fn relay_pairing_bootstrap(
         .bootstrap(
             server.inner().clone(),
             &pairing_envelope,
-            allow_runtime_download.unwrap_or(false),
         )
         .await
         .map_err(|error| format!("{error:#}"))
@@ -1232,12 +1230,11 @@ async fn relay_pairing_bootstrap(
 async fn relay_pairing_restart(
     manager: tauri::State<'_, Arc<relay_pairing::RelayPairingManager>>,
     server: tauri::State<'_, Arc<DesktopServer>>,
-    allow_runtime_download: Option<bool>,
 ) -> Result<relay_pairing::RelayPairingStatus, String> {
     manager
         .inner()
         .clone()
-        .restart(server.inner().clone(), allow_runtime_download.unwrap_or(false))
+        .restart(server.inner().clone())
         .await
         .map_err(|error| format!("{error:#}"))
 }
@@ -3266,6 +3263,18 @@ fn reconcile_companion_windows(
 }
 
 fn main() -> std::process::ExitCode {
+    // Remove the native daemon registration from its own signed App identity
+    // before uninstalling the bundle. Ordinary startup never unregisters it.
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().skip(1).eq([std::ffi::OsString::from("--unregister-system-execution")]) {
+        return match nomi_system_execution::SystemExecutionClient::unregister() {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{}: {}", error.code, error.message);
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
     #[cfg(windows)]
     if let Some(code)=browser_surface::windows::user_file_picker::helper_entry() {return code;}
     // If a terminal agent CLI spawned this shell as an MCP stdio bridge

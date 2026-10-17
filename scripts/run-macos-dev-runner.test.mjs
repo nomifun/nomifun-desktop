@@ -386,6 +386,10 @@ describe('complete development app cache', () => {
         outDir: root,
         environment: { NOMIFUN_MACOS_DEV_SIGN_IDENTITY: 'Apple Development: Fast Fixture (TEAMFIXTURE)' },
         target: 'x86_64-apple-darwin',
+        installSystemExecution: async ({ appPath, target }) => {
+          expect(appPath).not.toBe(original);
+          expect(target).toBe('x86_64-apple-darwin');
+        },
         sign: async ({ appPath, identity, target }) => {
           // Simulate Cargo watch and a later bundler replacing raw outputs
           // while signing this immutable generation.

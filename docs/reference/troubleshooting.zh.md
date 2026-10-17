@@ -66,14 +66,11 @@ nomicore tool-doctor
 不打开数据库、不下载 Node/Bun。Web 宿主可执行文件不提供这些子命令；
 诊断 binary 可用 `cargo build --release -p nomifun-app --bin nomicore` 构建。
 
-发布构建内嵌 OfficeCLI。命令优先系统 Bun/`bunx`，再用已验证受管缓存；
-缺失组件需要用户选择下载。应用托管使用系统或配置的 Node。
+发布构建内嵌 OfficeCLI。必需的 Node/npm/npx 与 Bun/`bunx` 命令优先使用有效用户工具，缺失时自动准备批准的受管制品。Agent、Terminal、MCP 共用每次启动环境，托管应用进程也复用该环境。
 Systemd 下确认服务账号可读/执行缓存，按需设置 `SHELL`。
 详见[外部工具](../architecture/external-tools.zh.md)。
 
-NomiRelay 恢复/重启同样只复用批准的本地 `nfagent`。
-缺失或变化时需要用户明确选择下载；
-离线 `NOMIFUN_NFAGENT_PATH` 仍须符合 manifest hash。
+NomiRelay 连接、恢复与重启复用批准的本地 `nfagent`，缺失或版本变化时自动准备当前批准制品，保留进度、重试与取消。离线 `NOMIFUN_NFAGENT_PATH` 仍须符合 manifest hash。
 
 ## Office 预览
 

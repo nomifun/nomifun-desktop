@@ -73,6 +73,8 @@ nomifun-agent-domain-wave5 = { path = "crates/backend/nomifun-agent-domain-wave5
 nomifun-net = { path = "crates/shared/nomifun-net" }
 nomi-redact = { path = "crates/shared/nomi-redact" }
 nomi-process-runtime = { path = "crates/shared/nomi-process-runtime" }
+nomi-system-execution = { path = "crates/shared/nomi-system-execution" }
+nomi-native-files = { path = "crates/shared/nomi-native-files" }
 nomi-ssh = { path = "crates/shared/nomi-ssh" }
 nomifun-ssh = { path = "crates/backend/nomifun-ssh" }
 

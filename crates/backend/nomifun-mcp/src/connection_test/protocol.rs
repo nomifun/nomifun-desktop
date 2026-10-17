@@ -93,17 +93,18 @@ pub(super) fn spawn_error_result(command: &str, error: &std::io::Error) -> McpCo
             let runtime = command_runtime(command);
             error_result(
                 McpConnectionTestErrorCode::CommandNotFound,
-                command_not_found_message(command),
+                format!("Command not found: {command}: {error}"),
                 Some(serde_json::json!({
                     "command": command,
                     "runtime": runtime,
+                    "io_error": error.to_string(),
                 })),
             )
         }
         std::io::ErrorKind::PermissionDenied => error_result(
             McpConnectionTestErrorCode::CommandPermissionDenied,
-            format!("Permission denied: {command}"),
-            Some(serde_json::json!({ "command": command })),
+            format!("Permission denied: {command}: {error}"),
+            Some(serde_json::json!({ "command": command, "io_error": error.to_string() })),
         ),
         _ => error_result(
             McpConnectionTestErrorCode::CommandStartFailed,
@@ -140,26 +141,6 @@ pub(super) fn command_runtime(command: &str) -> &'static str {
         "python" | "python3" => "python",
         "deno" => "deno",
         _ => "generic",
-    }
-}
-
-fn command_not_found_message(command: &str) -> String {
-    match command_runtime(command) {
-        "node" => format!(
-            "Command not found: {command}. Install Node.js (which includes npm/npx), then restart Nomi or configure this MCP server to use an absolute command path."
-        ),
-        "uv" => format!(
-            "Command not found: {command}. Install uv, then restart Nomi or configure this MCP server to use an absolute command path."
-        ),
-        "python" => format!(
-            "Command not found: {command}. Install Python, then restart Nomi or configure this MCP server to use an absolute command path."
-        ),
-        "deno" => format!(
-            "Command not found: {command}. Install Deno, then restart Nomi or configure this MCP server to use an absolute command path."
-        ),
-        _ => format!(
-            "Command not found: {command}. Install the command or configure this MCP server to use an absolute command path."
-        ),
     }
 }
 
@@ -331,8 +312,7 @@ mod tests {
         let result = spawn_error_result("npx", &err);
         let error = result.error.as_deref().unwrap();
         assert!(error.contains("Command not found: npx"));
-        assert!(error.contains("Install Node.js"));
-        assert!(error.contains("absolute command path"));
+        assert_eq!(result.details.as_ref().unwrap()["io_error"], "not found");
         assert_eq!(
             result.code,
             Some(McpConnectionTestErrorCode::CommandNotFound)
@@ -361,8 +341,7 @@ mod tests {
         let result = spawn_error_result("missing-mcp", &err);
         let error = result.error.as_deref().unwrap();
         assert!(error.contains("Command not found: missing-mcp"));
-        assert!(error.contains("Install the command"));
-        assert!(error.contains("absolute command path"));
+        assert_eq!(result.details.as_ref().unwrap()["io_error"], "not found");
         assert_eq!(result.details.as_ref().unwrap()["runtime"], "generic");
     }
 
@@ -372,8 +351,7 @@ mod tests {
         let result = spawn_error_result("/user/configured/bunx", &err);
         let error = result.error.as_deref().unwrap();
         assert!(error.contains("Command not found: /user/configured/bunx"));
-        assert!(error.contains("Install the command"));
-        assert!(error.contains("absolute command path"));
+        assert_eq!(result.details.as_ref().unwrap()["io_error"], "not found");
         assert_eq!(result.details.as_ref().unwrap()["runtime"], "bun");
     }
 
@@ -383,7 +361,7 @@ mod tests {
         let result = spawn_error_result("uvx", &err);
         let error = result.error.as_deref().unwrap();
         assert!(error.contains("Command not found: uvx"));
-        assert!(error.contains("Install uv"));
+        assert!(error.contains("not found"));
         assert_eq!(result.details.as_ref().unwrap()["runtime"], "uv");
     }
 
@@ -393,7 +371,7 @@ mod tests {
         let result = spawn_error_result("python3", &err);
         let error = result.error.as_deref().unwrap();
         assert!(error.contains("Command not found: python3"));
-        assert!(error.contains("Install Python"));
+        assert!(error.contains("not found"));
         assert_eq!(result.details.as_ref().unwrap()["runtime"], "python");
     }
 
@@ -403,7 +381,7 @@ mod tests {
         let result = spawn_error_result("deno", &err);
         let error = result.error.as_deref().unwrap();
         assert!(error.contains("Command not found: deno"));
-        assert!(error.contains("Install Deno"));
+        assert!(error.contains("not found"));
         assert_eq!(result.details.as_ref().unwrap()["runtime"], "deno");
     }
 

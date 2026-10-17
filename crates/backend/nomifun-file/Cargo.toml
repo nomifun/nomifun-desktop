@@ -7,6 +7,7 @@ edition.workspace = true
 nomifun-api-types.workspace = true
 nomifun-auth.workspace = true
 nomifun-common.workspace = true
+nomi-native-files.workspace = true
 nomifun-realtime.workspace = true
 async-trait.workspace = true
 axum.workspace = true

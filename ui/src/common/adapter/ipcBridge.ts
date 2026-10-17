@@ -53,7 +53,6 @@ import {
   tauriRelayPairingRefreshQr,
   tauriRelayPairingStop,
   type TauriRelayPairingBootstrapRequest,
-  type TauriRelayPairingRestartRequest,
   type TauriRelayPairingStatus,
   tauriWindowClose,
   tauriWindowIsMaximized,
@@ -1939,7 +1938,7 @@ export const mcpService = {
       www_authenticate?: string;
     },
     McpConnectionTestRequest
-  >('/api/mcp/test-connection'),
+  >('/api/mcp/test-connection', undefined, { timeoutMs: 13 * 60_000 }),
   checkOAuthStatus: httpPost<{ authenticated: boolean }, { server_url: string }>('/api/mcp/oauth/check-status'),
   loginMcpOAuth: httpPost<{ success: boolean; error?: string }, { server_url: string }>('/api/mcp/oauth/login'),
   logoutMcpOAuth: httpPost<void, { server_url: string }>('/api/mcp/oauth/logout'),
@@ -2564,28 +2563,32 @@ export type SystemPermissionKind =
   | 'location'
   | 'local_network'
   | 'notifications'
+  | 'automation'
   | 'full_disk_access';
 
 export type SystemPermissionState =
   | 'granted'
   | 'denied'
   | 'not_determined'
+  | 'not_granted'
   | 'restricted'
   | 'not_required'
   | 'unknown';
 
 export interface SystemPermissionEntry {
-  kind: Extract<SystemPermissionKind, 'microphone' | 'accessibility' | 'screen_recording'>;
+  kind: SystemPermissionKind;
   state: SystemPermissionState;
   can_request: boolean;
   can_open_settings: boolean;
   requires_restart_after_grant: boolean;
-  capabilities: Array<'voice_input' | 'computer_use'>;
+  capabilities: Array<'voice_input' | 'computer_use' | 'browser_use' | 'local_files' | 'application_automation' | 'local_connections'>;
 }
 
 export interface SystemPermissionStatus {
   platform: 'macos' | 'windows' | 'linux' | 'other';
   app_label: string;
+  process_id?: number;
+  app_bundle_identifier?: string | null;
   permissions: SystemPermissionEntry[];
 }
 
@@ -2768,8 +2771,8 @@ export const relayPairing = {
     () => tauriRelayPairingStop(),
     { state: 'disconnected' }
   ),
-  restart: shellProvider<IRelayPairingStatus, TauriRelayPairingRestartRequest | void>(
-    (request) => tauriRelayPairingRestart(request),
+  restart: shellProvider<IRelayPairingStatus, void>(
+    () => tauriRelayPairingRestart(),
     { state: 'disconnected' }
   ),
   disconnect: shellProvider<IRelayPairingStatus, void>(

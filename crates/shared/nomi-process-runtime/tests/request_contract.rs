@@ -6,7 +6,7 @@ use std::{
 };
 
 use nomi_process_runtime::{
-    CapabilityPolicy, CleanupReport, CommandSpec, EncodingMetadata,
+    CleanupReport, CommandSpec, EncodingMetadata,
     ProcessOutcome, ProcessOwner, ProcessPolicy, ProcessRequest, OutputChunk, OutputCursor,
     OutputSnapshot, OutputStream, ProcessSnapshot, ProcessState, SessionId, ShellKind, SpawnFailure,
     Transport, normalize_request,
@@ -24,7 +24,6 @@ fn request(cwd: PathBuf) -> ProcessRequest {
         env: BTreeMap::new(),
         transport: Transport::Pipe,
         policy: ProcessPolicy::default(),
-        capability: CapabilityPolicy::local_owner(std::env::temp_dir()),
     }
 }
 
@@ -32,8 +31,8 @@ fn request(cwd: PathBuf) -> ProcessRequest {
 fn relative_cwd_is_anchored_and_validated() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("child")).unwrap();
-    let mut req = request(PathBuf::from("child"));
-    req.capability = CapabilityPolicy::local_owner(root.path().to_path_buf());
+    let req = request(PathBuf::from("child"));
+
     let normalized = normalize_request(req, root.path()).unwrap();
     assert_eq!(
         normalized.cwd.canonicalize().unwrap(),
@@ -44,113 +43,58 @@ fn relative_cwd_is_anchored_and_validated() {
 #[test]
 fn missing_cwd_fails_before_spawn() {
     let root = tempfile::tempdir().unwrap();
-    let mut req = request(PathBuf::from("missing"));
-    req.capability = CapabilityPolicy::local_owner(root.path().to_path_buf());
+    let req = request(PathBuf::from("missing"));
+
     let err = normalize_request(req, root.path()).unwrap_err();
     assert_eq!(err.code(), "invalid_working_directory");
 }
 
 #[test]
-fn cwd_outside_capability_root_is_denied() {
+fn absolute_cwd_outside_the_session_default_is_accepted() {
     let root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
-    let mut req = request(outside.path().to_path_buf());
-    req.capability = CapabilityPolicy::local_owner(root.path().to_path_buf());
-    let err = normalize_request(req, root.path()).unwrap_err();
-    assert_eq!(err.code(), "capability_denied");
+    let normalized = normalize_request(request(outside.path().to_path_buf()), root.path()).unwrap();
+    assert_eq!(normalized.cwd.canonicalize().unwrap(), outside.path().canonicalize().unwrap());
 }
 
 #[test]
-fn capability_roots_are_canonicalized() {
+fn parent_relative_cwd_is_resolved_from_the_session_default() {
     let root = tempfile::tempdir().unwrap();
-    std::fs::create_dir(root.path().join("child")).unwrap();
-    let mut req = request(PathBuf::from("child"));
-    req.capability = CapabilityPolicy::local_owner(root.path().join("child").join(".."));
-
-    let normalized = normalize_request(req, root.path()).unwrap();
-
-    assert_eq!(normalized.capability.cwd_roots.len(), 1);
-    assert_eq!(
-        normalized.capability.cwd_roots[0].canonicalize().unwrap(),
-        root.path().canonicalize().unwrap()
-    );
+    std::fs::create_dir(root.path().join("session")).unwrap();
+    std::fs::create_dir(root.path().join("outside 中文")).unwrap();
+    let normalized = normalize_request(request(PathBuf::from("../outside 中文")), &root.path().join("session")).unwrap();
+    assert_eq!(normalized.cwd.canonicalize().unwrap(), root.path().join("outside 中文").canonicalize().unwrap());
 }
 
 #[cfg(unix)]
 #[test]
-fn symlink_cwd_cannot_escape_its_capability_root() {
+fn symlink_cwd_may_target_outside_the_session_default() {
     let root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
-    std::os::unix::fs::symlink(outside.path(), root.path().join("linked workspace")).unwrap();
-    let mut req = request(PathBuf::from("linked workspace"));
-    req.capability = CapabilityPolicy::local_owner(root.path().to_path_buf());
-
-    let err = normalize_request(req, root.path()).unwrap_err();
-
-    assert_eq!(err.code(), "capability_denied");
-}
-
-#[cfg(unix)]
-#[test]
-fn symlink_capability_root_accepts_the_same_canonical_workspace() {
-    let root = tempfile::tempdir().unwrap();
-    let workspace = root.path().join("中文 workspace");
-    std::fs::create_dir(&workspace).unwrap();
-    let alias = root.path().join("workspace alias");
-    std::os::unix::fs::symlink(&workspace, &alias).unwrap();
-    let mut req = request(workspace.clone());
-    req.capability = CapabilityPolicy::local_owner(alias);
-
-    let normalized = normalize_request(req, root.path()).unwrap();
-
-    assert_eq!(normalized.cwd, workspace.canonicalize().unwrap());
-    assert_eq!(normalized.capability.cwd_roots, vec![normalized.cwd]);
+    std::os::unix::fs::symlink(outside.path(), root.path().join("linked directory")).unwrap();
+    let normalized = normalize_request(request(PathBuf::from("linked directory")), root.path()).unwrap();
+    assert_eq!(normalized.cwd, outside.path().canonicalize().unwrap());
 }
 
 #[cfg(windows)]
 #[test]
-fn junction_cwd_cannot_escape_its_capability_root() {
+fn junction_cwd_may_target_outside_the_session_default() {
     let root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
-    let alias = root.path().join("linked 工作区");
+    let alias = root.path().join("linked 中文");
     junction::create(outside.path(), &alias).unwrap();
-    let mut req = request(PathBuf::from("linked 工作区"));
-    req.capability = CapabilityPolicy::local_owner(root.path().to_path_buf());
-
-    let result = normalize_request(req, root.path());
+    let result = normalize_request(request(PathBuf::from("linked 中文")), root.path());
     junction::delete(&alias).unwrap();
-
-    assert_eq!(result.unwrap_err().code(), "capability_denied");
-    assert!(outside.path().is_dir(), "removing the junction must retain its target");
-}
-
-#[cfg(windows)]
-#[test]
-fn junction_capability_root_accepts_the_same_canonical_workspace() {
-    let root = tempfile::tempdir().unwrap();
-    let workspace = root.path().join("中文 workspace");
-    std::fs::create_dir(&workspace).unwrap();
-    let alias = root.path().join("workspace alias");
-    junction::create(&workspace, &alias).unwrap();
-    let mut req = request(workspace.clone());
-    req.capability = CapabilityPolicy::local_owner(alias.clone());
-
-    let result = normalize_request(req, root.path());
-    junction::delete(&alias).unwrap();
-
-    let normalized = result.unwrap();
-    let expected = workspace.canonicalize().unwrap();
-    assert_eq!(normalized.cwd.canonicalize().unwrap(), expected);
-    assert_eq!(normalized.capability.cwd_roots.len(), 1);
-    assert_eq!(normalized.capability.cwd_roots[0].canonicalize().unwrap(), expected);
+    assert_eq!(result.unwrap().cwd.canonicalize().unwrap(), outside.path().canonicalize().unwrap());
+    assert!(outside.path().is_dir());
 }
 
 #[test]
 fn non_directory_cwd_fails_before_spawn() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("file"), b"not a directory").unwrap();
-    let mut req = request(PathBuf::from("file"));
-    req.capability = CapabilityPolicy::local_owner(root.path().to_path_buf());
+    let req = request(PathBuf::from("file"));
+
 
     let err = normalize_request(req, root.path()).unwrap_err();
 
@@ -161,7 +105,7 @@ fn non_directory_cwd_fails_before_spawn() {
 fn zero_sized_pty_is_rejected() {
     let root = tempfile::tempdir().unwrap();
     let mut req = request(root.path().to_path_buf());
-    req.capability = CapabilityPolicy::local_owner(root.path().to_path_buf());
+
     req.transport = Transport::Pty { cols: 0, rows: 24 };
 
     assert!(normalize_request(req, root.path()).is_err());
@@ -171,7 +115,7 @@ fn zero_sized_pty_is_rejected() {
 fn empty_program_is_rejected() {
     let root = tempfile::tempdir().unwrap();
     let mut req = request(root.path().to_path_buf());
-    req.capability = CapabilityPolicy::local_owner(root.path().to_path_buf());
+
     req.command = CommandSpec::Program {
         program: OsString::new(),
         args: Vec::new(),
@@ -184,7 +128,7 @@ fn empty_program_is_rejected() {
 fn empty_shell_script_is_rejected() {
     let root = tempfile::tempdir().unwrap();
     let mut req = request(root.path().to_path_buf());
-    req.capability = CapabilityPolicy::local_owner(root.path().to_path_buf());
+
     req.command = CommandSpec::Shell {
         shell: ShellKind::Posix,
         script: String::new(),

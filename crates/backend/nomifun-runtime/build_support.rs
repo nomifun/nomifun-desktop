@@ -175,6 +175,7 @@ impl ComponentSpec {
                 || asset.sha256.len() != 64
                 || !asset.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
                 || !matches!(asset.format.as_str(), "raw" | "zip" | "tar.gz")
+                || (self.id == "node" && asset.format == "raw")
                 || asset.executable != expected_executable
                 || !matches!(asset.variant.as_str(), "default" | "baseline")
                 || !keys.insert((&asset.target, &asset.variant))

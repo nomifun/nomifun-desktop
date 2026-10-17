@@ -177,22 +177,12 @@ async fn test_connection(
 }
 
 fn connection_test_error_response(result: McpConnectionTestResult) -> Response {
-    let missing_runtime = result.details.as_ref()
-        .and_then(|details| details.get("owner_code"))
-        .and_then(serde_json::Value::as_str)
-        == Some("COMPONENT_PREPARATION_REQUIRED");
-    let status = if missing_runtime { StatusCode::CONFLICT } else { result
-        .code
-        .map(connection_test_failure_status)
-        .unwrap_or(StatusCode::BAD_GATEWAY) };
-    let error = result
-        .error
-        .clone()
-        .unwrap_or_else(|| "MCP connection test failed".to_string());
-    let code = if missing_runtime { "COMPONENT_PREPARATION_REQUIRED" } else { result
+    let status = result.code.map(connection_test_failure_status).unwrap_or(StatusCode::BAD_GATEWAY);
+    let error = result.error.clone().unwrap_or_else(|| "MCP connection test failed".to_owned());
+    let code = result
         .code
         .map(McpConnectionTestErrorCode::as_str)
-        .unwrap_or("MCP_CONNECTION_FAILED") };
+        .unwrap_or("MCP_CONNECTION_FAILED");
 
     (
         status,
@@ -275,21 +265,21 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn missing_runtime_response_preserves_the_download_choice_contract() {
+    async fn runtime_failure_response_preserves_real_reason_without_download_choice() {
         let result = McpConnectionTestResult {
             success: false, tools: None, error: Some("Bun is unavailable".into()),
             code: Some(McpConnectionTestErrorCode::CommandStartFailed),
             details: Some(serde_json::json!({
-                "owner_code":"COMPONENT_PREPARATION_REQUIRED", "component":"bun",
+                "owner_code":"MCP_RUNTIME_UNAVAILABLE",
                 "runtime":"bun", "phase":"runtime_resolution", "retryable":true,
             })),
             needs_auth: None, auth_method: None, www_authenticate: None,
         };
         let response = connection_test_error_response(result);
-        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(body["code"], "COMPONENT_PREPARATION_REQUIRED");
+        assert_eq!(body["code"], "MCP_COMMAND_START_FAILED");
         assert_eq!(body["details"]["runtime"], "bun");
         assert_eq!(body["details"]["phase"], "runtime_resolution");
     }

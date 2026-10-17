@@ -17,5 +17,7 @@
   <string>NomiFun shares your location with a website only after you explicitly allow the request in the built-in browser.</string>
   <key>NSLocalNetworkUsageDescription</key>
   <string>NomiFun connects to local websites, SSH hosts, companion devices, and services only when you ask it to.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>NomiFun controls other applications through macOS automation to complete the tasks you request.</string>
 </dict>
 </plist>

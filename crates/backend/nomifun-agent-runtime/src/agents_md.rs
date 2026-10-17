@@ -81,7 +81,7 @@ pub async fn load_agents_md(
     cancellation: CancellationToken,
 ) -> Result<AgentsMdContext, AgentEngineError> {
     let policy = policy.validate()?;
-    let working_directory = normalize_workspace_directory(working_directory)?;
+    let working_directory = normalize_native_instruction_path(working_directory)?;
     let candidates = agents_candidates(&working_directory, policy.max_depth)?;
     let mut context = AgentsMdContext::default();
 
@@ -143,7 +143,7 @@ pub async fn load_agents_md(
                 .push(format!("{path} exceeded the per-file context limit"));
         }
 
-        let header = format!("Instructions from {path}:\n");
+        let header = format!("Instructions from {}:\n", serde_json::to_string(&path).expect("path serializes"));
         let separator_bytes = usize::from(!context.combined.is_empty()) * 2;
         let fixed_bytes = header.len().saturating_add(separator_bytes);
         let remaining = policy
@@ -182,64 +182,50 @@ pub async fn load_agents_md(
     Ok(context)
 }
 
-pub(crate) fn normalize_workspace_directory(value: &str) -> Result<String, AgentEngineError> {
-    if value.len() > 4096 {
-        return Err(AgentEngineError::WorkspaceContext(
-            "workspace path exceeds 4096 bytes".into(),
-        ));
+/// Validate native path spelling without reading the host filesystem. Actual
+/// canonical identity belongs to the Session file owner, including links and
+/// parent components. Runtime must not impose a workspace containment policy.
+pub(crate) fn normalize_native_instruction_path(value: &str) -> Result<String, AgentEngineError> {
+    if value.len() > 4096 || value.contains('\0') {
+        return Err(AgentEngineError::WorkspaceContext("native instruction path is invalid or exceeds 4096 bytes".into()));
     }
-    let value = value.trim();
-    if value.is_empty() || value == "." {
-        return Ok(String::new());
+    if value.is_empty() || value == "." { return Ok(String::new()); }
+    let path = std::path::Path::new(value);
+    #[cfg(windows)]
+    if (path.has_root() || matches!(path.components().next(), Some(std::path::Component::Prefix(_)))) && !path.is_absolute() {
+        return Err(AgentEngineError::WorkspaceContext("use an absolute drive/UNC or Session-relative instruction path".into()));
     }
-    if value.starts_with('/')
-        || value.starts_with('\\')
-        || value.ends_with('/')
-        || value.contains('\\')
-        || value.chars().any(char::is_control)
-        || value.contains(':')
-    {
-        return Err(AgentEngineError::WorkspaceContext(
-            "working directory must be a normalized workspace-relative path".to_owned(),
-        ));
-    }
-    let segments = value.split('/').collect::<Vec<_>>();
-    if segments
-        .iter()
-        .any(|segment| segment.is_empty() || *segment == "." || *segment == "..")
-    {
-        return Err(AgentEngineError::WorkspaceContext(
-            "working directory contains an invalid path segment".to_owned(),
-        ));
-    }
-    Ok(segments.join("/"))
+    path.components().collect::<std::path::PathBuf>().to_str().map(str::to_owned)
+        .ok_or_else(|| AgentEngineError::WorkspaceContext("instruction path is not UTF-8".into()))
 }
 
-fn agents_candidates(
-    working_directory: &str,
-    max_depth: usize,
-) -> Result<Vec<String>, AgentEngineError> {
-    let segments = if working_directory.is_empty() {
-        Vec::new()
-    } else {
-        working_directory.split('/').collect::<Vec<_>>()
-    };
-    if segments.len() > max_depth {
-        return Err(AgentEngineError::WorkspaceContext(format!(
-            "working directory depth {} exceeds the AGENTS.md limit {max_depth}",
-            segments.len()
-        )));
+pub(crate) fn parent_directory(path: &str) -> String {
+    std::path::Path::new(path).parent().and_then(std::path::Path::to_str).unwrap_or("").to_owned()
+}
+
+/// Project-relative scopes are relative only to the Session default directory.
+/// Absolute native scopes have their own ancestry and never inherit the
+/// project's root instruction merely because its relative label is empty.
+pub(crate) fn path_in_scope(path: &str, root: &str) -> bool {
+    let path = std::path::Path::new(path);
+    let root = std::path::Path::new(root);
+    path.is_absolute() == root.is_absolute() && path.starts_with(root)
+}
+
+fn agents_candidates(working_directory: &str, max_depth: usize) -> Result<Vec<String>, AgentEngineError> {
+    let directory = std::path::Path::new(working_directory);
+    let mut ancestors = directory.ancestors().collect::<Vec<_>>();
+    // Empty Session-relative scope is still the project default root.
+    if ancestors.is_empty() { ancestors.push(std::path::Path::new("")); }
+    if ancestors.len().saturating_sub(1) > max_depth {
+        return Err(AgentEngineError::WorkspaceContext(format!("instruction path depth exceeds the AGENTS.md limit {max_depth}")));
     }
-    let mut candidates = vec!["AGENTS.md".to_owned()];
-    let mut prefix = String::new();
-    for segment in segments {
-        if !prefix.is_empty() {
-            prefix.push('/');
-        }
-        prefix.push_str(segment);
-        candidates.push(format!("{prefix}/AGENTS.md"));
+    ancestors.reverse();
+    if directory.components().any(|component| matches!(component, std::path::Component::ParentDir)) {
+        ancestors.retain(|ancestor| !ancestor.as_os_str().is_empty());
     }
-    Ok(candidates)
+    ancestors.into_iter().map(|parent| parent.join("AGENTS.md").to_str().map(str::to_owned)
+        .ok_or_else(|| AgentEngineError::WorkspaceContext("instruction path is not UTF-8".into()))).collect()
 }
 
 fn truncate_utf8(value: &mut String, max_bytes: usize) {
@@ -312,22 +298,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_workspace_escape_without_calling_the_owner() {
+    async fn native_parent_relative_instruction_paths_are_read_through_the_owner() {
         let workspace = MemoryWorkspace {
             files: BTreeMap::new(),
             reads: Mutex::new(Vec::new()),
         };
-        assert!(matches!(
-            load_agents_md(
+        let result = load_agents_md(
                 &workspace,
                 "../outside",
                 AgentsMdPolicy::default(),
                 CancellationToken::new(),
             )
-            .await,
-            Err(AgentEngineError::WorkspaceContext(_))
-        ));
-        assert!(workspace.reads.lock().unwrap().is_empty());
+            .await.unwrap();
+        assert!(result.layers.is_empty());
+        assert!(workspace.reads.lock().unwrap().iter().any(|path| path == "../outside/AGENTS.md"));
+    }
+
+    #[tokio::test]
+    async fn absolute_native_scopes_load_their_own_ancestry_without_project_root_aliasing() {
+        let absolute = if cfg!(windows) { r"C:\external\nested" } else { "/external/nested" };
+        let candidates = agents_candidates(absolute, 32).unwrap();
+        let leaf = std::path::Path::new(absolute).join("AGENTS.md").to_str().unwrap().to_owned();
+        let workspace = MemoryWorkspace { files: BTreeMap::from([(leaf.clone(), "external rules".into()),
+            ("AGENTS.md".into(), "unrelated project rules".into())]), reads: Mutex::new(Vec::new()) };
+        let context = load_agents_md(&workspace, absolute, AgentsMdPolicy::default(), CancellationToken::new()).await.unwrap();
+        assert_eq!(context.layers.len(), 1);
+        assert_eq!(context.layers[0].path, leaf);
+        assert!(!candidates.iter().any(|path| path == "AGENTS.md"));
+        assert!(!path_in_scope(absolute, ""));
+        assert!(path_in_scope(&leaf, absolute));
     }
 
     #[tokio::test]

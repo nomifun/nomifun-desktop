@@ -4,8 +4,7 @@ import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { mcpService } from '@/common/adapter/ipcBridge';
-import { downloadBunRuntime, formatRuntimePreparation, isBunDownloadRequired, type RuntimeToolSnapshot } from '@/common/adapter/runtimeTools';
-import { useRuntimeDownloadConfirmation } from '@/renderer/hooks/system/useRuntimeDownloadConfirmation';
+import { withRuntimePreparation, formatRuntimePreparation, type RuntimeToolSnapshot } from '@/common/adapter/runtimeTools';
 import { uuidv7 } from '@/common/utils/uuidv7';
 import { buildMcpConnectionTestRequest } from '@/common/adapter/mcpRequest';
 import type { IMcpServer } from '@/common/config/storage';
@@ -54,6 +53,9 @@ const getMcpErrorDetails = (details: unknown): McpErrorDetails => {
 const formatMcpErrorMessage = (t: TFunction, payload: McpErrorPayload): string => {
   const fallback = payload.error || t('settings.mcpError');
   const details = getMcpErrorDetails(payload.details);
+  if (payload.error && ['MCP_COMMAND_NOT_FOUND', 'MCP_COMMAND_PERMISSION_DENIED', 'MCP_COMMAND_START_FAILED'].includes(payload.code ?? '')) {
+    return payload.error;
+  }
 
   switch (payload.code) {
     case 'MCP_COMMAND_NOT_FOUND':
@@ -202,7 +204,6 @@ export const useMcpConnection = (
   onAuthResolved?: (server: IMcpServer) => void
 ) => {
   const { t } = useTranslation();
-  const requestRuntimeDownload = useRuntimeDownloadConfirmation();
   const [testingServers, setTestingServers] = useState<Record<string, boolean>>({});
   const active = useRef(true);
   const pendingTests = useRef(new Map<string, number>());
@@ -243,30 +244,14 @@ export const useMcpConnection = (
       try {
         if (!active.current) return;
         probeEntered = true;
-        let result: Awaited<ReturnType<typeof mcpService.testMcpConnection.invoke>>;
-        try {
-          result = await mcpService.testMcpConnection.invoke(buildMcpConnectionTestRequest(server));
-        } catch (error) {
-          if (server.transport.type !== 'stdio' || !isBunDownloadRequired(error)) throw error;
-          // The owner resolves the server's own PATH before reporting a missing
-          // runtime. This preflight failure does not update its saved catalog.
-          probeEntered = false;
-          // Save/import can trigger silent probes. Only an explicit test offers
-          // a runtime download, and cancelling leaves the saved server intact.
-          if (!notify || !active.current || !await requestRuntimeDownload(() => active.current)) return;
-          if (!await downloadBunRuntime({
+        const result = await withRuntimePreparation(
+          () => mcpService.testMcpConnection.invoke(buildMcpConnectionTestRequest(server)), {
             isCurrent: () => active.current,
             onProgress: (snapshot: RuntimeToolSnapshot) => {
-              if (active.current) closePreparation = Message.loading({ id: preparationId,
+              if (notify && active.current) closePreparation = Message.loading({ id: preparationId,
                 content: `${server.name}: ${formatRuntimePreparation(snapshot, t)}`, duration: 0 });
             },
-          })) return;
-          closePreparation?.();
-          closePreparation = undefined;
-          if (!active.current) return;
-          probeEntered = true;
-          result = await mcpService.testMcpConnection.invoke(buildMcpConnectionTestRequest(server));
-        }
+          });
         if (!active.current) return;
         const needsAuth = result.needsAuth ?? result.needs_auth;
         const authMethod = result.authMethod ?? result.auth_method;
@@ -349,7 +334,7 @@ export const useMcpConnection = (
         if (probeEntered) notifyMcpCatalogChanged();
       }
     },
-    [t, onAuthRequired, onAuthResolved, requestRuntimeDownload]
+    [t, onAuthRequired, onAuthResolved]
   );
 
   const handleTestMcpConnections = useCallback(

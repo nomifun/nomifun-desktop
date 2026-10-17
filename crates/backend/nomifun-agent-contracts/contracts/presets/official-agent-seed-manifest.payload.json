@@ -4,9 +4,40 @@
   "target_runtime_feature_inventory_digest": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
   "templates": {
     "chat.minimal": {
-      "enabled_capabilities": [],
+      "enabled_capabilities": [
+        {
+          "capability": {
+            "id": "workspace.files"
+          },
+          "action_allowlist": [
+            "workspace.files/delete",
+            "workspace.files/patch",
+            "workspace.files/read",
+            "workspace.files/rename",
+            "workspace.files/search",
+            "workspace.files/write"
+          ]
+        },
+        {
+          "capability": {
+            "id": "workspace.process"
+          },
+          "action_allowlist": [
+            "workspace.process/cancel",
+            "workspace.process/close_stdin",
+            "workspace.process/exec",
+            "workspace.process/input",
+            "workspace.process/poll",
+            "workspace.process/resize",
+            "workspace.process/start"
+          ]
+        }
+      ],
       "skill_bindings": [],
-      "required_resource_kinds": [],
+      "required_resource_kinds": [
+        "process_session",
+        "workspace"
+      ],
       "required_runtime_features": []
     },
     "assistant.general": {
@@ -103,6 +134,7 @@
             "workspace.files/delete",
             "workspace.files/patch",
             "workspace.files/read",
+            "workspace.files/rename",
             "workspace.files/search",
             "workspace.files/write"
           ]
@@ -258,6 +290,7 @@
             "workspace.files/delete",
             "workspace.files/patch",
             "workspace.files/read",
+            "workspace.files/rename",
             "workspace.files/search",
             "workspace.files/write"
           ]
@@ -426,6 +459,7 @@
             "workspace.files/delete",
             "workspace.files/patch",
             "workspace.files/read",
+            "workspace.files/rename",
             "workspace.files/search",
             "workspace.files/write"
           ]
@@ -671,6 +705,7 @@
             "workspace.files/delete",
             "workspace.files/patch",
             "workspace.files/read",
+            "workspace.files/rename",
             "workspace.files/search",
             "workspace.files/write"
           ]
@@ -927,6 +962,7 @@
             "workspace.files/delete",
             "workspace.files/patch",
             "workspace.files/read",
+            "workspace.files/rename",
             "workspace.files/search",
             "workspace.files/write"
           ]
@@ -1032,6 +1068,7 @@
             "workspace.files/delete",
             "workspace.files/patch",
             "workspace.files/read",
+            "workspace.files/rename",
             "workspace.files/search",
             "workspace.files/write"
           ]
@@ -1141,10 +1178,20 @@
   },
   "role_coverage": {
     "chat.minimal": {
-      "required_capability_categories": [],
-      "required_capability_ids": [],
+      "required_capability_categories": [
+        "file_operations",
+        "shell_process_pty",
+        "workspace_repository"
+      ],
+      "required_capability_ids": [
+        "workspace.files",
+        "workspace.process"
+      ],
       "required_runtime_features": [],
-      "required_resource_kinds": []
+      "required_resource_kinds": [
+        "process_session",
+        "workspace"
+      ]
     },
     "assistant.general": {
       "required_capability_categories": [

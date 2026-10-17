@@ -122,14 +122,12 @@ fn explicit_true_can_restore_default_feature_settings() {
 }
 
 #[test]
-fn merge_retains_documented_additive_tool_policies() {
+fn merge_retains_additive_tool_selection() {
     let merged = merge_sources(
-        "[tools]\nbash_sandbox = true\nwrite_root = \"guarded\"\nbuiltin_allowlist = [\"Read\"]\n[tools.computer]\nenabled = true",
-        "[tools]\nbash_sandbox = false\nwrite_root = \"\"\nbuiltin_allowlist = []\n[tools.computer]\nenabled = false",
+        "[tools]\nbuiltin_allowlist = [\"Read\"]\n[tools.computer]\nenabled = true",
+        "[tools]\nbuiltin_allowlist = []\n[tools.computer]\nenabled = false",
     );
-    assert!(merged.tools.bash_sandbox);
     assert!(merged.tools.computer.enabled);
-    assert_eq!(merged.tools.write_root, "guarded");
     assert_eq!(merged.tools.builtin_allowlist, ["Read"]);
 }
 
@@ -137,7 +135,7 @@ fn merge_retains_documented_additive_tool_policies() {
 fn invalid_existing_config_is_not_silently_replaced_by_defaults() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("config.toml");
-    let invalid = "[tools]\nbash_sandbox = \"typo\"\n";
+    let invalid = "[tools]\nmax_recent_images = \"typo\"\n";
     std::fs::write(&path, invalid).unwrap();
     assert!(load_config_file(&path).is_err());
     assert_eq!(std::fs::read_to_string(path).unwrap(), invalid);

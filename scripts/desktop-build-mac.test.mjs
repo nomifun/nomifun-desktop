@@ -129,7 +129,7 @@ describe('macOS Desktop build contract', () => {
 
   test('preserves host website media and local-network privacy reasons', () => {
     const hostPlist = readFileSync(new URL('../apps/desktop/Info.plist', import.meta.url), 'utf8');
-    for (const key of ['NSMicrophoneUsageDescription', 'NSCameraUsageDescription', 'NSLocationUsageDescription', 'NSLocalNetworkUsageDescription']) {
+    for (const key of ['NSMicrophoneUsageDescription', 'NSCameraUsageDescription', 'NSLocationUsageDescription', 'NSLocalNetworkUsageDescription', 'NSAppleEventsUsageDescription']) {
       expect(hostPlist).toContain(`<key>${key}</key>`);
     }
   });

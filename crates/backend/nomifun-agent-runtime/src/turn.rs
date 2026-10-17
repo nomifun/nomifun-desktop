@@ -3637,6 +3637,15 @@ async fn invoke_tool_calls(
         // cancellation/failure cannot erase the already recorded prefix. This
         // is a tool observation, not owner cleanup or task-success proof.
         let recorded = record_tool_result(call_id, result, event_sink, model_step).await?;
+        // A later read in this same serial batch must not reuse instructions
+        // observed before an applied process/file effect. The outer result
+        // loop still invalidates before the next model boundary; this earlier
+        // derived-state invalidation closes the between-calls window.
+        if crate::execution_policy::affects_workspace(&observed_binding)
+            && !crate::execution_policy::process_operation_not_applied(&observed_binding, &recorded.1)
+        {
+            scoped_instructions.invalidate();
+        }
         if exact_armed {
             execution_plan.settle_exact_action(&observed_call,&recorded.1,
                 crate::execution_policy::process_operation_not_applied(&observed_binding,&recorded.1),event_sink).await?;
@@ -6760,6 +6769,116 @@ mod tests {
         instructions.before_model(&tool, &sink, CancellationToken::new()).await.unwrap();
         assert!(tool.instruction_reads.load(Ordering::SeqCst) > loaded,
             "effects must force a fresh instruction observation");
+    }
+
+    async fn serial_effect_instruction_refresh_case(effect_identity: &str, read_identity: &str) {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event); Ok(())
+            }
+        }
+        #[derive(Default)]
+        struct Tools {
+            changed: std::sync::atomic::AtomicBool,
+            effects: AtomicUsize,
+            source_reads: std::sync::Mutex<Vec<String>>,
+        }
+        #[async_trait]
+        impl AgentToolInvoker for Tools {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+                let args = &invocation.call.arguments.0;
+                if args["missing_ok"] == true {
+                    let path = args["path"].as_str().unwrap();
+                    let value = if path == "AGENTS.md" && self.changed.load(Ordering::SeqCst) {
+                        let content = "CHANGED_BY_SETTLED_SERIAL_EFFECT: reconsider remaining calls.\n";
+                        json!({"path":path,"content":content,"offset":0,"total_bytes":content.len(),
+                            "sha256":nomifun_agent_contracts::digest_bytes(content.as_bytes()),"eof":true,"next_offset":null})
+                    } else { json!({"kind":"workspace_file_absent","path":path}) };
+                    return Ok(AgentToolResult::text(invocation.call.call_id, value.to_string(), false));
+                }
+                if let Some(result) = instruction_result(&invocation) { return Ok(result); }
+                if invocation.binding.action_id.as_ref() == "workspace.process/exec" {
+                    self.effects.fetch_add(1, Ordering::SeqCst);
+                    self.changed.store(true, Ordering::SeqCst);
+                    return Ok(AgentToolResult::text(invocation.call.call_id,
+                        json!({"process_id":"settled-effect","state":"exited","exit_code":0,
+                            "cleanup":{"reaped":true},"success":true,"output":{"text":"changed rules\n"}}).to_string(), false));
+                }
+                self.source_reads.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                Ok(workspace_result(invocation))
+            }
+        }
+        let combine = |mut first: Vec<Result<ChatModelEvent, ChatModelError>>, second| {
+            first.pop(); first.extend(second); first
+        };
+        let prewarm = combine(
+            control_step("prewarm-current", "read_file", json!({"path":"a","execution_identity":"current_user"})),
+            control_step("prewarm-admin", "read_file", json!({"path":"a","execution_identity":"administrator"})),
+        );
+        let mutate_then_read = combine(
+            control_step("change-rules-once", "exec_command", json!({"command":"fixture-effect","execution_identity":effect_identity})),
+            control_step("after-effect-read", "read_file", json!({"path":"a","execution_identity":read_identity})),
+        );
+        let quote = "Inspect the fixture once.";
+        let model = Arc::new(ObservingModel { requests: Default::default(), steps: std::sync::Mutex::new(vec![
+            plan_step("in_progress", quote), prewarm, mutate_then_read,
+            vec![Err(ChatModelError::protocol_violation("controlled stop after serial freshness observation"))],
+        ]) });
+        let mut read_binding = tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true);
+        read_binding.definition.input_schema.0["properties"]["execution_identity"] = json!({"enum":["current_user","administrator"]});
+        read_binding.schema_digest = crate::tool::input_schema_digest(&read_binding.definition.input_schema).unwrap();
+        let plan = AgentToolPlan::new([
+            read_binding,
+            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+        ]).unwrap();
+        let mut initial = request();
+        initial.input.messages[0].content = vec![ChatContentPart::Text { text: quote.into() }];
+        let tools = Arc::new(Tools::default());
+        let sink = Arc::new(Sink::default());
+        let engine = AgentEngine::new(AgentEngineBuild {
+            build_id: EngineBuildId::from("coding-dev"), build_digest: DigestHex::from("a".repeat(64)),
+        }).unwrap();
+        let result = engine.open_session(binding(), model.clone(), tools.clone(), Some(sink.clone())).unwrap().run_turn(
+            AgentTurnRequest::new(initial, plan, principal(), 0)).await;
+        assert!(result.is_err(), "the fixture deliberately stops after observing the next request");
+        assert_eq!(tools.effects.load(Ordering::SeqCst), 1, "the settled effect is never replayed");
+        assert_eq!(*tools.source_reads.lock().unwrap(), ["prewarm-current", "prewarm-admin"],
+            "the later same-batch read must not dispatch using pre-effect rules");
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        let next = requests.last().unwrap();
+        assert!(next.input.instructions.iter().any(|instruction| instruction.contains("CHANGED_BY_SETTLED_SERIAL_EFFECT")));
+        assert!(next.input.messages.iter().flat_map(|message| &message.content).any(|part|
+            matches!(part, ChatContentPart::ToolResult { call_id, is_error: true, .. } if call_id.as_ref() == "after-effect-read")));
+        assert!(serde_json::to_string(&next.input.messages).unwrap().contains("submit new call identities"));
+        let events = sink.0.lock().unwrap();
+        let settled = events.iter().position(|event| matches!(event, AgentEngineEvent::ToolCompleted { result, .. }
+            if result.call_id.as_ref() == "change-rules-once" && !result.is_error)).unwrap();
+        let updated = events.iter().position(|event| matches!(event, AgentEngineEvent::InstructionsUpdated { context }
+            if context.contains("CHANGED_BY_SETTLED_SERIAL_EFFECT"))).unwrap();
+        let held = events.iter().position(|event| matches!(event, AgentEngineEvent::ToolCompleted { result, runtime_hold: Some(crate::RuntimeToolHoldReason::RuntimeGate), .. }
+            if result.call_id.as_ref() == "after-effect-read" && result.is_error)).unwrap();
+        assert!(settled < updated && updated < held, "settle the original effect, publish fresh rules, then hold the unexecuted read");
+        assert!(!events.iter().any(|event| matches!(event, AgentEngineEvent::ToolStarted { call_id, .. }
+            if call_id.as_ref() == "after-effect-read")));
+    }
+
+    #[tokio::test]
+    async fn serial_ordinary_effect_defers_same_batch_read_for_new_instructions() {
+        serial_effect_instruction_refresh_case("current_user", "current_user").await;
+    }
+
+    #[tokio::test]
+    async fn serial_administrator_effect_defers_same_identity_read_for_new_instructions() {
+        serial_effect_instruction_refresh_case("administrator", "administrator").await;
+    }
+
+    #[tokio::test]
+    async fn serial_administrator_effect_defers_current_user_read_for_new_instructions() {
+        serial_effect_instruction_refresh_case("administrator", "current_user").await;
     }
 
     #[tokio::test]

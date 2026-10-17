@@ -9,6 +9,7 @@ mod error;
 mod context_resource;
 mod kernel;
 mod process;
+mod system_process;
 mod system_permission;
 mod tool;
 mod tool_display;
@@ -25,7 +26,7 @@ pub use kernel::{EngineToolExposure, KernelEngineToolInvoker, compile_engine_too
 pub use nomifun_chat_model_broker::{BrokerEngineModelPort, EngineModelPort, EngineModelStream};
 pub use nomi_process_runtime::MAX_PTY_DIMENSION;
 pub use process::{
-    EngineCleanupReport, EngineProcessOutput, EngineProcessPoll, EngineProcessRequest,
+    EngineCleanupReport, EngineExecutionIdentity, EngineProcessOutput, EngineProcessPoll, EngineProcessRequest,
     EngineProcessSession, EngineProcessStartError, EngineProcessTransport, ManagedEngineProcessOwner,
 };
 pub use tool::{

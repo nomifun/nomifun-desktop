@@ -275,20 +275,6 @@ struct NfagentDownloadSpec {
     sha256: String,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum NfagentPreparation {
-    /// Automatic recovery must never install or repair an executable.
-    CachedOnly,
-    /// The user explicitly chose an action that includes downloading.
-    AllowDownload,
-}
-
-impl NfagentPreparation {
-    fn from_download_choice(allow_download: bool) -> Self {
-        if allow_download { Self::AllowDownload } else { Self::CachedOnly }
-    }
-}
-
 #[derive(Default)]
 struct PairingRuntime {
     persisted: Option<PersistedPairing>,
@@ -452,16 +438,16 @@ impl RelayPairingManager {
             if self.pending_path.is_file() {
                 let pending: PendingBootstrap = self.read_protected(&self.pending_path).await?;
                 if !pending.enabled { return Ok(self.runtime.lock().await.status.clone()); }
-                return self.bootstrap_locked(server, &pending_envelope(&pending)?, NfagentPreparation::CachedOnly).await;
+                return self.bootstrap_locked(server, &pending_envelope(&pending)?).await;
             }
             return Ok(self.runtime.lock().await.status.clone());
         };
         if !state.enabled { return Ok(self.runtime.lock().await.status.clone()); }
         if state.protocol_version == 2 && self.pending_path.is_file() {
-            return self.restart_locked(server, NfagentPreparation::CachedOnly).await;
+            return self.restart_locked(server).await;
         }
 
-        let nfagent_path = self.prepare_nfagent(NfagentPreparation::CachedOnly)
+        let nfagent_path = self.prepare_nfagent()
             .await
             .context("恢复 Relay agent 失败")?;
         self.ensure_webui_port(&server, state.protocol_version)
@@ -611,7 +597,6 @@ impl RelayPairingManager {
         self: &Arc<Self>,
         server: Arc<DesktopServer>,
         raw_envelope: &str,
-        allow_runtime_download: bool,
     ) -> Result<RelayPairingStatus> {
         let _operation = self.operation_gate.lock().await;
         if let Err((code, error)) = self.precheck_bootstrap(raw_envelope).await {
@@ -619,13 +604,13 @@ impl RelayPairingManager {
             return Err(error);
         }
         self.begin_operation("bootstrap").await;
-        let result = self.bootstrap_locked(server.clone(), raw_envelope, NfagentPreparation::from_download_choice(allow_runtime_download)).await;
+        let result = self.bootstrap_locked(server.clone(), raw_envelope).await;
         if result.is_err() { self.release_idle_relay_edge(&server).await; }
         self.finish_operation(&result).await;
         match result { Ok(_) => Ok(self.runtime.lock().await.status.clone()), Err(error) => Err(error) }
     }
 
-    async fn bootstrap_locked(self: &Arc<Self>, server: Arc<DesktopServer>, raw_envelope: &str, preparation: NfagentPreparation) -> Result<RelayPairingStatus> {
+    async fn bootstrap_locked(self: &Arc<Self>, server: Arc<DesktopServer>, raw_envelope: &str) -> Result<RelayPairingStatus> {
         anyhow::ensure!(!self.closing.load(Ordering::Acquire), "Desktop 正在关闭，不能进行 Relay 配对");
         self.refuse_unreadable_state().await?;
         let envelope = parse_pairing_envelope(raw_envelope)?;
@@ -645,10 +630,9 @@ impl RelayPairingManager {
             }
         }
 
-        // Verify or explicitly install the runtime before exchanging the
-        // one-shot invite. Automatic restore accepts only the approved cache;
+        // Prepare the verified runtime before exchanging the one-shot invite;
         // a missing runtime or failed download must never consume an invite.
-        let nfagent_path = self.prepare_nfagent(preparation).await?;
+        let nfagent_path = self.prepare_nfagent().await?;
         self.ensure_webui_port(&server, envelope.protocol_version).await?;
         prepare_agent_state_dir(&self.agent_state_dir)?;
 
@@ -758,18 +742,17 @@ impl RelayPairingManager {
     pub async fn restart(
         self: &Arc<Self>,
         server: Arc<DesktopServer>,
-        allow_runtime_download: bool,
     ) -> Result<RelayPairingStatus> {
         self.interrupt_waits();
         let _operation = self.operation_gate.lock().await;
         self.begin_operation("restart").await;
-        let result = self.restart_locked(server.clone(), NfagentPreparation::from_download_choice(allow_runtime_download)).await;
+        let result = self.restart_locked(server.clone()).await;
         if result.is_err() { self.release_idle_relay_edge(&server).await; }
         self.finish_operation(&result).await;
         match result { Ok(_) => Ok(self.runtime.lock().await.status.clone()), Err(error) => Err(error) }
     }
 
-    async fn restart_locked(self: &Arc<Self>, server: Arc<DesktopServer>, preparation: NfagentPreparation) -> Result<RelayPairingStatus> {
+    async fn restart_locked(self: &Arc<Self>, server: Arc<DesktopServer>) -> Result<RelayPairingStatus> {
         anyhow::ensure!(!self.closing.load(Ordering::Acquire), "Desktop 正在关闭，不能恢复 Relay 连接");
         self.refuse_unreadable_state().await?;
         if self.runtime.lock().await.persisted.is_none() && self.pending_path.is_file() {
@@ -779,7 +762,7 @@ impl RelayPairingManager {
             pending.enabled = true;
             write_secret_json(&self.pending_path, &pending)?;
             self.runtime.lock().await.status.enabled = true;
-            return self.bootstrap_locked(server, &pending_envelope(&pending)?, preparation).await;
+            return self.bootstrap_locked(server, &pending_envelope(&pending)?).await;
         }
         let mut persisted = {
             let guard = self.runtime.lock().await;
@@ -788,9 +771,9 @@ impl RelayPairingManager {
                 .clone()
                 .context("没有可恢复的 Relay 配对状态")?
         };
-        // Check local runtime availability before an automatic recovery can
-        // retry the bootstrap exchange or make other external requests.
-        let nfagent_path = self.prepare_nfagent(preparation).await?;
+        // Prepare the verified runtime before retrying the bootstrap exchange
+        // or starting the saved connection.
+        let nfagent_path = self.prepare_nfagent().await?;
         if self.pending_path.is_file() && persisted.protocol_version == 2 && !self.agent_state_dir.join("credential.json").is_file() {
             let pending: PendingBootstrap = self.read_protected(&self.pending_path).await?;
             let envelope = parse_pairing_envelope(&pending_envelope(&pending)?)?;
@@ -1174,34 +1157,32 @@ impl RelayPairingManager {
             .context("Relay bootstrap 响应格式无效")
     }
 
-    /// Explicit download entry point for the native acceptance harness.
-    /// Production pairing commands carry their own per-action download choice.
+    /// Runtime preparation entry point for the native acceptance harness.
     pub(crate) async fn download_nfagent(&self) -> Result<PathBuf> {
-        self.prepare_nfagent(NfagentPreparation::AllowDownload).await
+        self.prepare_nfagent().await
     }
 
-    /// Verify the exact shipped runtime, installing it only on a user action.
-    async fn prepare_nfagent(&self, preparation: NfagentPreparation) -> Result<PathBuf> {
+    /// Verify the shipped runtime and automatically prepare it when needed.
+    async fn prepare_nfagent(&self) -> Result<PathBuf> {
+        let interrupted = self.op_interrupt.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
         let result = async {
             if let Some(path) = explicit_nfagent_path()? {
-                if preparation == NfagentPreparation::CachedOnly && !is_executable(&path)? {
-                    anyhow::bail!("本地网络代理端不可执行；请在 Relay 面板选择下载连接组件后重试");
-                }
-                if preparation == NfagentPreparation::AllowDownload { ensure_executable(&path)?; }
+                ensure_executable(&path)?;
                 return Ok(path);
             }
             let spec = configured_nfagent_download_spec()?;
             let _install_guard = tokio::select! {
                 biased;
                 _ = self.shutdown_cancel.cancelled() => anyhow::bail!("Desktop 关闭已取消网络代理端安装"),
+                _ = interrupted.cancelled() => anyhow::bail!("Relay 操作已取消网络代理端安装"),
                 guard = self.nfagent_install_lock.lock() => guard,
             };
-            prepare_nfagent_cached(&self.data_dir, &spec, &self.download_client, Some(&self.shutdown_cancel), preparation).await
+            // Shutdown also interrupts the current operation. Passing its token
+            // into the installer lets cancellation remove its staging file.
+            prepare_nfagent_cached(&self.data_dir, &spec, &self.download_client, Some(&interrupted)).await
         }.await;
         self.runtime.lock().await.status.runtime_available = result.is_ok();
-        if preparation == NfagentPreparation::CachedOnly && result.is_err() {
-            self.set_action_error("RELAY_AGENT_INSTALL_REQUIRED").await;
-        }
         result
     }
 }
@@ -1211,20 +1192,13 @@ async fn prepare_nfagent_cached(
     spec: &NfagentDownloadSpec,
     client: &reqwest::Client,
     cancel: Option<&tokio_util::sync::CancellationToken>,
-    preparation: NfagentPreparation,
 ) -> Result<PathBuf> {
     let destination = nfagent_cache_destination(data_dir, spec)?;
     let install_dir = destination.parent().context("nfagent cache destination has no parent")?;
 
     if verify_file_sha256(&destination, &spec.sha256)? {
-        if preparation == NfagentPreparation::AllowDownload {
-            ensure_executable(&destination)?;
-            return Ok(destination);
-        }
-        if is_executable(&destination)? { return Ok(destination); }
-    }
-    if preparation == NfagentPreparation::CachedOnly {
-        anyhow::bail!("本地网络代理端缺失或版本不匹配；请在 Relay 面板选择下载连接组件后重试");
+        ensure_executable(&destination)?;
+        return Ok(destination);
     }
     if destination.exists() {
         fs::remove_file(&destination).with_context(|| {
@@ -1249,7 +1223,7 @@ async fn prepare_nfagent_cached(
     let result = if let Some(cancel) = cancel {
         tokio::select! {
             biased;
-            _ = cancel.cancelled() => Err(anyhow::anyhow!("Desktop 关闭已取消网络代理端下载")),
+            _ = cancel.cancelled() => Err(anyhow::anyhow!("Relay 操作已取消网络代理端下载")),
             result = download_verified_nfagent(client, spec, &temp_path, &destination) => result,
         }
     } else {
@@ -2878,65 +2852,40 @@ mod tests {
         ensure_executable(&destination).unwrap();
 
         let client = reqwest::Client::new();
-        let resolved = prepare_nfagent_cached(root.path(), &spec, &client, None, NfagentPreparation::CachedOnly)
+        let resolved = prepare_nfagent_cached(root.path(), &spec, &client, None)
             .await
             .unwrap();
         assert_eq!(resolved, destination);
         assert_eq!(fs::read(resolved).unwrap(), bytes);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
-    async fn automatic_nfagent_preparation_does_not_download_or_repair_missing_cache() {
+    async fn valid_nfagent_cache_repairs_execute_permission_without_downloading() {
+        use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let spec = test_download_spec(
-            &format!("http://{}/nfagent-test", listener.local_addr().unwrap()),
-            b"approved nfagent",
-        );
-        let client = reqwest::Client::new();
-
-        let error = prepare_nfagent_cached(root.path(), &spec, &client, None, NfagentPreparation::CachedOnly)
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("选择下载连接组件"));
-        assert!(!root.path().join(NFAGENT_RUNTIME_DIR_NAME).exists());
-        assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn automatic_nfagent_preparation_preserves_invalid_cache_without_http() {
-        let root = tempfile::tempdir().unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let spec = test_download_spec(
-            &format!("http://{}/nfagent-test", listener.local_addr().unwrap()),
-            b"approved nfagent",
-        );
-        let destination = root.path()
-            .join(NFAGENT_RUNTIME_DIR_NAME)
-            .join(NFAGENT_CACHE_DIR_NAME)
-            .join(&spec.version)
-            .join(&spec.sha256[..16])
-            .join(&spec.file_name);
+        let bytes = b"cached nfagent";
+        let spec = test_download_spec("http://127.0.0.1:9/nfagent-test", bytes);
+        let destination = nfagent_cache_destination(root.path(), &spec).unwrap();
         fs::create_dir_all(destination.parent().unwrap()).unwrap();
-        fs::write(&destination, b"unapproved executable").unwrap();
-        let client = reqwest::Client::new();
-
-        assert!(prepare_nfagent_cached(root.path(), &spec, &client, None, NfagentPreparation::CachedOnly)
-            .await
-            .is_err());
-        assert_eq!(fs::read(destination).unwrap(), b"unapproved executable");
-        assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
+        fs::write(&destination, bytes).unwrap();
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(!is_executable(&destination).unwrap());
+        let resolved = prepare_nfagent_cached(root.path(), &spec, &reqwest::Client::new(), None).await.unwrap();
+        assert_eq!(resolved, destination);
+        assert!(is_executable(&resolved).unwrap());
+        assert_eq!(fs::read(resolved).unwrap(), bytes);
     }
 
     #[tokio::test]
-    async fn explicit_nfagent_preparation_downloads_missing_cache() {
+    async fn automatic_nfagent_preparation_downloads_missing_cache() {
         let root = tempfile::tempdir().unwrap();
         let bytes = b"approved nfagent";
         let (url, server) = spawn_test_http_server(200, bytes).await;
         let spec = test_download_spec(&url, bytes);
         let client = reqwest::Client::new();
 
-        let resolved = prepare_nfagent_cached(root.path(), &spec, &client, None, NfagentPreparation::AllowDownload)
+        let resolved = prepare_nfagent_cached(root.path(), &spec, &client, None)
             .await
             .unwrap();
         server.await.unwrap();
@@ -2960,7 +2909,7 @@ mod tests {
         fs::write(&destination, b"corrupt").unwrap();
 
         let client = reqwest::Client::new();
-        let resolved = prepare_nfagent_cached(root.path(), &spec, &client, None, NfagentPreparation::AllowDownload)
+        let resolved = prepare_nfagent_cached(root.path(), &spec, &client, None)
             .await
             .unwrap();
         server.await.unwrap();
@@ -2977,7 +2926,7 @@ mod tests {
 
         let client = reqwest::Client::new();
         assert!(
-            prepare_nfagent_cached(root.path(), &spec, &client, None, NfagentPreparation::AllowDownload)
+            prepare_nfagent_cached(root.path(), &spec, &client, None)
                 .await
                 .is_err()
         );
@@ -2998,7 +2947,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_cancels_an_inflight_runtime_download_and_removes_staging() {
+    async fn operation_cancellation_stops_runtime_download_and_removes_staging() {
         let root = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -3013,14 +2962,15 @@ mod tests {
         });
         let spec = test_download_spec(&format!("http://{address}/nfagent-test"), b"abcdefghi");
         let directory = root.path().to_path_buf();
-        let cancellation = tokio_util::sync::CancellationToken::new();
-        let cancel_download = cancellation.clone();
+        let manager = RelayPairingManager::new(directory.clone()).unwrap();
+        manager.begin_operation("bootstrap").await;
+        let cancel_download = manager.op_interrupt.lock().unwrap().clone();
         let task = tokio::spawn(async move {
             let client = reqwest::Client::builder().no_proxy().build().unwrap();
-            prepare_nfagent_cached(&directory, &spec, &client, Some(&cancel_download), NfagentPreparation::AllowDownload).await
+            prepare_nfagent_cached(&directory, &spec, &client, Some(&cancel_download)).await
         });
         started_rx.await.unwrap();
-        cancellation.cancel();
+        manager.interrupt_waits();
         assert!(tokio::time::timeout(Duration::from_secs(3), task).await.unwrap().unwrap().is_err());
         server.abort();
         fn no_staged_files(path: &Path) {

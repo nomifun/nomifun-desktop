@@ -2,6 +2,8 @@
 //! Downloads are authorized by components.json's upstream-published archive hashes.
 #[path = "build_support.rs"]
 mod build_support;
+#[path = "node_distribution_contract.rs"]
+mod node_distribution_contract;
 
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
@@ -13,7 +15,7 @@ fn main() {
     for key in ["BUN_VARIANT", "NOMIFUN_EMBED_OFFICECLI"] {
         println!("cargo:rerun-if-env-changed={key}");
     }
-    for file in ["build.rs", "build_support.rs", "components.json"] {
+    for file in ["build.rs", "build_support.rs", "components.json", "node_distribution_contract.rs"] {
         println!("cargo:rerun-if-changed={file}");
     }
     let target = std::env::var("TARGET").expect("cargo target");
@@ -99,8 +101,11 @@ fn main() {
         extract_executable(&archive, &executable, &asset.format, &asset.executable);
         let digest = sha256_file(&executable);
         if spec.delivery == build_support::ComponentDelivery::Download {
+            let distribution = if spec.id == "node" {
+                Some(node_distribution_contract::identity(&node_distribution_contract::decode(&archive, &asset.format, None, || false).expect("valid complete Node distribution")).expect("Node distribution identity"))
+            } else { None };
             fs::write(out_dir.join(format!("{}_identity.rs", spec.id)), format!(
-                "// @generated identity from approved artifact\npub const SHA256: &str = {digest:?};\npub const VERSION: &str = {:?};\npub const EXECUTABLE: &str = {:?};\n", spec.version, asset.executable
+                "// @generated identity from approved artifact\npub const SHA256: &str = {digest:?};\npub const VERSION: &str = {:?};\npub const EXECUTABLE: &str = {:?};\npub const DISTRIBUTION_SHA256: Option<&str> = {:?};\n", spec.version, asset.executable, distribution.as_deref()
             )).unwrap();
             fs::remove_file(executable).expect("remove identity scratch");
             continue;

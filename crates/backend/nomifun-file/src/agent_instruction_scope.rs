@@ -2,7 +2,6 @@
 //! Metadata only; neither shell parsing nor a filesystem snapshot/write lease.
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 use nomifun_common::AppError;
 use serde::{Deserialize, Serialize};
@@ -12,7 +11,7 @@ use crate::{AgentSessionWorkspaceBinding, FileService, WORKSPACE_READ_OPERATION}
 // The permit stays with a blocking scan even if the caller stops waiting.
 static SCOPE_READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentInstructionScopeRequest {
     pub path: String,
@@ -38,17 +37,13 @@ pub struct AgentInstructionScope {
 
 impl FileService {
     pub async fn instruction_scope_for_agent_session(
-        &self,
-        scope: &AgentSessionWorkspaceBinding,
-        request: AgentInstructionScopeRequest,
+        &self, scope: &AgentSessionWorkspaceBinding, request: AgentInstructionScopeRequest,
     ) -> Result<AgentInstructionScope, AppError> {
         self.instruction_scope_with_hooks(scope, request, |_| {}, |_| {}).await
     }
 
     async fn instruction_scope_with_hooks(
-        &self,
-        scope: &AgentSessionWorkspaceBinding,
-        request: AgentInstructionScopeRequest,
+        &self, scope: &AgentSessionWorkspaceBinding, request: AgentInstructionScopeRequest,
         before_listing: impl FnMut(&Path) + Send + 'static,
         after_listing: impl FnMut(&Path) + Send + 'static,
     ) -> Result<AgentInstructionScope, AppError> {
@@ -59,183 +54,100 @@ impl FileService {
         &self, scope: &AgentSessionWorkspaceBinding, request: AgentInstructionScopeRequest,
         before_metadata: impl FnOnce() + Send + 'static,
         after_metadata: impl FnOnce() + Send + 'static,
-        mut before_listing: impl FnMut(&Path) + Send + 'static,
-        mut after_listing: impl FnMut(&Path) + Send + 'static,
+        before_listing: impl FnMut(&Path) + Send + 'static,
+        after_listing: impl FnMut(&Path) + Send + 'static,
     ) -> Result<AgentInstructionScope, AppError> {
         scope.require_operation(WORKSPACE_READ_OPERATION)?;
-        validate_relative(&request.path)?;
-        // The model-facing scope protocol names the workspace root ".", while
-        // ordinary file operations require a normalized relative path. Resolve
-        // that one metadata-only spelling as the binding root without making
-        // "." a valid write/delete target.
-        let target = scope.resolve_relative_path(if request.path == "." { "" } else { &request.path })?;
+        validate_agent_instruction_scope_request(&request)?;
+        let target = scope.resolve_path(if request.path == "." { "" } else { &request.path })?;
         let root = scope.workspace_root().to_owned();
         let authority = scope.authority();
-        let permit = SCOPE_READS
-            .acquire()
-            .await
-            .map_err(|_| AppError::Conflict("Instruction scope reader is closed".into()))?;
+        let permit = SCOPE_READS.acquire().await.map_err(|_| AppError::Conflict("Instruction scope reader is closed".into()))?;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let root = crate::path_safety::validate_path_authority(&root.to_string_lossy(), &authority)?;
-            let canonical = resolve_missing(&target, &authority)?;
-            before_metadata();
-            let metadata = crate::workspace_read_dir::metadata(&canonical, &authority);
-            after_metadata();
-            let (kind, directory) = match metadata? {
-                Some(observed) if observed.metadata.file_type().is_symlink() =>
-                    return Err(AppError::Conflict("INSTRUCTION_SCOPE_CHANGED: target became a symbolic link".into())),
-                Some(observed) if observed.metadata.is_dir() => ("directory", canonical.clone()),
-                Some(observed) if observed.metadata.is_file() => ("file", canonical.parent().ok_or_else(invalid)?.to_owned()),
-                None => ("missing", canonical.parent().ok_or_else(invalid)?.to_owned()),
-                _ => return Err(invalid()),
-            };
-            let mut result = AgentInstructionScope {
-                observation_kind: "instruction_scope", is_directory_listing: false,
-                path: request.path, canonical_path: relative(&root, &canonical)?, kind,
-                recursive: request.recursive, directories: BTreeSet::from([relative(&root, &directory)?]),
-                complete: true, incomplete_reasons: BTreeSet::new(), entries_scanned: 0,
-                notice: "Instruction-location metadata, not a filesystem entry listing, snapshot, permission grant or proof of shell access scope. entries_scanned counts discovery traversal; nonrecursive metadata has zero scans even for a nonempty directory. complete describes instruction discovery, not directory contents. Load ancestor AGENTS.override.md/AGENTS.md for each directory. Recursive discovery includes hidden/ignored directories, never follows descendant symlinks and reports them as incomplete. Use canonical paths and refresh applicable instruction discovery when needed after effects; external concurrent renames remain possible.",
-            };
-            if request.recursive && kind == "directory" {
-                let started = Instant::now();
-                let mut pending = vec![(directory, 0usize)];
-                while let Some((directory, depth)) = pending.pop() {
-                    if result.entries_scanned >= 20_000 || started.elapsed() >= Duration::from_secs(5) {
-                        result.incomplete_reasons.insert("scan_budget".into()); break;
-                    }
-                    let resolved = crate::path_safety::validate_path_authority(&directory.to_string_lossy(), &authority)?;
-                    if resolved != directory { return Err(AppError::Conflict("INSTRUCTION_SCOPE_CHANGED: directory identity changed".into())); }
-                    before_listing(&directory);
-                    let entries = match crate::workspace_read_dir::read_directory(&directory, &authority) {
-                        Ok(entries) => entries,
-                        Err(error @ (AppError::Conflict(_) | AppError::Forbidden(_))) => return Err(error),
-                        Err(_) => { result.incomplete_reasons.insert("unreadable_directory".into()); continue; }
-                    };
-                    for entry in entries {
-                        result.entries_scanned += 1;
-                        if result.entries_scanned > 20_000 || started.elapsed() >= Duration::from_secs(5) {
-                            result.incomplete_reasons.insert("scan_budget".into()); break;
-                        }
-                        let entry = match entry {
-                            Ok(entry) => entry,
-                            Err(_) => { result.incomplete_reasons.insert("unreadable_entry".into()); continue; }
-                        };
-                        let file_type = entry.file_type().map_err(|_| invalid())?;
-                        // Win32 junctions are reparse points too; canonical
-                        // comparison below rejects aliases even if is_symlink
-                        // does not identify a platform-specific directory link.
-                        if file_type.is_symlink() {
-                            result.incomplete_reasons.insert("symlink_entry".into()); continue;
-                        }
-                        let name = entry.file_name();
-                        let instruction_name = name.to_str().is_some_and(|name| {
-                            ["AGENTS.md", "AGENTS.override.md"].iter().any(|expected| {
-                                name == *expected || (cfg!(windows) && name.eq_ignore_ascii_case(expected))
-                            })
-                        });
-                        if instruction_name {
-                            if !file_type.is_file() { result.incomplete_reasons.insert("invalid_instruction_file".into()); }
-                            result.directories.insert(relative(&root, &directory)?);
-                            if result.directories.len() > 64 {
-                                result.incomplete_reasons.insert("instruction_directory_budget".into()); break;
-                            }
-                        }
-                        if file_type.is_dir() {
-                            if depth >= 32 {
-                                result.incomplete_reasons.insert("depth_limit".into());
-                            } else if pending.len() >= 2048 {
-                                result.incomplete_reasons.insert("directory_budget".into());
-                            } else {
-                                pending.push((entry.path(), depth + 1));
-                            }
-                        }
-                    }
-                    after_listing(&directory);
-                    if result.incomplete_reasons.contains("scan_budget")
-                        || result.incomplete_reasons.contains("instruction_directory_budget") { break; }
-                }
-            }
-            if resolve_missing(&target, &authority)? != canonical {
-                return Err(AppError::Conflict("INSTRUCTION_SCOPE_CHANGED: target identity changed".into()));
-            }
-            result.complete = result.incomplete_reasons.is_empty();
-            if !crate::agent_text_read::fits_text_result(&result, 0)? {
-                return Err(AppError::BadRequest("Instruction scope result exceeds the bounded envelope; narrow the path".into()));
-            }
-            Ok(result)
+            let root = std::fs::canonicalize(&root).unwrap_or(root);
+            let access = WorkspaceDirectoryAccess { authority };
+            let native = nomi_native_files::acquire_instruction_scope_with_access(
+                &target, request.recursive, &access, before_metadata, after_metadata, before_listing, after_listing,
+            ).map_err(crate::native_file_acquisition_error)?;
+            project_agent_instruction_scope(request, native, &root)
         }).await.map_err(|error| AppError::Internal(format!("instruction discovery failed: {error}")))?
     }
 }
 
-fn invalid() -> AppError {
-    AppError::BadRequest("Invalid or unreadable workspace instruction scope".into())
-}
-
-fn validate_relative(path: &str) -> Result<(), AppError> {
-    if path == "." {
-        return Ok(());
-    }
-    if path.is_empty()
-        || path.len() > 4096
-        || path.trim() != path
-        || path.contains(['\\', ':'])
-        || path.chars().any(char::is_control)
-        || path.split('/').any(|part| {
-            part.is_empty()
-                || part == "."
-                || part == ".."
-                || crate::path_safety::is_unsafe_path_segment(part)
-        })
-    {
-        return Err(invalid());
+pub fn validate_agent_instruction_scope_request(request: &AgentInstructionScopeRequest) -> Result<(), AppError> {
+    if request.path.is_empty() || request.path.len() > 4096 || request.path.contains('\0') {
+        return Err(AppError::BadRequest("invalid native instruction scope path".into()));
     }
     Ok(())
 }
 
-fn relative(root: &Path, path: &Path) -> Result<String, AppError> {
-    let relative = path
-        .strip_prefix(root)
-        .map_err(|_| invalid())?
-        .to_str()
-        .ok_or_else(invalid)?;
-    let relative = relative.replace('\\', "/");
-    if relative.is_empty() {
-        return Ok(String::new());
+/// Pure owner projection for either native execution identity. The caller
+/// supplies its already host-resolved project root; this function performs no
+/// filesystem access and cannot adopt an external path as project ownership.
+pub fn project_agent_instruction_scope(
+    request: AgentInstructionScopeRequest, native: nomi_native_files::NativeInstructionScope, workspace_root: &Path,
+) -> Result<AgentInstructionScope, AppError> {
+    validate_agent_instruction_scope_request(&request)?;
+    let invalid = || AppError::Conflict("native instruction acquisition differs from its bounded contract".into());
+    let valid_path = |value: &str| {
+        let path = Path::new(value);
+        !value.is_empty() && value.len() <= 4096 && !value.contains('\0') && path.is_absolute()
+            && !path.components().any(|part| matches!(part, std::path::Component::ParentDir | std::path::Component::CurDir))
+    };
+    let canonical = Path::new(&native.canonical_path);
+    let base = if native.kind == "directory" { canonical } else { canonical.parent().ok_or_else(invalid)? };
+    if request.recursive != native.recursive || !matches!(native.kind.as_str(), "file" | "directory" | "missing")
+        || !valid_path(&native.canonical_path) || native.directories.is_empty() || native.directories.len() > 65
+        || native.entries_scanned > 20_001 || (!native.recursive && native.entries_scanned != 0)
+        || native.complete != native.incomplete_reasons.is_empty()
+        || !native.directories.iter().any(|path| Path::new(path) == base)
+        || native.directories.iter().any(|path| !valid_path(path)
+            || (Path::new(path) != base && !(native.recursive && native.kind == "directory" && Path::new(path).starts_with(base))))
+    { return Err(invalid()); }
+    let kind = match native.kind.as_str() { "file" => "file", "directory" => "directory", _ => "missing" };
+    let result = AgentInstructionScope {
+        observation_kind: "instruction_scope", is_directory_listing: false, path: request.path,
+        canonical_path: crate::path_safety::session_path_label(workspace_root, canonical)?, kind,
+        recursive: native.recursive,
+        directories: native.directories.into_iter().map(|path| crate::path_safety::session_path_label(workspace_root, Path::new(&path)))
+            .collect::<Result<BTreeSet<_>, _>>()?,
+        complete: native.complete, incomplete_reasons: native.incomplete_reasons, entries_scanned: native.entries_scanned,
+        notice: "Instruction-location metadata, not a filesystem entry listing, snapshot, permission grant or proof of shell access scope. entries_scanned counts discovery traversal; nonrecursive metadata has zero scans even for a nonempty directory. complete describes instruction discovery, not directory contents. Load ancestor AGENTS.override.md/AGENTS.md for each directory. Recursive discovery includes hidden/ignored directories, never follows descendant symlinks and reports them as incomplete. Use canonical paths and refresh applicable instruction discovery when needed after effects; external concurrent renames remain possible.",
+    };
+    if !crate::agent_text_read::fits_text_result(&result, 0)? {
+        return Err(AppError::BadRequest("Instruction scope result exceeds the bounded envelope; narrow the path".into()));
     }
-    validate_relative(&relative)?;
-    Ok(relative)
+    Ok(result)
 }
 
-/// Missing child paths inherit the nearest existing, confined real parent.
-/// A dangling symlink or denied parent is not absence and never gets adopted.
-fn resolve_missing(path: &Path, authority: &crate::PathAuthority) -> Result<PathBuf, AppError> {
-    let mut candidate = path;
-    let mut suffix = Vec::new();
-    loop {
-        match std::fs::symlink_metadata(candidate) {
-            Ok(_) => {
-                let mut real = crate::path_safety::validate_path_authority(
-                    &candidate.to_string_lossy(),
-                    authority,
-                )?;
-                if !suffix.is_empty() && !real.is_dir() {
-                    return Err(invalid());
-                }
-                for part in suffix.into_iter().rev() {
-                    real.push(part);
-                }
-                return Ok(real);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if suffix.len() >= 64 {
-                    return Err(invalid());
-                }
-                suffix.push(candidate.file_name().ok_or_else(invalid)?.to_owned());
-                candidate = candidate.parent().ok_or_else(invalid)?;
-            }
-            Err(_) => return Err(invalid()),
-        }
+struct WorkspaceDirectoryAccess { authority: crate::PathAuthority }
+impl nomi_native_files::NativeDirectoryAccess for WorkspaceDirectoryAccess {
+    fn canonicalize(&self, path: &Path) -> Result<PathBuf, nomi_native_files::NativeFileError> {
+        crate::path_safety::validate_path_authority(&path.to_string_lossy(), &self.authority)
+            .map_err(crate::native_acquisition::owner_error_to_native)
+    }
+    fn metadata(&self, path: &Path) -> Result<Option<nomi_native_files::NativeEntryKind>, nomi_native_files::NativeFileError> {
+        crate::workspace_read_dir::metadata(path, &self.authority).map_err(crate::native_acquisition::owner_error_to_native)
+            .map(|metadata| metadata.map(|entry| {
+                let kind = entry.metadata.file_type();
+                if kind.is_symlink() { nomi_native_files::NativeEntryKind::Link }
+                else if kind.is_dir() { nomi_native_files::NativeEntryKind::Directory }
+                else if kind.is_file() { nomi_native_files::NativeEntryKind::File }
+                else { nomi_native_files::NativeEntryKind::Other }
+            }))
+    }
+    fn entries(&self, path: &Path) -> Result<Box<dyn Iterator<Item = Result<nomi_native_files::NativeDirectoryEntry, nomi_native_files::NativeFileError>>>, nomi_native_files::NativeFileError> {
+        let entries = crate::workspace_read_dir::read_directory(path, &self.authority).map_err(crate::native_acquisition::owner_error_to_native)?;
+        Ok(Box::new(entries.map(|entry| {
+            let entry = entry.map_err(|error| nomi_native_files::NativeFileError::io("enumerating native instruction entry", error))?;
+            let kind = entry.file_type().map_err(|error| nomi_native_files::NativeFileError::io("classifying native instruction entry", std::io::Error::new(error.kind(), error.to_string())))?;
+            Ok(nomi_native_files::NativeDirectoryEntry { path: entry.path(),
+                kind: if kind.is_symlink() { nomi_native_files::NativeEntryKind::Link }
+                else if kind.is_dir() { nomi_native_files::NativeEntryKind::Directory }
+                else if kind.is_file() { nomi_native_files::NativeEntryKind::File }
+                else { nomi_native_files::NativeEntryKind::Other } })
+        })))
     }
 }
 
@@ -297,6 +209,28 @@ mod tests {
         assert_eq!(observed.directories, BTreeSet::from(["parent".into()]));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_worker_and_login_owner_share_exact_scope_projection() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        std::fs::create_dir_all(root.join("nested/.hidden/deep")).unwrap();
+        std::fs::create_dir(root.join("outside")).unwrap();
+        std::fs::write(root.join("nested/AGENTS.md"), b"parent rules").unwrap();
+        std::fs::write(root.join("nested/.hidden/deep/AGENTS.override.md"), b"deep rules").unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), root.join("nested/alias")).unwrap();
+        let scope = crate::workspace_binding(nomifun_common::generate_id(), "binding", "workspace", "owner", [WORKSPACE_READ_OPERATION], &root).unwrap();
+        let service = FileService::new(Arc::new(NullEvents), vec![]);
+        for (path, recursive) in [("./nested", true), ("nested/AGENTS.md", false), ("future/nested/file", false), ("nested/alias", false)] {
+            let request = AgentInstructionScopeRequest { path: path.into(), recursive };
+            let ordinary = service.instruction_scope_for_agent_session(&scope, request.clone()).await.unwrap();
+            let target = scope.resolve_path(path).unwrap();
+            let native = nomi_native_files::acquire_instruction_scope(&target, recursive).unwrap();
+            let projected = project_agent_instruction_scope(request, native, &root).unwrap();
+            assert_eq!(serde_json::to_value(ordinary).unwrap(), serde_json::to_value(projected).unwrap(), "{path}");
+        }
+    }
+
     #[tokio::test]
     async fn instruction_metadata_preserves_file_directory_and_deep_missing_scope() {
         let root = tempfile::tempdir().unwrap();
@@ -317,7 +251,7 @@ mod tests {
             assert_eq!(metadata["observation_kind"], "instruction_scope");
             assert_eq!(metadata["is_directory_listing"], false);
         }
-        for path in ["source.txt/child", "../outside", ".nomifun/internal"] {
+        for path in ["source.txt/child", "bad\0path"] {
             assert!(service.instruction_scope_for_agent_session(&binding,
                 AgentInstructionScopeRequest { path: path.into(), recursive: false }).await.is_err(), "{path}");
         }
@@ -419,7 +353,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn root_scope_uses_the_workspace_binding_without_granting_dot_file_operations() {
+    async fn root_scope_uses_the_session_default_directory() {
         let workspace = tempfile::tempdir().unwrap();
         std::fs::write(workspace.path().join("AGENTS.md"), "root rules").unwrap();
         let scope = crate::resource::workspace_binding(
@@ -446,6 +380,6 @@ mod tests {
         assert_eq!(observed.kind, "directory");
         assert!(observed.complete);
         assert!(observed.directories.contains(""));
-        assert!(scope.resolve_relative_path(".").is_err());
+        assert!(scope.resolve_path(".").is_ok());
     }
 }

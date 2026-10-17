@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+nomifun-runtime.workspace = true
 nomi-process-runtime.workspace = true
 nomi-redact.workspace = true
 serde.workspace = true

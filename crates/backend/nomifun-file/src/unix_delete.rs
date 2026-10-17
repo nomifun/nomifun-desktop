@@ -14,7 +14,7 @@ fn changed() -> AppError {
 }
 
 fn open_error(error: std::io::Error) -> AppError {
-    AppError::BadRequest(format!("cannot open the authorized deletion directory: {error}"))
+    crate::path_safety::native_io_error("opening native deletion directory", error)
 }
 
 struct PinnedDirectory {
@@ -83,13 +83,13 @@ pub(crate) fn remove_entry(
         .map_err(|error| AppError::NotFound(format!("cannot remove '{}': {error}", target.display())))?;
     // The caller resolved symlinks before authorizing the target. A newly
     // introduced final symlink is a different entry and must not be adopted.
-    if metadata.is_symlink() { return Err(changed()); }
+    if metadata.is_symlink() && !matches!(authority, PathAuthority::Unrestricted) { return Err(changed()); }
 
     after_open();
     root.verify()?;
     parent.verify()?;
     let current = parent.directory.symlink_metadata(name).map_err(|_| changed())?;
-    if current.is_symlink() || current.dev() != metadata.dev() || current.ino() != metadata.ino() {
+    if current.is_symlink() != metadata.is_symlink() || current.dev() != metadata.dev() || current.ino() != metadata.ino() {
         return Err(changed());
     }
 
@@ -101,9 +101,7 @@ pub(crate) fn remove_entry(
             crate::service::FILE_DELETE_OUTCOME_UNKNOWN, target.display(),
         )))
     } else {
-        parent.directory.remove_file(name).map_err(|error| AppError::Internal(format!(
-            "cannot remove file '{}': {error}", target.display(),
-        )))
+        parent.directory.remove_file(name).map_err(|error| crate::path_safety::native_io_error(format!("removing native file '{}'", target.display()), error))
     }
 }
 

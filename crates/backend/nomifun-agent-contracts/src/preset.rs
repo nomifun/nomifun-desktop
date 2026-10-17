@@ -30,7 +30,7 @@ pub const PRESET_REVISION_SAVE_FAILED: &str = "PRESET_REVISION_SAVE_FAILED";
 pub const PRESET_RESOURCE_NOT_BOUND: &str = "PRESET_RESOURCE_NOT_BOUND";
 pub const RESOURCE_OWNER_MISMATCH: &str = "RESOURCE_OWNER_MISMATCH";
 pub const OFFICIAL_PRESET_KEY_SET_MISMATCH: &str = "OFFICIAL_PRESET_KEY_SET_MISMATCH";
-pub const CHAT_MINIMAL_NOT_EXACT_EMPTY: &str = "CHAT_MINIMAL_NOT_EXACT_EMPTY";
+pub const DEFAULT_LOCAL_OS_CAPABILITIES_INCOMPLETE: &str = "DEFAULT_LOCAL_OS_CAPABILITIES_INCOMPLETE";
 pub const CODING_CODEX_NATIVE_INCOMPLETE: &str = "CODING_CODEX_NATIVE_INCOMPLETE";
 pub const ROLE_COVERAGE_INCOMPLETE: &str = "ROLE_COVERAGE_INCOMPLETE";
 pub const MODEL_ROUTE_RECORD_INVALID: &str = "MODEL_ROUTE_RECORD_INVALID";
@@ -1183,6 +1183,18 @@ pub fn official_preset_seed_manifest_payload() -> OfficialPresetSeedManifestPayl
         .expect("official preset seed fixture must match OfficialPresetSeedManifestPayload")
 }
 
+/// Normal local operating-system tools are intrinsic to the default personal
+/// Agent. Specialized task Agents and explicit subtask trimming retain their
+/// authored selection; this is not a permission mode or a capability tier.
+pub fn default_local_os_capability_selections() -> Vec<CapabilitySelection> {
+    [("workspace.files", &["read", "search", "write", "patch", "delete", "rename"][..]),
+     ("workspace.process", &["exec", "start", "poll", "input", "close_stdin", "resize", "cancel"][..])]
+        .into_iter().map(|(id, actions)| CapabilitySelection {
+            capability: CapabilityRef { id: id.into() },
+            action_allowlist: actions.iter().map(|action| ActionId::from(format!("{id}/{action}"))).collect(),
+        }).collect()
+}
+
 impl OfficialPresetSeedManifestPayload {
     pub fn validate(&self) -> Result<(), PresetContractViolation> {
         let expected = OfficialPresetKey::ALL.into_iter().collect::<BTreeSet<_>>();
@@ -1230,20 +1242,14 @@ impl OfficialPresetSeedManifestPayload {
         }
 
         let chat = &self.templates[&OfficialPresetKey::ChatMinimal];
-        let chat_coverage = &self.role_coverage[&OfficialPresetKey::ChatMinimal];
-        if !chat.enabled_capabilities.is_empty()
-
+        if chat.enabled_capabilities != default_local_os_capability_selections()
             || !chat.skill_bindings.is_empty()
-            || !chat.required_resource_kinds.is_empty()
+            || chat.required_resource_kinds != BTreeSet::from([ResourceKind::from("workspace"), ResourceKind::from("process_session")])
             || !chat.required_runtime_features.is_empty()
-            || !chat_coverage.required_capability_categories.is_empty()
-            || !chat_coverage.required_capability_ids.is_empty()
-            || !chat_coverage.required_runtime_features.is_empty()
-            || !chat_coverage.required_resource_kinds.is_empty()
         {
             return Err(PresetContractViolation {
-                code: CanonicalErrorCode::from(CHAT_MINIMAL_NOT_EXACT_EMPTY),
-                message: "chat.minimal must be exact-empty".into(),
+                code: CanonicalErrorCode::from(DEFAULT_LOCAL_OS_CAPABILITIES_INCOMPLETE),
+                message: "the default personal Agent must expose the complete local file and process tools".into(),
             });
         }
 
@@ -2201,6 +2207,20 @@ mod tests {
             .flat_map(|selection| &selection.action_allowlist)
             .map(AsRef::as_ref)
             .collect()
+    }
+
+    #[test]
+    fn default_personal_agent_exposes_complete_local_file_and_process_tools() {
+        let manifest = official_preset_seed_manifest_payload();
+        let actions = official_actions(&manifest, OfficialPresetKey::ChatMinimal);
+        for selection in default_local_os_capability_selections() {
+            for action in selection.action_allowlist { assert!(actions.contains(action.as_ref())); }
+        }
+        let seed = &manifest.templates[&OfficialPresetKey::ChatMinimal];
+        assert_eq!(seed.required_resource_kinds, BTreeSet::from([ResourceKind::from("workspace"), ResourceKind::from("process_session")]));
+        let mut removed = manifest;
+        removed.templates.get_mut(&OfficialPresetKey::ChatMinimal).unwrap().enabled_capabilities.clear();
+        assert!(removed.validate().is_err(), "the retired empty default must not return");
     }
 
     #[test]

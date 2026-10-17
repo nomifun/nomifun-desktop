@@ -2,7 +2,7 @@
 //!
 //! The host resolves a logical workspace resource to a native path before
 //! entering this crate.  This adapter validates the immutable binding facts and
-//! then delegates to the existing path-authority implementation.  It does not
+//! then resolves native paths with the OS user access controls.  It does not
 //! persist a second session mapping or infer ownership from a path.
 
 use std::collections::BTreeSet;
@@ -110,22 +110,37 @@ impl AgentSessionWorkspaceBinding {
         }
     }
 
-    /// Resolve a workspace-relative path without allowing an absolute path,
-    /// parent component, NUL byte, or portable separator escape.
-    pub fn resolve_relative_path(&self, relative_path: &str) -> Result<PathBuf, AppError> {
-        let relative = crate::artifact_store::normalized_workspace_relative(relative_path, true)?;
-        let resolved = if relative.as_os_str().is_empty() {
-            self.workspace_root.clone()
-        } else {
-            self.workspace_root.join(relative)
-        };
-        crate::path_safety::validate_workspace_candidate(&resolved, &self.workspace_root)?;
-        Ok(resolved)
+    /// Resolve a native path against the Session's default directory. The
+    /// workspace is project identity and a default, never an access boundary.
+    /// Leave `..` and links for native lookup so link/parent semantics are not
+    /// changed by lexical normalization.
+    pub fn resolve_path(&self, path: &str) -> Result<PathBuf, AppError> {
+        if path.contains('\0') {
+            return Err(AppError::BadRequest("file path contains a NUL byte".into()));
+        }
+        let path = Path::new(path);
+        #[cfg(windows)]
+        if path.has_root() && !path.is_absolute()
+            || matches!(path.components().next(), Some(std::path::Component::Prefix(_))) && !path.is_absolute()
+        {
+            return Err(AppError::BadRequest("use an absolute drive/UNC path or a path relative to the Session default directory".into()));
+        }
+        Ok(if path.is_absolute() { path.to_owned() } else { self.workspace_root.join(path) })
+    }
+
+    /// Project APIs (VCS, inventories and artifact ownership) retain a real
+    /// project-relative identity independent of global native file access.
+    pub fn resolve_project_path(&self, path: &str) -> Result<PathBuf, AppError> {
+        let relative = crate::artifact_store::normalized_workspace_relative(path, true)?;
+        let path = self.workspace_root.join(relative);
+        crate::path_safety::validate_workspace_candidate(&path, &self.workspace_root)?;
+        Ok(path)
     }
 
     pub fn authority(&self) -> PathAuthority {
-        PathAuthority::Workspace(self.workspace_root.clone())
+        PathAuthority::Unrestricted
     }
+
 }
 
 /// Build a binding for a host-resolved workspace resource.
@@ -184,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_wrong_kind_relative_escape_and_non_absolute_root() {
+    fn validates_binding_and_accepts_native_session_relative_paths() {
         let mut wrong_kind = binding();
         wrong_kind.resource_kind = "terminal".into();
         assert!(AgentSessionWorkspaceBinding::new(valid_session_id(), wrong_kind, "C:\\work").is_err());
@@ -192,40 +207,40 @@ mod tests {
         let root = tempdir().unwrap().keep();
         let scope = AgentSessionWorkspaceBinding::new(valid_session_id(), binding(), &root)
             .expect("valid workspace binding");
-        assert!(scope.resolve_relative_path("../outside").is_err());
-        assert!(scope.resolve_relative_path("/outside").is_err());
-        assert!(scope.resolve_relative_path(r"nested\outside").is_err());
-        assert!(scope.resolve_relative_path(".nomifun/artifacts/receipt").is_err());
-        assert!(scope.resolve_relative_path("./.nomifun/artifacts/receipt").is_err());
-        assert!(scope.resolve_relative_path("nested//file.txt").is_err());
-        assert!(scope.resolve_relative_path("./nested/file.txt").is_err());
-        #[cfg(any(windows, target_os = "macos"))]
-        assert!(scope.resolve_relative_path(".NOMIFUN/artifacts/receipt").is_err());
+        for path in ["../outside", r"nested\outside", ".nomifun/artifacts/receipt", "./.nomifun/artifacts/receipt", "nested//file.txt", "./nested/file.txt"] {
+            assert_eq!(scope.resolve_path(path).unwrap(), root.join(path));
+        }
+        assert!(scope.resolve_path("bad\0path").is_err());
+        let absolute = root.parent().unwrap().join("outside");
+        assert_eq!(scope.resolve_path(absolute.to_str().unwrap()).unwrap(), absolute);
+        assert!(matches!(scope.authority(), PathAuthority::Unrestricted));
+        assert!(scope.resolve_project_path("../outside").is_err());
+        assert!(scope.resolve_project_path(".nomifun/artifacts/receipt").is_err());
     }
 
     #[cfg(unix)]
     #[test]
-    fn rejects_symlink_alias_into_workspace_owner_namespace() {
+    fn native_file_paths_accept_symlink_aliases() {
         let root = tempdir().unwrap();
         std::fs::create_dir_all(root.path().join(".nomifun/artifacts")).unwrap();
         std::fs::write(root.path().join(".nomifun/artifacts/receipt"), "owned").unwrap();
         std::os::unix::fs::symlink(".nomifun", root.path().join("alias")).unwrap();
         let scope = AgentSessionWorkspaceBinding::new(valid_session_id(), binding(), root.path())
             .unwrap();
-        assert!(scope.resolve_relative_path("alias/artifacts/receipt").is_err());
-        assert!(scope.resolve_relative_path("alias/artifacts/new").is_err());
+        assert!(scope.resolve_path("alias/artifacts/receipt").is_ok());
+        assert!(scope.resolve_path("alias/artifacts/new").is_ok());
     }
 
     #[cfg(windows)]
     #[test]
-    fn rejects_junction_alias_into_workspace_owner_namespace() {
+    fn native_file_paths_accept_junction_aliases() {
         let root = tempdir().unwrap();
         std::fs::create_dir_all(root.path().join(".nomifun/artifacts")).unwrap();
         std::fs::write(root.path().join(".nomifun/artifacts/receipt"), "owned").unwrap();
         junction::create(root.path().join(".nomifun"), root.path().join("alias")).unwrap();
         let scope = AgentSessionWorkspaceBinding::new(valid_session_id(), binding(), root.path())
             .unwrap();
-        assert!(scope.resolve_relative_path("alias/artifacts/receipt").is_err());
-        assert!(scope.resolve_relative_path("alias/artifacts/new").is_err());
+        assert!(scope.resolve_path("alias/artifacts/receipt").is_ok());
+        assert!(scope.resolve_path("alias/artifacts/new").is_ok());
     }
 }
