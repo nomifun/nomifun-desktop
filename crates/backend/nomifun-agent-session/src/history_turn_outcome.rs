@@ -28,7 +28,7 @@ pub(super) async fn read(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessio
          ('turn/started','turn/completed','turn/failed','turn/cancelled','message/content-part','message/completed') \
          OR (e.kind='runtime/progress-recorded' AND COALESCE(json_extract(e.inline_json,'$.event.event'),\
          json_extract(CAST(p.body AS TEXT),'$.value.event.event')) IN \
-         ('model_step_started','output_text_delta','completion_delivered','model_output_truncated','model_response_rejected','tool_call_completed','voice_model_step_superseded'))) \
+         ('model_step_started','output_text_delta','completion_delivered','silent_completion','model_output_truncated','model_response_rejected','tool_call_completed','voice_model_step_superseded'))) \
          ORDER BY e.seq LIMIT 1000001")
         .bind(session.as_ref()).bind(as_i64(start.seq,"Turn outcome start")?).bind(as_i64(upper,"Turn outcome end")?)
         .fetch_all(&mut **tx).await?;

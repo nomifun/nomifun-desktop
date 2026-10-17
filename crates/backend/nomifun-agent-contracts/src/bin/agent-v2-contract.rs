@@ -28,6 +28,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use ts_rs::TS;
 
 fn main() {
     if let Err(error) = run() {
@@ -294,6 +295,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         ),
     ]);
 
+    let outcome_binding_path = root.join("../../../ui/src/common/protocolBindings/AgentTurnOutcome.ts");
+    let outcome_binding = AgentTurnOutcome::export_to_string(&ts_rs::Config::default())?
+        .replace("\r\n", "\n").replace('\r', "\n");
+    let outcome_binding = format!("{}\n", outcome_binding.trim_end());
     if mode == "write" {
         fs::create_dir_all(&generated)?;
         write_json(&seed_path, &seed)?;
@@ -301,6 +306,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         for (name, contents) in &outputs {
             fs::write(generated.join(name), contents)?;
         }
+        fs::write(&outcome_binding_path, &outcome_binding)?;
     } else {
         check_json(&seed_path, &seed)?;
         check_json(&platform_path, &platform)?;
@@ -315,6 +321,10 @@ fn run() -> Result<(), Box<dyn Error>> {
                 )
                 .into());
             }
+        }
+        if fs::read_to_string(&outcome_binding_path)?.replace("\r\n", "\n") != outcome_binding {
+            return Err(format!("generated artifact drift: {}; run agent-v2-contract write",
+                outcome_binding_path.display()).into());
         }
     }
 

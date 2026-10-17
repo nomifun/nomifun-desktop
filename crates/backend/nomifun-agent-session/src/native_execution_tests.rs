@@ -184,6 +184,22 @@ async fn model_response_validation_is_a_fenced_observation_without_new_admission
     assert_eq!((effects, admitted), (0, 0));
 }
 
+#[tokio::test]
+async fn silent_completion_intent_is_idempotent_observation_and_blocks_automatic_replay() {
+    let store=AgentSessionStore::open_in_memory().await.unwrap();
+    let f=fixture(&store,"silent-completion-observation").await;
+    let lease=store.claim_native_execution(claim(&f,"owner",0,None)).await.unwrap();
+    let cp=checkpoint(&store,&f,&lease).await;
+    let intent=progress(&f,"silent-completion-intent",json!({"event":"silent_completion","step":1,"tool_call_ids":["physical-action"]}));
+    let first=store.append_native_observation(&lease,&intent,None).await.unwrap();
+    let repeated=store.append_native_observation(&lease,&intent,None).await.unwrap();
+    assert!(repeated.duplicate);assert_eq!(first.cursor,repeated.cursor);
+    expire(&store,&f).await;
+    assert!(matches!(store.claim_native_execution(claim(&f,"replacement",0,Some(&cp))).await,
+        Err(SessionStoreError::RecoveryRequiresReconciliation)),"an accepted silent finish is not an unexecuted model prefix");
+    assert!(store.verify_native_execution(&lease).await.is_ok());
+}
+
 #[tokio::test(flavor="multi_thread", worker_threads=2)]
 async fn native_recovery_race_has_exactly_one_winner() {
     let store = AgentSessionStore::open_in_memory_with_connections(2).await.unwrap();

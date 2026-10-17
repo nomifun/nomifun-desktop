@@ -241,6 +241,15 @@ pub(crate) fn persona_flavor(preset: &str) -> &'static str {
     }
 }
 
+/// Spoken physical delivery expresses personality through words and real
+/// device actions, rather than borrowing the desktop's text-face preference.
+pub(crate) fn robot_persona_flavor(preset: &str) -> &'static str {
+    match preset {
+        "calm" | "sassy" => persona_flavor(preset),
+        _ => "你的性格活泼粘人，语气自然亲切，对主人的事情充满好奇。",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

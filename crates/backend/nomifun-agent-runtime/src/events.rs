@@ -303,6 +303,12 @@ pub enum AgentEngineEvent {
         step: u16,
         usage: ChatUsage,
     },
+    /// Explicit public-reply intent after the terminal input/host fences.
+    /// This never proves physical movement or an asynchronous task completed.
+    SilentCompletion {
+        step: u16,
+        tool_call_ids: Vec<ToolCallId>,
+    },
     TurnCompleted {
         model_steps: u16,
         finish_reason: ChatFinishReason,
@@ -351,6 +357,7 @@ impl AgentEngineEvent {
             | Self::ModelResponseRejected { .. }
             | Self::DeliveryReviewSuperseded { .. }
             | Self::VoiceModelStepSuperseded { .. }
+            | Self::SilentCompletion { .. }
             | Self::TurnCompleted { .. }
             | Self::UserInputRequested { .. }
             | Self::TurnInputRequired { .. }

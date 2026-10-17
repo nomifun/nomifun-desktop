@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::Value;
 use nomifun_agent_contracts::{MessageTimeline, TimelineSegmentKind, TimelineSegmentState};
 
 struct TimelineFixture { session: AgentSessionId, operation: OperationId, root: EventId, start: EventId }
@@ -23,6 +24,42 @@ async fn timeline_part(store: &AgentSessionStore, f: &TimelineFixture, key: &str
 
 fn timeline(row: &crate::MessageProjection) -> MessageTimeline {
     serde_json::from_value(row.projection["timeline"].clone()).unwrap()
+}
+
+#[tokio::test]
+async fn silent_finish_is_audit_only_in_live_timeline_and_cold_tool_history() {
+    let store=AgentSessionStore::open_in_memory().await.unwrap();let f=timeline_fixture(&store,"silent-finish-history").await;
+    for (call,name,failed) in [
+        ("quiet-success","finish_without_reply",false),("quiet-failed","finish_without_reply",true),
+        ("motion-success","robot_dog_action",false),("motion-failed","robot_dog_action",true),
+        ("report","report_completion",false),
+    ] {
+        timeline_progress(&store,&f,&format!("{call}-delta"),json!({"event":"tool_call_delta","step":1,
+            "call_id":call,"name":name,"arguments_delta":"{}"})).await;
+        timeline_progress(&store,&f,&format!("{call}-proposal"),json!({"event":"tool_call_completed","step":1,
+            "call":{"call_id":call,"name":name,"arguments":{}}})).await;
+        timeline_progress(&store,&f,&format!("{call}-result"),json!({"event":"tool_completed","step":1,
+            "result":{"call_id":call,"output":[],"is_error":failed}})).await;
+    }
+    let expected=BTreeSet::from(["motion-success","motion-failed","report"]);
+    let live=store.message_timeline_updates_for_turn(&f.session,f.root.as_ref()).await.unwrap();
+    assert_eq!(live.iter().filter_map(|update|update.call_id.as_deref()).collect::<BTreeSet<_>>(),expected);
+    assert_eq!(live.iter().find(|update|update.call_id.as_deref()==Some("motion-failed")).unwrap().timeline.segments[0].state,TimelineSegmentState::Failed);
+    store.cancel_active_turn(&f.session,"silent-finish-history-close".into(),"session_api".into()).await.unwrap();
+    let before=store.read_events(&f.session,None,500).await.unwrap();
+    for rebuild in [false,true] {
+        if rebuild {store.rebuild_projections(&f.session).await.unwrap();}
+        let history=store.message_history_before(&f.session,None,100).await.unwrap().0;
+        let tools=history.iter().filter(|row|row.presentation_intent=="tool").collect::<Vec<_>>();
+        assert_eq!(tools.iter().filter_map(|row|row.projection.pointer("/tool_summary/call_id").and_then(Value::as_str)).collect::<BTreeSet<_>>(),expected);
+        assert!(tools.iter().all(|row|row.projection.pointer("/tool_summary/name").and_then(Value::as_str)!=Some("finish_without_reply")));
+        for row in tools {
+            let detail=store.message_by_id(&f.session,row.projection["correlation_id"].as_str().unwrap()).await.unwrap().unwrap();
+            assert_eq!(timeline(&detail),timeline(row));
+        }
+    }
+    assert_eq!(store.read_events(&f.session,None,500).await.unwrap(),before,"internal finish proposals and results remain canonical audit facts");
+    assert_eq!(before.events.iter().filter(|event|event.kind.0=="runtime/progress-recorded").count(),15);
 }
 
 #[tokio::test]

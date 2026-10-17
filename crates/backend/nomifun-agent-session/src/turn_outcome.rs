@@ -34,6 +34,12 @@ struct Part { content: String, turn_id: String }
 #[derive(Deserialize)]
 struct Seal { part_count: u64, content_digest: String }
 
+#[derive(Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
+enum PublicResponseIntent {
+    SilentCompletion { step: u16, tool_call_ids: Vec<String> },
+}
+
 fn owned_empty_seal(event: &SessionEventRecord, start: &SessionEventRecord, root: &str) -> bool {
     if event.causation_event_id.as_ref().is_some_and(|cause|cause==&start.event_id || cause.as_ref()==root) { return true; }
     let (Ok(root),Ok(id))=(uuid::Uuid::parse_str(root),uuid::Uuid::parse_str(event.correlation_id.as_ref())) else {return false};
@@ -96,6 +102,8 @@ pub(crate) fn derive_turn_public_result(receipt: &TurnReceipt, paused: bool,
     let mut nonpublic=BTreeSet::<u16>::new();
     let mut proven_model_steps=BTreeSet::<u16>::new();
     let mut delivered_steps=BTreeSet::<u16>::new();
+    let mut invalidated_steps=BTreeSet::<u16>::new();
+    let mut silent_step=None;
     let mut previous_seq=start.seq;
     for event in events.iter().filter(|event|event.seq>start.seq && event.seq<upper) {
         if event.seq<=previous_seq {return Err(invalid("event order is not strictly increasing"));}
@@ -131,6 +139,17 @@ pub(crate) fn derive_turn_public_result(receipt: &TurnReceipt, paused: bool,
             }
             "runtime/progress-recorded" if event.correlation_id.as_ref()==receipt.operation_id.as_ref()=>{
                 let progress=payload(event)?.get("event").unwrap_or(&Value::Null);
+                if progress.get("event").and_then(Value::as_str)==Some("silent_completion") {
+                    let PublicResponseIntent::SilentCompletion {step,tool_call_ids}=serde_json::from_value(progress.clone())?;
+                    let unique=tool_call_ids.iter().collect::<BTreeSet<_>>();
+                    if event.producer_id.as_ref()!="runtime_supervisor"
+                        || !event.causation_event_id.as_ref().is_some_and(|cause|cause==&start.event_id || cause.as_ref()==root)
+                        || step==0 || tool_call_ids.is_empty() || unique.len()!=tool_call_ids.len()
+                        || tool_call_ids.iter().any(|id|id.trim().is_empty() || id.len()>256 || id.chars().any(char::is_control))
+                        || silent_step.replace(step).is_some() {
+                        return Err(invalid("invalid or duplicate silent completion intent"));
+                    }
+                }
                 let Some(step)=progress.get("step").and_then(Value::as_u64).and_then(|step|u16::try_from(step).ok()) else {continue;};
                 match progress.get("event").and_then(Value::as_str) {
                     Some("model_step_started"|"output_text_delta")=>{proven_model_steps.insert(step);}
@@ -145,8 +164,10 @@ pub(crate) fn derive_turn_public_result(receipt: &TurnReceipt, paused: bool,
                         if latest_part.as_ref()==Some(&id) {latest_part=None;}
                         if latest_seal.as_ref()==Some(&id) {latest_seal=None;}
                         nonpublic.insert(step);
+                        invalidated_steps.insert(step);
                     }
-                    Some("model_response_rejected"|"tool_call_completed")=>{nonpublic.insert(step);}
+                    Some("model_response_rejected")=>{nonpublic.insert(step);invalidated_steps.insert(step);}
+                    Some("tool_call_completed")=>{nonpublic.insert(step);}
                     _=>{}
                 }
             }
@@ -154,6 +175,15 @@ pub(crate) fn derive_turn_public_result(receipt: &TurnReceipt, paused: bool,
         }
     }
     if receipt.status==TurnReceiptStatus::Completed && !parts.is_empty() {return Err(invalid("completed Turn has unfinished public content"));}
+    if receipt.status==TurnReceiptStatus::Completed && let Some(step)=silent_step {
+        let expected=canonical_assistant_step_message_id(root,step).map_err(invalid)?;
+        if request.is_some() || terminal_model_step!=Some(step) || !proven_model_steps.contains(&step)
+            || invalidated_steps.contains(&step) || delivered_steps.contains(&step)
+            || latest_seal.as_ref()!=Some(&expected) || messages.get(&expected).is_none_or(|text|!text.is_empty()) {
+            return Err(invalid("silent completion differs from the exact empty closing model step"));
+        }
+        return Ok(result(Some(AgentTurnOutcome::Silent {})));
+    }
     if let Some(request)=request {return Ok(result(Some(AgentTurnOutcome::InputRequired {request_id:request.request_id.as_ref().into()})));}
     if receipt.status==TurnReceiptStatus::Completed {
         let Some(step)=terminal_model_step.filter(|step|proven_model_steps.contains(step)
@@ -217,9 +247,96 @@ mod tests {
             self.push("message/content-part",&id,json!({"turn_id":ROOT,"content":text}));
             self.push("message/completed",&id,json!({"part_count":1,"content_digest":digest_bytes(text.as_bytes())}));id
         }
+        fn silent(&mut self,step:u16) {
+            self.payloads.get_mut("terminal").unwrap()["model_steps"]=json!(step);
+            self.push("runtime/progress-recorded","operation",json!({"event":{"event":"model_step_started","step":step,"operation_id":format!("operation:model:{step}")}}));
+            self.push("runtime/progress-recorded","operation",json!({"event":{"event":"silent_completion","step":step,"tool_call_ids":["physical-action"]}}));
+            self.push("message/completed",&canonical_assistant_step_message_id(ROOT,step).unwrap(),json!({"part_count":0,"content_digest":digest_bytes(b"")}));
+        }
+        fn silent_marker_mut(&mut self)->&mut Value {
+            self.payloads.values_mut().find(|value|value.pointer("/event/event").and_then(Value::as_str)==Some("silent_completion")).unwrap()
+        }
         fn derive(&self,paused:bool)->Result<CanonicalTurnPublicResult,SessionStoreError> {
             derive_turn_public_result(&self.receipt,paused,&self.events,&self.payloads)
         }
+    }
+    #[test]
+    fn explicit_silent_completion_is_read_only_and_does_not_reuse_an_earlier_public_preface() {
+        let mut f=Fixture::new();f.answer(1,"Earlier public progress.");f.silent(2);
+        f.push("runtime/progress-recorded","operation",json!({"event":{"event":"tool_call_completed","step":2}}));
+        let before=(f.events.clone(),f.payloads.clone());
+        let expected=CanonicalTurnPublicResult {turn_outcome:Some(AgentTurnOutcome::Silent {}),result_text:None};
+        assert_eq!(f.derive(false).unwrap(),expected);
+        assert_eq!(f.derive(false).unwrap(),expected,"repeated result reads are idempotent");
+        assert_eq!((f.events,f.payloads),before,"silent result derivation never edits public or action facts");
+    }
+    #[test]
+    fn silent_completion_requires_bounded_unique_tool_identities_and_an_exact_typed_marker() {
+        for ids in [json!([]),json!(["same","same"]),json!([""]),json!(["   "]),json!(["bad\nid"]),json!(["x".repeat(257)]),json!([1])] {
+            let mut f=Fixture::new();f.silent(1);f.silent_marker_mut()["event"]["tool_call_ids"]=ids;
+            assert!(f.derive(false).is_err());
+        }
+        for step in [json!(0),json!(-1),json!(65536),json!("1")] {
+            let mut f=Fixture::new();f.silent(1);f.silent_marker_mut()["event"]["step"]=step;
+            assert!(f.derive(false).is_err());
+        }
+        let mut f=Fixture::new();f.silent(1);f.silent_marker_mut()["event"]["summary"]=json!("fabricated acknowledgement");
+        assert!(f.derive(false).is_err());
+        let mut f=Fixture::new();f.silent(1);
+        f.push("runtime/progress-recorded","operation",json!({"event":{"event":"silent_completion","step":1,"tool_call_ids":["physical-action"]}}));
+        assert!(f.derive(false).is_err(),"two distinct silent markers cannot elect the same result");
+    }
+    #[test]
+    fn silent_completion_requires_its_own_producer_cause_final_step_and_empty_seal() {
+        for identity in ["producer","cause","version","terminal_step","model_proof","seal"] {
+            let mut f=Fixture::new();f.silent(1);
+            let marker=f.events.iter().position(|event|f.payloads.get(event.event_id.as_ref())
+                .and_then(|value|value.pointer("/event/event")).and_then(Value::as_str)==Some("silent_completion")).unwrap();
+            match identity {
+                "producer"=>f.events[marker].producer_id="session_api".into(),
+                "cause"=>f.events[marker].causation_event_id=Some("another-turn".into()),
+                "version"=>f.events[marker].kind_version=2,
+                "terminal_step"=>f.payloads.get_mut("terminal").unwrap()["model_steps"]=json!(2),
+                "model_proof"=>{f.events.remove(1);},
+                "seal"=>{f.events.pop();},
+                _=>unreachable!(),
+            }
+            assert!(f.derive(false).is_err(),"invalid silent {identity} must fail closed");
+        }
+        let mut f=Fixture::new();f.answer(1,"A public reply cannot also be silent.");
+        f.push("runtime/progress-recorded","operation",json!({"event":{"event":"silent_completion","step":1,"tool_call_ids":["physical-action"]}}));
+        assert!(f.derive(false).is_err());
+        let mut f=Fixture::new();f.silent(1);
+        f.push("message/content-part",&canonical_assistant_step_message_id(ROOT,2).unwrap(),json!({"turn_id":ROOT,"content":"unfinished reply"}));
+        assert!(f.derive(false).is_err());
+        for kind in ["model_response_rejected","voice_model_step_superseded","completion_delivered"] {
+            let mut f=Fixture::new();f.silent(1);
+            f.push("runtime/progress-recorded","operation",json!({"event":{"event":kind,"step":1}}));
+            assert!(f.derive(false).is_err(),"silent completion cannot promote an invalidated or delivered step");
+        }
+    }
+    #[test]
+    fn silent_marker_cannot_replace_handoff_failure_cancellation_or_another_turn() {
+        let mut f=Fixture::new();f.silent(1);
+        f.payloads.get_mut("terminal").unwrap()["user_input_request"]=json!({"request_id":"ask-name","question":"姓名？","remaining_work":"完成PPT"});
+        assert!(f.derive(false).is_err(),"a user-input handoff cannot also be silent");
+        for (status,kind,expected) in [
+            (TurnReceiptStatus::Failed,"turn/failed",AgentTurnOutcome::Failed {message_ids:vec![]}),
+            (TurnReceiptStatus::Cancelled,"turn/cancelled",AgentTurnOutcome::Cancelled {message_ids:vec![]}),
+        ] {
+            let mut f=Fixture::new();f.silent(1);f.receipt.status=status;
+            f.receipt.terminal_event.as_mut().unwrap().kind=SessionEventKind(kind.into());
+            assert_eq!(f.derive(false).unwrap().turn_outcome,Some(expected));
+        }
+        let mut f=Fixture::new();f.silent(1);
+        let marker=f.events.iter_mut().find(|event|f.payloads.get(event.event_id.as_ref())
+            .and_then(|value|value.pointer("/event/event")).and_then(Value::as_str)==Some("silent_completion")).unwrap();
+        marker.correlation_id="another-operation".into();
+        assert_eq!(f.derive(false).unwrap().turn_outcome,Some(AgentTurnOutcome::Unavailable));
+        let mut f=Fixture::new();f.silent(1);
+        f.events.retain(|event|f.payloads.get(event.event_id.as_ref())
+            .and_then(|value|value.pointer("/event/event")).and_then(Value::as_str)!=Some("silent_completion"));
+        assert_eq!(f.derive(false).unwrap().turn_outcome,Some(AgentTurnOutcome::Unavailable),"old empty completions remain unavailable");
     }
     #[test]
     fn typed_handoff_survives_the_empty_assistant_seal_without_copying_the_question() {

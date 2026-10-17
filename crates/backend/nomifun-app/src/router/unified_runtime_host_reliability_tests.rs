@@ -613,6 +613,28 @@ fn robot_interaction_context_uses_only_the_frozen_active_tool_mapping() {
 }
 
 #[test]
+fn robot_reply_style_follows_custom_guidance_and_applies_to_expanded_physical_agents() {
+    let original = vec!["Custom persona: append ヾ(≧▽≦*)o and emoji to every reply.".to_owned(),
+        "Quoted technical data: x <= 3, dog_v2, https://example.test/a_b".to_owned()];
+    for role_description in ["lean robot", "explicitly expanded robot"] {
+        let mut instructions = original.clone();
+        append_robot_reply_style(&mut instructions, true);
+        assert_eq!(&instructions[..original.len()], original.as_slice(), "{role_description} retains original input data");
+        assert_eq!(instructions.last().unwrap(), ROBOT_REPLY_STYLE_INSTRUCTION);
+        assert!(instructions.last().unwrap().contains("overrides decorative style in persona/custom settings"));
+        assert!(instructions.last().unwrap().contains("Preserve symbols in user-requested quotations, code, formulas"));
+        assert!(instructions.last().unwrap().contains("finish silently after all required tool receipts succeed"));
+        assert!(instructions.last().unwrap().contains("never invent an unavailable control or stop before the remaining actions"));
+        assert!(instructions.last().unwrap().contains("question or requires a verbal receipt"));
+        assert!(instructions.last().unwrap().contains("real failure, blocker, uncertain result or necessary clarification"));
+        assert!(!instructions.last().unwrap().contains("finish_without_reply"), "only the Runtime's actual exposed control gives its exact invocation contract");
+    }
+    let mut desktop = original.clone();
+    append_robot_reply_style(&mut desktop, false);
+    assert_eq!(desktop, original, "device resources or a decorative custom persona alone do not select physical delivery");
+}
+
+#[test]
 fn robot_profile_preserves_explicit_reasoning_and_does_not_guess_a_supported_low_tier() {
     assert!(session_reasoning(None).is_none(), "reasoning-capable routes do not advertise which default tier is supported");
     for (selected, expected) in [

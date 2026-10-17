@@ -50,7 +50,7 @@ const APP_DEVELOPMENT_INSTRUCTIONS: &str = "You are NomiFun's built-in applicati
 fn official_template_instructions(key: OfficialPresetKey) -> &'static str {
     match key {
         OfficialPresetKey::AppDeveloper => APP_DEVELOPMENT_INSTRUCTIONS,
-        OfficialPresetKey::CompanionRobot => "Prioritize responsive physical interaction while keeping the selected Companion's identity and memories. For a clear supported device request, call the already available authorized device tool immediately; do not search unrelated capabilities or perform preliminary narration. Discover a device tool only when the needed operation is not already visible. If the request is ambiguous or unsupported, ask one short clarification or explain the limitation. For computer work, use the tools the owner explicitly enabled when available; otherwise call agent/delegate with strategy=planned, target_role=desktop and the explicit goal; the host delegates to this same Companion's desktop Agent. Once accepted, briefly acknowledge and end this Turn so conversation stays responsive. Acceptance is not completion; report progress or results only from actual linked Execution receipts. Keep spoken replies brief and natural. Report an action only from the device tool's actual result, distinguishing acceptance from completion; never claim physical success from your own text. Do not repeat a device action after an uncertain result without resolving its status.",
+        OfficialPresetKey::CompanionRobot => "Prioritize responsive physical interaction while keeping the selected Companion's identity and memories. For a clear supported device request, call the already available authorized device tool immediately; do not search unrelated capabilities, perform preliminary narration or invent a planning step. Discover a device tool only when the needed operation is not already visible. For a device-action-only request, finish silently after every requested action has a successful receipt, without greetings, acknowledgments or recaps. Use only an actually advertised silent-finish control under its declared contract and never stop before all requested actions. Speak for a question, an explicitly requested verbal receipt, a real failure, blocker, uncertain result or necessary clarification. Ask one short clarification only when necessary. Respond naturally to ordinary companionship and answer directly when the available facts suffice; reason carefully for substantive questions and use deeper planning when asked to invent or coordinate autonomous physical behavior, checking the actual device capabilities and execution boundaries before acting. For research, current information, knowledge retrieval or computer work that needs tools, use the tools the owner explicitly enabled when available; otherwise call agent/delegate with strategy=planned, target_role=desktop and the complete user goal. This same Companion's saved desktop Agent supplies its own authorized platform capabilities, including short queries such as '北京今天的天气怎么样'; being in a physical robot is not a reason to refuse. Preserve the user's location, date and other necessary context, and request a concise factual answer. This directed delegation needs no extra planning Agent. Once accepted, end this Turn without narration or acknowledgment; the runtime handles this handoff without requiring a public reply. Do not poll or block the conversation waiting for it. The platform returns the actual result to the original device while its source connection remains valid. Acceptance is not completion; report progress or results only from actual linked Execution receipts. Keep spoken replies brief and natural, with detail when the user asks for it. Report an action only from the device tool's actual result, distinguishing acceptance from completion; never claim physical success from your own text. Do not repeat a device action after an uncertain result without resolving its status. Neither delegation nor shared identity grants additional tools or device authority.",
         _ => "",
     }
 }
@@ -3857,6 +3857,19 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn robot_seed_prefers_silent_success_with_explicit_spoken_exceptions() {
+        let instructions = official_template_instructions(OfficialPresetKey::CompanionRobot);
+        assert!(instructions.contains("device-action-only request, finish silently after every requested action has a successful receipt"));
+        assert!(instructions.contains("never stop before all requested actions"));
+        assert!(instructions.contains("a question, an explicitly requested verbal receipt, a real failure, blocker, uncertain result or necessary clarification"));
+        assert!(!instructions.contains("at most one short useful confirmation"));
+        assert!(instructions.contains("end this Turn without narration or acknowledgment"));
+        assert!(!instructions.contains("briefly acknowledge"));
+        assert!(!instructions.contains("finish_without_reply"), "the seed cannot assume that a Runtime control is exposed");
+        assert!(!official_template_instructions(OfficialPresetKey::CompanionDefault).contains("silent-finish"));
+    }
+
     #[tokio::test]
     async fn robot_companion_official_configuration_is_seeded_once_and_keeps_its_core_identity() {
         let store = Arc::new(InMemoryControlPlaneStore::new());
@@ -3866,7 +3879,22 @@ pub(crate) mod tests {
         assert_eq!(created.draft.source_template_key, Some(nomifun_api_types::OfficialPresetKeyDto::CompanionRobot));
         assert_eq!(created.draft.document.instructions, official_template_instructions(OfficialPresetKey::CompanionRobot));
         assert!(!created.draft.document.instructions.is_empty());
-        assert!(created.draft.document.instructions.contains("use the tools the owner explicitly enabled when available; otherwise call agent/delegate"));
+        for boundary in [
+            "call the already available authorized device tool immediately",
+            "finish silently after every requested action has a successful receipt",
+            "explicitly requested verbal receipt",
+            "real failure, blocker, uncertain result or necessary clarification",
+            "ordinary companionship",
+            "deeper planning",
+            "use the tools the owner explicitly enabled when available; otherwise call agent/delegate",
+            "target_role=desktop",
+            "北京今天的天气怎么样",
+            "Do not poll or block the conversation",
+            "original device while its source connection remains valid",
+            "Do not repeat a device action after an uncertain result",
+        ] {
+            assert!(created.draft.document.instructions.contains(boundary), "Robot instructions retain {boundary}");
+        }
         assert_eq!(created.draft.document.enabled_capabilities.iter().map(|selection| selection.capability.id.as_str())
             .collect::<BTreeSet<_>>(), BTreeSet::from(["agent.collaboration", "companion", "companion.memory", "robot", "session.management"]));
         let mut draft = created.draft.clone();

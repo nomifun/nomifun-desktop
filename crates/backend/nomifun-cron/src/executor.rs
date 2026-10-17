@@ -1374,7 +1374,7 @@ mod public_delivery_tests {
             ExecutionResult::Error {message} if message.contains("CRON_USER_INPUT_REQUIRED") && message.contains("请提供姓名")));
         question.user_input_request.as_mut().unwrap().request_id="different-question".into();
         assert!(matches!(replayed_delivery_result("run","session",question),ExecutionResult::Error {..}));
-        for outcome in [AgentTurnOutcome::Unavailable,AgentTurnOutcome::Failed {message_ids:vec![]},
+        for outcome in [AgentTurnOutcome::Unavailable,AgentTurnOutcome::Silent {},AgentTurnOutcome::Failed {message_ids:vec![]},
             AgentTurnOutcome::Cancelled {message_ids:vec![]}] {
             assert!(matches!(replayed_delivery_result("run","session",delivery(outcome)),ExecutionResult::Error {..}));
         }

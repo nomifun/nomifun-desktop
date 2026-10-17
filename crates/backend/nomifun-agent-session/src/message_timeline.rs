@@ -73,6 +73,7 @@ struct Timeline {
     narration: Option<(String, String)>,
     reasoning_start: Option<(String, u64)>,
     withdrawn: BTreeSet<String>,
+    internal_silent_finishes: BTreeSet<String>,
 }
 
 impl Timeline {
@@ -80,7 +81,7 @@ impl Timeline {
         Self { root: turn.source_message_id.clone(), operation: turn.operation_id.clone(), started_event: turn.started_event_id.clone(),
             group: format!("process:{}", turn.source_message_id), sources: BTreeMap::new(),
             tools: BTreeMap::new(), active: None, phase: None, narration: None,
-            reasoning_start: None, withdrawn: BTreeSet::new() }
+            reasoning_start: None, withdrawn: BTreeSet::new(), internal_silent_finishes: BTreeSet::new() }
     }
 
     fn close(&mut self, seq: u64, state: State) {
@@ -166,7 +167,7 @@ impl Timeline {
 
     fn tool(&mut self, fact: &Fact, owner: bool, visible: bool) -> Result<(), SessionStoreError> {
         let Some(call_id) = &fact.call_id else { return Err(invalid("tool identity missing")); };
-        if call_id.starts_with("agent-instructions:") { return Ok(()); }
+        if call_id.starts_with("agent-instructions:") || self.internal_silent_finishes.contains(call_id) { return Ok(()); }
         if owner && fact.causation_event_id.as_deref() != Some(self.started_event.as_str()) { return Ok(()); }
         if self.tools.get(call_id).is_some_and(|tool| tool.step.zip(fact.runtime_step).is_some_and(|(original,current)| original != current)) {
             return Ok(());
@@ -195,6 +196,7 @@ impl Timeline {
 
     fn result(&mut self, fact: &Fact) -> Result<(), SessionStoreError> {
         let Some(call_id) = &fact.call_id else { return Err(invalid("result identity missing")); };
+        if self.internal_silent_finishes.contains(call_id) { return Ok(()); }
         let Some(tool) = self.tools.get_mut(call_id) else { return Ok(()); };
         if tool.step.zip(fact.runtime_step).is_some_and(|(original,current)| original != current) { return Ok(()); }
         if fact.kind == "tool/result-recorded" && tool.owner.as_deref() != Some(fact.correlation_id.as_str()) {
@@ -215,6 +217,17 @@ impl Timeline {
             return Ok(());
         }
         if fact.kind_version != 1 { return Err(invalid("unsupported canonical event version")); }
+        if fact.kind=="runtime/progress-recorded" && fact.correlation_id==self.operation {
+            if fact.tool_name.as_deref()==Some("finish_without_reply")
+                && matches!(fact.runtime_kind.as_deref(),Some("tool_call_delta"|"tool_call_completed")) {
+                if let Some(call)=&fact.call_id { self.internal_silent_finishes.insert(call.clone()); }
+                return Ok(());
+            }
+            if fact.call_id.as_ref().is_some_and(|call|self.internal_silent_finishes.contains(call))
+                && matches!(fact.runtime_kind.as_deref(),Some("tool_call_delta"|"tool_call_completed"|"tool_started"|"tool_completed"|"host_tool_settled")) {
+                return Ok(());
+            }
+        }
         let seq = as_u64(fact.seq, "timeline sequence")?;
         match fact.kind.as_str() {
             "message/content-part" => self.text(fact, Kind::Narration)?,
@@ -351,7 +364,7 @@ async fn read_turn(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionId, t
              THEN json_extract(fact,'$.output.is_error') \
              WHEN kind='tool/result-recorded' AND json_type(fact,'$.output') IS NOT NULL \
              THEN 0 END AS result_error, \
-        json_extract(fact,'$.event.call.name') AS tool_name FROM facts ORDER BY seq LIMIT ")
+        COALESCE(json_extract(fact,'$.event.call.name'),json_extract(fact,'$.event.name')) AS tool_name FROM facts ORDER BY seq LIMIT ")
         .push_bind((MAX_TIMELINE_EVENTS + 1) as i64);
     let facts = query.build_query_as::<Fact>().fetch_all(&mut **tx).await?;
     if facts.len() > MAX_TIMELINE_EVENTS { return Err(invalid("event budget exceeded")); }
@@ -475,6 +488,30 @@ mod tests {
         assert_eq!(segments[0].segment_id,"event-3");
         assert_eq!(segments[2].segment_id,"event-7");
         assert!(segments.iter().all(|segment| segment.group_id == format!("process:{ROOT}")));
+    }
+
+    #[test]
+    fn silent_finish_control_never_splits_public_text_or_reveals_its_result_as_a_tool() {
+        for failed in [0,1] {
+            let mut timeline=Timeline::new(&turn());
+            for event in [
+                fact(2,"message/content-part","answer",Some("A")),
+                Fact {tool_name:Some("finish_without_reply".into()),..tool(3,"tool_call_delta","quiet-finish")},
+                Fact {tool_name:Some("finish_without_reply".into()),..tool(4,"tool_call_completed","quiet-finish")},
+                Fact {tool_name:None,result_error:Some(failed),..tool(5,"tool_completed","quiet-finish")},
+                fact(6,"message/content-part","answer",Some("B")),
+                Fact {tool_name:Some("robot_dog_action".into()),..tool(7,"tool_call_completed","motion")},
+                tool(8,"tool_started","motion"),
+                Fact {result_error:Some(1),..tool(9,"tool_completed","motion")},
+                Fact {tool_name:Some("report_completion".into()),..tool(10,"tool_call_completed","report")},
+                Fact {result_error:Some(0),..tool(11,"tool_completed","report")},
+            ] {timeline.accept(&event).unwrap();}
+            let updates=timeline.finish(&turn(),11).unwrap();
+            assert!(!updates.iter().any(|update|update.call_id.as_deref()==Some("quiet-finish")));
+            let answer=source(&updates,"answer");assert_eq!(answer.segments.len(),1);assert_eq!(answer.segments[0].end_utf16,Some(2));
+            assert_eq!(updates.iter().find(|update|update.call_id.as_deref()==Some("motion")).unwrap().timeline.segments[0].state,State::Failed);
+            assert!(updates.iter().any(|update|update.call_id.as_deref()==Some("report")),"other controls remain inspectable");
+        }
     }
 
     #[test]

@@ -43,7 +43,7 @@ const joinedText = (state: CompanionSessionBubbleState): string => {
   if (state.outcome?.kind === 'input_required') {
     return state.handoff?.requestId === state.outcome.request_id ? state.handoff.text : '';
   }
-  if (state.outcome?.kind === 'unavailable') return '';
+  if (state.outcome?.kind === 'silent' || state.outcome?.kind === 'unavailable') return '';
   const ids = state.outcome && 'message_ids' in state.outcome ? state.outcome.message_ids : state.order;
   const text = ids.map(id => state.segments.get(id as MessageId) ?? '').filter(Boolean).join('\n\n').trim();
   return !state.outcome && state.handoff ? [text, state.handoff.text].filter(Boolean).join('\n\n') : text;
@@ -108,6 +108,7 @@ export const hydrateCompanionSessionBubble = (
     hint: outcome?.kind === 'unavailable' ? unavailableHint : state.hint };
   const text = joinedText(next);
   if (!owned.length && outcome === state.outcome && handoff === state.handoff) return state;
+  if (outcome?.kind === 'silent') return { ...next, bubble: '', loading: false };
   return { ...next, bubble: text || next.hint || (state.phase === 'settled' ? '' : '…'),
     loading: !text && !next.hint && state.phase !== 'settled' };
 };
@@ -132,8 +133,12 @@ export const streamCompanionSessionBubble = (
       hint: outcome?.kind === 'unavailable' ? unavailableHint : state.hint,
     };
     const text = joinedText(next);
+    if (next.outcome?.kind === 'silent') return { ...next, bubble: '', loading: false };
     return { ...next, bubble: text || next.hint || (state.phase === 'settled' ? '' : '…'), loading: !text && !next.hint && state.phase !== 'settled' };
   }
+  // Only the host's typed terminal establishes silence. Late process frames
+  // must not reintroduce a tool hint or a completion acknowledgement.
+  if (state.outcome?.kind === 'silent') return state;
   if (message.hidden) {
     const segments = new Map(state.segments);
     segments.delete(message.msg_id);
@@ -170,7 +175,7 @@ export const settleCompanionSessionBubble = (
 ): CompanionSessionBubbleState => {
   if (state.turnId !== turnId || state.phase === 'settled') return state;
   return { ...state, phase: paused ? 'paused' : 'settled', loading: false,
-    bubble: state.dismissed ? '' : joinedText(state) || state.hint || fallback };
+    bubble: state.dismissed || state.outcome?.kind === 'silent' ? '' : joinedText(state) || state.hint || fallback };
 };
 
 export const clearCompanionSessionBubble = (

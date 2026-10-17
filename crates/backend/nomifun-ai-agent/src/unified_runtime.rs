@@ -293,6 +293,7 @@ impl TurnProjection {
                 let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
                 calls.get_mut(call_id.as_ref())
                     .filter(|call| !call.public.call_id.starts_with("agent-instructions:"))
+                    .filter(|call| call.public.name != nomifun_agent_runtime::FINISH_WITHOUT_REPLY_TOOL_NAME)
                     .map(|pending| {
                         let call = &mut pending.public;
                         call.identity.capability_id = Some(capability_id.as_ref().to_owned());
@@ -318,7 +319,8 @@ impl TurnProjection {
                 // These are engine-owned instruction preflight reads, not
                 // model-selected work. Keep their durable observations but do
                 // not flood the conversation with synthetic read/error rows.
-                if call.call_id.starts_with("agent-instructions:") {
+                if call.call_id.starts_with("agent-instructions:")
+                    || call.name == nomifun_agent_runtime::FINISH_WITHOUT_REPLY_TOOL_NAME {
                     return Ok(());
                 }
                 call.status = if result.is_error {
@@ -1164,6 +1166,42 @@ mod tests {
         assert!(projection.emit(AgentEngineEvent::ReasoningDelta { step: 2, text: "uncommitted".into() }).await.is_err());
         assert_eq!(host.timeline_reads.load(Ordering::Acquire), 3, "failed canonical writes cannot trigger metadata publication");
         assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn silent_robot_finish_remains_canonical_without_a_user_visible_control_row() {
+        let host = Host::new();
+        let state = AgentRuntimeState::new(SESSION, "silent-projection-workspace", 32);
+        let turn = state.reset_for_new_turn(ConversationStatus::Running);
+        let projection = TurnProjection {
+            host: host.clone(), message: message(), output: EngineTurnOutput::new(state.clone(), turn),
+            calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
+            last_model_step: std::sync::atomic::AtomicU16::new(0),
+        };
+        let mut stream = state.subscribe();
+        for (id, name, capability, action) in [
+            ("motion", "robot_motion", "robot", "robot/motion"),
+            ("quiet", nomifun_agent_runtime::FINISH_WITHOUT_REPLY_TOOL_NAME, "engine.control", "engine.control/finish"),
+        ] {
+            projection.emit(AgentEngineEvent::ToolCallCompleted { step: 1,
+                call: nomifun_chat_model_broker::ChatToolCall { call_id: id.into(), name: name.into(),
+                    arguments: nomifun_agent_contracts::StrictJsonValue(serde_json::json!({})), provider_metadata: None } }).await.unwrap();
+            projection.emit(AgentEngineEvent::ToolStarted { step: 1, call_id: id.into(),
+                capability_id: capability.into(), action_id: action.into() }).await.unwrap();
+            projection.emit(AgentEngineEvent::ToolCompleted { step: 1, runtime_hold: None,
+                result: AgentToolResult::text(id.into(), "accepted", false) }).await.unwrap();
+        }
+        projection.emit(AgentEngineEvent::SilentCompletion { step: 1, tool_call_ids: vec!["motion".into()] }).await.unwrap();
+        let recorded = host.events.lock().unwrap();
+        assert!(recorded.iter().any(|event| matches!(event, AgentEngineEvent::SilentCompletion {step:1,tool_call_ids}
+            if tool_call_ids.as_slice()==[nomifun_chat_model_broker::ToolCallId::from("motion")])));
+        assert!(recorded.iter().any(|event| matches!(event, AgentEngineEvent::ToolCompleted {result,..} if result.call_id.as_ref()=="quiet")));
+        drop(recorded);
+        let mut visible = Vec::new();
+        while let Ok(event) = stream.try_recv() { visible.push(event); }
+        assert_eq!(visible.len(), 2, "only the real device running/result rows are user-facing");
+        assert!(visible.iter().all(|event| matches!(event, AgentStreamEvent::ToolCall(call) if call.call_id=="motion")));
+        assert!(projection.calls.lock().unwrap().is_empty(), "hidden controls still settle their pending projection entries");
     }
 
     #[tokio::test]

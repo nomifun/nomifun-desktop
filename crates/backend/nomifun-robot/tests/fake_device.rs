@@ -216,6 +216,126 @@ fn uplink_packets(ms: u32, loud: bool) -> Vec<Vec<u8>> {
         .unwrap()
 }
 
+/// Exercise the actual WebSocket framing and admission route, with one device
+/// listen window across two silent actions and a following ordinary question.
+/// The dispatcher is mocked: this test never sends a physical motion command.
+async fn continuous_silent_voice_round(mode: &str) {
+    use std::time::Duration;
+
+    let h = boot().await;
+    let robot_id = "aa:bb:cc:dd:ee:30";
+    h.dispatcher.set_vad_engine("energy");
+    for transcript in ["坐下", "站起来", "现在天气如何"] {
+        h.speech.push_transcript(transcript);
+    }
+    h.dispatcher.script_turn(vec![TurnEvent::Done]);
+    h.dispatcher.script_turn(vec![TurnEvent::Done]);
+    h.dispatcher.script_turn(vec![TurnEvent::Text("有小雨。".into()), TurnEvent::Done]);
+
+    let ota: Value = h.http.post(format!("{}/robot/ota", h.base))
+        .header("Device-Id", robot_id).header("Client-Id", "silent-voice")
+        .json(&serde_json::json!({
+            "version": 2, "application": {"version": "1.9.0"},
+            "board": {"type": "esp32-s3n16r8-emoji"}
+        }))
+        .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    h.http.post(format!("{}/api/robots/claim", h.base))
+        .json(&serde_json::json!({
+            "code": ota["activation"]["code"],
+            "companion_id": "0190f5fe-7c00-7a00-8000-0000000000aa"
+        }))
+        .send().await.unwrap().error_for_status().unwrap();
+    let bearer = format!("Bearer {}", ota["websocket"]["token"].as_str().unwrap());
+    let request = ws_request(ota["websocket"]["url"].as_str().unwrap(), &[
+        ("Authorization", &bearer), ("Device-Id", robot_id),
+        ("Client-Id", "silent-voice"), ("Protocol-Version", "1"),
+    ]);
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    send_text(&mut socket, r#"{"type":"hello","version":1,"transport":"websocket"}"#).await;
+    let hello = tokio::time::timeout(Duration::from_secs(3), next_json(&mut socket)).await
+        .expect("authenticated device must receive hello");
+    assert_eq!(hello["type"], "hello");
+    send_text(&mut socket, &serde_json::json!({
+        "session_id": hello["session_id"], "type": "listen", "state": "start", "mode": mode,
+    }).to_string()).await;
+
+    for (index, transcript) in ["坐下", "站起来", "现在天气如何"].into_iter().enumerate() {
+        // Firmware emits only one listen.start while it remains Listening.
+        // A second start here would conceal the microphone-window regression.
+        for packet in uplink_packets(300, true).into_iter().chain(uplink_packets(900, false)) {
+            socket.send(Message::Binary(packet.into())).await.unwrap();
+        }
+        let stt = tokio::time::timeout(Duration::from_secs(3), next_json(&mut socket)).await
+            .unwrap_or_else(|_| panic!("{mode} utterance {} must reach ASR in the existing listen window", index + 1));
+        assert_eq!(stt["type"], "stt");
+        assert_eq!(stt["text"], transcript);
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let statuses: Value = h.http.get(format!("{}/api/robots/statuses", h.base))
+                    .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+                let idle = statuses["statuses"].as_array().unwrap().iter()
+                    .any(|status| status["robot_id"] == robot_id && status["phase"] == "idle");
+                if h.dispatcher.dispatched_text().len() == index + 1 && idle { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("each admitted turn must finish before the next spoken command");
+
+        if index < 2 {
+            assert!(h.speech.synthesized_text().is_empty(), "silent action has no TTS provider call");
+            // Completion may use state-only controls, but no sentence or audio
+            // is an acceptable replacement for a deliberately silent action.
+            while let Ok(frame) = tokio::time::timeout(Duration::from_millis(50), next_frame(&mut socket)).await {
+                match frame {
+                    Message::Text(raw) => {
+                        let value: Value = serde_json::from_str(&raw).unwrap();
+                        assert!(!(value["type"] == "tts" && value["state"] == "sentence_start"),
+                            "silent action unexpectedly spoke or reported failure: {value}");
+                    }
+                    Message::Binary(_) => panic!("silent action unexpectedly sent speech audio"),
+                    Message::Close(_) => panic!("silent action closed the device link"),
+                    _ => {}
+                }
+            }
+        } else {
+            let mut sentences = Vec::new();
+            let mut audio_frames = 0;
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    match next_frame(&mut socket).await {
+                        Message::Text(raw) => {
+                            let value: Value = serde_json::from_str(&raw).unwrap();
+                            if value["type"] == "tts" && value["state"] == "sentence_start" {
+                                sentences.push(value["text"].as_str().unwrap().to_owned());
+                            }
+                            if value["type"] == "tts" && value["state"] == "stop" { break; }
+                        }
+                        Message::Binary(_) => audio_frames += 1,
+                        Message::Close(_) => panic!("device link closed during the following answer"),
+                        _ => {}
+                    }
+                }
+            }).await.expect("following question must still receive an ordinary spoken answer");
+            assert_eq!(sentences, vec!["有小雨。"]);
+            assert!(audio_frames > 0, "following answer includes real Opus downlink frames");
+        }
+    }
+    assert_eq!(h.dispatcher.dispatched_text(), vec!["坐下", "站起来", "现在天气如何"]);
+    assert_eq!(h.speech.transcribe_calls(), 3);
+    assert_eq!(h.speech.synthesized_text(), vec!["有小雨。".to_owned()]);
+    socket.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn continuous_silent_voice_uses_one_auto_listen_window_over_websocket() {
+    continuous_silent_voice_round("auto").await;
+}
+
+#[tokio::test]
+async fn continuous_silent_voice_uses_one_realtime_listen_window_over_websocket() {
+    continuous_silent_voice_round("realtime").await;
+}
+
 /// One full device lifetime: report, activate, claim, talk, get interrupted, go
 /// away.
 #[tokio::test]

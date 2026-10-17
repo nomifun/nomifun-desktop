@@ -50,6 +50,8 @@ pub use history::{replay_closed_history, replay_closed_turn};
 mod model;
 mod output_limit;
 mod public_output;
+mod silent_completion;
+pub use silent_completion::FINISH_WITHOUT_REPLY_TOOL_NAME;
 mod protocol_recovery;
 mod planning;
 mod exact_actions;

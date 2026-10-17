@@ -27,7 +27,7 @@ export function normalizeAgentTurnOutcome(value: unknown): AgentTurnOutcome | un
     return { kind: 'input_required', request_id: row.request_id };
   }
   if (Object.keys(row).length !== 1) return;
-  if (row.kind === 'unavailable') {
+  if (row.kind === 'silent' || row.kind === 'unavailable') {
     return { kind: row.kind };
   }
 }

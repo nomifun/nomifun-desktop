@@ -3716,6 +3716,20 @@
       },
       {
         "additionalProperties": false,
+        "description": "This exact Turn intentionally has no public reply. Physical actions\nand their acceptance/completion remain owned by their original facts.",
+        "properties": {
+          "kind": {
+            "const": "silent",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
         "description": "The question remains in the original typed user-input request.",
         "properties": {
           "kind": {

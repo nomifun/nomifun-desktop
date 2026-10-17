@@ -1,5 +1,52 @@
 use super::*;
 use nomifun_agent_contracts::{AgentTurnOutcome,canonical_assistant_step_message_id};
+use serde_json::Value;
+
+#[tokio::test]
+async fn silent_turn_outcome_matches_live_facts_history_rebuild_and_idempotent_reads() {
+    let store=AgentSessionStore::open_in_memory().await.unwrap();
+    let (session,_)=create_ready(&store,"silent-outcome-page").await;
+    let sid=&session.agent_session_id;let operation=OperationId::from("silent-outcome-turn");
+    let (input,start)=store.start_turn(sid,"session_api".into(),"silent-outcome-input".into(),operation.clone(),
+        StrictJsonValue(json!({"content":"坐下"}))).await.unwrap();
+    let root=input.ack.unwrap().event_id;let start=start.ack.unwrap().event_id;
+    let model=append(sid,"silent-outcome-model","runtime_supervisor","silent-outcome-model",
+        "runtime/progress-recorded",operation.as_ref(),Some(root.clone()),
+        json!({"producer_seq":1,"event":{"event":"model_step_started","step":1,"operation_id":"silent-outcome-turn:model:1"}}));
+    store.append_event(&model).await.unwrap();
+    let marker=append(sid,"silent-outcome-intent","runtime_supervisor","silent-outcome-intent",
+        "runtime/progress-recorded",operation.as_ref(),Some(root.clone()),
+        json!({"producer_seq":2,"event":{"event":"silent_completion","step":1,"tool_call_ids":["sit-down"]}}));
+    let first=store.append_event(&marker).await.unwrap();
+    let repeated=store.append_event(&marker).await.unwrap();
+    assert!(repeated.duplicate);assert_eq!(first.cursor,repeated.cursor);
+    let seal=append(sid,"silent-outcome-seal","runtime_supervisor","silent-outcome-seal",
+        "message/completed",&canonical_assistant_step_message_id(root.as_ref(),1).unwrap(),Some(start),
+        json!({"part_count":0,"content_digest":digest_bytes(b"")}));
+    store.append_event(&seal).await.unwrap();
+    let terminal=append(sid,"silent-outcome-terminal","runtime_supervisor","silent-outcome-terminal",
+        "turn/completed",operation.as_ref(),Some(seal.event_id),json!({"model_steps":1,"finished_at_ms":1_990_000_000_000_i64}));
+    store.append_event(&terminal).await.unwrap();
+    let before=store.read_events(sid,None,500).await.unwrap();
+    let receipt=store.read_turn_receipt(sid,&operation).await.unwrap();
+    let live=crate::canonical_turn_public_result(&store.turn_output_facts(sid,&operation).await.unwrap(),&receipt).unwrap();
+    assert_eq!(live.turn_outcome,Some(AgentTurnOutcome::Silent {}));assert!(live.result_text.is_none());
+    for _ in 0..2 {
+        assert_eq!(store.turn_outcome(sid,&operation).await.unwrap(),live.turn_outcome);
+        let (page,_,_,_)=store.message_history_with_turns_before(sid,None,50).await.unwrap();
+        let summary=page.iter().find(|row|row.presentation_intent=="turn_summary").unwrap();
+        assert_eq!(summary.projection["turn_outcome"],json!({"kind":"silent"}));
+        assert!(!page.iter().any(|row|row.presentation_intent=="message"
+            && row.projection.get("position").and_then(Value::as_str)==Some("left")
+            && row.projection.get("content").and_then(Value::as_str).is_some_and(|text|!text.is_empty())));
+    }
+    store.rebuild_projections(sid).await.unwrap();
+    assert_eq!(store.turn_outcome(sid,&operation).await.unwrap(),Some(AgentTurnOutcome::Silent {}));
+    assert_eq!(store.read_events(sid,None,500).await.unwrap(),before,"reads and projection rebuild retain exact immutable action/intent facts");
+    store.start_turn(sid,"session_api".into(),"silent-outcome-next-input".into(),"silent-outcome-next-turn".into(),
+        StrictJsonValue(json!({"content":"北京今天的天气怎么样"}))).await.unwrap();
+    assert_eq!(store.turn_outcome(sid,&operation).await.unwrap(),Some(AgentTurnOutcome::Silent {}));
+}
 
 #[tokio::test]
 async fn turn_outcome_history_attaches_exact_results_without_consuming_raw_page_cursors_or_mutating_facts() {

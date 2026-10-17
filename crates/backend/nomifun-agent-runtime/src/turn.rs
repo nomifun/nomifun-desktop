@@ -71,6 +71,9 @@ pub struct AgentTurnRequest {
     /// ToolSearch activation: reveals already-admitted deferred schemas from
     /// the first model step. Never changes bindings or authority.
     pub preactivated_tools: std::collections::BTreeSet<String>,
+    /// Host opt-in for explicit no-reply Robot action completion. This is
+    /// presentation intent only and grants no tool or completion authority.
+    pub silent_robot_actions: bool,
 }
 
 impl AgentTurnRequest {
@@ -109,6 +112,7 @@ impl AgentTurnRequest {
             patch_recovery: Default::default(),
             recovery: None,
             preactivated_tools: Default::default(),
+            silent_robot_actions: false,
         }
     }
 
@@ -117,6 +121,11 @@ impl AgentTurnRequest {
         names: impl IntoIterator<Item = String>,
     ) -> Self {
         self.preactivated_tools = names.into_iter().collect();
+        self
+    }
+
+    pub fn with_silent_robot_actions(mut self, enabled: bool) -> Self {
+        self.silent_robot_actions = enabled;
         self
     }
 
@@ -418,6 +427,10 @@ pub(crate) async fn run_turn(
             .await?;
     }
     let mut model_request = request.model_request;
+    // A resumed turn lacks this shortcut's original local observations. Its
+    // existing canonical recovery/accounting path remains authoritative.
+    let mut silent_robot = crate::silent_completion::SilentRobotCompletion::new(
+        request.silent_robot_actions && recovery.is_none());
     model_request
         .input
         .instructions
@@ -540,6 +553,7 @@ pub(crate) async fn run_turn(
             if *step > 0 && crate::execution_policy::requires_task_ledger_capability(capability_id.as_ref())));
     let mut adaptive_slots = AdaptiveContextSlots {
         user_input_enabled: crate::user_input_request::enabled(request.user_input_request_port.as_ref()),
+        silent_robot_enabled: silent_robot.enabled,
         ..Default::default()
     };
     let live_context_slot = if let Some(port) = &request.live_context_port {
@@ -898,11 +912,19 @@ pub(crate) async fn run_turn(
         );
         protocol_recovery.constrain_exposed_tool(&mut model_request.input.tool_choice, &model_request.input.tools);
         protocol_recovery.narrow_repair_surface(&model_request.input.tool_choice, &mut model_request.input.tools);
+        if adaptive_slots.silent_robot_enabled {
+            let visible = model_request.input.tools.iter().any(|tool| tool.name == crate::silent_completion::TOOL_NAME);
+            upsert_instruction(&mut model_request.input.instructions, &mut adaptive_slots.silent_robot_policy,
+                if visible { crate::silent_completion::INSTRUCTIONS.into() } else {
+                    "The current phase permits only its advertised controls. Preserve unresolved work and required public answers; use the existing completion, recovery or input handoff rules.".into()
+                });
+        }
         // Discovery cannot share an execution batch. Ask supporting providers
         // for one call while both kinds are visible; keep the complete-batch
         // guard below even if a provider ignores this delivery preference.
         model_request.input.parallel_tool_calls = if model_request.input.tools.len() > 1
             && model_request.input.tools.iter().any(|tool| tool.name == crate::tool_discovery::TOOL_NAME)
+            && !model_request.input.tools.iter().any(|tool| tool.name == crate::silent_completion::TOOL_NAME)
         { Some(false) } else { requested_parallel_tool_calls };
         context_lifecycle.prepare(&mut model_request, &retained_inputs, &binding, model.clone(), event_sink.as_ref(), cancellation.clone()).await?;
         let context_bytes = serde_json::to_vec(&model_request.input)
@@ -1725,6 +1747,8 @@ pub(crate) async fn run_turn(
                 archive,
                 request.history_port.as_deref(),
                 &binding,
+                &silent_robot,
+                output_text.trim().is_empty(),
             )
             .await };
             let results = match invocation {
@@ -1754,9 +1778,16 @@ pub(crate) async fn run_turn(
             let single_call_batch = step.call_order.len() == 1;
             let mut terminal_collaboration_accepted = false;
             let mut terminal_completion_requested = false;
+            let mut terminal_silent_requested = false;
             let mut repeated_control_rejection = None;
             for (expected_call_id, result) in results {
                 result.validate_for(&expected_call_id)?;
+                if let Some(call) = step.calls.get(&expected_call_id).and_then(|pending| pending.completed.as_ref()) {
+                    let tool_binding = request.tool_plan.binding(&call.name);
+                    let attempted = tool_binding.is_some() && dispatch.attempted(&expected_call_id)?;
+                    silent_robot.observe(call, tool_binding, attempted, &result);
+                    terminal_silent_requested |= call.name == crate::silent_completion::TOOL_NAME && !result.is_error;
+                }
                 // One accounting boundary: phase corrections carry paired
                 // protocol feedback only, never work, evidence or plan changes.
                 if disposition == ToolBatchDisposition::WorkAccounting {
@@ -2010,7 +2041,11 @@ pub(crate) async fn run_turn(
                         && state.work_status.successful_workspace_mutations == 0
                         && state.work_status.successful_commands == 0
                         && retained_inputs.len() == 1));
-            if (terminal_handoff || terminal_report.is_some())
+            let terminal_silent = terminal_silent_requested && silent_robot.ready()
+                && output_text.trim().is_empty() && !state.execution_plan.needs_replan
+                && !state.execution_plan.is_open() && state.work_status.failed_tools == 0
+                && !patch_recovery.unresolved();
+            if (terminal_handoff || terminal_report.is_some() || terminal_silent)
                 && state.work_status.running_processes.is_empty()
                 && (!patch_recovery.pending() || terminal_report.as_ref().is_some_and(|report| report.is_blocked()))
             {
@@ -2026,6 +2061,7 @@ pub(crate) async fn run_turn(
                 // owns the outcome at its safe point, so an honest blocked
                 // account below settles instead of failing.
                 let mut host_settles_blocked = false;
+                let mut silent_settlement_allowed = true;
                 match crate::completion_check::settle(
                     request.completion_check_port.as_ref(),
                     &model_request.causality,
@@ -2047,7 +2083,10 @@ pub(crate) async fn run_turn(
                         completion_review_used = false;
                         continue 'model_steps;
                     }
-                    crate::completion_check::HostSettlement::Pause => host_settles_blocked = true,
+                    crate::completion_check::HostSettlement::Pause => {
+                        host_settles_blocked = true;
+                        silent_settlement_allowed = false;
+                    },
                     crate::completion_check::HostSettlement::Delivered => host_settles_blocked = !ledger_work,
                     crate::completion_check::HostSettlement::Settle => {}
                 }
@@ -2074,6 +2113,15 @@ pub(crate) async fn run_turn(
                         if report.is_blocked() && !host_settles_blocked {
                             return fail_turn(&event_sink,model_steps,"completion account contains blocked work; this turn cannot be published as task completion").await;
                         }
+                    }
+                    if silent_settlement_allowed && output_text.trim().is_empty()
+                        && state.work_status.failed_tools == 0
+                        && (terminal_silent || (request.silent_robot_actions && terminal_handoff)) {
+                        let tool_call_ids = if terminal_silent { silent_robot.tool_call_ids.clone() }
+                            else { completed.iter().filter(|call| request.tool_plan.binding(&call.name)
+                                .is_some_and(crate::execution_policy::completes_turn_on_success))
+                                .map(|call| call.call_id.clone()).collect() };
+                        event_sink.emit(AgentEngineEvent::SilentCompletion { step: model_steps, tool_call_ids }).await?;
                     }
                     let finish_reason = ChatFinishReason::Completed;
                     let result = AgentTurnResult {
@@ -2422,7 +2470,7 @@ type ControlRejections = AgentControlRejectionState;
 
 impl AgentControlRejectionState {
     pub(crate) fn validate(&self) -> Result<(), AgentEngineError> {
-        if !matches!(self.name.as_str(), "" | crate::planning::TOOL_NAME | crate::completion::TOOL_NAME | crate::user_input_request::TOOL_NAME)
+        if !matches!(self.name.as_str(), "" | crate::planning::TOOL_NAME | crate::completion::TOOL_NAME | crate::user_input_request::TOOL_NAME | crate::silent_completion::TOOL_NAME)
             || self.consecutive > 4 || self.total > 8 || self.no_progress > 4 || self.phase_corrections > 4 {
             return Err(AgentEngineError::InvalidContract("invalid persisted control correction budget".into()));
         }
@@ -2444,7 +2492,7 @@ impl AgentControlRejectionState {
     }
 
     pub(crate) fn observe(&mut self, name: &str, result: &AgentToolResult, made_progress: bool) -> Option<String> {
-        if result.is_error && matches!(name, crate::planning::TOOL_NAME | crate::completion::TOOL_NAME | crate::user_input_request::TOOL_NAME) {
+        if result.is_error && matches!(name, crate::planning::TOOL_NAME | crate::completion::TOOL_NAME | crate::user_input_request::TOOL_NAME | crate::silent_completion::TOOL_NAME) {
             self.consecutive = if self.name == name { self.consecutive.saturating_add(1) } else { 1 };
             self.total = self.total.saturating_add(1);
             self.name = name.to_owned();
@@ -2461,7 +2509,7 @@ impl AgentControlRejectionState {
             self.consecutive = 0;
             return None;
         }
-        if !made_progress && matches!(name, crate::planning::TOOL_NAME | crate::completion::TOOL_NAME | crate::user_input_request::TOOL_NAME) {
+        if !made_progress && matches!(name, crate::planning::TOOL_NAME | crate::completion::TOOL_NAME | crate::user_input_request::TOOL_NAME | crate::silent_completion::TOOL_NAME) {
             self.name.clear();
             self.consecutive = 0;
             self.no_progress = self.no_progress.saturating_add(1);
@@ -2478,6 +2526,8 @@ impl AgentControlRejectionState {
 #[derive(Default)]
 struct AdaptiveContextSlots {
     user_input_enabled: bool,
+    silent_robot_enabled: bool,
+    silent_robot_policy: Option<usize>,
     long_horizon_policy: Option<usize>,
     scoped_instructions: Option<usize>,
     patch_recovery: Option<usize>,
@@ -2606,6 +2656,7 @@ fn synchronize_adaptive_context(
         adaptive.tool_history(),
         tool_discovery,
         slots.user_input_enabled,
+        slots.silent_robot_enabled,
         discovered_tools,
     )?;
     let workspace_mutation_forbidden =
@@ -2928,11 +2979,12 @@ fn configure_tools(
     tool_history: bool,
     tool_discovery: bool,
     user_input_enabled: bool,
+    silent_robot_actions: bool,
     discovered_tools: &std::collections::BTreeSet<String>,
 ) -> Result<(), AgentEngineError> {
     // Retired capability-control names remain reserved so a host cannot
     // accidentally restore the old dynamic authority surface as ordinary tools.
-    if [crate::planning::TOOL_NAME, crate::completion::TOOL_NAME, crate::user_input_request::TOOL_NAME, crate::context_resources::TOOL_NAME, crate::tool_discovery::TOOL_NAME, "search_capabilities", "activate_capability", crate::task_continuation::TOOL_NAME, crate::remote_resources::LIST, crate::remote_resources::READ, crate::remote_resources::TEMPLATES, crate::tool_archive::SEARCH, crate::tool_archive::READ, crate::tool_archive::LOAD]
+    if [crate::planning::TOOL_NAME, crate::completion::TOOL_NAME, crate::user_input_request::TOOL_NAME, crate::silent_completion::TOOL_NAME, crate::context_resources::TOOL_NAME, crate::tool_discovery::TOOL_NAME, "search_capabilities", "activate_capability", crate::task_continuation::TOOL_NAME, crate::remote_resources::LIST, crate::remote_resources::READ, crate::remote_resources::TEMPLATES, crate::tool_archive::SEARCH, crate::tool_archive::READ, crate::tool_archive::LOAD]
         .iter().any(|name| plan.binding(name).is_some()) {
         return Err(AgentEngineError::InvalidContract("engine control tool names cannot be shadowed".into()));
     }
@@ -2961,6 +3013,7 @@ fn configure_tools(
     if resources { request.input.tools.push(crate::context_resources::definition()); }
     if remote_resources { request.input.tools.extend(crate::remote_resources::definitions()); }
     if user_input_enabled { request.input.tools.push(crate::user_input_request::definition()); }
+    if silent_robot_actions { request.input.tools.push(crate::silent_completion::definition()); }
     if request.input.tools.len() > crate::tool_discovery::MAX_VISIBLE_TOOL_DEFINITIONS {
         return Err(AgentEngineError::InvalidContract(
             "model-visible tools exceed the reserved Runtime control window".into(),
@@ -3113,6 +3166,8 @@ async fn invoke_tool_calls(
     tool_archive: &mut crate::tool_archive::ToolArchive,
     history_port: Option<&dyn crate::AgentHistoryPort>,
     engine_binding: &EngineBinding,
+    silent_robot: &crate::silent_completion::SilentRobotCompletion,
+    no_public_output: bool,
 ) -> Result<Vec<(ToolCallId, AgentToolResult)>, AgentEngineError> {
     let completed = step.call_order.iter().map(|id| step.calls.get(id).and_then(|pending| pending.completed.clone())
         .ok_or_else(|| AgentEngineError::InvalidModelEvent("incomplete tool call".into())))
@@ -3143,6 +3198,17 @@ async fn invoke_tool_calls(
             recorded.push(record_tool_result_with_hold(call_id, result, Some(reason), event_sink, model_step).await?);
         }
         return Ok(recorded);
+    }
+    let silent_finish = completed.iter().find(|call| call.name == crate::silent_completion::TOOL_NAME);
+    if silent_finish.is_some() && (!silent_robot.allows_batch(&completed, plan)
+        || !no_public_output || phase != AgentExecutionPhase::Execution
+        || execution_plan.needs_replan || execution_plan.is_open()
+        || work_status.failed_tools != 0 || !work_status.running_processes.is_empty()
+        || patch_recovery.pending() || patch_recovery.unresolved()) {
+        let results = completed.iter().map(|call| (call.call_id.clone(), Ok(AgentToolResult::text(
+            call.call_id.clone(), "No calls in this batch executed: finish_without_reply is only a final no-answer declaration after successful Robot motion/display actions in this turn. Submit it once, last in the final motion/display batch, or alone after all actions succeeded. Public answers, failures, other work, unresolved plans/processes/effects and recovery obligations must use the normal reply path. Do not repeat earlier settled actions.", true)))).collect();
+        return finish_tool_results_with_hold(results, Some(crate::RuntimeToolHoldReason::RuntimeGate),
+            event_sink, model_step, cancellation).await;
     }
     if completed.iter().any(|call| call.name == crate::user_input_request::TOOL_NAME) {
         let refusal = if completed.len() != 1 {
@@ -3446,7 +3512,7 @@ async fn invoke_tool_calls(
         return finish_tool_results_with_hold(results, Some(crate::RuntimeToolHoldReason::RuntimeGate), event_sink, model_step, cancellation).await;
     }
     let mut calls = Vec::with_capacity(step.call_order.len());
-    let mut can_parallelize = !has_exact_call && !step.call_order.is_empty();
+    let mut can_parallelize = silent_finish.is_none() && !has_exact_call && !step.call_order.is_empty();
     for call_id in &step.call_order {
         if cancellation.is_cancelled() {
             return Err(AgentEngineError::Cancelled);
@@ -3464,6 +3530,7 @@ async fn invoke_tool_calls(
                     call_id.as_ref()
                 ))
             })?;
+        if call.name == crate::silent_completion::TOOL_NAME { continue; }
         let binding = plan
             .binding(&call.name)
             .ok_or_else(|| AgentEngineError::ToolNotExposed(call.name.clone()))?;
@@ -3667,6 +3734,16 @@ async fn invoke_tool_calls(
     }
     if cancellation.is_cancelled() {
         return Err(AgentEngineError::Cancelled);
+    }
+    if let Some(call) = silent_finish {
+        let failed = results.iter().any(|(_, result)| result.is_error);
+        let result = AgentToolResult::text(call.call_id.clone(), if failed {
+            "No silent completion: an action in this batch failed or was held. Explain the actual result without repeating settled effects."
+        } else {
+            "No-public-reply intent accepted, subject to terminal steering, cancellation and host settlement. Device tool acceptance does not prove the physical action finished."
+        }, failed);
+        results.push(record_tool_result_with_hold(call.call_id.clone(), Ok(result),
+            failed.then_some(crate::RuntimeToolHoldReason::PriorCallFailed), event_sink, model_step).await?);
     }
     Ok(results)
 }
@@ -4443,10 +4520,10 @@ mod tests {
     #[test]
     fn history_loader_bootstraps_only_when_the_authenticated_port_exists() {
         let mut sample=request();
-        configure_tools(&mut sample,&tool_plan(),false,false,false,true,false,false,false,false,&Default::default()).unwrap();
+        configure_tools(&mut sample,&tool_plan(),false,false,false,true,false,false,false,false,false,&Default::default()).unwrap();
         assert!(sample.input.tools.iter().any(|tool|tool.name==crate::tool_archive::LOAD));
         assert!(!sample.input.tools.iter().any(|tool|matches!(tool.name.as_str(),crate::tool_archive::SEARCH|crate::tool_archive::READ|crate::planning::TOOL_NAME)));
-        configure_tools(&mut sample,&tool_plan(),false,false,false,false,false,false,false,false,&Default::default()).unwrap();
+        configure_tools(&mut sample,&tool_plan(),false,false,false,false,false,false,false,false,false,&Default::default()).unwrap();
         assert!(!sample.input.tools.iter().any(|tool|tool.name==crate::tool_archive::LOAD));
     }
 
@@ -4746,16 +4823,16 @@ mod tests {
     fn frozen_tool_surface_never_advertises_capability_activation() {
         let mut request = request();
         let plan = tool_plan();
-        configure_tools(&mut request, &plan, true, true, true, true, false, false, false, false, &Default::default()).unwrap();
+        configure_tools(&mut request, &plan, true, true, true, true, false, false, false, false, false, &Default::default()).unwrap();
         assert!(request.input.tools.iter().any(|tool| tool.name == "read_file"));
         assert!(request.input.tools.iter().any(|tool| tool.name == crate::task_continuation::TOOL_NAME));
         assert!(!request.input.tools.iter().any(|tool| tool.name == crate::planning::TOOL_NAME));
         assert!(!request.input.tools.iter().any(|tool| tool.name == crate::tool_archive::SEARCH));
-        configure_tools(&mut request, &plan, true, true, true, true, true, true, false, false, &Default::default()).unwrap();
+        configure_tools(&mut request, &plan, true, true, true, true, true, true, false, false, false, &Default::default()).unwrap();
         assert!(request.input.tools.iter().any(|tool| tool.name == crate::planning::TOOL_NAME));
         assert!(request.input.tools.iter().any(|tool| tool.name == crate::completion::TOOL_NAME));
         assert!(request.input.tools.iter().any(|tool| tool.name == crate::tool_archive::SEARCH));
-        configure_tools(&mut request, &plan, true, false, true, true, true, true, false, false, &Default::default()).unwrap();
+        configure_tools(&mut request, &plan, true, false, true, true, true, true, false, false, false, &Default::default()).unwrap();
         assert!(!request.input.tools.iter().any(|tool| tool.name == crate::task_continuation::TOOL_NAME));
         assert!(!request.input.tools.iter().any(|tool|
             matches!(tool.name.as_str(), "activate_capability" | "search_capabilities")));
@@ -4772,14 +4849,14 @@ mod tests {
             let shadow = AgentToolPlan::new([tool_binding(
                 name, "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true,
             )]).unwrap();
-            assert!(configure_tools(&mut request, &shadow, false, false, false, false, false, false, false, false, &Default::default()).is_err());
+            assert!(configure_tools(&mut request, &shadow, false, false, false, false, false, false, false, false, false, &Default::default()).is_err());
         }
     }
 
     #[test]
     fn advertised_history_tools_distinguish_archive_ids_from_call_ids() {
         let mut request = request();
-        configure_tools(&mut request, &tool_plan(), true, true, true, true, true, true, false, false, &Default::default()).unwrap();
+        configure_tools(&mut request, &tool_plan(), true, true, true, true, true, true, false, false, false, &Default::default()).unwrap();
         let read = request.input.tools.iter().find(|tool| tool.name == crate::tool_archive::READ).unwrap();
         let id = &read.input_schema.0["properties"]["id"];
         assert!(id["description"].as_str().unwrap_or_default().contains("hits[].id"));
@@ -8238,16 +8315,16 @@ mod tests {
         crate::tool_discovery::activate_deferred_tools(&plan, &mut activated,
             &(0..5).map(|index| format!("deferred_{index:03}")).collect::<Vec<_>>()).unwrap();
         let mut request = request();
-        configure_tools(&mut request, &plan, true, true, true, true, true, true, true, true, &activated).unwrap();
+        configure_tools(&mut request, &plan, true, true, true, true, true, true, true, true, true, &activated).unwrap();
         assert_eq!(request.input.tools.len(), crate::tool_discovery::MAX_VISIBLE_TOOL_DEFINITIONS,
             "the reserved control count must match the actual full Runtime surface");
 
         let direct = AgentToolPlan::new((0..120).map(|index| tool_binding(&format!("direct_{index:03}"),
             "fixture.tools", &format!("fixture.tools/direct_{index:03}"), AgentEffectClass::ReadOnly, true))).unwrap();
-        configure_tools(&mut request, &direct, false, false, false, true, true, true, false, false, &BTreeSet::new()).unwrap();
+        configure_tools(&mut request, &direct, false, false, false, true, true, true, false, false, false, &BTreeSet::new()).unwrap();
         assert_eq!(request.input.tools.len(), 125,
             "without ToolSearch, enforce the actual assembled wire limit instead of its reserved 112-tool base");
-        let over_limit = configure_tools(&mut request, &direct, true, true, true, true, true, true, false, true, &BTreeSet::new());
+        let over_limit = configure_tools(&mut request, &direct, true, true, true, true, true, true, false, true, true, &BTreeSet::new());
         assert!(matches!(over_limit, Err(AgentEngineError::InvalidContract(message))
             if message.contains("model-visible tools exceed")));
     }
@@ -10976,4 +11053,5 @@ mod tests {
     include!("turn_process_settlement_tests.rs");
     include!("turn_user_input_tests.rs");
     include!("turn_user_input_continuation_tests.rs");
+    include!("turn_silent_completion_tests.rs");
 }

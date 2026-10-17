@@ -1,6 +1,6 @@
 //! Installed Robot ingress, desktop execution, typed report, result Turn and
-//! explicit history recall. Device transport is connected with an empty tool
-//! catalog; this does not claim firmware or audible-playback acceptance.
+//! explicit history recall. Optional motion transport simulates MCP command
+//! acceptance; this does not claim firmware or audible-playback acceptance.
 use super::*;
 use nomifun_agent_contracts::{AgentInputSource, CompanionSessionRole, OperationId};
 use nomifun_api_types::SendMessageRequest;
@@ -12,6 +12,13 @@ const DESKTOP_FINAL_TOKEN: &str = "ORCHID-CANONICAL-73921";
 const ROBOT_FINAL: &str = "The desktop task is complete and its result is available.";
 const RECALL_PROBE: &str = "HISTORY_RECALL_PROBE";
 const DELEGATED_GOAL: &str = "Prepare the requested desktop report and return its verified conclusion.";
+const WEATHER_QUERY: &str = "北京今天的天气怎么样";
+const SILENT_ACTION_QUERY: &str = "坐下";
+const SILENT_ACTION_PAIR_QUERY: &str = "先坐下，再站起来";
+const WEATHER_GOAL: &str = "北京今天的天气怎么样？使用已授权查询能力，保留北京与今天的范围，返回简短且有来源的天气结论。";
+// Provider-fixture data exercises the real delegation and delivery owners. It
+// is not a live forecast or proof that a search provider exists on this host.
+const WEATHER_RESULT: &str = "天气查询夹具结果：北京今天晴，18～26℃；来源：测试天气数据。";
 const DESKTOP_QUESTION: &str = "What name should the desktop report use?";
 const NATURAL_ANSWER: &str = "小明";
 const RESULT_FAILURE_NOTICE: &str = "电脑端任务的结果已保存，但机器人回应失败，请在桌面查看。";
@@ -130,8 +137,21 @@ impl DirectedFlowModelServer {
                 }
                 let (delta, reason) = if let Some(step) = memory_crud_step(&body,&state,&user) { step }
                 else if body["model"] == ROBOT_MODEL {
-                    if user.contains("directed_delegation_result") {
-                        (json!({"role":"assistant","content":ROBOT_FINAL}), "stop")
+                    if matches!(user.trim(),SILENT_ACTION_QUERY|SILENT_ACTION_PAIR_QUERY) {
+                        assert!(tool_available(&body,"robot_dog_action"),"the frozen Robot motion tool is visible on the first model call");
+                        assert!(tool_available(&body,"finish_without_reply"),"the physical role exposes the native reply-intent control");
+                        let mut calls=vec![json!({"index":0,"id":"silent-motion-sit","type":"function",
+                            "function":{"name":"robot_dog_action","arguments":json!({"action":"sitdown"}).to_string()}})];
+                        if user.trim()==SILENT_ACTION_PAIR_QUERY {
+                            calls.push(json!({"index":1,"id":"silent-motion-stand","type":"function",
+                                "function":{"name":"robot_dog_action","arguments":json!({"action":"standup"}).to_string()}}));
+                        }
+                        calls.push(json!({"index":calls.len(),"id":"silent-motion-finish","type":"function",
+                            "function":{"name":"finish_without_reply","arguments":"{}"}}));
+                        (json!({"role":"assistant","tool_calls":calls}),"tool_calls")
+                    } else if user.contains("directed_delegation_result") {
+                        let response = if user.contains(WEATHER_RESULT) { WEATHER_RESULT } else { ROBOT_FINAL };
+                        (json!({"role":"assistant","content":response}), "stop")
                     } else if state.question_mode && user.trim() == "嗯" {
                         if tool_result(&body, "robot-backchannel-answer").is_some() {
                             (json!({"role":"assistant","content":"The pending desktop question remains open."}), "stop")
@@ -151,10 +171,13 @@ impl DirectedFlowModelServer {
                     } else if tool_result(&body, "robot-directed-delegate").is_some() {
                         (json!({"role":"assistant","content":"I have handed the task to the desktop companion."}), "stop")
                     } else if tool_available(&body, "delegate_task") {
-                        tool_call("delegate_task", "robot-directed-delegate", json!({"strategy":"planned","target_role":"desktop","goal":DELEGATED_GOAL}))
+                        let goal = if user.contains(WEATHER_QUERY) { WEATHER_GOAL } else { DELEGATED_GOAL };
+                        tool_call("delegate_task", "robot-directed-delegate", json!({"strategy":"planned","target_role":"desktop","goal":goal}))
                     } else {
                         tool_call("ToolSearch", "robot-find-delegate", json!({"query":"agent/delegate"}))
                     }
+                } else if body["model"] == DESKTOP_MODEL && user.contains(WEATHER_QUERY) {
+                    (json!({"role":"assistant","content":WEATHER_RESULT}), "stop")
                 } else if body["model"] == DESKTOP_MODEL && user.contains(RECALL_PROBE) {
                     if tool_result(&body, "history-recall-exact-child").is_some() {
                         (json!({"role":"assistant","content":"The previous desktop conclusion was found in canonical history."}), "stop")
@@ -205,6 +228,10 @@ async fn model(router: &axum::Router, server: &DirectedFlowModelServer, name: &s
 }
 
 async fn desktop_preset(router: &axum::Router, model: &Value) -> String {
+    desktop_preset_with_research(router, model, false).await
+}
+
+async fn desktop_preset_with_research(router: &axum::Router, model: &Value, research: bool) -> String {
     let editor = api(router, "/api/agent-presets/from-template/chat.minimal", json!({"reuse_existing":false,
         "display_name":"Directed desktop companion fixture","model":model})).await;
     let preset = editor["preset"]["preset_id"].as_str().unwrap().to_owned();
@@ -215,6 +242,11 @@ async fn desktop_preset(router: &axum::Router, model: &Value) -> String {
         {"capability":{"id":"workspace.files"},"action_allowlist":["workspace.files/read"]},
         {"capability":{"id":"agent.collaboration"},"action_allowlist":["agent/delegate","agent/fork","agent/request_user_decision"]}
     ]);
+    if research {
+        draft["document"]["enabled_capabilities"].as_array_mut().unwrap().push(json!({
+            "capability":{"id":"web.research"},"action_allowlist":["web.research/search","web.research/fetch"]
+        }));
+    }
     api(router, &format!("/api/agent-presets/{preset}/revisions"), json!({"expected_current_revision":draft["current_revision"],
         "draft":draft,"reason":"explicit minimal desktop role for the real directed flow"})).await;
     preset
@@ -239,17 +271,31 @@ struct RobotFlowFixture {
     desktop_id: AgentSessionId,
     device_id: String,
     connection: String,
-    _device_rx: tokio::sync::mpsc::Receiver<nomifun_robot::link::Frame>,
+    _device_rx: Option<tokio::sync::mpsc::Receiver<nomifun_robot::link::Frame>>,
+    motion_requests: Arc<Mutex<Vec<Value>>>,
+    motion_responder: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl RobotFlowFixture {
     async fn new(server: &DirectedFlowModelServer, scenario: &str) -> Self {
+        Self::with_desktop_research(server, scenario, false).await
+    }
+
+    async fn with_desktop_research(server: &DirectedFlowModelServer, scenario: &str, research: bool) -> Self {
+        Self::with_options(server,scenario,research,false).await
+    }
+
+    async fn with_motion(server: &DirectedFlowModelServer, scenario: &str) -> Self {
+        Self::with_options(server,scenario,false,true).await
+    }
+
+    async fn with_options(server: &DirectedFlowModelServer, scenario: &str, research: bool, motion: bool) -> Self {
         let fixture = Fixture::with_input_model(scenario,&server.url).await;
         let corpus_version = nomifun_skill_library::builtin_skills_materialize_version(env!("CARGO_PKG_VERSION"));
         nomifun_skill_library::materialize_if_needed(&fixture.services.data_dir,nomifun_skill_library::builtin_skills_corpus(),&corpus_version).await.unwrap();
         let owner = fixture.services.authoritative_user_id.to_string(); let router = &fixture._router;
         let desktop_model = model(router,server,DESKTOP_MODEL).await; let robot_model = model(router,server,ROBOT_MODEL).await;
-        let preset = desktop_preset(router,&desktop_model).await;
+        let preset = desktop_preset_with_research(router,&desktop_model,research).await;
         let companion = api(router,"/api/companion/companions",json!({"name":scenario,"character":"ink"})).await;
         let companion_id = companion["companion_id"].as_str().unwrap().to_owned();
         request(router,"PATCH",&format!("/api/companion/companions/{companion_id}"),json!({"model":desktop_model,"robot":{"model":robot_model}})).await;
@@ -263,17 +309,44 @@ impl RobotFlowFixture {
             client_id:"directed-regression-client".into(),board:"fixture-board".into(),firmware_version:"test".into()},1).await.unwrap();
         robots.registry.claim(device.activation_code.as_deref().unwrap(),&companion_id).await.unwrap();
         let connection = "directed-regression-original-connection".to_owned();
-        let (device_tx,device_rx) = tokio::sync::mpsc::channel(4);
+        let (device_tx,mut device_rx) = tokio::sync::mpsc::channel(4);
         robots.registry.connect(&device.robot_id,&companion_id,&connection).await.unwrap();
-        robots.tools.attach(&device.robot_id,Arc::new(nomifun_robot::mcp_bridge::RobotMcpClient::new(device_tx,connection.clone())),Vec::new()).await;
+        let client=Arc::new(nomifun_robot::mcp_bridge::RobotMcpClient::new(device_tx,connection.clone()));
+        let motion_requests=Arc::new(Mutex::new(Vec::new()));
+        let (device_rx,motion_responder)=if motion {
+            robots.registry.set_permissions(&device.robot_id,nomifun_robot::registry::RobotPermissions {
+                motion:true,..Default::default()
+            }).await.unwrap();
+            robots.tools.attach(&device.robot_id,client.clone(),vec![nomifun_robot::mcp_bridge::RobotToolDescriptor {
+                device_name:"self.dog.action".into(),exposed_name:"robot_dog_action".into(),description:"Arrange a dog posture".into(),
+                input_schema:json!({"type":"object","properties":{"action":{"type":"string","enum":["sitdown","standup"]}},
+                    "required":["action"],"additionalProperties":false}),
+            }]).await;
+            let captured=motion_requests.clone();
+            let task=tokio::spawn(async move { while let Some(nomifun_robot::link::Frame::Text(frame))=device_rx.recv().await {
+                let value:Value=serde_json::from_str(&frame).unwrap();
+                captured.lock().unwrap().push(value["payload"]["params"].clone());
+                client.handle_incoming(json!({"jsonrpc":"2.0","id":value["payload"]["id"],
+                    "result":{"content":[{"type":"text","text":"command accepted"}],"isError":false}})).await;
+            }});
+            (None,Some(task))
+        } else {
+            robots.tools.attach(&device.robot_id,client,Vec::new()).await;
+            (Some(device_rx),None)
+        };
         let robot = fixture.services.companion_service.ensure_session_for_role(&companion_id,nomifun_companion::CompanionRole::Robot,Some(&device.robot_id)).await.unwrap();
         Self { fixture,owner,companion_id,robot_id:robot.conversation_id.into(),desktop_id:desktop.conversation_id.into(),
-            device_id:device.robot_id,connection,_device_rx:device_rx }
+            device_id:device.robot_id,connection,_device_rx:device_rx,motion_requests,motion_responder }
     }
 
     fn request(&self, key: &str, text: &str) -> nomifun_robot::services::RobotTurnRequest {
         nomifun_robot::services::RobotTurnRequest {robot_id:self.device_id.clone(),companion_id:self.companion_id.clone(),
             conversation_id:self.robot_id.as_ref().into(),connection_id:self.connection.clone(),request_id:key.into(),text:text.into(),presented_question_id:None}
+    }
+
+    async fn finish(self) {
+        self.fixture.finish().await;
+        if let Some(task)=self.motion_responder {task.abort();let _=task.await;}
     }
 }
 
@@ -546,6 +619,161 @@ async fn send_and_complete_robot_turn(fixture: &Fixture, owner: &str, request: &
     assert!(!accepted.completed); assert!(!accepted.replayed,"this is a new authenticated root, not a completed delivery");
     wait_for_completed_turn(fixture,&request.conversation_id.clone().into(),&operation).await;
     operation
+}
+
+#[tokio::test]
+async fn installed_robot_motion_finishes_silently_in_one_model_round_without_repeating_accepted_actions() {
+    let server=DirectedFlowModelServer::new().await;
+    let flow=RobotFlowFixture::with_motion(&server,"robot-silent-motion-flow").await;
+    let store=flow.fixture.owner.canonical().store();
+    let projection=flow.fixture.owner.get_session(&flow.owner,flow.robot_id.as_ref()).await.unwrap();
+    assert!(projection.agent_snapshot.as_ref().unwrap().enabled_capability_actions["robot"].contains("robot/motion"));
+    for (key,text,expected_actions) in [
+        ("silent-sit",SILENT_ACTION_QUERY,vec!["sitdown"]),
+        ("silent-sit-stand",SILENT_ACTION_PAIR_QUERY,vec!["sitdown","standup"]),
+    ] {
+        let calls_before=flow.motion_requests.lock().unwrap().len();
+        let requests_before=server.state.requests.lock().unwrap().len();
+        let utterance=flow.request(key,text);
+        let operation=send_and_complete_robot_turn(&flow.fixture,&flow.owner,&utterance,key).await;
+        let receipt=store.read_turn_receipt(&flow.robot_id,&operation).await.unwrap();
+        let facts=store.turn_output_facts(&flow.robot_id,&operation).await.unwrap();
+        let public=nomifun_agent_session::canonical_turn_public_result(&facts,&receipt).unwrap();
+        assert_eq!(public.turn_outcome,Some(nomifun_agent_contracts::AgentTurnOutcome::Silent {}));
+        assert!(public.result_text.is_none());
+        assert_eq!(store.turn_outcome(&flow.robot_id,&operation).await.unwrap(),public.turn_outcome);
+        let marker=facts.events.iter().filter_map(|event|facts.event_payloads.get(event.event_id.as_ref()))
+            .find_map(|payload|payload.get("event").filter(|event|event["event"]=="silent_completion")).unwrap();
+        assert_eq!(marker["step"],1);assert_eq!(marker["tool_call_ids"].as_array().unwrap().len(),expected_actions.len());
+        assert!(!facts.events.iter().any(|event|event.kind.0=="message/content-part"),"successful explicit actions produce no public acknowledgement");
+        let calls=flow.motion_requests.lock().unwrap().clone();
+        assert_eq!(calls.len()-calls_before,expected_actions.len(),"only the requested physical actions reach the transport");
+        for (call,action) in calls[calls_before..].iter().zip(expected_actions) {
+            assert_eq!(call["name"],"self.dog.action");assert_eq!(call["arguments"]["action"],action);
+        }
+        assert_eq!(server.state.requests.lock().unwrap().len()-requests_before,1,"no post-action receipt model call is required");
+        let replay=flow.fixture.owner.send_robot_session_message_idempotent(&flow.owner,&utterance,key,robot_message(text)).await.unwrap();
+        assert!(replay.completed&&replay.replayed);assert_eq!(replay.result_ok,Some(true));
+        assert_eq!(replay.turn_outcome,Some(nomifun_agent_contracts::AgentTurnOutcome::Silent {}));assert!(replay.result_text.is_none());
+        assert_eq!(flow.motion_requests.lock().unwrap().len(),calls.len(),"idempotent delivery never repeats accepted motion");
+        assert_eq!(server.state.requests.lock().unwrap().len(),requests_before+1);
+        let (history,_,_,_)=store.message_history_with_turns_before(&flow.robot_id,None,50).await.unwrap();
+        assert!(history.iter().any(|row|row.presentation_intent=="turn_summary"
+            && row.projection["turn_operation_id"]==json!(operation) && row.projection["turn_outcome"]==json!({"kind":"silent"})));
+        assert!(!history.iter().any(|row|row.presentation_intent=="tool"
+            && row.projection.pointer("/tool_summary/name").and_then(Value::as_str)==Some("finish_without_reply")),
+            "the internal reply-intent control has no cold-history tool row");
+        for call in marker["tool_call_ids"].as_array().unwrap() {
+            assert!(history.iter().any(|row|row.presentation_intent=="tool" && row.projection["tool_summary"]["call_id"]==*call),
+                "actual motion receipts remain inspectable after a silent finish");
+        }
+    }
+    flow.finish().await;server.close().await;
+}
+
+#[tokio::test]
+async fn short_robot_weather_query_uses_saved_desktop_research_without_planner_and_returns_to_original_device() {
+    let server = DirectedFlowModelServer::new().await;
+    let flow = RobotFlowFixture::with_desktop_research(&server,"companion-directed-weather-flow",true).await;
+    let playback = SimulatedPlayback::start(&flow).await;
+    let store = flow.fixture.owner.canonical().store();
+    let desktop_before = store.head(&flow.desktop_id).await.unwrap().last_seq;
+    let desktop_projection = flow.fixture.owner.get_session(&flow.owner,flow.desktop_id.as_ref()).await.unwrap();
+    let saved_desktop = desktop_projection.agent_snapshot.as_ref().unwrap();
+    let utterance = flow.request("weather-query-1",WEATHER_QUERY);
+    let original = send_and_complete_robot_turn(&flow.fixture,&flow.owner,&utterance,"weather-query-input").await;
+    let result = wait_for_directed_result(&flow,&original,nomifun_agent_session::TurnReceiptStatus::Completed).await;
+    assert_eq!(result.detail.execution.status,nomifun_common::AgentExecutionStatus::Completed);
+    assert_eq!(result.detail.execution.goal,WEATHER_GOAL);
+    assert_eq!(result.detail.participants.len(),1); assert_eq!(result.detail.steps.len(),1); assert_eq!(result.detail.attempts.len(),1);
+    let participant = &result.detail.participants[0]; let target = participant.agent_snapshot.as_ref().unwrap();
+    assert_eq!(target.preset_id,saved_desktop.preset_id); assert_eq!(target.preset_revision,saved_desktop.preset_revision);
+    assert_eq!(participant.model.as_deref(),Some(DESKTOP_MODEL));
+    assert_eq!(target.resolved_model.as_ref().unwrap().model,DESKTOP_MODEL);
+    for action in ["web.research/search","web.research/fetch"] {
+        assert!(target.enabled_capability_actions["web.research"].contains(action),"the exact saved desktop grant survives: {action}");
+    }
+    assert!(target.enabled_capability_actions["workspace.files"].contains("workspace.files/read"));
+    assert!(!target.enabled_capabilities.iter().any(|capability|capability == "robot"));
+    let report: nomifun_agent_execution::DirectedDelegationReport = serde_json::from_value(result.report_payload["delegation_report"].clone()).unwrap();
+    assert_eq!(report.source.agent_session_id,flow.robot_id.as_ref()); assert_eq!(report.source.turn_operation_id,original.as_ref());
+    assert_eq!(report.status,"completed"); assert_eq!(report.attempts.len(),1);
+    let child = store.get_live_session(&report.attempts[0].agent_session_id.clone().into()).await.unwrap();
+    let scope = child.metadata.companion.as_ref().unwrap();
+    assert_eq!(scope.companion_id,flow.companion_id); assert_eq!(scope.role,CompanionSessionRole::Companion);
+    assert_eq!(serde_json::to_value(&child.agent_binding.resolved_snapshot_ref).unwrap(),
+        serde_json::to_value(&target.canonical_binding.as_ref().unwrap().resolved_snapshot_ref).unwrap());
+    let (_, original_input) = store.turn_accepted_input(&flow.robot_id,&original).await.unwrap();
+    assert_eq!(original_input.0["input_source"]["connection_id"],flow.connection);
+    assert_eq!(original_input.0["input_source"]["robot_id"],flow.device_id);
+    let (_, result_input) = store.turn_accepted_input(&flow.robot_id,&result.operation).await.unwrap();
+    assert_eq!(result_input.0["input_source"]["kind"],"directed_delegation_result");
+    assert_eq!(result_input.0["input_source"]["report_message_id"],json!(result.report_event.event_id));
+    let facts = store.turn_output_facts(&flow.robot_id,&result.operation).await.unwrap();
+    let public = nomifun_agent_session::canonical_turn_public_result(&facts,&result.receipt).unwrap();
+    assert_eq!(public.result_text.as_deref(),Some(WEATHER_RESULT));
+    let speech = playback.wait_for(WEATHER_RESULT).await;
+    let Some(nomifun_agent_contracts::AgentTurnOutcome::Answered {message_ids}) = public.turn_outcome else {panic!("the weather result has a canonical public answer");};
+    assert!(message_ids.contains(&speech.message_id)); assert_eq!(playback.accepted_sources.lock().unwrap().len(),1);
+    assert!(flow.fixture.services.robot.as_ref().unwrap().registry.connection_matches(&flow.device_id,&flow.connection).await);
+    assert_eq!(store.head(&flow.desktop_id).await.unwrap().last_seq,desktop_before,"an independent Attempt leaves the idle desktop conversation alone");
+    let requests = server.state.requests.lock().unwrap().clone();
+    let desktop_requests = requests.iter().filter(|body|body["model"] == DESKTOP_MODEL).collect::<Vec<_>>();
+    assert_eq!(desktop_requests.len(),1,"one desktop Attempt runs directly, without a separate planning model call");
+    assert!(last_user_text(desktop_requests[0]).contains(WEATHER_GOAL));
+    assert!(requests.iter().all(|body|body["model"] == DESKTOP_MODEL || body["model"] == ROBOT_MODEL));
+    let callbacks = requests.iter().filter(|body|body["model"] == ROBOT_MODEL && last_user_text(body).contains("directed_delegation_result")).collect::<Vec<_>>();
+    assert_eq!(callbacks.len(),1);
+    for name in ["delegate_task","fork_agent"] { assert!(!tool_available(callbacks[0],name),"the result continuation cannot delegate again"); }
+    let executions = flow.fixture.voice_execution.list(&flow.owner,Some(20),Some(0)).await.unwrap();
+    assert_eq!(executions.iter().filter(|execution|execution.lead_conversation_id.as_deref() == Some(flow.robot_id.as_ref())).count(),1);
+    let robot_projection = flow.fixture.owner.get_session(&flow.owner,flow.robot_id.as_ref()).await.unwrap();
+    assert!(!robot_projection.agent_snapshot.as_ref().unwrap().enabled_capabilities.iter().any(|capability|capability == "web.research"));
+    for body in requests.iter().filter(|body|body["model"] == ROBOT_MODEL) {
+        assert!(!tool_available(body,"web_search")); assert!(!tool_available(body,"read_file"));
+    }
+    flow.fixture.finish().await; playback.stop().await; server.close().await;
+}
+
+#[tokio::test]
+async fn robot_reply_style_reaches_existing_session_model_requests_after_custom_persona_update() {
+    let server = DirectedFlowModelServer::new().await;
+    let flow = RobotFlowFixture::with_desktop_research(&server,"robot-reply-style-flow",true).await;
+    let playback = SimulatedPlayback::start(&flow).await;
+    // Update the profile after the Robot Session exists: the selected product
+    // Context must supply the current persona without recreating that Session.
+    let custom = "叫主人老大，每次回复都带颜文字ヾ(≧▽≦*)o和emoji。";
+    request(&flow.fixture._router,"PATCH",&format!("/api/companion/companions/{}",flow.companion_id),
+        json!({"persona":{"preset":"lively","custom":custom}})).await;
+    let utterance = flow.request("reply-style-weather-1",WEATHER_QUERY);
+    let original = send_and_complete_robot_turn(&flow.fixture,&flow.owner,&utterance,"reply-style-weather-input").await;
+    let result = wait_for_directed_result(&flow,&original,nomifun_agent_session::TurnReceiptStatus::Completed).await;
+    assert_eq!(result.detail.execution.status,nomifun_common::AgentExecutionStatus::Completed);
+    playback.wait_for(WEATHER_RESULT).await;
+
+    // Inspect the actual serialized provider requests for initial ingress and
+    // the independently admitted result continuation. A successful directed
+    // handoff can finish the parent without another model step for its receipt.
+    // The fixture model's fixed answer is not evidence of model compliance.
+    let requests = server.state.requests.lock().unwrap().clone();
+    let robot_requests = requests.iter().filter(|body|body["model"] == ROBOT_MODEL).collect::<Vec<_>>();
+    assert!(robot_requests.len() >= 2,"real ingress and the result continuation both call the Robot model");
+    assert!(robot_requests.iter().any(|body|!last_user_text(body).contains("directed_delegation_result")));
+    assert!(robot_requests.iter().any(|body|last_user_text(body).contains("directed_delegation_result")));
+    for body in robot_requests {
+        let system = body["messages"].as_array().unwrap().iter().filter(|message|message["role"] == "system")
+            .map(|message|message["content"].as_str().map(str::to_owned).unwrap_or_else(||message["content"].to_string()))
+            .collect::<Vec<_>>().join("\n");
+        let custom_at = system.find(custom).expect("the current custom persona reaches the existing Robot Session");
+        let style_at = system.rfind("Physical Robot reply style:")
+            .expect("every real Robot model request carries the physical reply-style contract");
+        assert!(style_at > custom_at,"the physical output rule follows even an explicit persona decoration preference");
+        assert!(system[style_at..].contains("without decorative emoji, kaomoji, ASCII emoticons or stage directions"));
+        assert!(system[style_at..].contains("overrides decorative style in persona/custom settings or historical replies"));
+        assert!(system[style_at..].contains("Preserve symbols in user-requested quotations, code, formulas, identifiers, URLs and technical content"));
+        assert!(!system.contains("喜欢用可爱的语气和颜文字"),"the lively Robot persona no longer asks the model to add decorations");
+    }
+    flow.fixture.finish().await; playback.stop().await; server.close().await;
 }
 
 #[tokio::test]

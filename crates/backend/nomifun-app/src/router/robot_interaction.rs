@@ -439,7 +439,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct RobotModel(Mutex<Vec<ChatModelRequest>>);
+    struct RobotModel(Mutex<Vec<ChatModelRequest>>, bool);
 
     #[async_trait]
     impl AgentModelPort for RobotModel {
@@ -448,6 +448,9 @@ mod tests {
             request: ChatModelRequest,
             _: CancellationToken,
         ) -> Result<AgentModelStream, ChatModelError> {
+            assert!(request.input.instructions.iter().any(|instruction|
+                instruction.starts_with("Physical Robot reply style:")),
+                "physical reply style must survive every model step, including tool receipts");
             assert!(request.input.tools.iter().any(|tool| tool.name == "robot_action"),
                 "a fitting robot turn must not first request a history summary");
             let mut requests = self.0.lock().unwrap();
@@ -461,11 +464,18 @@ mod tests {
                     }}),
                     Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
                 ],
-                1 => vec![
+                1 if self.1 => vec![
+                    Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                        call_id: "second-action".into(), name: "robot_action".into(),
+                        arguments: StrictJsonValue(json!({"action":"turn"})), provider_metadata: None,
+                    }}),
+                    Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
+                ],
+                1 | 2 => vec![
                     Ok(ChatModelEvent::OutputTextDelta { text: "The action completed.".into() }),
                     Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed }),
                 ],
-                _ => panic!("a simple action unexpectedly opened a third model request"),
+                _ => panic!("a simple action sequence unexpectedly opened another model request"),
             };
             Ok(Box::pin(futures_util::stream::iter(events)))
         }
@@ -501,6 +511,15 @@ mod tests {
 
     #[tokio::test]
     async fn robot_full_history_runs_action_and_reply_without_a_compaction_model_request() {
+        run_robot_action_scenario(false).await;
+    }
+
+    #[tokio::test]
+    async fn robot_reply_style_short_acknowledgment_still_waits_for_every_requested_movement() {
+        run_robot_action_scenario(true).await;
+    }
+
+    async fn run_robot_action_scenario(sequence: bool) {
         let engine = AgentEngine::new(AgentEngineBuild {
             build_id: "robot-budget-regression".into(), build_digest: "a".repeat(64).into(),
         }).unwrap().with_context_budget(context_budget(true)).unwrap();
@@ -509,12 +528,13 @@ mod tests {
             request.causality.resolved_snapshot_ref.clone()).unwrap();
         let original: Vec<_> = (0..4).flat_map(|i| exchange(&format!("history-{i}"))).collect();
         request.input = input();
+        super::super::append_robot_reply_style(&mut request.input.instructions, true);
         request.input.messages = bounded_history(original.clone(), true).unwrap();
         assert_eq!(request.input.messages.len(), 16);
         let handoff = "large earlier cross-Agent handoff ".repeat(8192);
         assert!(handoff.len() > context_budget(true).max_context_bytes);
         request.input.messages.push(text(ChatRole::Assistant, &bounded_handoff(handoff, true)));
-        request.input.messages.push(text(ChatRole::User, "Stand once."));
+        request.input.messages.push(text(ChatRole::User, if sequence { "Stand once, then turn." } else { "Stand once." }));
         let definition = ChatToolDefinition {
             name: "robot_action".into(), description: "Control the selected robot.".into(),
             input_schema: StrictJsonValue(json!({"type":"object","properties":{"action":{"type":"string"}},"required":["action"]})),
@@ -529,7 +549,7 @@ mod tests {
             resource_binding_ids: Default::default(),
             effect_class: AgentEffectClass::ExternalUncertainEffect, parallel_safe: false,
         }]).unwrap();
-        let model = Arc::new(RobotModel::default());
+        let model = Arc::new(RobotModel(Mutex::new(Vec::new()), sequence));
         let tool = Arc::new(RobotTool::default());
         let events = Arc::new(Events::default());
         let session = engine.open_session(binding, model.clone(), tool.clone(), Some(events.clone())).unwrap();
@@ -538,9 +558,14 @@ mod tests {
             .with_max_model_steps(LEAN_MAX_MODEL_STEPS)).await.unwrap();
         assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
         let requests = model.0.lock().unwrap();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), if sequence { 3 } else { 2 });
         assert_eq!(&requests[0].input.messages[..16], original.as_slice());
-        assert_eq!(tool.0.load(Ordering::SeqCst), 1);
+        assert_eq!(tool.0.load(Ordering::SeqCst), if sequence { 2 } else { 1 });
+        for (step, call) in [(1, "current-action"), (2, "second-action")].into_iter().take(if sequence { 2 } else { 1 }) {
+            assert!(requests[step].input.messages.iter().any(|message| message.content.iter().any(|part|
+                matches!(part, ChatContentPart::ToolResult {call_id, is_error:false, ..} if call_id.as_ref()==call))),
+                "each next step must observe the preceding real movement receipt");
+        }
         assert!(!events.0.lock().unwrap().iter().any(|event|
             matches!(event, AgentEngineEvent::CompactionStarted { .. } | AgentEngineEvent::ContextCompacted { .. })));
     }
