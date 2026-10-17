@@ -36,14 +36,16 @@ function mount({ roster = companions, pending = null, current = id(0) }: {
 afterEach(cleanup);
 
 describe('compact vertical companion switcher', () => {
-  test('shows three alternatives and routes overflow to the existing full picker', () => {
+  test('shows three alternatives and routes overflow to the existing full picker', async () => {
     const view = mount();
     const trigger = view.getByRole('button', { name: triggerName });
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
     fireEvent.mouseEnter(trigger.parentElement!);
+    await act(async () => {});
     expect(view.getByRole('tooltip', { name: triggerName }).textContent).toBe(triggerName);
     expect(view.queryByRole('group')).toBeNull();
     fireEvent.click(trigger);
+    await act(async () => {});
     expect(view.getByRole('tooltip', { name: 'Nomi' }).textContent).toBe('Nomi');
     const rail = view.getByRole('group');
     expect(within(rail).getAllByRole('button')).toHaveLength(4);
@@ -52,31 +54,35 @@ describe('compact vertical companion switcher', () => {
     expect(view.queryByRole('button', { name: switchName(4) })).toBeNull();
     expect(rail.hasAttribute('data-companion-hit')).toBe(true);
     fireEvent.click(view.getByText('+2'));
+    await act(async () => {});
     expect(view.showAllCount()).toBe(1);
     expect(view.switched).toEqual([]);
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
     expect((view.getByRole('textbox') as HTMLInputElement).value).toBe('Keep this draft');
   });
 
-  test('switches the chosen companion, closes the rail and restores trigger focus', () => {
+  test('switches the chosen companion, closes the rail and restores trigger focus', async () => {
     const view = mount();
     const trigger = view.getByRole('button', { name: triggerName });
     fireEvent.click(trigger);
     const choice = view.getByRole('button', { name: switchName(2) });
     fireEvent.mouseEnter(choice.parentElement!);
+    await act(async () => {});
     const tooltip = view.getByRole('tooltip', { name: 'Partner 2' });
     expect(tooltip.textContent).toBe('Partner 2');
-    expect(tooltip.className).toContain('right-[calc(100%+8px)]');
+    expect(tooltip.style.position).toBe('fixed');
+    expect(tooltip.classList.contains('nomi-companion-switcher__tooltip')).toBe(true);
     fireEvent.mouseLeave(choice.parentElement!);
     expect(view.queryByRole('tooltip', { name: 'Partner 2' })).toBeNull();
     fireEvent.click(choice);
+    await act(async () => {});
     expect(view.switched).toEqual([id(2)]);
     expect(view.queryByRole('group')).toBeNull();
     expect(document.activeElement).toBe(trigger);
     expect(view.container.querySelector('[data-companion-hit]')).toBeNull();
   });
 
-  test('dismisses on outside pointer, Escape and loss of native window focus', () => {
+  test('dismisses on outside pointer, Escape and loss of native window focus', async () => {
     const view = mount();
     const trigger = view.getByRole('button', { name: triggerName });
     fireEvent.click(trigger);
@@ -84,14 +90,16 @@ describe('compact vertical companion switcher', () => {
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
     fireEvent.click(trigger);
     fireEvent.keyDown(document, { key: 'Escape' });
+    await act(async () => {});
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
     expect(document.activeElement).toBe(trigger);
     fireEvent.click(trigger);
+    await act(async () => {});
     fireEvent.blur(window);
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
   });
 
-  test('repeated hover and keyboard focus changes keep the open rail and avatars mounted', () => {
+  test('repeated hover and keyboard focus changes keep the open rail and avatars mounted', async () => {
     const view = mount();
     const trigger = view.getByRole('button', { name: triggerName });
     fireEvent.click(trigger);
@@ -101,12 +109,13 @@ describe('compact vertical companion switcher', () => {
     const firstAvatar = first.firstElementChild;
     for (let index = 0; index < 10; index++) {
       fireEvent.mouseEnter(first.parentElement!);
+      await act(async () => {});
       expect(view.getByRole('tooltip', { name: 'Partner 1' })).toBeTruthy();
       fireEvent.mouseLeave(first.parentElement!);
       fireEvent.mouseEnter(second.parentElement!);
-      act(() => second.focus());
+      await act(async () => second.focus());
       fireEvent.mouseLeave(second.parentElement!);
-      act(() => first.focus());
+      await act(async () => first.focus());
       expect(view.getByRole('group')).toBe(rail);
       expect(first.firstElementChild).toBe(firstAvatar);
       expect(trigger.getAttribute('aria-expanded')).toBe('true');
@@ -115,15 +124,17 @@ describe('compact vertical companion switcher', () => {
     expect(view.switched).toEqual([]);
     expect(view.showAllCount()).toBe(0);
     fireEvent.keyDown(document, { key: 'Escape' });
+    await act(async () => {});
     expect(view.queryByRole('tooltip', { name: 'Partner 1' })).toBeNull();
   });
 
-  test('keeps navigation in the column and prevents switching while a switch is pending', () => {
+  test('keeps navigation in the column and prevents switching while a switch is pending', async () => {
     const view = mount();
     fireEvent.click(view.getByRole('button', { name: triggerName }));
     const first = view.getByRole('button', { name: switchName(1) });
-    act(() => first.focus());
+    await act(async () => first.focus());
     fireEvent.keyDown(first, { key: 'ArrowDown' });
+    await act(async () => {});
     expect(document.activeElement).toBe(view.getByRole('button', { name: switchName(2) }));
     view.unmount();
     const pending = mount({ pending: id(2) });
