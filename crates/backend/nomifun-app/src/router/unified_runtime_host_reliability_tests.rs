@@ -10,6 +10,12 @@ use tower::ServiceExt;
 #[path = "engine_knowledge_writeback_tests.rs"]
 mod knowledge_writeback_tests;
 
+#[path = "companion_directed_flow_tests.rs"]
+mod companion_directed_flow_tests;
+
+#[path = "robot_authored_execution_tests.rs"]
+mod robot_authored_execution_tests;
+
 type HostMap = BTreeMap<String, Weak<ConversationRuntimeHost>>;
 static HOSTS: OnceLock<Mutex<HostMap>> = OnceLock::new();
 
@@ -329,10 +335,10 @@ async fn voice_actual_lazy_recovery_admits_known_queued_original_key_once_and_un
     port.shutdown_pending_inputs().await.unwrap();fixture.owner.canonical().cancel_exact_turn(&PrincipalRef {principal_kind:"user".into(),principal_id:owner},&id,"recovery-cleanup",&receipt.operation_id).await.unwrap();fixture.finish().await;server.abort();let _=server.await;
 }
 
-async fn voice_pending_decision_fixture(fixture:&Fixture)->nomifun_agent_contracts::AgentSessionId {
+async fn voice_running_decision_attempt_fixture(fixture:&Fixture)->(String,String,nomifun_db::AgentExecutionStepDetailRow) {
     use nomifun_db::{IAgentExecutionRepository,SqliteAgentExecutionRepository,CreateAgentExecutionParams,NewAgentExecutionParticipant,NewAgentExecutionEvent,ReconcileAgentExecutionPlanParams,
-        NewAgentExecutionStep,CreateAgentExecutionAttemptParams,AgentExecutionAttemptSessionKind,SettleAgentExecutionAttemptParams,AgentExecutionActiveTurnGuard,AttemptConversationEffects};
-    use nomifun_common::{AgentExecutionStatus,AgentExecutionEventKind,AgentExecutionActor,ExecutionStepStatus,ExecutionAttemptStatus};
+        NewAgentExecutionStep,CreateAgentExecutionAttemptParams,AgentExecutionAttemptSessionKind};
+    use nomifun_common::{AgentExecutionStatus,AgentExecutionEventKind,AgentExecutionActor,ExecutionStepStatus};
     fixture.voice_execution.shutdown().await.unwrap();let repository=SqliteAgentExecutionRepository::new(fixture.pool().clone());
     let owner=&fixture.host.options.user_id;let session=&fixture.host.options.conversation_id;let participant=nomifun_common::generate_id();let step=nomifun_common::generate_id();
     let event=|kind|NewAgentExecutionEvent {event_type:kind,step_id:None,attempt_id:None,actor:AgentExecutionActor::system(),payload:"{}".into()};
@@ -357,9 +363,18 @@ async fn voice_pending_decision_fixture(fixture:&Fixture)->nomifun_agent_contrac
         trigger_reason:"initial".into(),effective_config:"{}".into(),retry_after:None,runtime_state:None},&event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();
     let attempt=queued.current_attempt.unwrap().attempt;
     let running=repository.start_attempt(owner,&created.execution_id,&step,queued.step.version,&attempt.attempt_id,attempt.version,session,AgentExecutionAttemptSessionKind::ChildAttempt,None,
-        &event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();let attempt=running.current_attempt.unwrap().attempt;let stop=nomifun_common::generate_id();
+        &event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();
+    (created.execution_id,step,running)
+}
+
+async fn voice_pending_decision_fixture(fixture:&Fixture)->nomifun_agent_contracts::AgentSessionId {
+    use nomifun_db::{IAgentExecutionRepository,SqliteAgentExecutionRepository,NewAgentExecutionEvent,SettleAgentExecutionAttemptParams,AgentExecutionActiveTurnGuard,AttemptConversationEffects};
+    use nomifun_common::{AgentExecutionStatus,AgentExecutionEventKind,AgentExecutionActor,ExecutionStepStatus,ExecutionAttemptStatus};
+    let (execution,step,running)=voice_running_decision_attempt_fixture(fixture).await;
+    let repository=SqliteAgentExecutionRepository::new(fixture.pool().clone());let owner=&fixture.host.options.user_id;let session=&fixture.host.options.conversation_id;
+    let attempt=running.current_attempt.unwrap().attempt;let stop=nomifun_common::generate_id();
     let mut effects=AttemptConversationEffects::default();effects.push_stop_turn(stop.clone(),"cleanup-retry-turn".into()).unwrap();
-    repository.settle_attempt(owner,&created.execution_id,&step,running.step.version,&attempt.attempt_id,attempt.version,None,&SettleAgentExecutionAttemptParams {
+    repository.settle_attempt(owner,&execution,&step,running.step.version,&attempt.attempt_id,attempt.version,None,&SettleAgentExecutionAttemptParams {
         expected_user_input_turn:None,
         expected_active_session_turn:Some(AgentExecutionActiveTurnGuard {conversation_id:session.clone(),canonical_operation_id:"cleanup-retry-turn".into()}),attempt_status:ExecutionAttemptStatus::WaitingInput,
         step_status:ExecutionStepStatus::WaitingInput,execution_status:Some(AgentExecutionStatus::WaitingInput),question:Some(Some("Choose option A or option B?".into())),error:None,output_summary:None,
@@ -394,6 +409,122 @@ async fn voice_off_original_decision_cas_keeps_its_unextended_payload() {
     let events=fixture.voice_execution.events(owner,&target.execution_id,None,Some(128)).await.unwrap();let answer=events.iter().find(|event|event.event_type==nomifun_common::AgentExecutionEventKind::DecisionAnswered).unwrap();
     assert_eq!(answer.payload.as_object().unwrap().len(),2);assert_eq!(answer.payload["answered"],true);assert!(answer.payload["operation_id"].is_string());
     assert!(answer.payload.get("voice_operation_key").is_none());fixture.finish().await;
+}
+
+#[tokio::test]
+async fn voice_actual_normal_input_handoff_presents_the_exact_native_turn_and_answers_once() {
+    use nomifun_db::{IAgentExecutionRepository,SqliteAgentExecutionRepository,NewAgentExecutionEvent,
+        SettleAgentExecutionAttemptParams,AgentExecutionUserInputTurnGuard,AttemptConversationEffects};
+    use nomifun_common::{AgentExecutionStatus,AgentExecutionEventKind,AgentExecutionActor,ExecutionStepStatus,ExecutionAttemptStatus};
+    use nomifun_voice_contracts::{VoiceApprovalAnswer,VoiceWorkStatus};
+
+    let server=InputHandoffModelServer::new().await;
+    let fixture=Fixture::with_input_model("voice-normal-input-handoff",&server.url).await;
+    let (execution,step,running)=voice_running_decision_attempt_fixture(&fixture).await;
+    let attempt=running.current_attempt.unwrap().attempt;
+    let owner=&fixture.host.options.user_id;let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let store=fixture.owner.canonical().store();
+    // The default fixture root was never dispatched. The real Attempt uses
+    // its durable initial-input identity, which the WaitingInput writer checks.
+    let (_,cancelled)=store.cancel_exact_turn(&session,&"cleanup-retry-turn".into(),
+        "voice-handoff-fixture-root-cancel".into(),"session_api".into()).await.unwrap();
+    let other_terminal=cancelled.record.unwrap().event_id;
+    let key=AttemptConversationEffects::default().current_turn_operation_key(&attempt.attempt_id).unwrap();
+    let operation:OperationId=format!("turn:user:{owner}:{}:{key}",session.as_ref()).into();
+    let content="Prepare the report and ask for its destination.";
+    let (input,_)=store.start_turn(&session,"session_api".into(),key.into(),operation.clone(),StrictJsonValue(json!({
+        "content":content,"admission":{"route_identity":fixture.host.route,"resolved_snapshot_ref":fixture.host.snapshot_ref}
+    }))).await.unwrap();
+    let message=SendMessageData {content:content.into(),msg_id:"voice-normal-input-handoff-wire".into(),
+        source_message_id:Some(input.record.unwrap().event_id.as_ref().into()),files:vec![],inject_skills:vec![],origin:None};
+    let events=fixture.runtime.subscribe();fixture.runtime.send_message(message).await.unwrap();
+    let received=receive_input_handoff_terminal(events).await;
+    assert!(received.iter().any(|event|matches!(event,nomifun_ai_agent::AgentStreamEvent::Finish(data)
+        if data.stop_reason==Some(nomifun_ai_agent::protocol::events::TurnStopReason::InputRequired))));
+    assert_eq!(server.requests.lock().unwrap().len(),1,"the native handoff closes before another model request");
+    let receipt=store.read_turn_receipt(&session,&operation).await.unwrap();
+    assert_eq!(receipt.status,nomifun_agent_session::TurnReceiptStatus::Completed);
+    let terminal=receipt.terminal_event.as_ref().unwrap();
+    let nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload)=&terminal.payload else{panic!("inline native terminal expected");};
+    let request:nomifun_agent_contracts::AgentUserInputRequest=serde_json::from_value(payload.0["user_input_request"].clone()).unwrap();
+    assert_eq!(request.request_id.as_ref(),"ask-report-path");
+    assert_eq!(request.question,"Where should the report be saved?");
+    let source=store.turn_output_facts(&session,&operation).await.unwrap();
+    let delivery=nomifun_agent_execution::canonical_turn_delivery(&source,&receipt,true).unwrap();
+    assert_eq!(delivery.user_input_request.as_ref(),Some(&request));
+    assert!(source.execution_generation>0,"the presentation must preserve a real native generation");
+
+    let repository=SqliteAgentExecutionRepository::new(fixture.pool().clone());
+    let guard=AgentExecutionUserInputTurnGuard {conversation_id:session.as_ref().into(),canonical_operation_id:operation.as_ref().into(),
+        terminal_event_id:terminal.event_id.as_ref().into(),user_input_request:request.clone()};
+    let params=|guard|SettleAgentExecutionAttemptParams {expected_active_session_turn:None,expected_user_input_turn:Some(guard),
+        attempt_status:ExecutionAttemptStatus::WaitingInput,step_status:ExecutionStepStatus::WaitingInput,execution_status:Some(AgentExecutionStatus::WaitingInput),
+        question:Some(Some(request.question.clone())),error:Some(None),output_summary:None,output_files:None,tokens:None,retry_after:None,
+        runtime_state:Some(None),started_at:None,finished_at:None,loop_repeat_reset:None};
+    let payload=json!({"canonical_operation_id":operation,"terminal_event_id":terminal.event_id,"question":request.question,"user_input_request":request});
+    let event=|payload:Value|NewAgentExecutionEvent {event_type:AgentExecutionEventKind::DecisionRequested,step_id:Some(step.clone()),
+        attempt_id:Some(attempt.attempt_id.clone()),actor:AgentExecutionActor::system(),payload:payload.to_string()};
+    let mut wrong_guard=guard.clone();wrong_guard.terminal_event_id=other_terminal.as_ref().into();
+    assert!(repository.settle_attempt(owner,&execution,&step,running.step.version,&attempt.attempt_id,attempt.version,None,
+        &params(wrong_guard),&event(payload.clone())).await.is_err(),"a different canonical terminal cannot settle this handoff");
+    let mut changed_guard=guard.clone();changed_guard.user_input_request.question="Use a changed question?".into();
+    assert!(repository.settle_attempt(owner,&execution,&step,running.step.version,&attempt.attempt_id,attempt.version,None,
+        &params(changed_guard),&event(payload.clone())).await.is_err(),"the canonical question cannot be replaced during settlement");
+
+    // Keep the real canonical source fixed while presenting stale Execution
+    // request metadata. The Host must verify that metadata against that source.
+    let mut wrong_terminal=payload.clone();wrong_terminal["terminal_event_id"]=json!(other_terminal);
+    repository.settle_attempt(owner,&execution,&step,running.step.version,&attempt.attempt_id,attempt.version,None,
+        &params(guard),&event(wrong_terminal)).await.unwrap();
+    let waiting=fixture.voice_execution.get(owner,&execution).await.unwrap();
+    assert_eq!(waiting.execution.status,AgentExecutionStatus::WaitingInput);
+    assert_eq!(waiting.attempts.iter().find(|current|current.attempt_id==attempt.attempt_id).unwrap().status,ExecutionAttemptStatus::WaitingInput);
+    let port=voice_port(&fixture);let binding=source.session.agent_binding.binding_version;
+    assert!(port.current_decision_presentations(owner,session.as_ref(),binding).await.unwrap().is_empty(),
+        "a WaitingInput event cannot borrow another terminal in the same Session");
+    let mut changed_question=payload.clone();changed_question["user_input_request"]["question"]=json!("Use a changed question?");
+    let version=fixture.voice_execution.get(owner,&execution).await.unwrap().execution.version;
+    repository.append_event(owner,&execution,version,&event(changed_question)).await.unwrap();
+    assert!(port.current_decision_presentations(owner,session.as_ref(),binding).await.unwrap().is_empty(),
+        "a changed typed question must not become a presentation");
+    let version=fixture.voice_execution.get(owner,&execution).await.unwrap().execution.version;
+    repository.append_event(owner,&execution,version,&event(payload)).await.unwrap();
+    let presentations=port.current_decision_presentations(owner,session.as_ref(),binding).await.unwrap();
+    assert_eq!(presentations.len(),1);let presentation=&presentations[0];let target=&presentation.target;
+    assert_eq!(presentation.question,request.question);
+    assert_eq!(target.work_target.agent_session_id,session);assert_eq!(target.work_target.turn_operation_id,operation);
+    assert_eq!(target.work_target.binding_version,binding);assert_eq!(target.work_target.execution_generation,source.execution_generation);
+    assert_eq!(target.interaction_agent_session_id,session);assert_eq!(target.action_id.as_ref(),"agent/request_user_decision");
+    assert_eq!(target.question_digest,nomifun_agent_contracts::digest_bytes(request.question.as_bytes()));
+    assert_eq!(target.execution_id,execution);assert_eq!(target.step_id,step);assert_eq!(target.attempt_id,attempt.attempt_id);
+    let events=fixture.voice_execution.events(owner,&execution,None,Some(128)).await.unwrap();
+    let requested=events.iter().find(|event|event.sequence==target.request_event_sequence).unwrap();
+    assert!(requested.payload.get("stop_turn_operation_id").is_none(),"this is the ordinary completed input handoff path");
+    assert_eq!(requested.payload["terminal_event_id"],json!(terminal.event_id));
+    let answer=VoiceApprovalAnswer {target:target.clone(),answer:"Save it in reports/.".into(),presented_context_id:target.presentation_id.clone()};
+    let mut altered=answer.clone();altered.target.question_digest=nomifun_agent_contracts::digest_bytes(b"a different question");
+    assert!(port.answer_decision_presentation(owner,"normal-handoff-altered-question",altered).await.is_err());
+    // The fixture stops the scheduler. This proves the original answer CAS
+    // and durable continuation intent, rather than another model dispatch.
+    let first=port.answer_decision_presentation(owner,"normal-handoff-answer",answer.clone()).await.unwrap();
+    assert_eq!(first.status,VoiceWorkStatus::Applied);assert!(!first.duplicate);
+    let resumed=fixture.voice_execution.get(owner,&execution).await.unwrap();
+    assert_eq!(resumed.execution.status,AgentExecutionStatus::Running);
+    assert_eq!(resumed.attempts.iter().find(|current|current.attempt_id==attempt.attempt_id).unwrap().status,ExecutionAttemptStatus::Running);
+    let replay=port.answer_decision_presentation(owner,"normal-handoff-answer",answer.clone()).await.unwrap();
+    assert!(replay.duplicate);assert_eq!(replay.receipt_id,first.receipt_id);
+    assert!(port.answer_decision_presentation(owner,"normal-handoff-late-answer",answer.clone()).await.is_err(),
+        "the original pending presentation cannot be answered twice under another key");
+    let mut different=answer;different.answer="Save it somewhere else.".into();
+    assert!(port.answer_decision_presentation(owner,"normal-handoff-answer",different).await.is_err());
+    assert!(port.current_decision_presentations(owner,session.as_ref(),binding).await.unwrap().is_empty());
+    let events=fixture.voice_execution.events(owner,&execution,None,Some(128)).await.unwrap();
+    let answered=events.iter().filter(|event|event.event_type==AgentExecutionEventKind::DecisionAnswered).collect::<Vec<_>>();
+    assert_eq!(answered.len(),1);assert_eq!(answered[0].payload["request_event_sequence"],json!(target.request_event_sequence));
+    assert_eq!(answered[0].payload["voice_source_target"],json!(target.work_target));
+    assert_eq!(store.read_turn_receipt(&session,&operation).await.unwrap().terminal_event.unwrap().event_id,terminal.event_id,
+        "answering resumes the Attempt; it cannot reopen or replace the completed native Turn");
+    fixture.finish().await;server.close().await;
 }
 
 #[tokio::test]
@@ -1036,7 +1167,7 @@ async fn steering_cleanup_scenario(fault: SteeringCleanupFault) {
 }
 
 #[cfg(feature = "browser-use")]
-mod browser_terminal_recovery {
+mod unused_browser_admission {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use nomifun_browser_platform::{
@@ -1045,26 +1176,32 @@ mod browser_terminal_recovery {
     };
 
     #[derive(Default)]
-    struct FaultBrowserFactory { creates: AtomicUsize, closes: Arc<AtomicUsize>, poison_only_final_unlock: bool }
-    struct FaultBrowser { generation: u64, poisoned: bool, poison_only_final_unlock: bool, closed: AtomicBool, closes: Arc<AtomicUsize>, locked: AtomicBool }
+    struct GateCalls { locks: AtomicUsize, releases: AtomicUsize, unlocks: AtomicUsize }
+    #[derive(Default)]
+    struct FaultBrowserFactory { creates: AtomicUsize, closes: Arc<AtomicUsize>, gate: Arc<GateCalls> }
+    struct FaultBrowser { generation: u64, closed: AtomicBool, closes: Arc<AtomicUsize>, gate: Arc<GateCalls> }
     #[async_trait]
     impl BrowserRuntimeFactory for FaultBrowserFactory {
         async fn create(&self, request: CreateBrowserRuntime) -> Result<Arc<dyn BrowserRuntime>, WorkspaceError> {
-            Ok(Arc::new(FaultBrowser { generation: request.runtime_generation,
-                poisoned: self.creates.fetch_add(1, Ordering::SeqCst) == 0, poison_only_final_unlock: self.poison_only_final_unlock, closed: AtomicBool::new(false),
-                closes: self.closes.clone(), locked: AtomicBool::new(!request.user_input_enabled) }))
+            assert!(request.user_input_enabled, "a user-created browser starts with user input");
+            self.creates.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(FaultBrowser { generation: request.runtime_generation, closed: AtomicBool::new(false),
+                closes: self.closes.clone(), gate: self.gate.clone() }))
         }
     }
     #[async_trait]
     impl NativeInputGate for FaultBrowser {
         async fn lock_user_input(&self) -> Result<(), RunAdmissionError> {
-            self.locked.store(true, Ordering::SeqCst);
-            if self.poisoned && !self.poison_only_final_unlock { Err(RunAdmissionError::InputGateFailed) } else { Ok(()) }
+            self.gate.locks.fetch_add(1, Ordering::SeqCst);
+            Err(RunAdmissionError::InputGateFailed)
         }
-        async fn release_pressed_input(&self) -> Result<(), RunAdmissionError> { Ok(()) }
+        async fn release_pressed_input(&self) -> Result<(), RunAdmissionError> {
+            self.gate.releases.fetch_add(1, Ordering::SeqCst);
+            Err(RunAdmissionError::InputGateFailed)
+        }
         async fn unlock_user_input(&self) -> Result<(), RunAdmissionError> {
-            if self.poisoned { return Err(RunAdmissionError::InputGateFailed); }
-            self.locked.store(false, Ordering::SeqCst); Ok(())
+            self.gate.unlocks.fetch_add(1, Ordering::SeqCst);
+            Err(RunAdmissionError::InputGateFailed)
         }
     }
     #[async_trait]
@@ -1074,7 +1211,7 @@ mod browser_terminal_recovery {
             Ok(BrowserRuntimeSnapshot { runtime_generation: self.generation, revision: 1, active_tab_id: None, tabs: vec![], downloads: vec![] })
         }
         async fn execute(&self, _: BrowserTabCommand, _: CancellationToken) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
-            if self.poisoned && !self.poison_only_final_unlock { Err(WorkspaceError::NativeCommandFailed) } else { self.snapshot().await }
+            self.snapshot().await
         }
         async fn close(&self) -> Result<(), WorkspaceError> {
             if !self.closed.swap(true, Ordering::SeqCst) { self.closes.fetch_add(1, Ordering::SeqCst); }
@@ -1082,138 +1219,92 @@ mod browser_terminal_recovery {
         }
     }
 
-    async fn model_fixture(expected_calls: usize) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/v1", listener.local_addr().unwrap());
-        let calls = Arc::new(AtomicUsize::new(0));
-        let counted = calls.clone();
-        let task = tokio::spawn(async move {
-            loop {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut bytes = Vec::new();
-                let mut chunk = [0_u8; 4096];
-                let header_end = loop {
-                    let read = socket.read(&mut chunk).await.unwrap();
-                    assert!(read > 0); bytes.extend_from_slice(&chunk[..read]);
-                    if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") { break index + 4; }
-                };
-                let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
-                let length = headers.lines().filter_map(|line| line.split_once(':'))
-                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                    .map(|(_, value)| value.trim().parse::<usize>().unwrap()).unwrap_or(0);
-                while bytes.len() < header_end + length {
-                    let read = socket.read(&mut chunk).await.unwrap(); assert!(read > 0); bytes.extend_from_slice(&chunk[..read]);
-                }
-                if headers.starts_with("GET ") {
-                    let body = r#"{"object":"list","data":[{"id":"cleanup-fixture","object":"model"}]}"#;
-                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-                    socket.write_all(response.as_bytes()).await.unwrap(); continue;
-                }
-                counted.fetch_add(1, Ordering::SeqCst);
-                let body = concat!(
-                    "data: {\"id\":\"browser-recovery\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"cleanup-fixture\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"The successor completed after Browser reopen.\"},\"finish_reason\":null}]}\n\n",
-                    "data: {\"id\":\"browser-recovery\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"cleanup-fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-                    "data: [DONE]\n\n");
-                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-                socket.write_all(response.as_bytes()).await.unwrap();
-                if counted.load(Ordering::SeqCst) == expected_calls { break; }
-            }
-        });
-        (url, calls, task)
+    struct PausedModel {
+        url: String,
+        started: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl PausedModel {
+        async fn new() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/v1", listener.local_addr().unwrap());
+            let started = Arc::new(tokio::sync::Notify::new());
+            let resume = Arc::new(tokio::sync::Notify::new());
+            let router = axum::Router::new()
+                .route("/v1/models", axum::routing::get(|| async {
+                    axum::Json(json!({"object":"list","data":[{"id":"cleanup-fixture","object":"model"}]}))
+                }))
+                .route("/v1/chat/completions", axum::routing::post(|
+                    axum::extract::State((started, resume)):
+                        axum::extract::State<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+                    axum::Json(_): axum::Json<Value>,
+                | async move {
+                    started.notify_one();
+                    resume.notified().await;
+                    let chunk = json!({"id":"unused-browser","object":"chat.completion.chunk","created":1,
+                        "model":"cleanup-fixture","choices":[{"index":0,"delta":{"role":"assistant",
+                            "content":"The file task completed."},"finish_reason":null}]});
+                    let end = json!({"id":"unused-browser","object":"chat.completion.chunk","created":1,
+                        "model":"cleanup-fixture","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+                    ([ (axum::http::header::CONTENT_TYPE, "text/event-stream") ],
+                        format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n"))
+                }))
+                .with_state((started.clone(), resume.clone()));
+            let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+            Self { url, started, resume, task }
+        }
     }
 
     #[tokio::test]
-    async fn published_failed_turn_retries_native_finish_after_user_reopen_and_the_sdk_successor_completes() {
-        recovery_scenario(false).await;
-    }
-
-    #[tokio::test]
-    async fn a_valid_native_guard_with_committed_terminal_can_reopen_after_failed_unlock_and_run_a_successor() {
-        recovery_scenario(true).await;
-    }
-
-    async fn recovery_scenario(poison_only_final_unlock: bool) {
-        let factory = Arc::new(FaultBrowserFactory { poison_only_final_unlock, ..Default::default() });
-        let (model, calls, model_task) = model_fixture(if poison_only_final_unlock { 2 } else { 1 }).await;
-        let fixture = Fixture::build_delivery("browser-native-failure-reopen-successor", vec![], vec![], None, false,None,false,
-            Some((factory.clone(), model))).await;
+    async fn a_running_file_turn_keeps_the_unused_browser_available_despite_native_gate_failures() {
+        let factory = Arc::new(FaultBrowserFactory::default());
+        let model = PausedModel::new().await;
+        let fixture = Fixture::build_delivery("unused-browser-native-gate-failure", vec![], vec![], None, false, None, false,
+            Some((factory.clone(), model.url.clone()))).await;
         let session: AgentSessionId = fixture.host.options.conversation_id.clone().into();
-        let store = fixture.owner.canonical().store();
-        let binding_before = store.get_live_session(&session).await.unwrap().agent_binding;
-        assert!(fixture.host.resources.compiled().resolved_capability(&CapabilityId::from("browser")).is_none(), "ordinary Chat has no Browser Tool authority");
+        assert!(fixture.host.resources.compiled().resolved_capability(&CapabilityId::from("browser")).is_none(),
+            "the file-only turn has no Browser Tool authority");
+        let events = fixture.runtime.subscribe();
         fixture.runtime.send_message(fixture.message.clone()).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(8), async {
-            while fixture.runtime.is_transport_healthy() { tokio::task::yield_now().await; }
-        }).await.unwrap();
-        assert_eq!(fixture.state().await, if poison_only_final_unlock { "completed" } else { "failed" });
-        assert!(fixture.host.active.lock().await.is_none());
-        assert!(fixture.host.terminal_already_recorded(fixture.host.root(&fixture.message)).unwrap());
-        assert_eq!(calls.load(Ordering::SeqCst), usize::from(poison_only_final_unlock));
-        let original = store.read_turn_receipt(&session, &"cleanup-retry-turn".into()).await.unwrap();
-        let original_event = original.terminal_event.unwrap();
-        let cursor = store.current_cursor(&session).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(8), model.started.notified()).await
+            .expect("an unused browser's native gate must not prevent model dispatch");
+        assert_eq!(fixture.state().await, "running");
+        assert_eq!(factory.gate.locks.load(Ordering::SeqCst), 0);
+        assert_eq!(factory.gate.releases.load(Ordering::SeqCst), 0);
+        assert_eq!(factory.gate.unlocks.load(Ordering::SeqCst), 0);
         let resources = fixture.services.browser_resources.as_ref().unwrap();
-        let user = resources.get_for_agent_session(fixture.services.authoritative_user_id.as_ref(), session.as_ref()).await.unwrap().unwrap();
-        let generation = user.runtime_generation();
+        let user = resources.get_for_agent_session(fixture.services.authoritative_user_id.as_ref(), session.as_ref())
+            .await.unwrap().unwrap();
+        api(&fixture._router, &format!("/api/agent-sessions/{}/browser/commands", session.as_ref()),
+            json!({"command":"create","url":"http://127.0.0.1/user-page"})).await;
         let response = fixture._router.clone().oneshot(Request::builder().method("DELETE")
             .uri(format!("/api/agent-sessions/{}/browser", session.as_ref()))
             .header("x-nomi-local-trust", "cleanup-fixture-local-trust").header("content-type", "application/json")
-            .body(Body::from(json!({"runtime_generation":generation}).to_string())).unwrap()).await.unwrap();
-        assert!(response.status().is_success());
+            .body(Body::from(json!({"runtime_generation":user.runtime_generation()}).to_string())).unwrap()).await.unwrap();
+        assert!(response.status().is_success(), "the running file turn must allow closing its unused browser");
         assert_eq!(factory.closes.load(Ordering::SeqCst), 1);
+        assert_eq!(factory.gate.locks.load(Ordering::SeqCst), 1,
+            "only the explicit user close attempts the native destruction gate");
         api(&fixture._router, &format!("/api/agent-sessions/{}/browser", session.as_ref()), json!({})).await;
         api(&fixture._router, &format!("/api/agent-sessions/{}/browser/commands", session.as_ref()),
-            json!({"command":"create","url":"http://127.0.0.1/browser-fixture"})).await;
+            json!({"command":"create","url":"http://127.0.0.1/reopened-user-page"})).await;
         assert_eq!(factory.creates.load(Ordering::SeqCst), 2);
-        // Strict retry rejects altered terminal outcome and altered delivery.
-        assert!(fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnCancelled { model_steps: 0 }).await.is_err());
-        let mut altered = fixture.message.clone(); altered.content.push_str(" changed");
-        let facts = store.chat_causality_facts(&session, &"cleanup-retry-turn".into()).await.unwrap();
-        let terminal_name = if poison_only_final_unlock { "turn_completed" } else { "turn_failed" };
-        let recorded: AgentEngineEvent = facts.event_payloads.values().filter_map(|payload| payload.get("event"))
-            .find(|event| event.get("event").and_then(Value::as_str) == Some(terminal_name))
-            .cloned().map(|value| serde_json::from_value(value).unwrap()).unwrap();
-        assert!(fixture.host.record_event(&altered, &recorded).await.is_err());
-        assert_eq!(store.current_cursor(&session).await.unwrap(), cursor);
-        // SDK teardown retries the already published failure and only finishes
-        // the closed native owner; it must not append another terminal.
-        fixture.runtime.kill_and_wait(None).await.unwrap();
-        assert_eq!(store.current_cursor(&session).await.unwrap(), cursor);
-        assert_eq!(store.read_turn_receipt(&session, &"cleanup-retry-turn".into()).await.unwrap().terminal_event.unwrap().event_id, original_event.event_id);
-        let (input, accepted) = store.start_turn(&session, "session_api".into(), "browser-recovery-successor".into(),
-            "browser-recovery-successor".into(), StrictJsonValue(json!({"content":"complete the successor", "admission":{
-                "route_identity":fixture.host.route,"resolved_snapshot_ref":fixture.host.snapshot_ref}}))).await.unwrap();
-        let generation = accepted.record.unwrap().seq;
-        let runtime = fixture.services.agent_runtime_sessions.get_or_create_runtime_for_turn(session.as_ref(), generation,
-            CancellationToken::new(), fixture.registry_options()).await.unwrap();
-        let message = SendMessageData { content: "complete the successor".into(), msg_id: "browser-recovery-successor-wire".into(),
-            source_message_id: Some(input.record.unwrap().event_id.as_ref().into()), files: vec![], inject_skills: vec![], origin: None };
-        let successor_host = HOSTS.get().unwrap().lock().unwrap().remove(session.as_ref()).unwrap().upgrade().unwrap();
-        assert!(fixture.host.resources.teardown_proven().unwrap());
-        assert!(!Arc::ptr_eq(&fixture.host.resources, &successor_host.resources),
-            "a still-referenced closed resource context cannot be reused by replacement");
-        fixture.host.cleanup_session().await.unwrap();
-        let admitted = successor_host.session_host.read_turn_receipt(&successor_host.options, &successor_host.binding,
-            &successor_host.snapshot_ref, &message).await.unwrap();
-        assert!(Arc::ptr_eq(&successor_host.resources, &successor_host.session_host.open_kernel_session(admitted.session()).unwrap()),
-            "late old teardown cannot evict the successor's exact resource context");
-        runtime.send_message(message).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(8), async {
-            loop {
-                let receipt = store.read_turn_receipt(&session, &"browser-recovery-successor".into()).await.unwrap();
-                if receipt.status == nomifun_agent_session::TurnReceiptStatus::Completed { break; }
-                assert_eq!(receipt.status, nomifun_agent_session::TurnReceiptStatus::Running, "unexpected successor terminal: {receipt:?}");
-                assert!(runtime.is_transport_healthy());
-                tokio::task::yield_now().await;
-            }
-        }).await.unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), if poison_only_final_unlock { 2 } else { 1 });
-        assert_eq!(store.get_live_session(&session).await.unwrap().agent_binding, binding_before);
-        assert_eq!(store.read_turn_receipt(&session, &"cleanup-retry-turn".into()).await.unwrap().terminal_event.unwrap().event_id, original_event.event_id);
-        runtime.kill_and_wait(None).await.unwrap();
-        model_task.await.unwrap();
-        fixture.services.shutdown_nomi_core_host().await.unwrap();
+        assert_eq!(fixture.state().await, "running");
+        model.resume.notify_one();
+        receive_input_handoff_terminal(events).await;
+        assert_eq!(fixture.state().await, "completed");
+        assert!(fixture.runtime.is_transport_healthy());
+        assert!(fixture.host.active.lock().await.is_none());
+        assert_eq!(factory.gate.locks.load(Ordering::SeqCst), 1);
+        assert_eq!(factory.gate.releases.load(Ordering::SeqCst), 0,
+            "a file turn's cleanup does not drain the browser");
+        assert_eq!(factory.gate.unlocks.load(Ordering::SeqCst), 0,
+            "a file turn's terminal does not unlock the browser");
+        fixture.finish().await;
+        model.task.abort();
+        let _ = model.task.await;
     }
 }
 

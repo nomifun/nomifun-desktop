@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
+import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Tooltip } from '@arco-design/web-react';
+import { Button, Message, Tooltip } from '@arco-design/web-react';
 import TaskModelSelect from '@/renderer/components/model/TaskModelSelect';
 import type { useCompanion } from './useNomi';
 
@@ -15,6 +15,7 @@ interface Props {
   companion: ReturnType<typeof useCompanion>;
   /** 总览的“基础配置”行已经渲染标题时，隐藏内联重复标签。 */
   showLabel?: boolean;
+  role?: 'companion' | 'robot';
 }
 
 /**
@@ -28,10 +29,21 @@ interface Props {
  * provider id；只有图像/视频/嵌入类模型的供应商也可见，其模型下拉为空并给出说明。失效
  * 引用一律由 TaskModelSelect 渲染成禁用的「(不可用)」项。
  */
-const CompanionModelControl: React.FC<Props> = ({ companion, showLabel = true }) => {
+const CompanionModelControl: React.FC<Props> = ({ companion, showLabel = true, role = 'companion' }) => {
   const { t } = useTranslation();
   const { profile, patchCompanion } = companion;
-  const configured = Boolean(profile?.model?.provider_id && profile?.model?.model);
+  const [saving, setSaving] = useState(false);
+  const model = role === 'robot' ? profile?.robot?.model ?? profile?.model : profile?.model;
+  const configured = Boolean(model?.provider_id && model?.model);
+  const inherited = role === 'robot' && !profile?.robot?.model;
+  const save = async (next: typeof model) => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      await patchCompanion(role === 'robot' ? { robot: { model: next ?? null } } : { model: next ?? null }, { optimistic: false });
+    } catch { Message.error(t('agentSettings.productBinding.saveFailed')); }
+    finally { setSaving(false); }
+  };
 
   if (!profile) return null;
 
@@ -54,11 +66,17 @@ const CompanionModelControl: React.FC<Props> = ({ companion, showLabel = true })
         <TaskModelSelect
           task='chat'
           scope='all-enabled'
-          value={profile.model}
+          value={model ?? null}
+          disabled={saving}
+          placeholder={inherited ? t('nomi.cohabit.robotInherited') : undefined}
           emptyHint={t('nomi.chat.modelNoTextModel')}
-          onChange={({ provider_id, model }) => void patchCompanion({ model: { provider_id, model } })}
+          onChange={({ provider_id, model }) => void save({ provider_id, model })}
         />
       </div>
+      {role === 'robot' && <span className='text-11px text-t-tertiary'>{t(inherited ? 'nomi.cohabit.robotInherited' : 'nomi.cohabit.robotIndependent')}</span>}
+      {role === 'robot' && !inherited && <Button size='mini' type='text' disabled={saving} onClick={() => void save(null)}>
+        {t('nomi.cohabit.inheritForFuture')}
+      </Button>}
     </div>
   );
 };

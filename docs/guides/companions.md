@@ -2,6 +2,13 @@
 
 Create multiple companions with separate names, figures, personas, models and knowledge bindings. Each companion owns its memories, learning settings, skills, XP and mood. Collection settings apply to the installation. Memories, companions and knowledge bases support ZIP export/import.
 
+Each companion has two concurrent execution roles: **Companion** and **Robot**,
+with separate Agent and default-model selections. Desktop, quick-window and IM
+inputs use the Companion role; physical devices use the Robot role. Persona and
+long-term memory still belong to the same companion. See the
+[companion architecture and acceptance status](../architecture/companion.zh.md)
+(Chinese) for integration progress and validation boundaries.
+
 > The entry point is the **Desktop Companion** page in the sidebar (the `/nomi`
 > route); the right-click menu of any desktop companion window ("Open chat")
 > deep-links there too.
@@ -14,8 +21,8 @@ Session tree. The selected companion then has two first-level modes:
 
 | Mode | Surface | Contents |
 | --- | --- | --- |
-| Cohabit | Dedicated companion conversation | One continuous history across desktop, IM and robot inputs, plus a concise status / memory / connection summary |
-| Manage | Overview | Name, figure, desktop visibility, level, persona, Agent and model / voice / vision slots |
+| Cohabit | Multiple conversations | Separate Companion and Robot sessions and histories, plus a concise status / shared-memory / connection summary |
+| Manage | Overview | Name, figure, desktop visibility, level, persona, separate Companion / Robot Agents and default models, and voice / vision slots |
 | Manage | Memory & knowledge | Only this companion's memories and knowledge bindings |
 | Manage | Channels & Robots | IM channels, physical robots and companion-scoped MCP connections |
 | Manage | Evolution / Skills | Learning cadence, collection inputs, retention, quiet hours and generated / configured skills |
@@ -25,7 +32,20 @@ The native desktop quick window is the lightweight path into the same product:
 it switches companions, shows the latest turns, accepts a quick reply, and
 deep-links to Cohabit or Manage. It never appears in the work Session sidebar.
 
-The Cohabit page keeps its docked companion-info sidebar and top controls. The sidebar offers dropdown editing for desktop visibility, mood, Agent and model without opening Manage. Desktop visibility controls the native figure window and is editable in the desktop app. Mood follows learning automatically unless you select a manual emotion, which stays until you return to Automatic and resumes the latest learned mood. Agent and model changes require an idle conversation, apply from the next message and preserve the same Session and history; a failed default save has a separate retry.
+The Cohabit toolbar provides a session selector, **New conversation** and role labels.
+Its companion-info sidebar offers desktop visibility and mood controls, plus
+separate **Companion** and **Robot** Agent/model settings. Desktop visibility
+controls the native figure window and is editable in the desktop app. Mood
+follows learning automatically unless you select a manual emotion, which stays
+until you return to Automatic and resumes the latest learned mood.
+
+When viewing a session, its role's settings explain that a change updates the
+current session and saves that role's future default. The other role's settings
+only change future defaults. Explicit Agent/model changes require an idle session
+with settled operations and preserve its identity and history. Other existing
+sessions keep their configurations. If the current session changes successfully
+but saving its default fails, the UI distinguishes the two results and offers a
+retry.
 
 The companion-info sidebar can hide when the conversation pane has insufficient room. Use the sidebar control to restore it after enlarging the pane.
 
@@ -47,7 +67,7 @@ inserts a companion row in the work Session tree.
 2. **The first companion automatically becomes the default companion** (its card
    carries a "default" badge). Channels still require an explicit binding and do not acquire the default companion automatically.
 3. In **Manage → Overview** you can rename it, swap its character, tune its
-   persona, **pick its Agent and chat model**, and toggle the desktop window. Quiet hours
+   persona, **pick separate default Agents and chat models for Companion and Robot**, and toggle the desktop window. Quiet hours
    and learning controls live under **Manage → Evolution**.
 4. **Deleting a companion** cascades: its **memories**, skills, companion
    conversations, runtime state (XP, …), and `('companion', companionId)` knowledge
@@ -60,31 +80,37 @@ inserts a companion row in the work Session tree.
    companion left there is no learning loop at all (the schedule belongs to the
    companion), so events simply accumulate until you create one.
 
-On disk each companion is a directory — `{data_dir}/companion/companions/{companion_id}/config.json`,
-**the directory is the source of truth** — which is also the unit the
-companion bundle exports and imports.
+Each companion's configuration is saved at
+`{data_dir}/companion/companions/{companion_id}/config.json`. Its bundle exports
+and imports that identity. Canonical Session facts own session affiliation and
+history; directory names do not establish ownership.
 
 ### Changing a companion's Agent
 
-Use **Manage → Overview → Model configuration → Agent settings** to select the
-companion's Agent. The Cohabit composer provides the same selector. The official
-Companion Agent is the default. Click **Edit Agent** below the selector to open
-the selected official or personal Agent in **Agent settings**. Official Agents
-have stable editable identities for your account; companions using the same
-Agent share its saved configuration while keeping their own persona and resources.
-You can also create a personal Agent and select it for a companion. After editing the currently
-selected Agent, return to the companion selector and click **Apply latest
-setup** to explicitly apply its new revision to the current Session. The selected Agent must keep
-the Companion capability and resource, and its model and other capabilities
-must be available in the current environment. Unavailable choices explain why
-they cannot be selected.
+Use **Manage → Overview → Model configuration** to select Agents separately for
+the Companion and Robot roles. The Cohabit sidebar offers the same two settings
+groups. Their defaults are the official **Companion** and **Robot**
+(`companion.robot`) Agents; personal Agents must meet the selected role's
+requirements. Companion handles desktop work. Robot handles physical interaction
+and directed desktop delegation to Companion. Both remain available together.
 
-Saving applies an explicit Agent transition to the companion's existing idle
-Session. Its next message uses the new Agent while preserving the same chat
-history, current chat model and companion ownership. Desktop, IM and robot entry
-points continue to use that Session; tools remain governed by the selected
-Agent's capabilities and connection permissions. If no Session exists yet, the
-selection becomes that companion's default for its first chat.
+These are defaults. The Agent workbench exposes the complete capability and
+Action catalog for every preset. You can add Robot tools to Companion, or
+computer, file and collaboration tools to Robot; normal authorization and
+resource configuration apply to the abilities you select.
+
+Click **Edit Agent** to open the selected official or personal Agent. Companions
+using the same Agent share its saved configuration while keeping their own
+persona and resources. After editing, select **Apply latest setup** to explicitly
+update the current idle session; saving an Agent alone does not replace existing
+session configurations. Unavailable choices explain their constraints. Tools
+also require the appropriate role, resources, device permissions and environment.
+
+The Robot default model inherits the Companion model until you choose an
+independent model. **Use Companion model for future conversations** clears the
+Robot override (`robot.model=null`); it does not change any existing Robot
+session's model. The roles can use different models, and Robot does not need to
+load all desktop tools to handle voice interaction.
 
 Finish or end the current work before changing an Agent while a reply is running,
 a Turn is paused for recovery, or effects remain unsettled. If the current
@@ -93,6 +119,28 @@ that partial outcome and offers **Apply latest setup** to retry; the current
 Session continues with its committed setup. Other failed saves do not make the
 displayed choice authoritative. Switching Agents never transfers
 the companion's memories, knowledge bases or robot permissions to another companion.
+
+### Multiple sessions and input routing
+
+**New conversation** creates an independent Companion-role session with the same
+persona and long-term memory. It has its own working context, without copying
+all history or clearing another session. The session selector also lets you
+inspect the companion's Robot sessions, identified by their role label.
+
+Viewing or creating a session does not redirect quick-window input. Select
+**Continue in desktop window** to make the viewed Companion session its future
+input target; the **Active in desktop window** marker identifies that target.
+Robot input resolves by companion and exact device, and IM input follows its
+channel binding. Navigating in this page or another window does not redirect
+those inputs.
+
+Deleting one session cleans up that Session while preserving the companion's
+shared working directory and long-term memory. Deleting the companion invokes
+cleanup for all its sessions, effects and directory; active work or unconfirmed
+operations can block deletion. Archiving and clearing context do not create a
+new session. Inspecting another session does not grant control over its tasks;
+questions and approvals still require explicit handling for the corresponding
+task.
 
 ### Multiple desktop companions on screen
 
@@ -105,7 +153,13 @@ Right-click any desktop companion to jump straight to its chat.
 
 ## Memory, collection and learning
 
-Every memory belongs to one companion. Its Memory page and conversation context use only its own memories. Learning settings, generated skills, XP and mood also remain separate. Memories saved during chat belong to the companion participating in it.
+Every memory belongs to one companion. Its two roles and multiple sessions share
+long-term memory and can retrieve that companion's experiences; other companions
+remain isolated. Updated shared context is read for subsequent model calls and
+does not alter requests already sent. Shared experiences help interpret the
+current request and do not automatically rerun old tasks. Learning settings,
+generated skills, XP and mood also remain separate. Memories saved during chat
+belong to the companion participating in it.
 
 - **Collection** records enabled sources of your working data for learning. This raw event spool is separate from persistent conversation history; recording user input for learning does not remove replies from chat history.
 - **Retention** defaults to a 30-day target and a hard 64 MiB capacity. Expired data is removed after enabled consumers process it, but the capacity limit can evict the oldest unprocessed data. Data Sources shows usage and date range; configurable limits are 7–365 days and 16–512 MiB.
@@ -183,6 +237,9 @@ Migration steps:
 
 ## Related
 
+- [Companion architecture and acceptance status](../architecture/companion.zh.md)
+  (Chinese) — dual roles, multiple sessions, shared context and directed delegation.
+- [Connect a XiaoZhi robot](./xiaozhi-robot.md) — Robot role, pairing and connection checks.
 - [Channels](./channels.md) — Channel Agent integration and per-platform
   companion binding.
 - [Data and Storage](../architecture/data-and-storage.md) — the `companion/`

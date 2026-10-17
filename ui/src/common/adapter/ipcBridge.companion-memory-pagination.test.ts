@@ -52,9 +52,10 @@ describe('companion memory pagination bridge', () => {
         });
         // `mergeMemories` maps its response through the memory parser; everything
         // else here ignores the payload.
-        const data = url.endsWith('/memories/merge')
+        const data = url.endsWith('/memories/merge') || init?.method === 'PUT'
           ? {
               memory_id: MEMORY_ID,
+              revision: 8,
               kind: 'knowledge',
               content: 'x',
               tags: [],
@@ -79,16 +80,19 @@ describe('companion memory pagination bridge', () => {
         memory_id: MEMORY_ID,
         content: 'x',
         companion_id: COMPANION_ID,
+        expected_revision: 7,
       });
-      await companion.deleteMemory.invoke({ memory_id: MEMORY_ID, companion_id: COMPANION_ID });
+      await companion.deleteMemory.invoke({ memory_id: MEMORY_ID, companion_id: COMPANION_ID, expected_revision: 7 });
       await companion.batchMemories.invoke({
         ids: [MEMORY_ID],
+        expected_revisions: { [MEMORY_ID]: 7 },
         action: 'archive',
         companion_id: COMPANION_ID,
       });
       await companion.memoryMergeSuggestions.invoke({ companion_id: COMPANION_ID });
       await companion.mergeMemories.invoke({
         group: [MEMORY_ID],
+        expected_revisions: { [MEMORY_ID]: 7 },
         merged_content: 'x',
         kind: 'knowledge',
         companion_id: COMPANION_ID,
@@ -96,13 +100,16 @@ describe('companion memory pagination bridge', () => {
 
       expect(calls.map((call) => call.method)).toEqual(['PUT', 'DELETE', 'POST', 'POST', 'POST']);
       // DELETE has no body, so the owner rides in the query string.
-      expect(calls[1]?.url.endsWith(`/api/companion/memories/${MEMORY_ID}?companion_id=${COMPANION_ID}`)).toBe(
+      expect(calls[1]?.url.endsWith(`/api/companion/memories/${MEMORY_ID}?companion_id=${COMPANION_ID}&expected_revision=7`)).toBe(
         true
       );
       for (const call of calls) {
         if (call.method === 'DELETE') continue;
         expect(call.body?.companion_id).toBe(COMPANION_ID);
       }
+      expect(calls[0].body?.expected_revision).toBe(7);
+      expect(calls[2].body?.expected_revisions).toEqual({ [MEMORY_ID]: 7 });
+      expect(calls[4].body?.expected_revisions).toEqual({ [MEMORY_ID]: 7 });
     } finally {
       globalThis.fetch = realFetch;
     }
@@ -122,6 +129,7 @@ describe('companion memory pagination bridge', () => {
   test('memory rows carry companion_id, and retired owner spellings are rejected', async () => {
     const rawMemory = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
       memory_id: MEMORY_ID,
+      revision: 7,
       kind: 'knowledge',
       content: '主人喜欢深烘焙',
       tags: [],

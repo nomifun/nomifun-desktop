@@ -1,6 +1,8 @@
 //! Authenticated user access to one managed browser per canonical Session.
 //! This surface never creates Agent grants or resource bindings. Agent tools
 //! independently validate frozen authority in the Browser Role owner.
+//! The workspace coordinator reports and enforces browser input admission;
+//! a canonical Turn can run without using the browser.
 
 use axum::{
     Json, Router,
@@ -139,24 +141,14 @@ impl BrowserResourceApiState {
 
     /// User ownership and an existing canonical Session authorize the side
     /// browser. Agent grants and bindings are deliberately not consulted here.
-    async fn require_user_session(&self, user: &CurrentUser, agent_session_id: &str) -> Result<nomifun_agent_session::SessionObservation, Response> {
+    async fn require_user_session(&self, user: &CurrentUser, agent_session_id: &str) -> Result<(), Response> {
         let principal = PrincipalRef { principal_kind: "user".to_owned(), principal_id: user.id.to_string() };
         self.sessions.get(&principal, &AgentSessionId::from(agent_session_id.to_owned()))
-            .await.map_err(IntoResponse::into_response)
+            .await.map(|_| ()).map_err(IntoResponse::into_response)
     }
 
-    async fn user_workspace(&self, user: &CurrentUser, agent_session_id: &str, allow_running: bool) -> Result<Arc<BrowserWorkspace>, Response> {
-        let observation = self.require_user_session(user, agent_session_id).await?;
-        if observation.head.status == "running" || observation.head.active_turn_id.is_some() {
-            // During canonical preparation, a native input gate may still be
-            // joining. Never create/reveal a user-ready child in that window.
-            let existing = self.require_service().map_err(IntoResponse::into_response)?
-                .get_for_agent_session(&user.id.to_string(), agent_session_id).await
-                .map_err(|error| BrowserApiError(error).into_response())?;
-            if !allow_running || match existing { Some(workspace) => !workspace.has_active_run().await, None => true } {
-                return Err(BrowserApiError(WorkspaceError::Admission(RunAdmissionError::UserInputLocked)).into_response());
-            }
-        }
+    async fn user_workspace(&self, user: &CurrentUser, agent_session_id: &str) -> Result<Arc<BrowserWorkspace>, Response> {
+        self.require_user_session(user, agent_session_id).await?;
         let key = managed_workspace_key(&user.id.to_string(), agent_session_id)
             .map_err(|error| BrowserApiError(error).into_response())?;
         let profile = BrowserProfileStore::new(self.data_dir.clone())
@@ -180,10 +172,7 @@ async fn close(
     let fence = operation_lock.write_owned().await;
     tokio::spawn(async move {
         let _fence = fence;
-        let observation = state.require_user_session(&user, &agent_session_id).await?;
-        if observation.head.status == "running" || observation.head.active_turn_id.is_some() {
-            return Err(BrowserApiError(WorkspaceError::Admission(RunAdmissionError::UserInputLocked)).into_response());
-        }
+        state.require_user_session(&user, &agent_session_id).await?;
         state.close_owner.close_user_workspace(&user.id.to_string(), &agent_session_id, request.runtime_generation)
             .await.map_err(|error| BrowserApiError(error).into_response())?;
         Ok(Json(ApiResponse::ok(())))
@@ -195,11 +184,11 @@ async fn snapshot(
     Extension(user): Extension<CurrentUser>,
     Path(agent_session_id): Path<String>,
 ) -> Result<Json<ApiResponse<BrowserUserSnapshot>>, Response> {
-    let observation = state.require_user_session(&user, &agent_session_id).await?;
+    state.require_user_session(&user, &agent_session_id).await?;
     let workspace = state.require_service().map_err(IntoResponse::into_response)?
         .get_for_agent_session(&user.id.to_string(), &agent_session_id).await
         .map_err(|error| BrowserApiError(error).into_response())?;
-    let mut snapshot = match workspace {
+    let snapshot = match workspace {
         Some(workspace) => workspace.snapshot().await.map_err(|error| BrowserApiError(error).into_response())?,
         None => BrowserUserSnapshot {
             interaction_capabilities: None,
@@ -208,9 +197,6 @@ async fn snapshot(
             runtime: None,
         },
     };
-    if observation.head.status == "running" || observation.head.active_turn_id.is_some() {
-        snapshot.run.input_state = BrowserInputState::AgentRunning;
-    }
     Ok(Json(ApiResponse::ok(snapshot)))
 }
 
@@ -219,7 +205,7 @@ async fn ensure(
     Extension(user): Extension<CurrentUser>,
     Path(agent_session_id): Path<String>,
 ) -> Result<Json<ApiResponse<BrowserUserSnapshot>>, Response> {
-    let workspace = state.user_workspace(&user, &agent_session_id, true).await?;
+    let workspace = state.user_workspace(&user, &agent_session_id).await?;
     Ok(Json(ApiResponse::ok(workspace.snapshot().await.map_err(|error| BrowserApiError(error).into_response())?)))
 }
 
@@ -245,7 +231,7 @@ async fn command(
     Path(agent_session_id): Path<String>,
     Json(command): Json<BrowserTabCommand>,
 ) -> Result<Json<ApiResponse<BrowserUserSnapshot>>, Response> {
-    let workspace = state.user_workspace(&user, &agent_session_id, false).await?;
+    let workspace = state.user_workspace(&user, &agent_session_id).await?;
     workspace.user_command(command).await.map_err(|error| BrowserApiError(error).into_response())?;
     Ok(Json(ApiResponse::ok(workspace.snapshot().await.map_err(|error| BrowserApiError(error).into_response())?)))
 }

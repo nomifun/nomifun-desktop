@@ -1,6 +1,6 @@
 use nomifun_agent_contracts::{
     AgentBindingValue, AgentHandoffBindingRefV1, AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata, ArtifactId,
-    CorrelationId, DeleteAgentSessionCommand, EventId, EventProducerId, IdempotencyKey,
+    CompanionSessionOrigin, CorrelationId, DeleteAgentSessionCommand, EventId, EventProducerId, IdempotencyKey,
     OperationId, PrincipalRef, ReasoningEffort, SessionPurpose, SemanticSessionEventDraft, SessionEventAppend, SessionEventCursor,
     SessionEventKind, SessionEventPayloadRef, SessionPayloadBody, StrictJsonValue,
 };
@@ -99,6 +99,7 @@ impl CanonicalAgentSessionOwner {
             None,
             SessionPurpose::Conversation,
             None,
+            None,
             idempotency_key,
             created_at,
         )
@@ -124,6 +125,7 @@ impl CanonicalAgentSessionOwner {
             reasoning_effort,
             SessionPurpose::Conversation,
             None,
+            None,
             idempotency_key,
             created_at,
         )
@@ -144,7 +146,24 @@ impl CanonicalAgentSessionOwner {
         created_at: i64,
     ) -> Result<OpenAgentSession, AppError> {
         self.open_with_options(owner, binding, title, active_capability_ids, None,
-            reasoning_effort, SessionPurpose::Conversation, Some(app_project_id),
+            reasoning_effort, SessionPurpose::Conversation, Some(app_project_id), None,
+            idempotency_key, created_at).await
+    }
+
+    /// Companion owners establish the exact product role after validating the
+    /// real companion and, for robot ingress, its authenticated device identity.
+    pub async fn open_with_companion_scope(
+        &self,
+        owner: PrincipalRef,
+        binding: AgentBindingValue,
+        title: Option<String>,
+        active_capability_ids: Vec<String>,
+        scope: CompanionSessionOrigin,
+        idempotency_key: &str,
+        created_at: i64,
+    ) -> Result<OpenAgentSession, AppError> {
+        self.open_with_options(owner, binding, title, active_capability_ids, None,
+            None, SessionPurpose::Conversation, None, Some(scope),
             idempotency_key, created_at).await
     }
 
@@ -158,6 +177,7 @@ impl CanonicalAgentSessionOwner {
         reasoning_effort: Option<ReasoningEffort>,
         purpose: SessionPurpose,
         app_project_id: Option<String>,
+        companion: Option<CompanionSessionOrigin>,
         idempotency_key: &str,
         created_at: i64,
     ) -> Result<OpenAgentSession, AppError> {
@@ -173,6 +193,7 @@ impl CanonicalAgentSessionOwner {
             metadata: AgentSessionMetadata {
                 purpose,
                 app_project_id,
+                companion,
                 title,
                 archived: false,
                 pinned: false,
@@ -547,6 +568,7 @@ impl CanonicalAgentSessionOwner {
             child_metadata: AgentSessionMetadata {
                 purpose: parent.metadata.purpose,
                 app_project_id: parent.metadata.app_project_id.clone(),
+                companion: parent.metadata.companion.clone(),
                 title,
                 archived: false,
                 pinned: false,
@@ -783,17 +805,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn companion_open_and_fork_preserve_the_exact_role_and_device() {
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let service = CanonicalAgentSessionOwner::from_pool(database.pool().clone()).await.unwrap();
+        let scope = CompanionSessionOrigin {
+            companion_id: Uuid::now_v7().to_string(),
+            role: nomifun_agent_contracts::CompanionSessionRole::Robot,
+            robot_id: Some("robot-board-1".into()),
+        };
+        let opened = service.open_with_companion_scope(owner(), binding(), Some("Robot".into()),
+            Vec::new(), scope.clone(), "robot-session", 1).await.unwrap();
+        assert_eq!(opened.session.metadata.companion.as_ref(), Some(&scope));
+        let replay = service.open_with_companion_scope(owner(), binding(), Some("Robot".into()),
+            Vec::new(), scope.clone(), "robot-session", 2).await.unwrap();
+        assert!(replay.duplicate);
+        assert_eq!(replay.session.agent_session_id, opened.session.agent_session_id);
+        let mut another_device = scope.clone();
+        another_device.robot_id = Some("robot-board-2".into());
+        assert!(service.open_with_companion_scope(owner(), binding(), Some("Robot".into()),
+            Vec::new(), another_device, "robot-session", 3).await.is_err());
+        let child = service.fork(&owner(), &opened.session.agent_session_id, opened.cursor.seq,
+            Some("Robot fork".into()), "robot-fork", 4).await.unwrap();
+        assert_eq!(child.child_session.metadata.companion.as_ref(), Some(&scope));
+        let ordinary = service.open(owner(), binding(), None, Vec::new(), "ordinary-without-scope", 5).await.unwrap();
+        assert!(ordinary.session.metadata.companion.is_none());
+    }
+
+    #[tokio::test]
     async fn historical_authoring_is_readable_but_cannot_open_execute_or_fork() {
         let database = nomifun_db::init_database_memory().await.unwrap();
         let service = CanonicalAgentSessionOwner::from_pool(database.pool().clone()).await.unwrap();
         let denied = service.open_with_options(owner(), binding(), None, Vec::new(), None, None,
-            SessionPurpose::PluginAuthoring, None, "retired-new", 1).await.unwrap_err();
+            SessionPurpose::PluginAuthoring, None, None, "retired-new", 1).await.unwrap_err();
         assert!(denied.to_string().contains("PLUGIN_AUTHORING_RETIRED"));
         // Fixture models an existing canonical record, never a migration reader.
         let session_id = AgentSessionId::from(Uuid::now_v7().to_string());
         let session = AgentSessionLiveRecord {
             agent_session_id: session_id.clone(), owner_ref: owner(),
-            metadata: AgentSessionMetadata { purpose: SessionPurpose::PluginAuthoring, app_project_id: None, title: Some("Historical app".into()),
+            metadata: AgentSessionMetadata { purpose: SessionPurpose::PluginAuthoring, app_project_id: None, companion: None, title: Some("Historical app".into()),
                 archived: false, pinned: false, reasoning_effort: None },
             agent_binding: binding(), remote_binding_provenance: None, parent_session_id: None, fork_base_payload_id: None, next_seq: 1,
         };

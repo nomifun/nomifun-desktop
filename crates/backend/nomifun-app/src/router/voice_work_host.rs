@@ -21,6 +21,15 @@ pub(crate) struct AppVoiceWorkHost {
     workers:Arc<Mutex<BTreeSet<(String,String)>>>,stop:CancellationToken,
 }
 impl AppVoiceWorkHost {
+    pub(crate) async fn current_decision_presentations(&self,owner:&str,session:&str,version:u64)
+        ->Result<Vec<VoiceApprovalPresentation>,VoiceError> {
+        if self.sessions.is_companion_robot_session(owner,&session.into()).await.map_err(work_error)? {
+            let ids=self.sessions.directed_decision_execution_ids(owner,&session.into()).await.map_err(work_error)?;
+            self.approvals_for_executions(owner,session,version,ids).await
+        }else{self.approvals(owner,session,version).await}
+    }
+    pub(crate) async fn answer_decision_presentation(&self,owner:&str,key:&str,answer:VoiceApprovalAnswer)
+        ->Result<VoiceWorkReceipt,VoiceError> { self.apply_approval(owner,key,answer).await }
     pub(crate) fn new(sessions:Arc<NomiCoreSessionOwner>,journal:Arc<SharedVoiceJournal>,control_plane:Arc<AgentControlPlane>,execution:Option<Arc<nomifun_agent_execution::AgentExecutionEngine>>)->Self {
         Self {sessions,journal,control_plane,execution,workers:Default::default(),stop:CancellationToken::new()}
     }
@@ -529,8 +538,11 @@ impl AppVoiceWorkHost {
         }Ok(ids)
     }
     async fn approvals(&self,owner:&str,session:&str,version:u64)->Result<Vec<VoiceApprovalPresentation>,VoiceError> {
+        self.approvals_for_executions(owner,session,version,self.execution_ids(owner,session).await?).await
+    }
+    async fn approvals_for_executions(&self,owner:&str,session:&str,version:u64,executions:Vec<String>)->Result<Vec<VoiceApprovalPresentation>,VoiceError> {
         let Some(engine)=&self.execution else{return Ok(vec![]);};let mut result=Vec::new();
-        for execution in self.execution_ids(owner,session).await? {
+        for execution in executions {
             let detail=engine.get(owner,&execution).await.map_err(work_error)?;
             if detail.execution.decision_policy!=nomifun_common::DecisionPolicy::AskUser{continue;}
             let waiting=detail.attempts.iter().filter(|attempt|attempt.status==nomifun_common::ExecutionAttemptStatus::WaitingInput).collect::<Vec<_>>();
@@ -543,17 +555,28 @@ impl AppVoiceWorkHost {
                 let (Some(question),Some(source_session),Some(step))=(attempt.question.as_ref(),attempt.conversation_id.as_ref(),detail.steps.iter().find(|step|step.step_id==attempt.step_id)) else{continue;};
                 let Some(request)=events.iter().rev().find(|event|event.attempt_id.as_deref()==Some(attempt.attempt_id.as_str())&&event.step_id.as_deref()==Some(step.step_id.as_str())
                     &&event.payload.get("question").and_then(Value::as_str)==Some(question.as_str())) else{continue;};
-                let Some(stop_key)=request.payload.get("stop_turn_operation_id").and_then(Value::as_str) else{continue;};
                 let source=self.owned_facts(owner,&source_session.clone().into()).await?;
-                let encoded=attempt.runtime_state.as_ref().map(Value::to_string);
-                let effects=nomifun_db::AttemptConversationEffects::decode(encoded.as_deref()).map_err(work_error)?;
-                let pending=effects.pending_conversation_effects.iter().find_map(|effect|match effect {
-                    nomifun_db::PendingConversationEffect::StopTurn {operation_id,target_operation_id} if operation_id==stop_key=>Some(target_operation_id.clone()),_=>None,
-                });
-                let cancelled=source.events.iter().find(|event|event.kind.0=="turn/cancelled"&&event.producer_id.as_ref()=="session_api"
-                    &&event.idempotency_key.as_ref()==format!("user:{owner}:{source_session}:{stop_key}:cancel"))
-                    .and_then(|event|source.event_payloads.get(event.event_id.as_ref())).and_then(|value|value.get("target_operation_id")).and_then(Value::as_str).map(str::to_owned);
-                let Some(operation)=pending.or(cancelled) else{continue;};
+                let operation=if let Some(stop_key)=request.payload.get("stop_turn_operation_id").and_then(Value::as_str) {
+                    let encoded=attempt.runtime_state.as_ref().map(Value::to_string);
+                    let effects=nomifun_db::AttemptConversationEffects::decode(encoded.as_deref()).map_err(work_error)?;
+                    let pending=effects.pending_conversation_effects.iter().find_map(|effect|match effect {
+                        nomifun_db::PendingConversationEffect::StopTurn {operation_id,target_operation_id} if operation_id==stop_key=>Some(target_operation_id.clone()),_=>None,
+                    });
+                    let cancelled=source.events.iter().find(|event|event.kind.0=="turn/cancelled"&&event.producer_id.as_ref()=="session_api"
+                        &&event.idempotency_key.as_ref()==format!("user:{owner}:{source_session}:{stop_key}:cancel"))
+                        .and_then(|event|source.event_payloads.get(event.event_id.as_ref())).and_then(|value|value.get("target_operation_id")).and_then(Value::as_str).map(str::to_owned);
+                    let Some(operation)=pending.or(cancelled) else{continue;}; operation
+                } else if let (Some(operation),Some(terminal),Some(typed))=(request.payload.get("canonical_operation_id").and_then(Value::as_str),
+                    request.payload.get("terminal_event_id").and_then(Value::as_str),request.payload.get("user_input_request")) {
+                    let expected:nomifun_agent_contracts::AgentUserInputRequest=serde_json::from_value(typed.clone()).map_err(work_error)?;
+                    expected.validate().map_err(work_error)?;
+                    let exact=self.sessions.canonical().store().turn_output_facts(&source_session.clone().into(),&operation.into()).await.map_err(work_error)?;
+                    let receipt=self.sessions.canonical().store().read_turn_receipt(&source_session.clone().into(),&operation.into()).await.map_err(work_error)?;
+                    if receipt.terminal_event.as_ref().map(|event|event.event_id.as_ref())!=Some(terminal) {continue;}
+                    let delivery=nomifun_agent_execution::canonical_turn_delivery(&exact,&receipt,true).map_err(work_error)?;
+                    if delivery.user_input_request.as_ref()!=Some(&expected)||expected.question!=*question {continue;}
+                    operation.to_owned()
+                } else {continue;};
                 let Some(start)=source.events.iter().find(|event|event.kind.0=="turn/started"&&event.correlation_id.as_ref()==operation) else{continue;};
                 if context_floor(&source)>start.seq {continue;}
                 let Some(admission)=source.event_payloads.get(start.event_id.as_ref()).and_then(|value|value.get("admission")) else{continue;};

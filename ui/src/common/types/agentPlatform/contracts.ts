@@ -435,6 +435,7 @@ export interface SelectProductAgentBindingRequest {
   model?: { provider_id: string; model: string };
   resource_selections?: AgentResourceSelection[];
   conversation_id?: string;
+  update_default?: boolean;
 }
 
 export type ProductAgentSelection =

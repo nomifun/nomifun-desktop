@@ -82,6 +82,7 @@ use super::idmm::IdmmRouterState;
 /// Reduces parameter bloat on router constructors and makes it easy for
 /// tests to override individual modules.
 pub struct ModuleStates {
+    _robot_voice_work: Arc<super::voice_work_host::AppVoiceWorkHost>,
     pub(crate) mobile_voice:Option<super::mobile_voice_host::VoiceRouterState>,
     pub system: SystemRouterState,
     pub ssh_host: nomifun_ssh::SshHostRouterState,
@@ -273,6 +274,8 @@ pub(crate) async fn try_build_module_states(
     let session_management_state = Arc::new(nomi_core_agent_api.clone());
     session_management_owner.install(&session_management_state, &agent_execution)
         .map_err(|error| anyhow::anyhow!("Session management owner installation failed: {error}"))?;
+    nomi_core_agent_api.wave5_owner.install_session_owner(&conversation_owner)
+        .map_err(|error| anyhow::anyhow!("Wave 5 session owner installation failed: {error}"))?;
     nomi_core_agent_api
         .wave5_owner
         .install_runtime_owners(
@@ -313,18 +316,23 @@ pub(crate) async fn try_build_module_states(
         services,
         channel_components.manager.clone(),
         conversation_owner.clone(),
-    )
+    )?
         .with_knowledge_service(services.knowledge_service.clone());
     let voice_journal=Arc::new(nomifun_voice::SharedVoiceJournal::new(services.data_dir.clone()));
+    let voice_work=Arc::new(super::voice_work_host::AppVoiceWorkHost::new(
+        conversation_owner.clone(),voice_journal.clone(),nomi_core_agent_api.control_plane.clone(),Some(agent_execution.clone())
+    ).with_shutdown_token(services.background_shutdown.child_token()));
+    conversation_owner.install_directed_voice_work(&voice_work)
+        .map_err(anyhow::Error::msg)?;
     let mobile_voice=match super::mobile_voice_registry::AppVoiceRegistry::new(services.model_invoke_service.clone(),services.database.pool().clone(),services.authoritative_user_id.clone()){
     Ok(voice_registry)=>{
     let voice_authority=Arc::new(super::mobile_voice_authority::AppVoiceAuthority::new(conversation_owner.clone(),voice_registry.clone(),voice_journal.clone(),services.database.pool().clone()));
     let voice_shutdown=services.background_shutdown.child_token();
-    let voice_work=Arc::new(super::voice_work_host::AppVoiceWorkHost::new(conversation_owner.clone(),voice_journal.clone(),nomi_core_agent_api.control_plane.clone(),Some(agent_execution.clone())).with_shutdown_token(voice_shutdown.clone()));
-    let voice_service=Arc::new(nomifun_voice::VoiceSessionService::with_journal(voice_registry.registry.clone(),voice_work,voice_authority.clone(),voice_journal,voice_shutdown.clone()));
+    let voice_service=Arc::new(nomifun_voice::VoiceSessionService::with_journal(voice_registry.registry.clone(),voice_work.clone(),voice_authority.clone(),voice_journal,voice_shutdown.clone()));
     Some(super::mobile_voice_host::VoiceRouterState{service:voice_service,registry:voice_registry,authority:voice_authority,allowed_origins:Arc::from([]),token_validator:services.instance_token_validator.clone(),jwt:services.jwt_service.clone(),shutdown:voice_shutdown,cleanup_registered:Arc::new(std::sync::atomic::AtomicBool::new(false))})
     },Err(error)=>{tracing::warn!(error=%error,"optional Mobile voice registration unavailable");None}};
     let states = ModuleStates {
+        _robot_voice_work: voice_work,
         mobile_voice,
         system: build_system_state_with_agent_cleanup(services, Some(nomi_core_agent_api.control_plane.clone())),
         ssh_host: build_ssh_host_state(services),
@@ -603,6 +611,7 @@ async fn build_nomi_core_agent_api_state(
             kernel: Arc::clone(&kernel), environment: environment.clone(), wave2: Arc::clone(&builtin_plan.wave2_owner),
             context_admission: Arc::clone(&platform_builtin_context_admission),
             knowledge: Arc::clone(&services.knowledge_service),
+            companion: Arc::downgrade(&services.companion_service),
             #[cfg(feature = "browser-use")]
             browser: browser_owner.clone(),
             hosted_effects: super::hosted_effect_receipts::HostedEffectReceipts::new(
@@ -1650,7 +1659,8 @@ pub fn build_companion_state(
     services: &AppServices,
     channel_manager: Arc<nomifun_channel::manager::ChannelManager>,
     conversation_owner: Arc<NomiCoreSessionOwner>,
-) -> CompanionRouterState {
+) -> Result<CompanionRouterState, nomifun_common::AppError> {
+    conversation_owner.install_companion_service(&services.companion_service)?;
     // Deleting a companion must also drop its ('companion', id) knowledge-binding row so
     // bindings don't orphan (T3.3). Switching a companion's chat model (single source
     // of truth) clears bound IM sessions. Physical endpoints share the same
@@ -1680,7 +1690,7 @@ pub fn build_companion_state(
         transcript,
     );
     services.companion_service.attach_companion(companion_ports);
-    CompanionRouterState::new(services.companion_service.clone())
+    Ok(CompanionRouterState::new(services.companion_service.clone()))
 }
 
 /// Companion-delete cascade hook: drops the deleted companion's knowledge binding via

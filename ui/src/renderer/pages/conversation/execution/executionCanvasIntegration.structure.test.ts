@@ -74,7 +74,7 @@ describe('conversation execution canvas integration', () => {
     expect(projectedSource.includes('participant.retired_in_revision == null')).toBe(true);
     expect(projectedSource.includes('projectReplacementStep(replacement)')).toBe(true);
     expect(projectedSource.includes('projectionKey: payload.projectionKey ?? payload.step.step_id')).toBe(true);
-    expect(projectedSource.includes('canSteerExecutionAttempt(attempt?.status, detail?.execution.status)')).toBe(true);
+    expect(projectedSource.includes('canSteerExecutionAttempt(attempt?.status, detail.execution.status)')).toBe(true);
     expect(projectedSource.includes('ipcBridge.agentExecution.steer.invoke')).toBe(true);
     expect(projectedSource.includes('expected_execution_version: detail.execution.version')).toBe(true);
   });
@@ -104,8 +104,8 @@ describe('conversation execution canvas integration', () => {
     const readOnlySource = readSource(new URL('./ReadOnlyConversationView.tsx', import.meta.url));
 
     const executionProviderCount =
-      (chatSource.match(/<ExecutionProvider conversation=\{conversation\}>/g)?.length ?? 0) +
-      (cohabitSource.match(/<ExecutionProvider conversation=\{conversation\}>/g)?.length ?? 0);
+      (chatSource.match(/<ExecutionProvider\b[^>]*\bconversation=\{conversation\}/g)?.length ?? 0) +
+      (cohabitSource.match(/<ExecutionProvider\b[^>]*\bconversation=\{conversation\}/g)?.length ?? 0);
     expect(executionProviderCount).toBeGreaterThanOrEqual(3);
     expect(companionSource.includes('<ExecutionConversationLayout')).toBe(false);
     expect(hookSource.includes("conversation?.type === 'nomi'")).toBe(false);

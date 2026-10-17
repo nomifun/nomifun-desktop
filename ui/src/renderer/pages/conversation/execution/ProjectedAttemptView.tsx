@@ -23,6 +23,7 @@ import StepConfigBar from './StepConfigBar';
 import styles from './projectedAttemptView.module.css';
 import { refreshOnVersionConflict } from './refreshOnVersionConflict';
 import { canSteerExecutionAttempt } from './executionStatusMeta';
+import { useExecutionLive } from './useExecutionLive';
 
 type ProjectedAttemptViewProps = { payload: OpenStepPayload };
 type StepConfigDraft = Pick<TConfigureExecutionStep, 'model' | 'preset_prompt'>;
@@ -42,7 +43,12 @@ function participantSupportsProfile(participant: TExecutionParticipant, profile:
 
 const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) => {
   const { t } = useTranslation();
-  const { returnToMain, detail, refetch, projectStep } = useExecution();
+  const { returnToMain, executionId: latestExecutionId, detail: latestDetail, refetch: refreshLatest, projectStep } = useExecution();
+  const matchesLatest = latestExecutionId === payload.executionId && latestDetail?.execution.execution_id === payload.executionId;
+  const selectedExecution = useExecutionLive(matchesLatest ? undefined : payload.executionId);
+  const detail = matchesLatest ? latestDetail
+    : selectedExecution.detail?.execution.execution_id === payload.executionId ? selectedExecution.detail : null;
+  const refetch = matchesLatest ? refreshLatest : selectedExecution.refetch;
   const [message, messageContext] = useArcoMessage();
   const [conversation, setConversation] = useState<TChatConversation | null>(null);
   const [loading, setLoading] = useState(false);
@@ -60,7 +66,7 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
   );
   const attempts = detail?.attempts ?? (payload.attempt ? [payload.attempt] : []);
   const attempt = latestAttemptForStep(attempts, step.step_id) ?? payload.attempt;
-  const conversationId = attempt?.conversation_id;
+  const conversationId = detail ? attempt?.conversation_id : undefined;
   const participants = detail?.participants ?? payload.participants;
   const assignableParticipants = participants.filter(
     (participant) => participant.retired_in_revision == null && participantSupportsProfile(participant, step.profile),
@@ -73,12 +79,12 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
     setDecisionAnswer('');
     setSteerText('');
   }, [attempt?.attempt_id]);
-  const canConfigure = step.kind === 'agent' && step.status === 'pending';
+  const canConfigure = detail !== null && step.kind === 'agent' && step.status === 'pending';
   const attemptActive = attempt ? ['queued', 'running', 'waiting_input'].includes(attempt.status) : false;
-  const canSteer = canSteerExecutionAttempt(attempt?.status, detail?.execution.status);
+  const canSteer = detail !== null && canSteerExecutionAttempt(attempt?.status, detail.execution.status);
   const executionCancelled = detail?.execution.status === 'cancelled';
   const canRetry =
-    !executionCancelled &&
+    detail !== null && !executionCancelled &&
     (['completed', 'failed', 'skipped'].includes(step.status) || (step.status === 'pending' && step.dispatch_after != null));
   const canAdopt =
     conversationId != null && Boolean(detail?.execution) && !executionCancelled && step.status !== 'cancelled' && !attemptActive;
@@ -220,7 +226,7 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
           expected_step_version: step.version,
         },
       });
-      await payload.refetch();
+      await refetch();
       message.success({
         content: t('agentExecution.retry.ok', { defaultValue: '任务已重试' }),
         duration: TOAST_OK_MS,
@@ -253,7 +259,7 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
           expected_step_version: step.version,
         },
       });
-      await payload.refetch();
+      await refetch();
       message.success({
         content: t('agentExecution.adopt.ok', {
           defaultValue: '已采用当前结果',
@@ -501,7 +507,9 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
 
       <div className={styles.body}>
         <RouteErrorBoundary>
-          {canConfigure ? (
+          {!detail ? (
+            <Spin loading className='flex flex-1 items-center justify-center' />
+          ) : canConfigure ? (
             <StepConfigBar
               step={step}
               participant={currentParticipant}
@@ -517,7 +525,7 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
                 })}
               </div>
             </div>
-          ) : loading ? (
+          ) : loading || (conversation !== null && conversation.id !== conversationId) ? (
             <Spin loading className='flex flex-1 items-center justify-center' />
           ) : conversation ? (
             <ReadOnlyConversationView conversation={conversation} agent_name={step.title} />

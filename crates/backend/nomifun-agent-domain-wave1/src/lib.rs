@@ -357,6 +357,7 @@ impl Wave1StateHandle {
 pub struct Wave1HostContext {
     pub principal: PrincipalRef,
     pub agent_session_id: AgentSessionId,
+    pub turn_id: OperationId,
     pub operation_id: OperationId,
     pub idempotency_key: IdempotencyKey,
     pub correlation_id: CorrelationId,
@@ -411,18 +412,8 @@ pub struct Wave1MemoryMutationRequest {
     pub items: Option<Vec<Value>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Default)]
-pub struct Wave1CompanionMemoryRecallRequest {
-    pub per_kind: Option<usize>,
-    pub char_budget: Option<usize>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Wave1CompanionMemoryWriteRequest {
-    pub kind: String,
-    pub content: String,
-    pub tags: Vec<String>,
-}
+pub type Wave1CompanionMemoryRecallRequest = nomifun_agent_contracts::CompanionMemoryRecallInput;
+pub type Wave1CompanionMemoryWriteRequest = nomifun_agent_contracts::CompanionMemoryWriteInput;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Wave1CapabilityOperation {
@@ -996,6 +987,7 @@ impl CapabilityHandler for Wave1CapabilityHandler {
                 context: Wave1HostContext {
                     principal: context.principal,
                     agent_session_id: context.agent_session_id,
+                    turn_id: context.turn_id,
                     operation_id: context.operation_id,
                     idempotency_key: context.idempotency_key,
                     correlation_id: context.correlation_id,
@@ -1110,40 +1102,12 @@ pub fn operation_from_action(
             })
         }
         COMPANION_MEMORY_RECALL_ACTION_ID => {
-            Wave1CapabilityOperation::CompanionMemoryRecall(
-                Wave1CompanionMemoryRecallRequest {
-                    per_kind: input
-                        .0
-                        .get("per_kind")
-                        .and_then(Value::as_u64)
-                        .map(|value| value as usize),
-                    char_budget: input
-                        .0
-                        .get("char_budget")
-                        .and_then(Value::as_u64)
-                        .map(|value| value as usize),
-                },
-            )
+            Wave1CapabilityOperation::CompanionMemoryRecall(serde_json::from_value(input.0)
+                .map_err(|error| KernelError::CapabilityExecution { reason: error.to_string() })?)
         }
         COMPANION_MEMORY_WRITE_ACTION_ID => {
-            let tags = input
-                .0
-                .get("tags")
-                .and_then(Value::as_array)
-                .map(|tags| {
-                    tags.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default();
-            Wave1CapabilityOperation::CompanionMemoryWrite(
-                Wave1CompanionMemoryWriteRequest {
-                    kind: required("kind")?,
-                    content: required("content")?,
-                    tags,
-                },
-            )
+            Wave1CapabilityOperation::CompanionMemoryWrite(serde_json::from_value(input.0)
+                .map_err(|error| KernelError::CapabilityExecution { reason: error.to_string() })?)
         }
         _ => {
             return Err(KernelError::CapabilityExecution {
@@ -1549,22 +1513,8 @@ pub fn action_input_schema(action_id: &str) -> Result<Value, String> {
             },
             "anyOf": [{"required": ["content"]}, {"required": ["items"]}]
         }),
-        COMPANION_MEMORY_RECALL_ACTION_ID => json!({
-            "type": "object", "additionalProperties": false,
-            "properties": {
-                "per_kind": {"type": "integer", "minimum": 1, "maximum": 20},
-                "char_budget": {"type": "integer", "minimum": 1, "maximum": 65536}
-            }
-        }),
-        COMPANION_MEMORY_WRITE_ACTION_ID => json!({
-            "type": "object", "additionalProperties": false,
-            "properties": {
-                "kind": {"type": "string", "enum": ["profile", "preference", "knowledge", "episode", "task", "affective"]},
-                "content": {"type": "string", "minLength": 1, "maxLength": 16384},
-                "tags": {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 64}}
-            },
-            "required": ["kind", "content"]
-        }),
+        COMPANION_MEMORY_RECALL_ACTION_ID => nomifun_agent_contracts::companion_memory_recall_input_schema(),
+        COMPANION_MEMORY_WRITE_ACTION_ID => nomifun_agent_contracts::companion_memory_write_input_schema(),
         _ => return Err(format!("unknown Wave 1 Action {action_id}")),
     };
     Ok(schema)
@@ -1626,6 +1576,18 @@ fn validate_action_input(action_id: &str, input: &Value) -> Result<(), KernelErr
             reason: format!("{action_id} input must be a JSON object"),
         });
     };
+    // The installed Wave 1 manifest, its decoder and the alternate host adapter
+    // share the formal input contract rather than keeping reduced field mirrors.
+    if action_id == COMPANION_MEMORY_RECALL_ACTION_ID {
+        let request: Wave1CompanionMemoryRecallRequest = serde_json::from_value(input.clone())
+            .map_err(|error| KernelError::CapabilityExecution { reason: error.to_string() })?;
+        return request.validate().map_err(|reason| KernelError::CapabilityExecution { reason });
+    }
+    if action_id == COMPANION_MEMORY_WRITE_ACTION_ID {
+        let request: Wave1CompanionMemoryWriteRequest = serde_json::from_value(input.clone())
+            .map_err(|error| KernelError::CapabilityExecution { reason: error.to_string() })?;
+        return request.validate().map_err(|reason| KernelError::CapabilityExecution { reason });
+    }
     let allowed = match action_id {
         WEB_RESEARCH_SEARCH_ACTION_ID | KNOWLEDGE_SEARCH_ACTION_ID => &["query", "limit"][..],
         WEB_RESEARCH_FETCH_ACTION_ID => &["url"][..],
@@ -1634,8 +1596,6 @@ fn validate_action_input(action_id: &str, input: &Value) -> Result<(), KernelErr
         KNOWLEDGE_AUTOGEN_ACTION_ID => &["base", "overwrite_readme"][..],
         PROJECT_MEMORY_READ_ACTION_ID => &["limit"][..],
         PROJECT_MEMORY_WRITE_ACTION_ID => &["content", "title", "items"][..],
-        COMPANION_MEMORY_RECALL_ACTION_ID => &["per_kind", "char_budget"][..],
-        COMPANION_MEMORY_WRITE_ACTION_ID => &["kind", "content", "tags"][..],
         _ => {
             return Err(KernelError::CapabilityExecution {
                 reason: format!("unknown Wave 1 Action {action_id}"),
@@ -1701,41 +1661,6 @@ fn validate_action_input(action_id: &str, input: &Value) -> Result<(), KernelErr
                 return Err(KernelError::CapabilityExecution {
                     reason: format!("{action_id} requires non-empty `content` or `items`"),
                 });
-            }
-        }
-        COMPANION_MEMORY_RECALL_ACTION_ID => {
-            validate_optional_integer(object, action_id, "per_kind", 1, 20)?;
-            validate_optional_integer(object, action_id, "char_budget", 1, 65_536)?;
-        }
-        COMPANION_MEMORY_WRITE_ACTION_ID => {
-            required_string("kind", 64)?;
-            required_string("content", 16_384)?;
-            let kind = object.get("kind").and_then(Value::as_str).unwrap_or_default();
-            if !matches!(kind, "profile" | "preference" | "knowledge" | "episode" | "task" | "affective") {
-                return Err(KernelError::CapabilityExecution {
-                    reason: format!("{action_id} field `kind` is unsupported"),
-                });
-            }
-            if let Some(tags) = object.get("tags") {
-                let tags = tags.as_array().ok_or_else(|| KernelError::CapabilityExecution {
-                    reason: format!("{action_id} field `tags` must be an array"),
-                })?;
-                if tags.len() > 32 {
-                    return Err(KernelError::CapabilityExecution {
-                        reason: format!("{action_id} field `tags` exceeds 32 entries"),
-                    });
-                }
-                let mut unique = BTreeSet::new();
-                for tag in tags {
-                    let tag = tag.as_str().filter(|tag| !tag.trim().is_empty()).ok_or_else(|| KernelError::CapabilityExecution {
-                        reason: format!("{action_id} tags must be non-empty strings"),
-                    })?;
-                    if tag.chars().count() > 64 || !unique.insert(tag.trim()) {
-                        return Err(KernelError::CapabilityExecution {
-                            reason: format!("{action_id} contains an invalid or duplicate tag"),
-                        });
-                    }
-                }
             }
         }
         _ => unreachable!("known Action matched above"),
@@ -1918,6 +1843,36 @@ mod tests {
                 assert!(capabilities[0].contributions.context_schema_refs.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn installed_companion_memory_manifest_and_decoder_keep_history_filters_and_cas_fields() {
+        let registration = companion_memory_registration().unwrap();
+        let module = &registration.metadata.manifest.payload.contributions.capabilities[0];
+        for (action_id, expected) in [
+            (COMPANION_MEMORY_RECALL_ACTION_ID, nomifun_agent_contracts::companion_memory_recall_input_schema()),
+            (COMPANION_MEMORY_WRITE_ACTION_ID, nomifun_agent_contracts::companion_memory_write_input_schema()),
+        ] {
+            let action = module.contributions.actions.iter().find(|action| action.action_id.as_ref() == action_id).unwrap();
+            let materialized = resolve_canonical_schema(module.id.as_ref(), &action.input_schema).unwrap();
+            assert_eq!(materialized.0, expected, "the installed package must expose the complete formal Action schema");
+        }
+        let session = "0199a000-0000-7000-8000-000000000001";
+        let history = json!({"scope":"history","query":"交付结果","source_session_id":session,"limit":4,
+            "char_budget":4096,"since_ts":123,"until_ts":456,"before":"opaque-cursor-from-the-previous-page"});
+        let Wave1CapabilityOperation::CompanionMemoryRecall(decoded) = operation_from_action(
+            &COMPANION_MEMORY_RECALL_ACTION_ID.into(), StrictJsonValue(history.clone())).unwrap() else { panic!("wrong operation"); };
+        assert_eq!(serde_json::to_value(decoded).unwrap(), history, "the installed decoder cannot drop filters or cursor");
+        let correction = json!({"kind":"preference","content":"用户刚更正的偏好","tags":[],
+            "memory_id":"0199a000-0000-7000-8000-000000000002","expected_revision":7});
+        let Wave1CapabilityOperation::CompanionMemoryWrite(decoded) = operation_from_action(
+            &COMPANION_MEMORY_WRITE_ACTION_ID.into(), StrictJsonValue(correction.clone())).unwrap() else { panic!("wrong operation"); };
+        assert_eq!(serde_json::to_value(decoded).unwrap(), correction);
+        assert!(operation_from_action(&COMPANION_MEMORY_WRITE_ACTION_ID.into(),
+            StrictJsonValue(json!({"kind":"preference","content":"x","expected_revision":1}))).is_err());
+        assert!(operation_from_action(&COMPANION_MEMORY_RECALL_ACTION_ID.into(),
+            StrictJsonValue(json!({"scope":"history","query":"x","companion_id":session}))).is_err(),
+            "the model never chooses another Companion namespace");
     }
 
     #[test]

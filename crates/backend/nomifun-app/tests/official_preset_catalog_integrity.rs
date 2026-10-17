@@ -177,7 +177,6 @@ fn official_preset_action_safety_matrix_is_exact() {
             ("companion.memory", &["companion.memory/recall", "companion.memory/write"]),
             ("knowledge", KNOWLEDGE),
             ("channel.messaging", &["channel.messaging/reply", "channel.messaging/send"]),
-            ("robot", &["robot/device", "robot/display", "robot/motion", "robot/vision"]),
             ("automation.schedule", SCHEDULE),
             ("workspace.files", FILES),
             ("workspace.process", PROCESS),
@@ -195,6 +194,8 @@ fn official_preset_action_safety_matrix_is_exact() {
             ("session.management", SESSION_MANAGEMENT),
         ])),
         (OfficialPresetKey::CompanionRobot, actions(&[
+            ("agent.collaboration", &["agent/delegate"]),
+            ("session.management", &["session.management/execution_answer_decision", "session.management/execution_cancel", "session.management/execution_status"]),
             ("companion", &["companion/evolve", "companion/learn"]),
             ("companion.memory", &["companion.memory/recall", "companion.memory/write"]),
             ("robot", &["robot/device", "robot/display", "robot/motion", "robot/vision"]),

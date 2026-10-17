@@ -25,6 +25,16 @@ async fn database() -> nomifun_db::Database {
     )
     .await
     .unwrap();
+    database_with_provider(database).await
+}
+
+async fn file_database(path: &std::path::Path) -> (nomifun_db::Database, String) {
+    let database = nomifun_db::init_database(path).await.unwrap();
+    let owner_id = nomifun_db::installation_owner_id(database.pool()).await.unwrap();
+    (database_with_provider(database).await, owner_id)
+}
+
+async fn database_with_provider(database: nomifun_db::Database) -> nomifun_db::Database {
     nomifun_db::sqlx::query(
         "INSERT INTO providers (\
             provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
@@ -265,10 +275,17 @@ async fn insert_canonical_session(
 async fn create_execution(
     repository: &SqliteAgentExecutionRepository,
 ) -> nomifun_db::models::AgentExecutionRow {
+    create_execution_for_owner(repository, OWNER_ID).await
+}
+
+async fn create_execution_for_owner(
+    repository: &SqliteAgentExecutionRepository,
+    owner_id: &str,
+) -> nomifun_db::models::AgentExecutionRow {
     let participant_id = nomifun_common::generate_id();
     repository
         .create_execution_with_participants(
-            OWNER_ID,
+            owner_id,
             &execution_params(),
             &[participant(participant_id)],
             &event(AgentExecutionEventKind::Created),
@@ -667,11 +684,19 @@ async fn recovery_fixture(
     db: &nomifun_db::Database,
     repository: &SqliteAgentExecutionRepository,
 ) -> (String, nomifun_db::AgentExecutionStepDetailRow, RecoveredAgentExecutionAttemptOutput) {
-    let created = create_execution(repository).await;
-    let participant_id = repository.get_execution_detail(OWNER_ID, &created.execution_id)
+    recovery_fixture_for_owner(db, repository, OWNER_ID).await
+}
+
+async fn recovery_fixture_for_owner(
+    db: &nomifun_db::Database,
+    repository: &SqliteAgentExecutionRepository,
+    owner_id: &str,
+) -> (String, nomifun_db::AgentExecutionStepDetailRow, RecoveredAgentExecutionAttemptOutput) {
+    let created = create_execution_for_owner(repository, owner_id).await;
+    let participant_id = repository.get_execution_detail(owner_id, &created.execution_id)
         .await.unwrap().unwrap().participants[0].participant_id.clone();
     let planned = repository.reconcile_plan(
-        OWNER_ID, &created.execution_id, created.version,
+        owner_id, &created.execution_id, created.version,
         &ReconcileAgentExecutionPlanParams {
             goal: None, adaptation_policy: None, decision_policy: None, delegation_policy: None,
             keep_step_ids: Vec::new(), new_participants: Vec::new(), retire_participant_ids: Vec::new(),
@@ -680,7 +705,7 @@ async fn recovery_fixture(
         }, &event(AgentExecutionEventKind::PlanChanged),
     ).await.unwrap();
     let queued = repository.create_attempt(
-        OWNER_ID, &created.execution_id, &planned.steps[0].step_id, planned.steps[0].version,
+        owner_id, &created.execution_id, &planned.steps[0].step_id, planned.steps[0].version,
         None, &CreateAgentExecutionAttemptParams {
             participant_id: Some(participant_id), start_immediately: false,
             trigger_reason: "initial".to_owned(), effective_config: "{}".to_owned(),
@@ -689,13 +714,13 @@ async fn recovery_fixture(
     ).await.unwrap();
     let attempt = queued.current_attempt.as_ref().unwrap().attempt.clone();
     let conversation_id = nomifun_common::generate_id();
-    insert_canonical_session(db, &conversation_id, OWNER_ID, "live").await;
+    insert_canonical_session(db, &conversation_id, owner_id, "live").await;
     let running = repository.start_attempt(
-        OWNER_ID, &created.execution_id, &queued.step.step_id, queued.step.version,
+        owner_id, &created.execution_id, &queued.step.step_id, queued.step.version,
         &attempt.attempt_id, attempt.version, &conversation_id,
         AgentExecutionAttemptSessionKind::ChildAttempt, None, &event(AgentExecutionEventKind::AttemptChanged),
     ).await.unwrap();
-    let operation_id = format!("turn:user:{OWNER_ID}:{conversation_id}:{}:initial-turn", attempt.attempt_id);
+    let operation_id = format!("turn:user:{owner_id}:{conversation_id}:{}:initial-turn", attempt.attempt_id);
     let terminal_event_id = nomifun_common::generate_id();
     nomifun_db::sqlx::query(
         "INSERT INTO agent_events (session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,inline_json) \
@@ -713,6 +738,151 @@ async fn recovery_fixture(
         terminal_event_id, user_input_request: None, ok: true, text: Some("已完成游戏实现".to_owned()),
         output_files: vec!["/workspace/index.html".to_owned()], error: None, tokens: Some(12),
     })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_waiting_attempt_waits_for_writer_and_rechecks_versions_and_target() {
+    use std::time::Duration;
+
+    for mutation in [
+        "unchanged",
+        "execution_version",
+        "step_version",
+        "attempt_version",
+        "attempt_cancelled",
+        "session_owner",
+        "inactive_link",
+    ] {
+        // Use the production file-backed WAL pool and its own canonical owner
+        // from the start; no backup or snapshot mechanism is part of this test.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("resume-contention.db");
+        let (db, owner_id) = file_database(&path).await;
+        let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
+        let (execution_id, running, _) = recovery_fixture_for_owner(&db, &repository, &owner_id).await;
+        let attempt = &running.current_attempt.as_ref().unwrap().attempt;
+        let waiting = repository
+            .settle_attempt(
+                &owner_id,
+                &execution_id,
+                &running.step.step_id,
+                running.step.version,
+                &attempt.attempt_id,
+                attempt.version,
+                None,
+                &nomifun_db::SettleAgentExecutionAttemptParams {
+                    expected_user_input_turn: None,
+                    expected_active_session_turn: None,
+                    attempt_status: nomifun_common::ExecutionAttemptStatus::WaitingInput,
+                    step_status: ExecutionStepStatus::WaitingInput,
+                    execution_status: Some(AgentExecutionStatus::WaitingInput),
+                    question: Some(Some("continue?".to_owned())),
+                    error: None,
+                    output_summary: None,
+                    output_files: None,
+                    tokens: None,
+                    retry_after: None,
+                    runtime_state: Some(None),
+                    started_at: None,
+                    finished_at: None,
+                    loop_repeat_reset: None,
+                },
+                &event(AgentExecutionEventKind::DecisionRequested),
+            )
+            .await
+            .unwrap();
+
+        let execution = repository
+            .get_execution(&owner_id, &execution_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let attempt = waiting.current_attempt.as_ref().unwrap().attempt.clone();
+        let mut effects = nomifun_db::AttemptConversationEffects::default();
+        effects.push_decision("continue-operation".into(), "continue".into()).unwrap();
+        let runtime_state = effects.encode().unwrap();
+
+        let mut writer = db.pool().begin().await.unwrap();
+        nomifun_db::sqlx::query(
+            "UPDATE agent_executions SET updated_at = updated_at WHERE execution_id = ?",
+        )
+        .bind(&execution_id)
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+
+        let concurrent_execution_id = execution_id.clone();
+        let concurrent_step_id = waiting.step.step_id.clone();
+        let concurrent_attempt_id = attempt.attempt_id.clone();
+        let concurrent_runtime_state = runtime_state.clone();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let mut resume = tokio::spawn(async move {
+            started.send(()).unwrap();
+            repository.resume_waiting_attempt(
+                &owner_id,
+                &concurrent_execution_id,
+                execution.version,
+                &concurrent_step_id,
+                waiting.step.version,
+                &concurrent_attempt_id,
+                attempt.version,
+                &nomifun_db::AttemptConversationEffectParams {
+                    runtime_state: Some(concurrent_runtime_state),
+                },
+                &event(AgentExecutionEventKind::DecisionAnswered),
+            ).await
+        });
+        ready.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut resume).await.is_err(),
+            "{mutation}: resume must wait for the writer instead of failing a read-to-write upgrade"
+        );
+        assert!(db.pool().size() >= 2, "resume must contend on a separate SQLite connection");
+
+        let mutation_sql = match mutation {
+            "unchanged" => None,
+            "execution_version" => Some("UPDATE agent_executions SET version = version + 1 WHERE execution_id = ?"),
+            "step_version" => Some("UPDATE agent_execution_steps SET version = version + 1 WHERE execution_id = ?"),
+            "attempt_version" => Some("UPDATE agent_execution_attempts SET version = version + 1 WHERE execution_id = ?"),
+            "attempt_cancelled" => Some("UPDATE agent_execution_attempts SET status = 'cancelled' WHERE execution_id = ?"),
+            "session_owner" => Some("UPDATE agent_sessions SET owner_ref_json = json_set(owner_ref_json, '$.principal_id', '0190f5fe-7c00-7a00-8000-000000000116') WHERE agent_session_id IN (SELECT conversation_id FROM conversation_execution_links WHERE execution_id = ?)"),
+            "inactive_link" => Some("UPDATE conversation_execution_links SET active = 0 WHERE execution_id = ? AND relation = 'attempt'"),
+            _ => unreachable!(),
+        };
+        if let Some(sql) = mutation_sql {
+            nomifun_db::sqlx::query(sql).bind(&execution_id).execute(&mut *writer).await.unwrap();
+        }
+        let state_sql = "SELECT execution.version, execution.status, step.version, step.status, \
+            attempt.version, attempt.status, attempt.question, attempt.runtime_state, execution.event_sequence \
+            FROM agent_executions execution \
+            JOIN agent_execution_steps step ON step.execution_id = execution.execution_id \
+            JOIN agent_execution_attempts attempt ON attempt.execution_id = execution.execution_id \
+                AND attempt.step_id = step.step_id \
+            WHERE execution.execution_id = ?";
+        type StoredState = (i64, String, i64, String, i64, String, Option<String>, Option<String>, i64);
+        let before: StoredState = nomifun_db::sqlx::query_as(state_sql)
+            .bind(&execution_id).fetch_one(&mut *writer).await.unwrap();
+        writer.commit().await.unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(6), resume)
+            .await.expect("resume should finish within SQLite busy_timeout")
+            .expect("resume task should not panic");
+        let after: StoredState = nomifun_db::sqlx::query_as(state_sql)
+            .bind(&execution_id).fetch_one(db.pool()).await.unwrap();
+        if mutation == "unchanged" {
+            let resumed = result.expect("resume should succeed after the competing writer commits");
+            assert_eq!(resumed.detail.step.status, "running");
+            assert_eq!(after, (
+                before.0 + 1, "running".into(), before.2 + 1, "running".into(),
+                before.4 + 1, "running".into(), None, Some(runtime_state), before.8 + 1,
+            ));
+        } else {
+            assert!(matches!(&result, Err(nomifun_db::DbError::Conflict(_))),
+                "{mutation}: a changed target must return a CAS conflict, not a database lock error: {result:?}");
+            assert_eq!(after, before, "{mutation}: conflict must roll back all partial resume writes and events");
+        }
+        db.close().await;
+    }
 }
 
 #[tokio::test]

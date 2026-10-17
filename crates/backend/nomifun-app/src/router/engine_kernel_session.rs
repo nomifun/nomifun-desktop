@@ -1,7 +1,7 @@
 //! Production Kernel/resource assembly shared by source-integrated engines.
 //! Strategy, tool naming and event codecs remain engine-owned. This module
 //! retains actual resource owners and their cleanup witnesses, not fake exits.
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use futures_util::{
     FutureExt,
@@ -110,10 +110,41 @@ pub(crate) struct EngineKernelAssembly {
     pub wave2: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
     pub context_admission: Arc<nomifun_ai_agent::NomiPlatformBuiltinContextAdmission>,
     pub knowledge: Arc<nomifun_knowledge::KnowledgeService>,
+    pub companion: Weak<nomifun_companion::CompanionService>,
     #[cfg(feature = "browser-use")]
     pub browser: Arc<super::engine_browser_tools::BrowserRoleOwner>,
     pub hosted_effects: super::hosted_effect_receipts::HostedEffectReceipts,
     pub robot: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
+}
+
+/// AppServices is the strong lifecycle owner. Runtime factories/resources may
+/// point back through Companion Session ports, so retaining an Arc here would
+/// form a service -> Session owner -> Runtime factory -> service cycle.
+pub(super) fn companion_owner(handle:&Weak<nomifun_companion::CompanionService>)
+    ->Result<Arc<nomifun_companion::CompanionService>,AppError>{
+    handle.upgrade().ok_or_else(||failure("Companion memory owner is unavailable"))
+}
+
+fn paired_companion_fact_owner(
+    principal:&nomifun_agent_contracts::PrincipalRef,compiled:&CompiledSnapshot,
+)->Result<String,AppError>{
+    if principal.principal_kind!="user" {return Err(failure("Companion Context requires its user owner"));}
+    let context=compiled.policy(&"companion".into()).ok_or_else(||failure("Companion Context policy missing"))?;
+    let memory=compiled.policy(&"companion.memory".into()).ok_or_else(||failure("Companion memory policy missing"))?;
+    let contexts=compiled.target_resource_bindings.iter().filter(|binding|
+        context.resource_binding_ids.contains(&binding.binding_id)&&binding.resource_kind.as_ref()=="companion")
+        .collect::<Vec<_>>();
+    let [context]=contexts.as_slice() else {return Err(failure("Companion Context requires exactly one bound companion resource"));};
+    if context.owner_id!=principal.principal_id || !context.operations.contains("read")
+        || context.binding_id.as_ref().trim().is_empty() || context.resource_id.as_ref().trim().is_empty() {
+        return Err(failure("Companion Context resource is not readable by this owner"));
+    }
+    let resources=compiled.target_resource_bindings.iter().filter(|binding|memory.resource_binding_ids.contains(&binding.binding_id))
+        .cloned().collect::<Vec<_>>();
+    let resource=super::agent_memory_authority::authorize_memory_resource(
+        &principal.principal_id,super::agent_memory_authority::ProductMemoryAction::CompanionRecall,&resources)?;
+    if resource.resource_id!=context.resource_id {return Err(failure("Companion Context and memory resources identify different companions"));}
+    Ok(resource.resource_id.as_ref().to_owned())
 }
 
 fn constraints_allow_action(
@@ -121,7 +152,8 @@ fn constraints_allow_action(
     capability_id: &str,
     action_id: &str,
 ) -> bool {
-    if constraints.exclude_delegation && capability_id == "agent.collaboration" {
+    if constraints.exclude_delegation && capability_id == "agent.collaboration"
+        && matches!(action_id, "agent/delegate" | "agent/fork") {
         return false;
     }
     constraints.allows_workspace_action(capability_id, action_id)
@@ -170,6 +202,7 @@ pub struct EngineKernelSession {
     wave2: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
     context_admission: Arc<nomifun_ai_agent::NomiPlatformBuiltinContextAdmission>,
     knowledge: Arc<nomifun_knowledge::KnowledgeService>,
+    companion: Weak<nomifun_companion::CompanionService>,
     #[cfg(feature = "browser-use")]
     browser: Arc<super::engine_browser_tools::BrowserRoleOwner>,
     hosted_effects: super::hosted_effect_receipts::HostedEffectReceipts,
@@ -407,6 +440,7 @@ impl EngineKernelSession {
             wave2: assembly.wave2.clone(),
             context_admission: assembly.context_admission.clone(),
             knowledge: assembly.knowledge.clone(),
+            companion: assembly.companion.clone(),
             #[cfg(feature = "browser-use")]
             browser: assembly.browser.clone(),
             git_root,
@@ -802,6 +836,75 @@ impl EngineKernelSession {
             .as_ref()
             .map(|tools| tools.plan.clone())
             .unwrap_or_default())
+    }
+
+    /// Whether a facts slot may be needed. The model-boundary reader checks the
+    /// active admitted Context and its paired frozen resource grants before any
+    /// fact or sibling data is read. ToolSearch activation is separate.
+    pub(super) fn has_companion_memory_context(&self) -> bool {
+        let id = nomifun_agent_contracts::CapabilityId::from("companion.memory");
+        !self.constraints.restricted() && self.allows_capability(&id)
+            && self.compiled.policy(&id).is_some_and(|policy| policy.allowed_actions.contains(
+                &nomifun_agent_contracts::ActionId::from("companion.memory/recall")))
+            && self.compiled.content().contributions().any(|resolved|resolved.capability.id.as_ref()=="companion")
+    }
+
+    /// Facts use the existing actual Persona Context contract plus the frozen
+    /// memory read ceiling. Ordinary explicitly configured Agents retain this
+    /// contract without becoming product Sessions or acquiring sibling history.
+    /// A deferred memory Tool need not be activated to read this Context.
+    pub(super) async fn frozen_companion_fact_owner(&self,generation:u64)->Result<Option<String>,AppError>{
+        if !self.has_companion_memory_context() { return Ok(None); }
+        let context_id=nomifun_agent_contracts::CapabilityId::from("companion");
+        let memory_id=nomifun_agent_contracts::CapabilityId::from("companion.memory");
+        let active = self.active.snapshot().map_err(failure)?;
+        if active.generation != generation || active.resolved_snapshot_ref != *self.compiled.snapshot_ref() {
+            return Err(failure("Companion memory context generation changed"));
+        }
+        if !active.active.contains(&context_id) {return Ok(None);}
+        let resolved=self.compiled.content().contributions().find(|item|item.capability.id==context_id)
+            .ok_or_else(||failure("Companion Context contribution missing"))?;
+        if resolved.contribution_lock.source_kind!=nomifun_agent_contracts::ContributionSourceKind::PlatformBuiltin
+            || resolved.resolved_source.source_kind!=nomifun_agent_contracts::PluginSourceKind::Bundled
+            || !self.context_admission.approved_capability_ids().contains(&context_id) {
+            return Ok(None);
+        }
+        if !self.compiled.capability_resources_bound(&context_id).map_err(failure)?
+            || !self.compiled.action_resources_bound(&memory_id,&"companion.memory/recall".into()).map_err(failure)? {
+            return Ok(None);
+        }
+        // Reuse the official composition admission/exact-target checks. This
+        // initializer collects BeforeTurn IDs without running an extra model.
+        self.capability_context().await?;
+        let registry=self.registry_snapshot()?;
+        let current=registry.capability(&context_id).ok_or_else(||failure("Companion Context is not materialized"))?;
+        resolved.validate().map_err(|error|failure(error.message))?;
+        let manifest_digest=nomifun_agent_contracts::digest_payload(&current.manifest).map_err(failure)?;
+        if current.manifest.id!=resolved.capability.id || current.manifest.package!=resolved.source_package
+            || current.contribution_id!=resolved.contribution_id || current.contribution_lock!=resolved.contribution_lock
+            || resolved.resolved_mount_id.as_ref()!=Some(&current.mount_id) || current.source!=resolved.resolved_source
+            || current.target_artifact_digest!=resolved.target_artifact_digest || current.schema_digest!=resolved.schema_digest
+            || manifest_digest!=resolved.schema_digest {
+            return Err(failure("Companion Context materialization differs from frozen Snapshot"));
+        }
+        if current.manifest.contributions.context_schema_refs.len()!=1
+            || current.manifest.contributions.context_phase!=nomifun_agent_contracts::ContextContributionPhase::BeforeTurn
+            || !current.manifest.supports_consumer(nomifun_agent_contracts::CapabilityConsumer::Agent) {
+            return Err(failure("Companion Context no longer publishes its admitted BeforeTurn contract"));
+        }
+        paired_companion_fact_owner(&self.principal,&self.compiled).map(Some)
+    }
+
+    pub(super) async fn current_companion_memory_context(
+        &self,companion_id:&str,generation:u64,max_bytes:usize,
+    )->Result<Option<nomifun_companion::CompanionMemoryContext>,AppError>{
+        let Some(authorized)=self.frozen_companion_fact_owner(generation).await? else {return Ok(None);};
+        if authorized!=companion_id {return Err(failure("Companion memory resource differs from canonical product membership"));}
+        let service=companion_owner(&self.companion)?;
+        if self.principal.principal_id!=service.authoritative_user_id(){return Err(failure("Companion memory context belongs to another owner"));}
+        let context=service.current_memory_context(companion_id,max_bytes).await?;
+        if self.active.snapshot().map_err(failure)?.generation!=generation {return Err(failure("Companion memory context generation changed while reading"));}
+        Ok(Some(context))
     }
 
     /// Latest existing Robot vision observation, not a camera capture or a
@@ -1521,6 +1624,61 @@ mod workspace_module_tests {
             exclude_delegation: false,
             managed_process_only: false,
         }
+    }
+
+    #[test]
+    fn delegation_ceiling_preserves_user_decision_handoffs() {
+        let ceiling = ExecutionConstraints {
+            exclude_delegation: true,
+            ..constraints(AgentToolPolicy::Full)
+        };
+        assert!(!constraints_allow_action(ceiling, "agent.collaboration", "agent/delegate"));
+        assert!(!constraints_allow_action(ceiling, "agent.collaboration", "agent/fork"));
+        assert!(constraints_allow_action(ceiling, "agent.collaboration", "agent/request_user_decision"));
+    }
+
+    #[test]
+    fn frozen_companion_fact_resource_requires_exact_paired_read_grants() {
+        use nomifun_agent_contracts::{PrincipalRef,TypedResourceBinding};
+        use nomifun_agent_kernel::CompiledCapabilityPolicy;
+        let principal=PrincipalRef{principal_kind:"user".into(),principal_id:"fact-owner".into()};
+        let binding=|id:&str,kind:&str,resource:&str|TypedResourceBinding{
+            binding_id:id.into(),resource_kind:kind.into(),resource_id:resource.into(),owner_id:principal.principal_id.clone(),
+            operations:["read".into()].into(),connection_config_ref:None,typed_parameters:Default::default(),
+        };
+        let digest="a".repeat(64);
+        let envelope=serde_json::from_value(serde_json::json!({
+            "snapshot_ref":{"snapshot_id":"fact-snapshot","snapshot_digest":digest},
+            "content":{"schema_version":"1","resolver_version":"1", "preset_revision_ref":{
+                "preset_id":"fact-preset","revision":1,"revision_digest":digest},
+                "required_runtime_protocol_version":"1","required_runtime_profile":"managed_minimal",
+                "runtime_feature_inventory_digest":digest,"required_runtime_features":[],"compiled_runtime_profile_digest":digest,
+                "model_route_refs":{},"enabled_capabilities":[],"capability_allowlist":[],"skill_locks":[],"mcp_tool_locks":[],
+                "canonical_schema_manifest_digest":digest,"target_contribution_manifest_digest":digest},
+            "actor":principal,"scene":"agent_chat","surface":"test","audience":"owner","created_at_ms":1,
+            "resolver_run_id":"fact-run","availability_evidence_revision":"1",
+        })).unwrap();
+        let mut compiled=CompiledSnapshot{
+            envelope,authority_policies:[
+                ("companion".into(),CompiledCapabilityPolicy{allowed_actions:Default::default(),resource_binding_ids:["persona".into()].into(),required_resource_kinds:["companion".into()].into()}),
+                ("companion.memory".into(),CompiledCapabilityPolicy{allowed_actions:["companion.memory/recall".into()].into(),resource_binding_ids:["memory".into()].into(),required_resource_kinds:["companion_memory".into()].into()}),
+            ].into(),
+            target_resource_bindings:vec![binding("persona","companion","chosen"),binding("memory","companion_memory","chosen"),
+                binding("unbound","companion_memory","unrelated")],
+            registry_generation:1,registry_digest:digest.into(),non_executable_capability_ids:Default::default(),
+        };
+        assert_eq!(paired_companion_fact_owner(&principal,&compiled).unwrap(),"chosen");
+        compiled.target_resource_bindings[1].resource_id="another-companion".into();
+        assert!(paired_companion_fact_owner(&principal,&compiled).is_err());
+        compiled.target_resource_bindings[1].resource_id="chosen".into();
+        compiled.target_resource_bindings[1].owner_id="different-owner".into();
+        assert!(paired_companion_fact_owner(&principal,&compiled).is_err());
+        compiled.target_resource_bindings[1].owner_id=principal.principal_id.clone();
+        compiled.target_resource_bindings[1].operations=["write".into()].into();
+        assert!(paired_companion_fact_owner(&principal,&compiled).is_err());
+        compiled.target_resource_bindings[1].operations=["read".into()].into();
+        compiled.authority_policies.get_mut(&"companion.memory".into()).unwrap().resource_binding_ids.clear();
+        assert!(paired_companion_fact_owner(&principal,&compiled).is_err(),"an unrelated same-kind grant is not the policy-bound memory resource");
     }
 
     #[test]

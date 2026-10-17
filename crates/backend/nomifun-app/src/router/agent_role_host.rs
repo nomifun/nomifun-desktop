@@ -1868,6 +1868,7 @@ mod tests {
                 metadata: AgentSessionMetadata {
                     purpose: Default::default(),
                     app_project_id: None,
+                    companion: None,
                     title: None,
                     archived: false,
                     pinned: false,

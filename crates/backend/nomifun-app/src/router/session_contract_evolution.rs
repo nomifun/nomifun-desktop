@@ -32,7 +32,12 @@ impl NomiCoreSessionOwner {
         .fetch_one(&self.pool)
         .await
         .map_err(|error| AppError::Internal(error.to_string()))?;
-        if attempt {
+        // Group guests own a dedicated model-only contract. Their trusted
+        // ingress prepares that ceiling separately; its empty official
+        // chat.minimal variant is not the retired personal default.
+        if attempt || self.is_companion_associated_task(owner_id, session_id).await?
+            || self.is_registered_channel_guest(session_id).await?
+        {
             return Ok(());
         }
         let control_plane = self.runtime_control_plane.get()
@@ -101,6 +106,12 @@ impl NomiCoreSessionOwner {
                 .cloned());
             candidate.typed_resource_bindings.sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
         }
+        candidate.binding_version = current.binding_version.checked_add(1)
+            .ok_or_else(|| AppError::Conflict("AgentSession binding version cannot advance".into()))?;
+        let (_, _, next_snapshot) = control_plane.saved_binding_artifacts(&owner, &candidate)
+            .await.map_err(control_plane_error_to_app)?;
+        let next_capabilities = next_snapshot.content.enabled_capabilities.iter()
+            .map(|capability| capability.capability.id.as_ref().to_owned()).collect::<BTreeSet<_>>();
         let replacement: AgentBindingValue = serde_json::to_value(&candidate)
             .and_then(serde_json::from_value)
             .map_err(|error| AppError::Conflict(format!("evolved Session binding is invalid: {error}")))?;
@@ -113,6 +124,7 @@ impl NomiCoreSessionOwner {
             active.sort();
             active.dedup();
         }
+        active.retain(|id| next_capabilities.contains(id));
         self.settle_session_binding_runtime(owner_id, session_id).await?;
         let transition_id = Uuid::now_v7().to_string();
         let request_digest = digest_payload(&json!({

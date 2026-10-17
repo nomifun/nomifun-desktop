@@ -42,6 +42,9 @@ pub struct MemorySearchQuery {
     /// memory (the owner's administrative view).
     pub companion_id: Option<CompanionId>,
     pub limit: usize,
+    pub source_session_id: Option<String>,
+    pub updated_since: Option<i64>,
+    pub updated_until: Option<i64>,
 }
 
 impl Default for MemorySearchQuery {
@@ -52,6 +55,9 @@ impl Default for MemorySearchQuery {
             status: MemoryStatusFilter::Active,
             companion_id: None,
             limit: 20,
+            source_session_id: None,
+            updated_since: None,
+            updated_until: None,
         }
     }
 }
@@ -107,6 +113,9 @@ struct FilterClause {
     kind: Option<String>,
     status: Option<&'static str>,
     visible_to: Option<String>,
+    source_session_id: Option<String>,
+    updated_since: Option<i64>,
+    updated_until: Option<i64>,
 }
 
 fn build_filter(q: &MemorySearchQuery) -> Result<FilterClause, AppError> {
@@ -129,7 +138,22 @@ fn build_filter(q: &MemorySearchQuery) -> Result<FilterClause, AppError> {
         sql.push_str(" AND (m.companion_id IS NULL OR m.companion_id = ?)");
         companion_id.as_str().to_owned()
     });
-    Ok(FilterClause { sql, kind, status, visible_to })
+    if let Some(session_id) = q.source_session_id.as_deref() {
+        nomifun_common::ConversationId::try_from(session_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid memory source_session_id: {error}")))?;
+        sql.push_str(" AND (m.source_session_id = ? OR EXISTS (SELECT 1 FROM json_each(m.source_message_refs) source \
+            WHERE json_extract(source.value, '$.session_id') = ?))");
+    }
+    if q.updated_since.is_some() { sql.push_str(" AND m.updated_at >= ?"); }
+    if q.updated_until.is_some() { sql.push_str(" AND m.updated_at <= ?"); }
+    if q.updated_since.is_some_and(|value| value < 0)
+        || q.updated_until.is_some_and(|value| value < 0)
+        || matches!((q.updated_since, q.updated_until), (Some(start), Some(end)) if start > end)
+    {
+        return Err(AppError::BadRequest("invalid memory update time range".into()));
+    }
+    Ok(FilterClause { sql, kind, status, visible_to, source_session_id: q.source_session_id.clone(),
+        updated_since: q.updated_since, updated_until: q.updated_until })
 }
 
 fn bind_filter<'q>(
@@ -145,6 +169,9 @@ fn bind_filter<'q>(
     if let Some(visible_to) = &filter.visible_to {
         query = query.bind(visible_to);
     }
+    if let Some(source_session_id) = &filter.source_session_id { query = query.bind(source_session_id).bind(source_session_id); }
+    if let Some(updated_since) = filter.updated_since { query = query.bind(updated_since); }
+    if let Some(updated_until) = filter.updated_until { query = query.bind(updated_until); }
     query
 }
 
@@ -266,6 +293,50 @@ impl CompanionStore {
 }
 
 #[cfg(test)]
+mod scoped_recall_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn query_filters_exact_source_time_and_companion_before_returning_hits() {
+        let store = CompanionStore::open_memory().await.unwrap();
+        let owner = CompanionId::new();
+        let other = CompanionId::new();
+        let session = nomifun_common::ConversationId::new().into_string();
+        let memory = store.insert_memory_scoped_with_provenance("preference", "主人偏爱龙井茶叶", &[], 0.8,
+            "agent", Some(owner.as_str()), Some(&session), Some("turn:user/tool:write")).await.unwrap();
+        store.insert_memory_scoped_with_provenance("preference", "另一个伙伴也记录了龙井茶叶", &[], 0.9,
+            "agent", Some(other.as_str()), Some(&session), Some("turn:user/tool:other")).await.unwrap();
+        let selected = MemorySearchQuery { queries: vec!["龙井茶叶".into()], companion_id: Some(owner),
+            source_session_id: Some(session), updated_since: Some(memory.updated_at), updated_until: Some(memory.updated_at),
+            ..Default::default() };
+        let hits = store.search_memories(selected.clone()).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].memory.memory_id, memory.memory_id);
+        let wrong_source = MemorySearchQuery { source_session_id: Some(nomifun_common::ConversationId::new().into_string()), ..selected.clone() };
+        assert!(store.search_memories(wrong_source).await.unwrap().is_empty());
+        let wrong_time = MemorySearchQuery { updated_since: Some(memory.updated_at + 1), updated_until: None, ..selected.clone() };
+        assert!(store.search_memories(wrong_time).await.unwrap().is_empty());
+        let owner = selected.companion_id.as_ref().unwrap().as_str();
+        let generation = store.memory_generation(owner).await.unwrap();
+        let learned = crate::LearnedMemoryCandidate { kind: "preference".into(), content: "龙井茶叶的整理应当按产地分组归档".into(),
+            tags: vec![], importance: 0.8, source_event_ids: vec![nomifun_common::CompanionEventId::new().into_string()],
+            source_message_refs: vec![crate::store::CompanionMemoryMessageSource {
+                session_id: selected.source_session_id.clone().unwrap(), message_id: nomifun_common::generate_id(),
+            }] };
+        store.apply_learning_batch(owner, &generation, &[], &[], &[learned]).await.unwrap();
+        let query = MemorySearchQuery { updated_since: None, updated_until: None, ..selected.clone() };
+        let hits = store.search_memories(query.clone()).await.unwrap();
+        assert_eq!(hits.len(), 2, "source filtering includes formally learned message references");
+        let ids = hits.into_iter().map(|hit| hit.memory.memory_id).collect::<Vec<_>>();
+        let merged = store.merge_memories(&ids, "龙井茶叶偏好和整理规则", "preference", &crate::store::MemoryActor::Companion(owner.into())).await.unwrap();
+        assert!(merged.source_session_id.is_none());
+        let hits = store.search_memories(query).await.unwrap();
+        assert_eq!(hits.len(), 1, "merged facts retain their precise source Session filter");
+        assert_eq!(hits[0].memory.memory_id, merged.memory_id);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use nomifun_common::CompanionMemoryId;
@@ -299,6 +370,11 @@ mod tests {
             updated_at: 1,
             last_reinforced_at: 1,
             companion_id: None,
+            revision: 1,
+            source_session_id: None,
+            source_operation_id: None,
+            source_event_ids: vec![],
+            source_message_refs: vec![],
         }
     }
 

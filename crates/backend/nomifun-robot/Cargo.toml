@@ -11,6 +11,7 @@ default = []
 test-support = []
 
 [dependencies]
+nomifun-voice-contracts.workspace = true
 # Shared speech/display cleanup; expressive actions use the granted MCP tools.
 nomifun-common = { workspace = true }
 nomifun-api-types = { workspace = true }

@@ -15,6 +15,7 @@ import MemoryListEmpty from './MemoryListEmpty';
 import MemoryListRow from './MemoryListRow';
 import { MEMORY_PAGE_SIZE_OPTIONS } from './constants';
 import type { MemoryListHandle } from './useMemoryList';
+import { memoryMutationErrorKey } from './memoryMutationError';
 
 interface MemoryListProps {
   list: MemoryListHandle;
@@ -104,9 +105,9 @@ const MemoryList: React.FC<MemoryListProps> = ({ list, activeId, onOpen, onDelet
             active={activeId === memory.memory_id}
             onToggleSelect={list.toggleSelected}
             onOpen={onOpen}
-            onTogglePin={(m) => void list.setPinned(m, !m.pinned).catch((e) => Message.error(String(e)))}
+            onTogglePin={(m) => void list.setPinned(m, !m.pinned).catch((e) => Message.error(t(memoryMutationErrorKey(e))))}
             onToggleArchive={(m) =>
-              void list.setArchived(m, m.status === 'active').catch((e) => Message.error(String(e)))
+              void list.setArchived(m, m.status === 'active').catch((e) => Message.error(t(memoryMutationErrorKey(e))))
             }
             onDelete={onDelete}
           />

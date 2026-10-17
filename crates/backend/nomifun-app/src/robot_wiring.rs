@@ -27,6 +27,9 @@ use nomifun_robot::wiring::{
     CompanionSlotReader, PreferenceReader, RobotSpeech, VisionCompletionExecutor,
     VisionCompletionRequest,
 };
+
+#[path = "robot_report_delivery.rs"]
+mod robot_report_delivery;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
@@ -506,6 +509,11 @@ impl AppRobotBackend {
             {
                 anyhow::bail!("robot turn belongs to another Companion AgentSession");
             }
+            // Keep the authenticated connection stable until canonical input
+            // admission completes, including time waiting for the Session gate.
+            let connection_lease = self.registry.hold_action_connection(
+                &request.robot_id, &request.connection_id).await
+                .ok_or_else(|| anyhow::anyhow!("robot connection changed before admission"))?;
             let record = self
                 .registry
                 .get(&request.robot_id)
@@ -534,11 +542,11 @@ impl AppRobotBackend {
             let delivery = tokio::select! {
                 biased;
                 _ = cancelled.cancelled() => {
-                    self.sessions.cancel_session(&self.owner_user_id, &request.conversation_id).await?;
+                    self.sessions.cancel_robot_session_request(&self.owner_user_id, request, &key).await?;
                     return Ok(());
                 },
-                result = self.sessions.send_session_message_idempotent(
-                    &self.owner_user_id, &request.conversation_id, &key, message,
+                result = self.sessions.send_robot_session_message_idempotent(
+                    &self.owner_user_id, request, &key, message,
                 ) => result,
             };
             let mut delivery = match delivery {
@@ -546,6 +554,7 @@ impl AppRobotBackend {
                 Err(nomifun_common::AppError::Conflict(_)) => continue,
                 Err(error) => return Err(error.into()),
             };
+            drop(connection_lease);
             if delivery.completed {
                 for event in completed_robot_delivery_events(&delivery) {
                     if tx.send(event).await.is_err() { break; }
@@ -579,7 +588,7 @@ impl AppRobotBackend {
                 }
                 tokio::select! {
                     _ = cancelled.cancelled() => {
-                        self.sessions.cancel_session(&self.owner_user_id, &request.conversation_id).await?;
+                        self.sessions.cancel_robot_session_request(&self.owner_user_id, request, &key).await?;
                         return Ok(());
                     }
                     _ = tokio::time::sleep(std::time::Duration::from_millis(30)) => {},
@@ -617,8 +626,9 @@ impl nomifun_robot::services::RobotPlaybackSource for AppRobotBackend {
 
 #[async_trait::async_trait]
 impl nomifun_robot::wiring::RobotConversationBackend for AppRobotBackend {
-    async fn ensure_companion_session(&self, companion_id: &str) -> anyhow::Result<String> {
-        Ok(self.companions.create_companion_thread(companion_id, None).await?.conversation_id)
+    async fn ensure_companion_session(&self, companion_id: &str, robot_id: &str) -> anyhow::Result<String> {
+        Ok(self.companions.ensure_session_for_role(companion_id,
+            nomifun_companion::CompanionRole::Robot, Some(robot_id)).await?.conversation_id)
     }
 
     async fn dispatch(&self, request: nomifun_robot::services::RobotTurnRequest) -> anyhow::Result<mpsc::Receiver<TurnEvent>> {
@@ -923,6 +933,9 @@ pub(crate) fn mount(
         bridge_workers: robot.bridge_workers.clone(),
         queues: Arc::new(Mutex::new(HashMap::new())),
     });
+    let delivery: Arc<dyn crate::router::nomi_core_session::DirectedReportDeliveryPort> = backend.clone();
+    backend.sessions.install_directed_report_delivery(&delivery)
+        .expect("install Robot directed-report delivery owner");
     #[cfg(test)]
     let _ = robot.backend.set(backend.clone());
     let dispatcher = Arc::new(nomifun_robot::wiring::RobotDispatcher::new(backend.clone()));
@@ -968,6 +981,7 @@ mod tests {
             connection_id: "connection-1".into(),
             request_id: "utterance-1".into(),
             text: "你好".into(),
+            presented_question_id: None,
         }
     }
 

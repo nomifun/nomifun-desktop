@@ -365,7 +365,7 @@ impl CompanionRegistry {
 
     /// 伙伴工作区树根：companions_dir 的兄弟目录 `{data_dir}/companion/workspaces`。
     /// （companions_dir == `{data_dir}/companion/companions`，取 parent 再 join。）
-    /// 见名知意的每伙伴工作目录落在此树下，与 home 目录解耦。
+    /// Registered per-Companion shared workspaces, separate from profile storage.
     pub(crate) fn workspaces_dir(&self) -> std::path::PathBuf {
         self.companions_dir
             .parent()

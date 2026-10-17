@@ -6,7 +6,7 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Message, Modal } from '@arco-design/web-react';
+import { Button, Message, Modal } from '@arco-design/web-react';
 import ContentAside from '@/renderer/components/layout/ContentAside';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
 import { NomiSettingList, NomiSettingRow, NomiSettingSection } from '@/renderer/components/base/NomiSettingLayout';
@@ -21,6 +21,7 @@ import MemoryToolbar from './MemoryToolbar';
 import MergeAssistantPane from './MergeAssistantPane';
 import { MEMORY_KINDS, formatMemoryTime } from './constants';
 import { useMemoryList } from './useMemoryList';
+import { memoryMutationErrorKey } from './memoryMutationError';
 
 /** What the right-hand pane is showing. `null` = closed. */
 type PaneMode = 'detail' | 'compose' | 'merge' | null;
@@ -43,6 +44,7 @@ const MemoryTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtte
   const [detail, setDetail] = useState<ICompanionMemory | null>(null);
   const [reclassifyOpen, setReclassifyOpen] = useState(false);
   const [reclassifyKind, setReclassifyKind] = useState<ICompanionMemoryKind>('knowledge');
+  const [reclassifyTargets, setReclassifyTargets] = useState<ICompanionMemory[]>([]);
 
   // Switching companion invalidates whatever the pane was showing.
   useEffect(() => {
@@ -88,14 +90,14 @@ const MemoryTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtte
       Modal.confirm({
         title: t('nomi.memories.delete', { defaultValue: '删除' }),
         // Memory is per-companion, so a delete only ever affects this companion.
-        content: t('nomi.memories.deleteConfirm', { defaultValue: '确定永久删除这条记忆？' }),
+        content: t('nomi.memories.deleteConfirm', { defaultValue: '确定永久删除这条记忆？删除伙伴记忆；已有聊天记录仍保留。需要移除对话内容，请在对应会话中清空上下文或删除会话。' }),
         okButtonProps: { status: 'danger' },
         onOk: async () => {
           try {
-            await list.removeMemory(memory.memory_id);
+            await list.removeMemory(memory);
             if (detail?.memory_id === memory.memory_id) closePane();
           } catch (e) {
-            Message.error(String(e));
+            Message.error(t(memoryMutationErrorKey(e)));
           }
         },
       });
@@ -104,13 +106,13 @@ const MemoryTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtte
   );
 
   const runBatch = useCallback(
-    async (action: ICompanionMemoryBatchAction, kind?: ICompanionMemoryKind) => {
+    async (action: ICompanionMemoryBatchAction, kind?: ICompanionMemoryKind, targets = list.selectedMemories) => {
       try {
         // `0` = the selection was empty and nothing was sent; never claim success.
-        const count = await list.runBatch(action, kind);
+        const count = await list.runBatch(action, kind, targets);
         if (count > 0) Message.success(t('nomi.memories.batchDone', { defaultValue: '批量操作完成' }));
       } catch (e) {
-        Message.error(String(e));
+        Message.error(t(memoryMutationErrorKey(e)));
       }
     },
     [list, t]
@@ -118,7 +120,8 @@ const MemoryTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtte
 
   const confirmBatch = useCallback(
     (action: 'archive' | 'restore' | 'delete') => {
-      const count = list.selected.length;
+      const targets = [...list.selectedMemories];
+      const count = targets.length;
       const title =
         action === 'archive'
           ? t('nomi.memories.batchArchiveConfirm', { count, defaultValue: '归档选中的 {{count}} 条记忆？' })
@@ -127,35 +130,26 @@ const MemoryTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtte
             : t('nomi.memories.batchDeleteConfirm', { count, defaultValue: '永久删除选中的 {{count}} 条记忆？' });
       Modal.confirm({
         title,
+        content: action === 'delete' ? t('nomi.memories.deleteHistoryHint') : undefined,
         okButtonProps: action === 'delete' ? { status: 'danger' } : undefined,
-        onOk: () => void runBatch(action),
+        onOk: () => void runBatch(action, undefined, targets),
       });
     },
-    [list.selected.length, runBatch, t]
+    [list.selectedMemories, runBatch, t]
   );
 
   const submitReclassify = useCallback(async () => {
     setReclassifyOpen(false);
-    await runBatch('reclassify', reclassifyKind);
-  }, [reclassifyKind, runBatch]);
+    await runBatch('reclassify', reclassifyKind, reclassifyTargets);
+  }, [reclassifyKind, reclassifyTargets, runBatch]);
 
-  /**
-   * Pin/archive from the pane must patch the open memory itself. Archiving while
-   * the list is filtered to `active` drops the row out of the result set, so the
-   * sync effect above has nothing to re-read and the switch would otherwise snap
-   * straight back to its old position on a request that actually succeeded.
-   * `memory` is the pre-mutation row, so a failure restores it exactly.
-   */
+  /** The returned Host row advances the exact revision, including rows leaving the active list. */
   const patchDetail = useCallback(
-    async (memory: ICompanionMemory, patch: Partial<ICompanionMemory>, run: () => Promise<void>) => {
+    async (memory: ICompanionMemory, run: () => Promise<ICompanionMemory>) => {
       const sameRow = (prev: ICompanionMemory | null) => prev != null && prev.memory_id === memory.memory_id;
-      setDetail((prev) => (sameRow(prev) ? { ...(prev as ICompanionMemory), ...patch } : prev));
-      try {
-        await run();
-      } catch (e) {
-        setDetail((prev) => (sameRow(prev) ? memory : prev));
-        Message.error(String(e));
-      }
+      const updated = await run();
+      setDetail(prev => sameRow(prev) && prev!.revision <= updated.revision ? updated : prev);
+      return updated;
     },
     []
   );
@@ -170,15 +164,17 @@ const MemoryTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtte
           storageKey='nomifun:nomi-aside-memory'
         >
           <MemoryDetailPane
+            key={detail.memory_id}
             memory={detail}
-            onSave={(content) => list.saveContent(detail.memory_id, content)}
-            onTogglePin={(pinned) => patchDetail(detail, { pinned }, () => list.setPinned(detail, pinned))}
+            onSave={(content, observed) => patchDetail(observed, () => list.saveContent(observed, content))}
+            onTogglePin={(pinned) => patchDetail(detail, () => list.setPinned(detail, pinned))}
             onToggleArchive={(archived) =>
-              patchDetail(detail, { status: archived ? 'archived' : 'active' }, () =>
+              patchDetail(detail, () =>
                 list.setArchived(detail, archived)
               )
             }
             onDelete={() => confirmDelete(detail)}
+            onRefresh={list.refresh}
           />
         </ContentAside>
       );
@@ -215,6 +211,10 @@ const MemoryTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtte
   return (
     <>
       <div className='flex flex-col gap-16px'>
+        {list.conflict && <div role='alert' className='text-12px text-t-secondary'>
+          {t('nomi.memory.conflict')}
+          <Button size='mini' type='text' onClick={() => { list.clearSelection(); void list.refresh(); }}>{t('nomi.memory.refreshSelection')}</Button>
+        </div>}
         <NomiSettingSection
           title={t('nomi.memory.memorySection', { defaultValue: '记忆' })}
           description={t('nomi.memory.memorySectionHint', {
@@ -242,7 +242,7 @@ const MemoryTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtte
               onDelete={confirmDelete}
               onAdd={openCompose}
               onBatch={confirmBatch}
-              onReclassify={() => setReclassifyOpen(true)}
+              onReclassify={() => { setReclassifyTargets([...list.selectedMemories]); setReclassifyOpen(true); }}
             />
           </div>
         </NomiSettingSection>
@@ -274,7 +274,7 @@ const MemoryTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtte
         <div className='flex flex-col gap-12px'>
           <div className='text-13px leading-20px text-t-secondary'>
             {t('nomi.memories.reclassifyPick', {
-              count: list.selected.length,
+              count: reclassifyTargets.length,
               defaultValue: '为选中的 {{count}} 条记忆选择新分类',
             })}
           </div>

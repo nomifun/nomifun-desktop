@@ -44,7 +44,7 @@ CLI 附带 Skill 必须进入现役技能库导入与发现路径，写到第三
 
 默认聊天 `chat.minimal` 正式具备 `workspace.files` 六个动作和 `workspace.process` 七个动作；资源由原 resolver 自动供给。`assistant.general`、伙伴等原有相应能力继续使用同一工具路径。
 
-当前代旧官方 exact-empty 聊天会话在空闲新 Turn/模型准备边界，经 `default_local_os_evolution` 的精确合同证明与原 binding CAS 追加正式转换，仅补这两根能力及其真实资源。旧 Revision/Snapshot、历史事实和 Session 身份不回填；活动、暂停、Remote、Attempt、未知效果和 native checkpoint 围栏不放宽。用户明确裁剪、专用机器人以及委派工具裁剪保持原任务分工语义，不从显示名称推断扩权。新发布未授权的描述符可以演进元数据，已选 Action、效果、资源和实际授权不因此扩大。
+当前代旧官方 exact-empty 聊天会话在空闲新 Turn/模型准备边界，经 `default_local_os_evolution` 的精确合同证明与原 binding CAS 追加正式转换，仅补这两根能力及其真实资源。旧 Revision/Snapshot、历史事实和 Session 身份不回填；活动、暂停、Remote、Attempt、未知效果和 native checkpoint 围栏不放宽。用户明确裁剪、专用机器人、已注册渠道访客以及委派工具裁剪保持原任务分工语义，不从显示名称推断扩权。新发布未授权的描述符可以演进元数据，已选 Action、效果、资源和实际授权不因此扩大。
 
 指令 scope 与其 AGENTS 分页读取继承待执行调用的真实身份，缓存按 `(identity, native path)` 隔离；普通读取不能借用管理员缓存。每个真实串行效果结算后、下一调用预检前失效指令缓存，最后一次效果后的模型准备也继续刷新。指令变化时保留未执行回执，读取新上下文后重新提出调用，不重放已有结果。普通内部读取可以省略身份字段使用正式缺省；管理员读取必须被冻结 schema 明确接受。旧会话通过现役空闲 ContextOnly 合同转换取得新 schema，精确 native checkpoint 或 frozen binding 不因新参数被私下改写。
 

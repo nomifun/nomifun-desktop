@@ -2,6 +2,10 @@
 
 AgentSession is the sole fact chain for sessions, turns, content, effects and cancellation. User-facing Conversation APIs project the same `AgentSessionId`. Chat and Coding run through one in-process `nomifun.nomi` Runtime.
 
+The [Companion implementation plan and acceptance status](companion.zh.md) covers
+concurrent desktop/Robot roles, multiple Sessions and bounded live shared memory.
+Pending acceptance must not be presented as verified physical-device behavior.
+
 This is the current development entry point. Rust types, the Session event registry and the canonical schema own executable contracts. Superseded designs and implementation instructions remain only in Git history.
 
 ## Facts and derived data
@@ -89,7 +93,7 @@ An accepted input that fails or is cancelled before Runtime startup remains vali
 
 Creation prompts, Cron notices and Execution summaries enter context through formal message events. Text before an explicit Agent transition is data only; it does not carry old grants, handles or completion gates. Context-clear events and the fixed accepted-root cursor bound the window.
 
-User context clearing, companion archiving and per-run Cron resets use one Session-owner
+User context clearing, automatic Companion window-summary resets and per-run Cron resets use one Session-owner
 command. It verifies the exact idle context boundary, joins knowledge write-back work,
 settles and tears down the existing Runtime, then rechecks native leases, recovery,
 effects, execution ownership and the original boundary under the canonical write fence.
@@ -240,8 +244,8 @@ Official seeds grant concrete business Actions rather than deriving authority fr
 | `assistant.general` | Files, processes, version control, artifacts, project memory, research, schedules, browser and computer operations, media, assets, Office, SSH, knowledge and Session management. |
 | `coding.codex` | Files, version control, processes, artifacts, project memory, research, collaboration, SSH, knowledge and Session management; retains headless Runtime requirements without browser or desktop-control dependencies. |
 | `app.developer` | Complete Coding baseline plus ten application-hosting actions; its independent project uses ordinary Sessions and the same application owner. Other presets keep application hosting optional. |
-| `companion.default` | Keeps persona, long-term memory, channels and schedules; recommends robot vision, display, motion and other device controls subject to explicit resource selection and device permissions; adds everyday files, processes, artifacts, research, browser, computer, media, assets, Office, SSH, collaboration and management. |
-| `companion.robot` | Optional lean device interaction with Companion, long-term memory and the four Robot Actions only; reuses the same companion and Session without silently replacing existing choices or adding workspace, Office or collaboration duties. |
+| `companion.default` | Desktop Companion: persona, shared memory, channels, schedules and everyday files, processes, artifacts, research, browser, computer, media, assets, Office, SSH, collaboration and management. Physical Robot tools are omitted by default and can be explicitly selected. |
+| `companion.robot` | Robot defaults: the same Companion identity and memory, independent device Sessions and four explicit Robot Actions; targeted desktop delegation and source-scoped task status, cancellation and ordinary-question answers. Users can explicitly add desktop work, collaboration and management capabilities. |
 | `customer-service.default` | Customer notes, handoff, knowledge retrieval, channel replies and sends, files, processes, artifacts, research and schedules; no default global knowledge-registry, cross-Session or terminal management. |
 | `creative-studio.default` | Media, Canvas, assets, templates, Office, files, processes, artifacts, project memory, research, browser, collaboration and schedules; retains its three creative Package Skills. |
 
@@ -256,10 +260,15 @@ Saved official customizations are not overwritten by release seeds. The owner-sc
 `knowledge.management` uses the existing domain service for list, inspect, managed creation, metadata/URL-source updates and deletion. Partial creation returns the committed base ID and actual document/source status, so retries repair that base. Mounting uses the existing knowledge selector at an idle boundary; a tool cannot rewrite the running Turn's frozen binding. `session.management` queries and creates canonical Sessions, sends input to another idle ordinary local conversation, cancels an exact observed Turn, and manages real PTYs and linked AgentExecutions. Input uses canonical idempotency and binding/context fences. Terminal input/relaunch/stop check owner, row version and PTY epoch; Execution mutations require the active lead/attempt relation and exact versions. Target results and terminal output are data, not borrowed authority or permission to replay unknown effects. Effects settle through the existing canonical chain.
 
 Companion persona and historical memory never advertise retired `nomi_*` tools or unverified full capabilities. Current Runtime tool descriptions and real receipts determine names, inputs, target scope and completion. Authorized catalog search finds deferred tools; their absence from the initial schema display does not prove a missing capability.
+Canonical Runtime persona/instructions come from this admission's exact frozen Revision
+payload. Product persona Context and current facts are assembled separately; old extra
+memory snapshots are not restored as static model instructions.
 
-Robot companion uses the existing explicit Companion product Agent transition, preserving the companion ID,
-Session, model, long-term memory and complete stored history. Its lean runtime policy requires exactly the
-`companion`, `companion.memory` and `robot` capability set, optionally with `agent.tool-discovery`.
+Desktop Companion and Robot are concurrent roles of one Companion identity, with independent
+Agent/model defaults and canonical Sessions. Device reconnects keep the device Session; browser navigation
+does not change its receive route. The lean policy requires `companion`, `companion.memory` and `robot`,
+optionally with discovery, delegate-only collaboration, and only source-scoped execution status,
+cancellation and question-answer management Actions.
 Adding other business capabilities restores ordinary budgets; display names cannot silently narrow an extended Agent.
 The derived model context is bounded to 128 KiB, with at most four complete historical user turns, 64 KiB and
 16 historical messages. Oversized historical turns are omitted whole, retaining tool call/result pairs in kept
@@ -275,6 +284,12 @@ Robot ASR runs as an owned task, with at most one recognition in flight and two 
 The device reader continues handling MCP replies, abort, disconnect and ping. Abort clears unsubmitted audio
 and joins recognition cleanup. Replaced connections and host shutdown cannot submit late transcripts as new
 Companion inputs. Independent recognition scheduling retains the existing final-public-answer speech contract.
+
+The conversation list's `archived` field is a canonical metadata annotation. It preserves
+history, working context, active tasks and ingress routes. It is separate from automatic
+Companion window summaries, their fenced context reset, explicit context clear and deletion.
+Listing and ensure read the current annotation from canonical metadata rather than an old
+navigation-table field; archiving does not redirect incoming device or quick-window input.
 
 The App's compilation surface remains desktop regardless of optional Browser/Computer adapters. Deferring physical availability in the resource ceiling requires an exact pinned bundled public Provider with one member, one resource kind, complete Action operation contracts, and no private implementation, dependencies, Context or Events. Unsupported physical members enter only the current compiled object's non-executable set, never Snapshot or checkpoint data; binding and invocation still reject them. Other Providers, incomplete contracts and direct non-Agent operations retain strict admission.
 
@@ -363,11 +378,16 @@ requires no Agent Browser Module or resource binding. Opening and retrying never
 Authorized managed Agent wrappers borrow the user's real page while enforcing the frozen Snapshot, exact Provider,
 typed resource and BrowserRunGuard. Attached Chrome remains a separate connected resource.
 
-Every Agent Turn locks its Session's managed browser during retained Runtime preparation, including chat without
-Browser tools. Settlement drains native operations while retaining the hardware input gate. Only the exact durable
-Turn terminal permits final release; later cleanup or terminal-write failures leave input locked. User commands and first native
-creation fail closed while canonical running precedes a proven gate. User profiles use owner/Session identity independent
-of grant definitions: Windows uses `browser-v4/agent-sessions/<hash>/`; macOS 14+ uses a separate persistent
+Turn preparation freezes Browser authority without locking the managed browser. The first actual managed browser
+invocation acquires the current Workspace's native input gate and guard for the remainder of that Turn. Tool completion,
+ordinary tool failure, model thinking and unrelated subsequent tools do not release ownership. Settlement drains native
+operations while retaining the hardware input gate; only the exact durable Turn terminal followed by successful finish
+permits final release. Failed settlement, uncertain native cleanup and terminal-write or finish failures retain the gate
+for the original Turn's recovery. User APIs use the actual coordinator gate, without deriving ownership from Session
+running or paused, model prose or configured Browser permissions. Turns that never invoke the managed browser,
+including chat, file work, attached Chrome and background rendering, leave it available to the user.
+User profiles use owner/Session identity independent of grant definitions: Windows uses
+`browser-v4/agent-sessions/<hash>/`; macOS 14+ uses a separate persistent
 WKWebsiteDataStore with a stable derived identifier and does not read former directory profiles. Session deletion includes this browser and its
 profile even when no Agent Browser binding exists; there is no second active Agent authority ledger.
 See the [browser architecture](browser-platform.md).
@@ -423,24 +443,101 @@ Failures, current pauses and rejected requests share one error presentation. Mod
 
 Cron, Companion, Requirements, AutoWork, IDMM and AgentExecution retain their own business configuration and supervision state. Session input, admission, cancellation and completion use canonical Turn receipts.
 
-Companion product Agent selections may use the official Companion template or
-a compatible personal Agent. Compatibility requires the Companion capability
-and required `companion` resource. Resource resolution uses the exact target
+An `auto_group` channel guest enters a dedicated model-only Session through the
+trusted Channel port and repository relationships. A caller-supplied
+extra grants no guest or product authority. The final frozen Snapshot has no
+business capabilities, Context, typed resources, Skills or MCP. Previously broad
+guest Sessions narrow only at idle CAS/effect/native-cleanup boundaries and then
+formally clear old context. Warmup, native recovery and new input verify that same
+actual contract. Approved channels retain their existing Agent/resource selections.
+See the [Companion acceptance status](companion.zh.md) for this integration's validation.
+Group reuse locates the exact Session by its formal creation key; only an explicit
+send repairs a stale receive pointer. Guest receipt replay requires the original
+accepted-admission Snapshot to equal the verified current empty Snapshot, with its
+root after the formal clear. Old broad receipts and old keys across model/contract
+changes are not forwarded; canonical history remains. The Host fixes the reserved
+`channel_guest` input origin, ordinary APIs reject impersonation, and collection
+excludes those inputs from the owner's ambient learning.
+The trusted guest Host request permits one chat-only model step, without continuation
+segments or HistoryPort, and disables UserInput. Provider-invented tool proposals are
+rejected and recorded by the existing exposure guard, without a second corrective
+model call or adaptive ToolHistory LOAD/SEARCH/READ. Approved channels and ordinary
+minimal Agents keep their existing contracts.
+
+The two Companion product roles select the official Companion/Robot templates or
+compatible personal Agents. Compatibility requires the Companion identity and memory
+core and the necessary resources. The templates have different defaults, while the
+workbench exposes the full capability catalog for both. Explicitly selected physical
+and local-work capabilities follow normal authorization and resource contracts without
+role-based clipping during save, creation or application. Resource resolution uses the exact target
 companion and cannot inherit another companion's identity or memory resources.
 The owner-scoped canonical opening fact identifies the Companion product
-Session; its typed binding establishes the exact companion ownership regardless
+Session; typed origin and binding together establish companion, role and device ownership regardless
 of whether the selected Agent is an official template. A regular Agent Session
 that mounts a Companion resource does not become that companion's product
-Session. Desktop, Channel and Robot continue to reference the same current Session.
+Session. Desktop, Channel and Robot may use independent canonical Sessions; viewing
+a Session never changes an ingress receive target.
 
-Voice from a paired robot is ordinary input to that Companion's current Session.
-It requires neither camera permission nor `robot/vision` authority, and does not
-require a selected `robot` resource. Admission verifies the canonical Companion
-identity, device pairing and current connection. If the Session explicitly
-selects a robot resource, it must uniquely match that device and Companion.
-Voice input neither changes the shared Session's frozen resources nor grants
-device control. Tools retain their selected-resource, current-Turn, exact
-connection and device-permission checks.
+Voice from a paired robot enters its dedicated Robot Session. Admission holds the
+current connection fence and verifies the exact canonical Companion, role and
+device. The authenticated host records typed input provenance; ordinary requests
+cannot invent it through an origin string. Camera permission and robot vision are
+independent. Voice input does not alter frozen grants; tools retain resource,
+Turn, connection and device-permission checks.
+
+Directed desktop results first commit a canonical report with the original
+Execution/Step/Attempt/Turn references, then admit an idempotent follow-up Turn at
+the original Robot Session's idle boundary using typed `DirectedDelegationResult`.
+Ordinary question notices reference the original `DecisionRequested` and verified
+presentation. Physical audio captures the unique already-presented question at the
+recording/ASR queue boundary and carries it through recognition and input admission.
+A new question may play while older audio awaits ASR, but that transcript retains
+its original `None` or older question ID and cannot acquire the newer question.
+Replaying an accepted old speech source only acknowledges it without rolling back
+the current question cut. The answer Action reads the accepted root rather than
+model-authored answer parameters. Successor questions, multiple pending questions and
+click-required approvals cannot gain authority through that Action. Completed parent
+Turns use the Store's exact read-only `turn_accepted_input` query, not native recovery
+reads restricted to an active Turn.
+An explicitly failed result Turn produces one idempotent fixed Host notice tied to
+its original report and failed terminal, on the original socket. A cancelled result
+Turn stays stopped without automatic failure playback or another model Turn.
+
+Same-companion facts refresh before subsequent model calls, and bounded recent context
+comes from typed canonical events. Deleting or correcting long-term memory invalidates
+later fact reads and source-traceable sharing/recall. The original Session conversation,
+local summaries and already-sent model requests remain. Use formal context clear to stop
+using that working context, or canonical Session deletion to remove its records.
+
+An ordinary explicitly configured Persona Agent may also refresh bounded facts before
+each model call. Its frozen bundled `companion` BeforeTurn Context must be admitted
+and active, with the frozen `companion.memory/recall` grant and exact same-owner,
+same-companion `companion/read` and `companion_memory/read` resource pair. This does
+not create product Session membership or automatically load sibling conversation text.
+Explicit history recall retains its separate frozen tool/resource authorization and
+verifies the target canonical product sources of that companion; its caller need not
+be a product Session. Automatic
+recent context honors every formal context clear. Explicit history retrieval may
+cross only fully verified Host automatic-window-summary clear facts; explicit user
+clears and unknown old shapes remain hard boundaries.
+
+Installed memory Actions use Wave 1's formal schema, validation and typed DTOs to
+reach the unified Companion service. Wave 4 registers only learn/evolve, without a
+second memory-write entry. Facts and history queries both accept at most
+1024 Unicode characters. The Host derives typed message refs from the current tool's
+canonical human root/steering causation, including formal `mobile_voice` inputs;
+models cannot supply provenance. The Companion Store saves those sources atomically
+with creation, deduplication or CAS correction. Source filters cover both the original
+Session column and typed refs. Existing domain idempotency receipts retain their old
+fingerprints and use `HostedEffectReceipts` to settle the same Effect. Unknown outcomes
+are not replayed, and old receipts without an Effect do not fabricate past execution.
+Memory tools use one `AgentMemoryProjection` for model output and budgeting, omitting
+the two full source-lineage arrays while storage, REST and exports retain them. Default
+recall, queries, and fresh or historical write receipts use that same projection.
+
+Historical Directed dependencies and known-receipt replay use the Store's read-only
+`committed_tool_call_causation` to verify exact typed tool facts on closed Turns. This
+does not widen active/native admission or grant new execution authority.
 
 Existing visual observations are optional context. When the device disables
 vision permission, the host omits that context without reading cached images;
@@ -461,15 +558,15 @@ path; unknown effects and incomplete cleanup still block a successor. Each new
 device Turn currently incurs one local Runtime rebuild, without permitting old
 connection calls or replaying old operations.
 
-Explicit resource selections at the product Agent binding endpoint apply to
-the current Companion Session. A request with `model` also materializes the
-corresponding future default binding. Omitting `model` does not rematerialize
-that binding, while still saving the user's Agent selection and preserving
-the `needs_model` contract. Even when Agent identity is unchanged, the host
+An explicit `conversation_id` and resource selections at the product Agent binding
+endpoint apply to that exact Session of the target role. Saving future defaults also
+requires `update_default=true`; a request without a Session defaults to updating the
+role's future configuration. Only a default update with `model` materializes its future
+binding; omitting `model` preserves the `needs_model` contract. Even when Agent identity is unchanged, the host
 compares resolved resources and uses the idle ContextOnly / CAS transition,
 preserving Session ID, current model and Companion identity. An identical
 selection appends no transition. Failure to apply the current Session does not
-first save its future default configuration.
+first save its future default configuration. Other existing Sessions keep their bindings.
 
 Model and extension derivation may bind execution to a hidden Session-only
 Preset. That cache ID cannot replace the user's original editable Agent choice.

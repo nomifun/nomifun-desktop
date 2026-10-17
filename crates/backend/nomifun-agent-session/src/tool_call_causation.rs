@@ -64,6 +64,82 @@ enum NativeSettlementIdentity {
 }
 
 impl AgentSessionStore {
+    /// Read a committed tool predecessor as historical data, including after
+    /// the Turn closes or a successor starts. This never returns a native
+    /// execution scope and cannot admit or repeat an Effect.
+    pub async fn committed_tool_call_causation(
+        &self,
+        session_id: &AgentSessionId,
+        turn_id: &OperationId,
+        operation_id: &OperationId,
+        capability_module: &CapabilityId,
+        action_id: &ActionId,
+    ) -> Result<CommittedToolCallCausation, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        // Share the exact same root/start/stored-payload validation used by
+        // the public accepted-input reader, inside this one read snapshot.
+        Self::turn_accepted_input_tx(&mut tx, session_id, turn_id).await?;
+        let invalid = || SessionStoreError::InvalidEvent(
+            "committed tool causation differs from its exact Turn".into());
+        let (state, started_id, terminal_id): (String, String, Option<String>) = sqlx::query_as(
+            "SELECT state,started_event_id,terminal_event_id FROM agent_turns WHERE session_id=? AND operation_id=?")
+            .bind(session_id.as_ref()).bind(turn_id.as_ref()).fetch_one(&mut *tx).await?;
+        let started = event_by_event_id_tx(&mut tx, &started_id).await?
+            .map(event_from_row).transpose()?.ok_or_else(invalid)?;
+        let upper = if let Some(terminal_id) = terminal_id {
+            let terminal = event_by_event_id_tx(&mut tx, &terminal_id).await?
+                .map(event_from_row).transpose()?.ok_or_else(invalid)?;
+            let expected = match state.as_str() {
+                "completed" => "turn/completed", "failed" => "turn/failed",
+                "cancelled" | "interrupted" => "turn/cancelled", _ => return Err(invalid()),
+            };
+            if terminal.agent_session_id != *session_id || terminal.kind.0 != expected
+                || terminal.kind_version != 1 || terminal.correlation_id.as_ref() != turn_id.as_ref()
+                || terminal.seq <= started.seq {
+                return Err(invalid());
+            }
+            if !payload_value_for_event_tx(&mut tx, &terminal).await?.is_object() {
+                return Err(invalid());
+            }
+            terminal.seq
+        } else {
+            if !matches!(state.as_str(), "accepted" | "running") { return Err(invalid()); }
+            head_by_id_tx(&mut tx, session_id.as_ref()).await?.last_seq.saturating_add(1)
+        };
+        // SQL selects at most two identities. Both inline and stored JSON are
+        // subsequently resolved by the existing Store integrity/owner reader.
+        let rows = sqlx::query_as::<_, StoredEventRow>(
+            "SELECT e.session_id,e.seq,e.event_id,e.producer_id,e.idempotency_key,e.kind,e.kind_version, \
+             e.correlation_id,e.causation_event_id,e.inline_json,e.payload_id FROM agent_events e \
+             LEFT JOIN agent_payloads p ON p.payload_id=e.payload_id \
+             WHERE e.session_id=? AND e.kind='tool/call-started' AND e.causation_event_id=? \
+              AND e.seq>? AND e.seq<? \
+              AND json_extract(COALESCE(e.inline_json,json_extract(CAST(p.body AS TEXT),'$.value')),'$.operation_id')=? \
+              AND json_extract(COALESCE(e.inline_json,json_extract(CAST(p.body AS TEXT),'$.value')),'$.capability_id')=? \
+              AND json_extract(COALESCE(e.inline_json,json_extract(CAST(p.body AS TEXT),'$.value')),'$.action_id')=? \
+             ORDER BY e.seq LIMIT 2")
+            .bind(session_id.as_ref()).bind(&started_id)
+            .bind(as_i64(started.seq, "started sequence")?).bind(as_i64(upper, "terminal sequence")?)
+            .bind(operation_id.as_ref()).bind(capability_module.as_ref()).bind(action_id.as_ref())
+            .fetch_all(&mut *tx).await?;
+        if rows.len() != 1 { return Err(invalid()); }
+        let tool = event_from_row(rows.into_iter().next().expect("unique tool row"))?;
+        if tool.agent_session_id != *session_id || tool.kind_version != 1
+            || tool.producer_id.as_ref() != "runtime_supervisor" || tool.correlation_id.as_ref().trim().is_empty()
+            || tool.causation_event_id.as_ref().map(EventId::as_ref) != Some(started_id.as_str()) {
+            return Err(invalid());
+        }
+        let payload: NativeToolCallPayload = serde_json::from_value(payload_value_for_event_tx(&mut tx, &tool).await?)?;
+        if payload.operation_id != *operation_id || payload.capability_id != *capability_module
+            || payload.action_id != *action_id || payload.call_id.as_ref().is_empty()
+            || payload.call_id.as_ref().trim() != payload.call_id.as_ref() {
+            return Err(invalid());
+        }
+        let result = CommittedToolCallCausation {event_id:tool.event_id, seq:tool.seq};
+        tx.commit().await?;
+        Ok(result)
+    }
+
     /// The exact unique predecessor of this invocation, including its durable
     /// sequence. It retains the existing non-native Effect causation contract.
     pub async fn tool_call_causation(

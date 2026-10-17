@@ -11,9 +11,10 @@ import { BookOne, Connection, Data, Right, RobotOne, SettingTwo } from '@icon-pa
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
-import type { CompanionId, ConversationId } from '@/common/types/ids';
+import type { CompanionId } from '@/common/types/ids';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
 import { ExecutionProvider } from '@/renderer/pages/conversation/execution/ExecutionContext';
+import ExecutionContentSwitcher from '@/renderer/pages/conversation/execution/ExecutionContentSwitcher';
 import { PreviewProvider } from '@/renderer/pages/conversation/Preview';
 import { browserStorageKey } from '@/common/utils/browserStorageKey';
 import CompanionConversation from '../companion/CompanionConversation';
@@ -21,7 +22,10 @@ import CompanionAppearanceQuickSettings from './CompanionAppearanceQuickSettings
 import CompanionAgentModelQuickSettings from './CompanionAgentModelQuickSettings';
 import CompanionRobotResourceSettings from './CompanionRobotResourceSettings';
 import { useCompanionConversationUpdates } from './useCompanionConversationUpdates';
+import { useCompanionSessions } from './useCompanionSessions';
+import CompanionSessionToolbar from './CompanionSessionToolbar';
 import type { CompanionHandle, WorkspaceTabKey } from './types';
+import { isConversationBindingBlocked } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import styles from './CompanionCohabitView.module.css';
 
 type NomiConversation = Extract<TChatConversation, { type: 'nomi' }>;
@@ -36,8 +40,8 @@ interface Props {
 const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManage, infoPanelCollapsed }) => {
   const { t } = useTranslation();
   const { profile, status } = companion;
-  const [conversationId, setConversationId] = useState<ConversationId | null>(null);
-  const [sessionError, setSessionError] = useState(false);
+  const sessions = useCompanionSessions(companionId, Boolean(profile?.model));
+  const { conversationId } = sessions;
   const [robotCount, setRobotCount] = useState(0);
   const [appearanceSaving, setAppearanceSaving] = useState(false);
   const [agentModelSaving, setAgentModelSaving] = useState(false);
@@ -45,7 +49,6 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
   const quickSettingsSaving = appearanceSaving || agentModelSaving || robotResourceSaving;
   const activeCompanionId = useRef(companionId);
   activeCompanionId.current = companionId;
-  const modelConfigured = Boolean(profile?.model);
   const onAppearanceSavingChange = useCallback((saving: boolean) => {
     if (activeCompanionId.current === companionId) setAppearanceSaving(saving);
   }, [companionId]);
@@ -63,24 +66,6 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
   }, [companionId]);
 
   useEffect(() => {
-    setConversationId(null);
-    setSessionError(false);
-    if (!modelConfigured) return;
-    let cancelled = false;
-    void ipcBridge.companion.ensureCompanionSession
-      .invoke({ companion_id: companionId })
-      .then((session) => {
-        if (!cancelled) setConversationId(session.conversation_id);
-      })
-      .catch(() => {
-        if (!cancelled) setSessionError(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [companionId, modelConfigured]);
-
-  useEffect(() => {
     let cancelled = false;
     void ipcBridge.robot.list.invoke()
       .then((robots) => {
@@ -94,15 +79,24 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
     };
   }, [companionId]);
 
-  const { data: conversation, error: conversationError, isLoading, mutate } = useSWR<NomiConversation | null>(
+  const { data: loadedConversation, error: conversationError, isLoading, mutate } = useSWR<NomiConversation | null>(
     conversationId ? `conversation/${conversationId}` : null,
     async () => {
       const row = await getConversationOrNull(conversationId!);
-      return row?.type === 'nomi' ? row : null;
+      if (!row || row.type !== 'nomi' || row.extra.companion_id !== companionId
+        || !['companion', 'robot'].includes(row.extra.companion_role ?? '')) {
+        throw new Error('Session does not belong to this companion');
+      }
+      return row;
     }
   );
+  const conversation = loadedConversation?.id === conversationId && loadedConversation.extra.companion_id === companionId
+    && ['companion', 'robot'].includes(loadedConversation.extra.companion_role ?? '') ? loadedConversation : undefined;
 
   useCompanionConversationUpdates(conversationId, mutate);
+  const sessionError = sessions.error || (sessions.missing && !conversation) || Boolean(conversationError)
+    || Boolean(loadedConversation && loadedConversation.id === conversationId && !conversation);
+  const role = conversation?.extra.companion_role;
   const refreshConversation = useCallback(() => {
     void mutate().catch(() => {});
   }, [mutate]);
@@ -115,12 +109,15 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
     : 0;
 
   const chat = useMemo(() => {
-    if (!profile?.model) {
+    if (sessions.selectionCleared) return <div className={styles.chatState}>
+      <strong>{t('nomi.cohabit.sessions.chooseOrCreate')}</strong>
+    </div>;
+    if (!conversationId && !profile?.model) {
       return (
         <div className={styles.chatState}>
           <RobotOne theme='outline' size='30' fill='currentColor' />
           <strong>{t('nomi.cohabit.modelRequired', { defaultValue: '先为伙伴配置主对话模型' })}</strong>
-          <span>{t('nomi.cohabit.modelRequiredHint', { defaultValue: '配置后即可在这里延续桌面、IM 与机器人的同一段相处历史。' })}</span>
+          <span>{t('nomi.cohabit.modelRequiredHint', { defaultValue: '配置伙伴默认模型后即可新建桌面会话；机器人使用独立设置。' })}</span>
           <Button type='primary' shape='round' onClick={() => onManage('overview')}>
             {t('nomi.cohabit.configureModel', { defaultValue: '配置模型' })}
           </Button>
@@ -146,16 +143,27 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
         persistNamespace={browserStorageKey('workspace-preview', 'conversation', conversation.id)}
         subscribeGlobalOpen
       >
-        <ExecutionProvider conversation={conversation}>
-          <CompanionConversation conversation={conversation} companion={companion} compact />
+        <ExecutionProvider key={conversation.id} conversation={conversation}>
+          <ExecutionContentSwitcher>
+            <CompanionConversation key={conversation.id} conversation={conversation} companion={companion} compact />
+          </ExecutionContentSwitcher>
         </ExecutionProvider>
       </PreviewProvider>
     );
-  }, [companion, conversation, conversationId, isLoading, onManage, profile?.model, sessionError, t]);
+  }, [companion, conversation, conversationId, isLoading, onManage, profile?.model, sessionError, sessions.selectionCleared, t]);
 
   return (
     <div className={styles.layout} data-info-panel-collapsed={infoPanelCollapsed}>
       <section className={styles.chatColumn}>
+        <CompanionSessionToolbar items={sessions.items} selectedId={conversationId} selectedName={conversation?.name}
+          selectedLoaded={Boolean(conversation)}
+          role={role} activeDesktopId={sessions.activeDesktopId} creating={sessions.creating} routing={sessions.routing}
+          selectedArchived={conversation?.extra.canonical_archived} managing={sessions.managing}
+          clearDisabled={!conversation || isConversationBindingBlocked(conversation)}
+          canCreate={Boolean(profile?.model)} failed={sessions.actionError || sessions.listError}
+          onSelect={sessions.select} onCreate={() => void sessions.create()} onContinue={() => void sessions.continueInWindow()}
+          onRefresh={sessions.refresh} onRename={sessions.rename} onArchive={sessions.setArchived}
+          onDelete={sessions.remove} onClear={sessions.clearContext} />
         <div className={styles.chatBody}>{chat}</div>
       </section>
 
@@ -173,12 +181,19 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
         </section>
 
         <section className={styles.infoGroup}>
-          <div className={styles.infoTitle}><RobotOne size='16' />{t('nomi.cohabit.mind', { defaultValue: '心智配置' })}</div>
-          <CompanionAgentModelQuickSettings key={companionId} companion={companion} conversation={conversation} disabled={quickSettingsSaving || Boolean(conversationError)} onChanged={refreshConversation} onSavingChange={onAgentModelSavingChange} />
+          <div className={styles.infoTitle}><RobotOne size='16' />{t('nomi.cohabit.sessions.companion')}</div>
+          <CompanionAgentModelQuickSettings key={`${companionId}/companion`} companion={companion} role='companion'
+            conversation={role === 'companion' ? conversation : undefined} disabled={quickSettingsSaving || Boolean(conversationError)} onChanged={refreshConversation} onSavingChange={onAgentModelSavingChange} />
           {conversationError && <span role='alert'>
             {t('agentSettings.productBinding.loadFailed')}
             <button type='button' onClick={refreshConversation}>{t('agentSettings.actions.retry')}</button>
           </span>}
+        </section>
+
+        <section className={styles.infoGroup}>
+          <div className={styles.infoTitle}><RobotOne size='16' />{t('nomi.cohabit.sessions.robot')}</div>
+          <CompanionAgentModelQuickSettings key={`${companionId}/robot`} companion={companion} role='robot'
+            conversation={role === 'robot' ? conversation : undefined} disabled={quickSettingsSaving || Boolean(conversationError)} onChanged={refreshConversation} onSavingChange={onAgentModelSavingChange} />
         </section>
 
         <section className={styles.infoGroup}>

@@ -1199,8 +1199,31 @@
           ]
         },
         "replay_rule": "rehydrate_runtime_input"
+      },
+      {
+        "kind": "robot/question-playback-accepted",
+        "version": 1,
+        "persistence": "persistent",
+        "payload_schema": "events/robot-question-playback-accepted/v1",
+        "producer": {
+          "allowed": [
+            "session_api"
+          ]
+        },
+        "predecessor": {
+          "mode": "any_of",
+          "kinds": [
+            "message/assistant-projected"
+          ]
+        },
+        "correlation": "message",
+        "idempotency": "producer_scoped_required",
+        "projector": {
+          "required": false
+        },
+        "replay_rule": "no_effect"
       }
     ]
   },
-  "payload_digest": "a903b61dedcf9f76082d3250aeff265f1ce69e4238c8057ad33ca0eace15d050"
+  "payload_digest": "3f52a59e3cdcc5c4952e490ba7c1c3f00e1775299fe77418bd4492966a7017c2"
 }

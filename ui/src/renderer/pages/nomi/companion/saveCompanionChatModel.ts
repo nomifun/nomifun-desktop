@@ -24,6 +24,7 @@ export async function saveCompanionChatModel({
   next,
   patchCompanion,
   onSessionChanged,
+  role = 'companion',
 }: {
   conversation?: Pick<TChatConversation, 'id'> | null;
   sessionModel?: CompanionChatModel | null;
@@ -31,6 +32,7 @@ export async function saveCompanionChatModel({
   next: CompanionChatModel;
   patchCompanion: CompanionHandle['patchCompanion'];
   onSessionChanged?: (next: CompanionChatModel) => void;
+  role?: 'companion' | 'robot';
 }): Promise<CompanionChatModelSaveResult> {
   if (conversation && (sessionModel?.provider_id !== next.provider_id || sessionModel.model !== next.model)) {
     const switched = await ipcBridge.conversation.switchModel.invoke({
@@ -44,7 +46,7 @@ export async function saveCompanionChatModel({
 
   if (profileModel?.provider_id === next.provider_id && profileModel.model === next.model) return { status: 'saved' };
   try {
-    const saved = await patchCompanion({ model: next }, { optimistic: false });
+    const saved = await patchCompanion(role === 'robot' ? { robot: { model: next } } : { model: next }, { optimistic: false });
     if (!saved) throw new Error('Companion model default was not saved');
     return { status: 'saved' };
   } catch (error) {

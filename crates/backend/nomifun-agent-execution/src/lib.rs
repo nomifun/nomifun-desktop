@@ -33,7 +33,8 @@ pub use automation::{
     admit_frozen_session_workspace, resolve_frozen_automation_workspace,
     resolve_frozen_session_workspace,
 };
-pub use delivery::{AgentExecutionDelivery, AgentExecutionTurnOutput};
+pub use delivery::{AgentExecutionDelivery, AgentExecutionTurnOutput, DirectedDelegationSource,
+    DirectedDelegationAttemptReport, DirectedDelegationReport, DirectedDelegationInput};
 mod user_input;
 pub use user_input::validate_user_input_handoff_policy;
 pub use engine::AgentExecutionEngine;

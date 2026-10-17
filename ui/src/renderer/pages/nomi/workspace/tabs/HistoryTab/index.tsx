@@ -7,6 +7,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Spin } from '@arco-design/web-react';
+import { useSearchParams } from 'react-router-dom';
+import useSWR from 'swr';
+import { ipcBridge } from '@/common';
+import NomiSelect from '@/renderer/components/base/NomiSelect';
 import { NomiSettingSection } from '@/renderer/components/base/NomiSettingLayout';
 import SegmentedTabs from '@/renderer/components/base/SegmentedTabs';
 import type { WorkspaceTabProps } from '../../types';
@@ -22,7 +26,7 @@ type Mode = 'byDay' | 'onThisDay';
 const isMode = (value: string): value is Mode => value === 'byDay' || value === 'onThisDay';
 
 /**
- * 聊天历史 — this companion's single long-lived conversation, read by day.
+ * 聊天历史 — the selected canonical conversation, read by day.
  *
  * Read-only: the session is resolved, never minted. The day index comes from the
  * server (`/history/days`) and is COMPLETE, so the rail reaches back to the first
@@ -31,7 +35,10 @@ const isMode = (value: string): value is Mode => value === 'byDay' || value === 
  */
 const HistoryTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAttentionChange }) => {
   const { t } = useTranslation();
-  const history = useHistoryDays(companionId);
+  const [params, setParams] = useSearchParams();
+  const history = useHistoryDays(companionId, params.get('session'));
+  const { data: sessions } = useSWR(['companion-sessions', companionId],
+    () => ipcBridge.companion.listCompanionSessions.invoke({ companion_id: companionId }), { shouldRetryOnError: false });
   const [mode, setMode] = useState<Mode>('byDay');
   const [selectedDay, setSelectedDay] = useState<DayKey | null>(null);
   const selected = history.days.find((entry) => entry.day === selectedDay) ?? null;
@@ -64,7 +71,7 @@ const HistoryTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtt
   );
 
   const body = (() => {
-    if (mode === 'onThisDay') return <OnThisDayPanel companionId={companionId} />;
+    if (mode === 'onThisDay') return <OnThisDayPanel companionId={companionId} conversationId={history.conversationId} />;
 
     if (history.loading) {
       return (
@@ -127,6 +134,13 @@ const HistoryTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtt
 
   return (
     <div className='flex flex-col gap-16px py-8px'>
+      <NomiSelect size='small' className='max-w-340px' aria-label={t('nomi.cohabit.sessions.label')}
+        value={history.conversationId ?? undefined} placeholder={t('nomi.cohabit.sessions.label')}
+        onChange={(id: string) => setParams(previous => { const next = new URLSearchParams(previous); next.set('session', id); return next; }, { replace: true })}>
+        {sessions?.items.map(session => <NomiSelect.Option key={session.conversation_id} value={session.conversation_id}>
+          {t(`nomi.cohabit.sessions.${session.role}`)} · {session.title || t('nomi.cohabit.sessions.untitled')}
+        </NomiSelect.Option>)}
+      </NomiSelect>
       <NomiSettingSection
         title={t('nomi.history.sectionTitle', { defaultValue: '聊天历史' })}
         description={t('nomi.history.sectionDesc', {

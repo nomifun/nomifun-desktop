@@ -111,7 +111,17 @@ async fn put_config(
     Json(config): Json<IdmmConfig>,
 ) -> Result<Json<ApiResponse<IdmmState>>, AppError> {
     state.authorize(&owner, &session_id).await?;
+    let enabling = config.mode != nomifun_api_types::IdmmMode::Off;
+    if enabling {
+        state.session_owner.ensure_channel_guest_idmm_allowed(&AgentSessionId::from(session_id.clone())).await?;
+    }
     let next = state.service.set_config(&session_id, config).await?;
+    if enabling && let Err(error) = state.session_owner.ensure_channel_guest_idmm_allowed(&AgentSessionId::from(session_id.clone())).await {
+        if state.session_owner.is_dedicated_channel_guest(owner.id.as_str(),&AgentSessionId::from(session_id.clone())).await? {
+            state.service.remove(&session_id).await?;
+        }
+        return Err(error);
+    }
     if let Err(error) = state.authorize(&owner, &session_id).await {
         let _ = state.service.remove(&session_id).await;
         return Err(error);
@@ -125,6 +135,7 @@ async fn evaluate_now(
     Path(session_id): Path<String>,
 ) -> Result<Json<ApiResponse<IdmmState>>, AppError> {
     state.authorize(&owner, &session_id).await?;
+    state.session_owner.ensure_channel_guest_idmm_allowed(&AgentSessionId::from(session_id.clone())).await?;
     Ok(Json(ApiResponse::ok(
         state.service.evaluate_now(&session_id).await?,
     )))
@@ -182,6 +193,10 @@ impl IdmmSessionPort for CanonicalIdmmSessionPort {
             principal_id: owner_id.to_owned(),
         };
         let owner = self.owner()?;
+        // A channel relation authorizes a read veto, not deletion of a possibly
+        // shared owner's configuration. Only proven dedicated guest adoption
+        // removes the override, outside the Session write fence.
+        owner.ensure_channel_guest_idmm_allowed(&session_id_typed).await?;
         let session = match owner
             .canonical()
             .store()

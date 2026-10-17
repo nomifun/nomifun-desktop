@@ -679,17 +679,6 @@
           },
           {
             "capability": {
-              "id": "robot"
-            },
-            "action_allowlist": [
-              "robot/device",
-              "robot/display",
-              "robot/motion",
-              "robot/vision"
-            ]
-          },
-          {
-            "capability": {
               "id": "automation.schedule"
             },
             "action_allowlist": [
@@ -879,7 +868,6 @@
           "knowledge_base",
           "process_session",
           "project_memory",
-          "robot",
           "scheduler",
           "ssh_host",
           "workspace"
@@ -888,6 +876,14 @@
       },
       "companion.robot": {
         "enabled_capabilities": [
+          {
+            "capability": {
+              "id": "agent.collaboration"
+            },
+            "action_allowlist": [
+              "agent/delegate"
+            ]
+          },
           {
             "capability": {
               "id": "companion"
@@ -915,6 +911,16 @@
               "robot/display",
               "robot/motion",
               "robot/vision"
+            ]
+          },
+          {
+            "capability": {
+              "id": "session.management"
+            },
+            "action_allowlist": [
+              "session.management/execution_answer_decision",
+              "session.management/execution_cancel",
+              "session.management/execution_status"
             ]
           }
         ],
@@ -1413,7 +1419,6 @@
           "knowledge.management",
           "office",
           "project.memory",
-          "robot",
           "session.management",
           "ssh",
           "web.research",
@@ -1432,7 +1437,6 @@
           "knowledge_base",
           "process_session",
           "project_memory",
-          "robot",
           "scheduler",
           "ssh_host",
           "workspace"
@@ -1445,9 +1449,11 @@
           "persona"
         ],
         "required_capability_ids": [
+          "agent.collaboration",
           "companion",
           "companion.memory",
-          "robot"
+          "robot",
+          "session.management"
         ],
         "required_runtime_features": [],
         "required_resource_kinds": [
@@ -1539,5 +1545,5 @@
       "research.web"
     ]
   },
-  "payload_digest": "ff0707bd49e655927fddaaa4431aad90315a1dd31000f95cf1550879aef48820"
+  "payload_digest": "1822ab3ffa286a20ef4f8c3a067c7c7cce5f4ab5b8fb3c372e0f774642edd0d6"
 }

@@ -57,6 +57,7 @@ use crate::automation::{
 };
 use crate::conversation_effect::AttemptConversationEffects;
 use crate::domain_mapper;
+use crate::delivery::DirectedDelegationSource;
 use crate::event_publisher::{
     AgentExecutionEventPublisher, LeadThinkingKind, LeadThinkingPhase,
 };
@@ -135,6 +136,10 @@ enum InitialPlanningCommand {
         supplemental_context: Option<serde_json::Value>,
     },
     Explicit { plan: PlannedExecution },
+    Directed {
+        source: DirectedDelegationSource,
+        plan: PlannedExecution,
+    },
     Automation {
         source: AutomationExecutionSource,
         plan: PlannedExecution,
@@ -147,11 +152,30 @@ pub(crate) fn is_automation_initial_plan(input: &str) -> Result<bool, AppError> 
     })?;
     match command.get("mode").and_then(serde_json::Value::as_str) {
         Some("automation") => Ok(true),
-        Some("automatic" | "explicit") => Ok(false),
+        Some("automatic" | "explicit" | "directed") => Ok(false),
         _ => Err(AppError::Internal(
             "persisted initial planning input has an unknown mode".to_owned(),
         )),
     }
+}
+
+pub(crate) fn directed_delegation_source(input: &str) -> Result<Option<DirectedDelegationSource>, AppError> {
+    let value: serde_json::Value = serde_json::from_str(input)
+        .map_err(|error| AppError::Internal(format!("invalid persisted planning input: {error}")))?;
+    if value.get("mode").and_then(serde_json::Value::as_str) != Some("directed") { return Ok(None); }
+    let command: InitialPlanningCommand = serde_json::from_value(value)
+        .map_err(|error| AppError::Internal(format!("invalid directed planning input: {error}")))?;
+    Ok(match command { InitialPlanningCommand::Directed { source, .. } => Some(source), _ => None })
+}
+
+fn directed_target_model(owner_id: &str, target: &AgentResolvedSnapshot) -> Result<nomifun_api_types::ExecutionModelRef, AppError> {
+    let binding = target.canonical_binding.as_ref().ok_or_else(||
+        AppError::Conflict("directed target requires a saved canonical Agent binding".into()))?;
+    if binding.typed_resource_bindings.iter().any(|resource| resource.owner_id != owner_id) {
+        return Err(AppError::Forbidden("directed desktop target has a foreign resource".into()));
+    }
+    target.resolved_model.clone().ok_or_else(||
+        AppError::Conflict("directed target has no frozen model".into()))
 }
 
 pub(crate) struct AgentExecutionEngineDeps {
@@ -515,6 +539,21 @@ impl AgentExecutionEngine {
         supplemental_context: Option<serde_json::Value>,
         automation_source: Option<AutomationExecutionSource>,
     ) -> Result<AgentExecution, AppError> {
+        self.persist_execution_with_source(owner_id, actor, request, participants,
+            supplemental_context, automation_source, None).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn persist_execution_with_source(
+        &self,
+        owner_id: &str,
+        actor: &AgentExecutionActor,
+        request: CreateAgentExecutionRequest,
+        participants: Vec<NewAgentExecutionParticipant>,
+        supplemental_context: Option<serde_json::Value>,
+        automation_source: Option<AutomationExecutionSource>,
+        directed_source: Option<DirectedDelegationSource>,
+    ) -> Result<AgentExecution, AppError> {
         if let Some(conversation_id) = request.lead_conversation_id.as_deref() {
             canonical_id::<ConversationId>("lead_conversation_id", conversation_id)?;
         }
@@ -530,27 +569,36 @@ impl AgentExecutionEngine {
                 "explicit execution steps must not be empty".to_owned(),
             ));
         }
-        let initial_plan = match (request.steps, automation_source) {
-            (Some(steps), Some(source)) => InitialPlanningCommand::Automation {
+        if directed_source.is_some() && automation_source.is_some() {
+            return Err(AppError::Internal("directed and automation sources cannot share an execution".into()));
+        }
+        let initial_plan = match (request.steps, automation_source, directed_source) {
+            (Some(steps), Some(source), None) => InitialPlanningCommand::Automation {
                 source,
                 plan: PlannedExecution { steps },
             },
-            (Some(steps), None) => InitialPlanningCommand::Explicit {
+            (Some(steps), None, Some(source)) => InitialPlanningCommand::Directed {
+                source,
                 plan: PlannedExecution { steps },
             },
-            (None, Some(_)) => {
+            (Some(steps), None, None) => InitialPlanningCommand::Explicit {
+                plan: PlannedExecution { steps },
+            },
+            (None, Some(_), _) | (None, _, Some(_)) => {
                 return Err(AppError::Internal(
                     "automation execution requires one explicit durable plan".to_owned(),
                 ));
             }
-            (None, None) => InitialPlanningCommand::Automatic {
+            (None, None, None) => InitialPlanningCommand::Automatic {
                 supplemental_context,
             },
+            (Some(_), Some(_), Some(_)) => unreachable!("sources checked above"),
         };
         // Do not create an aggregate that can never leave Planning. The
         // original declarative plan remains the persisted recovery input;
         // generated step IDs are intentionally materialized only at commit.
         if let InitialPlanningCommand::Explicit { plan }
+        | InitialPlanningCommand::Directed { plan, .. }
         | InitialPlanningCommand::Automation { plan, .. } = &initial_plan
         {
             let resolved = participants_from_new("preflight", 0, &participants)?;
@@ -2762,6 +2810,7 @@ impl AgentExecutionEngine {
             })?;
             let plan = match &command {
                 InitialPlanningCommand::Explicit { plan }
+                | InitialPlanningCommand::Directed { plan, .. }
                 | InitialPlanningCommand::Automation { plan, .. } => plan.clone(),
                 InitialPlanningCommand::Automatic {
                     supplemental_context,
@@ -3070,6 +3119,9 @@ impl AgentExecutionEngine {
     /// Product `agent.collaboration` boundary. A calling Attempt appends work
     /// to its exact aggregate; an ordinary AgentSession creates one aggregate
     /// whose lead keeps the frozen Session Snapshot and exact resolved model.
+    ///
+    /// A directed product delegation uses `delegate_to_frozen_agent` instead:
+    /// the target owns its permissions and does not inherit the caller grant.
     pub async fn collaborate_from_session(
         &self,
         owner_id: &str,
@@ -3086,6 +3138,55 @@ impl AgentExecutionEngine {
             single_step.then_some(1),
         )
         .await
+    }
+
+    /// Delegate one product task to an already owner-resolved immutable Agent.
+    /// The product Host resolves the permitted role; no public/model API can
+    /// supply this Snapshot or use it to widen the calling Session's grants.
+    /// A single explicit Step avoids an extra planner/model round trip.
+    pub async fn delegate_to_frozen_agent(
+        &self,
+        owner_id: &str,
+        source: DirectedDelegationSource,
+        target: AgentResolvedSnapshot,
+        goal: String,
+    ) -> Result<AgentExecution, AppError> {
+        canonical_id::<ConversationId>("source.agent_session_id", &source.agent_session_id)?;
+        for (name, value) in [("turn", &source.turn_operation_id), ("tool", &source.tool_operation_id), ("effect", &source.effect_id)] {
+            if value.is_empty() || value.len() > 1024 {
+                return Err(AppError::BadRequest(format!("directed source {name} identity is invalid")));
+            }
+        }
+        let goal = non_empty("goal", goal)?;
+        // This command cannot turn an Attempt into another product controller.
+        let links = self.repository.resolve_conversation_link(owner_id, &source.agent_session_id).await?;
+        if links.iter().any(|link| matches!(link.relation.as_str(), "attempt" | "automation")) {
+            return Err(AppError::Forbidden("an execution Attempt cannot direct another product Agent".into()));
+        }
+        self.session.get(owner_id, &source.agent_session_id).await?;
+        let model = directed_target_model(owner_id, &target)?;
+        let model_pool = ExecutionModelPool::Single { model: model.clone() };
+        let mut participants = self.resolver.resolve(&model_pool, Some(&model)).await?;
+        ParticipantResolver::prepend_frozen_snapshot(&mut participants, &target, Some(&model))?;
+        let workspace = collaboration_workspace(owner_id, &source.agent_session_id, &target, &self.managed_workspace_root)?;
+        let mut step = collaboration_step(&goal);
+        step.title = "桌面伙伴任务".into();
+        step.role = Some("desktop_companion".into());
+        step.assignment_rationale = Some("Exact product-selected desktop Agent snapshot".into());
+        let actor = AgentExecutionActor::agent(&source.agent_session_id, None);
+        let source_session = source.agent_session_id.clone();
+        self.persist_execution_with_source(owner_id, &actor, CreateAgentExecutionRequest {
+            goal,
+            work_dir: workspace,
+            model_pool,
+            delegation_policy: nomifun_common::DelegationPolicy::Disabled,
+            adaptation_policy: nomifun_common::AdaptationPolicy::Adaptive,
+            decision_policy: DecisionPolicy::AskUser,
+            max_parallel: Some(1),
+            lead_conversation_id: Some(source_session),
+            lead_model: Some(model),
+            steps: Some(vec![step]),
+        }, participants, None, None, Some(source)).await
     }
 
     async fn collaborate_with_plan_from_session(
@@ -4476,6 +4577,7 @@ mod tests {
         AgentExecutionEngine, AutomationExecutionSource, InitialPlanningCommand,
         attempt_delegation_operation_id, automation_cancellation_replay_safe,
         collaboration_workspace, explicit_cancel_payload, is_automation_cancel_cas_conflict,
+        directed_delegation_source, directed_target_model,
         is_automation_outcome_unknown_error, reject_automation_external_command,
         reject_automation_manual_recovery_command, runtime_model_pair,
         validate_automation_source, validate_max_parallel,
@@ -4495,6 +4597,52 @@ mod tests {
 
     const PROVIDER_A: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const PROVIDER_OVERRIDE: &str = "0190f5fe-7c00-7a00-8000-000000000002";
+
+    #[test]
+    fn directed_restart_input_retains_the_exact_source_and_skips_automatic_planning() {
+        let raw = serde_json::json!({
+            "mode":"directed",
+            "source":{"agent_session_id":"source-session","turn_operation_id":"original-turn",
+                "tool_operation_id":"original-tool","effect_id":"original-effect"},
+            "plan":{"steps":[{"title":"Desktop task","spec":"write the requested file"}]}
+        });
+        let command: InitialPlanningCommand = serde_json::from_value(raw).unwrap();
+        let encoded = serde_json::to_string(&command).unwrap();
+        let source = directed_delegation_source(&encoded).unwrap().unwrap();
+        assert_eq!(source.turn_operation_id, "original-turn");
+        assert_eq!(source.tool_operation_id, "original-tool");
+        assert_eq!(source.effect_id, "original-effect");
+        assert!(!super::is_automation_initial_plan(&encoded).unwrap());
+        assert!(matches!(command, InitialPlanningCommand::Directed { ref plan, .. }
+            if plan.steps.len() == 1 && plan.steps[0].spec == "write the requested file"));
+        assert!(directed_delegation_source(r#"{"mode":"explicit"}"#).unwrap().is_none());
+    }
+
+    #[test]
+    fn directed_target_requires_saved_owner_resources_and_uses_its_own_model() {
+        let preset = nomifun_common::generate_id();
+        let mut target: AgentResolvedSnapshot = serde_json::from_value(serde_json::json!({
+            "preset_id":preset,"preset_revision":1,"preset_name":"Desktop companion",
+            "canonical_binding":{
+                "preset_revision_ref":{"preset_id":preset,"revision":1,"revision_digest":"a".repeat(64)},
+                "resolved_snapshot_ref":{"snapshot_id":nomifun_common::generate_id(),"snapshot_digest":"b".repeat(64)},
+                "typed_resource_bindings":[{"binding_id":"computer","resource_kind":"computer",
+                    "resource_id":"local-computer","owner_id":"owner","operations":["observe","input"]}],
+                "binding_version":1
+            },
+            "resolved_model":{"provider_id":PROVIDER_A,"model":"desktop-model"},
+            "enabled_capabilities":["computer"]
+        })).unwrap();
+        let model = directed_target_model("owner", &target).unwrap();
+        assert_eq!(model.model, "desktop-model");
+        assert_eq!(target.enabled_capabilities, vec!["computer"]);
+        assert!(directed_target_model("another-owner", &target).is_err());
+        target.canonical_binding.as_mut().unwrap().typed_resource_bindings[0].resource_kind = "robot".into();
+        assert_eq!(directed_target_model("owner", &target).unwrap().model, "desktop-model");
+        assert!(directed_target_model("another-owner", &target).is_err());
+        target.canonical_binding = None;
+        assert!(directed_target_model("owner", &target).is_err());
+    }
 
     #[test]
     fn initial_planning_command_round_trips_automatic_and_complete_explicit_input() {

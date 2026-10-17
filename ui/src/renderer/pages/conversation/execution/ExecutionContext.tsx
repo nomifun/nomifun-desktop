@@ -38,6 +38,11 @@ export const ExecutionProvider: React.FC<{
 
   useEffect(() => {
     setProjectedPayload(null);
+  }, [conversation.id]);
+
+  // A task opened from older history owns its exact execution identity. A new
+  // latest execution may refresh the canvas without closing that transcript.
+  useEffect(() => {
     setCanvasOpen(Boolean(executionId));
   }, [executionId]);
 

@@ -4,6 +4,55 @@
 //! this DTO. Agent Execution consumes only this boundary and never owns or
 //! constructs a second conversation session.
 
+use serde::{Deserialize, Serialize};
+
+/// Host-authored provenance for one product-directed delegation. These are
+/// references to the original canonical facts, never another task ledger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectedDelegationSource {
+    pub agent_session_id: String,
+    pub turn_operation_id: String,
+    pub tool_operation_id: String,
+    pub effect_id: String,
+}
+
+/// Exact settled Attempt references carried with a directed execution report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectedDelegationAttemptReport {
+    pub step_id: String,
+    pub attempt_id: String,
+    pub agent_session_id: String,
+    pub turn_operation_id: String,
+    pub terminal_event_id: String,
+    pub result_ok: Option<bool>,
+    pub output_integrity_ok: bool,
+    pub output_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectedDelegationReport {
+    pub source: DirectedDelegationSource,
+    pub execution_id: String,
+    pub execution_event_sequence: i64,
+    pub status: String,
+    pub attempts: Vec<DirectedDelegationAttemptReport>,
+}
+
+/// An existing DecisionRequested event is the durable input-notice outbox.
+/// Question text and presentation versions are read from that exact owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectedDelegationInput {
+    pub source: DirectedDelegationSource,
+    pub execution_id: String,
+    pub request_event_sequence: i64,
+    pub step_id: String,
+    pub attempt_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentExecutionDelivery {
     pub message_id: String,

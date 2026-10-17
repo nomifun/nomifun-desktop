@@ -20,7 +20,7 @@ export function useCompanionConversationUpdates(conversationId: ConversationId |
     };
     const unsubscribes = [
       ipcBridge.conversation.listChanged.on((event) => {
-        if (event.conversation_id === conversationId && event.action !== 'deleted') update();
+        if (event.conversation_id === conversationId) update();
       }),
       ipcBridge.agentPlatform.sessions.onAgentChanged.on((event) => {
         if (String(event.agent_session_id) === String(conversationId)) update();

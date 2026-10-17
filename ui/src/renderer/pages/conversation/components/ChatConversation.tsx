@@ -48,42 +48,13 @@ import {
   reasoningEffortsForProtocol,
   type SessionReasoningEffort,
 } from '@/common/types/reasoningEffort';
+import { conversationDestination } from '@/renderer/utils/routes/conversationDestination';
 
 type NomiConversation = Extract<TChatConversation, { type: 'nomi' }>;
 
-const CompanionConversationRedirect: React.FC<{ conversationId: NomiConversation['id'] }> = ({ conversationId }) => {
-  const [target, setTarget] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    void ipcBridge.companion.listCompanions
-      .invoke()
-      .then(async (companions) => {
-        const sessions = await Promise.all(
-          companions.map(async (companion) => ({
-            companionId: companion.companion_id,
-            session: await ipcBridge.companion.getCompanionSession
-              .invoke({ companion_id: companion.companion_id })
-              .catch(() => ({ conversation_id: null })),
-          }))
-        );
-        const owner = sessions.find((item) => item.session.conversation_id === conversationId);
-        if (!cancelled) {
-          setTarget(owner
-            ? `/nomi?companion=${encodeURIComponent(owner.companionId)}&mode=cohabit`
-            : '/nomi?mode=cohabit');
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setTarget('/nomi?mode=cohabit');
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [conversationId]);
-
-  return target ? <Navigate replace to={target} /> : <div className='size-full bg-1' />;
-};
+const CompanionConversationRedirect: React.FC<{ conversation: NomiConversation }> = ({ conversation }) => (
+  <Navigate replace to={conversationDestination(conversation)} />
+);
 
 const NomiConversationLayout: React.FC<{
   conversation: NomiConversation;
@@ -438,16 +409,9 @@ const ChatConversation: React.FC<{
   }
 
   if (conversation && conversation.type === 'nomi') {
-    // Use the shared shell and composer with companion-owned configuration
-    // callbacks; model/Agent edits must update the companion across all inputs.
-    const isCompanionConversation =
-      conversation.extra?.companion_session ||
-      Boolean(conversation.extra?.companion_id) ||
-      conversation.agent_snapshot?.preset_name === 'companion.default' ||
-      conversation.agent_snapshot?.preset_name === 'companion.robot' ||
-      conversation.agent_snapshot?.enabled_capabilities.includes('companion') === true;
-    if (isCompanionConversation) {
-      return <CompanionConversationRedirect conversationId={conversation.id} />;
+    // Product ownership comes from the canonical opening projected by the host.
+    if (conversation.extra?.companion_id) {
+      return <CompanionConversationRedirect conversation={conversation} />;
     }
     return (
       <ExecutionProvider conversation={conversation}>

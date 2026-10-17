@@ -220,7 +220,7 @@ test.each(['metaKey', 'ctrlKey'] as const)('native address shortcut focuses and 
   expect(screen.commands).toEqual([]);
 });
 
-test('native shortcut rejects other AgentSessions, stale documents and events received after Agent starts', async () => {
+test('native shortcut rejects other AgentSessions, stale documents and events received while the browser is Agent-owned', async () => {
   const screen = fixture(); await screen.ready();
   await act(async () => {
     screen.shortcut({agent_session_id:'another',target,expected_navigation_sequence:1,action:'reload'});
@@ -233,6 +233,51 @@ test('native shortcut rejects other AgentSessions, stale documents and events re
   expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(true);
   await act(async () => screen.shortcut({agent_session_id:'session-1',target,expected_navigation_sequence:1,action:'close_tab'}));
   expect(screen.commands).toEqual([]);
+});
+
+test.each(['button', 'native shortcut'] as const)('tab close through %s stays locked after tool completion and settlement until the Turn finishes', async source => {
+  const occupied: BrowserSnapshot = { ...initial, run: { ...initial.run, revision: 2, input_state: 'agent_running' } };
+  const toolFinished: BrowserSnapshot = { ...occupied, runtime: { ...initial.runtime!, revision: 2 } };
+  const settled: BrowserSnapshot = { ...toolFinished, run: { ...occupied.run, revision: 3 } };
+  // Only the host's exact durable Turn terminal and successful finish produce user_ready.
+  const released: BrowserSnapshot = { ...toolFinished, run: { ...initial.run, revision: 4 } };
+  const commands: BrowserCommand[] = [];
+  const screen = fixture({
+    async ensure() { return occupied; },
+    async command(_id, command) {
+      commands.push(command);
+      return { ...released, runtime: { ...released.runtime!, revision: 3, tabs: [], active_tab_id: null } };
+    },
+  });
+  await screen.ready();
+  const close = screen.getByRole('button', { name: words.closePage.replace('{{title}}', 'Fixture') }) as HTMLButtonElement;
+  const requestClose = async () => act(async () => {
+    if (source === 'button') fireEvent.click(close);
+    else screen.shortcut({ agent_session_id: 'session-1', target, expected_navigation_sequence: 1, action: 'close_tab' });
+  });
+  expect(close.disabled).toBe(true);
+  await requestClose();
+  expect(commands).toEqual([]);
+
+  // A finished browser operation may be followed by thinking or other tools in the same Turn.
+  for (const snapshot of [toolFinished, settled]) {
+    await act(async () => screen.emit({ kind: 'snapshot', snapshot }));
+    expect(close.disabled).toBe(true);
+    expect(screen.getByText(words.stopHint)).toBeTruthy();
+    await requestClose();
+    expect(commands).toEqual([]);
+  }
+
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: released }));
+  expect(close.disabled).toBe(false);
+  expect(commands).toEqual([]);
+  expect(screen.queryByText(words.stopHint)).toBeNull();
+  // A delayed ownership snapshot cannot lock the released browser again.
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: settled }));
+  expect(close.disabled).toBe(false);
+  await requestClose();
+  expect(commands).toEqual([{ command: 'close', target }]);
+  await waitFor(() => expect(screen.queryAllByRole('tab')).toHaveLength(0));
 });
 
 test('a delayed native reload shortcut cannot retarget a newer provisional attempt in the same document', async () => {
@@ -481,7 +526,7 @@ test('external handoff failure is nonfatal and has no automatic retry', async ()
   expect(screen.queryByText(words.unavailable)).toBeNull();
   expect(calls).toBe(1);
 });
-test('an open menu cannot hand off a page after the Agent starts', async () => {
+test('an open menu cannot hand off a page after the Agent acquires the browser', async () => {
   const screen = fixture(); await screen.ready();
   fireEvent.click(screen.getByRole('button', { name: words.menu }));
   await screen.findByText(words.openExternal);
@@ -503,7 +548,7 @@ test('download menu shows plain text progress and cancels using the current docu
   await waitFor(() => expect(screen.commands).toEqual([{ command: 'cancel_download', target: { ...target, document_generation: 5 }, download_id: 'download-1' }]));
 });
 
-test('an open download menu loses input authority when the Agent starts', async () => {
+test('an open download menu loses input authority when the Agent acquires the browser', async () => {
   const screen = fixture({ async ensure() { return downloadSnapshot; } }); await screen.ready();
   fireEvent.click(screen.getByRole('button', { name: words.menu }));
   await screen.findByRole('button', { name: /^Cancel download:/ });
@@ -764,7 +809,7 @@ test('confirmed site data clearing waits for native acknowledgement before showi
   expect(screen.queryByRole('tab',{name:'Fixture'})).toBeNull();
 });
 
-test('an Agent starting while clear confirmation is open prevents submission', async () => {
+test('Agent browser ownership acquired while clear confirmation is open prevents submission', async () => {
   const screen=fixture();await screen.ready();
   fireEvent.click(screen.getByRole('button',{name:words.menu}));
   fireEvent.click(await screen.findByText(words.clearSiteDataTitle));
@@ -853,7 +898,7 @@ test('a cancelled website permission offers a scoped page refresh, not an implic
   expect(screen.queryByRole('button', { name: words.permissionAllow })).toBeNull();
 });
 
-test('Agent run hides permission decisions even if an old tab snapshot still contains a request', async () => {
+test('Agent browser ownership hides permission decisions even if an old tab snapshot still contains a request', async () => {
   const pending: BrowserSnapshot = { ...initial, runtime: { ...initial.runtime!, tabs: [{ ...initial.runtime!.tabs[0], permission_requests: [{ request_id: 'request-1', kind: 'camera', origin: 'https://example.test' }] }] } };
   const screen = fixture({ async ensure() { return pending; } }); await screen.ready();
   await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...pending, run: { ...pending.run, revision: 2, input_state: 'agent_running' } } }));
@@ -956,7 +1001,7 @@ test('a clicked URL that already exists activates the exact tab without reloadin
   await waitFor(() => expect(screen.commands).toEqual([{ command: 'activate', target }]));
 });
 
-test('a stale queued link during an Agent run is returned for external fallback and never replayed', async () => {
+test('a stale queued link while the browser is Agent-owned is returned for external fallback and never replayed', async () => {
   const running: BrowserSnapshot = { ...initial, run: { ...initial.run, input_state: 'agent_running' } };
   const screen = fixture({ async ensure() { return running; } }, { id: 1, url: 'http://localhost:5173/' });
   await screen.ready();
@@ -1101,7 +1146,7 @@ test('validation and native command failures use request guidance instead of cla
   }
 });
 
-test('a canonical preparation lock tells the user to stop the Agent without opening a native surface', async () => {
+test('a browser ownership lock explains browser use without opening a native surface', async () => {
   let attaches = 0;
   const screen = fixture({
     async ensure() { throw new BackendHttpError({ method: 'POST', path: '/api/agent-sessions/session-1/browser', status: 409,

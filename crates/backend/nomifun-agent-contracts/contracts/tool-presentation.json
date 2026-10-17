@@ -102,6 +102,7 @@
   {"action_id":"session.management/terminal_stop","capability_id":"session.management","name":"stop_terminal","titles":{"zh-CN":"停止终端","en-US":"Stop terminal"},"target_fields":["terminal_id"]},
   {"action_id":"session.management/execution_list","capability_id":"session.management","name":"list_agent_executions","titles":{"zh-CN":"协作任务列表","en-US":"List agent executions"},"target_fields":[]},
   {"action_id":"session.management/execution_status","capability_id":"session.management","name":"inspect_agent_execution","titles":{"zh-CN":"协作任务状态","en-US":"Inspect agent execution"},"target_fields":["execution_id"]},
+  {"action_id":"session.management/execution_answer_decision","capability_id":"session.management","name":"answer_desktop_question","titles":{"zh-CN":"回答桌面任务问题","en-US":"Answer desktop task question"},"target_fields":[]},
   {"action_id":"session.management/execution_retry_step","capability_id":"session.management","name":"retry_agent_execution_step","titles":{"zh-CN":"重试协作步骤","en-US":"Retry agent execution step"},"target_fields":["execution_id"]},
   {"action_id":"session.management/execution_adjust","capability_id":"session.management","name":"adjust_agent_execution","titles":{"zh-CN":"调整协作任务","en-US":"Adjust agent execution"},"target_fields":["execution_id"]},
   {"action_id":"session.management/execution_cancel","capability_id":"session.management","name":"cancel_agent_execution","titles":{"zh-CN":"取消协作任务","en-US":"Cancel agent execution"},"target_fields":["execution_id"]},

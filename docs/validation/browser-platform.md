@@ -9,6 +9,7 @@ Source and receipts from the current run determine the actual result.
 | Change | Smallest relevant entry point |
 | --- | --- |
 | Shared browser state and layout | Affected `ui/` tests and `bun run check:browser-platform-boundary`; add `bun run check:desktop-ui-boundary` for renderer changes |
+| Browser ownership from first use through Turn completion | Affected [Browser Role owner](../../crates/backend/nomifun-app/src/router/engine_browser_tools.rs), [coordinator](../../crates/backend/nomifun-browser-platform/src/run_guard.rs), HTTP and BrowserPanel tests; native/production GUI evidence remains separate |
 | Rust browser domain and host integration | `bun run test:browser`, or select affected crates through the [Rust test runner](../../scripts/test-rust.mjs) |
 | Windows native navigation, Profile, input and popups | [browser_workspace_smoke.rs](../../apps/desktop/examples/browser_workspace_smoke.rs) and its [support modules](../../apps/desktop/examples/support/) |
 | macOS main thread and termination | [macos_appkit_main_loop_smoke.rs](../../apps/desktop/examples/macos_appkit_main_loop_smoke.rs), [macos_appkit_termination_probe.rs](../../apps/desktop/examples/macos_appkit_termination_probe.rs) |
@@ -31,6 +32,7 @@ acceptance does not establish the background engine's lifecycle or cleanup behav
 - Report static checks, units, native smoke, production GUI, external sites and signed release validation separately. Building and signing do not prove native execution.
 - Record exact target, navigation sequence, attempt and document identities alongside server main-document request counts. Separate URL changes, SPA transitions, subresources and redirects from repeated main-document requests.
 - Exercise Stop, Pause/Resume, queued/claimed popups, late callbacks, retained content after failure, and same-document/cross-document Back/Forward through their native lifecycle. Resume must not replay old candidates or navigation.
+- Verify browser ownership separately from Session status: Turns that never invoke the managed browser, including chat, file tasks, attached Chrome and background render, leave it available. The first real managed invocation locks it through subsequent tool completion, thinking, unrelated tools, pause and native settlement. Release requires the exact durable Turn terminal and successful finish; cancellation alone, unknown effects and uncertain cleanup do not unlock it. Test button/shortcut closure, exact-generation reopen, acquisition/close races and stale callbacks without replaying user commands.
 - Test Cookie, localStorage and IndexedDB across close/reopen and process restart, Session/store isolation and completed native temporary-store cleanup. Do not substitute imported everyday-browser cookies.
 - Compare sites on the same machine/network with controlled initial state. Record embedded identity and system-browser results separately, leaving each idle for at least 60 seconds. Distinguish normal, captcha, version rejection, pending and looping results; do not solve challenges or repeatedly refresh to obtain a pass.
 - Validate the shared renderer at desktop sizes only, with an 880×600 minimum. Simulated component geometry does not establish native pixels, input or focus behavior.
@@ -41,6 +43,13 @@ acceptance does not establish the background engine's lifecycle or cleanup behav
 As of October 15, 2026, historical targeted Windows runs cover navigation, Profile, popup
 recovery, same-document History and the minimum desktop window. They do not establish all
 platforms or every active-Agent interaction.
+
+Acquisition on first browser use, ownership retained through the Turn and closing an unused browser during an active
+Agent Turn still require native and production-GUI acceptance on both platforms. Historical input-lock records and
+component tests do not establish this complete contract. Include tool completion followed by thinking or unrelated
+work, pending navigation/dialog completion, failed settlement/unlock and exact-terminal recovery. Close or reopen
+the browser before its first use, then invoke it in the same Turn; stale generations and old cleanup must not affect
+its replacement.
 
 The latest macOS popup Pause, same-document History and launch-receipt fixes have source,
 targeted checks and build records. Complete native WK and production-GUI evidence for the

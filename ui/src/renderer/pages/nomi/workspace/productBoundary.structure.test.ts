@@ -49,6 +49,6 @@ describe('desktop companion product boundary', () => {
 
   test('legacy companion conversation URLs redirect into the cohabit mode', () => {
     expect(chat.includes('CompanionConversationRedirect')).toBe(true);
-    expect(chat.includes('&mode=cohabit')).toBe(true);
+    expect(chat.includes('conversationDestination(conversation)')).toBe(true);
   });
 });

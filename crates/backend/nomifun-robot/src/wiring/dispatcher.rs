@@ -21,8 +21,8 @@ use crate::vad::VadTuning;
 /// The narrow view of the conversation stack this crate needs.
 #[async_trait::async_trait]
 pub trait RobotConversationBackend: Send + Sync {
-    /// Obtain the Companion's single Conversation.
-    async fn ensure_companion_session(&self, companion_id: &str) -> anyhow::Result<String>;
+    /// Obtain this exact device's stable Robot-role Session.
+    async fn ensure_companion_session(&self, companion_id: &str, robot_id: &str) -> anyhow::Result<String>;
     /// Send one user turn and stream reduced events.
     async fn dispatch(
         &self,
@@ -48,8 +48,8 @@ impl RobotDispatcher {
 
 #[async_trait::async_trait]
 impl CompanionTurnDispatcher for RobotDispatcher {
-    async fn ensure_companion_session(&self, companion_id: &str) -> anyhow::Result<String> {
-        self.inner.ensure_companion_session(companion_id).await
+    async fn ensure_companion_session(&self, companion_id: &str, robot_id: &str) -> anyhow::Result<String> {
+        self.inner.ensure_companion_session(companion_id, robot_id).await
     }
 
     async fn dispatch(

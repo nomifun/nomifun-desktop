@@ -12,7 +12,7 @@ button permits direct user browsing without a Browser Module grant, Provider sel
 Opening, retrying and user commands never create Agent authority or a second Session. Retired global management and
 browser Settings surfaces remain removed.
 
-The page is a native embedded WebView, not an iframe, screenshot stream, canvas viewer, or JPEG transport. The user and Agent operate the same page. While the Agent runs, native user input and page-changing chrome controls are locked. A run must stop and its pending operations must settle before user input is restored. There is no takeover or hand-back state.
+The page is a native embedded WebView, not an iframe, screenshot stream, canvas viewer, or JPEG transport. The user and Agent operate the same page. After the Agent first uses this browser, native user input and page-changing chrome controls stay locked until that Turn ends and cleanup completes. A Turn that never uses it leaves it available to the user. There is no user takeover or hand-back mode.
 
 Hiding the surface preserves its tabs. The Session has one managed runtime, profile and input coordinator.
 `BrowserResource` wraps exact frozen Agent authority over the same `BrowserWorkspace`; a different authorization
@@ -25,15 +25,25 @@ The shared desktop renderer supports an inner viewport of at least 880×600. Cha
 
 Only Browser registers the space reservation and its sidebar-expansion dismissal. Dismissal hides/detaches the Browser surface, retaining pages, runtime and input ownership; it does not destroy tabs or release an Agent's lock. Preview keeps its existing sidebar-collapse policy: layout callbacks never receive `closePreview`, which clears tabs and unsaved edits. Switching between Browser and Preview also transfers sidebar management. Layout, native input and active-Agent Stop require separate evidence; see [continuing validation](../validation/browser-platform.md).
 
-Every Agent Turn, including ordinary chat without Browser tools and attached Chrome Agents, acquires the managed
-browser input gate during Runtime preparation. Creating the entity does not create a native page. A native child first
-created during a run starts with user input disabled. When the canonical Turn is already running but its native
-gate is not proven yet, user commands and first opening fail closed. Retained preparation owners drain cancellation
-and failure while keeping hardware input locked. Only the exact durable Turn terminal permits final release; downstream
-cleanup and terminal write failures cannot unlock input. A start that issued no guard uses the same drain/terminal/recovery boundary.
+Turn preparation freezes Browser authority without acquiring the managed browser input gate. An actual authorized
+managed Browser invocation acquires its current Workspace and guard before native work. The first such invocation
+retains ownership for the entire remaining Turn; any native child first created under that ownership starts with user
+input disabled. A completed browser tool, ordinary tool failure, model thinking, unrelated tools and paused execution
+do not release the gate. Ordinary chat, file work, attached Chrome and background rendering do not lock the managed
+browser when the Turn never invokes it. Neither configured Browser permissions nor model prose predict ownership.
 
-Terminal publication and native final release are separate receipts. If release fails after publication, an SDK retry
-must match the same root's canonical receipt, original Runtime terminal, delivery, Snapshot and route before retrying
+The retained owner settles native operations with input still locked. Only the exact durable Turn terminal followed by
+successful finish releases ownership. Pending navigation or dialogs, unsettled or unknown effects, receipt persistence
+failures and uncertain native cleanup remain protected by the original Turn's recovery. A failed acquisition that issued
+no guard retains the same drain/terminal/failed-start-recovery boundary. Completion of an individual tool or native
+operation never authorizes a mid-Turn unlock.
+
+User APIs verify the authenticated owner and canonical Session, then admit commands through the Workspace coordinator.
+Session `running` or `paused` does not itself lock the browser. The Browser snapshot reports actual input ownership and
+gate failure; it is not overwritten from global Agent state. This same admission controls navigation, tab closure and downloads.
+
+Terminal publication and native final release are separate receipts.
+If release fails after publication, an SDK retry must match the same root's canonical receipt, original Runtime terminal, delivery, Snapshot and route before retrying
 finish. It does not append another terminal or change failure into cancellation. Cancellation before execution keeps
 its separate exact witness for generation zero. After complete Runtime teardown, the Kernel resource context retires
 from its Weak cache by exact Arc identity. Old handles may remain alive, but replacements cannot reuse a closed
@@ -69,15 +79,14 @@ The conversation browser uses WebView2 on Windows and system WKWebView on macOS 
 
 Before compiling Agent configuration, a native host derives the Browser Role v2 default binding from its materialized bundled Provider. This is exact boot composition, not a user-facing Role setting or a migration of old installation bindings.
 
-The browser menu offers an explicitly confirmed Reopen browser action. It closes page tabs and loses unsaved page content, but does not clear conversation messages or project files. The backend holds the same Session operation fence and validates the generation at a canonical idle boundary.
-Without a native guard it uses ordinary idle close. If an issued guard's final unlock failed, closing requires that
-exact Operation's canonical terminal, proven native settlement and matching old Workspace instance/generation.
-Canonical running and unproven settlement still reject reopening; this user operation never cancels an active Agent
-or manufactures a terminal. `turn/paused` retains the same active Operation and native checkpoint resume authority,
-so it is not a final terminal for this close path. Reopening remains rejected while paused; the user must first finish
-the Operation through the formal Stop/cancel path and prove Runtime cleanup before reopening. The old Workspace's confirmed destruction lets the SDK acknowledge its existing terminal
-and retry final release. The new user Workspace has another generation and cannot be released by the old owner;
-the model is not replayed and the original outcome is not rewritten.
+The browser menu offers an explicitly confirmed Reopen browser action. It closes page tabs and loses unsaved page content, but does not clear conversation messages or project files. The backend holds the same Session operation fence, validates the exact runtime generation and closes through the coordinator's actual idle gate. A Turn that has never used this browser does not prevent this close. Once the Turn has acquired it, later unrelated work does not permit closing; the user cannot cancel or steal its guard through a browser command.
+If the final unlock failed, closing still requires that exact Operation's canonical terminal, proven
+native settlement and matching old Workspace instance/generation. `turn/paused` retains the same active Operation and
+native checkpoint resume authority, so it cannot substitute for this final-terminal witness. If ownership remains held,
+the user must finish the Operation through the formal Stop/cancel path and prove Runtime cleanup before this recovery
+close. The old Workspace's confirmed destruction lets the SDK acknowledge its existing terminal and retry final release.
+The new user Workspace has another generation and cannot be released by the old owner; the model is not replayed and
+the original outcome is not rewritten.
 
 macOS embeds a visible WKWebView child using Tauri's existing AppKit main thread and event loop. WK/AppKit
 objects are created, used and released on that thread. There is no second NSApplication, downloaded browser
@@ -134,8 +143,9 @@ macOS conformance can select an immutable `NativeWebKit` comparison policy at En
 | Persistent sign-in, Session deletion/site-data clear | Separate macOS 14+ WKWebsiteDataStore | Directory Profile retained |
 
 `semantic_dom` never fabricates `isTrusted` or user activation. Successful DOM calls or event dispatch do not
-prove a site's business outcome; observe again. When a site requires manual interaction, use the existing
-Stop, wait for cleanup, and unlock flow. Observation and user snapshots report `interaction_capabilities`;
+prove a site's business outcome; observe again. When a site requires manual interaction, let the Turn end or use Stop,
+then wait for cleanup and final release. Completing a browser tool alone does not restore manual input.
+Observation and user snapshots report `interaction_capabilities`;
 the schema action union does not promise all actions on every runtime. Unsupported errors forbid repeating
 the same action without making ordinary browsing unavailable. The browser menu explains common limits.
 
@@ -157,13 +167,13 @@ On Windows, optional `browser.upload` authorizes observed visible standard file 
 
 WebView2 delivers through `DOM.setFileInputFiles` without synthetic input/change events; empty lists are rejected. Frame, document, Session and current-request checks precede assignment. New iframe routes install chooser policy before initial scripts. Unknown routing, policy failure and stale observation grant no file authority. Directory upload, File System Access, Agent download/sandbox publication and complete abnormal-exit reclamation require separate delivery and acceptance.
 
-An isolated helper owns user Open/Save dialogs through a bounded private protocol. Only visible, live, idle tabs may request selection. Hiding, navigation and Agent admission revoke unconfirmed choices; cancellation awaits real process-tree exit. Windows safely parses HTML `accept` as a filter hint while retaining all files; public WK APIs do not expose equivalent filtering metadata on macOS. Filters prove neither file authority nor content validity.
+An isolated helper owns user Open/Save dialogs through a bounded private protocol. Only visible, live, idle tabs may request selection. Hiding, navigation and Agent acquisition of this browser revoke unconfirmed choices; cancellation awaits real process-tree exit. Windows safely parses HTML `accept` as a filter hint while retaining all files; public WK APIs do not expose equivalent filtering metadata on macOS. Filters prove neither file authority nor content validity.
 
-User downloads retain native DownloadStarting/download ownership, with at most four active requests and one pending Save dialog per tab. Authorized transfers may continue during Agent entry, but new Agent-time downloads are denied. Tab closure cancels and awaits native terminal state; failed cleanup retains retry ownership. Default download UI cannot bypass the input lock. See [continuing validation](../validation/browser-platform.md) for incomplete network, redirect, permission and platform coverage.
+User downloads retain native DownloadStarting/download ownership, with at most four active requests and one pending Save dialog per tab. Authorized transfers may continue when the Agent acquires this browser, but new user downloads are denied while that ownership is held. Tab closure cancels and awaits native terminal state; failed cleanup retains retry ownership. Default download UI cannot bypass the input lock. See [continuing validation](../validation/browser-platform.md) for incomplete network, redirect, permission and platform coverage.
 
 ## Independent search and rendering
 
-`web.research` is optional and separate from Browser automation and provider-native search. Its anonymous `headless_page` owner uses temporary contexts, restricted-origin forwarding and exact process/Profile cleanup without visible tabs or login state. Search resolves only fixed engine domains through fixed public DNS. Content rendering uses system DNS with strict public-address validation, connection pinning and GET-only forwarding, retaining browser CORS/Referrer. Fake-IP and private networks receive no exemption.
+`web.research` is optional and separate from Browser automation and provider-native search. Its anonymous `headless_page` owner uses temporary contexts, restricted-origin forwarding and exact process/Profile cleanup without visible tabs or login state, and never acquires the managed browser input gate. Search resolves only fixed engine domains through fixed public DNS. Content rendering uses system DNS with strict public-address validation, connection pinning and GET-only forwarding, retaining browser CORS/Referrer. Fake-IP and private networks receive no exemption.
 
 Windows/macOS discover Chrome 120+ in known installation locations and freeze its release/file fingerprint, rechecked before actual page creation. Discovery neither scans arbitrary PATH nor runs or installs the browser. Missing qualified dependencies remain unavailable without blocking startup. macOS fingerprints cover the real framework, helpers, Libraries and Resources, not just the launcher.
 
@@ -173,7 +183,7 @@ Visible WK/WebView2, Attached Chrome and background Chrome engines require separ
 
 ## System browser and retirement boundary
 
-Attached Chrome uses an explicitly authorized connection. Temporary debugger rendering overrides remain from the first non-observation action until run settlement, rather than being released immediately after one wheel acknowledgement. Uncertain setup/release closes only NomiFun's connection, without closing user tabs or changing Profile, launch arguments or OS windows.
+Attached Chrome uses an explicitly authorized connection without acquiring the managed browser input gate. Temporary debugger rendering overrides remain from the first non-observation action until run settlement, rather than being released immediately after one wheel acknowledgement. Uncertain setup/release closes only NomiFun's connection, without closing user tabs or changing Profile, launch arguments or OS windows.
 
 Host classification uses explicit `BrowserRuntimeTarget` and persisted owner/source/cron/execution facts, never a missing Workspace. Ordinary chat may omit Browser; selecting it without a native host fails explicitly. Background automation for channels, schedules and execution steps still lacks a current v2 owner. Do not restore Hub/Lane, leases, private engines, shared vaults or old Profile import. Independent search and Knowledge rendering keep their own owners.
 

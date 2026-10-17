@@ -431,6 +431,9 @@ export function useAgentSettingsController() {
       const nextDraft: AgentPresetDraft = {
         ...draftToSave,
         current_revision: saved.revision.reference,
+        // Submitted authoring input must not overwrite the canonical document
+        // returned by the Host after saving.
+        document: cloneAgentPresetDocument(saved.revision.document),
       };
       setDraftState(nextDraft);
       setSavedDraft(cloneDraft(nextDraft));

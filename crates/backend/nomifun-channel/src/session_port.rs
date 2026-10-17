@@ -120,6 +120,26 @@ pub trait ChannelSessionPort: Send + Sync {
         request: CreateConversationRequest,
         creation_key: &str,
     ) -> Result<ConversationResponse, AppError>;
+
+    /// Resolve the existing canonical opening identity for a dedicated group
+    /// chat. A miss creates nothing and never guesses from display metadata.
+    async fn find_created_session(&self, _owner_id: &str, _creation_key: &str)
+        -> Result<Option<String>, AppError> { Ok(None) }
+
+    /// Only the Channel owner calls this after authoritative auto-group
+    /// admission. The Host freezes a real model-only binding; presentation
+    /// extras cannot supply or broaden that authority.
+    async fn create_group_guest_idempotent(&self, _owner_id: &str,
+        _request: CreateConversationRequest, _creation_key: &str) -> Result<ConversationResponse, AppError> {
+        Err(AppError::Conflict("model-only group guest creation is unavailable".into()))
+    }
+
+    /// Recheck the original guest creation command and its subtractive ceiling
+    /// at the same canonical input boundary on every guest invocation.
+    async fn send_group_guest_turn(&self, _owner_id: &str, _session_id: &str,
+        _idempotency_key: &str, _request: SendMessageRequest, _creation_key: &str) -> Result<ChannelTurnDelivery, AppError> {
+        Err(AppError::Conflict("model-only group guest delivery is unavailable".into()))
+    }
 }
 
 #[cfg(test)]

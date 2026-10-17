@@ -531,6 +531,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn formal_default_write_replays_old_receipt_and_cas_identity_is_fingerprinted() {
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let ledger = CompanionMemoryWriteLedger::with_lease(database.pool().clone(), LEASE_A);
+        let legacy = StrictJsonValue(serde_json::json!({"kind":"preference","content":"先给结论","tags":[]}));
+        let default: nomifun_agent_contracts::CompanionMemoryWriteInput = serde_json::from_value(legacy.0.clone()).unwrap();
+        let encoded_default = StrictJsonValue(serde_json::to_value(default).unwrap());
+        let ReceiptAdmission::Execute(mut guard) = ledger.admit(context("default-write"), &legacy).await.unwrap() else { panic!("first effect must execute"); };
+        let memory_id = "0199a000-0000-7000-8000-000000000006";
+        let original = StrictJsonValue(serde_json::json!({"memory_id":memory_id,"revision":1,
+            "source_session_id":SESSION_ID,"source_operation_id":"exact-create-effect-operation"}));
+        ledger.settle(&mut guard, &Ok(original.clone())).await.unwrap();
+        let ReceiptAdmission::Return(Ok(replayed)) = ledger.admit(context("default-write"), &encoded_default).await.unwrap() else {
+            panic!("new optional input fields must not re-execute the original committed write");
+        };
+        assert_eq!(replayed, original);
+        let correction = StrictJsonValue(serde_json::json!({"kind":"preference","content":"改为先给风险","tags":[],
+            "memory_id":memory_id,"expected_revision":1}));
+        let ReceiptAdmission::Execute(mut guard) = ledger.admit(context("correction-effect"), &correction).await.unwrap() else { panic!("new correction effect must execute"); };
+        let corrected = StrictJsonValue(serde_json::json!({"memory_id":memory_id,"revision":2,
+            "source_session_id":SESSION_ID,"source_operation_id":"exact-create-effect-operation"}));
+        ledger.settle(&mut guard, &Ok(corrected.clone())).await.unwrap();
+        let restarted = CompanionMemoryWriteLedger::with_lease(database.pool().clone(), LEASE_B);
+        let ReceiptAdmission::Return(Ok(replayed)) = restarted.admit(context("correction-effect"), &correction).await.unwrap() else {
+            panic!("an already committed correction returns its receipt instead of applying CAS again");
+        };
+        assert_eq!(replayed, corrected);
+        for (field, value) in [("memory_id", serde_json::json!("0199a000-0000-7000-8000-000000000007")),
+            ("expected_revision", serde_json::json!(2))] {
+            let mut changed = correction.clone();
+            changed.0[field] = value;
+            assert_eq!(restarted.admit(context("correction-effect"), &changed).await.unwrap_err().code.as_ref(), IDEMPOTENCY_CONFLICT);
+        }
+        database.close().await;
+    }
+
+    #[tokio::test]
     async fn crashed_process_is_promoted_to_durable_outcome_unknown() {
         let database = nomifun_db::init_database_memory().await.unwrap();
         let context = context("crash-key");

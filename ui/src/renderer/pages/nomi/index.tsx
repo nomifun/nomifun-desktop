@@ -200,6 +200,7 @@ const NomiWorkspacePage: React.FC = () => {
       setSearchParams(
         (prev) => {
           prev.set('companion', id);
+          prev.delete('session');
           prev.delete('view');
           return prev;
         },
@@ -228,6 +229,7 @@ const NomiWorkspacePage: React.FC = () => {
       setSearchParams(
         (prev) => {
           prev.set('companion', profile.companion_id);
+          prev.delete('session');
           prev.set('tab', 'overview');
           prev.set('mode', 'manage');
           prev.delete('view');
@@ -246,6 +248,7 @@ const NomiWorkspacePage: React.FC = () => {
         (prev) => {
           if (rest[0]) prev.set('companion', rest[0].companion_id);
           else prev.delete('companion');
+          prev.delete('session');
           return prev;
         },
         { replace: true }

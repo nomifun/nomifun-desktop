@@ -3539,7 +3539,11 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         event: &NewAgentExecutionEvent,
     ) -> Result<AttemptConversationEffectResult, DbError> {
         let now = now_ms();
-        let mut tx = self.pool.begin().await?;
+        let mut conn = self.pool.acquire().await?;
+        // Acquire the writer lock before reading the active Session link. A
+        // deferred read snapshot cannot reliably upgrade while another writer
+        // holds the lock; BEGIN IMMEDIATE waits before all owner and CAS checks.
+        let mut tx = Transaction::begin(&mut *conn, Some("BEGIN IMMEDIATE".into())).await?;
         let conversation_id = active_attempt_conversation_tx(
             &mut tx,
             user_id,

@@ -5,6 +5,8 @@
 //! runtime crates.
 
 pub mod closure;
+pub mod companion_memory;
+pub use companion_memory::*;
 pub mod binding_evolution;
 pub mod catalog;
 pub mod chat_model;

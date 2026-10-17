@@ -423,7 +423,6 @@ fn action_input(operation: &Wave4CapabilityOperation) -> &StrictJsonValue {
         | Wave4CapabilityOperation::CompanionLearn { input }
         | Wave4CapabilityOperation::CompanionEvolve { input }
         | Wave4CapabilityOperation::CompanionMemoryRecall { input }
-        | Wave4CapabilityOperation::CompanionMemoryWrite { input }
         | Wave4CapabilityOperation::CustomerServiceNotesRead { input }
         | Wave4CapabilityOperation::CustomerServiceNotesWrite { input }
         | Wave4CapabilityOperation::CustomerServiceHandoff { input }

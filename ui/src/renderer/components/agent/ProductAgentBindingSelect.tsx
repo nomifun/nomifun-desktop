@@ -14,11 +14,12 @@ import useSWR from 'swr';
 import styles from './ProductAgentBindingSelect.module.css';
 
 type Props = {
-  targetKind: 'companion' | 'customer' | 'creative_studio_canvas';
+  targetKind: 'companion' | 'robot' | 'customer' | 'creative_studio_canvas';
   targetId: string;
   defaultTemplateKey: OfficialPresetKey;
   model?: Pick<TProviderWithModel, 'id' | 'use_model'>;
   conversationId?: string | null;
+  updateDefault?: boolean;
   disabled?: boolean;
   compact?: boolean;
   /** Keep the sidebar's quick control to one full-width dropdown. */
@@ -41,10 +42,10 @@ export function productAgentErrorReason(error: unknown): 'modelChanged' | 'busy'
   return 'saveFailed';
 }
 
-const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, model, conversationId, disabled = false, compact = false, layout = 'inline', showManagementActions = true, onChanged, onSavingChange }) => {
+const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, model, conversationId, updateDefault = false, disabled = false, compact = false, layout = 'inline', showManagementActions = true, onChanged, onSavingChange }) => {
   const { t } = useTranslation();
   const selectedModel = model?.id && model.use_model ? { provider_id: model.id, model: model.use_model } : undefined;
-  const key = ['product-agent-options', targetKind, targetId, selectedModel?.provider_id ?? '', selectedModel?.model ?? ''];
+  const key = ['product-agent-options', targetKind, targetId, conversationId ?? '', selectedModel?.provider_id ?? '', selectedModel?.model ?? ''];
   const requestKey = JSON.stringify(key);
   const activeRequest = useRef(requestKey);
   activeRequest.current = requestKey;
@@ -54,7 +55,8 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
   const [saveError, setSaveError] = useState<string>();
   const [retrySelection, setRetrySelection] = useState<ProductAgentSelection | null>(null);
   const { data, error, isLoading, mutate } = useSWR<ProductAgentOptions>(key,
-    () => agentPlatform.productBindingOptions.invoke({ target_kind: targetKind, target_id: targetId, model: selectedModel }),
+    () => agentPlatform.productBindingOptions.invoke({ target_kind: targetKind, target_id: targetId, model: selectedModel,
+      ...(conversationId ? { conversation_id: conversationId } : {}) }),
     { shouldRetryOnError: false });
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => { setSaveError(undefined); setRetrySelection(null); }, [requestKey]);
@@ -80,7 +82,8 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
       if (!current()) return;
       const result = await agentPlatform.selectProductBinding.invoke({
         target_kind: targetKind, target_id: targetId,
-        request: { selection: option.selection, ...(selectedModel ? { model: selectedModel } : {}), ...(activeId ? { conversation_id: activeId } : {}) },
+        request: { selection: option.selection, ...(selectedModel ? { model: selectedModel } : {}),
+          ...(activeId ? { conversation_id: activeId, ...(updateDefault ? { update_default: true } : {}) } : {}) },
       });
       onChanged?.();
       if (!current()) return;
@@ -118,12 +121,13 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
     ? nameFor(selected)
     : t(selection ? 'agentSettings.productBinding.unavailableAgent' : 'agentSettings.productBinding.selectionNeeded');
   const selectionNeededHint = !selection ? t('agentSettings.productBinding.selectionNeededHint') : undefined;
-  const canApplyLatest = targetKind === 'companion' && Boolean(selection);
+  const companionRole = targetKind === 'companion' || targetKind === 'robot';
+  const canApplyLatest = companionRole && Boolean(selection);
   const editPath = selection?.kind === 'template'
     ? `/agent?template=${encodeURIComponent(selection.template_key)}`
     : selection?.kind === 'preset' ? `/agent?preset=${encodeURIComponent(selection.preset_id)}` : undefined;
   const canEdit = canApplyLatest && selected && selected.reason !== 'removed';
-  const options = targetKind === 'companion'
+  const options = companionRole
     ? data.options.filter((option) => option.reason !== 'companion' && option.reason !== 'removed')
     : data.options;
   const sourceTag = (selection: ProductAgentSelection) => <span className={styles.sourceTag}

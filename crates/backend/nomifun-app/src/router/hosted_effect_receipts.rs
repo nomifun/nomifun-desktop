@@ -32,6 +32,7 @@ impl Receipt {
 pub(crate) enum Domain {
     Robot,
     AppHosting,
+    CompanionMemory,
 }
 
 impl Domain {
@@ -39,6 +40,7 @@ impl Domain {
         match self {
             Self::Robot => "robot",
             Self::AppHosting => "app_hosting",
+            Self::CompanionMemory => "companion_memory",
         }
     }
 
@@ -46,6 +48,7 @@ impl Domain {
         match self {
             Self::Robot => EffectStrategy::ExternalUncertainEffect,
             Self::AppHosting => EffectStrategy::ManagedEffect,
+            Self::CompanionMemory => EffectStrategy::ExternalUncertainEffect,
         }
     }
 }
@@ -60,6 +63,12 @@ struct InvocationAuthority<'a> {
     snapshot: &'a ResolvedSnapshotRef,
     capability: &'a CapabilityId,
     action: &'a ActionId,
+}
+
+fn memory_authority(context: &nomifun_agent_domain_wave1::Wave1HostContext) -> InvocationAuthority<'_> {
+    InvocationAuthority {principal:&context.principal, session:&context.agent_session_id, turn:&context.turn_id,
+        operation:&context.operation_id, snapshot:&context.resolved_snapshot_ref,
+        capability:&context.capability_id, action:&context.action_id}
 }
 
 fn failure() -> AppError {
@@ -78,6 +87,110 @@ fn admission_failure(stage: &'static str) -> AppError {
 impl HostedEffectReceipts {
     pub(crate) fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    /// Wave 1 carries the Kernel's exact Turn. A durable memory mutation must
+    /// never infer that authority from the Session's latest active head.
+    pub(crate) async fn begin_wave1(
+        &self,
+        store: &AgentSessionStore,
+        context: &nomifun_agent_domain_wave1::Wave1HostContext,
+        input: &Value,
+    ) -> Result<Receipt, AppError> {
+        self.validate_wave1_scope(store, context).await?;
+        let native = store.native_tool_call_causation(&context.principal, &context.agent_session_id,
+            &context.turn_id, &context.operation_id, &context.capability_id, &context.action_id)
+            .await.map_err(|_| admission_failure("memory_native_causation"))?;
+        if native.execution_scope.resolved_snapshot_ref() != &context.resolved_snapshot_ref {
+            return Err(admission_failure("memory_native_snapshot"));
+        }
+        let binding = super::agent_memory_authority::authorize_memory_resource(
+            &context.principal.principal_id, super::agent_memory_authority::ProductMemoryAction::CompanionWrite,
+            &context.resource_bindings)?;
+        let resource_key = format!("companion-memory:{}:{}",context.principal.principal_id,binding.resource_id.as_ref());
+        self.begin_exact(store.clone(), context.agent_session_id.clone(), context.turn_id.clone(),
+            context.operation_id.as_ref(), context.capability_id.as_ref(), context.action_id.as_ref(),
+            input, Domain::CompanionMemory, Some(resource_key), true).await
+    }
+
+    async fn validate_wave1_scope(&self, store: &AgentSessionStore,
+        context: &nomifun_agent_domain_wave1::Wave1HostContext) -> Result<(), AppError> {
+        self.validate_memory_scope(store, &memory_authority(context)).await
+    }
+
+    async fn validate_memory_scope(&self, store: &AgentSessionStore,
+        authority: &InvocationAuthority<'_>) -> Result<(), AppError> {
+        if authority.principal.principal_kind != "user"
+            || authority.capability.as_ref() != nomifun_agent_domain_wave1::COMPANION_MEMORY_MODULE_ID
+            || authority.action.as_ref() != nomifun_agent_domain_wave1::COMPANION_MEMORY_WRITE_ACTION_ID {
+            return Err(admission_failure("memory_action"));
+        }
+        let session = store.get_live_session(authority.session).await.map_err(|_| admission_failure("memory_session"))?;
+        if session.owner_ref != *authority.principal || session.agent_binding.resolved_snapshot_ref != *authority.snapshot {
+            return Err(admission_failure("memory_owner_snapshot"));
+        }
+        Ok(())
+    }
+
+    /// Call only after the memory owner's existing receipt is durably settled.
+    /// Unknown/cancelled dispatches keep their pending Effect for reconciliation.
+    pub(crate) async fn settle_wave1_known(&self, store: &AgentSessionStore,
+        receipt: Receipt, ok: bool, observation: &Value) -> Result<(), AppError> {
+        if receipt.request.owner_domain != Domain::CompanionMemory.as_str()
+            || receipt.request.strategy != EffectStrategy::ExternalUncertainEffect {
+            return Err(admission_failure("memory_receipt_domain"));
+        }
+        self.finish_in_store(store, receipt,
+            if ok {EffectTerminalState::Succeeded} else {EffectTerminalState::Failed}, bounded(observation)?).await
+    }
+
+    /// An exact durable owner receipt can close a previously started Effect
+    /// without dispatching the memory store again. Older receipts with no
+    /// canonical Effect remain reads; this never fabricates historical starts.
+    pub(crate) async fn settle_wave1_replay_known(&self, store: &AgentSessionStore,
+        context: &nomifun_agent_domain_wave1::Wave1HostContext, input: &Value,
+        ok: bool, observation: &Value) -> Result<(), AppError> {
+        self.settle_memory_replay_known(store, memory_authority(context), &context.resource_bindings,
+            input, ok, observation).await
+    }
+
+    async fn settle_memory_replay_known(&self, store: &AgentSessionStore, authority: InvocationAuthority<'_>,
+        resources: &[nomifun_agent_contracts::TypedResourceBinding], input: &Value,
+        ok: bool, observation: &Value) -> Result<(), AppError> {
+        self.validate_memory_scope(store, &authority).await?;
+        let effect_id = format!("hosted:{}:{}",Domain::CompanionMemory.as_str(),authority.operation.as_ref());
+        let Some(effect) = store.read_effect(authority.session, &effect_id).await.map_err(|_| failure())?
+            else {return Ok(());};
+        let binding = super::agent_memory_authority::authorize_memory_resource(
+            &authority.principal.principal_id, super::agent_memory_authority::ProductMemoryAction::CompanionWrite,
+            resources)?;
+        let expected_resource = format!("companion-memory:{}:{}",authority.principal.principal_id,binding.resource_id.as_ref());
+        if effect.turn_id != *authority.turn || effect.operation_id != *authority.operation
+            || effect.capability_module != *authority.capability || effect.action_id != *authority.action
+            || effect.owner_domain != Domain::CompanionMemory.as_str()
+            || effect.resource_key.as_deref() != Some(expected_resource.as_str())
+            || effect.strategy != EffectStrategy::ExternalUncertainEffect
+            || effect.input_digest.as_ref() != summarize(input)?.digest() {
+            return Err(admission_failure("memory_receipt_identity"));
+        }
+        if !matches!(effect.state, nomifun_agent_session::AgentEffectState::Pending
+            | nomifun_agent_session::AgentEffectState::Returned | nomifun_agent_session::AgentEffectState::Rejected) {
+            return Err(admission_failure("memory_outcome_unknown"));
+        }
+        // Historical causation is a fact check, not a new native execution
+        // lease. It authorizes only this terminal receipt projection.
+        store.committed_tool_call_causation(authority.session, authority.turn,
+            authority.operation, authority.capability, authority.action).await.map_err(|_| failure())?;
+        let request = EffectEventRequest {
+            agent_session_id:effect.agent_session_id, effect_id:effect.effect_id.clone(), turn_id:effect.turn_id,
+            operation_id:effect.operation_id, owner_domain:effect.owner_domain, capability_module:effect.capability_module,
+            action_id:effect.action_id, resource_binding_id:effect.resource_binding_id, resource_key:effect.resource_key,
+            input_digest:effect.input_digest, recorded_at:effect.created_at, event_id:effect.started_event_id,
+            producer_id:"capability_host".into(), idempotency_key:format!("effect:{}",effect.effect_id).into(),
+            correlation_id:effect.effect_id.into(), strategy:effect.strategy,
+            causation_event_id:None, payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
+        };
+        self.settle_wave1_known(store, Receipt {request}, ok, observation).await
     }
 
     /// Begin an application mutation only under its exact admitted Tool call.
@@ -335,10 +448,15 @@ impl HostedEffectReceipts {
         state: EffectTerminalState,
         observation: Value,
     ) -> Result<(), AppError> {
+        let store = self.store().await?;
+        self.finish_in_store(&store, receipt, state, observation).await
+    }
+
+    async fn finish_in_store(&self, store: &AgentSessionStore, receipt: Receipt,
+        state: EffectTerminalState, observation: Value) -> Result<(), AppError> {
         if serde_json::to_vec(&observation).map_err(|_| failure())?.len() > 8192 {
             return Err(failure());
         }
-        let store = self.store().await?;
         let Receipt { request } = receipt;
         let mut terminal = request;
         terminal.recorded_at = nomifun_common::now_ms();
@@ -671,7 +789,7 @@ mod tests {
         let session = AgentSessionLiveRecord {
             agent_session_id: AgentSessionId::from(id.clone()), owner_ref: principal,
             metadata: AgentSessionMetadata { purpose: Default::default(), app_project_id: None, title: Some("Hosted application receipt".into()),
-                archived:false, pinned:false, reasoning_effort:None },
+                archived:false, pinned:false, reasoning_effort:None, companion:None },
             agent_binding: AgentBindingValue {
                 preset_revision_ref: PresetRevisionRef { preset_id:AgentPresetId::from(uuid::Uuid::now_v7().to_string()),
                     revision:1, revision_digest:DigestHex::from("a".repeat(64)) },
@@ -865,4 +983,6 @@ mod tests {
         assert!(fixture.receipts.context(&fixture.session.owner_ref.principal_id,fixture.session.agent_session_id.as_ref()).await.unwrap().unwrap().contains("robot/move"));
         fixture.database.close().await;
     }
+
+    include!("hosted_memory_effect_tests.rs");
 }

@@ -21,7 +21,6 @@ await i18n.init({ lng: 'en', keySeparator: false, resources: { en: { translation
   'nomi.cohabit.robotResource.saved': 'Robot updated',
   'nomi.cohabit.robotResource.changed': 'Settings changed; review and apply again',
   'nomi.cohabit.robotResource.capabilitiesChanged': 'Apply the updated device capabilities',
-  'nomi.cohabit.robotResource.robotAgentHint': 'Choose Robot companion in Mind configuration; this keeps the same conversation.',
   'agentSettings.productBinding.busy': 'Wait for the current reply',
   'agentSettings.productBinding.loadFailed': 'Load failed',
   'agentSettings.productBinding.saveFailed': 'Save failed',
@@ -32,11 +31,11 @@ await i18n.init({ lng: 'en', keySeparator: false, resources: { en: { translation
 const companionId = parseCompanionId('019b0000-0000-7000-8000-000000000022');
 const conversationId = parseConversationId('019b0000-0000-7000-8000-000000000023');
 const providerId = parseProviderId('019b0000-0000-7000-8000-000000000021');
-const idle = { id: conversationId, type: 'nomi', status: 'pending', extra: { workspace: '' },
+const idle = { id: conversationId, type: 'nomi', status: 'pending', extra: { workspace: '', companion_id: companionId, companion_role: 'robot' },
   model: { id: providerId, use_model: 'model-a' },
   runtime: { state: 'idle', is_processing: false, can_send_message: true, has_runtime: false },
 } as TChatConversation;
-const options: ProductAgentOptions = { selection: { kind: 'template', template_key: 'companion.default' }, needs_model: false, options: [] };
+const options: ProductAgentOptions = { selection: { kind: 'template', template_key: 'companion.robot' }, needs_model: false, options: [] };
 const workspaceRoot = 'C:\\Companion\\existing-workspace';
 const resources = [
   { resource_kind: 'companion', resource_id: companionId },
@@ -54,6 +53,10 @@ const binding = (robotId?: string, version = 1, capabilityRevision = 0) => ({ bi
       typed_parameters: resource.resource_kind === 'robot' ? { capability_revision: String(capabilityRevision) }
         : resource.resource_kind === 'workspace' ? { workspace_root: workspaceRoot } : {} })),
 } as AgentBindingValue);
+const desktop = (robotId?: string, capabilities = ['robot']) => ({ ...idle,
+  extra: { ...idle.extra, companion_role: 'companion' },
+  agent_snapshot: { enabled_capabilities: capabilities, canonical_binding: binding(robotId) },
+} as TChatConversation);
 const robot = (robot_id: string, name: string, owner = companionId, capability_revision = 0) => ({ robot_id, name, companion_id: owner, capability_revision } as IApiRobot);
 const restores: Array<() => void> = [];
 afterEach(() => { cleanup(); restores.splice(0).reverse().forEach((restore) => restore()); });
@@ -88,19 +91,29 @@ const choose = async (view: ReturnType<typeof mount>, text: string) => {
   fireEvent.click(await view.findByText(text));
 };
 
-test('paired robots need an explicit apply and submit catalog identities for a frozen workspace while retaining other resources', async () => {
+test('desktop companion Sessions without Robot authorization or an existing device do not load resources', async () => {
+  const api = install();
+  const view = mount({ ...idle, extra: { ...idle.extra, companion_role: 'companion' } } as TChatConversation);
+  await act(async () => {});
+  expect(view.container.textContent).toBe('');
+  expect(api.get).not.toHaveBeenCalled();
+  expect(api.getOptions).not.toHaveBeenCalled();
+  expect(api.save).not.toHaveBeenCalled();
+});
+
+test.each(['robot', 'companion'] as const)('paired robots need an explicit apply and retain other resources through the actual %s endpoint', async (role) => {
   const { save, get, permissions } = install();
   let resolveSave!: () => void;
   save.mockImplementation(() => new Promise((resolve) => { resolveSave = () => resolve({ selection: options.selection!, needs_model: false }); }));
   const saving: boolean[] = [];
-  const view = mount(idle, undefined, (value) => saving.push(value));
+  const view = mount(role === 'robot' ? idle : desktop(), undefined, (value) => saving.push(value));
   await choose(view, 'Head B');
   expect(view.queryByText('Other companion')).toBeNull();
   expect(save).not.toHaveBeenCalled();
   fireEvent.click(view.getByRole('button', { name: 'Apply robot' }));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
   expect(get).toHaveBeenCalledTimes(2);
-  expect(save.mock.calls[0][0]).toEqual({ target_kind: 'companion', target_id: companionId, request: {
+  expect(save.mock.calls[0][0]).toEqual({ target_kind: role, target_id: companionId, request: {
     selection: options.selection, conversation_id: conversationId, model: { provider_id: providerId, model: 'model-a' },
     resource_selections: [...resources.map((resource) => resource.resource_kind === 'project_memory'
       ? { ...resource, resource_id: 'default-project-memory' }
@@ -124,28 +137,38 @@ test('explicitly removing a robot preserves other resources', async () => {
   expect(save.mock.calls[0][0].request.resource_selections?.some((resource) => resource.resource_kind === 'robot')).toBe(false);
 });
 
-test('robot mode guidance appears only for an explicitly selected robot and never switches the Agent automatically', async () => {
-  const { save, setBinding, robots } = install();
+test('desktop companion can remove its existing device resource even after Robot authorization was removed', async () => {
+  const { save, getOptions } = install('robot-a');
+  const view = mount(desktop('robot-a', []));
+  await choose(view, 'No robot control');
+  expect(getOptions.mock.calls[0][0]).toEqual({ target_kind: 'companion', target_id: companionId, conversation_id: conversationId,
+    model: { provider_id: providerId, model: 'model-a' } });
+  fireEvent.click(view.getByRole('button', { name: 'Apply robot' }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(save.mock.calls[0][0].target_kind).toBe('companion');
+  expect(save.mock.calls[0][0].request.resource_selections).toHaveLength(resources.length);
+  expect(save.mock.calls[0][0].request.resource_selections?.some((resource) => resource.resource_kind === 'robot')).toBe(false);
+});
+
+test('robot configuration reads the exact robot Session and never rewrites the companion role', async () => {
+  const { save, getOptions } = install();
   const view = mount();
   await waitFor(() => expect(view.container.querySelector('.arco-select')).not.toBeNull());
-  expect(view.queryByText('Choose Robot companion in Mind configuration; this keeps the same conversation.')).toBeNull();
-  view.unmount();
-  setBinding(binding('robot-a'));
-  const selectedView = mount();
-  await selectedView.findByText('Choose Robot companion in Mind configuration; this keeps the same conversation.');
-  expect(robots).toHaveBeenCalled();
+  expect(getOptions.mock.calls[0][0]).toEqual({ target_kind: 'robot', target_id: companionId, conversation_id: conversationId,
+    model: { provider_id: providerId, model: 'model-a' } });
   expect(save).not.toHaveBeenCalled();
 });
 
-test('a capability revision can be explicitly reapplied without selecting a different robot', async () => {
+test.each(['robot', 'companion'] as const)('a capability revision can be reapplied through the %s endpoint without changing the device', async (role) => {
   const { save, setRobots } = install('robot-a');
   setRobots([robot('robot-a', 'Head A', companionId, 2)]);
-  const view = mount();
+  const view = mount(role === 'robot' ? idle : desktop('robot-a'));
   await waitFor(() => expect(view.getByRole('status').textContent).toBe('Apply the updated device capabilities'));
   const button = view.getByRole('button', { name: 'Apply robot' });
   expect(button.hasAttribute('disabled')).toBe(false);
   fireEvent.click(button);
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(save.mock.calls[0][0].target_kind).toBe(role);
   expect(save.mock.calls[0][0].request.conversation_id).toBe(conversationId);
   expect(save.mock.calls[0][0].request.resource_selections?.find((item) => item.resource_kind === 'robot')?.resource_id).toBe('robot-a');
   await waitFor(() => expect(view.queryByRole('status')).toBeNull());

@@ -3,16 +3,16 @@
   "payload": {
     "manifest_version": "1.0.0",
     "database_schema_digest": "855244c46e97838c4deaee55f3fd5640875c2b87e43ccba2ef6773f23258b4d8",
-    "rust_contract_schema_digest": "eb1572f0e721090fa9f901d18df0cf6bcf70b10120a0ed9dca11dc3201240352",
+    "rust_contract_schema_digest": "1b9e86240251bdd69bf468e08d81910698a351893da7b960a5216fa3e5175dbc",
     "package_schema_digest": "78633c6aada5d08339172daa0ef7eb11610c48f471dd9ba36f3da0fafc32905a",
-    "official_preset_seed_manifest_digest": "ff0707bd49e655927fddaaa4431aad90315a1dd31000f95cf1550879aef48820",
+    "official_preset_seed_manifest_digest": "1822ab3ffa286a20ef4f8c3a067c7c7cce5f4ab5b8fb3c372e0f774642edd0d6",
     "canonical_api_inventory_digest": "6addf6ddc6847571816ad3cd67db7d807002d4b843d4de7febcb01eeda7d12d6",
-    "session_event_registry_digest": "a903b61dedcf9f76082d3250aeff265f1ce69e4238c8057ad33ca0eace15d050",
+    "session_event_registry_digest": "3f52a59e3cdcc5c4952e490ba7c1c3f00e1775299fe77418bd4492966a7017c2",
     "error_registry_digest": "ff3b5f493e1074300216596660500c204008de331b172965b241a5d2b69a59a6",
     "runtime_protocol_digest": "5c7792fb52932933b387984887475a525bedde5c03cd6b5b3fa81e7df614382f",
     "runtime_feature_inventory_digest": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
     "platform_validation_contract_digest": "2ad5072bfff0fb80034265b1e6a93f7eb036fceeec4a4515c13075bbb828c97a",
     "confirmed_decision_contract_digest": "92b3de5b8e46bb769e1af7143555dd3cf65be323ab2a6335e48b0fa01854a6c4"
   },
-  "payload_digest": "99e78310d33641554df8752cc6ffa913c14b2b4f05db82c910688810847dd26b"
+  "payload_digest": "d685c10f33c4e5d017b544ec9c65fef7a64df45b33ed0efe5dd5838c50bc9316"
 }

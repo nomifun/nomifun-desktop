@@ -46,6 +46,8 @@ test('canonical lifecycle events refresh only this companion Session and reconne
   handlers[4]!({ agent_session_id: id });
   handlers[5]!(undefined);
   expect(refresh).toHaveBeenCalledTimes(6);
+  handlers[3]!({ conversation_id: id, action: 'deleted' });
+  expect(refresh).toHaveBeenCalledTimes(7);
   view.unmount();
   detached.forEach((unsubscribe) => expect(unsubscribe).toHaveBeenCalledTimes(1));
 });
