@@ -237,6 +237,27 @@
   margin-left: 0;
 }
 
+.update-compact-card__notice {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(var(--warning-6), 0.22);
+  border-radius: 8px;
+  background: rgba(var(--warning-6), 0.08);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.update-install-location {
+  margin-top: 6px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  font-size: 11px;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
 body[arco-theme='dark'] .update-compact-card,
 [data-theme='dark'] .update-compact-card {
   box-shadow:

@@ -18,6 +18,12 @@ in the release workflow; do not maintain a second release checklist here.
 - Renderer capabilities allow metadata checking and relaunch, not the raw updater plugin's
   download/install operations. The [native install context](../src/updater_install_context.rs)
   and commands own installation preflight and failure recovery.
+- On macOS the update check also reads the native install context. A running bundle that
+  cannot be replaced in place (disk image or external volume, App Translocation, a volume
+  other than the temporary directory's, or an unreadable location) is reported with its
+  specific cause and running path, and the renderer offers manual download instead of
+  downloading a package it cannot install. Installation repeats the same preflight and
+  fails closed.
 - A failure after installer admission retains the native slot and reports manual recovery.
   Correcting an already published bad archive requires a newly signed artifact and matching
   manifests; changing only the application source cannot repair downloaded bytes.

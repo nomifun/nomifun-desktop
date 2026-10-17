@@ -70,6 +70,7 @@ import {
   tauriUpdateDownload,
   tauriUpdatePackageSnapshot,
   tauriUpdateInstallAndRelaunch,
+  tauriUpdaterInstallContextSnapshot,
 } from './tauriUpdater';
 import type {
   IMcpServer,
@@ -1356,6 +1357,8 @@ export const autoUpdate = {
       /** Native slot state, so a re-check can also land on "already downloading". */
       packageState?: import('./tauriShell').TauriUpdatePackageState | null;
       packageVersion?: string | null;
+      /** Whether this process may replace its own bundle, and why not. */
+      installContext?: import('./tauriUpdateInstall').UpdaterInstallContext | null;
     }>,
     { includePrerelease?: boolean }
   >(async () => {
@@ -1369,11 +1372,15 @@ export const autoUpdate = {
       packageVersion: snapshot?.version ?? null,
     };
     if (!info) return { success: true, data: slot };
+    // Only queried when an update exists: the native command logs a warning on
+    // every refused call, so an up-to-date check must not trip it.
+    const installContext = await tauriUpdaterInstallContextSnapshot();
     return {
       success: true,
       data: {
         updateInfo: { version: info.version, releaseDate: info.releaseDate, releaseNotes: info.releaseNotes },
         ...slot,
+        installContext,
       },
     };
   }, { success: false }),
