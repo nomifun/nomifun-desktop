@@ -3,7 +3,7 @@ use std::{env, path::PathBuf, process::Command};
 
 fn main() {
     let platform = env::var("CARGO_CFG_TARGET_OS").unwrap();
-    if platform != "macos" && platform != "windows" {
+    if !matches!(platform.as_str(), "macos" | "windows" | "linux") {
         return;
     }
     let sources = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -50,6 +50,15 @@ fn main() {
     ] {
         hash_file(&root, &root.join(relative), &mut identity);
     }
+    // Installation and native admission are part of the component identity,
+    // along with the build logic that selects and fingerprints these inputs.
+    for relative in [
+        "apps/desktop/linux-system-execution/com.nomifun.system-execution.policy",
+        "apps/desktop/linux-system-execution/install.sh",
+        "crates/shared/nomi-system-execution/build.rs",
+    ] {
+        hash_file(&root, &root.join(relative), &mut identity);
+    }
     for relative in [
         "crates/shared/nomi-system-execution/src",
         "crates/shared/nomi-process-runtime/src",
@@ -79,7 +88,9 @@ fn main() {
         "cargo:rustc-env=NOMIFUN_SYSTEM_EXECUTION_BUILD_ID={:x}",
         identity.finalize()
     );
-    if platform == "windows" { return; }
+    if platform != "macos" {
+        return;
+    }
     let arch = match env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str() {
         "aarch64" => "arm64",
         "x86_64" => "x86_64",

@@ -16,7 +16,7 @@ describe('desktop companion chrome layout', () => {
   });
 
   test('keeps desktop companion switcher tooltips flat', () => {
-    const tooltipRule = companionCss.match(/\.nomi-companion-switcher__tooltip \[role='tooltip'\] \{([\s\S]*?)\}/)?.[1] ?? '';
+    const tooltipRule = companionCss.match(/\.nomi-companion-switcher__tooltip \{([\s\S]*?)\}/)?.[1] ?? '';
     expect(tooltipRule.includes('box-shadow: none;')).toBe(true);
   });
 

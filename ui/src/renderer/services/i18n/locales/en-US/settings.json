@@ -1,5 +1,9 @@
 {
   "title": "Settings",
+  "modelConfiguration": {
+    "back": "Back",
+    "identityTitle": "Model details"
+  },
   "contextLimit": "Context window (tokens)",
   "contextLimitHint": "Leave unset to avoid overriding the model context. Only a provider-declared window is used; if unknown, enter the documented window. Safety budgets are separate.",
   "contextLimitSelectPlaceholder": "Select context window",
@@ -537,7 +541,7 @@
   "removeModelTask": "Remove interface",
   "removeModelTaskConfirm": "Remove the {{task}} interface and its invocation configuration?",
   "completeCapabilityConfiguration": "Complete the protocol and connection for each invocation interface.",
-  "editModelCapabilities": "Edit invocation interfaces, protocols and URLs",
+  "editModelCapabilities": "Edit model configuration",
   "compatibleProtocolPlaceholder": "Select a registered adapter",
   "noCompatibleProtocolForTask": "No registered protocol can execute this task yet. You may keep the task, but it cannot be saved until a compatible adapter is registered.",
   "protocolProviderRecommended": "Current provider recommendation",

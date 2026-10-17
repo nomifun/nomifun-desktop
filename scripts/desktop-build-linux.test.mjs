@@ -6,7 +6,7 @@ import { describe, expect, test } from 'bun:test';
 
 const source = readFileSync(new URL('./desktop-build-linux.sh', import.meta.url), 'utf8');
 
-function runBuildFixture(args, noPackageTarget = '') {
+function runBuildFixture(args, noPackageTarget = '', missingPackage = '') {
   const root = mkdtempSync(join(tmpdir(), 'nomifun-linux-build-'));
   const triple = 'x86_64-unknown-linux-gnu';
   const stale = join(root, 'target', triple, 'release/bundle/rpm/old.rpm');
@@ -15,13 +15,14 @@ function runBuildFixture(args, noPackageTarget = '') {
   mkdirSync(bin);
   mkdirSync(join(root, 'scripts/release'), { recursive: true });
   copyFileSync(new URL('./desktop-build-linux.sh', import.meta.url), join(root, 'scripts/desktop-build-linux.sh'));
+  writeFileSync(join(root, 'scripts/prepare-linux-system-execution.mjs'), '// mocked');
   writeFileSync(join(root, 'scripts/release/release-lock.mjs'), '// mocked');
   for (const path of [stale, other]) {
     mkdirSync(join(path, '..'), { recursive: true });
     writeFileSync(path, 'previous build');
   }
   const tools = {
-    'pkg-config': '#!/bin/sh\nexit 0\n',
+    'pkg-config': '#!/bin/sh\nfor arg in "$@"; do [ "$arg" != "$MOCK_MISSING_PACKAGE" ] || exit 1; done\nexit 0\n',
     rustup: '#!/bin/sh\nprintf "%s\\n" x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu\n',
     bun: `#!/bin/bash
 set -eu
@@ -42,6 +43,8 @@ if [[ "$1" == x ]]; then
   if [[ "$triple" != "$MOCK_NO_PACKAGE_TARGET" ]]; then
     printf 'current package' > "target/$triple/$profile/bundle/deb/current-$triple.deb"
   fi
+elif [[ "$1" == */prepare-linux-system-execution.mjs ]]; then
+  printf '%s\\n' "$PWD/mock-system-execution.conf.json"
 elif [[ "$1" == */release-lock.mjs && "$2" == create ]]; then
   while [[ "$1" != --output ]]; do shift; done
   shift
@@ -56,7 +59,7 @@ fi
   const result = spawnSync('bash', [join(root, 'scripts/desktop-build-linux.sh'), ...args], {
     // Deliberately invoke outside the repository to test root resolution.
     cwd: tmpdir(),
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, MOCK_NO_PACKAGE_TARGET: noPackageTarget },
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, MOCK_NO_PACKAGE_TARGET: noPackageTarget, MOCK_MISSING_PACKAGE: missingPackage },
     encoding: 'utf8',
     timeout: 10_000,
   });
@@ -64,6 +67,17 @@ fi
 }
 
 describe('Linux Desktop build contract', () => {
+  for (const pkg of ['gstreamer-1.0', 'gstreamer-app-1.0', 'gstreamer-video-1.0']) {
+    test.skipIf(process.platform !== 'linux')(`rejects an unavailable GStreamer build dependency before building: ${pkg}`, () => {
+      const fixture = runBuildFixture(['x64'], '', pkg);
+      try {
+        expect(fixture.result.status).toBe(1);
+        expect(fixture.result.stderr).toContain(pkg);
+        expect(existsSync(fixture.stale)).toBe(true);
+        expect(existsSync(join(fixture.root, 'dist/desktop'))).toBe(false);
+      } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+    });
+  }
   test('creates and immediately verifies one release lock per collected package', () => {
     expect(source.includes('lock="$package.release-lock.json"')).toBe(true);
     expect(source.includes('write_release_lock "$t" "$host" "$package" "$lock"')).toBe(true);

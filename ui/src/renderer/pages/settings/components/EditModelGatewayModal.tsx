@@ -6,7 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import type { IProvider } from '@/common/config/storage';
-import NomiModal from '@/renderer/components/base/NomiModal';
+import ModelConfigurationPanel from '@/renderer/pages/modelHub/ModelConfigurationPanel';
 import ModalHOC from '@/renderer/utils/ui/ModalHOC';
 import { Alert, Button, Input } from '@arco-design/web-react';
 import { useEffect, useState } from 'react';
@@ -37,17 +37,17 @@ const EditModelGatewayModal = ModalHOC<{ data?: IProvider; onChanged(provider: I
     } catch { setError(true); }
     finally { setSaving(false); }
   };
-  return <NomiModal visible={modalProps.visible} onCancel={modalCtrl.close} header={{ title: t('settings.modelGateway.edit'), showClose: !saving }} style={{ width: 620, maxWidth: '95vw' }} contentStyle={{ padding: '16px 24px' }} footer={<div className='flex justify-end gap-8px'><Button onClick={modalCtrl.close} disabled={saving}>{t('common.cancel')}</Button><Button type='primary' onClick={() => void save()} loading={saving} disabled={!address || !name.trim() || (destinationChanged && !apiKey.trim())}>{t('common.save')}</Button></div>} unmountOnExit>
+  return <ModelConfigurationPanel visible={modalProps.visible} onBack={modalCtrl.close} busy={saving} title={t('settings.modelGateway.edit')} subtitle={data?.name} footer={<div className='flex justify-end gap-8px'><Button onClick={modalCtrl.close} disabled={saving}>{t('common.cancel')}</Button><Button type='primary' onClick={() => void save()} loading={saving} disabled={saving || !address || !name.trim() || (destinationChanged && !apiKey.trim())}>{t('common.save')}</Button></div>}>
     <div className='flex flex-col gap-12px'>
-      <label className='flex flex-col gap-6px'><span>{t('settings.modelProvider')}</span><Input value={name} onChange={setName} disabled={saving} aria-label={t('settings.modelProvider')} /></label>
-      <label className='flex flex-col gap-6px'><span>{t('settings.modelGateway.address')}</span><Input value={baseUrl} onChange={setBaseUrl} disabled={saving} aria-label={t('settings.modelGateway.address')} /></label>
+      <label className='flex flex-col gap-6px'><span>{t('settings.modelProvider')}</span><Input autoCapitalize='none' autoCorrect='off' spellCheck={false} value={name} onChange={setName} disabled={saving} aria-label={t('settings.modelProvider')} /></label>
+      <label className='flex flex-col gap-6px'><span>{t('settings.modelGateway.address')}</span><Input autoCapitalize='none' autoCorrect='off' spellCheck={false} value={baseUrl} onChange={setBaseUrl} disabled={saving} aria-label={t('settings.modelGateway.address')} /></label>
       {!address && <Alert type='error' content={t('settings.modelGateway.invalidAddress')} />}
       {address?.insecure && <Alert type='warning' content={t('settings.modelGateway.insecureAddress')} />}
-      <label className='flex flex-col gap-6px'><span>{t('settings.apiKey')}</span><Input.Password value={apiKey} onChange={setApiKey} disabled={saving} autoComplete='off' aria-label={t('settings.apiKey')} /><span className='text-12px text-t-secondary'>{t('settings.modelGateway.keyDestination', { domain: address?.domain ?? '' })}</span></label>
+      <label className='flex flex-col gap-6px'><span>{t('settings.apiKey')}</span><Input.Password autoCapitalize='none' autoCorrect='off' spellCheck={false} value={apiKey} onChange={setApiKey} disabled={saving} autoComplete='off' aria-label={t('settings.apiKey')} /><span className='text-12px text-t-secondary'>{t('settings.modelGateway.keyDestination', { domain: address?.domain ?? '' })}</span></label>
       <div className='text-12px text-t-secondary'>{t(destinationChanged ? 'settings.modelGateway.keyRequiredOnAddressChange' : 'settings.modelGateway.keepKey')}</div>
       <div className='text-12px text-t-secondary'>{t('settings.modelGateway.atomicConnections')}</div>
       {error && <Alert type='error' content={t('settings.modelGateway.saveFailed')} />}
     </div>
-  </NomiModal>;
+  </ModelConfigurationPanel>;
 });
 export default EditModelGatewayModal;

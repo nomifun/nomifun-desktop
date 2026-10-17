@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { SWRConfig, unstable_serialize } from 'swr';
 import ModelAdvancedEditor from '../src/renderer/pages/settings/components/ModelAdvancedEditor';
+import { ModelConfigurationWorkspace } from '../src/renderer/pages/modelHub/ModelConfigurationPanel';
 import { ThemeProvider } from '../src/renderer/hooks/context/ThemeContext';
 import { aliasCapability, aliasProtocolManifest, aliasProviderBaseUrl, aliasProviderId } from './fixtures/modelAliasEditor';
 
@@ -17,7 +18,7 @@ const capabilities = [aliasCapability];
 /** Actual model editor with isolated preview state; no model service is called. */
 export default function ModelAliasEditorPreview() {
   const [displayName, setDisplayName] = useState<string | undefined>('日常助理模型');
-  return <SWRConfig value={config}><ThemeProvider>
+  return <SWRConfig value={config}><ThemeProvider><ModelConfigurationWorkspace>
     <main style={{ maxWidth: 760, margin: '64px auto', padding: 24 }}>
       <h2>模型别名编辑预览</h2>
       <p>当前别名：{displayName || '未设置（显示原始模型 ID）'}</p>
@@ -26,5 +27,5 @@ export default function ModelAliasEditorPreview() {
         displayName={displayName} capabilities={capabilities}
         onSave={async (patch) => setDisplayName(patch.display_name ?? undefined)} />
     </main>
-  </ThemeProvider></SWRConfig>;
+  </ModelConfigurationWorkspace></ThemeProvider></SWRConfig>;
 }

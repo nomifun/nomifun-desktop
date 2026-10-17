@@ -213,3 +213,17 @@ Browser13业务后的真实快照5aWxzd在该次正常关闭前存在、关闭�
 历史刷新补强后的完整Runtime最终455通过/0失败/1忽略，实际退出0，回执`windows-runtime-final-typed-history-tests-receipt.json` SHA-256 `b4e16c0b5c6f62e4b314e9945ed13991161cc9a2c5e40f3e4ba8bce426d653a1`。包括真实Session-loop、同身份新鲜预检、ACL外部变化使dirty、20×16KiB空白规则触发256KiB硬cache预算、combined48KiB，以及Scope/Source两阶段未知owner原错误落ToolCompleted后fatal、无任何sibling重派。硬预算不再被load_agents_md的warning包装吞成unavailable。首轮451通过/4失败保留：root的过严guard错误要求role host包装码等于native cause码；修后依据独立typed native cause并保留外层码，显式unknown及无typed native完成证明的owner错误仍fatal，未从message恢复类型。
 
 共享type的只读跨cfg构造审查未发现遗漏，尤其macOS-only GUI fixture的两处构造显式details=None；这只是源码构造完整性，不冒充macOS编译/原生重跑。最终`bun run check`实际退出0：前后168个Git变更输入摘要完全相同，完整UI/installer/进程/Browser/Agent Session等边界全部通过；`windows-final-typed-source-check-receipt.json` SHA-256 `ef22c0188e666c14c4f9b3bcfd1ced446f3cda1d4139f17b8ce7cc3094064693`，日志SHA-256 `6a5eb6bfa40c54d0d1e0998ba7b72adaf624037589232009b54b3d4479baa3fb`。后续仅追加文档记录时用最小文档检查，不把本结果冒充尚未执行的最终App或installer验收。
+
+交付前真实远端检查发现main已前进，未覆盖或force-push：原Windows168文件先在`codex/windows-global-os`保存提交`1b9c317ecaf5a5b7f70de382defbaf6214849fff`（tree`c25f784760d3d1704828421cc25727bacdfa6305`），当时工作树干净；该提交记录455 Runtime/60 typed native与已发生App证据，未将后续App/installer写成通过。随后fetch并非快进整合远端`d129fa9994cdc408fc2469e23e6115dd2e3be00b`，包含Linux全局能力`05c9de03a`及4条UI/updater修复。11个冲突按平台与共享语义逐项解决，未整文件选ours/theirs，也未丢弃Linux实现。
+
+合并保留Windows Entry/Follow、typed error、历史退役/fatal owner/硬预算，同时吸收main的canonical alias改进：路径拼写差异本身不再强迫新调用，实际新指令仍延期并要求fresh call；原调用参数不改写。unbound workspace统一`resolve_unbound_workspace_anchor`，保留Windows pinned native缺失/ACL/别名证明并加入Linux clean frozen-anchor约束；files/process共用原namespace，VCS/artifacts继续要求真实物理目录。共享执行client保留Mac、Windows、Linux各自原生入口与生命周期，其他平台明确unavailable；build identity新增build.rs自身和真实Linuxpolkit/install资产。上述源码合并不替代其他平台重验。
+
+共享验证driver的16块冲突已合并，保留Windows精确canonical slot/unknown/control cleanup门禁和Linux全部场景。35项通过、0失败、4个平台跳过，321断言、6模块import及3个CLI错误平台flag提前拒绝通过；`windows-linux-driver-merge-review.json` SHA-256 `4cb0c5edb8dab92014306ece751dcbd1e9ba9655f81c96c5533d7b3a30b7e5af`。失败夹具继续保留原报告与目录；不是Linux原生或最终Windows App证明。
+
+合并Runtime首轮456通过/2失败/1忽略保留：一个Windows alias夹具未按内部metadata请求归一化分隔符查表；一个旧Entry测试仍要求仅拼写变化的`resolves to`延期。修复仅调整夹具键和断言，新增确认Follow确实独立发现真实目标目录，而不是复用Entry观察。最终完整Runtime458通过/0失败/1忽略，实际退出0，日志`windows-merged-runtime-tests-final.log`。knowledge新增Linux反例在Windows verbatim PathBuf::push已正规化掉`..`，17/1首红保留，改为OsString保留真实ParentDir并断言夹具前提后18/0通过；生产检查未放宽。合并system-execution原生库7/0通过。后续App/包原生结果另记。
+
+合并初次离线解析因本机缺gstreamer元数据而101，按既有Cargo.lock执行Windows目标`cargo fetch --locked --target x86_64-pc-windows-msvc`后退出0，仅补索引/所需缓存，不升级依赖、不安装Linux系统组件。完整`bun run check`实际退出0：135文档/1308引用、2177 renderer源的880×600边界和所有现役Agent/进程/Browser/installer边界通过；日志`windows-merged-source-check.log`。独立新UI与Linux历史结果保持原归属，不借本次Windows检查重新认证。
+
+合并定向验证已完整结束，33通过/0失败：knowledge18、system-execution7、App8（两项missing-default effect-key/plain-verbatim与VCS strictness，加workspace_file_read全6）。App使用相同browser-use,computer-use features单次no-run编译实际退出0、8m15s，随后同exe直接过滤执行，均非0匹配。总回执`windows-merged-targeted-tests-receipt.json` SHA-256 `fb597b32f5db2ba31e94b828d34b3da7be4edbcaeb0651ff413f45668f6279de`，App子回执SHA-256 `f9844107b225eb6d4eedf3e29e94cc2c3767019d28a29c52567472ea0cd6db46`。首红与修后正例保留，没有通过放宽生产来消除测试。最终Windows native App、NSIS与收尾仍以之后实际报告为准。
+
+远端main前进后已停止109批次debug编译（actual1，`windows-debug-build-typed-history.log`），没有将中途exe当最终artifact。此前109冻结及静态/单元结果属于整合前source cut，不套用到当前合并源码。新完整Git merge保存后重新冻结/构建，组件ID取本轮实际产物，不沿用0259或Mac e4身份。

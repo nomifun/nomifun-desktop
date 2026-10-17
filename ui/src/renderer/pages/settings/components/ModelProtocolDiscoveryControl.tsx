@@ -199,7 +199,7 @@ export default function ModelProtocolDiscoveryControl({ model, committed, attemp
       <div className='flex items-center justify-between gap-8px'>
         <span>{t('settings.modelProtocolDiscovery.title')}</span>
       </div>
-      {(displayed?.error || diagnostics.length > 0) && <div className='text-t-tertiary'>
+      {(displayed?.error || diagnostics.length > 0) && <div className='text-t-secondary'>
         <Button size='mini' type='text' aria-expanded={diagnosticsOpen} onClick={() => {
           setDisclosure({ identity: disclosureIdentity, settings: true, diagnostics: !diagnosticsOpen });
         }}>{t('settings.modelProtocolDiscovery.diagnostics')}</Button>

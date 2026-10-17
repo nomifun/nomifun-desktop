@@ -1,5 +1,9 @@
 {
   "title": "设置",
+  "modelConfiguration": {
+    "back": "返回",
+    "identityTitle": "模型信息"
+  },
   "contextLimit": "上下文窗口 (tokens)",
   "contextLimitHint": "未填写不覆盖模型上下文。仅采用供应商明确提供的窗口；未知时请按模型文档填写，安全预算独立。",
   "contextLimitSelectPlaceholder": "选择上下文窗口",
@@ -537,7 +541,7 @@
   "removeModelTask": "移除调用接口",
   "removeModelTaskConfirm": "移除“{{task}}”接口及其调用配置？",
   "completeCapabilityConfiguration": "请完整配置调用接口的协议和连接。",
-  "editModelCapabilities": "编辑调用接口、协议与地址",
+  "editModelCapabilities": "编辑模型配置",
   "compatibleProtocolPlaceholder": "选择已注册适配器",
   "noCompatibleProtocolForTask": "当前还没有可执行此任务的已注册协议。可以保留该任务，但需有兼容适配器注册后才能保存。",
   "protocolProviderRecommended": "当前供应商推荐",

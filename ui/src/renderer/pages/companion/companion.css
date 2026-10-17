@@ -650,7 +650,7 @@
 
 /* Size to the name, never to the 28px avatar wrapper. Transparent native space
    is reserved at initialization, never resized in response to hover/focus. */
-.nomi-companion-switcher__tooltip [role='tooltip'] {
+.nomi-companion-switcher__tooltip {
   width: max-content;
   max-width: 160px;
   white-space: nowrap;

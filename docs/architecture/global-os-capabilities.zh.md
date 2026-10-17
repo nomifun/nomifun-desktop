@@ -11,6 +11,7 @@
 Windows 普通文件和目录 rename 使用 pinned source 的 DELETE 句柄与 pinned destination directory，调用 `NtSetInformationFile(FileRenameInformation)` 的相对单入口名称，`ReplaceIfExists=false`；不创建 guard 子项，不复制后删除，不自动创建缺失的目标父目录。原生操作检查真实 ACL 和卷边界。ADS 使用同一底层文件内的原生 stream rename 语义；替换非空 stream 等系统不支持的原子发布保留原始错误和原字节，不以截断写模拟成功。本机 DOS、UNC、Volume GUID 及可解析的文件系统别名按真实句柄身份处理；设备对象不伪装为 regular file。
 
 Windows 删除与发布残留清理先使用同一已校验 DELETE handle 的 extended disposition；只有 native1/50/87 表示该调用不受支持时才尝试 basic disposition，ACL/共享拒绝不触发回退，不改变readonly属性或ACL。mark成功还不是清理证明：必须关闭本应用相关句柄，再相对 retained parent 检查原名称真实缺失。共享 publication identity 在成功mark后统一消费，旧Arc不能再用缓存FileID重试；外部reader或借用身份仍持有对象而无法证明缺失时保留原 unknown/未结算事实。绝对祖先路径消失不能代替原目录对象内的缺失证明，artifact借用pin也不能被强行释放以制造成功。平台实测与未覆盖范围见Windows验证记录。
+Linux 原子替换在已固定的源与 staging fd 上保留 UID/GID、mode 和内核可观察的 ACL/xattrs，复核源与目标后再发布；权限或元数据复制失败在发布前返回真实错误。普通用户无权观察的属性不能由测试补造。新 regular file 在文件系统明确不支持 `renameat2(RENAME_NOREPLACE)` 时可用同目录 `linkat` 原子 no-replace 发布，随后精确处理 staging 清理；通用重命名不采用覆盖或复制后删除降级，文件系统不支持时保留真实错误和源文件。
 
 项目 watcher、VCS、产物和应用归属继续指向确切项目。工作区外写入不发布伪造的工作区相对文件事件，也不因为物理路径相邻而成为项目产物。Session/Turn/Event/Payload/Effect 仍是唯一 Agent 事实链。
 
@@ -60,7 +61,13 @@ Windows 聚焦使用一次原生 `SetForegroundWindow`。目标不存在或系�
 
 高完整性桥的 remote focus 在派发前可传递 App 已具备的前台资格：仅当真实前台 PID 属于当前 App、线程和输入桌面均为 Default、原 facility 未关闭且 retained helper 进程句柄仍存活时，对该句柄取得的确切 PID 调用 [AllowSetForegroundWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-allowsetforegroundwindow)。不接受模型或 RPC 提供的 PID，不向所有进程开放，不主动激活 App；系统拒绝时不重复请求或注入输入。此资格可由后续用户输入撤销，成功委托也不能证明下一次聚焦成功，仍须保留真实 native 结果及原 Effect 结算。
 
-Linux 当前共享接口对尚未实现的管理员适配返回明确 `SYSTEM_EXECUTION_NOT_AVAILABLE`；macOS 或 Windows 的实现不构成 Linux 原生证据。
+Linux 使用固定 `/usr/bin/pkexec --disable-internal-agent /usr/libexec/nomifun-system-runner --stdio`，由发行版 polkit 完成系统认证。普通 GUI 继续使用登录用户；runner 通过原监督器管理 Pipe/PTY 与 typed readonly worker。每连接使用有界帧和并发 RPC，握手核对真实 root、`PKEXEC_UID` 对应的调用用户及同源 build identity。调用用户的 HOME/USER/LOGNAME 从系统用户记录取得，不使用 root HOME；认证等待可取消，认证完成前不派发操作。丢失回执保持 unknown，断联和输出写失败进入原监督器清理，不能用新连接重放未知操作。
+
+Linux 的 pkexec 必须由拥有原 child 整个寿命的专用创建线程启动；不能在返回后会被回收的临时 blocking thread 上创建。pkexec 的父线程死亡保护保持启用，client 关闭 stdin 后创建线程仍等待原 runner 完成 EOF cleanup 并实际退出回收。原生认证错误保留真实 exit code/signal 与有界 stderr 诊断，不把无回执或信号退出概括为密码错误。
+
+Linux `.deb`/`.rpm` 将 runner 和固定 action 安装为系统文件，开发构建与 AppImage 携带同版本显式安装入口。action 绑定固定 executable 和 `--stdio`，各 session 类型均使用系统的 `auth_admin_keep`，不安装 sudoers、不保存密码，也不由 GUI 启动时偷偷写系统目录。缺组件、无认证代理、拒绝、取消、超时与未知结果分别表达。实际认证和原生产品通过范围见 [Linux 验证](../validation/global-os-linux-2026-10-17.zh.md)。
+
+三平台的实现、编译、系统认证和真实产品验收各自计证；某一平台的 runner 或隔离夹具不能代替另一平台的原生证明。
 
 ## 命令、环境与依赖
 
@@ -88,7 +95,9 @@ Computer 普通操作在登录桌面的 App 进程执行，每次操作按实际
 
 权限库存包含实际 PID 和可解析的真实 App bundle 身份。AX/CG 返回 false 只证明 `not_granted`；FDA、Automation 和局域网没有适用于所有目标的全局可靠探针，保留 unknown，实际目标操作再给真实结果。Camera/Microphone 使用原生状态；使用说明与 Apple Events automation entitlement 随 App 打包。详见[系统许可](system-permissions.zh.md)。
 
-普通监听、本机/局域网访问、原生安装、服务与系统设置复用上述通用路径。SIP、UAC、安全桌面、TCC、ACL、网络设施和实际设备存在性仍按系统真实限制表达。Linux Computer 产品入口与 X11/Wayland/portal 仍有工程缺口；Windows 桥的源码存在也不替代具体高完整性目标的原生验收。
+普通监听、本机/局域网访问、原生安装、服务与系统设置复用上述通用路径。SIP、UAC、安全桌面、TCC、ACL、网络设施和实际设备存在性仍按系统真实限制表达。Linux Computer 已接入正式模块与资源选择：完整 X11 后端核实真实服务器、窗口管理器及 EWMH 激活结果，不以点击窗口中心代替聚焦，也不把 XWayland 当作全局桌面。Wayland 使用系统 RemoteDesktop/ScreenCast portal、受控会话与 PipeWire/GStreamer 帧，通过同一 Computer 工具链观察和输入；缺 backend、尚未授权、session 关闭与失效必须如实返回，输入不能隐式重新弹出授权后继续旧动作。Wayland 没有通用的全局窗口枚举/聚焦和指针查询接口，这些操作保留明确限制，不用 XWayland 规避 compositor。
+
+独立 X11 虚拟桌面测试、portal 协议 fixture 与真实用户桌面授权分别计证，见 [Linux 桌面验证](../validation/global-os-linux-desktop-2026-10-17.zh.md)。Windows 普通和高完整性桌面的具体来源、真实结果与未覆盖项见 [Windows 验证](../validation/global-os-windows-2026-10-17.zh.md)，源码存在不替代原生验收。
 
 ## 验证与平台接续
 

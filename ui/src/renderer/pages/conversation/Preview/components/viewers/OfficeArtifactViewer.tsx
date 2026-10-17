@@ -278,6 +278,7 @@ const OfficeArtifactViewer: React.FC<OfficeArtifactViewerProps> = ({ docType, fi
           <iframe
             key={frame.requestId}
             ref={(element) => { if (element) frames.current.set(frame.requestId, element); else frames.current.delete(frame.requestId); }}
+            allow="camera 'none'; microphone 'none'"
             src={frame.url}
             title={IFRAME_TITLE[docType]}
             sandbox='allow-scripts'

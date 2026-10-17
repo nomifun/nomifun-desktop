@@ -73,6 +73,7 @@ const TextToSpeechContent: React.FC = () => {
           <NomiSettingRow
             title={t('settings.modelHub.speech.ttsSource')}
             description={t('settings.taskModel.voiceFreeTextHint')}
+            descriptionClassName='!text-t-secondary'
             controls={
               <>
                 <TaskModelSelect

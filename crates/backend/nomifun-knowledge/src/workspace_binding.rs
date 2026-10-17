@@ -62,7 +62,7 @@ impl WorkspaceBindingLease {
     /// without mount metadata from racing with, or observing the mutable
     /// namespace of, a differently-bound runtime in the same physical
     /// workspace. A genuinely missing frozen default retains its original
-    /// namespace key without creating a directory or mounting knowledge.
+    /// clean namespace key without creating a directory or mounting knowledge.
     pub fn acquire_unbound(
         workspace: &Path,
         owner: impl Into<String>,
@@ -141,7 +141,8 @@ impl WorkspaceBindingLease {
         })
     }
 
-    /// Canonical, platform-comparison identity of the physical workspace.
+    /// Platform-comparison identity of the physical workspace, or its frozen
+    /// missing default anchor for an unbound runtime.
     pub fn workspace_key(&self) -> &Path {
         &self.inner.workspace_key
     }
@@ -236,13 +237,21 @@ pub(crate) fn canonical_workspace_key(workspace: &Path) -> Result<PathBuf, AppEr
 }
 
 fn canonical_workspace_path(workspace: &Path) -> Result<PathBuf, AppError> {
-    let canonical = std::fs::canonicalize(workspace).map_err(|error| {
-        AppError::BadRequest(format!(
-            "knowledge workspace {} cannot be canonicalized: {error}",
-            workspace.display()
-        ))
-    })?;
-    let metadata = std::fs::metadata(&canonical).map_err(|error| {
+    let canonical = std::fs::canonicalize(workspace)
+        .map_err(|error| workspace_canonicalization_error(workspace, error))?;
+    inspect_workspace_directory(&canonical)?;
+    Ok(canonical)
+}
+
+fn workspace_canonicalization_error(workspace: &Path, error: std::io::Error) -> AppError {
+    AppError::BadRequest(format!(
+        "knowledge workspace {} cannot be canonicalized: {error}",
+        workspace.display()
+    ))
+}
+
+fn inspect_workspace_directory(canonical: &Path) -> Result<(), AppError> {
+    let metadata = std::fs::metadata(canonical).map_err(|error| {
         AppError::BadRequest(format!(
             "knowledge workspace {} cannot be inspected: {error}",
             canonical.display()
@@ -254,12 +263,15 @@ fn canonical_workspace_path(workspace: &Path) -> Result<PathBuf, AppError> {
             canonical.display()
         )));
     }
-    Ok(canonical)
+    Ok(())
 }
 
-/// Resolve the existing physical directory, or retain a genuinely missing
-/// frozen absolute default as the same unbound namespace identity. This does
-/// not create that directory or authorize knowledge mounts in a missing root.
+/// Resolve the existing physical directory, or retain a genuinely missing,
+/// already clean absolute frozen default as the same unbound namespace identity.
+/// Native scope acquisition proves the surviving ancestor without following
+/// a replacement link, swallowing ACL errors or recreating the missing root.
+/// The native canonical spelling, including Windows verbatim prefixes, keeps
+/// future bound leases and existing Effect fences in the same namespace.
 /// Callers retain owner/binding admission; only an unbound lease may use it.
 pub fn resolve_unbound_workspace_anchor(workspace: &Path) -> Result<PathBuf, AppError> {
     let native_error = |error: nomi_native_files::NativeFileError| match error {
@@ -276,8 +288,12 @@ pub fn resolve_unbound_workspace_anchor(workspace: &Path) -> Result<PathBuf, App
             Ok(canonical)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if !workspace.is_absolute() || workspace.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
-                return Err(AppError::Conflict("a missing default workspace requires its frozen absolute path without parent traversal".into()));
+            if !workspace.is_absolute()
+                || workspace.components().any(|part| matches!(part,
+                    std::path::Component::CurDir | std::path::Component::ParentDir))
+                || workspace.components().collect::<PathBuf>().as_os_str() != workspace.as_os_str()
+            {
+                return Err(AppError::Conflict("a missing default workspace requires its absolute, already clean frozen anchor".into()));
             }
             let scope = nomi_native_files::acquire_instruction_scope(workspace, false).map_err(native_error)?;
             let canonical = PathBuf::from(&scope.canonical_path);
@@ -899,6 +915,171 @@ mod tests {
 
         WorkspaceBindingLease::acquire(workspace.path(), "binding-b", "conversation-b")
             .expect("RAII drop must release authority during unwind");
+    }
+
+    #[test]
+    fn missing_unbound_anchor_keeps_authority_when_the_directory_is_created() {
+        let parent = tempfile::tempdir().unwrap();
+        let workspace = std::fs::canonicalize(parent.path()).unwrap().join("missing");
+        let unbound_a =
+            WorkspaceBindingLease::acquire_unbound(&workspace, "conversation-a").unwrap();
+        let unbound_b =
+            WorkspaceBindingLease::acquire_unbound(&workspace, "conversation-b").unwrap();
+
+        assert!(!workspace.exists(), "an unbound lease must not create the default directory");
+        assert!(unbound_a.same_binding(&unbound_b));
+        assert!(unbound_a.matches_workspace(&workspace).unwrap());
+        let original_lock_path = workspace_lock_path(&workspace).unwrap();
+        assert!(
+            acquire_workspace_os_lock(&workspace).is_err(),
+            "the missing anchor must retain the existing OS lock authority"
+        );
+
+        std::fs::create_dir(&workspace).unwrap();
+        assert!(unbound_a.matches_workspace(&workspace).unwrap());
+        assert_eq!(
+            original_lock_path,
+            workspace_lock_path(&canonical_workspace_path(&workspace).unwrap()).unwrap()
+        );
+        assert!(matches!(
+            WorkspaceBindingLease::acquire(&workspace, "kb-binding-v1:mounted", "conversation-c"),
+            Err(AppError::Conflict(_))
+        ));
+        assert!(!workspace.join(".nomi").exists());
+
+        drop(unbound_a);
+        assert!(matches!(
+            WorkspaceBindingLease::acquire(&workspace, "kb-binding-v1:mounted", "conversation-c"),
+            Err(AppError::Conflict(_))
+        ));
+        drop(unbound_b);
+        WorkspaceBindingLease::acquire(&workspace, "kb-binding-v1:mounted", "conversation-c")
+            .expect("mounted authority may take over only after every unbound holder releases");
+        assert!(!workspace.join(".nomi").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn missing_plain_windows_anchor_keeps_the_future_bound_verbatim_authority() {
+        let parent = tempfile::tempdir().unwrap();
+        let canonical_parent = std::fs::canonicalize(parent.path()).unwrap();
+        let plain_workspace = nomifun_common::paths::simplified(&canonical_parent).join("missing");
+        let verbatim_workspace = canonical_parent.join("missing");
+        let plain =
+            WorkspaceBindingLease::acquire_unbound(&plain_workspace, "conversation-a").unwrap();
+        let verbatim =
+            WorkspaceBindingLease::acquire_unbound(&verbatim_workspace, "conversation-b").unwrap();
+
+        assert!(plain.same_binding(&verbatim));
+        assert!(plain.matches_workspace(&plain_workspace).unwrap());
+        assert!(plain.matches_workspace(&verbatim_workspace).unwrap());
+        assert_eq!(
+            plain.workspace_key(),
+            platform_comparison_path(verbatim_workspace.clone())
+        );
+        assert!(!plain_workspace.exists());
+
+        std::fs::create_dir(&plain_workspace).unwrap();
+        assert!(plain.matches_workspace(&plain_workspace).unwrap());
+        assert_eq!(
+            plain.workspace_key(),
+            canonical_workspace_key(&plain_workspace).unwrap()
+        );
+        assert!(matches!(
+            WorkspaceBindingLease::acquire(
+                &plain_workspace,
+                "kb-binding-v1:mounted",
+                "conversation-c",
+            ),
+            Err(AppError::Conflict(_))
+        ));
+        assert!(!plain_workspace.join(".nomi").exists());
+
+        drop(plain);
+        drop(verbatim);
+        WorkspaceBindingLease::acquire(
+            &plain_workspace,
+            "kb-binding-v1:mounted",
+            "conversation-c",
+        )
+        .expect("the bound lease must reuse the same authority after every unbound holder exits");
+    }
+
+    #[test]
+    fn missing_unbound_anchor_refuses_unfrozen_spellings_and_nondirectory_ancestors() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(parent.path()).unwrap();
+        let missing = root.join("missing");
+        // PathBuf::push normalizes `..` for Windows verbatim roots. Preserve
+        // the supplied spelling so this actually exercises an unfrozen path.
+        let mut traversing = root.join("absent").into_os_string();
+        traversing.push(format!("{}..{}missing", std::path::MAIN_SEPARATOR, std::path::MAIN_SEPARATOR));
+        let traversing = PathBuf::from(traversing);
+        assert!(traversing.components().any(|component| matches!(component, std::path::Component::ParentDir)));
+
+        for path in [
+            PathBuf::from("missing-relative-anchor"),
+            traversing,
+            PathBuf::from(format!("{}/./missing", root.display())),
+            PathBuf::from(format!("{}//missing", root.display())),
+        ] {
+            assert!(
+                WorkspaceBindingLease::acquire_unbound(&path, "conversation-a").is_err(),
+                "missing unbound fallback requires an absolute, already clean frozen anchor: {}",
+                path.display()
+            );
+        }
+        std::fs::write(root.join("file"), b"not a directory").unwrap();
+        assert!(WorkspaceBindingLease::acquire_unbound(&root.join("file"), "conversation-a").is_err());
+        assert!(
+            WorkspaceBindingLease::acquire_unbound(&root.join("file").join("child"), "conversation-a")
+                .is_err()
+        );
+        assert!(!missing.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unbound_anchor_rechecks_physical_identity_after_symlink_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(parent.path()).unwrap();
+        let workspace = root.join("missing");
+        let other = root.join("other");
+        let unbound = WorkspaceBindingLease::acquire_unbound(&workspace, "conversation-a").unwrap();
+        std::fs::create_dir(&other).unwrap();
+        symlink(&other, &workspace).unwrap();
+
+        assert!(!unbound.matches_workspace(&workspace).unwrap());
+        let physical =
+            WorkspaceBindingLease::acquire_unbound(&workspace, "conversation-b").unwrap();
+        assert_eq!(physical.workspace_key(), std::fs::canonicalize(&other).unwrap());
+        assert!(!unbound.same_binding(&physical));
+        assert!(matches!(
+            WorkspaceBindingLease::acquire(&other, "kb-binding-v1:mounted", "conversation-c"),
+            Err(AppError::Conflict(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_unbound_anchor_refuses_a_changed_symlink_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(parent.path()).unwrap();
+        let original = root.join("original");
+        let replacement = root.join("replacement");
+        std::fs::create_dir(&replacement).unwrap();
+        symlink(&replacement, &original).unwrap();
+
+        assert!(
+            WorkspaceBindingLease::acquire_unbound(&original.join("missing"), "conversation-a")
+                .is_err(),
+            "a missing anchor must not split physical authority through a changed ancestor alias"
+        );
+        assert!(!replacement.join("missing").exists());
     }
 
     #[test]

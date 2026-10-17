@@ -40,7 +40,9 @@ import MusicModelsContent from './MusicModelsContent';
 import EmbeddingModelsContent from './EmbeddingModelsContent';
 import RerankModelsContent from './RerankModelsContent';
 import ModelImportChat from './ModelImportChat';
+import { ModelConfigurationWorkspace } from './ModelConfigurationPanel';
 import { withoutModelAdditionTask } from './modelAdditionIntent';
+import styles from './modelHub.module.css';
 
 type Section =
   | 'models'
@@ -120,7 +122,7 @@ const SECTION_GROUPS: SectionGroup[] = [
       {
         key: 'models',
         labelKey: 'settings.modelHub.sectionModels',
-        icon: <LinkCloud theme='outline' size='16' strokeWidth={3} />,
+        icon: <LinkCloud theme='outline' size='16' strokeWidth={2} />,
       },
     ],
   },
@@ -131,57 +133,57 @@ const SECTION_GROUPS: SectionGroup[] = [
       {
         key: 'chat',
         labelKey: 'settings.modelHub.sectionChat',
-        icon: <Comment theme='outline' size='16' strokeWidth={3} />,
+        icon: <Comment theme='outline' size='16' strokeWidth={2} />,
       },
       {
         key: 'realtime',
         labelKey: 'settings.modelHub.sectionRealtime',
-        icon: <BroadcastRadio theme='outline' size='16' strokeWidth={3} />,
+        icon: <BroadcastRadio theme='outline' size='16' strokeWidth={2} />,
       },
       {
         key: 'asr',
         labelKey: 'settings.modelHub.sectionAsr',
-        icon: <HeadsetOne theme='outline' size='16' strokeWidth={3} />,
+        icon: <HeadsetOne theme='outline' size='16' strokeWidth={2} />,
       },
       {
         key: 'tts',
         labelKey: 'settings.modelHub.sectionTts',
-        icon: <Voice theme='outline' size='16' strokeWidth={3} />,
+        icon: <Voice theme='outline' size='16' strokeWidth={2} />,
       },
       {
         key: 'vision',
         labelKey: 'settings.modelHub.sectionVision',
-        icon: <PreviewOpen theme='outline' size='16' strokeWidth={3} />,
+        icon: <PreviewOpen theme='outline' size='16' strokeWidth={2} />,
       },
       {
         key: 'image',
         labelKey: 'settings.modelHub.sectionImage',
-        icon: <Pic theme='outline' size='16' strokeWidth={3} />,
+        icon: <Pic theme='outline' size='16' strokeWidth={2} />,
       },
       {
         key: 'image-edit',
         labelKey: 'settings.modelHub.sectionImageEdit',
-        icon: <Pic theme='outline' size='16' strokeWidth={3} />,
+        icon: <Pic theme='outline' size='16' strokeWidth={2} />,
       },
       {
         key: 'video',
         labelKey: 'settings.modelHub.sectionVideo',
-        icon: <VideoTwo theme='outline' size='16' strokeWidth={3} />,
+        icon: <VideoTwo theme='outline' size='16' strokeWidth={2} />,
       },
       {
         key: 'music',
         labelKey: 'settings.modelHub.sectionMusic',
-        icon: <HeadsetOne theme='outline' size='16' strokeWidth={3} />,
+        icon: <HeadsetOne theme='outline' size='16' strokeWidth={2} />,
       },
       {
         key: 'embedding',
         labelKey: 'settings.modelHub.sectionEmbedding',
-        icon: <SafeRetrieval theme='outline' size='16' strokeWidth={3} />,
+        icon: <SafeRetrieval theme='outline' size='16' strokeWidth={2} />,
       },
       {
         key: 'rerank',
         labelKey: 'settings.modelHub.sectionRerank',
-        icon: <SafeRetrieval theme='outline' size='16' strokeWidth={3} />,
+        icon: <SafeRetrieval theme='outline' size='16' strokeWidth={2} />,
       },
     ],
   },
@@ -192,7 +194,7 @@ const SECTION_GROUPS: SectionGroup[] = [
       {
         key: 'failover',
         labelKey: 'settings.modelHub.sectionFailover',
-        icon: <SettingTwo theme='outline' size='16' strokeWidth={3} />,
+        icon: <SettingTwo theme='outline' size='16' strokeWidth={2} />,
       },
     ],
   },
@@ -217,6 +219,7 @@ const FLAT_SECTIONS: SectionDef[] = SECTION_GROUPS.flatMap((group) => group.sect
 const ModelHubPage: React.FC = () => {
   const { t } = useTranslation();
   const [searchParams, setSearchParams] = useSearchParams();
+  const [editing, setEditing] = useState(false);
 
   const [section, setSection] = useState<Section>(
     () => resolveSection(searchParams.get('section')) ?? 'chat'
@@ -224,20 +227,20 @@ const ModelHubPage: React.FC = () => {
 
   useEffect(() => {
     const resolved = resolveSection(searchParams.get('section'));
-    if (resolved && resolved !== section) {
+    if (!editing && resolved && resolved !== section) {
       setSection(resolved);
     }
-  }, [searchParams, section]);
+  }, [editing, searchParams, section]);
 
   const handleSectionChange = useCallback(
     (key: string) => {
-      if (!isSection(key)) return;
+      if (editing || !isSection(key)) return;
       setSection(key);
       const next = withoutModelAdditionTask(searchParams);
       next.set('section', key);
       setSearchParams(next, { replace: true });
     },
-    [searchParams, setSearchParams]
+    [editing, searchParams, setSearchParams]
   );
 
   const focusSectionTab = useCallback((key: Section) => {
@@ -286,9 +289,9 @@ const ModelHubPage: React.FC = () => {
   }
 
   const siderHeader = (
-    <div className='px-16px pt-16px pb-10px'>
-      <div className='text-15px font-600 text-t-primary leading-none'>{t('settings.modelHub.title')}</div>
-      <div className='mt-4px text-12px leading-18px text-t-secondary'>{t('settings.modelHub.subtitle')}</div>
+    <div className={styles.siderHeader}>
+      <div className={styles.siderTitle}>{t('settings.modelHub.title')}</div>
+      <div className={styles.siderSubtitle}>{t('settings.modelHub.subtitle')}</div>
     </div>
   );
 
@@ -304,10 +307,13 @@ const ModelHubPage: React.FC = () => {
         icon={s.icon}
         isActive={selected}
         aria-selected={selected}
+        aria-disabled={editing && !selected}
+        className={classNames(styles.tab, editing && !selected && styles.tabDisabled)}
         aria-controls='model-hub-panel'
         tabIndex={selected ? 0 : -1}
         onClick={() => handleSectionChange(s.key)}
         onKeyDown={(e) => {
+          if (editing) return;
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
             handleSectionChange(s.key);
@@ -331,8 +337,9 @@ const ModelHubPage: React.FC = () => {
   };
 
   return (
-    <div className='relative flex size-full min-h-0'>
+    <div className={classNames('relative flex size-full min-h-0', styles.page)}>
       <ContentSider
+        className={styles.sider}
         width={resize.splitRatio}
         header={siderHeader}
         ariaLabel={t('settings.modelHub.title')}
@@ -341,23 +348,25 @@ const ModelHubPage: React.FC = () => {
         {/* The group captions are `aria-hidden` decoration: a `tablist` may own
             only `tab` children, so exposing them would break that contract while
             the tabs themselves already carry their labels and position. */}
-        <div className='flex flex-col px-8px pb-8px' role='tablist' aria-orientation='vertical'>
+        <div className={styles.navigation} role='tablist' aria-orientation='vertical'>
           {SECTION_GROUPS.map((group) => (
             <React.Fragment key={group.key}>
               <SiderSectionHeader label={t(group.titleKey)} collapsed={false} aria-hidden='true' />
-              <div className='flex flex-col gap-1px'>{group.sections.map(renderTab)}</div>
+              <div className={styles.groupTabs}>{group.sections.map(renderTab)}</div>
             </React.Fragment>
           ))}
         </div>
       </ContentSider>
       <div
         id='model-hub-panel'
-        className='flex-1 min-w-0 min-h-0 overflow-y-auto'
+        className={classNames('flex-1 min-w-0 min-h-0', styles.pane)}
         role='tabpanel'
         aria-labelledby={`model-hub-tab-${section}`}
         ref={paneRef}
       >
-        <div className={classNames('mx-auto w-full max-w-1100px box-border py-32px', panePadX)}>{content}</div>
+        <ModelConfigurationWorkspace onEditingChange={setEditing}>
+          <div className={classNames('mx-auto w-full max-w-1100px box-border py-32px', panePadX, styles.content)}>{content}</div>
+        </ModelConfigurationWorkspace>
       </div>
     </div>
   );

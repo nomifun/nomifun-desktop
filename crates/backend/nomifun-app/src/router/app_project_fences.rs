@@ -196,6 +196,9 @@ impl NomiCoreSessionOwner {
         let mut root = None;
         for resource in resources {
             if let Some(path) = resource.typed_parameters.get("workspace_root") {
+                // A frozen default remains the same project admission key
+                // when absent. Native proof retains that identity without
+                // recreating the directory or following a changed ancestor.
                 let canonical = nomifun_common::paths::simplified(
                     &nomifun_knowledge::resolve_unbound_workspace_anchor(std::path::Path::new(path))?);
                 if root.as_ref().is_some_and(|previous| previous != &canonical) {

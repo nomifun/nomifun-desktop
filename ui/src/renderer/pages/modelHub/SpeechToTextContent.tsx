@@ -83,7 +83,7 @@ const SpeechToTextContent: React.FC = () => {
           description={t('settings.modelHub.speech.asrSubtitle')}
           actions={
             <Button
-              type='text'
+              type='secondary'
               size='small'
               className='shrink-0'
               icon={<LinkCloud theme='outline' size='14' />}
@@ -98,7 +98,7 @@ const SpeechToTextContent: React.FC = () => {
           <NomiSettingRow
             title={t('settings.modelHub.speech.source')}
             description={sourceHint || undefined}
-            descriptionClassName='!text-warning-6'
+            descriptionClassName='!text-t-secondary'
             controls={
               <TaskModelSelect
                 task='speech_recognition'

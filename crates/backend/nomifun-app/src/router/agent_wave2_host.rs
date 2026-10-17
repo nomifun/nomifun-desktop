@@ -3414,6 +3414,57 @@ mod tests {
         assert!(error.message.contains("Do not replay"));
     }
 
+    #[test]
+    fn missing_default_directory_keeps_file_and_process_effect_keys_and_vcs_strictness() {
+        let fixture = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(fixture.path()).unwrap();
+        let workspace = base.join("frozen-default");
+        std::fs::create_dir(&workspace).unwrap();
+        let files = context(&workspace);
+        let mut process = files.clone();
+        process.capability_id = CapabilityId::from("workspace.process");
+        process.action_id = ActionId::from("workspace.process/exec");
+        process.resource_bindings[0].resource_kind = ResourceKind::from("process_session");
+        let original = wave2_effect_resource_key(&files, &files.resource_bindings[0]).unwrap();
+        assert_eq!(wave2_effect_resource_key(&process, &process.resource_bindings[0]).unwrap(), original);
+        std::fs::remove_dir(&workspace).unwrap();
+        assert_eq!(wave2_effect_resource_key(&files, &files.resource_bindings[0]).unwrap(), original);
+        assert_eq!(wave2_effect_resource_key(&process, &process.resource_bindings[0]).unwrap(), original);
+        let mut vcs = files;
+        vcs.capability_id = CapabilityId::from("workspace.vcs");
+        vcs.action_id = ActionId::from("workspace.vcs/commit");
+        assert_eq!(wave2_effect_resource_key(&vcs, &vcs.resource_bindings[0]).unwrap_err().code, "INVALID_PAYLOAD");
+        assert!(!workspace.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn missing_default_effect_keys_keep_windows_plain_and_verbatim_namespace() {
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("frozen-default");
+        std::fs::create_dir(&workspace).unwrap();
+        let native = std::fs::canonicalize(&workspace).unwrap();
+        let plain = nomifun_common::paths::simplified(&native);
+        let mut cases = Vec::new();
+        for root in [&plain, &native] {
+            for module in ["workspace.files", "workspace.process"] {
+                let mut context = context(root);
+                context.capability_id = CapabilityId::from(module);
+                if module == "workspace.process" {
+                    context.action_id = ActionId::from("workspace.process/exec");
+                    context.resource_bindings[0].resource_kind = ResourceKind::from("process_session");
+                }
+                let key = wave2_effect_resource_key(&context, &context.resource_bindings[0]).unwrap();
+                cases.push((context, key));
+            }
+        }
+        assert!(cases.iter().all(|(_, key)| key == &cases[0].1));
+        std::fs::remove_dir(&workspace).unwrap();
+        for (context, key) in cases {
+            assert_eq!(wave2_effect_resource_key(&context, &context.resource_bindings[0]).unwrap(), key);
+        }
+    }
+
     #[tokio::test]
     async fn missing_default_directory_preserves_file_and_process_effect_identity_and_absolute_access() {
         let fixture = tempfile::tempdir().unwrap();

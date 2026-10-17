@@ -13,7 +13,7 @@ import type {
 } from '@/common/types/provider/providerModel';
 import type { ProviderId } from '@/common/types/ids';
 import { modelDisplayLabel, modelPresentationRawId } from '@/common/utils/modelPresentation';
-import { Button, Collapse, Divider, Input, Message, Popover, Switch, Tag, Tooltip } from '@arco-design/web-react';
+import { Button, Collapse, Divider, Message, Popover, Switch, Tag, Tooltip } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { Copy, DeleteFour, Info, Minus, Plus, Write, Heartbeat, Drag } from '@icon-park/react';
 import {
@@ -78,7 +78,7 @@ const ModelHealthCheckAction: React.FC<{
   const [open, setOpen] = useState(false);
   const label = t('settings.healthCheck');
   const buttonClass =
-    '!w-28px !h-28px !min-w-28px !bg-[var(--color-bg-1)] text-t-secondary hover:text-t-primary hover:!bg-[var(--fill-0)]';
+    'model-provider-tool-btn !w-28px !h-28px !min-w-28px !bg-[var(--color-bg-1)] text-t-secondary hover:text-t-primary hover:!bg-[var(--fill-0)]';
 
   if (tasks.length <= 1) {
     const task = tasks[0];
@@ -187,7 +187,7 @@ const CapabilityHealthTag: React.FC<{ capability: ProviderModelCapabilityRespons
         size='small'
         color={color}
         bordered
-        className='shrink-0 select-none'
+        className='model-provider-capability-tag shrink-0 select-none'
         data-capability-health-task={capability.task}
         data-capability-health-status={status}
       >
@@ -229,148 +229,6 @@ const providerModelInputFor = (row: ProviderModelResponse) => ({
   ...(row.description ? { description: row.description } : {}),
   capabilities: row.capabilities.map(capabilityInputFromResponse),
 });
-
-const ModelDisplayNameEditor: React.FC<{
-  displayName: string;
-  onSave: (text: string) => void;
-}> = ({ displayName, onSave }) => {
-  const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState(displayName);
-
-  const handleVisibleChange = (visible: boolean) => {
-    if (visible) setDraft(displayName);
-    setOpen(visible);
-  };
-
-  const handleSave = () => {
-    const next = draft.trim();
-    if (next !== displayName.trim()) onSave(next);
-    setOpen(false);
-  };
-
-  return (
-    <Popover
-      trigger='click'
-      position='bl'
-      popupVisible={open}
-      onVisibleChange={handleVisibleChange}
-      content={
-        <div className='flex w-280px flex-col gap-8px' onClick={(e) => e.stopPropagation()}>
-          <div className='text-12px text-t-secondary'>
-            {t('settings.modelDisplayNameTitle', { defaultValue: '模型别名（选填）' })}
-          </div>
-          <Input
-            autoFocus
-            value={draft}
-            onChange={setDraft}
-            placeholder={t('settings.modelDisplayNamePlaceholder', {
-              defaultValue: '例如：Seedance 1.5 Pro',
-            })}
-            maxLength={128}
-          />
-          <div className='text-11px leading-16px text-t-tertiary'>
-            {t('settings.modelDisplayNameHint', {
-              defaultValue: '非必填，仅用于界面展示；实际请求仍使用原始模型 ID。',
-            })}
-          </div>
-          <div className='flex items-center justify-end gap-8px'>
-            <Button size='mini' onClick={() => setOpen(false)}>
-              {t('common.cancel', { defaultValue: '取消' })}
-            </Button>
-            <Button size='mini' type='primary' onClick={handleSave}>
-              {t('common.save', { defaultValue: '保存' })}
-            </Button>
-          </div>
-        </div>
-      }
-    >
-      <Tooltip content={t('settings.editModelDisplayName', { defaultValue: '编辑模型别名' })}>
-        <Button
-          size='mini'
-          className={`model-provider-action-btn !h-24px !w-24px !min-w-24px shrink-0 ${
-            displayName ? 'text-primary-6 hover:text-primary-5' : 'text-t-secondary hover:text-t-primary'
-          }`}
-          icon={<Info theme='outline' size='14' />}
-          onClick={(e) => e.stopPropagation()}
-        />
-      </Tooltip>
-    </Popover>
-  );
-};
-
-/**
- * 每模型描述编辑浮层 / Per-model description editor popover.
- * 描述用于智能协作自动选择模型；空态显示占位提示。
- * The description drives automatic model selection for collaboration.
- */
-const ModelDescriptionEditor: React.FC<{
-  description: string;
-  onSave: (text: string) => void;
-}> = ({ description, onSave }) => {
-  const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState(description);
-
-  const placeholder = t('settings.modelDescriptionPlaceholder', {
-    defaultValue: '描述该模型擅长什么，用于协作任务自动选择',
-  });
-
-  // 每次打开时同步最新描述，避免外部更新后草稿陈旧
-  // Re-sync draft when opening so external updates aren't masked by stale draft.
-  const handleVisibleChange = (visible: boolean) => {
-    if (visible) setDraft(description);
-    setOpen(visible);
-  };
-
-  const handleSave = () => {
-    const next = draft.trim();
-    if (next !== (description ?? '').trim()) {
-      onSave(next);
-    }
-    setOpen(false);
-  };
-
-  return (
-    <Popover
-      trigger='click'
-      position='bl'
-      popupVisible={open}
-      onVisibleChange={handleVisibleChange}
-      content={
-        <div className='flex flex-col gap-8px w-280px' onClick={(e) => e.stopPropagation()}>
-          <div className='text-12px text-t-secondary'>
-            {t('settings.modelDescriptionTitle', { defaultValue: '模型描述（用于智能协作）' })}
-          </div>
-          <Input.TextArea
-            autoFocus
-            value={draft}
-            onChange={setDraft}
-            placeholder={placeholder}
-            autoSize={{ minRows: 3, maxRows: 6 }}
-          />
-          <div className='flex items-center justify-end gap-8px'>
-            <Button size='mini' onClick={() => setOpen(false)}>
-              {t('common.cancel', { defaultValue: '取消' })}
-            </Button>
-            <Button size='mini' type='primary' onClick={handleSave}>
-              {t('common.save', { defaultValue: '保存' })}
-            </Button>
-          </div>
-        </div>
-      }
-    >
-      <Tooltip content={t('settings.editModelDescription', { defaultValue: '编辑模型描述' })}>
-        <Button
-          size='mini'
-          className={`model-provider-action-btn !w-24px !h-24px !min-w-24px shrink-0 ${description ? 'text-primary-6 hover:text-primary-5' : 'text-t-secondary hover:text-t-primary'}`}
-          icon={<Write theme='outline' size='14' />}
-          onClick={(e) => e.stopPropagation()}
-        />
-      </Tooltip>
-    </Popover>
-  );
-};
 
 const providerSortableId = (providerId: ProviderId) => `provider:${providerId}`;
 const modelSortableId = (providerId: ProviderId, model: string) => `model:${providerId}:${model}`;
@@ -792,7 +650,7 @@ const ModelModalContent: React.FC = () => {
               {result.attempted_url && (
                 <>
                   <br />
-                  <span className='text-t-tertiary break-all'>
+                  <span className='text-t-secondary break-all'>
                     {t('settings.modelAdvanced.resolvedUrl', { defaultValue: '实际请求地址' })}:{' '}
                     {result.attempted_url}
                   </span>
@@ -890,7 +748,7 @@ const ModelModalContent: React.FC = () => {
   };
 
   return (
-    <div ref={paneRef} className='flex flex-col'>
+    <div ref={paneRef} className='model-provider-management flex flex-col'>
       {messageContext}
       {addPlatformModalContext}
       {editModalContext}
@@ -912,12 +770,12 @@ const ModelModalContent: React.FC = () => {
           </> : <div>{t('settings.modelDeletion.providerSummary', { count: deletion.provider.models.length })}</div>}
           <div>{t('settings.modelDeletion.effects')}</div>
           <div>{t('settings.modelDeletion.preserve')}</div>
-          {deletionError && <div role='alert' className='break-words text-danger-6'>{deletionError}</div>}
+          {deletionError && <div role='alert' className='model-provider-deletion-error break-words'>{deletionError}</div>}
         </div>}
       </NomiModal>}
 
       {/* Header with Add Button */}
-      <div className='flex-shrink-0 border-b border-b-solid border-[var(--color-border-2)] pb-12px mb-14px flex flex-col gap-10px'>
+      <div className='model-provider-page-header flex-shrink-0 border-b border-b-solid border-[var(--color-border-2)] pb-12px mb-14px flex flex-col gap-10px'>
         <ModelHubPageHeader
           title={t('settings.modelHub.provider.title')}
           description={t('settings.modelHub.provider.subtitle')}
@@ -927,18 +785,14 @@ const ModelModalContent: React.FC = () => {
               shape='round'
               icon={<Plus size='16' />}
               onClick={() => addPlatformModalCtrl.open({ initialTask, deepLinkData: undefined })}
-              className='rd-100px border-1px border-solid border-[var(--color-border-2)] h-34px px-14px text-t-secondary hover:text-t-primary'
+              className='model-provider-add-btn rd-100px border-1px border-solid border-[var(--color-border-2)] h-34px px-14px text-t-secondary hover:text-t-primary'
             >
               {t('settings.addProvider', { defaultValue: '添加供应商' })}
             </Button>
           }
         />
         <div
-          className='rd-10px px-12px py-10px border border-solid flex items-start gap-9px'
-          style={{
-            borderColor: 'rgba(var(--primary-6),0.24)',
-            backgroundColor: 'rgba(var(--primary-6),0.06)',
-          }}
+          className='model-provider-notice rd-10px px-12px py-10px border border-solid flex items-start gap-9px'
         >
           <Info theme='outline' size='16' className='mt-1px shrink-0 text-primary-6' />
           <div className='min-w-0'>
@@ -951,7 +805,7 @@ const ModelModalContent: React.FC = () => {
           </div>
         </div>
         {/* 职责收窄：本页只管接入与凭证；「按用途找模型」已迁到模态分区。 */}
-        <div className='mt-8px text-12px leading-18px text-t-tertiary'>
+        <div className='model-provider-scope-note mt-8px text-12px leading-18px text-t-secondary'>
           {t('settings.modelHub.provider.scopeNote')}
         </div>
       </div>
@@ -959,7 +813,7 @@ const ModelModalContent: React.FC = () => {
       {/* Content Area */}
       <NomiScrollArea className='flex-1 min-h-0' disableOverflow>
         {!data || editableProviders.length === 0 ? (
-          <div className='flex flex-col items-center justify-center py-40px'>
+          <div className='model-provider-empty flex flex-col items-center justify-center py-40px'>
             <Info theme='outline' size='48' className='text-t-secondary mb-16px' />
             <h3 className='text-16px font-500 text-t-primary mb-8px'>
               {t('settings.noConfiguredProviders', { defaultValue: '暂无已配置的供应商' })}
@@ -970,7 +824,7 @@ const ModelModalContent: React.FC = () => {
                 href='https://github.com/nomifun/nomifun-app/wiki/LLM-Configuration'
                 target='_blank'
                 rel='noopener noreferrer'
-                className='text-primary-6 hover:text-primary-5 underline ml-4px'
+                className='text-t-primary hover:text-t-secondary underline underline-offset-2 ml-4px'
               >
                 {t('settings.configGuide')}
               </a>
@@ -980,7 +834,7 @@ const ModelModalContent: React.FC = () => {
         ) : (
           <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
             <SortableContext items={providerSortableItems} strategy={verticalListSortingStrategy}>
-              <div className='space-y-16px'>
+              <div className='model-provider-list space-y-16px'>
             {editableProviders.map((platform: IProvider) => {
               const key = platform.id;
               const isExpanded = collapseKey[platform.id] ?? false;
@@ -996,17 +850,13 @@ const ModelModalContent: React.FC = () => {
                   }}
                   bordered
                   expandIconPosition='left'
-                  className={`[&_.arco-collapse-item]:!border-0 [&_.arco-collapse-item]:!rounded-12px [&_.arco-collapse-item]:!overflow-hidden [&_.arco-collapse-item]:!bg-[var(--color-bg-2)] [&_.arco-collapse-item-header]:!bg-[var(--fill-0)] [&_.arco-collapse-item-header]:!pl-36px [&_.arco-collapse-item-header]:!pr-12px [&_.arco-collapse-item-header]:!py-8px [&_.arco-collapse-item-header]:transition-colors [&_.arco-collapse-item-header]:hover:!bg-[var(--color-bg-2)] [&_.arco-collapse-item-header]:!gap-8px [&_.arco-collapse-item-header-title]:!min-w-0 [&_.arco-collapse-item-header-icon]:!text-2 [&_.arco-collapse-item-header:hover_.arco-collapse-item-header-icon]:!text-1 [&_.arco-collapse-item-content]:!bg-fill-1 [&_.arco-collapse-item-content-box]:!px-10px [&_.arco-collapse-item-content-box]:!py-8px [&_.arco-collapse-item-content]:!border-t [&_.arco-collapse-item-content]:!border-t-solid [&_.arco-collapse-item-content]:!border-[var(--color-border-2)] ${
-                    isExpanded
-                      ? '[&_.arco-collapse-item-header]:!rounded-t-12px [&_.arco-collapse-item-header]:!rounded-b-0 [&_.arco-collapse-item-content]:!rounded-b-12px'
-                      : '[&_.arco-collapse-item-header]:!rounded-12px'
-                  }`}
+                  className='model-provider-card'
                 >
                   <Collapse.Item
                     name='image-generation'
-                    className='[&_.arco-collapse-item-header-title]:flex-1 group'
+                    className='group'
                     header={
-                      <div className='group flex items-center justify-between w-full min-h-32px gap-8px min-w-0'>
+                      <div className='model-provider-header-line group flex items-center justify-between w-full min-h-32px gap-8px min-w-0'>
                         <div className='flex items-center gap-8px min-w-0 flex-1'>
                           <PriorityDragHandle
                             attributes={attributes}
@@ -1016,13 +866,13 @@ const ModelModalContent: React.FC = () => {
                             label={t('settings.dragProviderPriority', { defaultValue: '拖拽调整供应商优先级' })}
                           />
                           <span
-                            className={`text-14px font-500 truncate min-w-0 transition-colors ${isExpanded ? 'text-t-primary' : 'text-2 group-hover:text-1'}`}
+                            className={`model-provider-name text-14px font-500 truncate min-w-0 transition-colors ${isExpanded ? 'text-t-primary' : 'text-2 group-hover:text-1'}`}
                           >
                             {platform.name}
                           </span>
                         </div>
                         <div
-                          className='flex items-center gap-8px shrink-0'
+                          className='model-provider-header-actions flex items-center gap-8px shrink-0'
                           onClick={(e) => {
                             e.stopPropagation();
                           }}
@@ -1124,9 +974,9 @@ const ModelModalContent: React.FC = () => {
                             isDragging: modelIsDragging,
                           }) => (
                         <div>
-                          <div className='flex items-center justify-between px-8px py-12px transition-colors hover:bg-[var(--fill-0)]'>
+                          <div className='model-provider-model-row flex items-center justify-between px-8px py-12px transition-colors hover:bg-[var(--fill-0)]'>
                             <div className='flex flex-col min-w-0 flex-1 gap-2px'>
-                              <div className='flex items-center gap-8px min-w-0'>
+                              <div className='model-provider-model-line flex items-center gap-8px min-w-0'>
                                 <PriorityDragHandle
                                   attributes={modelAttributes}
                                   listeners={modelListeners}
@@ -1181,7 +1031,7 @@ const ModelModalContent: React.FC = () => {
                                   </Tooltip>
                                 )}
 
-                                <span className='text-14px text-t-primary min-w-0 truncate' title={displayName}>
+                                <span className='model-provider-model-name text-14px text-t-primary min-w-0 truncate' title={displayName}>
                                   {displayName}
                                 </span>
 
@@ -1199,6 +1049,7 @@ const ModelModalContent: React.FC = () => {
                                   providerAuthScheme={platform.auth_scheme}
                                   model={model}
                                   displayName={modelDisplayName}
+                                  description={modelDescription}
                                   capabilities={row.capabilities}
                                   onSave={(patch) => updateModelDefinition(platform, row, patch)}
                                   openRequest={
@@ -1225,25 +1076,11 @@ const ModelModalContent: React.FC = () => {
                                   }}
                                 />
 
-                                <ModelDisplayNameEditor
-                                  displayName={modelDisplayName}
-                                  onSave={(text) => {
-                                    void updateModelRow(platform, row, { display_name: text || null });
-                                  }}
-                                />
-
-                                {/* 每模型描述编辑（驱动智能协作选择）/ Per-model collaboration description */}
-                                <ModelDescriptionEditor
-                                  description={modelDescription}
-                                  onSave={(text) => {
-                                    void updateModelRow(platform, row, { description: text || null });
-                                  }}
-                                />
                               </div>
 
                               {rawModelId && (
                                 <div
-                                  className='text-11px text-t-tertiary font-mono leading-16px truncate pr-8px'
+                                  className='model-provider-model-id text-11px text-t-secondary font-mono leading-16px truncate pr-8px'
                                   title={rawModelId}
                                 >
                                   {t('settings.modelId', { defaultValue: '模型 ID' })}: {rawModelId}
@@ -1253,7 +1090,7 @@ const ModelModalContent: React.FC = () => {
                               {/* 描述次级行（空态隐藏）/ Description secondary line (hidden when empty) */}
                               {modelDescription && (
                                 <div
-                                  className='text-12px text-t-secondary leading-snug line-clamp-2 break-words pr-8px'
+                                  className='model-provider-model-description text-12px text-t-secondary leading-snug line-clamp-2 break-words pr-8px'
                                   title={modelDescription}
                                 >
                                   {modelDescription}
@@ -1261,7 +1098,7 @@ const ModelModalContent: React.FC = () => {
                               )}
                             </div>
 
-                            <div className='flex items-center gap-6px shrink-0'>
+                            <div className='model-provider-model-actions flex items-center gap-6px shrink-0'>
                               {/* 单任务一键检测；多任务先选具体模态 / Single task: one click; multi-task: explicit picker. */}
                               <ModelHealthCheckAction
                                 tasks={healthTasks}
@@ -1271,7 +1108,7 @@ const ModelModalContent: React.FC = () => {
 
                                 <Button
                                   size='mini'
-                                  className='!w-28px !h-28px !min-w-28px !bg-[var(--color-bg-1)] text-t-secondary hover:text-t-primary hover:!bg-[var(--fill-0)]'
+                                  className='model-provider-tool-btn !w-28px !h-28px !min-w-28px !bg-[var(--color-bg-1)] text-t-secondary hover:text-t-primary hover:!bg-[var(--fill-0)]'
                                   icon={<DeleteFour theme='outline' size='18' strokeWidth={2} />}
                                   aria-label={t('settings.modelDeletion.deleteModel')}
                                   onClick={() => requestDeletion(platform, row)}

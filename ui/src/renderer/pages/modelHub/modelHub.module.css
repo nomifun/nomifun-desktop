@@ -1,0 +1,120 @@
+.page {
+  background: var(--bg-base);
+}
+
+.sider {
+  background: color-mix(in srgb, var(--bg-1) 72%, var(--bg-base));
+  border-right: 1px solid var(--color-border-2);
+  box-shadow: none;
+}
+
+.siderHeader {
+  margin: 0 16px;
+  padding: 24px 4px 18px;
+  border-bottom: 1px solid var(--color-border-2);
+}
+
+.siderTitle {
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 22px;
+  letter-spacing: -0.2px;
+}
+
+.siderSubtitle {
+  margin-top: 5px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.navigation {
+  display: flex;
+  flex-direction: column;
+  padding: 12px 12px 20px;
+}
+
+.navigation :global(.sider-nav-group) {
+  min-height: 22px;
+  margin: 13px 0 6px;
+  padding: 0 10px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+  letter-spacing: 0.3px;
+}
+
+.navigation :global(.sider-nav-group):first-child {
+  margin-top: 0;
+}
+
+.groupTabs {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.navigation .tab {
+  min-height: 36px;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: var(--text-secondary);
+}
+
+.navigation .tab :global(.sider-nav-item__icon) {
+  width: 18px;
+  height: 18px;
+  opacity: 0.8;
+}
+
+.navigation .tab :global(.sider-nav-item__label) {
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 20px;
+}
+
+.navigation .tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.navigation .tab[aria-selected='true'] {
+  border-color: var(--color-border-2);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text-primary) 3%, transparent);
+}
+
+.navigation .tab[aria-selected='true'] :global(.sider-nav-item__label) {
+  font-weight: 600;
+}
+
+.navigation .tabDisabled,
+.navigation .tabDisabled:hover {
+  opacity: 0.5;
+  background: transparent;
+  cursor: not-allowed;
+}
+
+.pane {
+  background: var(--bg-base);
+}
+
+.content {
+  padding-top: 28px;
+  padding-bottom: 32px;
+}
+
+/* The failover editor lives outside ModelConfigurationPanel. Keep its primary
+   action on the same paired palette, above preset gradients and hover rules. */
+.failoverSaveButton:global(.arco-btn.arco-btn-primary:not(:disabled):not(.arco-btn-disabled):not(.arco-btn-status-danger):not(.arco-btn-status-warning):not(.arco-btn-status-success)) {
+  --button-primary-text: var(--control-selected-fg, var(--bg-base)) !important;
+  background-color: var(--control-selected-bg, var(--text-primary)) !important;
+  background-image: none !important;
+  border-color: var(--control-selected-bg, var(--text-primary)) !important;
+  color: var(--control-selected-fg, var(--bg-base)) !important;
+}

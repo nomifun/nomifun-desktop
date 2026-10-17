@@ -1,0 +1,13 @@
+/* Status scales are decorative colors, not small-text colors. Preserve their
+ * hue while bringing validation and connection guidance toward the theme ink. */
+:is([data-model-definition-editor], [data-model-catalog-dropdown]) :is(.text-warning-6, .text-warning-7) {
+  color: color-mix(in srgb, var(--warning) 40%, var(--text-primary));
+}
+
+[data-model-definition-editor] :is(.text-danger-6, .text-danger-7) {
+  color: color-mix(in srgb, var(--danger) 40%, var(--text-primary));
+}
+
+[data-model-definition-editor] :is(.text-success-6, .text-success-7) {
+  color: color-mix(in srgb, var(--success) 40%, var(--text-primary));
+}

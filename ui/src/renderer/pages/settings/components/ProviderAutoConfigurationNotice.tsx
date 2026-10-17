@@ -136,7 +136,7 @@ const ProviderAutoConfigurationNotice: React.FC<{
               {hasMultipleTasks ? `${t(`settings.modelTask.${candidate.task}`, { defaultValue: candidate.task })} · ` : ''}{candidate.protocol}
             </Button>
             <Tag size='small' bordered={false} color={!candidateStale && candidate.confidence === 'reachable' ? 'gray' : 'orange'}>{status}</Tag>
-            {candidate.suggestedBaseUrl && <span className='min-w-0 break-all text-t-tertiary'>{candidate.suggestedBaseUrl}</span>}
+            {candidate.suggestedBaseUrl && <span className='min-w-0 break-all text-t-secondary'>{candidate.suggestedBaseUrl}</span>}
           </div>;
         })}
       </div>}

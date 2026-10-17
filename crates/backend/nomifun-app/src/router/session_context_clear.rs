@@ -294,7 +294,7 @@ mod tests {
         let registry=Arc::new(CompanionRegistry::scan(f._root.path().join("companions"),f._root.path().join("shared")).unwrap());
         let companion=registry.create("Archive fixture","ink").await.unwrap();
         let store=CompanionStore::open_memory().await.unwrap();
-        store.set_companion_state(&companion.companion_id,"companion_active_thread",f.session.as_ref()).await.unwrap();
+        store.insert_companion_thread(f.session.as_ref(),&companion.companion_id,"Archive fixture").await.unwrap();
         let started=Arc::new(tokio::sync::Notify::new());
         let release=Arc::new(tokio::sync::Notify::new());
         let archiver=Arc::new(nomifun_companion::archiver::Archiver {

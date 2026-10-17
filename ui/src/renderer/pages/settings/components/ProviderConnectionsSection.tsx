@@ -6,12 +6,13 @@
 
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Drawer, Input, Popconfirm, Select, Tag, Tooltip } from '@arco-design/web-react';
+import { Button, Input, Popconfirm, Select, Tag, Tooltip } from '@arco-design/web-react';
 import { DeleteFour, Down, LinkCloud, Plus, Right, Write } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { IProvider } from '@/common/config/storage';
 import type { ProviderConnectionResponse } from '@/common/types/provider/providerConnection';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
+import ModelConfigurationPanel from '@/renderer/pages/modelHub/ModelConfigurationPanel';
 import {
   AUTH_SCHEME_PRESETS,
   buildConnectionCredentials,
@@ -24,7 +25,7 @@ import { useProviderConnections } from './useProviderConnections';
 
 const CUSTOM_SCHEME = '__custom__';
 
-type DrawerState = {
+type FormState = {
   editing?: ProviderConnectionResponse;
   prefillRole?: string;
   prefillScheme?: string;
@@ -39,12 +40,12 @@ const emptyCredentialsDraft: ConnectionCredentialsDraft = {
 };
 
 /**
- * Add/edit drawer for one per-role connection profile. Credentials are
+ * Add/edit page for one per-role connection profile. Credentials are
  * write-only: in edit mode an empty credentials form keeps the stored ones.
  */
-const ConnectionDrawer: React.FC<{
+const ConnectionForm: React.FC<{
   provider: IProvider;
-  state: DrawerState;
+  state: FormState;
   onClose: () => void;
   onSaved: () => void;
 }> = ({ provider, state, onClose, onSaved }) => {
@@ -73,6 +74,7 @@ const ConnectionDrawer: React.FC<{
   ];
 
   const handleSave = async () => {
+    if (saving) return;
     const nextRole = role.trim();
     if (!isValidConnectionRole(nextRole)) {
       message.error(
@@ -127,22 +129,26 @@ const ConnectionDrawer: React.FC<{
   };
 
   return (
-    <Drawer
+    <ModelConfigurationPanel
       visible
-      width={440}
-      placement='right'
-      zIndex={1300}
       title={
         isEdit
           ? t('settings.connections.edit', { defaultValue: '编辑连接档案' })
           : t('settings.connections.add', { defaultValue: '添加连接档案' })
       }
-      onCancel={onClose}
-      onOk={handleSave}
-      okText={t('common.save', { defaultValue: '保存' })}
-      cancelText={t('common.cancel', { defaultValue: '取消' })}
-      confirmLoading={saving}
-      unmountOnExit
+      subtitle={provider.name}
+      onBack={onClose}
+      busy={saving}
+      footer={
+        <div className='flex justify-end gap-8px'>
+          <Button onClick={onClose} disabled={saving}>
+            {t('common.cancel', { defaultValue: '取消' })}
+          </Button>
+          <Button type='primary' onClick={() => void handleSave()} loading={saving} disabled={saving}>
+            {t('common.save', { defaultValue: '保存' })}
+          </Button>
+        </div>
+      }
     >
       {messageContext}
       <div className='flex flex-col gap-14px'>
@@ -150,9 +156,9 @@ const ConnectionDrawer: React.FC<{
           <div className='text-13px font-500 text-t-secondary'>
             {t('settings.connections.role', { defaultValue: '角色（role）' })}
           </div>
-          <Input value={role} onChange={setRole} disabled={isEdit} placeholder='voice' />
+          <Input autoCapitalize='none' autoCorrect='off' spellCheck={false} value={role} onChange={setRole} disabled={isEdit} placeholder='voice' />
           {!isEdit && (
-            <div className='text-11px text-t-tertiary leading-4'>
+            <div className='text-11px text-t-secondary leading-4'>
               {t('settings.connections.roleHint', {
                 defaultValue: '小写字母开头，可含数字、下划线、连字符，最长 32 位；default 为保留角色',
               })}
@@ -164,14 +170,14 @@ const ConnectionDrawer: React.FC<{
           <div className='text-13px font-500 text-t-secondary'>
             {t('settings.connections.label', { defaultValue: '名称' })}
           </div>
-          <Input value={label} onChange={setLabel} />
+          <Input autoCapitalize='none' autoCorrect='off' spellCheck={false} value={label} onChange={setLabel} />
         </div>
 
         <div className='space-y-6px'>
           <div className='text-13px font-500 text-t-secondary'>
             {t('settings.connections.baseUrl', { defaultValue: '请求地址（base_url）' })}
           </div>
-          <Input value={baseUrl} onChange={setBaseUrl} placeholder='https://openspeech.bytedance.com' />
+          <Input autoCapitalize='none' autoCorrect='off' spellCheck={false} value={baseUrl} onChange={setBaseUrl} placeholder='https://openspeech.bytedance.com' />
         </div>
 
         <div className='space-y-6px'>
@@ -181,6 +187,9 @@ const ConnectionDrawer: React.FC<{
           <Select value={schemeSelect} onChange={setSchemeSelect} options={schemeOptions} />
           {schemeSelect === CUSTOM_SCHEME && (
             <Input
+              autoCapitalize='none'
+              autoCorrect='off'
+              spellCheck={false}
               value={customScheme}
               onChange={setCustomScheme}
               placeholder={t('settings.connections.authSchemeCustomPlaceholder', {
@@ -196,6 +205,9 @@ const ConnectionDrawer: React.FC<{
           </div>
           {credentialsKind === 'api_keys' && (
             <Input.TextArea
+              autoCapitalize='none'
+              autoCorrect='off'
+              spellCheck={false}
               value={creds.apiKeysText}
               onChange={(apiKeysText) => setCreds((prev) => ({ ...prev, apiKeysText }))}
               placeholder={t('settings.connections.apiKeys', {
@@ -207,16 +219,25 @@ const ConnectionDrawer: React.FC<{
           {credentialsKind === 'volc_voice' && (
             <div className='flex flex-col gap-8px'>
               <Input
+                autoCapitalize='none'
+                autoCorrect='off'
+                spellCheck={false}
                 value={creds.appKey}
                 onChange={(appKey) => setCreds((prev) => ({ ...prev, appKey }))}
                 placeholder={t('settings.connections.volcAppKey', { defaultValue: 'App Key' })}
               />
               <Input
+                autoCapitalize='none'
+                autoCorrect='off'
+                spellCheck={false}
                 value={creds.accessKey}
                 onChange={(accessKey) => setCreds((prev) => ({ ...prev, accessKey }))}
                 placeholder={t('settings.connections.volcAccessKey', { defaultValue: 'Access Key' })}
               />
               <Input
+                autoCapitalize='none'
+                autoCorrect='off'
+                spellCheck={false}
                 value={creds.resourceId}
                 onChange={(resourceId) => setCreds((prev) => ({ ...prev, resourceId }))}
                 placeholder={t('settings.connections.volcResourceId', { defaultValue: 'Resource ID' })}
@@ -225,6 +246,9 @@ const ConnectionDrawer: React.FC<{
           )}
           {credentialsKind === 'custom' && (
             <Input.TextArea
+              autoCapitalize='none'
+              autoCorrect='off'
+              spellCheck={false}
               value={creds.rawJson}
               onChange={(rawJson) => setCreds((prev) => ({ ...prev, rawJson }))}
               placeholder={t('settings.connections.rawCredentials', { defaultValue: '凭证 JSON' })}
@@ -232,7 +256,7 @@ const ConnectionDrawer: React.FC<{
             />
           )}
           {isEdit && (
-            <div className='text-11px text-t-tertiary leading-4'>
+            <div className='text-11px text-t-secondary leading-4'>
               {t('settings.connections.keepCredentialsHint', {
                 defaultValue: '留空保持现有凭证不变',
               })}
@@ -241,7 +265,7 @@ const ConnectionDrawer: React.FC<{
         </div>
 
       </div>
-    </Drawer>
+    </ModelConfigurationPanel>
   );
 };
 
@@ -255,7 +279,7 @@ const ProviderConnectionsSection: React.FC<{ provider: IProvider }> = ({ provide
   const { t } = useTranslation();
   const [message, messageContext] = useArcoMessage();
   const [expanded, setExpanded] = useState(false);
-  const [drawer, setDrawer] = useState<DrawerState | null>(null);
+  const [form, setForm] = useState<FormState | null>(null);
   const { connections, isLoading, mutate } = useProviderConnections(provider.id, expanded);
 
   // Providers freshly created from the volc/ark family most likely need the
@@ -297,7 +321,7 @@ const ProviderConnectionsSection: React.FC<{ provider: IProvider }> = ({ provide
             size='mini'
             className='model-provider-action-btn !h-24px !min-w-24px shrink-0 px-6px text-t-secondary hover:text-t-primary'
             icon={<Plus size='12' />}
-            onClick={() => setDrawer({})}
+            onClick={() => setForm({})}
           >
             {t('settings.connections.add', { defaultValue: '添加连接档案' })}
           </Button>
@@ -314,16 +338,16 @@ const ProviderConnectionsSection: React.FC<{ provider: IProvider }> = ({ provide
                 backgroundColor: 'rgba(var(--primary-6),0.06)',
               }}
             >
-              <span className='text-12px leading-5 text-primary-6 min-w-0'>
+              <span className='text-12px leading-5 text-t-primary min-w-0'>
                 {t('settings.connections.voiceHint', {
                   defaultValue: '语音识别/合成需要独立的语音连接档案（role: voice）',
                 })}
               </span>
               <Button
                 size='mini'
-                type='outline'
+                type='secondary'
                 className='shrink-0'
-                onClick={() => setDrawer({ prefillRole: 'voice', prefillScheme: 'volc_voice' })}
+                onClick={() => setForm({ prefillRole: 'voice', prefillScheme: 'volc_voice' })}
               >
                 {t('settings.connections.voiceHintAction', { defaultValue: '配置语音连接' })}
               </Button>
@@ -331,7 +355,7 @@ const ProviderConnectionsSection: React.FC<{ provider: IProvider }> = ({ provide
           )}
 
           {connections.length === 0 && !isLoading && (
-            <div className='text-12px text-t-tertiary leading-5 px-2px'>
+            <div className='text-12px text-t-secondary leading-5 px-2px'>
               {t('settings.connections.empty', {
                 defaultValue: '暂无独立连接档案（默认使用供应商自身的地址与密钥）',
               })}
@@ -372,7 +396,7 @@ const ProviderConnectionsSection: React.FC<{ provider: IProvider }> = ({ provide
                     size='mini'
                     className='model-provider-action-btn !w-24px !h-24px !min-w-24px text-t-secondary hover:text-t-primary'
                     icon={<Write size='12' />}
-                    onClick={() => setDrawer({ editing: connection })}
+                    onClick={() => setForm({ editing: connection })}
                   />
                 </Tooltip>
                 <Popconfirm
@@ -391,11 +415,11 @@ const ProviderConnectionsSection: React.FC<{ provider: IProvider }> = ({ provide
         </div>
       )}
 
-      {drawer && (
-        <ConnectionDrawer
+      {form && (
+        <ConnectionForm
           provider={provider}
-          state={drawer}
-          onClose={() => setDrawer(null)}
+          state={form}
+          onClose={() => setForm(null)}
           onSaved={() => void mutate()}
         />
       )}

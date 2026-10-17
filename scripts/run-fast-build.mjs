@@ -12,6 +12,7 @@ import { signMacosAppBundle } from './lib/macos-app-bundle.mjs';
 import { prepareMacosBuildEnvironment, resolveMacosTarget } from './lib/macos-build-environment.mjs';
 import { macosDevelopmentSigningIdentity, macosDevelopmentSigningNotice } from './lib/macos-dev-signing.mjs';
 import { installMacosSystemExecution } from './lib/macos-system-execution.mjs';
+import { prepareLinuxSystemExecution } from './lib/linux-system-execution.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -23,6 +24,14 @@ export function fastBuildInvocation(args, platform = process.platform, architect
     return index < 0 ? null : args[index + 1];
   };
   const target = value('--target') ?? value('-t');
+  if (platform === 'linux') {
+    if (args.some(arg => arg === '--bundles' || arg === '-b' || arg.startsWith('--bundles=') || /^-b.+/.test(arg))) {
+      throw new Error('Linux build:fast produces an unbundled debug Host; use build:linux for complete installable packages');
+    }
+    if (args.some(arg => arg === '--profile' || arg.startsWith('--profile=') || arg === '--release' || arg === '-r')) {
+      throw new Error('Linux build:fast uses the debug profile for both Host and system runner; use build:linux for release builds');
+    }
+  }
   if (platform === 'darwin') {
     resolveMacosTarget(target, architecture);
     if (args.some(arg => arg === '--no-bundle' || arg === '--bundles' || arg === '-b' || arg.startsWith('--bundles='))) {
@@ -131,6 +140,12 @@ export async function main(args = process.argv.slice(2)) {
       buildArgs.splice(separator < 0 ? buildArgs.length : separator, 0, '--config', compiler.bundleConfig);
     }
     await runCommand(tauri, buildArgs, { environment: compiler.environment });
+    if (process.platform === 'linux') {
+      const prepared = await prepareLinuxSystemExecution({ target: requestedTarget, profile: 'debug', environment });
+      console.log(`[build:fast] system runner staged: ${prepared.directory}`);
+      const installer = join(prepared.directory, 'install.sh').replaceAll("'", "'\\''");
+      console.log(`[build:fast] install system components explicitly when needed: sudo '${installer}'`);
+    }
     if (process.platform !== 'darwin') return;
     const appPath = await completeFastMacosApp({
       outDir,

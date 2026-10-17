@@ -118,7 +118,7 @@ const readOwnedPublicFixtureFile = async path => {
     return value;
   } finally { await file.close(); }
 };
-const validateNativeDataset = async root => {
+export const validateNativeDataset = async root => {
   assert(isAbsolute(root) && basename(root) === 'native-data', '--native-data-root must be the exact private fixture native-data directory');
   assert.equal(await realpath(root), root, 'Native fixture data root must be canonical without symlink aliases');
   const parent = dirname(root);
@@ -133,7 +133,8 @@ const validateNativeDataset = async root => {
     assert.equal(await readOwnedPublicFixtureFile(join(parent, '.nomifun-global-os-fixture')), 'nomifun-global-os-native-acceptance-fixture.v1\n');
     return { root, parent, portPath: join(root, 'port.json') };
   }
-  assert(/^\/private\/tmp\/nomifun-global-os-owner-[A-Za-z0-9-]+$/.test(parent), 'Only the explicitly marked private OS acceptance dataset is allowed');
+  const fixtureParent = process.platform === 'linux' ? /^\/tmp\/nomifun-global-os-owner-[A-Za-z0-9-]+$/ : /^\/private\/tmp\/nomifun-global-os-owner-[A-Za-z0-9-]+$/;
+  assert(fixtureParent.test(parent), 'Only the explicitly marked private OS acceptance dataset is allowed');
   for (const directory of [parent, root]) {
     const info = await lstat(directory);
     assert(info.isDirectory() && !info.isSymbolicLink() && info.uid === process.getuid() && (info.mode & 0o077) === 0,
@@ -147,7 +148,7 @@ export async function nativeStableAnnouncementSnapshot(read){
     try{return await read();}catch(error){if(error.code!=='NATIVE_FIXTURE_METADATA_CHANGED'||attempt===2)throw error;await wait(25);}
   }
 }
-const readNativeAnnouncement = async dataset => {
+export const readNativeAnnouncement = async dataset => {
   const value = JSON.parse(await nativeStableAnnouncementSnapshot(()=>readOwnedPublicFixtureFile(dataset.portPath)));
   assert(['127.0.0.1', 'localhost', '::1'].includes(value.host), 'Native announcement must be loopback only');
   assert(Number.isInteger(value.port) && value.port > 0 && value.port <= 65535 && Number.isInteger(value.pid) && value.pid > 1, 'Native announcement must contain a valid port and actual App PID');
@@ -550,8 +551,15 @@ export function nativeUncCwdControlOptions({scenario,nativeDataRoot,platform,adm
   assert.equal(platform,'win32');assert(typeof nativeDataRoot==='string'&&isAbsolute(nativeDataRoot),'UNC cwd control requires the same marked private native data root');
   assert(!administrator&&!protectedUserDirectory&&!desktopBackgroundFocus&&!retainServiceForAppExit&&!continueSession&&installerReport===undefined&&!missingDefault,'UNC cwd control cannot combine independent scenarios or source continuation');
 }
-export async function runNativeRegression({ baseUrl, token, tokenFile, reportDirectory, administrator = false, scenario = 'files-process', template = 'chat.minimal', administratorDirectory, retainServiceForAppExit = false, appPid, nativeDataRoot, signal, protectedUserDirectory = false, desktopBackgroundFocus = false, continueSession, continuationSourceReport, continuationRetryReport, installerReport, missingDefault = false,preservedUncReport }) {
-  assert(['darwin', 'win32'].includes(process.platform), 'This runner requires an actual supported native App host');
+export async function runNativeRegression({ baseUrl, token, tokenFile, reportDirectory, administrator = false, scenario = 'files-process', template = 'chat.minimal', administratorDirectory, retainServiceForAppExit = false, appPid, nativeDataRoot, signal, protectedUserDirectory = false, desktopBackgroundFocus = false, continueSession, continuationSourceReport, continuationRetryReport, installerReport, missingDefault = false,preservedUncReport, x11SessionRoot, administratorReadMatrix = false, administratorSystemService = false }) {
+  assert(['darwin', 'linux', 'win32'].includes(process.platform), 'This runner requires an actual supported native App host');
+  const linux = process.platform === 'linux';
+  if (linux) {
+    assert(!desktopBackgroundFocus && !protectedUserDirectory && !continueSession && !continuationSourceReport && !continuationRetryReport,
+      'Linux has its own native entries; macOS desktop and historical continuation fixtures are never reused');
+    assert(typeof nativeDataRoot === 'string', 'Linux acceptance requires its private native App data root');
+  }
+  assert(x11SessionRoot === undefined || (linux && scenario === 'desktop'), '--x11-session-root belongs only to the independent Linux desktop scenario');
   nativeMissingDefaultOptions({enabled:missingDefault,platform:process.platform,scenario,administrator,protectedUserDirectory,retainServiceForAppExit,desktopBackgroundFocus,continueSession,installerReport,nativeDataRoot});
   nativeSmbControlOptions({scenario,preservedUncReport,nativeDataRoot,platform:process.platform,administrator,protectedUserDirectory,desktopBackgroundFocus,retainServiceForAppExit,continueSession,installerReport,missingDefault});
   nativeUncCwdControlOptions({scenario,nativeDataRoot,platform:process.platform,administrator,protectedUserDirectory,desktopBackgroundFocus,retainServiceForAppExit,continueSession,installerReport,missingDefault});
@@ -562,10 +570,12 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
   if (!windows) assert.notEqual(process.getuid(), 0, 'Run the driver as the real ordinary login user');
   assert(!windows || !desktopBackgroundFocus, 'Windows background-focus requires its own exact App-window proof; use the full desktop case');
   assert.equal(administratorDirectory, undefined, 'Arbitrary administrator directories are forbidden; use administrator=true / --administrator');
-  assert(['files-process', 'system', 'service', 'desktop', 'desktop-high', 'browser', 'unc','installer','smb-disposition-control','unc-cwd-spelling-control'].includes(scenario), 'Supported scenarios: files-process, system, service, desktop, desktop-high, browser, unc, installer, smb-disposition-control, unc-cwd-spelling-control');
+  assert(['files-process', 'system', 'service', 'desktop', 'desktop-high', 'browser', 'unc','installer','smb-disposition-control','unc-cwd-spelling-control', ...(linux ? ['missing-default'] : [])].includes(scenario), 'Supported scenarios: files-process, system, desktop; Windows also supports service, desktop-high, browser, unc, installer, smb-disposition-control, unc-cwd-spelling-control; Linux also supports missing-default');
   assert(windows || !['desktop-high', 'service', 'browser', 'unc','installer','smb-disposition-control','unc-cwd-spelling-control'].includes(scenario), 'This fixture is Windows-specific');
   assert(scenario==='installer'?typeof installerReport==='string'&&installerReport.length>0:installerReport===undefined,'--installer-report is required only for the independent Windows installer scenario');
   assert(!administrator || scenario === 'files-process', 'Administrator verification is an independent scenario');
+  assert(!administratorReadMatrix || (linux && administrator && template === 'assistant.general' && !retainServiceForAppExit), 'The administrator read matrix is an independent Linux default-General scenario');
+  assert(!administratorSystemService || (linux && administrator && template === 'assistant.general' && !administratorReadMatrix && !retainServiceForAppExit), 'The administrator system service is an independent Linux default-General scenario');
   assert(!retainServiceForAppExit || (scenario === 'system' && !administrator), 'Retained service verification is a separate system scenario');
   assert.equal(typeof desktopBackgroundFocus, 'boolean', '--desktop-background-focus is a boolean test option');
   assert(!desktopBackgroundFocus || (scenario === 'desktop' && !administrator && !retainServiceForAppExit), '--desktop-background-focus requires the independent desktop scenario');
@@ -573,7 +583,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
   assert(!protectedUserDirectory || (scenario === 'files-process' && !administrator && !retainServiceForAppExit), '--protected-user-directory applies only to ordinary files-process verification');
   assert(retainServiceForAppExit || appPid === undefined, '--app-pid applies only to retained-service verification');
   const continuationRequested = nativeContinuationOptions({ administrator, scenario, template, continueSession, continuationSourceReport, continuationRetryReport, nativeDataRoot, retainServiceForAppExit, desktopBackgroundFocus, protectedUserDirectory });
-  assert(retainServiceForAppExit || desktopBackgroundFocus || continuationRequested || scenario==='installer' || isolatedNativeControl || missingDefault || nativeDataRoot === undefined, '--native-data-root applies only to retained-service, background-focus, canonical installer, isolated SMB controls, missing-default or pinned administrator continuation verification');
+  assert(linux || retainServiceForAppExit || desktopBackgroundFocus || continuationRequested || scenario==='installer' || isolatedNativeControl || missingDefault || nativeDataRoot === undefined, '--native-data-root is required for Linux and otherwise applies only to retained-service, background-focus, canonical installer, isolated SMB controls, missing-default or pinned administrator continuation verification');
   assert(['chat.minimal', 'assistant.general'].includes(template), 'Supported default templates: chat.minimal, assistant.general');
   const origin = new URL(baseUrl);
   assert(['127.0.0.1', 'localhost', '[::1]'].includes(origin.hostname), 'Only an explicitly supplied local native App is accepted');
@@ -596,13 +606,19 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
     }
     throw new Error('Canonical evidence exceeded bounded pagination');
   };
-  let nativeDataset, initialAnnouncement, desktopHostIdentity, authenticatedNativeCaller, continuation,preservedSmbEvidence;
-  if (retainServiceForAppExit || desktopBackgroundFocus || continuationRequested || scenario==='installer' || isolatedNativeControl || missingDefault) {
+  let nativeDataset, initialAnnouncement, linuxNativeIdentity, desktopHostIdentity, authenticatedNativeCaller, continuation,preservedSmbEvidence;
+  if (linux || retainServiceForAppExit || desktopBackgroundFocus || continuationRequested || scenario==='installer' || isolatedNativeControl || missingDefault) {
     assert(typeof nativeDataRoot === 'string', '--native-data-root is required for this native App identity check');
     nativeDataset = await validateNativeDataset(nativeDataRoot);
     initialAnnouncement = await readNativeAnnouncement(nativeDataset);
     assert.equal(Number(origin.port), initialAnnouncement.port, 'API origin must match this native dataset announcement');
     assert(!processIsGone(initialAnnouncement.pid), 'The announced native App must be alive before this test phase begins');
+    if (linux) {
+      assert.equal(origin.hostname, initialAnnouncement.host, 'Linux API origin must be the exact announced loopback address');
+      assert(!origin.username && !origin.password, 'Native API URLs must not contain credentials');
+      const { verifyLinuxNativeApp } = await import('./global-os-linux-cases.mjs');
+      linuxNativeIdentity = await verifyLinuxNativeApp({ pid: initialAnnouncement.pid, port: initialAnnouncement.port, data: nativeDataset.root, uid: process.getuid() });
+    }
     if (retainServiceForAppExit) {
       assert(Number.isInteger(appPid) && appPid > 1 && appPid !== process.pid, '--app-pid must identify the actual running native App');
       assert.equal(initialAnnouncement.pid, appPid, 'The actual initial App PID must match the private dataset announcement');
@@ -727,7 +743,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
   await mkdir(reportDirectory, { recursive: true });
   // The host allocates the only writable test namespace. Never accept a caller's
   // daily root directory, and never reuse a fixture after a failed attempt.
-  const allocated = windows ? join(await realpath(tmpdir()), `nomifun-global-os-product-${randomUUID()}`) : `/private/tmp/nomifun-global-os-product-${randomUUID()}`;
+  const allocated = windows ? join(await realpath(tmpdir()), `nomifun-global-os-product-${randomUUID()}`) : `${linux ? '/tmp' : '/private/tmp'}/nomifun-global-os-product-${randomUUID()}`;
   await mkdir(allocated, { mode: 0o700 });
   const fixture = await realpath(allocated);
   assert.equal(fixture, allocated);
@@ -766,6 +782,8 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
   const initial = 'NomiFun global native before\n';
   const changed = 'NomiFun global native after 中文\n';
   const file = join(outside, 'sample.txt');
+  const ordinaryLink = join(fixture, 'outside-link');
+  const renamedFile = join(outside, 'renamed.txt');
   const checks = [], observations = new Map(), completedSteps = new Set(), callSteps = new Map(), attempts = new Map(), discoveryAttempts = new Map(), rawResults = new Map(), discoveries = new Map(), completions = new Map(), planControls=new Map(), activeCompletionIds = new Set(), activeTurnCallIds = new Set();
   const runId = randomUUID();
   let processId, nativePid, providerFailure, sessionId = continueSession, accepted, pendingAdmissionOperationId, cursor = 0, sequence = 0, completionAccepted = false, readinessText = '', activeTurnRole = 'main', completionAttempts = 0, currentCompletionMode = 'report_completion', directAnswerCount = 0, missingDefaultFrozen;
@@ -785,13 +803,17 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
     if (windows) systemScenario = await windowsCases.createWindowsSystemScenario({ fixture, workspace, loginIdentity, preserveServiceForHostExit: retainServiceForAppExit });
     else {
       const { allocateLoopbackPort, createMacSystemScenario } = await import('./global-os-system-cases.mjs');
-      systemScenario = createMacSystemScenario({ fixture, workspace, uid: process.getuid(), loopbackPort: await allocateLoopbackPort(), preserveServiceForHostExit: retainServiceForAppExit });
+      const createScenario = linux ? (await import('./global-os-linux-cases.mjs')).createLinuxSystemScenario : createMacSystemScenario;
+      systemScenario = createScenario({ fixture, workspace, uid: process.getuid(), loopbackPort: await allocateLoopbackPort(), preserveServiceForHostExit: retainServiceForAppExit });
     }
   }
   if (scenario === 'desktop') {
     if (windows) {
       const { createWindowsDesktopScenario } = await import('./global-os-windows-desktop-cases.mjs');
       desktopScenario = await createWindowsDesktopScenario({ fixture, workspace });
+    } else if (linux) {
+      const { createLinuxDesktopScenario } = await import('./global-os-linux-desktop-cases.mjs');
+      desktopScenario = await createLinuxDesktopScenario({ fixture, workspace, uid: process.getuid(), nativeIdentity: linuxNativeIdentity, nativeDataRoot, x11SessionRoot });
     } else {
       const { createMacDesktopScenario } = await import('./global-os-desktop-cases.mjs');
       desktopScenario = createMacDesktopScenario({ fixture, workspace, uid: process.getuid(), desktopBackgroundFocus, desktopHostIdentity });
@@ -835,11 +857,14 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
         verifyInstructions: callId => verifyAdministratorInstructions(administratorStartProposalContexts.get(callId), callId) })
       : windowsCases.createWindowsFilesScenario({ fixture, workspace, outside, initial, changed });
   }
-  const acceptanceScenario = systemScenario ?? desktopScenario ?? windowsScenario;
+  const readScenario = administratorReadMatrix ? (await import('./global-os-linux-read-cases.mjs')).createLinuxAdministratorReadScenario({ fixture, workspace, uid: process.getuid() }) : undefined;
+  const systemRootScenario = administratorSystemService ? (await import('./global-os-linux-system-root-cases.mjs')).createLinuxSystemRootScenario({ fixture, workspace, uid: process.getuid() }) : undefined;
+  const missingDefaultScenario = scenario === 'missing-default' ? (await import('./global-os-linux-missing-default-cases.mjs')).createLinuxMissingDefaultScenario({ fixture, workspace, uid: process.getuid() }) : undefined;
+  const acceptanceScenario = systemScenario ?? desktopScenario ?? windowsScenario ?? readScenario ?? systemRootScenario ?? missingDefaultScenario;
   const safeFailure = error => acceptanceScenario?.sanitizeFailure?.(error) ?? { name: error?.name ?? 'Error', message: error.message, stack: error.stack };
   const safeReport = value => acceptanceScenario?.sanitizeReport?.(value) ?? value;
   const steps = acceptanceScenario?.steps ?? (administrator ? [
-    { id: 'admin-fixture', name: 'exec_command', args: { command: '/bin/sh', args: ['-c', 'set -eu; umask 077; /bin/mkdir -m 700 "$1"; [ ! -e "$2" ] && [ ! -L "$2" ]; set -C; printf "%s" "$3" > "$2"; /usr/bin/stat -f "%u:%Lp" "$1" "$2"', 'nomifun-admin-prepare', administratorRoot, administratorInstructions, administratorInstructionContent], execution_identity: 'administrator' }, verify: async value => {
+    { id: 'admin-fixture', name: 'exec_command', args: { command: '/bin/sh', args: ['-c', `set -eu; umask 077; /bin/mkdir -m 700 "$1"; [ ! -e "$2" ] && [ ! -L "$2" ]; set -C; printf "%s" "$3" > "$2"; /usr/bin/stat ${linux ? '-c "%u:%a"' : '-f "%u:%Lp"'} "$1" "$2"`, 'nomifun-admin-prepare', administratorRoot, administratorInstructions, administratorInstructionContent], execution_identity: 'administrator' }, verify: async value => {
       requireExited(value); assert.equal(value.output.text, '0:700\n0:600\n');
       const info = await lstat(administratorRoot);
       assert(info.isDirectory() && !info.isSymbolicLink()); assert.equal(info.uid, 0); assert.equal(info.mode & 0o777, 0o700);
@@ -847,7 +872,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
       await assert.rejects(writeFile(deniedMarker, 'must not be written', { flag: 'wx', mode: 0o600 }), error => ['EACCES', 'EPERM'].includes(error.code));
       checks.push({ id: 'ordinary-user-denied', status: 'passed', driver_uid: process.getuid(), path: deniedMarker, fixture_uid: info.uid, fixture_mode: '700' });
     } },
-    { id: 'admin-write-read', name: 'exec_command', args: { command: '/bin/sh', args: ['-c', 'set -eu; umask 077; [ ! -e "$2" ] && [ ! -L "$2" ]; set -C; printf "%s\\n" "$1" > "$2"; /usr/bin/id -u; /bin/cat "$2"; /usr/bin/stat -f "%u:%Lp" "$2"', 'nomifun-admin-marker', markerValue, marker], execution_identity: 'administrator' }, verify: value => {
+    { id: 'admin-write-read', name: 'exec_command', args: { command: '/bin/sh', args: ['-c', `set -eu; umask 077; [ ! -e "$2" ] && [ ! -L "$2" ]; set -C; printf "%s\\n" "$1" > "$2"; /usr/bin/id -u; /bin/cat "$2"; /usr/bin/stat ${linux ? '-c "%u:%a"' : '-f "%u:%Lp"'} "$2"`, 'nomifun-admin-marker', markerValue, marker], execution_identity: 'administrator' }, verify: value => {
       requireExited(value); assert.equal(value.output.text, `0\n${markerValue}\n0:600\n`);
     } },
     { id: 'admin-process-start', name: 'start_process', repeatable: true, maxAttempts: 3, allowInstructionRefresh: true, args: { command: '/bin/sh', args: ['-c', 'set -eu; /usr/bin/id -u; /bin/pwd; printf "%s\\n" "$HOME"; printf "%s\\n" "NOMIFUN_ADMIN_WAITING"; i=0; while [ "$i" -lt 60 ]; do /bin/sleep 1; i=$((i + 1)); done', 'nomifun-admin-wait'], execution_identity: 'administrator', cwd: administratorRoot, wait_ms: 0, timeout_ms: 60000 }, verify: async (value, context) => {
@@ -890,7 +915,16 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
     { id: 'patch', name: 'apply_patch', args: { files: [{ path: file, expected_source: { kind: 'existing', sha256: createHash('sha256').update(initial).digest('hex') }, hunks: [{ old_start: 1, old_lines: 1, new_start: 1, new_lines: 1, lines: [{ kind: 'remove', text: initial.trimEnd() }, { kind: 'add', text: changed.trimEnd() }] }] }] }, verify: async () => assert.equal(await readFile(file, 'utf8'), changed) },
     { id: 'read-after', name: 'read_file', args: { path: file }, verify: value => assert(JSON.stringify(value).includes(changed.trimEnd())) },
     { id: 'search', name: 'search_files', args: { path: outside, query: changed.trimEnd() }, verify: value => assert(JSON.stringify(value).includes('sample.txt')) },
-    { id: 'start', name: 'start_process', args: { command: '/bin/sh', args: ['-c', 'pwd; /bin/cat "$1"; printf "WAITING\\n"; while :; do /bin/sleep 1; done', 'nomifun-global-fixture', 'sample.txt'], cwd: outside, wait_ms: 0, timeout_ms: 60000 }, verify: value => {
+    ...linux ? [
+      { id: 'read-parent-traversal', name: 'read_file', args: { path: `${workspace}/../outside/sample.txt` }, verify: value => {
+        assert.equal(value.content, changed); assert.equal(value.workspace_path, undefined); assert.equal(value.sha256, createHash('sha256').update(changed).digest('hex'));
+      } },
+      { id: 'rename-outside', name: 'rename_path', args: { path: file, destination: renamedFile }, verify: async () => { assert.equal(await present(file), false); assert.equal(await readFile(renamedFile, 'utf8'), changed); } },
+      { id: 'rename-back', name: 'rename_path', args: { path: renamedFile, destination: file }, verify: async () => { assert.equal(await present(renamedFile), false); assert.equal(await readFile(file, 'utf8'), changed); } },
+      { id: 'symlink-create', name: 'exec_command', args: { command: '/bin/ln', args: ['-s', '--', outside, ordinaryLink] }, verify: async value => { requireExited(value); assert((await lstat(ordinaryLink)).isSymbolicLink()); assert.equal(await realpath(ordinaryLink), outside); } },
+      { id: 'read-symlink', name: 'read_file', args: { path: join(ordinaryLink, 'sample.txt') }, verify: value => { assert.equal(value.content, changed); assert.equal(value.workspace_path, undefined); assert.equal(value.sha256, createHash('sha256').update(changed).digest('hex')); } },
+    ] : [],
+    { id: 'start', name: 'start_process', args: { command: '/bin/sh', args: ['-c', 'pwd; /bin/cat "$1"; printf "WAITING\\n"; while :; do /bin/sleep 1; done', 'nomifun-global-fixture', 'sample.txt'], cwd: linux ? `${workspace}/../outside-link` : outside, wait_ms: 0, timeout_ms: 60000 }, verify: value => {
       assert.equal(value.state, 'running'); processId = value.process_id; nativePid = value.pid; cursor = value.output.next_cursor; readinessText = value.output.text;
       assert(processId); assert(Number.isInteger(nativePid)); process.kill(nativePid, 0);
     } },
@@ -903,6 +937,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
     { id: 'poll-exit', name: 'poll_process', allowCancelledObservation: true, args: () => ({ process_id: processId, cursor, wait_ms: 0 }), verify: value => {
       assert.equal(value.state, 'cancelled'); assert.equal(value.cleanup.reaped, true); assert.throws(() => process.kill(nativePid, 0), { code: 'ESRCH' });
     } },
+    ...linux ? [{ id: 'symlink-remove', name: 'exec_command', args: { command: '/bin/rm', args: ['--', ordinaryLink] }, verify: async value => { requireExited(value); assert.equal(await present(ordinaryLink), false); assert.equal(await readFile(file, 'utf8'), changed); } }] : [],
     { id: 'delete', name: 'delete_path', args: { path: outside }, verify: async () => assert.equal(await present(outside), false) },
   ]);
   let activeSteps = steps;
@@ -915,6 +950,11 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
   };
   const currentCompletionSummary = () => {
     if (windows && acceptanceScenario?.completionSummary) return acceptanceScenario.completionSummary(activeTurnRole);
+    if (readScenario) return readScenario.completionSummary(activeTurnRole);
+    if (systemRootScenario) return systemRootScenario.completionSummary(activeTurnRole);
+    if (missingDefaultScenario) return missingDefaultScenario.completionSummary(activeTurnRole);
+    if (systemScenario?.completionSummary) return systemScenario.completionSummary(activeTurnRole);
+    if (linux && desktopScenario) return desktopScenario.completionSummary(activeTurnRole);
     const stepObservation = stepId => [...observations].findLast(([callId]) => callSteps.get(callId)?.id === stepId)?.[1];
     let systemSummary;
     if (systemScenario) {
@@ -930,8 +970,8 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
     if (activeTurnRole === 'retained-cleanup') return `此前主阶段按要求保留了本次服务；宿主已独立确认原 App PID ${appPid} 退出、同一服务真实存续，再以原 owner 登录身份在同数据根的新 App 继续同一 Session。本轮原生停止唯一服务 ${systemScenario.resources.target}，确认已观察进程退出和服务不存在，并删除 ${systemScenario.resources.root}。具体退出和重启证据保留在验收记录中。`;
     if (activeTurnRole === 'cleanup') return `原验收失败保留。本次新 Turn 只清理本次唯一服务 ${systemScenario.resources.target}，确认原生状态不存在并删除 ${systemScenario.resources.root}；恢复清理不把首次失败改写为通过。`;
     if (systemScenario) return systemSummary;
-    if (administrator) return `root:0600 的 ${administratorInstructions} 含本次随机指令标记；管理员 instruction_scope/AGENTS read 与 canonical InstructionsUpdated 摘要已匹配实际模型 system context，指令变化后使用新调用身份。隔离夹具 ${administratorRoot} 由系统执行创建为 root:0700；普通用户写入实际被 EACCES/EPERM 拒绝。系统 uid=0 写读标记 ${marker}，内容 ${markerValue}、权限 root:0600。随后同系统路径启动实际等待进程 PID ${administratorPid}，独立poll核对uid0、cwd=${administratorRoot}、登录用户HOME=${homedir()}，宿主只读ps证明UID0；XPC取消和terminal poll为cancelled、cleanup.reaped=true，独立ps确认确切PID不存在后才删除标记和root目录。本地脚本供应器不代表外网模型推理验收。`;
-    return `文件工具在工作区外 ${file} 创建并读取文本，再patch为 ${changed.trimEnd()}，搜索返回sample.txt。等待进程实际cwd=${outside}，输出修改后文本和WAITING；独立poll观察running，再取消为cancelled、cleanup.reaped=true，末次poll及独立PID核验确认退出，${outside}已删除。此为本机脚本供应器驱动的原生产品路径实测。`;
+    if (administrator) return `root:0600 的 ${administratorInstructions} 含本次随机指令标记；管理员 instruction_scope/AGENTS read 与 canonical InstructionsUpdated 摘要已匹配实际模型 system context，指令变化后使用新调用身份。隔离夹具 ${administratorRoot} 由系统执行创建为 root:0700；普通用户写入实际被 EACCES/EPERM 拒绝。系统 uid=0 写读标记 ${marker}，内容 ${markerValue}、权限 root:0600。随后同系统路径启动实际等待进程 PID ${administratorPid}，独立poll核对uid0、cwd=${administratorRoot}、登录用户HOME=${homedir()}，宿主只读ps证明UID0；原生helper取消和terminal poll为cancelled、cleanup.reaped=true，独立ps确认确切PID不存在后才删除标记和root目录。本地脚本供应器不代表外网模型推理验收。`;
+    return `文件工具在工作区外 ${file} 创建并读取文本，再patch为 ${changed.trimEnd()}，搜索返回sample.txt。${linux ? '同一默认Agent还完成工作区外rename往返、合法父路径和符号链接读取，其完整源摘要一致且没有伪造workspace_path；通过原生进程创建/移除本次唯一链接，等待进程cwd使用父路径和链接。' : ''}等待进程实际cwd=${outside}，输出修改后文本和WAITING；独立poll观察running，再取消为cancelled、cleanup.reaped=true，末次poll及独立PID核验确认退出，${outside}已删除。此为本机脚本供应器驱动的原生产品路径实测。`;
   };
   const completionArguments = tool => nativeCompletionArguments({ tool, observedCallIds: observations.keys(), summary: currentCompletionSummary() });
   const server = createServer(async (request, response) => {
@@ -984,6 +1024,13 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
           if(raw.startsWith('[tool error]')&&typeof step.observeTerminalFailure==='function'){
             assert.equal(scenario,'unc-cwd-spelling-control');assert.equal(step.id,'unc-cwd-two-spellings');
             await step.observeTerminalFailure(nativeControlTerminalFailureObservation({raw,callId:id,callArguments:proposedArguments.get(id),events:await sessionEvents(),operationId:accepted.operation_id,sessionId}));
+          }
+          if (step.verifyError) {
+            assert(readScenario, 'Expected tool refusals belong only to the explicit Linux read matrix');
+            const observed = await step.verifyError(raw, { messages, callId: id, toolMessage: message });
+            observations.set(id, observed); completedSteps.add(step.id);
+            checks.push({ id, step: step.id, status: 'passed', expected_error: observed.expected_error });
+            continue;
           }
           let value;try{value=toolValue(raw);}catch(error){error.safe_step=step.id;throw error;}
           // A read-only poll of an intentionally cancelled process reports
@@ -1078,9 +1125,9 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const providerUrl = `http://127.0.0.1:${server.address().port}/v1`;
-  const report = { schema: 'nomifun.global-os-native-regression.v2', platform: process.platform, login_identity: loginIdentity, native_case_evidence: windowsScenario?.nativeEvidence, windows_administrator_process: windowsScenario?.administratorEvidence, run_id: runId, session_id: continueSession, started_at: new Date().toISOString(), host: origin.origin, fixture, workspace, outside, template, scenario: administrator ? 'administrator' : scenario,
-    evidence_scope: scenario==='unc-cwd-spelling-control' ? 'Diagnostic same-App Windows ProcessStartInfo UNC cwd spelling control with two natural child WinPS exits. ProviderPath observations do not certify the full product UNC case or settle any preserved Effect.' : scenario==='smb-disposition-control' ? 'Public default Agent / same original private App and owner JWT / distinct UUID SMB native primitive control. Raw primitive outcomes are diagnostic observations, not product success or resolution of the preserved source Effect. No preserved source path is read or modified by the control probe.' : continuation ? 'Real native App / same originally selected Agent and Session / same private owner JWT / public model command and canonical contract transition / new isolated administrator fixture. No new Agent, grants or resources. Original failure remains failed. Local scripted provider is not live-model reasoning evidence.' : 'Real native App / unmodified default template / owner login JWT / local scripted provider / real native owners. App signing identity and GUI review require separate driver evidence. No live-model reasoning claim.', continuation: continuation?.report, administrator, administrator_fixture: administrator ? { path: administratorRoot, marker } : undefined, administrator_instructions: administrator ? administratorInstructionEvidence : undefined, administrator_process: administrator ? (windows ? windowsScenario.administratorEvidence : administratorProcessEvidence) : undefined, protected_user_directory: protectedParent ? { ...protectedParent, allocated_test_directory: outside } : undefined, checks, status: 'running', system_resources: systemScenario?.resources, native_case_resources: windowsScenario?.resources, desktop_resources: desktopScenario?.resources, desktop_mode: desktopScenario ? (desktopBackgroundFocus ? 'background_focus' : scenario === 'desktop-high' ? 'high_integrity' : 'full') : undefined, desktop_host_identity: desktopHostIdentity, pending_acceptance: acceptanceScenario?.pendingAcceptance, native_system_evidence: systemScenario?.nativeEvidence, retain_service_for_app_exit: retainServiceForAppExit, native_dataset: nativeDataset, initial_native_announcement: initialAnnouncement, phase_checkpoints: [] };
-  const reportPath = join(reportDirectory, `${administrator ? 'administrator' : scenario}${continuation ? '-continuation' : ''}-${template}-${Date.now()}-${randomUUID()}.json`);
+  const report = { schema: 'nomifun.global-os-native-regression.v2', platform: process.platform, login_identity: loginIdentity, native_case_evidence: windowsScenario?.nativeEvidence, windows_administrator_process: windowsScenario?.administratorEvidence, run_id: runId, session_id: continueSession, started_at: new Date().toISOString(), host: origin.origin, fixture, workspace, outside, template, scenario: administratorSystemService ? 'administrator-system-service' : administratorReadMatrix ? 'administrator-read-matrix' : administrator ? 'administrator' : scenario,
+    evidence_scope: scenario==='unc-cwd-spelling-control' ? 'Diagnostic same-App Windows ProcessStartInfo UNC cwd spelling control with two natural child WinPS exits. ProviderPath observations do not certify the full product UNC case or settle any preserved Effect.' : scenario==='smb-disposition-control' ? 'Public default Agent / same original private App and owner JWT / distinct UUID SMB native primitive control. Raw primitive outcomes are diagnostic observations, not product success or resolution of the preserved source Effect. No preserved source path is read or modified by the control probe.' : continuation ? 'Real native App / same originally selected Agent and Session / same private owner JWT / public model command and canonical contract transition / new isolated administrator fixture. No new Agent, grants or resources. Original failure remains failed. Local scripted provider is not live-model reasoning evidence.' : 'Real native App / unmodified default template / owner login JWT / local scripted provider / real native owners. App signing identity and GUI review require separate driver evidence. No live-model reasoning claim.', continuation: continuation?.report, administrator, administrator_fixture: administrator && !administratorReadMatrix && !administratorSystemService ? { path: administratorRoot, marker } : undefined, administrator_instructions: administrator && !administratorReadMatrix && !administratorSystemService ? administratorInstructionEvidence : undefined, administrator_process: administrator && !administratorReadMatrix && !administratorSystemService ? (windows ? windowsScenario.administratorEvidence : administratorProcessEvidence) : undefined, protected_user_directory: protectedParent ? { ...protectedParent, allocated_test_directory: outside } : undefined, checks, status: 'running', system_resources: systemScenario?.resources, native_case_resources: windowsScenario?.resources, desktop_resources: desktopScenario?.resources, desktop_mode: desktopScenario ? (desktopBackgroundFocus ? 'background_focus' : scenario === 'desktop-high' ? 'high_integrity' : 'full') : undefined, desktop_host_identity: desktopHostIdentity, pending_acceptance: acceptanceScenario?.pendingAcceptance, native_system_evidence: systemScenario?.nativeEvidence, native_read_evidence: readScenario?.nativeEvidence, read_resources: readScenario?.resources, native_system_root_evidence: systemRootScenario?.nativeEvidence, system_root_resources: systemRootScenario?.resources, native_missing_default_evidence: missingDefaultScenario?.nativeEvidence, missing_default_resources: missingDefaultScenario?.resources, retain_service_for_app_exit: retainServiceForAppExit, native_dataset: nativeDataset, initial_native_announcement: initialAnnouncement, linux_native_identity: linuxNativeIdentity, phase_checkpoints: [] };
+  const reportPath = join(reportDirectory, `${administratorSystemService ? 'administrator-system-service' : administratorReadMatrix ? 'administrator-read-matrix' : administrator ? 'administrator' : scenario}${continuation ? '-continuation' : ''}-${template}-${Date.now()}-${randomUUID()}.json`);
   if(missingDefault)report.missing_default={requested:true,status:'awaiting_frozen_session',workspace};
   const phaseCheckpoint = async (phase, extra = {}) => {
     const checkpointPath = reportPath.replace(/\.json$/, `.${phase}.json`);
@@ -1249,7 +1296,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
     });
     await waitForPhase('awaiting_app_exit', deadline, () => processIsGone(appPid));
     const survival = await systemScenario.observeAfterAppExit({ appPid });
-    const pending = systemScenario.pendingAcceptance.find(item => ['launchd-survives-native-App-exit', 'task-survives-app-exit'].includes(item.id));
+    const pending = systemScenario.pendingAcceptance.find(item => item.id === (systemScenario.survivalAcceptanceId ?? (windows ? 'task-survives-app-exit' : 'launchd-survives-native-App-exit')));
     if (pending) Object.assign(pending, { status: 'passed', reason: 'The actual old App PID disappeared; the same unique native persistent task/service, observed PID and marker were independently verified after that exit.' });
     await phaseCheckpoint('awaiting_app_restart', { app_exit_survival: { ...survival, observed_at: new Date().toISOString() } });
     const restarted = await waitForPhase('awaiting_app_restart', deadline, async () => {
@@ -1270,17 +1317,18 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
       assert.equal(JSON.stringify(value.session.owner_ref), originalOwner, 'The Session owner changed across the native App restart');
       const confirmed = await readNativeAnnouncement(nativeDataset);
       if (confirmed.pid !== announcement.pid || confirmed.port !== announcement.port || processIsGone(announcement.pid)) return undefined;
-      return { announcement, candidate, session: value };
+      const nativeIdentity = linux ? await (await import('./global-os-linux-cases.mjs')).verifyLinuxNativeApp({ pid: announcement.pid, port: announcement.port, data: nativeDataset.root, uid: process.getuid() }) : undefined;
+      return { announcement, candidate, session: value, nativeIdentity };
     });
     const oldOrigin = origin.origin; origin.href = restarted.candidate.href;
-    report.restart = { original_app_pid: appPid, new_app_pid: restarted.announcement.pid, old_origin: oldOrigin, new_origin: origin.origin, native_announcement: restarted.announcement, owner_jwt_reused: true, same_session_id: sessionId, observed_at: new Date().toISOString() };
+    report.restart = { original_app_pid: appPid, new_app_pid: restarted.announcement.pid, old_origin: oldOrigin, new_origin: origin.origin, native_announcement: restarted.announcement, native_identity: restarted.nativeIdentity, owner_jwt_reused: true, same_session_id: sessionId, observed_at: new Date().toISOString() };
     // Read the old exact Turn on the restarted App before admitting new work.
     report.restart_prior_turn_settlement = await awaitCleanup();
     report.restart.canonical_preservation=nativeRetainedSessionPreservation({before:originalSession,after:restarted.session,eventsBefore:originalEvents,eventsAfter:await sessionEvents()});
     assert.equal(report.restart_prior_turn_settlement.execution.operation_id, report.accepted.operation_id, 'Unexpected work replaced the original settled Turn before cleanup');
     report.app_restart_service_survival = { ...await systemScenario.observeAfterAppExit({ appPid }), observed_after_new_app_pid: restarted.announcement.pid, observed_at: new Date().toISOString() };
     await phaseCheckpoint('restarted_app_authenticated', { restart: report.restart });
-    report.retained_service_cleanup = await driveTurn(systemScenario.retainedCleanupPrompt ?? `本次唯一 launchd 服务 ${systemScenario.resources.target} 是先前阶段明确要求保留的测试产物。宿主已独立确认原 App PID ${appPid} 正常退出后该服务仍存续，且以同一 owner 登录身份在同数据根的新 App 继续同一 Session。现在仅通过现役工具清理本次随机系统偏好（如已使用）、停止并卸载该唯一服务，读回原生状态并确认已观察进程退出，再删除 ${systemScenario.resources.root}。不重跑主验收、不操作其他服务或既有文件。`, systemScenario.cleanupSteps, 'retained-cleanup');
+    report.retained_service_cleanup = await driveTurn(systemScenario.retainedCleanupPrompt ?? systemScenario.cleanupPrompt ?? `本次唯一 launchd 服务 ${systemScenario.resources.target} 是先前阶段明确要求保留的测试产物。宿主已独立确认原 App PID ${appPid} 正常退出后该服务仍存续，且以同一 owner 登录身份在同数据根的新 App 继续同一 Session。现在仅通过现役工具清理本次随机系统偏好（如已使用）、停止并卸载该唯一服务，读回原生状态并确认已观察进程退出，再删除 ${systemScenario.resources.root}。不重跑主验收、不操作其他服务或既有文件。`, systemScenario.cleanupSteps, 'retained-cleanup');
     report.restart.canonical_preservation_after_cleanup=nativeRetainedSessionPreservation({before:originalSession,after:await api('GET',`/api/agent-sessions/${sessionId}`),eventsBefore:originalEvents,eventsAfter:await sessionEvents()});
     assert.equal(await present(systemScenario.resources.root), false, 'Retained-service files remain after product cleanup');
     report.retained_service_final_status = 'stopped_unregistered_and_fixture_deleted';
@@ -1388,8 +1436,8 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
       missingDefaultFrozen=await beginWindowsMissingDefaultCase({fixture,workspace,loginIdentity,session:await api('GET',`/api/agent-sessions/${sessionId}`),projection:await api('GET',`/api/agent-sessions/${sessionId}/projection`),events:await sessionEvents(),nativeDataset,announcement:initialAnnouncement,caller:authenticatedNativeCaller,evidence:report.missing_default});
     }
     const content = acceptanceScenario?.prompt ?? (administrator ?
-      `Only operate on this host-allocated fixture ${fixture}. Through the native administrator execution path, create ${administratorRoot} as root:0700 and a benign root:0600 AGENTS.md inside it; independently prove an ordinary-user write is refused. Preserve the actual instruction preflight: if new rules defer a call, read the updated model instructions and submit a fresh call identity. Write the absent random marker ${marker}, then verify uid, contents and root:0600 metadata. Next use start_process with execution_identity=administrator and cwd=${administratorRoot} to run the bounded 60-second sh wait loop, printing real uid, pwd and login HOME (expected ${homedir()}). Make a distinct running poll and independently read exact PID UID through ps; use the same helper/XPC process cancellation and terminal poll, require cancelled plus cleanup.reaped, and independently prove the exact PID absent through ps. Only then remove this marker and the fixture AGENTS.md and rmdir this root fixture. No host signal, sudo, PTY, stdin expansion, additional authentication method or unrelated target.` :
-      `请在当前工作区之外创建独立测试目录 ${outside}，用文件工具写入并修改一份文本，再在该目录启动一个本机等待进程，输出实际工作目录和文本内容；独立 poll 核对进程仍在运行及输出，随后停止并确认该进程已退出，最后删除本次创建的测试目录，报告实际结果。`);
+      `Only operate on this host-allocated fixture ${fixture}. Through the native administrator execution path, create ${administratorRoot} as root:0700 and a benign root:0600 AGENTS.md inside it; independently prove an ordinary-user write is refused. Preserve the actual instruction preflight: if new rules defer a call, read the updated model instructions and submit a fresh call identity. Write the absent random marker ${marker}, then verify uid, contents and root:0600 metadata. Next use start_process with execution_identity=administrator and cwd=${administratorRoot} to run the bounded 60-second sh wait loop, printing real uid, pwd and login HOME (expected ${homedir()}). Make a distinct running poll and independently read exact PID UID through ps; use the same native helper process cancellation and terminal poll, require cancelled plus cleanup.reaped, and independently prove the exact PID absent through ps. Only then remove this marker and the fixture AGENTS.md and rmdir this root fixture. No host signal, sudo, PTY, stdin expansion, additional authentication method or unrelated target.` :
+      `请在当前工作区之外创建独立测试目录 ${outside}，用文件工具写入并修改一份文本，搜索核对。${linux ? `继续用同一文件工具将 ${file} rename到 ${renamedFile}并rename回原名，通过合法路径 ${workspace}/../outside/sample.txt 读回。以原生进程创建唯一符号链接 ${ordinaryLink} 指向 ${outside}，通过该链接读取同一文本，核对完整摘要一致且工作区外内容不伪造workspace_path；用 ${workspace}/../outside-link 作为等待进程cwd。进程确认退出后，用原生rm只移除此唯一链接并确认原文本仍在。` : ''}再在该目录启动一个本机等待进程，输出实际工作目录和文本内容；独立 poll 核对进程仍在运行及输出，随后停止并确认该进程已退出，最后删除本次创建的测试目录，报告实际结果。`);
     if (scenario==='installer') {
       report.acceptance_phases=[];
       for(const phase of nativeInstallerPhases(acceptanceScenario)){
@@ -1397,8 +1445,30 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
         report.acceptance_phases.push({role:phase.role,step_ids:phase.steps.map(step=>step.id),...result});Object.assign(report,result);
       }
     }
-    else if (systemScenario) await driveSystemPhases();
-    else Object.assign(report, await driveTurn(content, steps, 'main'));
+    else if (missingDefaultScenario) {
+      const original = await api('GET', `/api/agent-sessions/${sessionId}`);
+      assert(original.session.agent_binding && original.session.owner_ref, 'The actual Session must expose its frozen binding and owner');
+      const frozenBinding = original.session.agent_binding, owner = original.session.owner_ref;
+      report.missing_default_phases = [];
+      for (const phase of missingDefaultScenario.phases) {
+        await missingDefaultScenario.verifyPhaseBoundary(phase.role);
+        const before = await api('GET', `/api/agent-sessions/${sessionId}`);
+        assert.equal(before.session.agent_session_id, sessionId); assert.deepEqual(before.session.agent_binding, frozenBinding); assert.deepEqual(before.session.owner_ref, owner);
+        const result = await driveTurn(phase.prompt, phase.steps, phase.role);
+        const after = await api('GET', `/api/agent-sessions/${sessionId}`);
+        assert.equal(after.session.agent_session_id, sessionId); assert.deepEqual(after.session.agent_binding, frozenBinding); assert.deepEqual(after.session.owner_ref, owner);
+        assert(await present(workspace) === false, 'The chosen default directory must remain absent after every phase');
+        report.missing_default_phases.push({ role: phase.role, step_ids: phase.steps.map(step => step.id), frozen_binding_sha256: createHash('sha256').update(stableJson(frozenBinding)).digest('hex'), original_owner_preserved: true, default_directory_absent: true, ...result });
+        Object.assign(report, result);
+      }
+    } else if (systemScenario) await driveSystemPhases();
+    else if (linux && desktopScenario?.phases) {
+      report.desktop_phases = [];
+      for (const phase of desktopScenario.phases) {
+        const result = await driveTurn(phase.prompt, phase.steps, phase.role);
+        report.desktop_phases.push({ role: phase.role, step_ids: phase.steps.map(step => step.id), ...result });
+      }
+    } else Object.assign(report, await driveTurn(content, steps, 'main'));
     assert.equal(await present(administrator ? administratorRoot : outside), false);
     if (retainServiceForAppExit) await continueAfterRootControlledAppRestart();
     if(missingDefaultFrozen)await verifyWindowsMissingDefaultCase({frozen:missingDefaultFrozen,session:await api('GET',`/api/agent-sessions/${sessionId}`),projection:await api('GET',`/api/agent-sessions/${sessionId}/projection`),events:await sessionEvents(),nativeDataset:await validateNativeDataset(nativeDataset.root),announcement:await readNativeAnnouncement(nativeDataset),evidence:report.missing_default});
@@ -1460,7 +1530,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
     }
     report.finished_at = new Date().toISOString(); report.observations = Object.fromEntries(observations); report.raw_tool_results = Object.fromEntries(rawResults); report.completion_receipts = Object.fromEntries(completions);
     if (acceptanceScenario) report.cleanup_intent = { ...acceptanceScenario.cleanupIntent, temporary_process: typeof acceptanceScenario.cleanupIntent?.temporary_process === 'function' ? acceptanceScenario.cleanupIntent.temporary_process() : acceptanceScenario.cleanupIntent?.temporary_process };
-    report.remaining_fixture = { outside: await present(outside).catch(error => ({ state: 'unknown', os_code: error.code, detail: safeFailure(error).message })), administrator_root: await present(administratorRoot), system_root: systemScenario ? await present(systemScenario.resources.root) : undefined };
+    report.remaining_fixture = { missing_default_external_root: missingDefaultScenario ? await present(missingDefaultScenario.resources.root) : undefined, missing_default_directory: missingDefaultScenario ? await present(workspace) : undefined, administrator_service_root: systemRootScenario ? await present(systemRootScenario.resources.root) : undefined, read_root: readScenario ? await present(readScenario.resources.root) : undefined, outside: await present(outside).catch(error => ({ state: 'unknown', os_code: error.code, detail: safeFailure(error).message })), administrator_root: await present(administratorRoot), system_root: systemScenario ? await present(systemScenario.resources.root) : undefined, desktop_root: desktopScenario?.resources.root ? await present(desktopScenario.resources.root) : undefined };
     // A failed run keeps its original default directory for a future scoped
     // canonical cleanup Turn, including after the original App has exited.
     // Successful runs remove only known empty fixture directories.
@@ -1479,6 +1549,8 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   if (process.argv.includes('--help')) console.log('node scripts/validation/global-os-native.mjs --base-url http://127.0.0.1:PORT --token-file /ABS/ISOLATED-OWNER-LOGIN-JWT --report-dir /ABS/EVIDENCE [--template chat.minimal|assistant.general] [--scenario files-process|system|service|desktop|desktop-high|browser|unc|installer|smb-disposition-control|unc-cwd-spelling-control] [--preserved-unc-report /ABS/PRESERVED_FAILED_UNC_REPORT] [--administrator [--continue-session PINNED_ID --continuation-source-report /ABS/PINNED_FAILED_REPORT [--continuation-retry-report /ABS/PINNED_ZERO_DISPATCH_FAILURE] --native-data-root /PRIVATE_MARKED_PARENT/native-data]] [--protected-user-directory] [--missing-default --native-data-root /PRIVATE_MARKED_PARENT/native-data] [--desktop-background-focus] [--retain-service-for-app-exit --app-pid ACTUAL_APP_PID --native-data-root /PRIVATE_MARKED_PARENT/native-data]. Run against an already running actual native App with its own isolated test dataset. Signing and notarization are separate acceptance evidence. Obtain the token by normal owner setup/login; the native browser trust secret is not an owner JWT. Run ordinary, system/network, SCM service, desktop, high-integrity desktop, Browser and administrator cases separately. SMB disposition control requires --preserved-unc-report and the marked original private --native-data-root; its distinct UUID namespace measures native primitive outcomes without replaying or settling the preserved source Effect. Windows service/desktop-high/browser are independent unique native fixtures; service uses SCM, while the system case uses Task Scheduler. The high-integrity fixture uses a real elevated WinForms window and existing Computer actions, preserving UAC and the Default desktop boundary. --protected-user-directory is a boolean ordinary files-process option: the actual existing homedir/Documents parent is resolved read-only, only an absent nomifun-global-os-product-UUID name is allocated there, and all creation/patch/search/cwd/process-cancel/deletion effects use the Agent; the workspace stays in the private /tmp fixture. Missing or denied Documents metadata is recorded, never prepared by the host. --missing-default is Windows ordinary files-process only: create and freeze the normal Session first, then rmdir only its known empty default directory before the first Turn; retain the same private data root, binding, resources and resolved snapshot throughout the external absolute-path cases. A busy directory is reported, never forced or recreated. --desktop-background-focus requires --scenario desktop and --native-data-root. The marked private data announcement and authenticated permission caller must identify the same live formal App; only that minimal identity is passed to the read-only window verifier. The Agent establishes background setup and performs all focus effects through Computer; no reviewer focus mutation is used. Desktop defaults to assistant.general with actual screenshot input capability on its local fixture model; all UI effects use the existing Agent Computer tools and reports omit private pixels/AX/global window text. Retained-service verification implies --scenario system: the driver emits an awaiting_app_exit checkpoint, waits at most ten minutes for the reviewer to quit and restart the App, independently observes service survival, authenticates the same owner JWT against the new private port announcement, then continues the same Session/provider with a new cleanup Turn. The driver never quits the App or kills a raw PID; SIGINT/SIGTERM cancel its wait and preserve any unproven service target. Administrator continuation is limited to the exact pinned private failed report, original Session, owner JWT and fourth dataset. It uses only the public model command to prepare current bundled contracts, preserves Agent intent/resources/workspace and original failure, allocates a fresh root fixture, and records source/event/schema digests. An optional retry accepts only the one pinned failed continuation whose canonical records prove no user effect dispatch, and requires that exact settled latest operation while retaining both old failures. It never creates a new Agent/Session or changes grants; prior-run receipts cannot satisfy new-run calls. Arbitrary administrator paths are forbidden. OS authentication stays in native UI. The local scripted provider is deterministic product-path evidence, not live-model or visual acceptance.');
   else {
+    assert.notEqual(process.platform, 'linux', 'Use scripts/validation/global-os-linux-native.mjs for the Linux CLI and its explicit native-data, read-matrix, system-service and X11 options');
+    assert(!['--x11-session-root', '--administrator-read-matrix', '--administrator-system-service'].some(flag => process.argv.includes(flag)), 'Linux-specific options require scripts/validation/global-os-linux-native.mjs on the actual Linux host');
     assert(!process.argv.includes('--administrator-directory'), '--administrator-directory is forbidden; use --administrator with a host-allocated fixture');
     const retained = process.argv.includes('--retain-service-for-app-exit');
     const background = process.argv.includes('--desktop-background-focus');

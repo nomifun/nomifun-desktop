@@ -253,13 +253,14 @@ pub const BROWSER_DESKTOP_HOST_TARGETS: &[&str] = &[
     "x86_64-unknown-linux-gnu",
 ];
 
-/// The first release does not claim a full Computer surface on Linux Desktop.
-/// Linux Desktop and all headless hosts therefore fail closed with the
-/// canonical platform-unavailable error.
+/// Linux Desktop uses native X11 and AT-SPI providers. Their live facility
+/// checks distinguish a supported host from a missing display/portal backend;
+/// all headless hosts remain unavailable.
 pub const COMPUTER_DESKTOP_HOST_TARGETS: &[&str] = &[
     "x86_64-pc-windows-msvc",
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
 ];
 
 pub const DESKTOP_HOST_SURFACES: &[&str] = &["desktop"];
@@ -3396,8 +3397,9 @@ mod tests {
             (
                 WORKSPACE_FILES_MODULE_ID,
                 "workspace.files/delete",
+                json!({"path": "bad\u{0}path"}),
+                // Native filenames may consist of whitespace; only NUL is invalid.
                 json!({"path": " \t"}),
-                json!({"path": "src/lib.rs"}),
             ),
             (
                 WORKSPACE_ARTIFACTS_MODULE_ID,
@@ -3612,9 +3614,13 @@ mod tests {
         };
         let strict = AgentPresetCompiler::compile(&registry, &environment, request.clone()).unwrap();
         assert!(strict.non_executable_capability_ids.is_empty());
+        environment.host_target = "x86_64-unknown-linux-gnu".into();
+        let linux_desktop = AgentPresetCompiler::compile(&registry, &environment, request.clone())
+            .expect("Linux desktop has a native Computer provider; live facilities are operation prerequisites");
+        assert!(linux_desktop.non_executable_capability_ids.is_empty());
         for (target, surface, non_executable) in [
             ("x86_64-pc-windows-msvc", "headless", BTreeSet::from([CapabilityId::from(BROWSER_MODULE_ID), CapabilityId::from(COMPUTER_MODULE_ID)])),
-            ("x86_64-unknown-linux-gnu", "desktop", BTreeSet::from([CapabilityId::from(COMPUTER_MODULE_ID)])),
+            ("x86_64-unknown-linux-gnu", "headless", BTreeSet::from([CapabilityId::from(BROWSER_MODULE_ID), CapabilityId::from(COMPUTER_MODULE_ID)])),
         ] {
             environment.host_target = target.into();
             environment.host_surface = surface.into();
@@ -4271,10 +4277,7 @@ mod tests {
                     "desktop".to_owned(),
                 ])
             );
-            for (target, surface) in [
-                ("x86_64-unknown-linux-gnu", "desktop"),
-                ("x86_64-unknown-linux-gnu", "headless"),
-            ] {
+            for (target, surface) in [("x86_64-unknown-linux-gnu", "headless")] {
                 let error = check_platform_availability(
                     &CapabilityId::from(*capability_id),
                     &RuntimeTarget::from(target),
@@ -4283,6 +4286,12 @@ mod tests {
                 .expect_err("unsupported Computer host must be unavailable");
                 assert_eq!(error.canonical_code(), unavailable_on_platform_code());
             }
+            assert!(check_platform_availability(
+                &CapabilityId::from(*capability_id),
+                &RuntimeTarget::from("x86_64-unknown-linux-gnu"),
+                "desktop",
+            )
+            .is_ok());
             assert!(check_platform_availability(
                 &CapabilityId::from(*capability_id),
                 &RuntimeTarget::from("x86_64-pc-windows-msvc"),

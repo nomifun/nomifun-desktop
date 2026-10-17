@@ -73,6 +73,10 @@ impl SystemEngineOwner {
             let connected = tokio::task::spawn_blocking(SystemExecutionClient::connect).await.map_err(failure)?;
             match connected {
                 Ok(client) => {
+                    tokio::select! {
+                        _ = cancellation.cancelled() => return Err(EngineProcessError::Cancelled),
+                        ready = client.wait_ready() => ready.map_err(failure)?,
+                    }
                     return Ok(Arc::new(client));
                 }
                 Err(error) if error.code == "SYSTEM_EXECUTION_APPROVAL_REQUIRED" && tokio::time::Instant::now() < deadline => {
@@ -333,6 +337,11 @@ mod tests {
 
     #[tokio::test]
     async fn unbundled_system_execution_never_falls_back_to_the_login_user() {
+        // This case is specifically the missing-component path. A developer
+        // machine with the real Linux component installed must not open an OS
+        // authentication prompt or perform root work as a side effect of tests.
+        #[cfg(target_os = "linux")]
+        if Path::new("/usr/libexec/nomifun-system-runner").exists() { return; }
         let root=tempfile::tempdir().unwrap();
         let owner=ManagedEngineProcessOwner::new(root.path(),Default::default()).unwrap();
         let marker=root.path().join("must-not-run");

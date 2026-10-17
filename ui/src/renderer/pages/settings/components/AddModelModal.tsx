@@ -8,7 +8,7 @@ import { ipcBridge } from '@/common';
 import type { IProvider } from '@/common/config/storage';
 import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import ModalHOC from '@/renderer/utils/ui/ModalHOC';
-import NomiModal from '@/renderer/components/base/NomiModal';
+import ModelConfigurationPanel from '@/renderer/pages/modelHub/ModelConfigurationPanel';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -207,20 +207,18 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
     return (
       <>
         {messageHolder}
-        <NomiModal
+        <ModelConfigurationPanel
           visible={modalProps.visible}
-          onCancel={modalCtrl.close}
-          unmountOnExit
-          header={{
-            title: focusedCallConfigTask
-              ? `${t(`settings.modelTask.${focusedCallConfigTask}`, {
-                  defaultValue: focusedCallConfigTask,
-                })} · ${t('settings.modelAdvanced.callConfigurationTitle', {
-                  defaultValue: '调用配置',
-                })}`
-              : t('settings.addModel'),
-            showClose: true,
-          }}
+          busy={saving}
+          onBack={focusedCallConfigTask ? () => modelEditorRef.current?.cancelCallConfig() : modalCtrl.close}
+          subtitle={data?.name}
+          title={focusedCallConfigTask
+            ? `${t(`settings.modelTask.${focusedCallConfigTask}`, {
+                defaultValue: focusedCallConfigTask,
+              })} · ${t('settings.modelAdvanced.callConfigurationTitle', {
+                defaultValue: '调用配置',
+              })}`
+            : t('settings.addModel')}
           footer={
             focusedCallConfigTask ? (
               <ModelCallConfigModalFooter
@@ -239,25 +237,6 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
               />
             )
           }
-          style={{
-            width: focusedCallConfigTask ? 840 : 760,
-            maxWidth: '94vw',
-            maxHeight: focusedCallConfigTask ? '96vh' : '92vh',
-          }}
-          contentStyle={{
-            background: 'var(--dialog-fill-0)',
-            borderRadius: 16,
-            padding: '20px 24px',
-            overflow: 'auto',
-            maxHeight: focusedCallConfigTask ? 'calc(96vh - 72px)' : undefined,
-          }}
-          onOk={() => void handleConfirm()}
-          confirmLoading={saving}
-          okText={t('common.confirm')}
-          cancelText={t('common.cancel')}
-          okButtonProps={{
-            disabled: !validation.valid || autoConfiguration.isLoading || protocolDetecting,
-          }}
         >
           <div className={focusedCallConfigTask ? 'pt-4px' : 'pt-16px'}>
             {!focusedCallConfigTask && (
@@ -320,7 +299,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSu
               }}
             />
           </div>
-        </NomiModal>
+        </ModelConfigurationPanel>
       </>
     );
   }

@@ -111,7 +111,7 @@ fn computer_states() -> (SystemPermissionState, SystemPermissionState) {
         let screen_recording = binary_grant_state(status.screen_recording);
         (accessibility, screen_recording)
     }
-    #[cfg(all(not(target_os = "macos"), feature = "computer-use"))]
+    #[cfg(all(target_os = "windows", feature = "computer-use"))]
     {
         // There is no macOS-style up-front TCC switch on these hosts. Native
         // calls may still fail across secure desktop / integrity / display
@@ -121,6 +121,20 @@ fn computer_states() -> (SystemPermissionState, SystemPermissionState) {
             SystemPermissionState::NotRequired,
         )
     }
+    #[cfg(all(target_os = "linux", feature = "computer-use"))]
+    {
+        // A Wayland portal grant belongs to an actual session and is not a
+        // process-wide Boolean. A working X11 connection has no such prompt.
+        match nomi_computer::linux_x11::desktop_state() {
+            nomi_computer::linux_x11::DesktopState::X11 { .. } => (
+                SystemPermissionState::NotRequired,
+                SystemPermissionState::NotRequired,
+            ),
+            _ => (SystemPermissionState::Unknown, SystemPermissionState::Unknown),
+        }
+    }
+    #[cfg(all(not(any(target_os = "macos", target_os = "windows", target_os = "linux")), feature = "computer-use"))]
+    { (SystemPermissionState::Unknown, SystemPermissionState::Unknown) }
     #[cfg(not(feature = "computer-use"))]
     {
         // A server/WebUI build has no local Computer provider. `not_required`

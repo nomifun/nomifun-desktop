@@ -5,7 +5,11 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
-No unreleased changes yet.
+- Check the macOS install location together with the update check: when NomiFun
+  runs from a disk image, an external volume or a translocated location, the
+  update card names the specific cause and running path and offers manual
+  download before any package is downloaded, instead of failing after the
+  download with one generic message.
 
 ## v0.8.12 - 2026-10-17
 

@@ -398,3 +398,7 @@ path = "tests/app_project_sessions.rs"
 name = "app_project_scope_ui_fixture"
 path = "tests/app_project_scope_ui_fixture.rs"
 required-features = ["browser-use"]
+
+[[test]]
+name = "linux_node_lifecycle"
+path = "tests/linux_node_lifecycle.rs"

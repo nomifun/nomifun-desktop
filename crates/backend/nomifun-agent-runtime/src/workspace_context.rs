@@ -886,7 +886,6 @@ impl ScopedInstructions {
         if scopes.len() > 64 {
             return Ok(Some("Requested calls deferred: too many instruction targets in one batch; split or narrow the operation. Earlier calls may already have run.".into()));
         }
-        let mut redirect = None;
         let mut recursive = self.recursive_scopes.clone();
         for (path, scan) in scopes {
             let normalized = match crate::agents_md::normalize_native_instruction_path(&path.path) {
@@ -904,13 +903,8 @@ impl ScopedInstructions {
                 }
                 Err(error) => return Err(error),
             };
-            if scope.canonical_path != normalized {
-                redirect = Some(format!(
-                    "Requested calls deferred; earlier calls may already have run. Path {} resolves to {}. Reconsider the operation using this canonical native path and its scoped instructions; arguments were not rewritten.",
-                    serde_json::to_string(&normalized).unwrap_or_default(),
-                    serde_json::to_string(&scope.canonical_path).unwrap_or_default()
-                ));
-            }
+            // Native spelling belongs to the original invocation. Canonical
+            // identity selects instructions; spelling alone is not a hold.
             if scan && scope.kind == "directory" {
                 recursive.insert(InstructionScope::with_semantics(path.identity, scope.canonical_path, path.path_semantics));
             }
@@ -929,9 +923,9 @@ impl ScopedInstructions {
         // The owner still resolves each explicit read target above. During a
         // read-only burst, already loaded instruction files cannot have been
         // changed by this turn; avoid re-reading the same ancestors on every
-        // model step. Effects, commands, redirects and new directories retain
+        // model step. Effects, commands and new canonical directories retain
         // the normal fresh instruction check.
-        if read_only_batch && self.loaded && !self.dirty && redirect.is_none()
+        if read_only_batch && self.loaded && !self.dirty
             && recursive == self.recursive_scopes
             && directories.is_subset(&self.directories)
         {
@@ -941,12 +935,11 @@ impl ScopedInstructions {
             Ok(changed) => {
                 self.recursive_scopes = recursive;
                 if changed {
-                    Ok(Some(format!(
-                        "Requested calls deferred; earlier calls may already have run. Repository instructions changed or a new directory scope was discovered. Read the current scoped instructions, reconsider the calls, and submit new call identities. {}",
-                        redirect.unwrap_or_default()
-                    )))
+                    Ok(Some(
+                        "Requested calls deferred; earlier calls may already have run. Repository instructions changed or a new directory scope was discovered. Read the current scoped instructions, reconsider the calls, and submit new call identities.".into()
+                    ))
                 } else {
-                    Ok(redirect)
+                    Ok(None)
                 }
             }
             Err(AgentEngineError::WorkspaceContext(error)) => {
@@ -1177,10 +1170,11 @@ mod tests {
         calls: Mutex<Vec<Value>>,
         content: Mutex<String>,
         failure: Mutex<Option<&'static str>>,
+        aliases: Mutex<BTreeMap<String, String>>,
     }
     impl Default for IdentityTool {
         fn default() -> Self {
-            Self { calls: Mutex::default(), content: Mutex::new("ROOT_INSTRUCTION_A".into()), failure: Mutex::default() }
+            Self { calls: Mutex::default(), content: Mutex::new("ROOT_INSTRUCTION_A".into()), failure: Mutex::default(), aliases: Mutex::default() }
         }
     }
     #[async_trait]
@@ -1193,8 +1187,9 @@ mod tests {
             let identity = InstructionIdentity::from_arguments(args).unwrap();
             let protected = path != protected_directory() && std::path::Path::new(path).starts_with(protected_directory());
             let value = if args["format"] == "instruction_scope" {
-                let directory = if path == protected_directory() { path.to_owned() } else { crate::agents_md::parent_directory(path) };
-                json!({"path":path,"canonical_path":path,"kind":if path == protected_directory() {"directory"} else {"file"},
+                let canonical = self.aliases.lock().unwrap().get(path).cloned().unwrap_or_else(|| path.to_owned());
+                let directory = if canonical == protected_directory() { canonical.clone() } else { crate::agents_md::parent_directory(&canonical) };
+                json!({"path":path,"canonical_path":canonical,"kind":if canonical == protected_directory() {"directory"} else {"file"},
                     "recursive":args["recursive"],"path_semantics":args.get("path_semantics").cloned().unwrap_or(json!("follow")),
                     "directories":[directory],"complete":true,"incomplete_reasons":[]})
             } else if protected && identity == InstructionIdentity::CurrentUser {
@@ -1249,6 +1244,70 @@ mod tests {
             else { json!({"command":if cfg!(windows) {"powershell.exe"} else {"/bin/sh"},"cwd":protected_directory()}) };
         if let Some(identity) = identity { arguments["execution_identity"] = identity.into(); }
         ChatToolCall { call_id: "proposed-call".into(), name: name.into(), arguments: StrictJsonValue(arguments), provider_metadata: None }
+    }
+
+    #[tokio::test]
+    async fn native_path_aliases_keep_invocations_and_reuse_the_canonical_read_only_scope() {
+        let mut instructions = instructions(); let tool = IdentityTool::default(); let sink = RecordingSink::default();
+        instructions.before_model(&tool, &sink, CancellationToken::new()).await.unwrap();
+        let canonical = if cfg!(windows) { r"C:\outside\file" } else { "/outside/file" };
+        let directory = crate::agents_md::parent_directory(canonical);
+        let agents = if cfg!(windows) { r"C:\outside\AGENTS.md" } else { "/outside/AGENTS.md" };
+        let second_alias = if cfg!(windows) { r"C:\workspace\alias\file" } else { "/workspace/alias/file" };
+        for path in ["../outside/file", second_alias] {
+            tool.aliases.lock().unwrap().insert(crate::agents_md::normalize_native_instruction_path(path).unwrap(), canonical.into());
+            let proposed = ChatToolCall { arguments: StrictJsonValue(json!({"path":path})), ..call("read_file", None) };
+            let original = proposed.arguments.clone();
+            let before = tool.calls.lock().unwrap().iter().filter(|args| args["path"] == agents).count();
+            assert!(instructions.before_calls(&[proposed.clone()], &tool, &sink, CancellationToken::new()).await.unwrap().is_none(),
+                "canonical spelling alone must not hold a legal native path");
+            assert_eq!(proposed.arguments, original, "preflight does not rewrite the accepted invocation");
+            let after = tool.calls.lock().unwrap().iter().filter(|args| args["path"] == agents).count();
+            if path == "../outside/file" { assert!(after > before); } else {
+                assert_eq!(after, before, "the second alias uses the already inspected canonical read-only scope");
+            }
+            assert!(instructions.directories.contains(&InstructionScope::new(InstructionIdentity::CurrentUser, &directory)));
+        }
+        let observed = tool.calls.lock().unwrap();
+        let parent_alias = crate::agents_md::normalize_native_instruction_path("../outside/file").unwrap();
+        assert!(observed.iter().any(|args| args["format"] == "instruction_scope" && args["path"] == parent_alias));
+        assert!(!observed.iter().any(|args| args["path"].as_str().is_some_and(|path| path.contains("../AGENTS"))));
+    }
+
+    #[tokio::test]
+    async fn native_alias_new_instructions_still_defer_and_never_lend_privileged_cache() {
+        let mut instructions = instructions(); let tool = IdentityTool::default(); let sink = RecordingSink::default();
+        let alias = if cfg!(windows) { r"C:\workspace\protected-link\file" } else { "/workspace/protected-link/file" };
+        tool.aliases.lock().unwrap().insert(alias.into(), protected_path("file"));
+        let admin = ChatToolCall { arguments: StrictJsonValue(json!({"path":alias,"execution_identity":"administrator"})), ..call("read_file", None) };
+        let original = admin.arguments.clone();
+        let held = instructions.before_calls(&[admin.clone()], &tool, &sink, CancellationToken::new()).await.unwrap().unwrap();
+        assert!(held.contains("submit new call identities"));
+        assert!(instructions.context().contains("ROOT_INSTRUCTION_A"));
+        assert_eq!(admin.arguments, original);
+        let fresh = ChatToolCall { call_id: "fresh-after-instructions".into(), ..admin.clone() };
+        assert!(instructions.before_calls(&[fresh], &tool, &sink, CancellationToken::new()).await.unwrap().is_none());
+        let ordinary = ChatToolCall { arguments: StrictJsonValue(json!({"path":alias})), ..call("read_file", None) };
+        let refused = instructions.before_calls(&[ordinary], &tool, &sink, CancellationToken::new()).await.unwrap().unwrap();
+        assert!(refused.contains("Permission denied"), "ordinary alias reads cannot borrow administrator instructions");
+        *tool.content.lock().unwrap() = "ROOT_INSTRUCTION_CHANGED".into();
+        instructions.invalidate();
+        let held = instructions.before_calls(&[admin], &tool, &sink, CancellationToken::new()).await.unwrap().unwrap();
+        assert!(held.contains("submit new call identities"), "effects still invalidate and refresh alias scopes");
+        assert!(instructions.context().contains("ROOT_INSTRUCTION_CHANGED"));
+    }
+
+    #[tokio::test]
+    async fn native_process_cwd_alias_requires_only_actual_instruction_refresh() {
+        let mut instructions = instructions(); let tool = IdentityTool::default(); let sink = RecordingSink::default();
+        let alias = if cfg!(windows) { r"C:\workspace\link\.." } else { "/workspace/link/.." };
+        tool.aliases.lock().unwrap().insert(alias.into(), protected_directory().into());
+        let proposed = ChatToolCall { arguments: StrictJsonValue(json!({"command":if cfg!(windows) {"powershell.exe"} else {"/bin/sh"},"cwd":alias,"execution_identity":"administrator"})), ..call("start_process", None) };
+        let original = proposed.arguments.clone();
+        assert!(instructions.before_calls(&[proposed.clone()], &tool, &sink, CancellationToken::new()).await.unwrap().is_some());
+        assert!(instructions.before_calls(&[proposed.clone()], &tool, &sink, CancellationToken::new()).await.unwrap().is_none());
+        assert_eq!(proposed.arguments, original);
+        assert!(instructions.directories.contains(&InstructionScope::new(InstructionIdentity::Administrator, protected_directory())));
     }
 
     #[tokio::test]
@@ -1386,9 +1445,11 @@ mod tests {
                     .all(|args| args["path_semantics"] == "entry"));
                 let count = tool.calls.lock().unwrap().len();
                 let read = ChatToolCall { name: "read_file".into(), ..entry_call(name) };
-                let deferred = instructions.before_calls(&[read], &tool, &sink, CancellationToken::new()).await.unwrap().unwrap();
-                assert!(deferred.contains("resolves to"), "an entry observation cannot satisfy a follow read");
+                assert!(instructions.before_calls(&[read], &tool, &sink, CancellationToken::new()).await.unwrap().is_none(),
+                    "fresh follow acquisition with no new rules does not require a spelling-only deferral");
                 assert!(tool.calls.lock().unwrap()[count..].iter().any(|args| args["format"] == "instruction_scope" && args.get("path_semantics").is_none()));
+                assert!(instructions.directories.contains(&InstructionScope::new(InstructionIdentity::CurrentUser, protected_path("outside"))),
+                    "entry observations cannot replace discovery and instructions at the actual follow target");
             }
         }
     }

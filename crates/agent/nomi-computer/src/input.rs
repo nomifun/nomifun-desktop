@@ -183,6 +183,8 @@ fn move_abs_windows(x: i32, y: i32) -> Result<(), String> {
 }
 
 fn new_enigo() -> Result<Enigo, String> {
+    #[cfg(target_os = "linux")]
+    crate::linux_x11::require_global_x11(true)?;
     let settings = Settings {
         // Never block the agent on an interactive permission prompt.
         open_prompt_to_get_permissions: false,
@@ -220,16 +222,27 @@ where
 }
 
 async fn join_input_task<T>(
-    mut handle: tokio::task::JoinHandle<Result<T, String>>,
+    handle: tokio::task::JoinHandle<Result<T, String>>,
     timeout: Duration,
 ) -> Result<T, String>
 where
     T: Send + 'static,
 {
+    join_input_task_with_cancel(handle, timeout, None).await
+}
+
+async fn join_input_task_with_cancel<T: Send + 'static>(
+    mut handle: tokio::task::JoinHandle<Result<T, String>>,
+    timeout: Duration,
+    cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<T, String> {
     match tokio::time::timeout(timeout, &mut handle).await {
         Ok(Ok(result)) => result,
         Ok(Err(join_err)) => Err(format!("Input task failed: {join_err}")),
         Err(_) => {
+            if let Some(cancellation) = cancellation {
+                cancellation.store(true, std::sync::atomic::Ordering::Release);
+            }
             // `spawn_blocking` tasks cannot be cancelled after they start. A
             // detached input task could still hold a key/button or apply a
             // late effect after the caller observed the timeout. Retain and
@@ -425,11 +438,19 @@ fn combine_input_and_cleanup_error(input_error: String, cleanup: Result<(), Stri
 
 /// Move the cursor to absolute screen coordinates.
 pub async fn mouse_move(x: i32, y: i32) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    if use_wayland() {
+        return with_wayland(move |cancel| crate::linux_wayland_input::mouse_move_blocking(cancel, x, y)).await;
+    }
     with_enigo(move |enigo| move_abs(enigo, x, y)).await
 }
 
 /// Click `button` `count` times at absolute screen coordinates.
 pub async fn click(x: i32, y: i32, button: Button, count: u32) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    if use_wayland() {
+        return with_wayland(move |cancel| crate::linux_wayland_input::click_blocking(cancel, x, y, button, count)).await;
+    }
     #[cfg(target_os = "macos")]
     {
         // Constructing Enigo still establishes the existing non-interactive
@@ -463,6 +484,10 @@ fn drag_axis(start: i32, end: i32, step: i64) -> i32 {
 /// Press at (start), drag to (end), release. Includes intermediate moves so
 /// apps that track motion register the drag.
 pub async fn drag(start_x: i32, start_y: i32, end_x: i32, end_y: i32) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    if use_wayland() {
+        return with_wayland(move |cancel| crate::linux_wayland_input::drag_blocking(cancel, start_x, start_y, end_x, end_y)).await;
+    }
     #[cfg(target_os = "macos")]
     {
         return with_enigo(move |_enigo| macos_pointer::drag(start_x, start_y, end_x, end_y)).await;
@@ -496,11 +521,19 @@ pub async fn drag(start_x: i32, start_y: i32, end_x: i32, end_y: i32) -> Result<
 
 /// Type a unicode string (layout-independent).
 pub async fn type_text(text: String) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    if use_wayland() {
+        return with_wayland(move |cancel| crate::linux_wayland_input::type_text_blocking(cancel, text)).await;
+    }
     with_enigo(move |enigo| enigo.text(&text).map_err(input_err)).await
 }
 
 /// Press a key combo: press front-to-back, release back-to-front.
 pub async fn key_combo(keys: Vec<enigo::Key>) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    if use_wayland() {
+        return with_wayland(move |cancel| crate::linux_wayland_input::key_combo_blocking(cancel, keys)).await;
+    }
     with_enigo(move |enigo| {
         // Resolve before recording or submitting any press, on this existing
         // main-queue native input path. The same resolved keys are released by
@@ -524,6 +557,10 @@ pub async fn scroll(
     direction: ScrollDirection,
     amount: i32,
 ) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    if use_wayland() {
+        return with_wayland(move |cancel| crate::linux_wayland_input::scroll_blocking(cancel, at, direction, amount)).await;
+    }
     #[cfg(target_os = "macos")]
     {
         return with_enigo(move |_enigo| macos_pointer::scroll(at, direction, amount)).await;
@@ -546,6 +583,10 @@ pub async fn scroll(
 
 /// Current cursor location in absolute screen coordinates.
 pub async fn cursor_position() -> Result<(i32, i32), String> {
+    #[cfg(target_os = "linux")]
+    if use_wayland() {
+        return crate::linux_wayland_input::cursor_position_blocking();
+    }
     #[cfg(target_os = "macos")]
     {
         // Observation must not construct Enigo: its constructor requires
@@ -559,6 +600,29 @@ pub async fn cursor_position() -> Result<(i32, i32), String> {
     {
         with_enigo(|enigo| enigo.location().map_err(input_err)).await
     }
+}
+
+#[cfg(target_os = "linux")]
+fn use_wayland() -> bool {
+    matches!(crate::linux_x11::desktop_state(), crate::linux_x11::DesktopState::Wayland)
+}
+
+#[cfg(target_os = "linux")]
+async fn with_wayland<T: Send + 'static>(operation: impl FnOnce(std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    // Preserve the same admitted worker and settlement rules as X11/Enigo.
+    // The portal adapter records and releases exact input obligations, and an
+    // expired deadline never detaches an outstanding native operation.
+    let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_cancellation = cancellation.clone();
+    let (completed, completion) = std::sync::mpsc::sync_channel(1);
+    let mut guard = crate::linux_native_worker::CancelAndJoin::new(cancellation.clone(), completion);
+    let handle = tokio::task::spawn_blocking(move || {
+        let _completion = crate::linux_native_worker::Completion(completed);
+        operation(worker_cancellation)
+    });
+    let result = join_input_task_with_cancel(handle, INPUT_TIMEOUT, Some(cancellation)).await;
+    guard.disarm();
+    result
 }
 
 #[cfg(target_os = "macos")]
@@ -596,6 +660,44 @@ mod macos_cursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_wayland_caller_cancels_and_joins_exact_native_worker_cleanup() {
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let worker_cleaned = cleaned.clone();
+        let (started, observed_start) = tokio::sync::oneshot::channel();
+        let caller = tokio::spawn(with_wayland(move |cancel| {
+            started.send(()).unwrap();
+            while !cancel.load(Ordering::Acquire) { std::thread::sleep(Duration::from_millis(1)); }
+            std::thread::sleep(Duration::from_millis(25));
+            worker_cleaned.store(true, Ordering::Release);
+            Err::<(), _>("cancelled after cleanup".to_owned())
+        }));
+        observed_start.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(cleaned.load(Ordering::Acquire), "caller cancellation must not detach its native cleanup worker");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn wayland_deadline_cancels_queued_native_work_before_joining_cleanup() {
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let worker_cancellation = cancellation.clone();
+        let cleanup = Arc::new(AtomicBool::new(false));
+        let worker_cleanup = cleanup.clone();
+        let handle = tokio::task::spawn_blocking(move || {
+            while !worker_cancellation.load(Ordering::Acquire) { std::thread::sleep(Duration::from_millis(1)); }
+            worker_cleanup.store(true, Ordering::Release);
+            Ok(())
+        });
+        let error = join_input_task_with_cancel(handle, Duration::from_millis(20), Some(cancellation)).await.unwrap_err();
+        assert!(error.contains("timed out"));
+        assert!(cleanup.load(Ordering::Acquire), "the deadline must cancel later native effects and join cleanup");
+    }
 
     #[test]
     fn drag_interpolation_handles_full_coordinate_range() {

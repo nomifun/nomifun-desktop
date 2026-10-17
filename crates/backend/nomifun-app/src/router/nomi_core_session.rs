@@ -801,6 +801,9 @@ impl NomiCoreSessionOwner {
         }
         workspace
             .map(|workspace| {
+                // Creation froze an existing canonical directory into this
+                // owner/binding. Its later absence does not block independent
+                // absolute targets; the shared proof preserves its anchor.
                 nomifun_knowledge::resolve_unbound_workspace_anchor(std::path::Path::new(&workspace))
                     .map(|path| nomifun_common::paths::simplified(&path).to_string_lossy().into_owned())
             })

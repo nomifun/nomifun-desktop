@@ -74,7 +74,7 @@ export default function CompanionSwitcher({
       <InstantHoverTooltip
         content={open ? profile?.name || 'Nomi' : t('nomi.companion.switchCompanion')}
         position='left'
-        className='nomi-companion-switcher__tooltip'
+        tooltipClassName='nomi-companion-switcher__tooltip'
       >
         <button
           ref={triggerRef}
@@ -118,7 +118,7 @@ export default function CompanionSwitcher({
         {targets.map((item) => {
           const switching = switchingCompanionId === item.companion_id;
           return (
-            <InstantHoverTooltip key={item.companion_id} content={item.name} position='left' className='nomi-companion-switcher__tooltip' disabled={!open}>
+            <InstantHoverTooltip key={item.companion_id} content={item.name} position='left' tooltipClassName='nomi-companion-switcher__tooltip' disabled={!open}>
               <button
                 type='button'
                 className={`nomi-companion-switcher__item${switching ? ' is-switching' : ''}`}
@@ -138,7 +138,7 @@ export default function CompanionSwitcher({
           );
         })}
         {overflow > 0 && (
-          <InstantHoverTooltip content={t('nomi.companion.showAll', { count: roster.length })} position='left' className='nomi-companion-switcher__tooltip' disabled={!open}>
+          <InstantHoverTooltip content={t('nomi.companion.showAll', { count: roster.length })} position='left' tooltipClassName='nomi-companion-switcher__tooltip' disabled={!open}>
             <button
               type='button'
               className='nomi-companion-switcher__more'

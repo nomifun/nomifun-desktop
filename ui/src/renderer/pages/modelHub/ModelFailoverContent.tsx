@@ -17,6 +17,7 @@ import { buildModelFailoverConfigForSave } from './modelFailoverQueue';
 import type { ProviderId } from '@/common/types/ids';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 import ModelHubPageHeader from './ModelHubPageHeader';
+import styles from './modelHub.module.css';
 
 const DEFAULT_CONFIG: IModelFailoverConfig = {
   enabled: false,
@@ -111,10 +112,10 @@ const ModelFailoverContent: React.FC = () => {
 
       <div className='flex flex-col gap-8px'>
         <span className='text-t-secondary text-13px'>{t('modelFailover.queue')}</span>
-        <div className='text-t-tertiary text-12px leading-18px'>{t('modelFailover.queueHint')}</div>
+        <div className='text-t-secondary text-12px leading-18px'>{t('modelFailover.queueHint')}</div>
 
         {config.queue.length === 0 ? (
-          <div className='rounded-8px border border-dashed border-[rgba(var(--primary-6),0.25)] px-12px py-14px text-center text-12px text-t-tertiary'>
+          <div className='rounded-8px border border-dashed border-[rgba(var(--primary-6),0.25)] px-12px py-14px text-center text-12px text-t-secondary'>
             {t('modelFailover.empty')}
           </div>
         ) : (
@@ -124,10 +125,10 @@ const ModelFailoverContent: React.FC = () => {
                 key={`${cand.provider_id}::${cand.model}`}
                 className='flex items-center gap-10px rounded-8px border border-solid border-[rgba(var(--primary-6),0.15)] bg-[rgba(var(--primary-6),0.04)] px-10px py-8px'
               >
-                <span className='w-20px shrink-0 text-center text-12px text-t-tertiary'>{index + 1}</span>
+                <span className='w-20px shrink-0 text-center text-12px text-t-secondary'>{index + 1}</span>
                 <div className='min-w-0 flex-1'>
                   <div className='truncate text-13px text-t-primary'>{cand.model}</div>
-                  <div className='truncate text-11px text-t-tertiary'>{providerName(cand.provider_id)}</div>
+                  <div className='truncate text-11px text-t-secondary'>{providerName(cand.provider_id)}</div>
                 </div>
                 <div
                   role='button'
@@ -168,25 +169,22 @@ const ModelFailoverContent: React.FC = () => {
               placeholder={t('modelFailover.selectModel')}
             />
           </div>
-          <div
-            role='button'
+          <Button
+            type='secondary'
             aria-label={t('modelFailover.add')}
-            className={`flex h-32px shrink-0 items-center gap-4px rounded-6px px-12px text-13px ${
-              draft
-                ? 'cursor-pointer bg-[rgba(var(--primary-6),0.12)] text-primary-6 hover:bg-[rgba(var(--primary-6),0.2)]'
-                : 'cursor-not-allowed bg-[rgba(var(--primary-6),0.06)] text-t-disabled'
-            }`}
+            className='shrink-0'
+            disabled={!draft}
+            icon={<Plus theme='outline' size='14' fill='currentColor' />}
             onClick={addCandidate}
           >
-            <Plus theme='outline' size='14' fill='currentColor' />
             <span>{t('modelFailover.add')}</span>
-          </div>
+          </Button>
         </div>
       </div>
 
       <div className='flex flex-col gap-6px'>
         <span className='text-t-secondary text-13px'>{t('modelFailover.maxSwitches')}</span>
-        <div className='text-t-tertiary text-12px leading-18px'>{t('modelFailover.maxSwitchesHint')}</div>
+        <div className='text-t-secondary text-12px leading-18px'>{t('modelFailover.maxSwitchesHint')}</div>
         <InputNumber
           min={1}
           max={20}
@@ -197,7 +195,7 @@ const ModelFailoverContent: React.FC = () => {
       </div>
 
       <div>
-        <Button type='primary' loading={saving} onClick={save}>
+        <Button type='primary' className={styles.failoverSaveButton} loading={saving} onClick={save}>
           {t('common.save', { defaultValue: 'Save' })}
         </Button>
       </div>
