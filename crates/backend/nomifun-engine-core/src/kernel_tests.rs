@@ -446,6 +446,32 @@ mod tests {
     }
 
     #[test]
+    fn system_execution_details_keep_authentication_and_unknown_states_without_prose_inference() {
+        for (code, facts) in [
+            ("SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED", json!({"kind":"Uncategorized","raw_os_error":1223,"user_code_not_started":true,"cleanup_proven":true})),
+            ("SYSTEM_READ_RESULT_UNKNOWN", json!({"user_code_not_started":false,"cleanup_proven":false})),
+            ("SYSTEM_EXECUTION_AUTHENTICATION_DENIED", json!({})),
+        ] {
+            let native = nomifun_agent_contracts::SystemExecutionFailure::from_owner(code.into(), "original native result".into(), &facts);
+            let details = json!({"system_execution_error":native});
+            let error = kernel_error(KernelError::CapabilityExecutionFailed {
+                failure: nomifun_agent_kernel::CapabilityExecutionFailure::new(code, "different outer prose: os error 0").with_details(details.clone()),
+            });
+            let EngineToolError::CapabilityKernel { code: actual, details: actual_details, .. } = error else { panic!("native class lost"); };
+            assert_eq!(actual, code);
+            assert_eq!(actual_details, Some(details));
+        }
+        let mut failure = nomifun_agent_contracts::SystemExecutionFailure::from_owner("SYSTEM_READ_RESULT_UNKNOWN".into(), format!("token=NEVER_EMIT {}", "界".repeat(5000)), &json!({}));
+        let projected = owner_failure_details(Some(&json!({"system_execution_error":failure}))).unwrap();
+        assert!(!projected.to_string().contains("NEVER_EMIT"));
+        assert!(serde_json::to_vec(&projected).unwrap().len() <= 8192);
+        assert!(projected["system_execution_error"]["raw_os_error"].is_null());
+        failure.kind = Some("NotFound raw_os_error=1223".into());
+        assert!(owner_failure_details(Some(&json!({"system_execution_error":failure}))).is_none());
+        assert!(owner_failure_details(Some(&json!({"message":"SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED raw_os_error=1223"}))).is_none());
+    }
+
+    #[test]
     fn system_identity_privacy_and_platform_failure_codes_keep_the_owner_fact() {
         for (code, detail) in [
             ("SYSTEM_EXECUTION_NOT_AVAILABLE", "Administrator execution is not implemented on this platform"),

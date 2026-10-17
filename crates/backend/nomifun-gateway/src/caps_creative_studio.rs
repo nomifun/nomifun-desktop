@@ -172,6 +172,7 @@ fn canvas_operation_error(error: AppError) -> String {
         AppError::BadRequest(_) => "Invalid Creative Studio Canvas request".to_owned(),
         AppError::NativeSystemAccessDenied { .. }
         | AppError::NativeFileAcquisition { code: "SYSTEM_ACCESS_DENIED", .. } => "Operating system access was denied for the Creative Studio Canvas operation".to_owned(),
+        AppError::SystemExecution(_) => "Operating system execution failed for the Creative Studio Canvas operation".to_owned(),
         AppError::Conflict(_) => {
             "Creative Studio Canvas request conflicts with current state".to_owned()
         }

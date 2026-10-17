@@ -53,44 +53,22 @@ async fn system_acquire(request: NativeReadRequest) -> Result<NativeReadAcquisit
 }
 
 fn system_read_error(error: nomi_system_execution::SystemExecutionError) -> AppError {
+    // An incomplete transport result cannot adopt a partial worker cause as
+    // proof that authentication or user code never ran.
+    if matches!(error.code.as_str(), "SYSTEM_READ_RESULT_UNKNOWN" | "SYSTEM_EXECUTION_RESULT_UNKNOWN" | "system_result_unknown") {
+        return AppError::SystemExecution(nomifun_agent_contracts::SystemExecutionFailure::from_owner(
+            error.code, error.message, &error.details,
+        ));
+    }
     if let Some(native) = error.details.get("native_file_error") {
         return match serde_json::from_value::<nomi_native_files::NativeFileFailure>(native.clone()) {
             Ok(failure) if failure.code == error.code => nomifun_file::native_file_failure_error(failure),
             _ => AppError::Internal("Native readonly owner returned an inconsistent typed failure".into()),
         };
     }
-    let message = format!("{}: {}", error.code, error.message);
-    match error.code.as_str() {
-        "SYSTEM_ACCESS_DENIED" => AppError::NativeSystemAccessDenied {
-            operation: message,
-            source: error
-                .details
-                .pointer("/native_file_error/raw_os_error")
-                .and_then(serde_json::Value::as_i64)
-                .and_then(|code| i32::try_from(code).ok())
-                .map(std::io::Error::from_raw_os_error)
-                .unwrap_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "Native system readonly access was refused",
-                    )
-                }),
-        },
-        "INVALID_PAYLOAD" | "invalid_system_read_request" => AppError::BadRequest(message),
-        "FILE_CHANGED_DURING_READ" => AppError::Conflict(message),
-        "RESOURCE_NOT_FOUND" => AppError::NotFound(message),
-        "SYSTEM_EXECUTION_NOT_AVAILABLE"
-        | "SYSTEM_EXECUTION_APPROVAL_REQUIRED"
-        | "SYSTEM_EXECUTION_AUTHENTICATION_UNAVAILABLE"
-        | "NATIVE_FILE_ACQUIRE_UNAVAILABLE" => AppError::ComponentUnavailable {
-            component: "system-execution".into(),
-            reason: message,
-        },
-        "SYSTEM_EXECUTION_AUTHENTICATION_DENIED"
-        | "SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED" => AppError::Forbidden(message),
-        "SYSTEM_EXECUTION_AUTHENTICATION_TIMED_OUT" => AppError::Timeout(message),
-        _ => AppError::Internal(format!("{message}; native read details: {}", error.details)),
-    }
+    AppError::SystemExecution(nomifun_agent_contracts::SystemExecutionFailure::from_owner(
+        error.code, error.message, &error.details,
+    ))
 }
 
 fn absolute_read_path(
@@ -586,5 +564,44 @@ mod tests {
     fn inconsistent_native_error_receipts_do_not_adopt_a_transport_code_or_invent_os_fields() {
         let error=system_read_error(nomi_system_execution::SystemExecutionError{code:"SYSTEM_ACCESS_DENIED".into(),message:"transport text".into(),details:serde_json::json!({"native_file_error":{"code":"RESOURCE_NOT_FOUND","message":"native text","kind":"NotFound","raw_os_error":67}})});
         assert!(matches!(error,AppError::Internal(_)));
+    }
+
+    #[tokio::test]
+    async fn administrator_authentication_and_unknown_failures_never_fallback_or_become_absence() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("sample.txt"), "ordinary fallback must not expose these bytes").unwrap();
+        let scope = workspace_binding(nomifun_common::generate_id(), "binding", "project", "owner", [WORKSPACE_READ_OPERATION], root.path()).unwrap();
+        let files = FileService::new(Arc::new(Events), vec![root.path().to_owned()]);
+        for (code, details) in [
+            ("SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED", serde_json::json!({"raw_os_error":1223,"kind":"Uncategorized","user_code_not_started":true,"cleanup_proven":true})),
+            ("SYSTEM_EXECUTION_AUTHENTICATION_DENIED", serde_json::json!({"user_code_not_started":true,"cleanup_proven":true})),
+            ("SYSTEM_EXECUTION_AUTHENTICATION_TIMED_OUT", serde_json::json!({"user_code_not_started":true,"cleanup_proven":true})),
+            ("SYSTEM_EXECUTION_AUTHENTICATION_UNAVAILABLE", serde_json::json!({})),
+            ("SYSTEM_READ_RESULT_UNKNOWN", serde_json::json!({"user_code_not_started":false,"cleanup_proven":false})),
+        ] {
+            for format in ["text", "instruction_scope"] {
+                let calls = AtomicUsize::new(0);
+                let message = "original owner message; PRESET_RESOURCE_NOT_BOUND is only prose";
+                let mut input = serde_json::json!({"path":"sample.txt","format":format,"execution_identity":"administrator"});
+                if format == "text" { input["missing_ok"] = true.into(); }
+                let error = read_with_acquirer(&files, &scope, StrictJsonValue(input), &|_| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let details = details.clone();
+                    async move { Err(system_read_error(nomi_system_execution::SystemExecutionError { code:code.into(), message:message.into(), details })) }
+                }).await.unwrap_err();
+                assert_eq!(calls.load(Ordering::SeqCst), 1, "authentication and transport failures are never retried");
+                assert_eq!(error.error_code(), code);
+                let AppError::SystemExecution(failure) = error else { panic!("native owner class was lost"); };
+                assert_eq!(failure.message, message);
+                assert_eq!(failure.raw_os_error, details["raw_os_error"].as_i64().map(|raw| raw as i32));
+                assert_eq!(failure.user_code_not_started, details["user_code_not_started"].as_bool());
+                assert_eq!(failure.cleanup_proven, details["cleanup_proven"].as_bool());
+            }
+        }
+        let acl = system_read_error(nomi_system_execution::SystemExecutionError { code:"SYSTEM_ACCESS_DENIED".into(), message:"ordinary native ACL".into(), details:serde_json::json!({"native_file_error":{"code":"SYSTEM_ACCESS_DENIED","message":"ordinary native ACL","kind":"PermissionDenied","raw_os_error":5}}) });
+        assert!(matches!(acl, AppError::NativeFileAcquisition { code:"SYSTEM_ACCESS_DENIED", raw_os_error:Some(5), .. }));
+        let partial = system_read_error(nomi_system_execution::SystemExecutionError { code:"SYSTEM_READ_RESULT_UNKNOWN".into(), message:"incomplete worker reply".into(), details:serde_json::json!({"native_file_error":{"code":"SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED","message":"partial reply","raw_os_error":1223},"user_code_not_started":false,"cleanup_proven":false}) });
+        assert!(matches!(partial, AppError::SystemExecution(ref failure) if failure.code == "SYSTEM_READ_RESULT_UNKNOWN" && failure.user_code_not_started == Some(false) && failure.cleanup_proven == Some(false)));
     }
 }

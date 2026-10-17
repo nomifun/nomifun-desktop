@@ -20,6 +20,11 @@ pub enum AppError {
     #[error("Forbidden: {0}")]
     Forbidden(String),
 
+    /// Native authentication, facility and transport failures keep their own
+    /// classification. They are neither binding refusals nor user Turn Stop.
+    #[error("{}", .0.message)]
+    SystemExecution(nomifun_agent_contracts::SystemExecutionFailure),
+
     /// Native access control refusal. It can be an ACL, TCC, protected volume
     /// or another OS boundary; it does not imply that root is the remedy.
     #[error("System access denied while {operation}: {source}")]
@@ -138,6 +143,13 @@ impl AppError {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) | Self::NativeSystemAccessDenied { .. } => StatusCode::FORBIDDEN,
+            Self::SystemExecution(failure) => match failure.code.as_str() {
+                "SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED" | "SYSTEM_EXECUTION_AUTHENTICATION_DENIED" => StatusCode::FORBIDDEN,
+                "SYSTEM_EXECUTION_AUTHENTICATION_TIMED_OUT" => StatusCode::GATEWAY_TIMEOUT,
+                "SYSTEM_EXECUTION_NOT_AVAILABLE" | "SYSTEM_EXECUTION_APPROVAL_REQUIRED"
+                | "SYSTEM_EXECUTION_AUTHENTICATION_UNAVAILABLE" => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::BAD_GATEWAY,
+            },
             Self::NativeFileAcquisition { code, .. } => match *code {
                 "SYSTEM_ACCESS_DENIED" => StatusCode::FORBIDDEN,
                 "RESOURCE_NOT_FOUND" => StatusCode::NOT_FOUND,
@@ -169,11 +181,12 @@ impl AppError {
     }
 
     /// Machine-readable error code string.
-    pub fn error_code(&self) -> &'static str {
+    pub fn error_code(&self) -> &str {
         match self {
             Self::NotFound(_) => "NOT_FOUND",
             Self::BadRequest(_) => "BAD_REQUEST",
             Self::Unauthorized(_) => "UNAUTHORIZED",
+            Self::SystemExecution(failure) => &failure.code,
             Self::NativeSystemAccessDenied { .. } => "SYSTEM_ACCESS_DENIED",
             Self::NativeFileAcquisition { code, .. } => match *code {
                 "SYSTEM_ACCESS_DENIED" => "SYSTEM_ACCESS_DENIED",
@@ -224,6 +237,7 @@ impl AppError {
     /// context in addition to the top-level error code.
     pub fn error_details(&self) -> Option<Value> {
         match self {
+            Self::SystemExecution(failure) => Some(json!({"system_execution_error": failure})),
             Self::NativeFileAcquisition { code, message, kind, raw_os_error, .. } => Some(json!({
                 "native_file_error": { "code": code, "message": message, "kind": kind, "raw_os_error": raw_os_error },
             })),
@@ -361,6 +375,30 @@ impl std::fmt::Display for ErrorChain<'_> {
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn system_execution_http_errors_keep_typed_native_and_unknown_facts() {
+        for (code, status, details) in [
+            ("SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED", StatusCode::FORBIDDEN, json!({"raw_os_error":1223,"kind":"Uncategorized","user_code_not_started":true,"cleanup_proven":true})),
+            ("SYSTEM_EXECUTION_AUTHENTICATION_DENIED", StatusCode::FORBIDDEN, json!({"user_code_not_started":true,"cleanup_proven":true})),
+            ("SYSTEM_EXECUTION_AUTHENTICATION_TIMED_OUT", StatusCode::GATEWAY_TIMEOUT, json!({})),
+            ("SYSTEM_EXECUTION_NOT_AVAILABLE", StatusCode::SERVICE_UNAVAILABLE, json!({"raw_os_error":5,"kind":"PermissionDenied"})),
+            ("SYSTEM_READ_RESULT_UNKNOWN", StatusCode::BAD_GATEWAY, json!({"user_code_not_started":false,"cleanup_proven":false})),
+        ] {
+            let failure = nomifun_agent_contracts::SystemExecutionFailure::from_owner(code.into(), "the original owner message".into(), &details);
+            let error = AppError::SystemExecution(failure.clone());
+            assert_eq!(error.error_code(), code);
+            let response = error.into_response();
+            assert_eq!(response.status(), status);
+            let bytes = to_bytes(response.into_body(), 8192).await.unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["code"], code);
+            assert_eq!(body["error"], "the original owner message");
+            assert_eq!(body["details"]["system_execution_error"], serde_json::to_value(&failure).unwrap());
+        }
+        assert_eq!(AppError::Forbidden("real binding refusal".into()).error_code(), "FORBIDDEN");
+        assert_eq!(AppError::NativeSystemAccessDenied { operation:"reading ordinary ACL-protected source".into(), source:std::io::Error::from_raw_os_error(5) }.error_code(), "SYSTEM_ACCESS_DENIED");
+    }
 
     #[tokio::test]
     async fn native_file_acquisition_failures_keep_static_codes_and_exact_error_details() {

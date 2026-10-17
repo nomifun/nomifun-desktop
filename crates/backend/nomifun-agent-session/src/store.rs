@@ -57,6 +57,8 @@ pub const MAX_EVENT_PAGE_SIZE: u32 = 500;
 mod shared_content;
 #[path = "terminal_content.rs"]
 mod terminal_content;
+#[path = "effect_native_targets.rs"]
+mod effect_native_targets;
 
 #[path = "native_checkpoint.rs"]
 mod native_checkpoint;
@@ -6356,6 +6358,8 @@ async fn validate_effect_transition_tx(
                 ));
             }
             validate_effect_started_causation_tx(tx, append).await?;
+            #[cfg(windows)]
+            effect_native_targets::validate_admission_tx(tx, append).await?;
             Ok(())
         }
         "effect/succeeded" | "effect/failed" | "effect/uncertain" => {
@@ -6544,6 +6548,7 @@ fn validate_effect_identity_transition(
     }
     let started_payload = effect_payload_from_event(started)?;
     let next_payload = effect_payload_from_append(append)?;
+    effect_native_targets::validate_settlement(started_payload, next_payload)?;
     for field in [
         "effect_id",
         "turn_id",

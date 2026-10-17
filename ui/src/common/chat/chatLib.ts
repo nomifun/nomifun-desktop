@@ -25,6 +25,7 @@ import { uuid } from '../utils';
 import { optionalDisplayText, toDisplayText } from './displayText';
 import { normalizeToolGroupStatus } from './toolGroupStatus';
 import { normalizeModelFailureDiagnostic, sanitizeDiagnosticDetail, type ModelFailureDiagnostic } from './providerDiagnostic';
+import { normalizeSystemExecutionFailure, type SystemExecutionFailure } from './systemExecutionError';
 import { normalizeKnowledgeWritebackDiagnostic, type KnowledgeWritebackDiagnostic } from './knowledgeWritebackDiagnostic';
 import { isAbsoluteLocalPath, isFileUri } from '../utils/localPath';
 import { computerPermissionKindsForOperation } from './computerPermissionContract';
@@ -195,6 +196,7 @@ export type AgentStreamErrorInfo = {
   workspacePath?: string;
   taskIncompleteReason?: AgentTaskIncompleteReason;
   providerDiagnostic?: ModelFailureDiagnostic;
+  systemExecutionError?: SystemExecutionFailure;
   /** Frozen execution identity supplied by the host, never the current selection. */
   agentLabel?: string;
   agentTemplateKey?: OfficialPresetKey;
@@ -707,6 +709,7 @@ export const normalizeAgentStreamError = (value: unknown): AgentStreamErrorInfo 
   const feedback_recommended = typeof value.feedback_recommended === 'boolean' ? value.feedback_recommended : undefined;
   const resolution = normalizeAgentErrorResolution(value.resolution);
   const providerDiagnostic = normalizeModelFailureDiagnostic(value.providerDiagnostic);
+  const systemExecutionError = normalizeSystemExecutionFailure(value.systemExecutionError);
 
   if (
     !code &&
@@ -715,6 +718,7 @@ export const normalizeAgentStreamError = (value: unknown): AgentStreamErrorInfo 
     !workspacePath &&
     !taskIncompleteReason &&
     !providerDiagnostic &&
+    !systemExecutionError &&
     !agentLabel &&
     !agentTemplateKey &&
     !modelName &&
@@ -733,6 +737,7 @@ export const normalizeAgentStreamError = (value: unknown): AgentStreamErrorInfo 
     ...(workspacePath ? { workspacePath } : {}),
     ...(taskIncompleteReason ? { taskIncompleteReason } : {}),
     ...(providerDiagnostic ? { providerDiagnostic } : {}),
+    ...(systemExecutionError ? { systemExecutionError } : {}),
     ...(agentLabel ? { agentLabel } : {}),
     ...(agentTemplateKey ? { agentTemplateKey } : {}),
     ...(modelName ? { modelName } : {}),

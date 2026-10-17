@@ -1008,6 +1008,36 @@ async fn directory_rename_needs_add_subdirectory_without_requiring_add_file() {
 }
 
 #[tokio::test]
+async fn admitted_entry_source_requires_no_add_file_right_on_its_parent() {
+    use nomifun_file::NativeMutationRequest;
+    let root = tempfile::tempdir().unwrap(); let parent = root.path().join("source-parent");
+    fs::create_dir(&parent).unwrap();
+    for name in ["native-delete", "file-delete", "native-rename", "file-rename"] {
+        fs::write(parent.join(name), b"authorized child DELETE").unwrap();
+    }
+    raw_deny(&parent, "(D;;0x2;;;WD)");
+    let prohibited = fs::write(parent.join("new-child"), b"denied");
+    let native_delete = fs::remove_file(parent.join("native-delete"));
+    let native_rename = fs::rename(parent.join("native-rename"), root.path().join("native-moved"));
+    let (service, scope, _) = owner(root.path());
+    let delete = match service.prepare_native_mutation_for_agent_session(&scope,
+        NativeMutationRequest::Delete { path: "source-parent/file-delete".into() }).await {
+        Ok(prepared) => service.remove_entry_with_native_mutation(&scope, "source-parent/file-delete", prepared).await.map(|_| ()),
+        Err(error) => Err(error),
+    };
+    let rename = match service.prepare_native_mutation_for_agent_session(&scope,
+        NativeMutationRequest::Rename { path: "source-parent/file-rename".into(), destination: "file-moved".into() }).await {
+        Ok(prepared) => service.rename_entry_with_native_mutation(&scope, "source-parent/file-rename", "file-moved", prepared).await.map(|_| ()),
+        Err(error) => Err(error),
+    };
+    icacls(&parent, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
+    assert_eq!(prohibited.unwrap_err().raw_os_error(), Some(5));
+    native_delete.unwrap(); native_rename.unwrap(); delete.unwrap(); rename.unwrap();
+    assert_eq!(fs::read(root.path().join("file-moved")).unwrap(), b"authorized child DELETE");
+    assert_eq!(fs::read_dir(&parent).unwrap().count(), 0);
+}
+
+#[tokio::test]
 async fn native_rename_does_not_require_delete_on_a_new_destination_child() {
     use std::os::windows::fs::OpenOptionsExt as _;
     use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_GENERIC_WRITE, FILE_FLAG_DELETE_ON_CLOSE};

@@ -291,6 +291,29 @@ impl Wave2ApplicationHost {
         Ok(None)
     }
 
+    #[cfg(windows)]
+    async fn prepare_native_file_mutation(
+        &self,
+        context: &Wave2HostContext,
+        binding: &TypedResourceBinding,
+        input: &StrictJsonValue,
+        scope: &AgentSessionWorkspaceBinding,
+        request: nomifun_file::NativeMutationRequest,
+    ) -> Result<PreparedWave2Invocation<nomifun_file::PreparedNativeMutation>, Wave2HostPortError> {
+        // A settled receipt is authoritative even if its original file or
+        // parent no longer exists. Never reacquire today's targets for replay.
+        if let Some(output) = self.read_managed_effect_result(context, binding, input).await? {
+            return Ok(PreparedWave2Invocation::Return(output));
+        }
+        match self.files.prepare_native_mutation_for_agent_session(scope, request).await {
+            Ok(prepared) => Ok(PreparedWave2Invocation::Invoke(prepared)),
+            Err(error) => match self.read_managed_effect_result(context, binding, input).await? {
+                Some(output) => Ok(PreparedWave2Invocation::Return(output)),
+                None => Err(operation_error(context.capability_id.as_ref(), error)),
+            },
+        }
+    }
+
     #[cfg(test)]
     fn with_git_mutation_hook(mut self, hook: Arc<GitMutationTestHook>) -> Self {
         self.git_mutation_hook = Some(hook);
@@ -582,7 +605,9 @@ fn observe_wave2_effect(
                 .unwrap_or(
                     "Wave 2 effect was durably rejected without a replayable bounded error",
                 );
-            Err(Wave2HostPortError::new(code, message))
+            let mut failure = Wave2HostPortError::new(code, message);
+            failure.details = error.and_then(|error| error.get("details")).filter(|details| !details.is_null()).cloned();
+            Err(failure)
         }
         nomifun_agent_session::AgentEffectState::Pending => {
             Err(Wave2HostPortError::unavailable(
@@ -681,6 +706,20 @@ async fn begin_wave2_effect_with_strategy(
     input: &StrictJsonValue,
     strategy: nomifun_agent_session::EffectStrategy,
 ) -> Result<Wave2EffectAdmission, Wave2HostPortError> {
+    begin_wave2_effect_with_native_targets(store, context, binding, input, strategy, None).await
+}
+
+/// Target facts come from the retained native mutation preparation. The Store
+/// commits overlap admission and these facts in the original Effect transaction;
+/// no SQLite transaction remains open during preparation or physical I/O.
+async fn begin_wave2_effect_with_native_targets(
+    store: &nomifun_agent_session::AgentSessionStore,
+    context: &Wave2HostContext,
+    binding: &TypedResourceBinding,
+    input: &StrictJsonValue,
+    strategy: nomifun_agent_session::EffectStrategy,
+    native_targets: Option<nomifun_agent_contracts::NativeMutationTargets>,
+) -> Result<Wave2EffectAdmission, Wave2HostPortError> {
     let effect_id = wave2_effect_id(context)?;
     let owner_domain = wave2_effect_owner_domain(context)?;
     let input_digest = wave2_effect_request_digest(context, binding, input)?;
@@ -731,7 +770,17 @@ async fn begin_wave2_effect_with_strategy(
         strategy,
         causation_event_id,
     );
-    match store.record_effect_started(request.clone()).await {
+    #[cfg(windows)]
+    let admission = match native_targets {
+        Some(targets) => store.record_effect_started_with_native_targets(request.clone(), targets).await,
+        None => store.record_effect_started(request.clone()).await,
+    };
+    #[cfg(not(windows))]
+    let admission = {
+        debug_assert!(native_targets.is_none());
+        store.record_effect_started(request.clone()).await
+    };
+    match admission {
         Ok(_) => Ok(Wave2EffectAdmission::Reserved(Wave2EffectReservation {
             store: store.clone(),
             request,
@@ -752,6 +801,9 @@ async fn begin_wave2_effect_with_strategy(
                     &resource_key,
                 ).map(Wave2EffectAdmission::Replay);
             }
+            if error.code() == Some("NATIVE_MUTATION_TARGET_UNSETTLED") {
+                return Err(Wave2HostPortError::new("NATIVE_MUTATION_TARGET_UNSETTLED", error.to_string()));
+            }
             Err(Wave2HostPortError::unavailable(format!(
                 "canonical Agent Effect admission failed or another Wave 2 effect is unsettled: {error}"
             )))
@@ -767,6 +819,7 @@ fn bounded_terminal_payload(completion: Wave2EffectCompletion<'_>) -> StrictJson
             "error": {
                 "code": error.code.as_str(),
                 "message": error.message.chars().take(2048).collect::<String>(),
+                "details": error.details,
             }
         }),
         Wave2EffectCompletion::Uncertain(error) => json!({
@@ -774,6 +827,7 @@ fn bounded_terminal_payload(completion: Wave2EffectCompletion<'_>) -> StrictJson
             "error": {
                 "code": error.code.as_str(),
                 "message": error.message.chars().take(2048).collect::<String>(),
+                "details": error.details,
             }
         }),
     };
@@ -995,20 +1049,37 @@ impl Wave2ApplicationHost {
                     },
                 )?);
                 let _write_guard = self.workspace_write_lock.lock().await;
-                match begin_wave2_exclusive_effect(
+                #[cfg(windows)]
+                let prepared = match self.prepare_native_file_mutation(context, binding, &effect_input, &scope,
+                    nomifun_file::NativeMutationRequest::Write { path: params.path.clone() }).await? {
+                    PreparedWave2Invocation::Return(output) => return Ok(output),
+                    PreparedWave2Invocation::Invoke(prepared) => prepared,
+                };
+                #[cfg(windows)]
+                let admission = begin_wave2_effect_with_native_targets(
                     self.effect_store()?, context, binding, &effect_input,
                     nomifun_agent_session::EffectStrategy::ManagedEffect,
-                ).await? {
+                    Some(prepared.targets().clone()),
+                ).await?;
+                #[cfg(not(windows))]
+                let admission = begin_wave2_exclusive_effect(self.effect_store()?, context, binding, &effect_input,
+                    nomifun_agent_session::EffectStrategy::ManagedEffect).await?;
+                match admission {
                     Wave2EffectAdmission::Replay(output) => Ok(output),
                     Wave2EffectAdmission::Reserved(reservation) => {
+                        #[cfg(windows)]
                         let result = self
                             .files
-                            .write_file_with_observation_for_agent_session(
+                            .write_file_with_native_mutation(
                                 &scope,
                                 &params.path,
                                 params.content.as_bytes(),
+                                prepared,
                             )
                             .await;
+                        #[cfg(not(windows))]
+                        let result = self.files.write_file_with_observation_for_agent_session(
+                            &scope, &params.path, params.content.as_bytes()).await;
                         match result {
                             Ok(receipt) => {
                                 let output = StrictJsonValue(json!({
@@ -1057,11 +1128,26 @@ impl Wave2ApplicationHost {
                 let effect_input = StrictJsonValue(serde_json::to_value(&params)
                     .map_err(|error| Wave2HostPortError::invalid_payload(error.to_string()))?);
                 let _write_guard = self.workspace_write_lock.lock().await;
-                match begin_wave2_exclusive_effect(self.effect_store()?, context, binding, &effect_input,
-                    nomifun_agent_session::EffectStrategy::ManagedEffect).await? {
+                #[cfg(windows)]
+                let prepared = match self.prepare_native_file_mutation(context, binding, &effect_input, &scope,
+                    nomifun_file::NativeMutationRequest::Rename { path: params.path.clone(), destination: params.destination.clone() }).await? {
+                    PreparedWave2Invocation::Return(output) => return Ok(output),
+                    PreparedWave2Invocation::Invoke(prepared) => prepared,
+                };
+                #[cfg(windows)]
+                let admission = begin_wave2_effect_with_native_targets(self.effect_store()?, context, binding, &effect_input,
+                    nomifun_agent_session::EffectStrategy::ManagedEffect, Some(prepared.targets().clone())).await?;
+                #[cfg(not(windows))]
+                let admission = begin_wave2_exclusive_effect(self.effect_store()?, context, binding, &effect_input,
+                    nomifun_agent_session::EffectStrategy::ManagedEffect).await?;
+                match admission {
                     Wave2EffectAdmission::Replay(output) => Ok(output),
                     Wave2EffectAdmission::Reserved(reservation) => {
-                        match self.files.rename_entry_with_observation_for_agent_session(&scope, &params.path, &params.destination).await {
+                        #[cfg(windows)]
+                        let result = self.files.rename_entry_with_native_mutation(&scope, &params.path, &params.destination, prepared).await;
+                        #[cfg(not(windows))]
+                        let result = self.files.rename_entry_with_observation_for_agent_session(&scope, &params.path, &params.destination).await;
+                        match result {
                             Ok(receipt) => {
                                 let output = StrictJsonValue(json!({
                                     "renamed": true, "path": receipt.source, "destination": receipt.destination,
@@ -1095,17 +1181,31 @@ impl Wave2ApplicationHost {
                 // A lost settlement must also fence a new idempotency key;
                 // otherwise re-submitting could duplicate a published patch.
                 let _write_guard = self.workspace_write_lock.lock().await;
-                match begin_wave2_exclusive_effect(
+                #[cfg(windows)]
+                let prepared = match self.prepare_native_file_mutation(context, binding, &effect_input, &scope,
+                    nomifun_file::NativeMutationRequest::Patch { paths: request.files.iter().map(|file| file.path.clone()).collect() }).await? {
+                    PreparedWave2Invocation::Return(output) => return Ok(output),
+                    PreparedWave2Invocation::Invoke(prepared) => prepared,
+                };
+                #[cfg(windows)]
+                let admission = begin_wave2_effect_with_native_targets(
                     self.effect_store()?,
                     context,
                     binding,
                     &effect_input,
                     nomifun_agent_session::EffectStrategy::ManagedEffect,
+                    Some(prepared.targets().clone()),
                 )
-                .await?
-                {
+                .await?;
+                #[cfg(not(windows))]
+                let admission = begin_wave2_exclusive_effect(self.effect_store()?, context, binding, &effect_input,
+                    nomifun_agent_session::EffectStrategy::ManagedEffect).await?;
+                match admission {
                     Wave2EffectAdmission::Replay(output) => Ok(output),
                     Wave2EffectAdmission::Reserved(reservation) => {
+                        #[cfg(windows)]
+                        let result = self.files.apply_patch_with_native_mutation(&scope, request, prepared).await;
+                        #[cfg(not(windows))]
                         let result = self.files.apply_patch_with_observation_for_agent_session(&scope, request).await;
                         match result {
                             Ok(result) => {
@@ -1161,13 +1261,27 @@ impl Wave2ApplicationHost {
                     },
                 )?);
                 let _write_guard = self.workspace_write_lock.lock().await;
-                match begin_wave2_effect(self.effect_store()?, context, binding, &effect_input).await? {
+                #[cfg(windows)]
+                let prepared = match self.prepare_native_file_mutation(context, binding, &effect_input, &scope,
+                    nomifun_file::NativeMutationRequest::Delete { path: params.path.clone() }).await? {
+                    PreparedWave2Invocation::Return(output) => return Ok(output),
+                    PreparedWave2Invocation::Invoke(prepared) => prepared,
+                };
+                #[cfg(windows)]
+                let admission = begin_wave2_effect_with_native_targets(self.effect_store()?, context, binding, &effect_input,
+                    nomifun_agent_session::EffectStrategy::ManagedEffect, Some(prepared.targets().clone())).await?;
+                #[cfg(not(windows))]
+                let admission = begin_wave2_effect(self.effect_store()?, context, binding, &effect_input).await?;
+                match admission {
                     Wave2EffectAdmission::Replay(output) => Ok(output),
                     Wave2EffectAdmission::Reserved(reservation) => {
+                        #[cfg(windows)]
                         let result = self
                             .files
-                            .remove_entry_with_receipt_for_agent_session(&scope, &params.path)
+                            .remove_entry_with_native_mutation(&scope, &params.path, prepared)
                             .await;
+                        #[cfg(not(windows))]
+                        let result = self.files.remove_entry_with_receipt_for_agent_session(&scope, &params.path).await;
                         match result {
                             Ok(receipt) => {
                                 let output = StrictJsonValue(json!({
@@ -2908,7 +3022,7 @@ fn workspace_typed_binding<'a>(
 }
 
 fn operation_error(capability_id: &str, error: AppError) -> Wave2HostPortError {
-    if matches!(&error, AppError::NativeFileAcquisition { .. }) {
+    if matches!(&error, AppError::NativeFileAcquisition { .. } | AppError::SystemExecution(_)) {
         return Wave2HostPortError::new(error.error_code(), error.to_string())
             .with_details(error.error_details().expect("native file failure has typed details"));
     }
@@ -2957,6 +3071,19 @@ impl UserEventSink for NullUserEvents {
 mod tests {
     use super::*;
 
+    fn explicit_file_unsettled_code() -> &'static str {
+        if cfg!(windows) { "NATIVE_MUTATION_TARGET_UNSETTLED" } else { "CAPABILITY_UNAVAILABLE" }
+    }
+
+    fn opaque_process_effect_context(root: &Path) -> Wave2HostContext {
+        let mut value = context(root);
+        value.capability_id = CapabilityId::from("workspace.process");
+        value.action_id = ActionId::from("workspace.process/start");
+        value.resource_bindings[0].resource_kind = ResourceKind::from("process_session");
+        value.resource_bindings[0].resource_id = ResourceId::from("managed-process-session");
+        value
+    }
+
     #[test]
     fn native_read_owner_failure_carries_exact_details_without_turning_into_absence() {
         let failure=nomi_native_files::NativeFileFailure{code:"RESOURCE_NOT_FOUND".into(),message:"resolving native read root: namespace unavailable".into(),kind:Some("NotFound".into()),raw_os_error:Some(67)};
@@ -2964,6 +3091,40 @@ mod tests {
         let host=operation_error("workspace.files",nomifun_file::native_file_failure_error(failure));
         assert_eq!(host.code,"RESOURCE_NOT_FOUND");assert_eq!(host.details.unwrap()["native_file_error"],expected);
         assert_eq!(host.message,expected["message"].as_str().unwrap());
+    }
+
+    #[test]
+    fn system_authentication_error_and_durable_rejection_keep_details_while_binding_and_acl_classes_stay_distinct() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut context = context(directory.path());
+        context.capability_id = CapabilityId::from("workspace.files");
+        context.action_id = ActionId::from("workspace.files/write");
+        let binding = context.resource_bindings[0].clone();
+        let input = StrictJsonValue(json!({"path":"unexecuted.txt","content":"value"}));
+        let input_digest = wave2_effect_request_digest(&context, &binding, &input).unwrap();
+        let resource_key = wave2_effect_resource_key(&context, &binding).unwrap();
+        let native = nomifun_agent_contracts::SystemExecutionFailure::from_owner("SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED".into(), "the native authentication operation was cancelled".into(),
+            &json!({"raw_os_error":1223,"kind":"Uncategorized","user_code_not_started":true,"cleanup_proven":true}));
+        let error = operation_error("workspace.files", AppError::SystemExecution(native.clone()));
+        assert_eq!(error.code, native.code);
+        assert_eq!(error.message, native.message);
+        let bounded = bounded_terminal_payload(Wave2EffectCompletion::Failed(&error));
+        assert_eq!(bounded.0["error"]["details"], error.details.clone().unwrap());
+        let uncertain = bounded_terminal_payload(Wave2EffectCompletion::Uncertain(&error));
+        assert_eq!(uncertain.0["outcome"], "unknown");
+        assert_eq!(uncertain.0["error"]["details"], error.details.clone().unwrap());
+        let record = nomifun_agent_session::AgentEffectRecord {
+            effect_id:wave2_effect_id(&context).unwrap(), agent_session_id:context.agent_session_id.clone(), turn_id:context.turn_id.clone(), operation_id:context.operation_id.clone(),
+            owner_domain:wave2_effect_owner_domain(&context).unwrap().to_owned(), capability_module:context.capability_id.clone(), action_id:context.action_id.clone(),
+            resource_binding_id:Some(binding.binding_id.clone()), resource_key:Some(resource_key.clone()), input_digest:input_digest.clone(), strategy:nomifun_agent_session::EffectStrategy::ManagedEffect,
+            state:nomifun_agent_session::AgentEffectState::Rejected, bounded_observation:Some(bounded.0), started_event_id:"started".into(), terminal_event_id:Some("terminal".into()), created_at:1, settled_at:Some(2),
+        };
+        let replay = observe_wave2_effect(record, &context, &binding, wave2_effect_owner_domain(&context).unwrap(), &input_digest, nomifun_agent_session::EffectStrategy::ManagedEffect, &resource_key).unwrap_err();
+        assert_eq!(replay, error);
+        assert_eq!(operation_error("workspace.files", AppError::Forbidden("workspace resource lacks read".into())).code, "PRESET_RESOURCE_NOT_BOUND");
+        assert_eq!(operation_error("workspace.files", AppError::NativeSystemAccessDenied { operation:"ordinary read".into(), source:std::io::Error::from_raw_os_error(5) }).code, "SYSTEM_ACCESS_DENIED");
+        let missing = Wave2HostContext { resource_bindings:Vec::new(), ..context };
+        assert_eq!(workspace_typed_binding(&missing).unwrap_err().code, "PRESET_RESOURCE_NOT_BOUND");
     }
     use std::collections::{BTreeMap, BTreeSet};
     use std::future::Future;
@@ -3852,15 +4013,18 @@ mod tests {
             (Err(error),Ok(_)) => (&right,&left,b"RIGHT\n".as_slice(),error),
             _ => unreachable!("one winner asserted"),
         };
-        assert_eq!(loser_error.code,"CAPABILITY_UNAVAILABLE");
         assert_eq!(std::fs::read(workspace.join("shared.txt")).unwrap(),winner_bytes);
         let winner_effects = left_store.list_effects(&winner_context.agent_session_id).await.unwrap();
         assert_eq!(winner_effects.len(),1);
         assert_eq!(winner_effects[0].state,nomifun_agent_session::AgentEffectState::Returned);
         let loser_effects = right_store.list_effects(&loser_context.agent_session_id).await.unwrap();
         match loser_effects.as_slice() {
-            [] => assert!(loser_error.message.contains("unsettled") || loser_error.message.contains("admission failed"),"{loser_error:?}"),
+            [] => {
+                assert_eq!(loser_error.code,explicit_file_unsettled_code());
+                assert!(loser_error.message.contains("unsettled") || loser_error.message.contains("admission failed"),"{loser_error:?}");
+            }
             [effect] => {
+                assert_eq!(loser_error.code,"CAPABILITY_UNAVAILABLE");
                 assert_eq!(effect.state,nomifun_agent_session::AgentEffectState::Rejected);
                 assert!(loser_error.message.contains("source precondition changed"),"{loser_error:?}");
             }
@@ -3925,7 +4089,7 @@ mod tests {
         let right_ok = right_result.is_ok();
         assert!(left_ok || right_ok,"both authorized writes failed: left={left_result:?}, right={right_result:?}");
         for error in [left_result.as_ref().err(),right_result.as_ref().err()].into_iter().flatten() {
-            assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+            assert_eq!(error.code,explicit_file_unsettled_code());
             assert!(error.message.contains("unsettled") || error.message.contains("admission failed"),"{error:?}");
         }
         let bytes = std::fs::read(workspace.join("shared.txt")).unwrap();
@@ -3995,7 +4159,7 @@ mod tests {
         let delete_ok = delete_result.is_ok();
         assert!(write_ok || delete_ok,"both authorized operations failed: write={write_result:?}, delete={delete_result:?}");
         for error in [write_result.as_ref().err(),delete_result.as_ref().err()].into_iter().flatten() {
-            assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+            assert_eq!(error.code,explicit_file_unsettled_code());
             assert!(error.message.contains("unsettled") || error.message.contains("admission failed"),"{error:?}");
         }
         match std::fs::read(workspace.join("shared.txt")) {
@@ -5050,17 +5214,22 @@ mod tests {
         second_owner.action_id = ActionId::from("workspace.files/write");
         second_owner.idempotency_key = IdempotencyKey::from("second-owner-pending");
         ensure_test_effect_context(&store, &second_owner).await;
-        assert!(matches!(
-            begin_wave2_effect(
+        let second_admission = begin_wave2_effect(
                 host.effect_store().unwrap(),
                 &second_owner,
                 workspace_typed_binding(&second_owner).unwrap(),
                 &input,
             )
-            .await
-            .unwrap(),
-            Wave2EffectAdmission::Reserved(_)
-        ));
+            .await;
+        #[cfg(windows)]
+        {
+            // Project resource ownership does not make the same unknown
+            // physical file safe for another account to mutate.
+            assert_eq!(second_admission.unwrap_err().code,"NATIVE_MUTATION_TARGET_UNSETTLED");
+            assert!(store.list_effects(&second_owner.agent_session_id).await.unwrap().is_empty());
+        }
+        #[cfg(not(windows))]
+        assert!(matches!(second_admission.unwrap(),Wave2EffectAdmission::Reserved(_)));
 
         let mut same_owner = context(directory.path());
         same_owner.resource_bindings[0].resource_id = ResourceId::from("workspace");
@@ -5076,8 +5245,139 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(blocked.code, "CAPABILITY_UNAVAILABLE");
+        assert_eq!(blocked.code, explicit_file_unsettled_code());
         assert!(blocked.message.contains("unsettled"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cross_project_native_pending_fence_survives_reopen_before_mutation() {
+        let directory = tempfile::tempdir().unwrap();
+        let first_root = directory.path().join("project-one");
+        let second_root = directory.path().join("project-two");
+        std::fs::create_dir(&first_root).unwrap();
+        std::fs::create_dir(&second_root).unwrap();
+        let target = directory.path().join("shared-external.txt");
+        let database_path = directory.path().join("agent.db");
+        let (database, store, host) = open_effect_host(&database_path, &first_root).await;
+        let hook = EffectSettlementTestHook::new("workspace.files/write");
+        let host = host.with_effect_settlement_hook(hook.clone());
+        let mut first = context(&first_root);
+        first.capability_id = CapabilityId::from("workspace.files");
+        first.action_id = ActionId::from("workspace.files/write");
+        let first_effect = wave2_effect_id(&first).unwrap();
+        let first_session = first.agent_session_id.clone();
+        let first_target = target.clone();
+        let invocation = tokio::spawn(async move {
+            invoke(&host, first, "workspace.files/write", json!({
+                "path": first_target, "content": "first publication"
+            })).await
+        });
+        tokio::time::timeout(Duration::from_secs(20), hook.entered.notified()).await.unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"first publication");
+        // The physical owner finished, but its canonical settlement was lost.
+        // Aborting the host future must preserve the original pending Effect.
+        invocation.abort();
+        assert!(invocation.await.unwrap_err().is_cancelled());
+        assert_eq!(store.read_effect(&first_session, &first_effect).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        drop(store);
+        database.close().await;
+
+        let (database, store, host) = open_effect_host(&database_path, &second_root).await;
+        let mut second = context(&second_root);
+        second.capability_id = CapabilityId::from("workspace.files");
+        second.action_id = ActionId::from("workspace.files/write");
+        let second_session = second.agent_session_id.clone();
+        let error = invoke(&host, second, "workspace.files/write", json!({
+            "path": target, "content": "must never publish"
+        })).await.expect_err("another project must not bypass a persistent native target fence");
+        assert!(error.message.contains("unsettled") || error.message.contains("native"), "{error:?}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"first publication");
+        assert!(store.list_effects(&second_session).await.unwrap().is_empty());
+        assert_eq!(store.read_effect(&first_session, &first_effect).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        let alias = directory.path().join("later-hardlink.txt");
+        std::fs::hard_link(&target, &alias).unwrap();
+        for (action, input) in [
+            ("workspace.files/write", json!({"path": alias, "content": "must never publish via later alias"})),
+            ("workspace.files/delete", json!({"path": alias})),
+            ("workspace.files/rename", json!({"path": alias, "destination": directory.path().join("must-not-exist.txt")})),
+        ] {
+            let mut contender = context(&second_root);
+            contender.capability_id = CapabilityId::from("workspace.files");
+            contender.action_id = ActionId::from(action);
+            let contender_session = contender.agent_session_id.clone();
+            let error = invoke(&host, contender, action, input).await.unwrap_err();
+            assert_eq!(error.code, "NATIVE_MUTATION_TARGET_UNSETTLED", "{action}: {error:?}");
+            assert!(store.list_effects(&contender_session).await.unwrap().is_empty());
+            assert_eq!(std::fs::read(&alias).unwrap(), b"first publication");
+            assert_eq!(std::fs::read(&target).unwrap(), b"first publication");
+            assert!(!directory.path().join("must-not-exist.txt").exists());
+        }
+        drop(host);
+        drop(store);
+        database.close().await;
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_target_fence_survives_a_real_process_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        for phase in ["publish", "restart"] {
+            let result = std::process::Command::new(&executable)
+                .args(["--exact", "router::agent_wave2_host::tests::native_target_restart_child",
+                    "--ignored", "--nocapture", "--test-threads=1"])
+                .env("NOMIFUN_NATIVE_TARGET_RESTART_ROOT", directory.path())
+                .env("NOMIFUN_NATIVE_TARGET_RESTART_PHASE", phase)
+                .output().unwrap();
+            assert!(result.status.success(), "{phase}: {}\n{}",
+                String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+            assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"), "child test did not execute");
+        }
+        assert_eq!(std::fs::read(directory.path().join("external.txt")).unwrap(), b"original publication");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "invoked with an isolated root by native_target_fence_survives_a_real_process_restart"]
+    async fn native_target_restart_child() {
+        let root = PathBuf::from(std::env::var_os("NOMIFUN_NATIVE_TARGET_RESTART_ROOT").unwrap());
+        let phase = std::env::var("NOMIFUN_NATIVE_TARGET_RESTART_PHASE").unwrap();
+        let workspace = root.join(if phase == "publish" { "first-project" } else { "second-project" });
+        std::fs::create_dir(&workspace).unwrap();
+        let target = root.join("external.txt");
+        let (database, store, host) = open_effect_host(&root.join("agent.db"), &workspace).await;
+        let mut invocation = context(&workspace);
+        invocation.capability_id = CapabilityId::from("workspace.files");
+        invocation.action_id = ActionId::from("workspace.files/write");
+        if phase == "publish" {
+            let hook = EffectSettlementTestHook::new("workspace.files/write");
+            let host = host.with_effect_settlement_hook(hook.clone());
+            let identity = json!({"session": invocation.agent_session_id, "effect": wave2_effect_id(&invocation).unwrap()});
+            let worker = tokio::spawn(async move {
+                invoke(&host, invocation, "workspace.files/write", json!({"path": target, "content": "original publication"})).await
+            });
+            tokio::time::timeout(Duration::from_secs(20), hook.entered.notified()).await.unwrap();
+            worker.abort();
+            assert!(worker.await.unwrap_err().is_cancelled());
+            std::fs::write(root.join("original-effect.json"), serde_json::to_vec(&identity).unwrap()).unwrap();
+        } else {
+            assert_eq!(phase, "restart");
+            let original: Value = serde_json::from_slice(&std::fs::read(root.join("original-effect.json")).unwrap()).unwrap();
+            let original_session = nomifun_agent_contracts::AgentSessionId::from(original["session"].as_str().unwrap());
+            let original_effect = original["effect"].as_str().unwrap();
+            let before = store.read_effect(&original_session, original_effect).await.unwrap().unwrap();
+            assert_eq!(before.state, nomifun_agent_session::AgentEffectState::Pending);
+            let error = invoke(&host, invocation.clone(), "workspace.files/write", json!({"path": target, "content": "forbidden replay"})).await.unwrap_err();
+            assert_eq!(error.code, "NATIVE_MUTATION_TARGET_UNSETTLED");
+            assert!(store.list_effects(&invocation.agent_session_id).await.unwrap().is_empty());
+            assert_eq!(store.read_effect(&original_session, original_effect).await.unwrap().unwrap(), before);
+            drop(host);
+        }
+        drop(store);
+        database.close().await;
     }
 
     #[tokio::test]
@@ -5118,7 +5418,7 @@ mod tests {
         let blocked = invoke(&restarted,second.clone(),"workspace.files/write",json!({
             "path":"second.txt","content":"must not run"
         })).await.unwrap_err();
-        assert_eq!(blocked.code,"CAPABILITY_UNAVAILABLE");
+        assert_eq!(blocked.code,explicit_file_unsettled_code());
         assert!(blocked.message.contains("unsettled"),"{blocked:?}");
         assert_ne!(first.agent_session_id,second.agent_session_id);
         assert_eq!(reopened_store.read_effect(&first.agent_session_id,&first_effect_id).await.unwrap().unwrap().state,
@@ -5173,7 +5473,7 @@ mod tests {
         let left_won = left_reservation.is_some();
         let reservation = left_reservation.or(right_reservation).unwrap();
         let loser_error = left_error.or(right_error).unwrap();
-        assert_eq!(loser_error.code,"CAPABILITY_UNAVAILABLE");
+        assert_eq!(loser_error.code,explicit_file_unsettled_code());
         assert!(loser_error.message.contains("unsettled") || loser_error.message.contains("admission failed"),"{loser_error:?}");
         let (winner_context,winner_host,winner_path,winner_bytes,loser_context,loser_path) = if left_won {
             (&left,&left_host,"left.txt",b"left".as_slice(),&right,"right.txt")
@@ -5200,7 +5500,7 @@ mod tests {
         let blocked = invoke(&restarted,loser_context.clone(),"workspace.files/write",json!({
             "path":loser_path,"content":"must not run after reopen"
         })).await.unwrap_err();
-        assert_eq!(blocked.code,"CAPABILITY_UNAVAILABLE");
+        assert_eq!(blocked.code,explicit_file_unsettled_code());
         assert!(blocked.message.contains("unsettled"),"{blocked:?}");
         assert_eq!(reopened_store.read_effect(&winner_context.agent_session_id,&winner_effect_id).await.unwrap().unwrap().state,
             nomifun_agent_session::AgentEffectState::Pending);
@@ -5448,7 +5748,7 @@ mod tests {
         different.operation_id = OperationId::from("different-write-operation");
         let error = invoke(&restarted, different.clone(), "workspace.files/write",
             json!({"path": "result.txt", "content": "must-not-run"})).await.unwrap_err();
-        assert_eq!(error.code, "CAPABILITY_UNAVAILABLE");
+        assert_eq!(error.code, explicit_file_unsettled_code());
         assert!(error.message.contains("unsettled"), "{error:?}");
         assert_eq!(reopened_store.read_effect(&pending.agent_session_id, &pending_effect_id).await.unwrap().unwrap().state,
             nomifun_agent_session::AgentEffectState::Pending);
@@ -5658,7 +5958,7 @@ mod tests {
         let different_key = invoke(&restarted,different.clone(),"workspace.files/write",json!({
             "path":"result.txt","content":"must not overwrite user edit"
         })).await.unwrap_err();
-        assert_eq!(different_key.code,"CAPABILITY_UNAVAILABLE");
+        assert_eq!(different_key.code,explicit_file_unsettled_code());
         assert!(different_key.message.contains("unsettled"),"{different_key:?}");
         assert_eq!(std::fs::read(workspace.join("result.txt")).unwrap(),b"user edit after terminal timeout");
         assert_eq!(reopened_store.read_effect(&pending.agent_session_id,&pending_effect_id).await.unwrap().unwrap().state,
@@ -5748,7 +6048,7 @@ mod tests {
         let different_key = invoke(&restarted,different.clone(),"workspace.files/write",json!({
             "path":"result.txt","content":"must not overwrite user edit"
         })).await.unwrap_err();
-        assert_eq!(different_key.code,"CAPABILITY_UNAVAILABLE");
+        assert_eq!(different_key.code,explicit_file_unsettled_code());
         assert!(different_key.message.contains("unsettled"),"{different_key:?}");
         assert_eq!(std::fs::read(workspace.join("result.txt")).unwrap(),b"user edit after terminal cancellation");
         assert_eq!(reopened_store.list_effects(&pending.agent_session_id).await.unwrap().len(),1);
@@ -5818,7 +6118,7 @@ mod tests {
         let different_key = invoke(&restarted,different.clone(),"workspace.files/write",json!({
             "path":"result.txt","content":"must not overwrite user edit"
         })).await.unwrap_err();
-        assert_eq!(different_key.code,"CAPABILITY_UNAVAILABLE");
+        assert_eq!(different_key.code,explicit_file_unsettled_code());
         assert!(different_key.message.contains("unsettled"),"{different_key:?}");
         assert_eq!(std::fs::read(workspace.join("result.txt")).unwrap(),b"user edit after store close");
         assert_eq!(reopened_store.list_effects(&pending.agent_session_id).await.unwrap().len(),1);
@@ -6032,7 +6332,7 @@ mod tests {
         let different_key = invoke(&restarted,different.clone(),"workspace.files/write",json!({
             "path":"result.txt","content":"must not overwrite user edit"
         })).await.unwrap_err();
-        assert_eq!(different_key.code,"CAPABILITY_UNAVAILABLE");
+        assert_eq!(different_key.code,explicit_file_unsettled_code());
         assert!(different_key.message.contains("unsettled"),"{different_key:?}");
         assert_eq!(std::fs::read(workspace.join("result.txt")).unwrap(),b"user edit after terminal store close");
         assert_eq!(reopened_store.list_effects(&pending.agent_session_id).await.unwrap().len(),1);
@@ -7082,8 +7382,29 @@ mod tests {
             operation:Wave2CapabilityOperation::WorkspaceExecution { input:input_b.clone() },
         });
         let (result_a,result_b)=tokio::join!(retry_a,retry_b);
-        assert_eq!(result_a.unwrap().0["written"],true);
-        assert_eq!(result_b.unwrap().0["written"],true);
+        assert!(result_a.is_ok() || result_b.is_ok(),"one independent recovery must finish: {result_a:?}, {result_b:?}");
+        for (result,host,call,input,effect) in [
+            (result_a,&host_a,&call_a,&input_a,&effect_a),
+            (result_b,&host_b,&call_b,&input_b,&effect_b),
+        ] {
+            let output = match result {
+                Ok(output) => output,
+                #[cfg(windows)]
+                Err(error) => {
+                    assert_eq!(error.code,"NATIVE_MUTATION_TARGET_UNSETTLED","{error:?}");
+                    assert!(observer.read_effect(&call.agent_session_id,effect).await.unwrap().is_none(),
+                        "only a proven pre-admission rejection can be explicitly retried after the other recovery settled");
+                    // This is an explicit test request after both original
+                    // futures finished. It never replays a pending/unknown
+                    // owner or bypasses the native admission fence.
+                    host.invoke(Wave2HostRequest { context:call.clone(),
+                        operation:Wave2CapabilityOperation::WorkspaceExecution { input:input.clone() } }).await.unwrap()
+                }
+                #[cfg(not(windows))]
+                Err(error) => panic!("independent project recovery failed: {error:?}"),
+            };
+            assert_eq!(output.0["written"],true);
+        }
         assert_eq!(std::fs::read(workspace_a.join("pool-a.txt")).unwrap(),b"pool a executes after storage recovery");
         assert_eq!(std::fs::read(workspace_b.join("pool-b.txt")).unwrap(),b"pool b executes after storage recovery");
         for session_id in [&session_a,&session_b] {
@@ -7131,10 +7452,13 @@ mod tests {
         let pool=store_pool(&database_path,3).await;
         let store=nomifun_agent_session::AgentSessionStore::from_pool(pool.clone()).await.unwrap();
         let observer=nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone()).await.unwrap();
-        let mut call_a=context(&workspace_a);
+        // These are synthetic owner-terminal failures, with no physical file
+        // dispatch. Opaque process Effects isolate the pool recovery contract
+        // without inventing disjoint native identities for C: file actions.
+        let mut call_a=opaque_process_effect_context(&workspace_a);
         call_a.idempotency_key=IdempotencyKey::from("interleaved-pool-disk-full-a");
         call_a.operation_id=OperationId::from("interleaved-pool-disk-full-a-operation");
-        let mut call_b=context(&workspace_b);
+        let mut call_b=opaque_process_effect_context(&workspace_b);
         call_b.idempotency_key=IdempotencyKey::from("interleaved-pool-disk-full-b");
         call_b.operation_id=OperationId::from("interleaved-pool-disk-full-b-operation");
         let session_a=call_a.agent_session_id.clone();
@@ -7143,14 +7467,14 @@ mod tests {
         ensure_test_effect_context(&store,&call_b).await;
         let effect_a=wave2_effect_id(&call_a).unwrap();
         let effect_b=wave2_effect_id(&call_b).unwrap();
-        let input_a=StrictJsonValue(json!({"path":"interleaved-a.txt","content":"fixture a"}));
-        let input_b=StrictJsonValue(json!({"path":"interleaved-b.txt","content":"fixture b"}));
+        let input_a=StrictJsonValue(json!({"command":"fixture-a-no-dispatch"}));
+        let input_b=StrictJsonValue(json!({"command":"fixture-b-no-dispatch"}));
         let Wave2EffectAdmission::Reserved(reservation_a)=begin_wave2_exclusive_effect(
-            &store,&call_a,workspace_typed_binding(&call_a).unwrap(),&input_a,
+            &store,&call_a,&call_a.resource_bindings[0],&input_a,
             nomifun_agent_session::EffectStrategy::ManagedEffect,
         ).await.unwrap() else { panic!("first effect must reserve") };
         let Wave2EffectAdmission::Reserved(reservation_b)=begin_wave2_exclusive_effect(
-            &store,&call_b,workspace_typed_binding(&call_b).unwrap(),&input_b,
+            &store,&call_b,&call_b.resource_bindings[0],&input_b,
             nomifun_agent_session::EffectStrategy::ManagedEffect,
         ).await.unwrap() else { panic!("second effect must reserve") };
         let owner_error_a=Wave2HostPortError::new(
@@ -7182,14 +7506,14 @@ mod tests {
         third.return_to_pool().await;
 
         let first_error=finish_wave2_failed_effect(
-            &reservation_a,"workspace.files/write",&owner_error_a,
+            &reservation_a,"workspace.process/start",&owner_error_a,
         ).await.unwrap_err();
         assert!(first_error.message.contains("full"),"{first_error:?}");
         let mut middle=pool.acquire().await.unwrap();
         assert!(!middle.is_in_transaction(),"the middle pool connection must remain healthy");
         middle.return_to_pool().await;
         let second_error=finish_wave2_failed_effect(
-            &reservation_b,"workspace.files/write",&owner_error_b,
+            &reservation_b,"workspace.process/start",&owner_error_b,
         ).await.unwrap_err();
         assert!(second_error.message.contains("full"),"{second_error:?}");
         assert_eq!(observer.read_effect(&session_a,&effect_a).await.unwrap().unwrap().state,
@@ -7223,9 +7547,9 @@ mod tests {
         healthy.return_to_pool().await;
         second_bad.return_to_pool().await;
 
-        finish_wave2_failed_effect(&reservation_a,"workspace.files/write",&owner_error_a)
+        finish_wave2_failed_effect(&reservation_a,"workspace.process/start",&owner_error_a)
             .await.unwrap();
-        finish_wave2_failed_effect(&reservation_b,"workspace.files/write",&owner_error_b)
+        finish_wave2_failed_effect(&reservation_b,"workspace.process/start",&owner_error_b)
             .await.unwrap();
         for (session_id,effect_id) in [(&session_a,&effect_a),(&session_b,&effect_b)] {
             let effects=observer.list_effects(session_id).await.unwrap();
@@ -7277,13 +7601,13 @@ mod tests {
             for index in 0..3 {
                 let workspace=fixture_root.join(format!("seed-{seed}-workspace-{index}"));
                 std::fs::create_dir(&workspace).unwrap();
-                let mut call=context(&workspace);
+                let mut call=opaque_process_effect_context(&workspace);
                 call.idempotency_key=IdempotencyKey::from(format!("all-full-{seed}-{index}"));
                 call.operation_id=OperationId::from(format!("all-full-{seed}-{index}-operation"));
                 ensure_test_effect_context(&store,&call).await;
-                let input=StrictJsonValue(json!({"path":"fixture.txt","content":"fixture"}));
+                let input=StrictJsonValue(json!({"command":"fixture-no-dispatch"}));
                 let Wave2EffectAdmission::Reserved(reservation)=begin_wave2_exclusive_effect(
-                    &store,&call,workspace_typed_binding(&call).unwrap(),&input,
+                    &store,&call,&call.resource_bindings[0],&input,
                     nomifun_agent_session::EffectStrategy::ManagedEffect,
                 ).await.unwrap() else { panic!("seed {seed}: fresh effect must reserve") };
                 let error=Wave2HostPortError::new("PROCESS_EXIT_NON_ZERO",
@@ -7304,7 +7628,7 @@ mod tests {
                 connection.return_to_pool().await;
             }
             for (call,reservation,owner_error) in &reservations {
-                let error=finish_wave2_failed_effect(reservation,"workspace.files/write",owner_error)
+                let error=finish_wave2_failed_effect(reservation,"workspace.process/start",owner_error)
                     .await.unwrap_err();
                 assert_eq!(error.code,"CAPABILITY_UNAVAILABLE","seed {seed}");
                 assert!(error.message.contains("full"),"seed {seed}: {error:?}");
@@ -7338,7 +7662,7 @@ mod tests {
                 workers.push(tokio::spawn(async move {
                     barrier.wait().await;
                     tokio::time::sleep(delay).await;
-                    finish_wave2_failed_effect(&reservation,"workspace.files/write",&error).await
+                    finish_wave2_failed_effect(&reservation,"workspace.process/start",&error).await
                 }));
             }
             barrier.wait().await;
@@ -7358,7 +7682,7 @@ mod tests {
                 assert_eq!(observation["operation_id"],call.operation_id.as_ref());
                 assert_eq!(observation["resource_key"],reservation.request.resource_key.as_deref().unwrap());
                 let head=observer.head(&call.agent_session_id).await.unwrap();
-                finish_wave2_failed_effect(reservation,"workspace.files/write",error).await.unwrap();
+                finish_wave2_failed_effect(reservation,"workspace.process/start",error).await.unwrap();
                 assert_eq!(observer.head(&call.agent_session_id).await.unwrap().last_seq,head.last_seq);
             }
             println!("seed={seed} full_connections=3 unique_terminals=3 replay_new_events=0");
@@ -7779,7 +8103,7 @@ mod tests {
             patch("first.txt","user first","must-not-run-first"),
             patch("second.txt","user second","must-not-run-second")
         ]})).await.unwrap_err();
-        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert_eq!(error.code,explicit_file_unsettled_code());
         assert!(error.message.contains("unsettled"),"{error:?}");
         assert_eq!(reopened_store.read_effect(&pending.agent_session_id,&pending_effect_id).await.unwrap().unwrap().state,
             nomifun_agent_session::AgentEffectState::Pending);
@@ -7837,7 +8161,7 @@ mod tests {
         let error = invoke(&restarted,different.clone(),"workspace.files/delete",json!({
             "path":"victim.txt"
         })).await.unwrap_err();
-        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert_eq!(error.code,explicit_file_unsettled_code());
         assert!(error.message.contains("unsettled"),"{error:?}");
         assert_eq!(reopened_store.read_effect(&pending.agent_session_id,&pending_effect_id).await.unwrap().unwrap().state,
             nomifun_agent_session::AgentEffectState::Pending);
@@ -7894,7 +8218,7 @@ mod tests {
         let error = invoke(&restarted,different.clone(),"workspace.files/delete",json!({
             "path":"tree"
         })).await.unwrap_err();
-        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert_eq!(error.code,explicit_file_unsettled_code());
         assert!(error.message.contains("unsettled"),"{error:?}");
         assert_eq!(reopened_store.read_effect(&pending.agent_session_id,&pending_effect_id).await.unwrap().unwrap().state,
             nomifun_agent_session::AgentEffectState::Pending);

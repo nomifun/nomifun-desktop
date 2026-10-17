@@ -16,9 +16,17 @@ pub(crate) fn remove_entry(path: &Path, root: Option<&crate::windows_read::ReadR
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS).open(path).map_err(io_error)?,
     };
+    if root.is_some() && file.metadata().map_err(io_error)?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(AppError::Conflict("workspace deletion target changed to a link".into()));
+    }
+    remove_pinned(path, file, after_open)
+}
+
+pub(crate) fn remove_pinned(path: &Path, file: File, after_open: impl FnOnce()) -> Result<(), AppError> {
+    let io_error = |error: io::Error| crate::path_safety::native_io_error(format!("removing native entry '{}'", path.display()), error);
     let metadata = file.metadata().map_err(io_error)?;
     let is_link = metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
-    if (is_link && root.is_some()) || (!is_link && !metadata.is_dir() && !metadata.is_file()) {
+    if !is_link && !metadata.is_dir() && !metadata.is_file() {
         return Err(AppError::Conflict("workspace deletion target changed to a link or unsupported entry".into()));
     }
     if crate::windows_read::final_path(&file)? != path {

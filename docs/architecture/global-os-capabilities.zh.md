@@ -17,7 +17,15 @@ Linux 原子替换在已固定的源与 staging fd 上保留 UID/GID、mode 和�
 
 已冻结的默认目录后来真正缺失时，Session 准入和无知识挂载的现役 workspace lease 保留原绝对身份锚点，不创建目录或重写 binding、资源、Snapshot、checkpoint。shared native scope 必须证明真正 missing 且仍匹配原冻结路径；ACL、非目录、悬空链接和重定向不能作为缺失吞掉。原签名 registry、跨进程 OS 锁和 RAII lease 继续保护该命名空间；实际知识挂载仍要求物理目录，unbound lease 不承载挂载元数据。合法绝对文件和进程 cwd 由各自原生 owner 执行；依赖已经消失目录的相对路径或 cwd 仍返回真实错误。
 
-canonical write/patch/delete/rename 的宿主活动写锁保留至 blocking worker 真正结束，跨默认目录的活动修改不交错。原 Store 的 owner + 真实 project root 唯一索引继续保护同项目跨 Session、跨重启的 pending/unknown；不同项目指向同一外部 native 目标时，尚无持久目标重叠围栏。现在磁盘上的链接不能证明过去目标身份；原未知操作禁止自动重放。此缺口不能由临时锁、盘符列表或新增授权/重试账本宣称解决。
+Windows canonical write/patch/delete/rename 在原 Effect started payload 保存本次捕获的 typed `native_mutation_targets`。事实包含原生卷、对象身份、pinned parent 与 native 名称键、祖先和 Entry/Follow 语义；句柄数值不持久化。实际执行复用同一次准备的父目录与 Entry 句柄。宿主活动写锁保留至真实 I/O owner 结束，原 owner + project/resource 围栏同时保留。本次持久目标准入限定 Windows，其他平台保留原文件 owner 与 project/resource 合同，不借 Windows 实现宣称 Unix mount 范围已获证明。
+
+用户已明确选择合作式并发合同：NomiFun 协调自己准入的显式文件 Action；用户、编辑器、同步软件或其他程序同时修改文件、链接和内部 staging 名称的风险由用户协调。捕获身份与现有版本校验继续尽力发现变化，但不承诺对任意外部并发提供目标冻结或“检查对象必定等于稍后 I/O 对象”的保证。外部竞争可能影响另一文件、卷及其 metadata/ACL/streams，不能仅假定当前目标内容保持原样。不为该范围增加文件系统拦截器、第二执行设施或另一份完成/授权账本；已有实际部分结果、unknown、清理证明与禁止自动重放的合同保持。此边界不新增权限模式或确认步骤。
+
+Store 在原 `BEGIN IMMEDIATE` 准入事务中校验所有 pending/unknown 的原始 Effect 事实、检查重叠并追加本次 Effect；不同 Session、项目、owner 或执行身份不构成同物理目标的豁免。rename 两端和 patch 全部目标成组准入，事务不跨文件 I/O 或系统认证。普通文件 delete/rename 按对象、命名空间与祖先比较，覆盖硬链接、可解析别名和 missing 名称竞争。Windows 名称键使用 OS UTF-16 upcase，保守合并大小写不同的名称，避免目录 case mode 变化绕过历史围栏；ADS 与 base file 保守重叠。
+
+write/patch 会发布新对象，目录内容也可在捕获后变化；在未结算时，`volume_wide` 明确保守保护实际 pinned 卷，防止新发布对象的后来硬链接或目录内新增别名绕过旧事实。多文件 publication 可合并相同卷的覆盖事实，全部原生 pins 仍保留；这不是精确的逐路径并发能力。已知不相交的其他卷及精确 Entry 目标可以正常推进。旧 explicit file pending/unknown 若没有充分 target facts，不能靠 digest、项目根、cwd 或当前磁盘证明过去目标，保守拒绝新的显式文件修改；不回填、清理或结算旧 Effect。读取不受此修改围栏影响。
+
+任意 process/shell 副作用没有可声明的完整文件 footprint，仍使用原 opaque process Effect 的 project/resource、进程 owner 与未知结算保护。不会扫描 shell 文本猜测目标，也不会把 cwd 或进程身份说成完整文件围栏；管理员写入经 process 的真实覆盖范围同样如此。
 
 `read_file` 的 text、image 和 instruction_scope 共用 `execution_identity`，缺省是当前用户。管理员读取仍是同一个只读 Action，不新增工具或文件写入权限：原生 worker 使用轻量 `nomi-native-files` 获取受限体积的真实源或目录 scope，App 复用 FileService 的 UTF-8、分页、完整 SHA-256、版本 pin、项目路径投影及图片 decoder。普通与管理员读取共用同一原生读取和 scope 扫描核心；真实缺失、访问拒绝、过大源和失效版本分别处理，拒绝不能成为 absence。
 
@@ -28,6 +36,8 @@ canonical write/patch/delete/rename 的宿主活动写锁保留至 blocking work
 原生 owner 或 transport 的未知结果不能退役为普通历史不可用状态。内部读取先记录原工具结果，再保留原 typed failure；指令 loader 即使把读取错误包装成 warning，也必须重新抛出该失败，并停止本轮的 sibling/fallback 读取。只有完整、已收束的 typed native acquisition failure 可以进入历史退役；不能从错误文案猜测成功、缺失或清理完成。
 
 原生只读错误的 code、message、kind、raw_os_error 沿原 AppError、Wave2、Kernel 和 Agent 工具结果载荷传递；可选结构化 details 不从诊断字符串反推。普通读取保留原本地 IO source 供 pinned owner 往返，管理员读取校验 worker 的 typed failure 与 transport code 一致。投影继续有界并使用现役凭据脱敏，只有成功 acquisition 的 `Source { source: None }` 或普通 owner 已证明的真实缺失才能成为 absence；卷或共享根不可用保留真实 OS 错误。
+
+系统认证或 transport 故障使用同一链上的 typed `SystemExecutionFailure`，保留真实 code/message、可选 kind/raw_os_error 以及已有 `user_code_not_started`、`cleanup_proven` 证据。Windows runas 在启动前返回1223时表达认证取消，不推断由谁操作；指令预检失败沿原 cleanup 和 `turn/failed` 关闭，既不变成 binding 缺失，也不伪装成用户 Stop。已派发、断连或不完整回复仍为 unknown，即使错误数值恰为1223也不能降为确定未执行。API、canonical 历史和 renderer 消费相同 typed 分类，无自动再认证、普通身份降级或原调用重放；真正的资源权限及 native ACL 错误继续使用原语义。
 
 ## 进程与系统执行
 

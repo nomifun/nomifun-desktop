@@ -115,6 +115,11 @@
     "fallbackBody": "本次请求失败，暂时无法确定具体原因。请查看技术细节；如果问题持续出现，请提交反馈并附上这些信息。",
     "details": {
       "rawDetail": "原始详情",
+      "nativeCode": "原生错误码",
+      "nativeKind": "原生 I/O 类型",
+      "nativeOsError": "操作系统错误码",
+      "userCodeNotStarted": "用户代码尚未启动",
+      "cleanupProven": "清理已获证明",
       "agent": "Agent",
       "model": "模型",
       "timestamp": "时间",
@@ -200,6 +205,42 @@
       "send_feedback": "请提交反馈并附带日志，方便团队排查。"
     },
     "codes": {
+      "SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED": {
+        "title": "系统认证已取消",
+        "body": "操作系统未完成认证，受影响的操作已停止。请查看原生执行详情后再继续。"
+      },
+      "SYSTEM_EXECUTION_AUTHENTICATION_DENIED": {
+        "title": "系统认证被拒绝",
+        "body": "操作系统拒绝了本次操作的认证。请查看原生错误和账号要求后再继续。"
+      },
+      "SYSTEM_EXECUTION_AUTHENTICATION_TIMED_OUT": {
+        "title": "系统认证超时",
+        "body": "系统认证未在期限内完成，受影响的操作已停止。"
+      },
+      "SYSTEM_EXECUTION_AUTHENTICATION_UNAVAILABLE": {
+        "title": "系统认证不可用",
+        "body": "操作系统无法为本次操作提供认证。请查看详情中的原生系统设施错误。"
+      },
+      "SYSTEM_EXECUTION_APPROVAL_REQUIRED": {
+        "title": "需要系统批准",
+        "body": "原生系统执行组件需要操作系统批准后才能继续本次操作。"
+      },
+      "SYSTEM_EXECUTION_NOT_AVAILABLE": {
+        "title": "原生系统执行不可用",
+        "body": "原生执行设施无法启动。请查看详情中的原始操作系统错误。"
+      },
+      "SYSTEM_EXECUTION_RESULT_UNKNOWN": {
+        "title": "原生执行结果未知",
+        "body": "原生执行方未提供完整结果。请先核对既有操作效果和清理状态；重复操作可能造成重复效果。"
+      },
+      "SYSTEM_READ_RESULT_UNKNOWN": {
+        "title": "原生读取结果未知",
+        "body": "原生只读执行方未提供完整结果。原始派发和清理事实保留在详情中。"
+      },
+      "SYSTEM_EXECUTION_FAILED": {
+        "title": "原生系统执行失败",
+        "body": "原生执行方报告了失败。请查看详情中的原始错误和执行状态。"
+      },
       "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED": {
         "title": "需要确认会话 Agent 配置",
         "body": "升级涉及权限、工具来源或执行要求的变化，无法自动沿用当前会话的 Agent 配置。请通过会话的 Agent 选择器确认配置后继续；已有记录会保留。"

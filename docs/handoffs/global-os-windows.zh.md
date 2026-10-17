@@ -2,6 +2,10 @@
 
 将本文件全文作为新会话的任务要求执行。先识别当前 Windows checkout 和实际环境，核实源码后持续完成实现及原生验收；不要停在方案报告，也不要再次等待产品方案确认。交接齐全、源码存在、编译通过和完整产品验收是不同事实，不能互相代替。
 
+本轮接续只修复两个发布阻塞：显式 native 文件动作的跨项目持久冲突围栏，以及 Windows UAC 取消在管理员只读/指令预检中的 typed 错误链。`925` 及下文既有原生结果属于上一批来源，不能证明本轮新修复已经构建或验收。本轮已正常合并 main `737c6046`，merge 为 `22094a49be31a911a7a4ec2c0d5527b14887954f`；新的源码冻结、测试、App/NSIS 与 Git 回执按[验证记录](../validation/global-os-windows-2026-10-17.zh.md)消费。
+
+用户于2026-10-18明确选定简化边界：保留 NomiFun 自己准入的显式文件 Action 持久冲突围栏，接受用户或其他程序并发编辑文件、链接和 staging 名称的外部竞争风险，由用户协调。这替代先前要求抵御任意外部并发的严格对象一致保证；不增加权限模式、确认流程或文件系统拦截设施。已有部分效果、unknown、cleanup 与禁止自动重放保持，旧失败和未结算事实不改。原生 source-link 干预的同卷移动、跨卷 metadata 变化已实测并保留，不能把它们写成“外部目标未受影响”。
+
 ## 产品合同
 
 最高原则：**最大权限赋予，最可靠实现，不要搞骚操作。** NomiFun 是用户完全信任的个人 Agent。目标是文件和卷、程序与进程、应用安装、系统配置、服务和后台任务、桌面与跨应用操作、网络和已经提供的设备能力。npm 是一条依赖回归，不能代替操作系统能力。
@@ -70,7 +74,9 @@ named pipe 核对两端确切PID、parent创建时间/映像/登录Session及来
 
 ## 必须保留的事实与未完成项
 
-canonical write/patch/delete/rename 的 `NATIVE_FILE_MUTATIONS` 活动锁保留至 blocking worker 真正结束。原 Store 的 owner+真实project root 唯一索引保护同项目跨Session/重启 pending/unknown；**不同项目指向同一外部 native 目标时仍无持久目标重叠围栏**。不能从当前symlink重建过去目标，也不能用活动锁、新授权/重试账本宣称解决；后续持久冲突证明须进入原 Effect 与 Store 事务。
+canonical write/patch/delete/rename 捕获同一次实际执行持有的 native pins，并将 typed target facts 保存在原 Effect started payload；Store 在原准入事务内检查所有 pending/unknown，不增加目标表、授权或重试账本。原 owner/project/resource 与活动锁继续保护各自边界。普通文件 Entry 比较对象和命名空间；publication 与动态目录明确保守保护实际原生卷，避免新对象及后来硬链接绕过。旧 explicit-file Effect 若没有充分 target facts，保守阻断无法证明不相交的新文件修改；不从当前 symlink/FileID 回填过去，不结算原34d。opaque process 保持原 project/resource 围栏，不能声称覆盖任意 shell 的全部文件副作用。精确覆盖与限制见[当前架构](../architecture/global-os-capabilities.zh.md)。
+
+管理员只读与指令预检使用原生 owner 的 typed `SystemExecutionFailure`，沿 Kernel/Runtime、原 canonical failed Turn、API 和 renderer 传递真实 code、kind/raw OS error 及已知未启动/清理证据。启动前1223不是资源未绑定、ACL拒绝或用户 Stop；已派发/断连 unknown 不能降级为未执行取消。无自动再认证、普通身份 fallback 或重放，真正的 Forbidden/binding 语义保留。真实 UAC 验收由用户在系统窗口完成，脚本不操作安全桌面。
 
 较早普通 Calculator focus 真实失败曾产生unknown，原failed报告和事件不改。用户亲自核实“那次聚焦失败”后，经原 Session owner 接口单次追加attestation/reconciliation，当前rejected、pending/unknown=0；随后同原Session新Turn已准确清理本次Calculator，当前升级保留证据为完整230事件前缀，含原80和原78 uncertain前缀。不能把较早80事件快照当作当前全部事实。修后mock、迟到的前台状态、JWT、重建数据集或新Session均不消除unknown；后续继续沿实际owner/Session，不重放原输入。
 

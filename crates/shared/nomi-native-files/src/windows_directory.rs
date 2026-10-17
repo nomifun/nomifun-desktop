@@ -122,6 +122,14 @@ pub fn open_metadata(parent: Option<&Dir>, path: &Path) -> io::Result<File> {
     open_with(parent, path, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0)
 }
 
+/// Retain an ancestor's object identity without requesting mutation rights.
+/// Metadata-only handles do not participate in Windows sharing checks: this
+/// is not a name lock. Publication keeps a real writable parent; Entry I/O
+/// uses its original DELETE handle and relative destination parent instead.
+pub fn open_namespace_pin(parent: Option<&Dir>, path: &Path) -> io::Result<File> {
+    open_with(parent, path, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_DIRECTORY_FILE)
+}
+
 /// Pin an existing native rename parent using only the right needed to add
 /// that entry kind. This avoids CreateFile's implicit synchronous access and
 /// creates no temporary child requiring extra DELETE access.

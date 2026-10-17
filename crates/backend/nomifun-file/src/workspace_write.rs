@@ -121,6 +121,15 @@ pub(crate) fn prepare_global_rename_parent(path: &Path, directory: bool) -> Resu
 }
 
 fn prepare_target_parent(target: PathBuf, root: PathBuf) -> Result<PreparedParent, AppError> {
+    prepare_target_parent_from(target, root, None)
+}
+
+#[cfg(windows)]
+pub(crate) fn prepare_pinned_parent(target: PathBuf, root: PathBuf, directory: Dir) -> Result<PreparedParent, AppError> {
+    prepare_target_parent_from(target, root, Some(directory))
+}
+
+fn prepare_target_parent_from(target: PathBuf, root: PathBuf, retained: Option<Dir>) -> Result<PreparedParent, AppError> {
     let parent = target.parent().ok_or_else(|| AppError::BadRequest("write path has no parent".into()))?;
     let relative = parent.strip_prefix(&root)
         .map_err(|_| AppError::Conflict("native write parent no longer matches its prepared ancestor".into()))?;
@@ -130,13 +139,15 @@ fn prepare_target_parent(target: PathBuf, root: PathBuf) -> Result<PreparedParen
     #[cfg(unix)]
     let mut dir = crate::unix_directory::open_search(None, &root)
         .map_err(|error| crate::path_safety::native_io_error("opening native write parent", error))?;
+    #[cfg(not(windows))]
+    let _ = retained;
     #[cfg(unix)]
     let root_directory = dir.try_clone().map_err(|error| AppError::BadRequest(format!("cannot retain workspace root: {error}")))?;
     #[cfg(unix)]
     crate::unix_directory::verify_named(&root_directory, &root)
         .map_err(|_| AppError::Conflict("workspace root changed identity during write preparation".into()))?;
     #[cfg(windows)]
-    let mut dir = open_windows_root(&root)?;
+    let mut dir = match retained { Some(directory) => { verify_windows_parent(&directory, &root)?; directory }, None => open_windows_root(&root)? };
     #[cfg(windows)]
     let mut directories = vec![dir.try_clone().map_err(parent_io_error)?];
     #[cfg(windows)]
@@ -237,7 +248,7 @@ fn open_windows_child(directory: &Dir, name: &std::ffi::OsStr) -> std::io::Resul
 }
 
 #[cfg(windows)]
-fn windows_parent_path_matches(actual: &Path, expected: &Path) -> bool {
+pub(crate) fn windows_parent_path_matches(actual: &Path, expected: &Path) -> bool {
     if actual == expected { return true; }
     fn unc_root(path: &Path) -> Option<(&std::ffi::OsStr, &std::ffi::OsStr)> {
         let Component::Prefix(prefix) = path.components().next()? else { return None; };

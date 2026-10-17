@@ -4,7 +4,31 @@
 
 本机为 Windows 10 Pro 22H2 x64、19045.6466；Rust 为 1.99.0，host/installed target 为 `x86_64-pc-windows-msvc`，Bun 1.4.2。真实登录身份为 `DESKTOP-NF7D5NP\muli`、Session 1、普通非 elevated token；USERPROFILE 为 `C:\Users\muli`。原始日志及报告位于本任务可视化目录的 `windows-native/`，JWT、私有数据集、截图、二进制和测试目录不提交。旧 macOS 的签名/原生报告仍属于[原三平台矩阵](global-os-2026-10-16.zh.md)，不计入本机结果。
 
-## 本轮交付结果：925 生产冻结
+## 发布阻塞修复接续
+
+本次从干净 `codex/windows-global-os` / `59d8c0db3061684faa972528982d204b97a49631` 接续，只处理跨项目持久 native 目标冲突与 UAC typed 错误链。核实远端 main 为 `737c6046bf7c823f674ca7cbaa4ad66bbdcd22ec` 后普通合入，merge `22094a49be31a911a7a4ec2c0d5527b14887954f`，没有 rebase、force 或覆盖无关工作。PR26 仍是同一个已附加的 draft PR；首次 API 读取为 open/mergeable/clean，main 未配置分支保护或 ruleset、无 review 和 check run，不能将空的状态组合说成 CI 已通过。
+
+首次命令结果、PR/rules 只读回执及后续日志保存在仓库外 `C:\Users\muli\.codex\visualizations\2026\10\17\01a14a71-8603-72e1-b928-fe93567f3dae\windows-native`。真实登录 token 核对 Windows10 Pro / 19045 / x64、Session1、Rust1.99 MSVC、Bun1.4.2；CurrentUser 与 LocalMachine 均无代码签名证书。原 UAC 失败报告实际 SHA 仍为 `83d45f1170417b4123d39739b6461b0a5ed048ee31a9c6d0e26e282e1ec1074b`，没有修改历史失败或34d/BoHTo0。
+
+源码将 Windows 本次 pinned target facts 保存在原 Effect started payload，原写事务原子检查重叠；不改 baseline/checksum，不增加目标表。publication 与动态目录显式使用保守卷范围，旧缺乏目标事实的文件 unknown 保守拒绝无法证明不相交的新文件修改。其他平台保留原文件与 project/resource 合同；任意 process/shell 仍为原 opaque Effect，不声明精确文件 footprint。详细边界见[当前架构](../architecture/global-os-capabilities.zh.md)。系统认证沿原 native→AppError→Kernel/Runtime→canonical failed Turn→API/renderer 保存 typed code、真实 OS 值与已知未启动/清理证据；unknown、普通 ACL 和真正 binding 错误分别保留。
+
+当前已取得 Session 全套267通过/0失败、含8项新准入/别名/多实例/重开/unknown/旧事实反例；独立 UAC/Host 源码审查、定向 UI 9通过/191断言、完整 TypeScript 和 desktop boundary，以及初轮文档检查通过。最终冻结、修前/修后 App 回归、Windows UAC/文件原生、新 App/NSIS、正常退出/安装数据保留与普通 Git 合并仍按后续实际回执分别记录，当前这些检查不能替代它们。
+
+隔离修前源码的首轮 App 测试尚未运行便在 ORT 链接失败；实际环境继承 `CARGO_NET_OFFLINE=true`，导致其占位错误符号与 `OrtGetApiBase` 未解析。保留 `cross-project-baseline-ort-link-failure.log`；只在后续构建进程移除该变量并保留 Cargo 的 `--offline` 参数，不改全局环境、依赖、ACL 或生产逻辑，也不把链接失败当成已复现目标冲突漏洞。
+
+纠正构建环境后，隔离修前 `22094a49` 仅加入回归测试，真实普通登录 token 下实际失败：第一个项目已写入并丢失 canonical settlement，数据库关闭重开后第二个项目仍真实返回 `written=true`、`created=false` 并改写同一外部文件。测试为0通过/1失败，actual101、1.57秒；`cross-project-before-fix.log` 和 `cross-project-baseline-counterexample.json` 保存原输出、源码/tree、测试 patch 与 executable 摘要。这是真实 FileService/Store/Windows I/O 反例，不是编译失败、镜像 predicate 或旧生产二进制的修后证据；修后相同接缝及真实进程重启另验。
+
+### 2026-10-18 明确的外部并发边界
+
+用户明确选择“按这个边界简化实现”：NomiFun 协调自己准入的显式文件 Action；用户或其他程序并发编辑文件、链接与 staging 名称的外部竞争由用户协调。不再把抵御任意外部编辑、始终冻结后续 I/O 对象作为本轮发布条件。原 Effect、幂等、部分结果、unknown、原生清理与禁止自动重放保留；任意 process/shell 不因此获得精确文件 footprint，也没有增加权限模式或新执行设施。
+
+该决定建立在真实独立夹具的结果之上。`windows_native.exe --file-symlink-fixture` 经用户在系统 UAC 允许后，原系统 runner 创建四组同卷/跨卷 source/target FILE symlink；C/D 的实际卷身份不同，worker32312 exit0/reaped、helper32684 exact shutdown/facility exit proven，六个唯一根保留。创建回执 `file-symlink-fixture-native.json` SHA-256 `3684b054bd22c2b32d46232c4f7284298634a734199a142ddf376f0d38adb399`，与旧 Agent 数据无关。
+
+原严格 probe 首次执行被自动审批在派发前拒绝，理由是尚未证明精确修改目标的授权；只读 marker、owner、FileID、内容、ADS/SDDL 与创建 manifest 核对后，同范围执行获准。`replacefile-probe-owned-fixture-preflight.json` 与四份原日志/各目录 `probe-result.json` 保留，未使用旁路审批。target 两组均原生1464拒绝，外部 bytes/metadata 未变；source 同卷组实际移动了外部 sentinel，跨卷组 bytes 保持但 metadata 已变。两组 source 原严格断言实际101，均保留未验证/清理未确认结果，未伪装为成功或确定未执行；该独立库诊断没有 Agent Effect，不等于 canonical 对账。`replacefile-final-symlink-native-summary.json` 保留这两个失败，不重跑已消费链接或清理部分结果。当前 opt-in 诊断改为验证外部干预下的诚实不确定结果表达，不再要求超出新合同的外部不变保证。
+
+整合 App 测试首次编译另发现 `caps_creative_studio.rs` 穷尽匹配漏掉新增 `AppError::SystemExecution`，在测试执行前101；已补该领域自己的明确系统执行失败显示，不将其误报 Canvas 不存在，原编译日志保留。源码首轮完整 `bun run check` 实际0；最终冻结与原生 App 的 UAC 取消/允许、跨项目围栏和安装证据仍以之后回执为准。
+
+## 上一批交付结果：925 生产冻结
 
 当前完整实现与原生补验已完成，生产源码为 `925e775a1c070fbbef75d8c2db0bbb5c27ce97e3`、tree `55a42d1b26a70c28faf9b11e4709c1f7ea72f36f`，含普通合并main至2c6及真实UI准备owner修复。最终其余变化仅为等待验收器和本记录/交接，不借验证文档提交冒充另一次production build。完整提交与普通推送以 `codex/windows-global-os` 和 [PR26](https://github.com/nomifun/nomifun-desktop/pull/26) 的实际Git回执为准；没有改写main。
 

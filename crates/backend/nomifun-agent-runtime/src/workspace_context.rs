@@ -1744,6 +1744,47 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn administrator_preflight_authentication_failure_stops_before_proposed_mutation_and_journals_typed_result() {
+        struct Owner { diagnostic: nomifun_agent_contracts::SystemExecutionFailure, reads: AtomicU32, effects: AtomicU32 }
+        #[async_trait]
+        impl AgentToolInvoker for Owner {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+                if invocation.binding.action_id.as_ref() != "workspace.files/read" {
+                    self.effects.fetch_add(1, Ordering::Relaxed);
+                    panic!("mutation dispatch must not precede successful native instruction acquisition");
+                }
+                assert_eq!(invocation.call.arguments.0["execution_identity"], "administrator");
+                self.reads.fetch_add(1, Ordering::Relaxed);
+                Err(AgentEngineError::CapabilityKernel { code:self.diagnostic.code.clone(), message:self.diagnostic.message.clone(),
+                    details:Some(json!({"system_execution_error":self.diagnostic})) })
+            }
+        }
+        for (code, facts) in [
+            ("SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED", json!({"raw_os_error":1223,"kind":"Uncategorized","user_code_not_started":true,"cleanup_proven":true})),
+            ("SYSTEM_EXECUTION_AUTHENTICATION_DENIED", json!({"user_code_not_started":true,"cleanup_proven":true})),
+            ("SYSTEM_READ_RESULT_UNKNOWN", json!({"user_code_not_started":false,"cleanup_proven":false})),
+        ] {
+            let mut instructions = instructions();
+            let sink = RecordingSink::default();
+            let diagnostic = nomifun_agent_contracts::SystemExecutionFailure::from_owner(code.into(), "native readonly owner failure".into(), &facts);
+            let owner = Owner { diagnostic:diagnostic.clone(), reads:AtomicU32::new(0), effects:AtomicU32::new(0) };
+            let proposed = ChatToolCall { arguments:StrictJsonValue(json!({"command":"unexecuted mutation","cwd":protected_directory(),"execution_identity":"administrator"})), ..call("start_process", None) };
+            let error = instructions.before_calls(&[proposed], &owner, &sink, CancellationToken::new()).await.unwrap_err();
+            assert!(matches!(error, AgentEngineError::CapabilityKernel { ref code, .. } if code == &diagnostic.code));
+            assert_eq!(owner.reads.load(Ordering::Relaxed), 1, "no authentication retry or ordinary fallback");
+            assert_eq!(owner.effects.load(Ordering::Relaxed), 0);
+            let events = sink.0.lock().unwrap();
+            assert!(events.iter().any(|event| matches!(event, AgentEngineEvent::ToolStarted { action_id, .. } if action_id.as_ref() == "workspace.files/read")));
+            assert!(!events.iter().any(|event| matches!(event, AgentEngineEvent::ToolStarted { action_id, .. } if action_id.as_ref() == "workspace.process/start")));
+            let recorded = events.iter().find_map(|event| match event {
+                AgentEngineEvent::ToolCompleted { result, .. } if result.is_error => serde_json::from_str::<Value>(&result.output_text()).ok(), _ => None,
+            }).expect("the internal preflight retains its original canonical ToolCompleted");
+            assert_eq!(recorded["details"]["system_execution_error"], serde_json::to_value(diagnostic).unwrap());
+            assert!(!instructions.has_context());
+        }
+    }
+
     #[test]
     fn historical_notice_is_bounded_escaped_data_and_preserves_contract_rejection() {
         let mut notices = BTreeMap::new();

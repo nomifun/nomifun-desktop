@@ -41,6 +41,8 @@ pub mod runtime;
 pub mod schema;
 pub mod session;
 pub mod supervision;
+pub mod system_execution;
+pub use system_execution::SystemExecutionFailure;
 pub mod storage_relocation;
 pub mod validation;
 
@@ -73,6 +75,8 @@ pub use schema::{
 pub use session::*;
 mod native_execution;
 pub use native_execution::*;
+pub mod native_mutation;
+pub use native_mutation::*;
 pub use supervision::*;
 pub use storage_relocation::*;
 pub use validation::*;

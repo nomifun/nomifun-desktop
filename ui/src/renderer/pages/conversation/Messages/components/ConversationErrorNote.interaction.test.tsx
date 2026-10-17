@@ -101,3 +101,23 @@ test('an unknown diagnostic does not turn arbitrary text into a key-expired diag
   });
   expect(page.getByRole('alert').textContent).toBe(enConversation.agentError.codes.USER_LLM_PROVIDER_UNAVAILABLE.title);
 });
+
+test.each(['en-US', 'zh-CN'])('native authentication and unknown results use canonical classification and show exact facts in %s', async language => {
+  const locale = language === 'zh-CN' ? zhConversation : enConversation;
+  for (const code of ['SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED', 'SYSTEM_READ_RESULT_UNKNOWN'] as const) {
+    const cancelled = code === 'SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED';
+    const { page } = await mount({ code, message:'PRESET_RESOURCE_NOT_BOUND and access denied are only prose',
+      systemExecutionError: { code, message:'original native owner message', kind:cancelled ? 'Uncategorized' : null,
+        raw_os_error:cancelled ? 1223 : null, user_code_not_started:cancelled, cleanup_proven:cancelled } }, language);
+    expect(page.getByRole('alert').textContent).toBe(locale.agentError.codes[code].title);
+    expect(page.queryByText(locale.agentError.codes.NOMIFUN_INTERNAL_ERROR.title)).toBeNull();
+    fireEvent.click(page.getByRole('button', { name:locale.agentError.expandDetails }));
+    const text = page.getByRole('region').textContent;
+    expect(text).toContain(code);
+    expect(text).toContain('original native owner message');
+    expect(text).toContain(locale.agentError.details.userCodeNotStarted);
+    expect(text).toContain(cancelled ? '1223' : locale.agentError.details.unavailable);
+    expect(text).toContain(cancelled ? 'true' : 'false');
+    cleanup();
+  }
+});

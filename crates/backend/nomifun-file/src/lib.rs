@@ -36,6 +36,10 @@ pub mod watch_service;
 pub mod workspace_listing;
 mod vcs_stage;
 mod workspace_write;
+#[cfg(windows)]
+mod native_mutation;
+#[cfg(windows)]
+pub use native_mutation::{NativeMutationRequest, PreparedNativeMutation};
 mod workspace_observation;
 mod workspace_read_dir;
 mod zip_source;

@@ -460,7 +460,15 @@ fn owner_failure_detail(detail: &str, limit: usize) -> String {
 /// Unknown diagnostic shapes do not change the original failed invocation.
 fn owner_failure_details(details: Option<&serde_json::Value>) -> Option<serde_json::Value> {
     const MAX_DETAILS_BYTES: usize = 8 * 1024;
-    let native = details?.as_object()?.get("native_file_error")?.as_object()?;
+    let details = details?.as_object()?;
+    if let Some(system) = details.get("system_execution_error") {
+        let mut failure: nomifun_agent_contracts::SystemExecutionFailure = serde_json::from_value(system.clone()).ok()?;
+        failure.message = owner_failure_detail(&failure.message, 1024);
+        if !failure.validate() { return None; }
+        let projected = serde_json::json!({"system_execution_error": failure});
+        return (serde_json::to_vec(&projected).ok()?.len() <= MAX_DETAILS_BYTES).then_some(projected);
+    }
+    let native = details.get("native_file_error")?.as_object()?;
     let code = native.get("code")?.as_str()?;
     if !matches!(code, "INVALID_PAYLOAD" | "FILE_CHANGED_DURING_READ"
         | "NATIVE_FILE_ACQUIRE_UNAVAILABLE" | "SYSTEM_ACCESS_DENIED"

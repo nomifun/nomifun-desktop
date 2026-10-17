@@ -120,12 +120,35 @@ fn before(code: &str, message: impl Into<String>) -> SystemExecutionError {
         details: json!({"user_code_not_started":true,"cleanup_proven":true}),
     }
 }
+fn before_io(code: &str, operation: &str, error: io::Error) -> SystemExecutionError {
+    let mut failure = before(code, format!("{operation}: {error}"));
+    failure.details["kind"] = format!("{:?}", error.kind()).into();
+    failure.details["raw_os_error"] = json!(error.raw_os_error());
+    failure
+}
+
+fn launch_failure(error: io::Error) -> SystemExecutionError {
+    // ERROR_CANCELLED describes the OS outcome, not who dismissed the native
+    // prompt. Other launch errors (including access denied) are insufficient
+    // evidence of an authentication rejection.
+    let code = match error.raw_os_error() {
+        Some(1223) => "SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED",
+        _ => "SYSTEM_EXECUTION_NOT_AVAILABLE",
+    };
+    before_io(code, "Windows UAC runner was not started", error)
+}
 pub(super) fn unknown(message: impl Into<String>) -> SystemExecutionError {
     SystemExecutionError {
         code: "SYSTEM_EXECUTION_RESULT_UNKNOWN".into(),
         message: message.into(),
         details: json!({"user_code_not_started":false,"cleanup_proven":false}),
     }
+}
+fn unknown_io(operation: &str, error: io::Error) -> SystemExecutionError {
+    let mut failure = unknown(format!("{operation}: {error}"));
+    failure.details["kind"] = format!("{:?}", error.kind()).into();
+    failure.details["raw_os_error"] = json!(error.raw_os_error());
+    failure
 }
 fn process(pid: u32) -> io::Result<Handle> {
     Handle::new(unsafe {
@@ -249,11 +272,11 @@ impl Facility {
             ));
         }
         let executable = std::env::current_exe()
-            .map_err(|e| before("SYSTEM_EXECUTION_NOT_AVAILABLE", e.to_string()))?;
+            .map_err(|e| before_io("SYSTEM_EXECUTION_NOT_AVAILABLE", "Locating the native executable", e))?;
         let key = Uuid::now_v7();
         let pipe = format!(r"\\.\pipe\NomiFun.SystemExecution.{key}");
         let stamp = created(unsafe { GetCurrentProcess() })
-            .map_err(|e| before("SYSTEM_EXECUTION_NOT_AVAILABLE", e.to_string()))?;
+            .map_err(|e| before_io("SYSTEM_EXECUTION_NOT_AVAILABLE", "Reading the native host identity", e))?;
         let arguments = wide(format!("{MODE} {key} {} {stamp}", std::process::id()));
         let executable = wide(executable);
         let verb = wide("runas");
@@ -278,14 +301,7 @@ impl Facility {
             }
         }
         if !launched {
-            return Err(before(
-                if error.raw_os_error() == Some(1223) {
-                    "SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED"
-                } else {
-                    "SYSTEM_EXECUTION_NOT_AVAILABLE"
-                },
-                format!("Windows UAC runner was not started: {error}"),
-            ));
+            return Err(launch_failure(error));
         }
         let process = Handle::new(info.hProcess)
             .map_err(|e| unknown(format!("UAC returned no runner process handle: {e}")))?;
@@ -328,35 +344,34 @@ impl Facility {
                 )
             };
             if handle != INVALID_HANDLE_VALUE {
-                break Handle::new(handle).map_err(|e| unknown(e.to_string()))?;
+                break Handle::new(handle).map_err(|e| unknown_io("Retaining the original administrator pipe", e))?;
             }
             let error = io::Error::last_os_error();
             if !matches!(error.raw_os_error(), Some(2 | 231))
                 || Instant::now() >= deadline
                 || !self.process.running()
             {
-                return Err(unknown(format!(
-                    "Cannot connect to the original administrator runner: {error}"
-                )));
+                return Err(unknown_io("Cannot connect to the original administrator runner", error));
             }
             thread::sleep(Duration::from_millis(10));
         };
         let mut server = 0;
-        if unsafe { GetNamedPipeServerProcessId(pipe.0, &mut server) } == 0
-            || server != unsafe { GetProcessId(self.process.0) }
-        {
+        if unsafe { GetNamedPipeServerProcessId(pipe.0, &mut server) } == 0 {
+            return Err(unknown_io("Reading the administrator pipe server identity", io::Error::last_os_error()));
+        }
+        if server != unsafe { GetProcessId(self.process.0) } {
             return Err(unknown(
                 "Administrator pipe server identity differs from the retained UAC process",
             ));
         }
         write_frame(pipe.0, &bytes, deadline, &self.process)
-            .map_err(|e| unknown(format!("Administrator request dispatch is unknown: {e}")))?;
+            .map_err(|e| unknown_io("Administrator request dispatch is unknown", e))?;
         let response = read_frame(pipe.0, MAX_REPLY, deadline, &self.process)
-            .map_err(|e| unknown(format!("Administrator reply is unknown: {e}")))?;
+            .map_err(|e| unknown_io("Administrator reply is unknown", e))?;
         // DisconnectNamedPipe discards unread buffered data. A receipt ACK lets
         // the server close only after the entire bounded reply was consumed.
         write_frame(pipe.0, &[1], deadline, &self.process)
-            .map_err(|e| unknown(format!("Administrator reply acknowledgement failed: {e}")))?;
+            .map_err(|e| unknown_io("Administrator reply acknowledgement failed", e))?;
         let reply: Value = serde_json::from_slice(&response)
             .map_err(|e| unknown(format!("Invalid administrator reply: {e}")))?;
         if reply["build"] != BUILD
@@ -1002,6 +1017,33 @@ pub(super) fn unregister() -> Result<(), SystemExecutionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uac_launch_failure_preserves_os_facts_without_guessing_who_cancelled() {
+        for raw in [1223, 5, 2, 1460] {
+            let native = io::Error::from_raw_os_error(raw);
+            let kind = format!("{:?}", native.kind());
+            let failure = launch_failure(native);
+            assert_eq!(failure.code, if raw == 1223 { "SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED" } else { "SYSTEM_EXECUTION_NOT_AVAILABLE" });
+            assert_eq!(failure.details["raw_os_error"], raw);
+            assert_eq!(failure.details["kind"], kind);
+            assert_eq!(failure.details["user_code_not_started"], true);
+            assert_eq!(failure.details["cleanup_proven"], true);
+        }
+        let failure = launch_failure(io::Error::other("no OS code; os error 1223 is only prose"));
+        assert_eq!(failure.code, "SYSTEM_EXECUTION_NOT_AVAILABLE");
+        assert!(failure.details["raw_os_error"].is_null());
+        let uncertain = unknown("disconnected after dispatch; UAC 1223 is only prose");
+        assert_eq!(uncertain.code, "SYSTEM_EXECUTION_RESULT_UNKNOWN");
+        assert_eq!(uncertain.details["user_code_not_started"], false);
+        assert_eq!(uncertain.details["cleanup_proven"], false);
+        assert!(uncertain.details.get("raw_os_error").is_none());
+        let disconnected = unknown_io("reply failed after dispatch", io::Error::from_raw_os_error(1223));
+        assert_eq!(disconnected.code, "SYSTEM_EXECUTION_RESULT_UNKNOWN");
+        assert_eq!(disconnected.details["raw_os_error"], 1223);
+        assert_eq!(disconnected.details["user_code_not_started"], false);
+        assert_eq!(disconnected.details["cleanup_proven"], false);
+    }
     // Exercise the real named-pipe framing and Runner without UAC. These are
     // transport tests, never evidence of an administrator token or product UI.
     fn security() -> PipeSecurity {
@@ -1060,6 +1102,40 @@ mod tests {
         );
         write_frame(pipe.0, &[1], deadline, &peer).unwrap();
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn lost_native_reply_after_dispatch_remains_unknown_with_actual_pipe_error() {
+        let name = format!(r"\\.\pipe\NomiFun.SystemExecution.LostReply.{}", Uuid::now_v7());
+        let pipe = listener(&name, &security(), true).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            let peer = process(std::process::id()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            connect_pipe(&pipe, &peer, None, deadline).unwrap();
+            let bytes = read_frame(pipe.0, MAX_REQUEST, deadline, &peer).unwrap();
+            let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(envelope["build"], BUILD);
+            assert_eq!(envelope["request"]["op"], "acquire_read");
+            sent.send(envelope).unwrap();
+            // The actual Windows pipe disappears after accepting the whole
+            // original request. There is intentionally no result or ACK.
+            drop(pipe);
+        });
+        let facility = Facility { pipe:name, process:process(std::process::id()).unwrap(),
+            stopped:AtomicBool::new(false), foreground_admission:FacilityAdmission::default() };
+        let connection = Uuid::now_v7();
+        let failure = facility.exchange(connection, json!({"op":"acquire_read","request":{"kind":"fixture"}})).unwrap_err();
+        let original = received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(original["connection"], connection.to_string());
+        worker.join().unwrap();
+        assert_eq!(failure.code, "SYSTEM_EXECUTION_RESULT_UNKNOWN");
+        assert_eq!(failure.details["user_code_not_started"], false);
+        assert_eq!(failure.details["cleanup_proven"], false);
+        let raw = failure.details["raw_os_error"].as_i64().expect("the real disconnected Windows pipe supplies its native error");
+        assert!(matches!(raw, 109 | 232 | 233), "unexpected real pipe error: {failure:?}");
+        assert_eq!(failure.details["kind"], format!("{:?}", io::Error::from_raw_os_error(raw as i32).kind()));
+        assert!(received.try_recv().is_err(), "the lost request was never replayed");
     }
     #[test]
     fn native_windows_runner_shell_cancel_terminal_and_cleanup() {
