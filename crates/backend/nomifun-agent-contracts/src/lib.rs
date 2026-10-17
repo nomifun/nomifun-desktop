@@ -47,7 +47,7 @@ pub mod validation;
 pub use closure::*;
 pub use binding_evolution::*;
 pub use catalog::*;
-pub use chat_model::ReasoningEffort;
+pub use chat_model::{ChatOutputTextSource, ReasoningEffort};
 pub use chat_model::{ModelFailureDiagnostic, ModelFailureReason, MODEL_GATEWAY_CATALOG_BASELINE_PARAM};
 pub use digest::{
     ArtifactEnvelope, CanonicalDigestError, canonical_json_bytes, digest_bytes, digest_payload,

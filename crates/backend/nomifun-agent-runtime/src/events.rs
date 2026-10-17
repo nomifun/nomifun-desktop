@@ -240,6 +240,8 @@ pub enum AgentEngineEvent {
     OutputTextDelta {
         step: u16,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<nomifun_agent_contracts::ChatOutputTextSource>,
     },
     ReasoningDelta {
         step: u16,

@@ -1445,7 +1445,7 @@ mod verification_tests {
         // Any event after the canonical terminal is rejected.
         let mut decoder = verification_decoder(vec![
             Ok(vec![ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed }]),
-            Ok(vec![ChatModelEvent::OutputTextDelta { text: "late".into() }]),
+            Ok(vec![ChatModelEvent::OutputTextDelta { text: "late".into(), source: None }]),
         ]);
         decoder.decode_frame(frame()).unwrap();
         let error = decoder.decode_frame(frame()).unwrap_err();
@@ -2229,7 +2229,7 @@ fn decode_frame_for_protocol(
         | "message.delta"
         | "response.output_text.delta" => {
             if let Some(text) = text_delta(&frame.data) {
-                events.push(ChatModelEvent::OutputTextDelta { text });
+                events.push(ChatModelEvent::OutputTextDelta { text, source: None });
             }
             if let Some(reasoning) = reasoning_delta(&frame.data) {
                 events.push(ChatModelEvent::ReasoningDelta { text: reasoning });
@@ -2342,7 +2342,7 @@ fn decode_frame_for_protocol(
         }
         _ => {
             if let Some(text) = text_delta(&frame.data) {
-                events.push(ChatModelEvent::OutputTextDelta { text });
+                events.push(ChatModelEvent::OutputTextDelta { text, source: None });
             } else if let Some(usage) = usage_from_nested(&frame.data) {
                 events.push(ChatModelEvent::Usage { usage });
             } else if is_terminal_frame(&frame.data) {
@@ -2500,6 +2500,7 @@ fn decode_openai_chat_raw_frame(
                 {
                     events.push(ChatModelEvent::OutputTextDelta {
                         text: text.to_owned(),
+                        source: None,
                     });
                 }
                 if let Some(reasoning) = extract_openai_raw_reasoning(delta) {
@@ -2730,6 +2731,7 @@ fn decode_gemini_raw_frame(
                         } else {
                             ChatModelEvent::OutputTextDelta {
                                 text: text.to_owned(),
+                                source: None,
                             }
                         };
                         events.push(event);

@@ -851,6 +851,29 @@ pub enum ChatFinishReason {
     Cancelled,
 }
 
+/// A provider-declared text block within one model response. Transport frames
+/// and reasoning events do not create text blocks. Protocols without native
+/// block identities leave this absent and use the model step's single source.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatOutputTextSource {
+    pub item_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_index: Option<u32>,
+    pub content_index: u32,
+}
+
+impl ChatOutputTextSource {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.item_id.is_empty() || self.item_id.trim() != self.item_id
+            || self.item_id.len() > 256 || self.item_id.chars().any(char::is_control)
+        {
+            return Err("invalid output text source identity");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ChatModelEvent {
@@ -860,6 +883,8 @@ pub enum ChatModelEvent {
     },
     OutputTextDelta {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<ChatOutputTextSource>,
     },
     OutputAudioDelta {
         media_type: String,

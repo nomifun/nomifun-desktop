@@ -544,7 +544,7 @@ mod tests {
                         arguments: StrictJsonValue(serde_json::json!({"id": self.target, "limit": 4096})),
                         provider_metadata: None,
                     } }), Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls })],
-                    1 => vec![Ok(ChatModelEvent::OutputTextDelta { text: "The reference read was checked.".into() }),
+                    1 => vec![Ok(ChatModelEvent::OutputTextDelta { text: "The reference read was checked.".into(), source: None }),
                         Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed })],
                     _ => panic!("one resource probe unexpectedly needed another model request"),
                 };

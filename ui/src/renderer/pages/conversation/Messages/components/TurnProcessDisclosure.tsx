@@ -45,7 +45,6 @@ export interface TurnProcessDisclosureExpansionSnapshot {
   itemId: string;
   hasProcessItems: boolean;
   defaultCollapsed: boolean;
-  running: boolean;
 }
 
 const sanitizeDomId = (value: string): string => value.replace(/[^A-Za-z0-9_-]/g, '_');
@@ -174,7 +173,6 @@ function TurnProcessDisclosure<T>({
     itemId,
     hasProcessItems,
     defaultCollapsed,
-    running,
   });
 
   useEffect(() => {
@@ -182,7 +180,6 @@ function TurnProcessDisclosure<T>({
       itemId,
       hasProcessItems,
       defaultCollapsed,
-      running,
     };
     const shouldReset = shouldResetTurnProcessDisclosureExpansion(expansionSnapshotRef.current, nextSnapshot);
     expansionSnapshotRef.current = nextSnapshot;
@@ -218,7 +215,7 @@ function TurnProcessDisclosure<T>({
     const itemKey = getProcessItemKey(processItem);
     const state = getProcessItemState(processItem);
     const layoutKind = getProcessItemLayoutKind?.(processItem) ?? 'other';
-    return <div key={itemKey} data-process-segment-id={itemKey} data-process-source-message-id={getProcessItemSourceId?.(processItem)}
+    return <div key={`item:${itemKey}`} data-process-segment-id={itemKey} data-process-source-message-id={getProcessItemSourceId?.(processItem)}
       className={classNames('turn-process-disclosure__item', `turn-process-disclosure__item--${layoutKind}`,
         `turn-process-disclosure__item--${state}`)}>
       {renderProcessItem(processItem)}
@@ -286,7 +283,7 @@ function TurnProcessDisclosure<T>({
       {disclosureExpanded && item && (
         <div id={bodyId} className='turn-process-disclosure__body'>
           {entries.map(entry => entry.kind === 'item' ? renderEntryItem(entry.item) :
-            <ProcessGroup key={entry.id} id={entry.id} items={entry.items}
+            <ProcessGroup key={`group:${entry.id}`} id={entry.id} items={entry.items}
               label={getProcessGroupLabel?.(entry.items) ?? t('conversation.thinking.complete')}
               running={running && (entry.id === continuingGroupId
                 || entry.items.some(processItem => getProcessItemState(processItem) === 'running'))}

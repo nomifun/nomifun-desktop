@@ -1,6 +1,7 @@
 //! Bounded persistence projection. UI deltas remain live; replay keeps display
 //! text, thinking, and completed calls without every provider fragment.
 use nomifun_chat_model_broker::{ChatContentPart, ChatToolCall, ToolCallId};
+use nomifun_agent_contracts::ChatOutputTextSource;
 use nomifun_agent_runtime::{AgentCompactedItem, AgentEngineEvent, AgentToolResult};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -8,40 +9,52 @@ use std::collections::BTreeSet;
 const FLUSH_BYTES: usize = 16 * 1024;
 const MAX_THINKING_BYTES_PER_TURN: usize = 512 * 1024;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ContentPhase {
-    Narration(u16),
-    Reasoning(u16),
-}
-
 #[derive(Default)]
 pub(super) struct AgentEventBuffer {
-    text: Option<(u16, String)>,
+    text: Option<(u16, Option<ChatOutputTextSource>, String)>,
     thinking: Option<(u16, String)>,
     thinking_bytes: usize,
-    active_phase: Option<ContentPhase>,
+    narration_source: Option<(u16, Option<ChatOutputTextSource>)>,
+    thinking_step: Option<u16>,
     instruction_reads: BTreeSet<ToolCallId>,
     proposal_ids: BTreeSet<ToolCallId>,
 }
 
 impl AgentEventBuffer {
+    /// The owner may commit steering while the same model stream is active.
+    /// Its next fragment must expose the new canonical boundary before live
+    /// publication, even though the model's text source has not changed.
+    pub(super) fn narration_boundary(&mut self) {
+        self.narration_source = None;
+    }
+
     pub(super) fn project(&mut self, event: &AgentEngineEvent) -> Vec<AgentEngineEvent> {
         let mut records = Vec::new();
+        // Reasoning activity and text ownership are independent. A late
+        // reasoning fragment must not manufacture another narration boundary.
         let transition = match event {
             AgentEngineEvent::OutputTextDelta { text, .. } if text.is_empty() => None,
-            AgentEngineEvent::OutputTextDelta { step, .. }
-            | AgentEngineEvent::CompletionDelivered { step, .. } => Some(Some(ContentPhase::Narration(*step))),
-            AgentEngineEvent::ReasoningDelta { step, .. } => Some(Some(ContentPhase::Reasoning(*step))),
-            _ => event.reasoning_display_transition().map(|_| None),
+            _ => event.reasoning_display_transition(),
         };
-        let starts_narration = matches!(transition, Some(Some(ContentPhase::Narration(_))))
-            && transition != Some(self.active_phase);
-        let starts_thinking = matches!(transition, Some(Some(ContentPhase::Reasoning(_))))
-            && transition != Some(self.active_phase);
-        let closes_phase = self.active_phase.is_some() && transition == Some(None);
-        if let Some(next) = transition {
-            self.active_phase = next;
+        let closes_content = transition == Some(None)
+            && !matches!(event, AgentEngineEvent::OutputTextDelta { .. });
+        let closes_phase = closes_content
+            && (self.narration_source.is_some() || self.thinking_step.is_some());
+        if closes_content {
+            self.narration_source = None;
         }
+        let starts_narration = match event {
+            AgentEngineEvent::OutputTextDelta { step, source, text } if !text.is_empty() => {
+                let next = (*step, source.clone());
+                let starts = self.narration_source.as_ref() != Some(&next);
+                self.narration_source = Some(next);
+                starts
+            }
+            _ => false,
+        };
+        let starts_thinking = matches!(event, AgentEngineEvent::ReasoningDelta { step, .. }
+            if self.thinking_step != Some(*step));
+        if let Some(next) = transition { self.thinking_step = next; }
         match event {
             AgentEngineEvent::ContextCompacted {
                 retained_context: Some(items),
@@ -119,17 +132,18 @@ impl AgentEventBuffer {
                     context: digest_notice(context),
                 });
             }
-            AgentEngineEvent::OutputTextDelta { step, text } => {
+            AgentEngineEvent::OutputTextDelta { step, source, text } => {
                 if text.is_empty() { return records; }
                 if self.thinking.is_some()
-                    || self.text.as_ref().is_some_and(|(previous, _)| previous != step)
+                    || self.text.as_ref().is_some_and(|(previous, previous_source, _)| previous != step || previous_source != source)
                 {
                     self.flush(&mut records);
                 }
-                let (_, pending) = self.text.get_or_insert_with(|| (*step, String::new()));
+                let (_, _, pending) = self.text.get_or_insert_with(|| (*step, source.clone(), String::new()));
                 pending.push_str(text);
                 // The first actual fragment owns the canonical narration
-                // boundary, including same-step resumes after a tool/thought.
+                // boundary, including same-step resumes after a real tool or
+                // provider block boundary. Reasoning never ends that source.
                 // Later fragments keep the normal bounded write cadence.
                 if starts_narration || pending.len() >= FLUSH_BYTES {
                     self.flush(&mut records);
@@ -174,8 +188,8 @@ impl AgentEventBuffer {
     }
 
     pub(super) fn flush(&mut self, records: &mut Vec<AgentEngineEvent>) {
-        if let Some((step, text)) = self.text.take() {
-            records.push(AgentEngineEvent::OutputTextDelta { step, text });
+        if let Some((step, source, text)) = self.text.take() {
+            records.push(AgentEngineEvent::OutputTextDelta { step, text, source });
         }
         if let Some((step, text)) = self.thinking.take() {
             records.push(AgentEngineEvent::ReasoningDelta { step, text });
@@ -293,10 +307,10 @@ mod content_lifecycle_tests {
         let mut buffer = AgentEventBuffer::default();
         let start = AgentEngineEvent::ModelStepStarted { step: 1, operation_id: "model:1".into(), correction_source: None };
         assert_eq!(buffer.project(&start), vec![start]);
-        assert!(buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: String::new() }).is_empty());
-        let first = AgentEngineEvent::OutputTextDelta { step: 1, text: "开始检查😀。".into() };
+        assert!(buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: String::new(), source: None, }).is_empty());
+        let first = AgentEngineEvent::OutputTextDelta { step: 1, text: "开始检查😀。".into(), source: None, };
         assert_eq!(buffer.project(&first), vec![first]);
-        let suffix = AgentEngineEvent::OutputTextDelta { step: 1, text: "后续内容。".into() };
+        let suffix = AgentEngineEvent::OutputTextDelta { step: 1, text: "后续内容。".into(), source: None, };
         assert!(buffer.project(&suffix).is_empty());
         let mut committed = Vec::new();
         buffer.flush(&mut committed);
@@ -307,7 +321,6 @@ mod content_lifecycle_tests {
     #[test]
     fn narration_reopens_after_typed_model_tool_and_control_boundaries() {
         let boundaries = [
-            AgentEngineEvent::ReasoningDelta { step: 1, text: "Inspect.".into() },
             AgentEngineEvent::ToolCallDelta { step: 1, call_id: "call".into(), name: "read_file".into(), arguments_delta: "PRIVATE_ARGUMENTS".into() },
             AgentEngineEvent::ToolStarted { step: 1, call_id: "call".into(), capability_id: "workspace.files".into(), action_id: "read".into() },
             AgentEngineEvent::ModelStepStarted { step: 2, operation_id: "model:2".into(), correction_source: None },
@@ -316,15 +329,15 @@ mod content_lifecycle_tests {
         ];
         for boundary in boundaries {
             let mut buffer = AgentEventBuffer::default();
-            buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: "Before.".into() });
-            let suffix = AgentEngineEvent::OutputTextDelta { step: 1, text: "Pending suffix.".into() };
+            buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: "Before.".into(), source: None, });
+            let suffix = AgentEngineEvent::OutputTextDelta { step: 1, text: "Pending suffix.".into(), source: None, };
             assert!(buffer.project(&suffix).is_empty());
             let committed = buffer.project(&boundary);
             assert_eq!(committed.first(), Some(&suffix), "{boundary:?}");
             let step = if matches!(boundary, AgentEngineEvent::ModelStepStarted { step: 2, .. }) { 2 } else { 1 };
-            let resumed = AgentEngineEvent::OutputTextDelta { step, text: "After.".into() };
+            let resumed = AgentEngineEvent::OutputTextDelta { step, text: "After.".into(), source: None, };
             assert_eq!(buffer.project(&resumed), vec![resumed], "{boundary:?}");
-            assert!(buffer.project(&AgentEngineEvent::OutputTextDelta { step, text: "Still the same phase.".into() }).is_empty());
+            assert!(buffer.project(&AgentEngineEvent::OutputTextDelta { step, text: "Still the same phase.".into(), source: None, }).is_empty());
         }
     }
 
@@ -333,15 +346,15 @@ mod content_lifecycle_tests {
         let mut buffer = AgentEventBuffer::default();
         let proposal = AgentEngineEvent::ToolCallDelta { step: 1, call_id: "same-call".into(), name: "read_file".into(), arguments_delta: "PRIVATE_ARGUMENTS".into() };
         buffer.project(&proposal);
-        buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: "Narration.".into() });
-        let suffix = AgentEngineEvent::OutputTextDelta { step: 1, text: "Buffered suffix.".into() };
+        buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: "Narration.".into(), source: None, });
+        let suffix = AgentEngineEvent::OutputTextDelta { step: 1, text: "Buffered suffix.".into(), source: None, };
         assert!(buffer.project(&suffix).is_empty());
         let committed = buffer.project(&proposal);
         assert_eq!(committed.len(), 2);
         assert_eq!(committed[0], suffix);
         assert!(matches!(&committed[1], AgentEngineEvent::ToolCallDelta { arguments_delta, .. } if arguments_delta.is_empty()));
         assert!(!serde_json::to_string(&committed).unwrap().contains("PRIVATE_ARGUMENTS"));
-        let resumed = AgentEngineEvent::OutputTextDelta { step: 1, text: "Resumed.".into() };
+        let resumed = AgentEngineEvent::OutputTextDelta { step: 1, text: "Resumed.".into(), source: None, };
         assert_eq!(buffer.project(&resumed), vec![resumed]);
     }
 
@@ -351,12 +364,12 @@ mod content_lifecycle_tests {
         let fragment = "x".repeat(1024);
         let mut committed = Vec::new();
         for _ in 0..50 {
-            committed.extend(buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: fragment.clone() }));
+            committed.extend(buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: fragment.clone(), source: None, }));
         }
         assert_eq!(committed.len(), 4, "one phase anchor followed by three 16KiB batches");
         buffer.flush(&mut committed);
         let chunks = committed.iter().map(|event| match event {
-            AgentEngineEvent::OutputTextDelta { step: 1, text } => text.as_str(),
+            AgentEngineEvent::OutputTextDelta { step: 1, text, .. } => text.as_str(),
             _ => panic!("unexpected narration record"),
         }).collect::<Vec<_>>();
         assert_eq!(chunks[0].len(), 1024);
@@ -370,22 +383,22 @@ mod content_lifecycle_tests {
     #[test]
     fn late_results_flush_pending_text_without_reopening_its_canonical_phase() {
         let mut buffer = AgentEventBuffer::default();
-        let first = AgentEngineEvent::OutputTextDelta { step: 1, text: "Answer.".into() };
+        let first = AgentEngineEvent::OutputTextDelta { step: 1, text: "Answer.".into(), source: None, };
         assert_eq!(buffer.project(&first), vec![first]);
-        let suffix = AgentEngineEvent::OutputTextDelta { step: 1, text: " More.".into() };
+        let suffix = AgentEngineEvent::OutputTextDelta { step: 1, text: " More.".into(), source: None, };
         assert!(buffer.project(&suffix).is_empty());
         let result = AgentEngineEvent::ToolCompleted { step: 1, result: AgentToolResult::text("earlier-call".into(), "done", false), runtime_hold: None };
         let committed = buffer.project(&result);
         assert_eq!(committed[0], suffix);
         assert_eq!(committed.len(), 2);
-        assert!(buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: " Continued.".into() }).is_empty());
+        assert!(buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: " Continued.".into(), source: None, }).is_empty());
     }
 
     #[test]
     fn accepted_completion_delivery_remains_one_unchanged_atomic_record() {
         let mut buffer = AgentEventBuffer::default();
-        buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: "Progress.".into() });
-        let suffix = AgentEngineEvent::OutputTextDelta { step: 1, text: " Buffered progress.".into() };
+        buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: "Progress.".into(), source: None, });
+        let suffix = AgentEngineEvent::OutputTextDelta { step: 1, text: " Buffered progress.".into(), source: None, };
         assert!(buffer.project(&suffix).is_empty());
         let delivery = AgentEngineEvent::CompletionDelivered { step: 1, text: "完整的已验收结果😀\n\n保留原始交付内容。".into() };
         assert_eq!(buffer.project(&delivery), vec![suffix, delivery]);
@@ -415,7 +428,7 @@ mod content_lifecycle_tests {
         assert_eq!(buffer.project(&first), vec![first]);
         let suffix = AgentEngineEvent::ReasoningDelta { step: 1, text: "Review the details. ".into() };
         assert!(buffer.project(&suffix).is_empty());
-        let handoff = AgentEngineEvent::OutputTextDelta { step: 1, text: "Reading the file.".into() };
+        let handoff = AgentEngineEvent::OutputTextDelta { step: 1, text: "Reading the file.".into(), source: None, };
         assert_eq!(buffer.project(&handoff), vec![suffix, handoff]);
         let resumed = AgentEngineEvent::ReasoningDelta { step: 1, text: "Verify. ".into() };
         assert_eq!(buffer.project(&resumed), vec![resumed]);
@@ -431,11 +444,52 @@ mod content_lifecycle_tests {
     }
 
     #[test]
+    fn reasoning_does_not_reopen_narration_or_change_its_provider_source() {
+        let source = ChatOutputTextSource { item_id: "message-one".into(), output_index: Some(1), content_index: 0 };
+        let mut buffer = AgentEventBuffer::default();
+        let first = AgentEngineEvent::OutputTextDelta { step: 1, text: "CL".into(), source: Some(source.clone()) };
+        assert_eq!(buffer.project(&first), vec![first]);
+        let thought = AgentEngineEvent::ReasoningDelta { step: 1, text: "Verify installation.".into() };
+        assert_eq!(buffer.project(&thought), vec![thought]);
+        let suffix = AgentEngineEvent::OutputTextDelta { step: 1, text: "I 和 SKILL 都已安装成功。".into(), source: Some(source) };
+        assert!(buffer.project(&suffix).is_empty(), "a reasoning observation is not a new text block");
+        let mut tail = Vec::new();
+        buffer.flush(&mut tail);
+        assert_eq!(tail, vec![suffix]);
+    }
+
+    #[test]
+    fn provider_text_blocks_commit_their_own_anchors_and_never_share_a_batch() {
+        let mut buffer = AgentEventBuffer::default();
+        let mut committed = Vec::new();
+        for (item_id, content_index, text) in [("one",0,"First"),("one",0," tail"),("one",1,"Second"),("two",0,"Third")] {
+            committed.extend(buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: text.into(),
+                source: Some(ChatOutputTextSource { item_id: item_id.into(), output_index: None, content_index }) }));
+        }
+        buffer.flush(&mut committed);
+        assert_eq!(committed.len(), 4);
+        for (event, (id, index, text)) in committed.iter().zip([("one",0,"First"),("one",0," tail"),("one",1,"Second"),("two",0,"Third")]) {
+            let AgentEngineEvent::OutputTextDelta { source: Some(source), text: body, .. } = event else { panic!("source lost") };
+            assert_eq!((&source.item_id,source.content_index,body.as_str()), (&id.to_owned(),index,text));
+        }
+    }
+
+    #[test]
+    fn owner_steering_commits_the_next_fragment_even_with_an_unchanged_text_source() {
+        let mut buffer = AgentEventBuffer::default();
+        buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: "Before".into(), source: None });
+        assert!(buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: " pending".into(), source: None }).is_empty());
+        buffer.narration_boundary();
+        assert_eq!(buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: " after".into(), source: None }),
+            vec![AgentEngineEvent::OutputTextDelta { step: 1, text: " pending after".into(), source: None }]);
+    }
+
+    #[test]
     fn an_exhausted_reasoning_body_budget_still_records_a_reopened_phase() {
         let mut buffer = AgentEventBuffer::default();
         let first = AgentEngineEvent::ReasoningDelta { step: 1, text: "x".repeat(MAX_THINKING_BYTES_PER_TURN) };
         assert_eq!(buffer.project(&first), vec![first]);
-        let handoff = AgentEngineEvent::OutputTextDelta { step: 1, text: "Reading.".into() };
+        let handoff = AgentEngineEvent::OutputTextDelta { step: 1, text: "Reading.".into(), source: None, };
         assert_eq!(buffer.project(&handoff), vec![handoff]);
         let resumed = AgentEngineEvent::ReasoningDelta { step: 1, text: "Visible live suffix".into() };
         assert_eq!(buffer.project(&resumed), vec![AgentEngineEvent::ReasoningDelta { step: 1, text: String::new() }]);

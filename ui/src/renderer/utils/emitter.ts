@@ -41,6 +41,9 @@ interface EventTypes {
   // GET-poll fallback confirms the runtime is idle, so the transcript
   // reloads even when every WebSocket frame was lost.
   'conversation.turn.settled': [ConversationId];
+  // Reload canonical content after an authoritative nonterminal boundary.
+  // This signal never settles a Turn or releases its input queue.
+  'conversation.history.refresh': [ConversationId];
   // 预览面板事件 / Preview panel events
   'preview.open': [
     { content: string; contentType: PreviewContentType; metadata?: { title?: string; file_name?: string } },

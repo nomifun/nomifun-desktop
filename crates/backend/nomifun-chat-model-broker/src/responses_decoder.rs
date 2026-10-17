@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::adapter::{ProviderWireFrame, parse_usage};
 use crate::contracts::{
-    ChatFinishReason, ChatModelError, ChatModelEvent, ChatProtocol,
+    ChatFinishReason, ChatModelError, ChatModelEvent, ChatOutputTextSource, ChatProtocol,
     ProviderResponseId, ToolCallId,
 };
 
@@ -514,6 +514,7 @@ impl ResponsesDecoder {
         } else {
             "output_text"
         };
+        let output_index = index(data, "output_index")? as u32;
         let item = self.open_item(data)?;
         if item.kind != if reasoning { "reasoning" } else { "message" } {
             return Err(invalid("Text event has incompatible item type"));
@@ -554,18 +555,22 @@ impl ResponsesDecoder {
         if done {
             item.finished_parts.insert(key);
         }
+        let source = ChatOutputTextSource {
+            item_id: item.id.clone(), output_index: Some(output_index), content_index: part_index as u32,
+        };
         self.last_frame_semantic_progress |= reasoning && !delta.is_empty();
         // Reasoning is delivered atomically with its opaque continuation at
         // item.done, so empty summaries and consecutive blocks stay distinct.
         Ok(if reasoning || delta.is_empty() {
             Vec::new()
         } else {
-            vec![ChatModelEvent::OutputTextDelta { text: delta }]
+            vec![ChatModelEvent::OutputTextDelta { text: delta, source: Some(source) }]
         })
     }
 
     fn finish_item(&mut self, data: &Value) -> Result<Vec<ChatModelEvent>, ChatModelError> {
         let value = field(data, "item")?;
+        let output_index = index(data, "output_index")? as u32;
         let item = self
             .items
             .get_mut(index(data, "output_index")?)
@@ -649,6 +654,8 @@ impl ResponsesDecoder {
                     } else if !reasoning && !text.is_empty() {
                         events.push(ChatModelEvent::OutputTextDelta {
                             text: text.to_owned(),
+                            source: Some(ChatOutputTextSource { item_id: item.id.clone(),
+                                output_index: Some(output_index), content_index: index as u32 }),
                         });
                     }
                     if kind == "refusal" {
@@ -959,9 +966,29 @@ mod tests {
                 ChatModelEvent::ProviderReasoningBlock {block} => Some(block), _ => None,
             }).unwrap();
             assert_eq!(block,&crate::ChatProviderReasoning::OpenaiResponsesReasoning {item:frames[6]["item"].clone(),route_digest:None});
-            assert!(events.iter().any(|event| matches!(event,ChatModelEvent::OutputTextDelta {text} if text == "OK")));
+            assert!(events.iter().any(|event| matches!(event,ChatModelEvent::OutputTextDelta {text, .. } if text == "OK")));
             assert!(events.last().unwrap().is_terminal());
         }
+    }
+
+    #[test]
+    fn streamed_text_deltas_share_the_verified_item_and_content_source() {
+        let mut decoder = ResponsesDecoder::with_argument_parser(false, Arc::new(crate::JsonToolArgumentParser));
+        let mut frames = stepfun_frames("content_part");
+        frames[9]["delta"] = serde_json::json!("O");
+        let mut suffix = frames[9].clone();
+        suffix["delta"] = serde_json::json!("K");
+        frames.insert(10, suffix);
+        let events: Vec<_> = frames.into_iter().flat_map(|frame| {
+            native(&mut decoder, frame["type"].as_str().unwrap(), frame.clone()).unwrap()
+        }).collect();
+        let text: Vec<_> = events.iter().filter_map(|event| match event {
+            ChatModelEvent::OutputTextDelta {text,source} => Some((text.as_str(),source.clone())), _ => None,
+        }).collect();
+        let source = Some(ChatOutputTextSource {
+            item_id:"message".into(), output_index:Some(1), content_index:0,
+        });
+        assert_eq!(text, vec![("O",source.clone()), ("K",source)]);
     }
 
     #[test]
@@ -1007,7 +1034,7 @@ mod tests {
             events.extend(native(&mut decoder, "message", frame).unwrap());
         }
         assert!(events.iter().any(|event| matches!(event,
-            ChatModelEvent::OutputTextDelta { text } if text == "hello")));
+            ChatModelEvent::OutputTextDelta { text, .. } if text == "hello")));
         assert!(events.iter().any(|event| matches!(event, ChatModelEvent::Completed { .. })));
         assert!(native(&mut decoder, "done", serde_json::json!({})).unwrap().is_empty());
         assert!(native(&mut decoder, "message", compatible_frames()[3].clone()).is_err());
@@ -1150,12 +1177,36 @@ mod tests {
         assert!(matches!(events.first(), Some(ChatModelEvent::ResponseStarted { .. })));
         assert!(events.iter().any(|event| matches!(
             event,
-            ChatModelEvent::OutputTextDelta { text } if text == "hello"
+            ChatModelEvent::OutputTextDelta { text, source: Some(source) }
+                if text == "hello" && source.item_id == "msg_1"
+                    && source.output_index == Some(0) && source.content_index == 0
         )));
         assert!(matches!(
             events.last(),
             Some(ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed })
         ));
+    }
+
+    #[test]
+    fn native_text_sources_keep_distinct_messages_and_content_blocks() {
+        let mut decoder = ResponsesDecoder::with_argument_parser(false, Arc::new(crate::JsonToolArgumentParser));
+        let events = native(&mut decoder, "json", serde_json::json!({
+            "id":"response_sources", "object":"response", "status":"completed",
+            "output":[
+                {"id":"message_a", "type":"message", "role":"assistant", "status":"completed",
+                    "content":[{"type":"output_text", "text":"first"}, {"type":"output_text", "text":"second"}]},
+                {"id":"message_b", "type":"message", "role":"assistant", "status":"completed",
+                    "content":[{"type":"output_text", "text":"third"}]}
+            ]
+        })).unwrap();
+        let sources: Vec<_> = events.into_iter().filter_map(|event| match event {
+            ChatModelEvent::OutputTextDelta { source, .. } => source, _ => None,
+        }).collect();
+        assert_eq!(sources, vec![
+            ChatOutputTextSource { item_id:"message_a".into(), output_index:Some(0), content_index:0 },
+            ChatOutputTextSource { item_id:"message_a".into(), output_index:Some(0), content_index:1 },
+            ChatOutputTextSource { item_id:"message_b".into(), output_index:Some(1), content_index:0 },
+        ]);
     }
 
     /// Gateways re-encrypt reasoning encrypted_content at every serialization,
@@ -1306,7 +1357,7 @@ mod tests {
             events.extend(native(&mut decoder, &kind, frame.clone()).unwrap());
         }
         let text: String = events.iter().filter_map(|event| match event {
-            ChatModelEvent::OutputTextDelta { text } => Some(text.as_str()),
+            ChatModelEvent::OutputTextDelta { text, .. } => Some(text.as_str()),
             _ => None,
         }).collect();
         assert_eq!(text, "hello", "streamed text must survive ignored events");

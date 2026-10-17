@@ -103,6 +103,8 @@ const MessageText: React.FC<{
   const { data, json } = useFormatContent(text);
   const [showCopyAlert, setShowCopyAlert] = useState(false);
   const isUserMessage = message.position === 'right';
+  const hasMultipleNarrationRanges = !isUserMessage
+    && (message.content.timeline?.segments.filter(segment => segment.kind === 'narration').length ?? 0) > 1;
   const decision = isUserMessage ? message.content.idmm_decision : undefined;
   const isAgentMessage = message.position === 'left' && message.content.agentMessage === true;
   const shouldRenderPlainText = isUserMessage;
@@ -282,7 +284,7 @@ const MessageText: React.FC<{
               <div className={MESSAGE_BODY_CLASS_NAME} data-testid='message-text-content'>
                 {text}
               </div>
-            ) : json ? (
+            ) : json && !hasMultipleNarrationRanges ? (
               <CollapsibleContent maxHeight={200} defaultCollapsed={true}>
                 <div data-testid='message-text-content'>
                   <MarkdownView

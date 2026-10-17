@@ -163,7 +163,7 @@ async fn silent_robot_mixed_business_work_or_invalid_finish_holds_the_entire_bat
 async fn silent_robot_prior_business_work_and_prior_public_text_cannot_be_erased() {
     for public in [false, true] {
         let mut first = silent_batch(&[("first", if public { "robot_motion" } else { "weather" })]);
-        if public { first.insert(0, Ok(ChatModelEvent::OutputTextDelta { text:"正在处理。".into() })); }
+        if public { first.insert(0, Ok(ChatModelEvent::OutputTextDelta { text:"正在处理。".into(), source: None })); }
         let model = silent_model(vec![first, silent_batch(&[("last", "robot_motion"), ("finish", crate::silent_completion::TOOL_NAME)]),
             text_step("保留需要提供的回答。")]);
         let tools = Arc::new(SilentRobotTools::default());

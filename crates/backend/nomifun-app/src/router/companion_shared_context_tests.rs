@@ -648,6 +648,7 @@ async fn ordinary_public_answer_uses_exact_closed_turn_seals_and_never_prior_ste
                 serde_json::to_string(&AgentEngineEvent::OutputTextDelta {
                     step: 1,
                     text: "Earlier narration is not the final result".into(),
+                    source: None,
                 })
                 .unwrap(),
                 None,
@@ -666,6 +667,7 @@ async fn ordinary_public_answer_uses_exact_closed_turn_seals_and_never_prior_ste
                 serde_json::to_string(&AgentEngineEvent::OutputTextDelta {
                     step: 2,
                     text: "Actual final answer".into(),
+                    source: None,
                 })
                 .unwrap(),
                 None,

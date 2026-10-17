@@ -888,6 +888,7 @@ impl ConversationRuntimeHost {
 
 #[async_trait]
 impl UnifiedRuntimeHost for ConversationRuntimeHost {
+    fn supports_canonical_timeline(&self) -> bool { true }
     async fn recoverable_preparation_step(&self, message:&SendMessageData) -> Result<Option<u16>,AppError> {
         let active = self.active.lock().await;
         Ok(active.as_ref().filter(|turn| turn.root == self.root(message))
@@ -1375,7 +1376,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         let writeback_input = {
             let mut active = self.active.lock().await;
             active.as_mut().and_then(|turn| {
-                if let AgentEngineEvent::OutputTextDelta { step, text } | AgentEngineEvent::CompletionDelivered { step, text } = event {
+                if let AgentEngineEvent::OutputTextDelta { step, text, .. } | AgentEngineEvent::CompletionDelivered { step, text } = event {
                     turn.assistant_text_by_step
                         .entry(*step)
                         .or_default()

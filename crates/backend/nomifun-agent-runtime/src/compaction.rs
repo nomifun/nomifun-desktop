@@ -237,7 +237,7 @@ pub(crate) async fn run_compaction_recorded(
         let event = item.map_err(AgentEngineError::from_model_error)?;
         stream_budget.admit(&event)?;
         match event {
-            ChatModelEvent::OutputTextDelta { text } => {
+            ChatModelEvent::OutputTextDelta { text, .. } => {
                 if text.is_empty() {
                     return Err(AgentEngineError::Compaction(
                         "compaction emitted an empty text delta".to_owned(),
@@ -426,6 +426,7 @@ mod tests {
             Ok(Box::pin(stream::iter(vec![
                 Ok(ChatModelEvent::OutputTextDelta {
                     text: "Keep exact bindings.".to_owned(),
+                    source: None,
                 }),
                 Ok(ChatModelEvent::Completed {
                     finish_reason: ChatFinishReason::Completed,
@@ -446,9 +447,11 @@ mod tests {
             Ok(Box::pin(stream::iter(vec![
                 Ok(ChatModelEvent::OutputTextDelta {
                     text: "12345".to_owned(),
+                    source: None,
                 }),
                 Ok(ChatModelEvent::OutputTextDelta {
                     text: "\n".to_owned(),
+                    source: None,
                 }),
                 Ok(ChatModelEvent::Completed {
                     finish_reason: ChatFinishReason::Completed,

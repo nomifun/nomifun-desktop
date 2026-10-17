@@ -31,7 +31,7 @@ impl VoiceAttemptTest {
                 sender.send(Ok(ChatModelEvent::ToolCallCompleted {call:ChatToolCall {call_id:"admitted-call".into(),name:"read_file".into(),arguments:nomifun_agent_contracts::StrictJsonValue(json!({"path":"README.md"})),provider_metadata:None}})).await.unwrap();
                 sender.send(Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::ToolCalls})).await.unwrap();
             }else if ordinal==1 {
-                sender.send(Ok(ChatModelEvent::OutputTextDelta {text:"OBSOLETE_DRAFT".into()})).await.unwrap();
+                sender.send(Ok(ChatModelEvent::OutputTextDelta {text:"OBSOLETE_DRAFT".into(), source: None })).await.unwrap();
                 sender.send(Ok(ChatModelEvent::ToolCallDelta {call_id:"withdrawn-call".into(),name:"read_file".into(),arguments_delta:"{".into()})).await.unwrap();
                 token.cancelled().await;
                 // A late completion from this old producer cannot become an

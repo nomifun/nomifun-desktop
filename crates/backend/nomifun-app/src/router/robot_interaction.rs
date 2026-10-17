@@ -472,7 +472,7 @@ mod tests {
                     Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
                 ],
                 1 | 2 => vec![
-                    Ok(ChatModelEvent::OutputTextDelta { text: "The action completed.".into() }),
+                    Ok(ChatModelEvent::OutputTextDelta { text: "The action completed.".into(), source: None }),
                     Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed }),
                 ],
                 _ => panic!("a simple action sequence unexpectedly opened another model request"),
