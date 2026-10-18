@@ -8,6 +8,60 @@ fn accepted_delivery(message_id:String,replayed:bool)->IdempotentMessageDelivery
         result_error_code:None,result_error_retryable:None,user_input_request:None,turn_outcome:None}
 }
 
+pub(super) fn unclaimed_input_unavailability(state:&Value)
+    ->Result<Option<nomifun_conversation::UnavailableInputCause>,AppError> {
+    use nomifun_conversation::UnavailableInputCause;
+    let reason=||state["reason"].as_str().ok_or_else(||AppError::Internal("canonical unavailable input lost its reason".into()));
+    Ok(match state["state"].as_str() {
+        Some("pending"|"claimed")=>None,
+        Some("cancelled") if reason()?=="CANCELLED_BY_OWNER"=>Some(UnavailableInputCause::CancelledByOwner),
+        Some("discarded") if reason()?=="CONTEXT_CLEARED"=>Some(UnavailableInputCause::ContextCleared),
+        Some("blocked")=>{
+            let reason=reason()?;
+            let typed:nomifun_agent_session::SessionInputBlockedReason=serde_json::from_value(json!(reason))
+                .map_err(|error|AppError::Internal(format!("canonical input block reason is invalid: {error}")))?;
+            if typed==nomifun_agent_session::SessionInputBlockedReason::CancelledByOwner {
+                return Err(AppError::Internal("terminal input cancellation cannot be a repairable block".into()));
+            }
+            Some(UnavailableInputCause::PreparationBlocked {reason:reason.into()})
+        },
+        _=>return Err(AppError::Internal("canonical input delivery state is invalid".into())),
+    })
+}
+
+pub(super) fn unavailable_input_error(message_id:&str,cause:&nomifun_conversation::UnavailableInputCause)->AppError {
+    let message=format!("Accepted input {message_id} is unavailable before Turn admission: {}",cause.code());
+    match cause {
+        nomifun_conversation::UnavailableInputCause::PreparationBlocked {..}=>AppError::UnprocessableEntity(message),
+        _=>AppError::Conflict(message),
+    }
+}
+
+fn unclaimed_channel_observation(state:&Value)->Result<nomifun_channel::ChannelInputObservation,AppError> {
+    use nomifun_conversation::UnavailableInputCause;
+    Ok(match unclaimed_input_unavailability(state)? {
+        None=>nomifun_channel::ChannelInputObservation::Pending,
+        Some(UnavailableInputCause::PreparationBlocked {reason})=>nomifun_channel::ChannelInputObservation::Blocked {reason},
+        Some(cause)=>nomifun_channel::ChannelInputObservation::Discarded {reason:cause.code().into()},
+    })
+}
+
+/// Project the public message fields from the canonical accepted envelope.
+/// Host provenance remains in the original fact and is read again by admission;
+/// it is not a client-authored SendMessageRequest field.
+pub(super) fn runtime_message_request(input:&nomifun_agent_contracts::StrictJsonValue)->Result<SendMessageRequest,AppError> {
+    let mut content=input.0.clone();
+    if let Some(object)=content.as_object_mut() {
+        object.remove("reply_to");
+        object.remove("channel_source");
+        if let Some(source)=object.remove("input_source").filter(|source|!source.is_null()) {
+            serde_json::from_value::<nomifun_agent_contracts::AgentInputSource>(source)
+                .map_err(|error|AppError::Internal(format!("invalid accepted input provenance: {error}")))?;
+        }
+    }
+    serde_json::from_value(content).map_err(|error|AppError::Internal(error.to_string()))
+}
+
 fn original_native_events(facts:&nomifun_agent_session::ChatCausalityFacts,operation:&OperationId)->Result<Vec<(u64,AgentEngineEvent)>,AppError> {
     let mut events=Vec::new();
     for event in facts.events.iter().filter(|event|event.kind.0=="runtime/progress-recorded"&&event.correlation_id.as_ref()==operation.as_ref()) {
@@ -43,15 +97,14 @@ impl NomiCoreSessionOwner {
         ->Result<nomifun_channel::ChannelInputObservation,AppError> {
         use nomifun_channel::ChannelInputObservation;
         let session=AgentSessionId::from(session_id.to_owned());let principal=PrincipalRef {principal_kind:"user".into(),principal_id:owner_id.into()};
+        let _observation=self.session_operation_lock(session_id).read_owned().await;
         self.canonical.session_record(&principal,&session).await?;
         let input=self.canonical.store().session_input(&session,&input_event_id.into()).await.map_err(agent_session_store_error)?;
-        let Some(claim)=self.canonical.store().session_input_claim(&session,&input.event.event_id).await.map_err(agent_session_store_error)? else {
+        let claim=self.canonical.store().session_input_claim(&session,&input.event.event_id).await.map_err(agent_session_store_error)?;
+        self.guard_channel_guest_input_read(owner_id,&session,&input,claim.as_ref()).await?;
+        let Some(claim)=claim else {
             let state=self.canonical.store().session_input_delivery(&session,&input.event.event_id).await.map_err(agent_session_store_error)?;
-            return Ok(match state["state"].as_str() {
-                Some("blocked")=>ChannelInputObservation::Blocked {reason:state["reason"].as_str().unwrap_or("INPUT_UNAVAILABLE").into()},
-                Some("discarded")=>ChannelInputObservation::Discarded {reason:"CONTEXT_CLEARED".into()},
-                _=>ChannelInputObservation::Pending,
-            });
+            return unclaimed_channel_observation(&state);
         };
         if claim.steering {
             let state=self.canonical.store().session_input_delivery(&session,&input.event.event_id).await.map_err(agent_session_store_error)?;
@@ -83,6 +136,7 @@ impl NomiCoreSessionOwner {
                 accepted_delivery(message_id,true)
             },
             PublicTurnDeliveryState::Missing=>return Err(AppError::Internal("input claim lost its exact original Turn".into())),
+            PublicTurnDeliveryState::InputUnavailable {message_id,cause,..}=>return Err(unavailable_input_error(&message_id,&cause)),
         };
         Ok(ChannelInputObservation::Claimed {turn_id:claim.source_message_id.as_ref().into(),
             delivery:nomifun_channel::ChannelTurnDelivery {delivery:channel_delivery_from_conversation(delivery),events:None},question,terminal_events})
@@ -181,8 +235,7 @@ impl NomiCoreSessionOwner {
             || self.runtime_sessions.active_turn_generation(session.as_ref()).is_some() {return Ok(());}
         let inputs=self.canonical.store().pending_session_inputs(session,retry_input.as_ref()).await.map_err(agent_session_store_error)?;
         for original in inputs {
-            let mut content=original.input.0.clone();if let Some(content)=content.as_object_mut() {content.remove("reply_to");content.remove("channel_source");}
-            let request:SendMessageRequest=serde_json::from_value(content).map_err(|error|AppError::Internal(error.to_string()))?;
+            let request=runtime_message_request(&original.input)?;
             let operation=OperationId::from(format!("turn:session-input:{}",original.event.event_id.as_ref()));
             let preparation=async {
                 let admitted=self.canonical_turn_input_with_admission(owner_id,session,&operation,&request).await?;
@@ -234,4 +287,65 @@ pub(super) async fn accept_message(State(state):State<NomiCoreAgentApiState>,Ext
         .ok_or_else(||AppError::Internal("accepted input acknowledgement could not be re-read".into()))?;
     Ok(Json(ApiResponse::ok(nomifun_api_types::AcceptAgentSessionMessageResponseDto {agent_session_id:id,
         message_id:delivery.message_id,cursor:session_cursor(&session,original.event.seq),replayed:delivery.replayed,status:"accepted".into()})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_input_read_causes_preserve_cancel_clear_and_repairable_blocks() {
+        use nomifun_conversation::UnavailableInputCause;
+        for state in ["pending","claimed"] {
+            assert_eq!(unclaimed_input_unavailability(&json!({"state":state})).unwrap(),None);
+        }
+        for (state,reason,cause) in [
+            ("cancelled","CANCELLED_BY_OWNER",UnavailableInputCause::CancelledByOwner),
+            ("discarded","CONTEXT_CLEARED",UnavailableInputCause::ContextCleared),
+            ("blocked","SKILL_UNAVAILABLE",UnavailableInputCause::PreparationBlocked {reason:"SKILL_UNAVAILABLE".into()}),
+        ] {
+            let value=json!({"state":state,"reason":reason,"event_seq":7});
+            assert_eq!(unclaimed_input_unavailability(&value).unwrap(),Some(cause.clone()));
+            assert_eq!(cause.code(),reason);
+            match unclaimed_channel_observation(&value).unwrap() {
+                nomifun_channel::ChannelInputObservation::Discarded {reason:code}
+                |nomifun_channel::ChannelInputObservation::Blocked {reason:code}=>assert_eq!(code,reason),
+                _=>panic!("an unavailable input is never pending or a claimed Turn"),
+            }
+            let remote=super::super::remote_unavailable_initial_input("original-accepted-id",&cause);
+            assert_eq!(remote["message_id"],"original-accepted-id");
+            assert_eq!(remote["initial_input"]["state"],state);
+            assert_eq!(remote["turn_admitted"],false);
+            assert!(remote.get("result_ok").is_none(),"opening a Session does not imply work completion");
+        }
+        for invalid in [json!({"state":"cancelled","reason":"SKILL_UNAVAILABLE"}),
+            json!({"state":"blocked","reason":"CANCELLED_BY_OWNER"}),json!({"state":"blocked"}),
+            json!({"state":"blocked","reason":"UNKNOWN_PREPARATION_FAILURE"})] {
+            assert!(unclaimed_input_unavailability(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn physical_provenance_stays_canonical_while_the_runtime_receives_public_message_fields() {
+        let input=StrictJsonValue(json!({
+            "content":"查询今天的天气", "files":[], "inject_skills":[], "hidden":false,
+            "origin":"robot", "channel_platform":"robot",
+            "input_source":{"kind":"authenticated_robot","companion_id":"partner",
+                "robot_id":"device","connection_id":"original-connection"},
+            "reply_to":{"turn_id":"original-question","question_seq":7}
+        }));
+        let original=input.clone();
+        assert!(serde_json::from_value::<SendMessageRequest>(input.0.clone()).is_err());
+        let message=runtime_message_request(&input).unwrap();
+        assert_eq!(message.content,"查询今天的天气");
+        assert_eq!(message.origin.as_deref(),Some("robot"));
+        assert_eq!(input,original,"projection must not erase the durable authenticated source or question");
+
+        let mut unknown=input.clone();
+        unknown.0["unexpected_client_field"]=json!(true);
+        assert!(runtime_message_request(&unknown).is_err(),"unknown client fields remain rejected");
+        let mut retired=input.clone();
+        retired.0["input_source"]["kind"]=json!("directed_delegation_result");
+        assert!(runtime_message_request(&retired).is_err(),"read-only retired history cannot enter live admission");
+    }
 }

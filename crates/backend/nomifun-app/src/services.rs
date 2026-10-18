@@ -821,6 +821,10 @@ pub struct AppServices {
     pub attached_chrome: Option<Arc<crate::AttachedChromeProviderService>>,
     #[cfg(feature = "browser-use")]
     pub local_web_search: Option<Arc<nomifun_ai_agent::local_web_search::BrowserSearchProvider>>,
+    /// Controlled host port for installed-Runtime unit fixtures. Production
+    /// builds select the real desktop BrowserSearchProvider above.
+    #[cfg(test)]
+    pub(crate) test_wave1_search: Option<Arc<dyn nomifun_ai_agent::web_search::SearchProvider>>,
     #[cfg(feature="browser-use")]
     pub headless_render: Option<Arc<crate::headless_render::HeadlessRenderRuntime>>,
     /// Ordered, cloneable Gateway/Browser shutdown authority used by every
@@ -2284,6 +2288,8 @@ impl AppServices {
             attached_chrome: host_services.attached_chrome,
             #[cfg(feature = "browser-use")]
             local_web_search: host_services.local_web_search,
+            #[cfg(test)]
+            test_wave1_search: None,
             #[cfg(feature="browser-use")]
             headless_render: host_services.headless_render,
             browser_platform_shutdown,

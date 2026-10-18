@@ -25,6 +25,10 @@ UI 或领域命令
 
 Agent revision 与 Snapshot 冻结选中的执行闭包。可见工具描述可以按需展开；授权仍由冻结 binding 和 Kernel 校验。Skill、MCP 和 Provider 不因为它们参与模型上下文就合并成新的 Agent 身份。
 
+伙伴的桌面、浮窗、已批准 IM 与实体设备共用一套主要 Agent 定义，各入口保留独立 Session。普通工作在接收会话直接使用授权工具；后台或并行由通用 AgentExecution 按需创建。设备能力、工具展示与交互上下文分别装配，不建立固定的机器人到桌面角色跳板。
+
+Runtime 的正式公开提交事件可发布不可撤回的可播前缀，完整 Turn 生命周期、最终结果与媒体播放事实分别结算。后台报告由精确来源事件直接交付，不默认追加模型总结。实施与证据见[伙伴架构](companion.zh.md)。
+
 ## 历史与恢复
 
 模型上下文从 canonical 事件和内容构建，不读取 UI 投影补齐缺失 Runtime 日志。闭合回合的只读重建与可执行 checkpoint 恢复具有不同条件，详见 [Session 架构](agent-session.zh.md)。

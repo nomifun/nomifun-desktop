@@ -243,13 +243,6 @@ struct RecallTurn {
     source_seq: i64,
 }
 
-#[derive(Deserialize)]
-struct DirectedPlanSource {
-    mode: String,
-    #[serde(default)]
-    source: Option<nomifun_agent_execution::DirectedDelegationSource>,
-}
-
 /// Follow existing typed result/Execution dependencies only for privacy
 /// filtering. This never creates a task relationship or grants target access.
 /// Root and accepted steering are both inputs to the public response; losing
@@ -290,6 +283,107 @@ pub(super) async fn turn_has_retracted_input(
 struct ResolvedTurnInputs {
     all_sources: std::collections::BTreeSet<CompanionMemoryMessageSource>,
     human_sources: std::collections::BTreeSet<CompanionMemoryMessageSource>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetiredResultReport {
+    content: String,
+    origin: String,
+    operation_id: String,
+    delegation_report: nomifun_agent_execution::AgentExecutionReport,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetiredResultBody {
+    kind: RetiredResultKind,
+    execution_id: String,
+    status: String,
+    report_message_id: String,
+    report_seq: u64,
+    result: String,
+    result_truncated: bool,
+}
+
+/// The removed callback's immutable provenance remains readable only after
+/// its original report, source Effect and Execution references agree. This
+/// returns a privacy dependency, never a new callback, input or authority.
+pub(super) async fn retired_result_dependency(
+    pool: &sqlx::SqlitePool,
+    store: &AgentSessionStore,
+    principal: &PrincipalRef,
+    session: &AgentSessionId,
+    scope: &CompanionSessionOrigin,
+    accepted: &AcceptedInput,
+    accepted_seq: u64,
+    source: &RetiredResultSource,
+) -> Result<Option<String>, AppError> {
+    if scope.role != nomifun_agent_contracts::CompanionSessionRole::Robot {
+        return Err(failure("retired result history has no canonical physical affiliation"));
+    }
+    let report = sqlx::query_as::<_, SourceEvent>(
+        "SELECT e.seq,e.event_id,e.kind,e.kind_version,e.correlation_id,e.producer_id,e.idempotency_key,e.causation_event_id, \
+         e.inline_json,e.payload_id,p.session_id AS payload_session_id,p.body AS payload_body,p.digest AS payload_digest, \
+         p.byte_len AS payload_byte_len FROM agent_events e LEFT JOIN agent_payloads p ON p.payload_id=e.payload_id \
+         WHERE e.session_id=? AND e.event_id=? AND (e.inline_json IS NULL OR length(CAST(e.inline_json AS BLOB))<=?) \
+         AND (p.body IS NULL OR length(p.body)<=?)")
+        .bind(session.as_ref()).bind(&source.report_message_id).bind(MAX_SOURCE_PAYLOAD_BYTES).bind(MAX_SOURCE_PAYLOAD_BYTES)
+        .fetch_optional(pool).await.map_err(failure)?;
+    let Some(report) = report else { return Ok(None); };
+    if report.kind != "message/assistant-projected" || report.kind_version != 1
+        || report.producer_id != "session_api" || report.correlation_id != source.report_message_id
+        || u64::try_from(report.seq).ok() != Some(source.report_seq) || source.report_seq >= accepted_seq {
+        return Err(failure("retired result differs from its exact canonical report event"));
+    }
+    let payload: RetiredResultReport = serde_json::from_value(report.value(session.as_ref())?).map_err(failure)?;
+    let body: RetiredResultBody = serde_json::from_str(&accepted.request.content).map_err(failure)?;
+    let _ = &body.kind;
+    let original = &payload.delegation_report.source;
+    let mut end = payload.content.len().min(8192);
+    while !payload.content.is_char_boundary(end) { end -= 1; }
+    if payload.origin != "agent_execution_report"
+        || report.idempotency_key != format!("agent-execution-projection:{}", payload.operation_id)
+        || payload.delegation_report.execution_id != source.execution_id
+        || original.agent_session_id != session.as_ref()
+        || original.turn_operation_id != source.source_turn_operation_id.as_ref()
+        || body.execution_id != source.execution_id || body.status != payload.delegation_report.status
+        || body.report_message_id != source.report_message_id || body.report_seq != source.report_seq
+        || body.result != payload.content[..end] || body.result_truncated != (payload.content.len() > 8192) {
+        return Err(failure("retired result body or original report references changed"));
+    }
+    let receipt = store.read_turn_receipt(session, &source.source_turn_operation_id).await.map_err(failure)?;
+    if receipt.status != nomifun_agent_session::TurnReceiptStatus::Completed
+        || receipt.terminal_event.as_ref().is_none_or(|terminal|
+            report.causation_event_id.as_deref() != Some(terminal.event_id.as_ref()) || terminal.seq >= source.report_seq) {
+        return Err(failure("retired report has no exact completed parent Turn"));
+    }
+    let effect = store.read_effect(session, &original.effect_id).await.map_err(failure)?;
+    let Some(effect) = effect else { return Ok(None); };
+    if effect.turn_id.as_ref() != original.turn_operation_id
+        || effect.operation_id.as_ref() != original.tool_operation_id
+        || effect.owner_domain != "wave5.product" || effect.capability_module.as_ref() != "agent.collaboration"
+        || effect.action_id.as_ref() != "agent/delegate" || effect.state != nomifun_agent_session::AgentEffectState::Returned {
+        return Err(failure("retired report source differs from its committed delegation Effect"));
+    }
+    store.committed_tool_call_causation(session, &effect.turn_id, &effect.operation_id,
+        &effect.capability_module, &effect.action_id).await.map_err(failure)?;
+    let initial: Option<String> = sqlx::query_scalar("SELECT initial_plan_input FROM agent_executions WHERE execution_id=? AND user_id=? AND deleted_at IS NULL")
+        .bind(&source.execution_id).bind(&principal.principal_id).fetch_optional(pool).await.map_err(failure)?;
+    let Some(initial) = initial else { return Ok(None); };
+    if nomifun_agent_execution::execution_source_from_initial_plan(&initial)?.as_ref() != Some(original) {
+        return Err(failure("retired report differs from its original Execution source"));
+    }
+    let terminal: Option<String> = sqlx::query_scalar("SELECT payload FROM agent_execution_events WHERE execution_id=? AND sequence=? AND event_type='status_changed' AND on_behalf_of_user_id=? AND EXISTS(SELECT 1 FROM conversation_execution_links link WHERE link.execution_id=agent_execution_events.execution_id AND link.conversation_id=? AND link.relation='lead')")
+        .bind(&source.execution_id).bind(payload.delegation_report.execution_event_sequence).bind(&principal.principal_id)
+        .bind(session.as_ref()).fetch_optional(pool).await.map_err(failure)?;
+    let Some(terminal) = terminal else { return Ok(None); };
+    let terminal: Value = serde_json::from_str(&terminal).map_err(failure)?;
+    if terminal.get("status").and_then(Value::as_str) != Some(payload.delegation_report.status.as_str())
+        || terminal.get("lead_report_operation_id").and_then(Value::as_str) != Some(payload.operation_id.as_str()) {
+        return Err(failure("retired report has no exact terminal Execution reference"));
+    }
+    Ok(Some(original.turn_operation_id.clone()))
 }
 
 /// Reuse the privacy graph to attribute a write to existing human messages.
@@ -435,19 +529,13 @@ async fn resolve_turn_inputs(
             return Ok(None);
         }
         let mut related = false;
-        if let Some(AgentInputSource::DirectedDelegationResult {
-            source_turn_operation_id,
-            ..
-        }) = &accepted.input_source
-        {
-            pending.push((
-                session.clone(),
-                source_turn_operation_id.as_ref().into(),
-                None,
-            ));
+        if let Some(HistoricalInputSource::RetiredResult(retired)) = &accepted.input_source {
+            let Some(parent) = retired_result_dependency(pool, store, principal, &session, &scope,
+                &accepted, source.seq as u64, retired).await? else { return Ok(None); };
+            pending.push((session.clone(), parent, None));
             related = true;
         }
-        // Directed Attempt creation and its canonical forks retain the exact
+        // Exact-source Attempt creation and its canonical forks retain the exact
         // source in the existing Execution. Do not infer it from task text or a
         // selected Companion resource on an ordinary Session.
         let plans:Vec<String>=sqlx::query_scalar("WITH RECURSIVE ancestry(id,depth) AS (SELECT ?,0 UNION ALL \
@@ -462,11 +550,7 @@ async fn resolve_turn_inputs(
             return Ok(None);
         }
         for plan in plans {
-            let plan: DirectedPlanSource = serde_json::from_str(&plan).map_err(failure)?;
-            if plan.mode == "directed" {
-                let source = plan
-                    .source
-                    .ok_or_else(|| failure("directed result dependency lost its source"))?;
+            if let Some(source) = nomifun_agent_execution::execution_source_from_initial_plan(&plan)? {
                 let parent = AgentSessionId::from(source.agent_session_id);
                 let Some(effect) = store
                     .read_effect(&parent, &source.effect_id)
@@ -479,10 +563,10 @@ async fn resolve_turn_inputs(
                     || effect.turn_id.as_ref() != source.turn_operation_id
                     || effect.operation_id.as_ref() != source.tool_operation_id
                     || effect.capability_module.as_ref() != "agent.collaboration"
-                    || effect.action_id.as_ref() != "agent/delegate"
+                    || !matches!(effect.action_id.as_ref(), "agent/delegate" | "agent/fork")
                 {
                     return Err(failure(
-                        "Directed human source differs from its exact delegation Effect",
+                        "Execution human source differs from its exact delegation Effect",
                     ));
                 }
                 let cause = store
@@ -497,7 +581,7 @@ async fn resolve_turn_inputs(
                     .map_err(failure)?;
                 if cause.seq == 0 || cause.seq > i64::MAX as u64 {
                     return Err(failure(
-                        "Directed human source causation boundary is invalid",
+                        "Execution human source causation boundary is invalid",
                     ));
                 }
                 pending.push((parent, source.turn_operation_id, Some(cause.seq)));
@@ -752,7 +836,7 @@ pub(crate) async fn recall_companion_history(
         let mut text = if human_input {
             format!("Historical user input: {}", accepted.request.content)
         } else {
-            "Verified-source directed task response (historical data):".into()
+            "Verified-source background task response (historical data):".into()
         };
         let mut event_ids = vec![turn.source_event_id];
         let mut answer_omitted = derived_source_withdrawn;

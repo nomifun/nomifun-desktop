@@ -55,6 +55,8 @@ pub(crate) async fn build(
     });
     #[cfg(not(feature = "browser-use"))]
     let wave1_search = None;
+    #[cfg(test)]
+    let wave1_search = services.test_wave1_search.clone().or(wave1_search);
     let wave1 = super::agent_wave1_host::wave1_registrations_for_nomi_core(
         Arc::clone(&services.knowledge_service),
         wave1_search,

@@ -548,6 +548,38 @@ impl AgentSessionStore {
         payload: Option<&SessionPayloadRecord>,
     ) -> Result<SessionEventAppendResult, SessionStoreError> {
         let mut tx = self.begin_write_transaction().await?;
+        let result = self.append_public_event_tx(&mut tx, append, payload).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    /// Append only the accepted Robot question-playback proof while the Host
+    /// holds its existing validation/write transaction. This never acquires a
+    /// second connection or commits; the caller owns commit and rollback.
+    /// Runtime, native, Turn and effect lifecycle writers are not exposed.
+    pub async fn append_robot_question_playback_in_transaction(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        append: &SessionEventAppend,
+    ) -> Result<SessionEventAppendResult, SessionStoreError> {
+        if append.semantic_event.kind.0 != "robot/question-playback-accepted"
+            || append.semantic_event.kind_version != 1
+            || append.producer_id.as_ref() != "session_api"
+            || !matches!(&append.semantic_event.payload, SessionEventPayloadRef::InlineJson(_))
+        {
+            return Err(SessionStoreError::ExecutionFenced);
+        }
+        self.append_public_event_tx(tx, append, None).await
+    }
+
+    /// Shared public append restrictions apply equally inside a caller-owned
+    /// transaction. Specialized lifecycle writers retain their own authority.
+    async fn append_public_event_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        append: &SessionEventAppend,
+        payload: Option<&SessionPayloadRecord>,
+    ) -> Result<SessionEventAppendResult, SessionStoreError> {
         if append.semantic_event.kind.0 == nomifun_agent_contracts::TURN_WORKSPACE_FILES_OBSERVED
             || append.semantic_event.kind.0 == nomifun_agent_contracts::CHANNEL_INPUT_QUESTION_DELIVERED
             || append.semantic_event.kind.0 == nomifun_agent_contracts::CHANNEL_INPUT_DELIVERY_STATE
@@ -557,12 +589,10 @@ impl AgentSessionStore {
             return Err(SessionStoreError::ExecutionFenced);
         }
         if matches!(append.semantic_event.kind.0.as_str(), "runtime/progress-recorded" | "context/model-visible-applied") {
-            reject_unleased_native_turn_tx(&mut tx, &append.agent_session_id,
+            reject_unleased_native_turn_tx(tx, &append.agent_session_id,
                 &OperationId::from(append.semantic_event.correlation_id.as_ref())).await?;
         }
-        let result = self.append_event_tx(&mut tx, append, payload).await?;
-        tx.commit().await?;
-        Ok(result)
+        self.append_event_tx(tx, append, payload).await
     }
 
     /// Accept one user message and its Turn in the same transaction. The Store
@@ -2402,7 +2432,24 @@ impl AgentSessionStore {
             return Err(SessionStoreError::InvalidPayload("resolved event batch exceeds its record budget".into()));
         }
         let mut tx = self.pool.begin().await?;
-        require_live_session_tx(&mut tx, session_id.as_ref()).await?;
+        let result=self.resolved_event_payloads_in_transaction(&mut tx,session_id,event_ids).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    /// Resolve the same exact canonical payloads inside the caller's existing
+    /// transaction. All identity, byte-budget, digest and shared-content reads
+    /// use this transaction; no connection is acquired or committed here.
+    pub async fn resolved_event_payloads_in_transaction(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        session_id: &AgentSessionId,
+        event_ids: &[EventId],
+    ) -> Result<BTreeMap<String,Value>, SessionStoreError> {
+        if event_ids.len() as u64 > nomifun_agent_contracts::MAX_NATIVE_APPROVED_JOURNAL_RECORDS + 4000 {
+            return Err(SessionStoreError::InvalidPayload("resolved event batch exceeds its record budget".into()));
+        }
+        require_live_session_tx(tx, session_id.as_ref()).await?;
         let mut result=BTreeMap::new();
         let mut expanded_bytes=0usize;
         // Remain below SQLite's bind limit without opening another snapshot.
@@ -2413,10 +2460,10 @@ impl AgentSessionStore {
             let mut selected=query.separated(",");
             for id in ids {selected.push_bind(id.as_ref());}
             selected.push_unseparated(")");
-            for row in query.build_query_as::<StoredEventRow>().fetch_all(&mut *tx).await? {
+            for row in query.build_query_as::<StoredEventRow>().fetch_all(&mut **tx).await? {
                 if result.contains_key(&row.event_id) {continue;}
                 let event=event_from_row(row)?;
-                let payload=payload_value_for_event_tx(&mut tx,&event).await?;
+                let payload=payload_value_for_event_tx(tx,&event).await?;
                 expanded_bytes=expanded_bytes.saturating_add(canonical_json_bytes(&payload)?.len());
                 if expanded_bytes>nomifun_agent_contracts::MAX_NATIVE_HISTORY_WINDOW_BYTES {
                     return Err(SessionStoreError::InvalidPayload("resolved event batch exceeds its expanded byte budget".into()));
@@ -2427,7 +2474,6 @@ impl AgentSessionStore {
                 return Err(SessionStoreError::InvalidPayload("canonical event is missing or belongs to another Session".into()));
             }
         }
-        tx.commit().await?;
         Ok(result)
     }
 

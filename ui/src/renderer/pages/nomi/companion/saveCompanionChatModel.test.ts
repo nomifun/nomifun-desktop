@@ -63,14 +63,3 @@ test('an unconfigured companion saves its first default without inventing a Sess
   const failure = new Error('profile unavailable');
   await expect(saveCompanionChatModel({ next, patchCompanion: patcher(async () => { throw failure; }) })).rejects.toBe(failure);
 });
-
-test('the robot default is independent and never overwrites the companion model', async () => {
-  const patches: unknown[] = [];
-  const switchModel = spyOn(ipcBridge.conversation.switchModel, 'invoke');
-  restores.push(() => switchModel.mockRestore());
-  const result = await saveCompanionChatModel({ role: 'robot', next,
-    patchCompanion: patcher(async patch => { patches.push(patch); return {}; }) });
-  expect(result).toEqual({ status: 'saved' });
-  expect(patches).toEqual([{ robot: { model: next } }]);
-  expect(switchModel).not.toHaveBeenCalled();
-});

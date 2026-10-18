@@ -24,5 +24,5 @@ pub use product_agent::{
     ProductAgentResolution, ProductAgentSnapshotResolver, ProductAgentTarget,
 };
 pub use turn_delivery::{
-    BackgroundTaskRegistrar, IdempotentMessageDelivery, PublicTurnDeliveryState,
+    BackgroundTaskRegistrar, IdempotentMessageDelivery, PublicTurnDeliveryState, UnavailableInputCause,
 };

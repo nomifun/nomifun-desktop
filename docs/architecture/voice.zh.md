@@ -32,6 +32,36 @@ VoiceJournal 保存转写、来源 revision、媒体消费和待处理输入，�
 
 重启后由用户明确启动语音并完成 lazy reconciliation。已确认未准入的 Queued 输入保留原 operation key、策略及 binding/context-floor 围栏；未知 Dispatched 只查询原 canonical receipt，不重新派发。详见 [Agent Session](agent-session.zh.md)。
 
+## 物理机器人入口
+
+实体机器人使用伙伴的主要 Agent 与独立设备 Session，由 [robot_wiring.rs](../../crates/backend/nomifun-app/src/robot_wiring.rs) 和 [robot session](../../crates/backend/nomifun-robot/src/session.rs) 装配。该链独立于 Mobile 的媒体实现，不能以另一产品的双工或播放能力代替设备验收。
+
+已真实准入工具后的早期公开进度，消费正式 `PublicOutputCommitted` 来源证明绑定的不可撤回前缀；原公开 part、模型步骤、accepted root、发布范围与摘要必须配对，每次前缀以其 commit event 身份去重。最终答案则使用原 `message/completed` 的 part 数及摘要，并要求 canonical 公开结果证明实际 Host 成功 `turn/completed` 与 `Answered` 的精确消息引用；`through_seq` 包含该终态许可。`CompletionDelivered` 仍是可被 Host 收窄为暂停的提案，不能提前据此播报完成。不将原始 token、推理、工具正文、可撤回草稿或已丢弃内容送入 TTS，也不提前封口仍可增长的聚合消息。
+
+直接设备请求沿同一 typed `request_user_input` 交接。问题、用户回答、状态、结果和取消引用原 Session、Turn 与 question identity；录音起始冻结已呈现的问题，新问题、慢 ASR、断连或新连接不补造关联。语音不替代要求点击的审批。
+
+后台子 Turn 已提交的真实缺信息请求不受 `automatic` 决策策略阻挡；该策略不提供缺失的真人答案。旧审批／StopTurn 路径仍要求 `AskUser`。问题呈现事实在原文字实际进入 writer 后记录，排队 ACK 不产生答案授权；每帧继续核验原问题的待答状态。普通请求的媒体同样核验原 accepted input 与精确 Turn，UI 取消后停止发送新帧，正常 Completed 仍可交付原最终答案。
+
+普通请求在设备 Session 直接执行已授权工具。按需后台任务的真实报告沿原请求来源直接交付，不固定开启隐藏总结 Turn。成功由正式事件推进；持久事实重读只修复漏帧或重启，不以退避巡检发现正常结果。
+
+供应商通过 SpeechServices 明确声明增量 ASR 与流式 TTS。支持的输入流协议在录音期间发送音频；流式合成在供应商响应完成前交付实际音频。批处理只声明 Batch，完整合成后切帧不成为 Streaming。生产播放保留音频节拍、有界队列、背压和 generation；停播、改口、补充、取消工作和新请求分别作用于确切对象。
+
+| 已实现的独立语音协议 | 交付方式 |
+| --- | --- |
+| `deepgram.listen_stream` | 显式选择的 WebSocket 增量输入；只将供应商最终片段组成正式转写，`CloseStream` 后验证终结与原 worker 退出 |
+| `openai.audio_speech` | 真实 HTTP PCM 字节流拉取，24 kHz、16 位小端单声道；音频到达后按节拍编码下发，不等待完整文件 |
+| 其他现役批量 ASR/TTS | 明确 Batch；ASR 的 SSE 文本响应不等于增量音频输入 |
+
+实现依据供应商公开合同：[Deepgram Listen Streaming](https://developers.deepgram.com/reference/speech-to-text/listen-streaming)、
+[Deepgram CloseStream](https://developers.deepgram.com/docs/close-stream) 和
+[OpenAI Text to Speech](https://developers.openai.com/api/docs/guides/text-to-speech)。
+协议测试使用本地受控 HTTP/WS，账号权限、网络缓冲和实际首音另行测量。
+Pacer 自身的队列为 32 个 60 毫秒音频帧；后续 writer 受理不证明设备已播放，不能把这一个队列的容量当作端到端播放延迟。
+
+设备断连、连接替换、改绑和 context clear 撤销原交付范围。迟到 ASR、模型、音频或后台结果不得进入后继请求或其他连接。媒体、模型、设备动作与后台执行各自有预算，后台总期限不替代首个公开答复或首音要求。
+
+具体阶段、实测范围与待解锁环境见[统一伙伴专项验收](../validation/companion-unification-2026-10-18.zh.md)。本地受控 HTTP、协议和模拟音频只证明代码路径，不证明真实账户可用、实体设备播放或机械完成。
+
 ## 验证边界
 
 定向检查覆盖公开端口、媒体预算、迟到事件、来源撤回、journal 恢复与 canonical 纠正。实际账号权限、双供应商交互、LAN/TLS、Android/iOS/H5 设备生命周期、声学效果和清理证明需要对应环境执行；类型检查、假设备、静态安装包和源码实现不能补证这些结果。历史本地执行记录留在 Git，当前页不声明未经重验的设备验收。

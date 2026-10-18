@@ -10,6 +10,9 @@ use tower::ServiceExt;
 #[path = "engine_knowledge_writeback_tests.rs"]
 mod knowledge_writeback_tests;
 
+#[path = "engine_knowledge_demand_tests.rs"]
+mod knowledge_demand_tests;
+
 #[path = "companion_directed_flow_tests.rs"]
 mod companion_directed_flow_tests;
 
@@ -43,7 +46,10 @@ async fn api(router: &axum::Router, path: &str, body: Value) -> Value {
         .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
-    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    let value: Value = serde_json::from_slice(&bytes).unwrap_or_else(|error|panic!(
+        "POST {path}: {status}: response was not JSON ({error}): {}",
+        String::from_utf8_lossy(&bytes[..bytes.len().min(16*1024)]),
+    ));
     assert!(status.is_success(), "{path}: {status}: {value}");
     value["data"].clone()
 }
@@ -88,8 +94,26 @@ impl Fixture {
         ).await
     }
 
+    async fn with_input_model_and_search(scenario: &str, model_base: &str,
+        search: Arc<dyn nomifun_ai_agent::web_search::SearchProvider>) -> Self {
+        Self::build_delivery_with_search(scenario,vec![],vec![],None,false,Some(model_base),false,
+            #[cfg(feature="browser-use")] None,
+            Some(search),
+        ).await
+    }
+
     async fn build_delivery(scenario: &str, files: Vec<String>, inject_skills: Vec<String>, origin: Option<String>, explicit_metadata: bool,model_base_override:Option<&str>, knowledge: bool,
         #[cfg(feature = "browser-use")] browser: Option<(Arc<dyn nomifun_browser_platform::runtime::BrowserRuntimeFactory>, String)>,
+    ) -> Self {
+        Self::build_delivery_with_search(scenario,files,inject_skills,origin,explicit_metadata,model_base_override,knowledge,
+            #[cfg(feature="browser-use")] browser,
+            None,
+        ).await
+    }
+
+    async fn build_delivery_with_search(scenario: &str, files: Vec<String>, inject_skills: Vec<String>, origin: Option<String>, explicit_metadata: bool,model_base_override:Option<&str>, knowledge: bool,
+        #[cfg(feature = "browser-use")] browser: Option<(Arc<dyn nomifun_browser_platform::runtime::BrowserRuntimeFactory>, String)>,
+        search:Option<Arc<dyn nomifun_ai_agent::web_search::SearchProvider>>,
     ) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let root = std::env::var_os("NOMIFUN_RELIABILITY_EVIDENCE_DIR")
@@ -105,9 +129,8 @@ impl Fixture {
         crate::config::load_or_create_storage_generation(&config.data_dir).unwrap();
         let database_path = config.database_path();
         let database = nomifun_db::init_database(&database_path).await.unwrap();
-        let services = crate::services::AppServices::from_config(database, &config).await.unwrap();
-        #[cfg(feature = "browser-use")]
-        let mut services = services;
+        let mut services = crate::services::AppServices::from_config(database, &config).await.unwrap();
+        services.test_wave1_search=search;
         #[cfg(feature = "browser-use")]
         if let Some((factory, _)) = &browser {
             services.browser_resources = Some(Arc::new(nomifun_browser_platform::workspace::BrowserResourceService::new(factory.clone())

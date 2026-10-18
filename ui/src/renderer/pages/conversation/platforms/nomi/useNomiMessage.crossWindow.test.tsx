@@ -118,6 +118,31 @@ test('another window accepted input is visible before model output or Turn compl
   expect(getMessage).not.toHaveBeenCalled();
 });
 
+test('owner cancellation of an unclaimed input settles its original row without busy state, retry or preparation failure', async () => {
+  const broadcasts = mockConversationBroadcasts();
+  const send = spyOn(ipcBridge.conversation.sendMessage, 'invoke').mockRejectedValue(new Error('unexpected retry'));
+  const onError = mock(() => {});
+  const hook = renderHook(() => ({ activity: useNomiMessage(conversationId, { onError }), messages: useMessageList() }), { wrapper });
+  await waitFor(() => expect(hook.result.current.activity.hasHydratedRunningState).toBe(true));
+  act(() => broadcasts.user(acceptedUser({ input_delivery: { state: 'pending', event_seq: 10 } })));
+  await waitFor(() => expect(hook.result.current.messages).toHaveLength(1));
+  const originalId = hook.result.current.messages[0].id;
+  act(() => broadcasts.user(acceptedUser({ input_delivery: { state: 'cancelled', reason: 'CANCELLED_BY_OWNER', event_seq: 20 } })));
+  await waitFor(() => expect((hook.result.current.messages[0] as IMessageText).content.input_delivery?.state).toBe('cancelled'));
+  expect(hook.result.current.messages[0]).toMatchObject({ id: originalId, msg_id: userMessageId, status: 'finish', content: { content: acceptedUser().content } });
+  expect(hook.result.current.activity.running).toBe(false);
+  expect(hook.result.current.activity.activeTurnId).toBeUndefined();
+  expect(hook.result.current.activity.pauseNotice).toBeNull();
+  expect(hook.result.current.activity.getTurnCompletionGeneration()).toBe(0);
+  expect(send).not.toHaveBeenCalled();
+  expect(onError).not.toHaveBeenCalled();
+  // A new input is a distinct accepted source and does not replace the cancelled one.
+  act(() => broadcasts.user(acceptedUser({ msg_id: otherMessageId, input_delivery: { state: 'pending', event_seq: 21 } })));
+  await waitFor(() => expect(hook.result.current.messages).toHaveLength(2));
+  expect((hook.result.current.messages[0] as IMessageText).content.input_delivery?.state).toBe('cancelled');
+  expect((hook.result.current.messages[1] as IMessageText).content.input_delivery?.state).toBe('pending');
+});
+
 test.each(['notification first', 'HTTP echo first'] as const)('%s: user notifications and local HTTP echoes reconcile once even after assistant output', async (order) => {
   const broadcasts = mockConversationBroadcasts();
   const hook = renderHook(() => useConversationMessages(conversationId), { wrapper });

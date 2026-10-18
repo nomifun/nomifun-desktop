@@ -11,6 +11,15 @@ test('delivery metadata accepts only literal states and positive canonical event
   expect(normalizeInputDelivery({ state: 'blocked', reason: 'SKILL_UNAVAILABLE', event_seq: 10 }))
     .toEqual({ state: 'blocked', reason: 'SKILL_UNAVAILABLE', event_seq: 10 });
   expect(normalizeInputDelivery({ state: 'pending' })).toEqual({ state: 'pending' });
+  expect(normalizeInputDelivery({ state: 'cancelled', reason: 'CANCELLED_BY_OWNER', event_seq: 12 }))
+    .toEqual({ state: 'cancelled', reason: 'CANCELLED_BY_OWNER', event_seq: 12 });
+});
+
+test('a cancelled accepted input retains its terminal fact over delayed pending or blocked projections', () => {
+  const cancelled = { state: 'cancelled' as const, reason: 'CANCELLED_BY_OWNER', event_seq: 20 };
+  expect(preferInputDelivery({ state: 'pending' }, cancelled)).toEqual(cancelled);
+  expect(preferInputDelivery({ state: 'pending', event_seq: 10 }, cancelled)).toEqual(cancelled);
+  expect(preferInputDelivery({ state: 'blocked', reason: 'SKILL_UNAVAILABLE', event_seq: 19 }, cancelled)).toEqual(cancelled);
 });
 
 test('delivery ordering follows canonical sequence through blocked, pending, claimed and discarded', () => {

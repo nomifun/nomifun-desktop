@@ -46,7 +46,7 @@ function fixture() {
   const onCreate = mock(() => {});
   const onSelect = mock(() => {});
   const props: Props = {
-    items: initialItems, selectedId: targetId, selectedName: 'Target chat', selectedLoaded: true, role: 'companion', activeDesktopId: receiverId,
+    items: initialItems, selectedId: targetId, selectedName: 'Target chat', selectedLoaded: true, entryKind: 'companion', activeDesktopId: receiverId,
     creating: false, routing: false, managing: false, canCreate: true, failed: false,
     onRename, onArchive, onDelete, onContinue, onCreate, onSelect,
     onClear: async () => {}, onRefresh: () => {},

@@ -40,6 +40,9 @@ impl NomiCoreSessionOwner {
         {
             return Ok(());
         }
+        if self.prepare_retired_companion_device_binding_locked(owner_id,session_id).await? {
+            return Ok(());
+        }
         let control_plane = self.runtime_control_plane.get()
             .and_then(std::sync::Weak::upgrade)
             .ok_or_else(|| AppError::Conflict("Session control plane is unavailable".into()))?;

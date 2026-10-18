@@ -10,6 +10,7 @@ mod attempt_runner;
 mod automation;
 mod canonical_output;
 mod control_steps;
+mod control;
 mod conversation_effect;
 mod delivery;
 mod domain_mapper;
@@ -33,11 +34,12 @@ pub use automation::{
     admit_frozen_session_workspace, resolve_frozen_automation_workspace,
     resolve_frozen_session_workspace,
 };
-pub use delivery::{AgentExecutionDelivery, AgentExecutionTurnOutput, DirectedDelegationSource,
-    DirectedDelegationAttemptReport, DirectedDelegationReport, DirectedDelegationInput};
+pub use delivery::{AgentExecutionDelivery, AgentExecutionTurnOutput, AgentExecutionSource,
+    AgentExecutionAttemptReport, AgentExecutionReport, AgentExecutionInput,
+    AgentExecutionControlSource, AgentExecutionControlReceipt};
 mod user_input;
 pub use user_input::validate_user_input_handoff_policy;
-pub use engine::AgentExecutionEngine;
+pub use engine::{AgentExecutionEngine, execution_source_from_initial_plan};
 pub use lifecycle::AgentExecutionLifecycle;
 pub use production::AgentExecutionEngineConfig;
 pub use routes::agent_execution_routes;

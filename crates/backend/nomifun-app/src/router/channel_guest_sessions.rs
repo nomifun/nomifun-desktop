@@ -159,6 +159,59 @@ impl NomiCoreSessionOwner {
             .ok_or_else(|| AppError::NotFound("Channel guest Session disappeared".into()))
     }
 
+    async fn guest_context_floor(&self,session:&AgentSessionId)->Result<u64,AppError> {
+        let floor:i64=sqlx::query_scalar("SELECT COALESCE(MAX(seq),0) FROM agent_events WHERE session_id=? AND kind='context/cleared'")
+            .bind(session.as_ref()).fetch_one(&self.pool).await.map_err(|error|AppError::Internal(error.to_string()))?;
+        u64::try_from(floor).map_err(|_|AppError::Conflict("Invalid guest context boundary".into()))
+    }
+
+    /// Shared by guest send and receipt hydration. Reading a current narrow
+    /// binding cannot authorize an older broad result or cross a real clear.
+    async fn channel_guest_replay_origin(&self,owner_id:&str,session:&AgentSessionId,operation:&OperationId)
+        ->Result<Option<String>,AppError> {
+        self.validate_registered_channel_guest_runtime(owner_id,session).await?;
+        let(root,accepted)=self.canonical.store().turn_accepted_input(session,operation).await.map_err(agent_session_store_error)?;
+        let current=self.canonical.get(&PrincipalRef {principal_kind:"user".into(),principal_id:owner_id.into()},session).await?;
+        let admitted:nomifun_agent_contracts::ResolvedSnapshotRef=serde_json::from_value(
+            accepted.0.pointer("/admission/resolved_snapshot_ref").cloned().unwrap_or(Value::Null))
+            .map_err(|_|AppError::Conflict("Channel guest replay has no exact model-only admission proof".into()))?;
+        if admitted!=current.session.agent_binding.resolved_snapshot_ref||root.seq<=self.guest_context_floor(session).await? {
+            return Err(AppError::Conflict("Channel guest cannot deliver a result from before its proven model-only context boundary".into()));
+        }
+        match accepted.0.get("origin") {
+            None|Some(Value::Null)=>Ok(None),
+            Some(Value::String(origin)) if origin=="channel_guest"=>Ok(Some(origin.clone())),
+            _=>Err(AppError::Conflict("Channel guest replay has a different original input source".into())),
+        }
+    }
+
+    pub(super) async fn guard_channel_guest_input_read(&self,owner_id:&str,session:&AgentSessionId,
+        input:&nomifun_agent_session::PendingSessionInput,claim:Option<&nomifun_agent_session::SessionInputClaim>)->Result<(),AppError> {
+        if !self.is_registered_channel_guest(session).await? {return Ok(());}
+        self.validate_registered_channel_guest_runtime(owner_id,session).await?;
+        if input.event.seq<=self.guest_context_floor(session).await? {
+            return Err(AppError::Conflict("Channel guest cannot reuse an input from before its model-only context boundary".into()));
+        }
+        if let Some(claim)=claim {self.channel_guest_replay_origin(owner_id,session,&claim.operation_id).await?;}
+        Ok(())
+    }
+
+    pub(super) async fn guard_channel_guest_key_read(&self,owner_id:&str,session:&AgentSessionId,key:&str)->Result<(),AppError> {
+        if !self.is_registered_channel_guest(session).await? {return Ok(());}
+        let principal=PrincipalRef {principal_kind:"user".into(),principal_id:owner_id.into()};
+        if let Some(input)=self.canonical.session_input_by_key(&principal,session,key).await? {
+            let claim=self.canonical.store().session_input_claim(session,&input.event.event_id).await.map_err(agent_session_store_error)?;
+            self.guard_channel_guest_input_read(owner_id,session,&input,claim.as_ref()).await?;
+        } else {
+            self.validate_registered_channel_guest_runtime(owner_id,session).await?;
+            let operation=Self::turn_operation_id(owner_id,session.as_ref(),key);
+            if self.canonical.store().read_turn_receipt(session,&operation).await.map_err(agent_session_store_error)?.started_event.is_some() {
+                self.channel_guest_replay_origin(owner_id,session,&operation).await?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn send_channel_group_guest(&self, owner_id: &str, session_id: &str, key: &str,
         mut request: SendMessageRequest, opening_key: &str) -> Result<nomifun_channel::ChannelTurnDelivery, AppError> {
         Self::validate_ordinary_message_origin(&request)?;
@@ -167,33 +220,35 @@ impl NomiCoreSessionOwner {
         self.remove_idmm_state(session_id).await?;
         let _operation = self.session_operation_lock(session_id).write_owned().await;
         self.prepare_channel_guest_locked(owner_id,&session,opening_key).await?;
+        let principal=PrincipalRef {principal_kind:"user".into(),principal_id:owner_id.into()};
+        if let Some(original)=self.canonical.session_input_by_key(&principal,&session,key).await? {
+            let claim=self.canonical.store().session_input_claim(&session,&original.event.event_id).await.map_err(agent_session_store_error)?;
+            if original.event.seq<=self.guest_context_floor(&session).await? {
+                return Err(AppError::Conflict("Channel guest cannot reuse an input from before its model-only context boundary".into()));
+            }
+            if let Some(claim)=claim.as_ref() {self.channel_guest_replay_origin(owner_id,&session,&claim.operation_id).await?;}
+            let original_request=super::session_input_intake::runtime_message_request(&original.input)?;
+            request.origin=original_request.origin.clone();
+            if super::canonical_turn_input(&request)!=super::canonical_turn_input(&original_request) {
+                return Err(AppError::Conflict("Channel guest input key was reused with different content".into()));
+            }
+            let delivery=match self.session_turn_delivery_state(owner_id,session_id,key).await? {
+                PublicTurnDeliveryState::Completed(mut delivery)=>{delivery.replayed=true;delivery},
+                PublicTurnDeliveryState::Accepted {message_id}=>IdempotentMessageDelivery {message_id,replayed:true,completed:false,
+                    result_ok:None,result_text:None,result_error:None,result_error_code:None,result_error_retryable:None,user_input_request:None,turn_outcome:None},
+                PublicTurnDeliveryState::InputUnavailable {message_id,cause,..}=>return Err(super::session_input_intake::unavailable_input_error(&message_id,&cause)),
+                PublicTurnDeliveryState::Missing=>return Err(AppError::Conflict("Channel guest input lost its original claim".into())),
+            };
+            return Ok(nomifun_channel::ChannelTurnDelivery {delivery:channel_delivery_from_conversation(delivery),events:None});
+        }
         let operation = Self::turn_operation_id(owner_id,session_id,key);
         let receipt = self.canonical.store().read_turn_receipt(&session,&operation).await.map_err(agent_session_store_error)?;
         // The host marks newly accepted external guests so ambient learning
         // cannot mistake them for the installation owner. Exact old accepted
         // roots keep their original source and never broadcast a fresh input.
         request.origin = if receipt.started_event.is_some() {
-            let (root, accepted) = self.canonical.store().turn_accepted_input(&session,&operation).await.map_err(agent_session_store_error)?;
-            let principal = PrincipalRef { principal_kind:"user".into(),principal_id:owner_id.into() };
-            let current = self.canonical.get(&principal,&session).await?;
-            let admitted: nomifun_agent_contracts::ResolvedSnapshotRef = serde_json::from_value(
-                accepted.0.pointer("/admission/resolved_snapshot_ref").cloned().unwrap_or(Value::Null),
-            ).map_err(|_| AppError::Conflict("Channel guest replay has no exact model-only admission proof".into()))?;
-            let floor: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(seq),0) FROM agent_events WHERE session_id=? AND kind='context/cleared'")
-                .bind(session.as_ref()).fetch_one(&self.pool).await.map_err(|error| AppError::Internal(error.to_string()))?;
-            // Current authority alone cannot authorize old broad results. A
-            // replay must belong to this proven empty Snapshot and follow the
-            // actual canonical clear that removed its predecessor's context.
-            if admitted != current.session.agent_binding.resolved_snapshot_ref
-                || root.seq <= u64::try_from(floor).map_err(|_| AppError::Conflict("Invalid guest context boundary".into()))? {
-                return Err(AppError::Conflict("Channel guest cannot deliver a result from before its proven model-only context boundary".into()));
-            }
-            match accepted.0.get("origin") {
-                None | Some(Value::Null) => None,
-                Some(Value::String(origin)) if origin == "channel_guest" => Some(origin.clone()),
-                _ => return Err(AppError::Conflict("Channel guest replay has a different original input source".into())),
-            }
-        } else { Some("channel_guest".into()) };
+            self.channel_guest_replay_origin(owner_id,&session,&operation).await?
+        } else {Some("channel_guest".into())};
         let delivery = self.dispatch_canonical_turn_locked(owner_id,&session,key,request,false,None,None,None,false,None,None).await?;
         let events = if delivery.completed { None } else { wait_for_runtime_subscription(&self.runtime_sessions,session_id).await };
         Ok(nomifun_channel::ChannelTurnDelivery { delivery:channel_delivery_from_conversation(delivery),events })

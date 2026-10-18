@@ -322,7 +322,7 @@ pub(crate) async fn try_build_module_states(
     let voice_work=Arc::new(super::voice_work_host::AppVoiceWorkHost::new(
         conversation_owner.clone(),voice_journal.clone(),nomi_core_agent_api.control_plane.clone(),Some(agent_execution.clone())
     ).with_shutdown_token(services.background_shutdown.child_token()));
-    conversation_owner.install_directed_voice_work(&voice_work)
+    conversation_owner.install_execution_voice_work(&voice_work)
         .map_err(anyhow::Error::msg)?;
     let mobile_voice=match super::mobile_voice_registry::AppVoiceRegistry::new(services.model_invoke_service.clone(),services.database.pool().clone(),services.authoritative_user_id.clone()){
     Ok(voice_registry)=>{

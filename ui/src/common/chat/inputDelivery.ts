@@ -1,6 +1,6 @@
 /** Read-only progress of one accepted input, ordered by canonical facts. */
 export type InputDelivery = {
-  state: 'pending' | 'blocked' | 'claimed' | 'discarded';
+  state: 'pending' | 'blocked' | 'claimed' | 'discarded' | 'cancelled';
   reason?: string;
   /** Missing only on an optimistic local echo. */
   event_seq?: number;
@@ -9,7 +9,7 @@ export type InputDelivery = {
 export function normalizeInputDelivery(raw: unknown): InputDelivery | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   const value = raw as Record<string, unknown>;
-  if (typeof value.state !== 'string' || !['pending', 'blocked', 'claimed', 'discarded'].includes(value.state)) return undefined;
+  if (typeof value.state !== 'string' || !['pending', 'blocked', 'claimed', 'discarded', 'cancelled'].includes(value.state)) return undefined;
   if (value.event_seq !== undefined &&
       (typeof value.event_seq !== 'number' || !Number.isSafeInteger(value.event_seq) || value.event_seq <= 0)) return undefined;
   return {

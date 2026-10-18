@@ -472,6 +472,7 @@ fn allowed_auth_schemes(spec: ProtocolSpec) -> &'static [&'static str] {
         // The persistent StepFun session performs the same strict check before
         // sending its Bearer header over the WebSocket handshake.
         "stepfun.realtime_s2s" => &["bearer"],
+        "deepgram.listen_stream" => &["token"],
         // Volcengine voice uses three required X-Api-* headers populated from
         // its purpose-built credential object.
         "volc.asr_file" | "volc.tts_v3" => &["volc_voice"],
@@ -553,6 +554,7 @@ const PROTOCOL_SPECS: &[ProtocolSpec] = &[
     ] },
     ProtocolSpec { id: "gemini.interactions_tts", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["gemini"], connection_role: None, endpoints: &[origin_endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/v1beta/interactions")] },
     ProtocolSpec { id: "deepgram.listen", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["deepgram"], connection_role: None, endpoints: &[origin_endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/v1/listen")] },
+    ProtocolSpec { id: "deepgram.listen_stream", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Websocket, scopes: NATIVE_CUSTOM, platforms: &["deepgram"], connection_role: None, endpoints: &[origin_endpoint(SpeechRecognition, "realtime_endpoint", Session, "GET", "/v1/listen")] },
     ProtocolSpec { id: "deepgram.speak_rest", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["deepgram"], connection_role: None, endpoints: &[origin_endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/v1/speak")] },
     ProtocolSpec { id: "ark.images", tasks: &[ImageGeneration, ImageEdit], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["ark", "volcengine", "ark-agent-plan", "ctyun"], connection_role: None, endpoints: &[
         endpoint(ImageGeneration, "endpoint", Submit, "POST", "/images/generations"),
@@ -782,6 +784,7 @@ fn provider_params_encoding(
         | ("openai.videos", VideoGeneration)
         | ("openai.audio_transcriptions", SpeechRecognition)
         | ("deepgram.listen", SpeechRecognition)
+        | ("deepgram.listen_stream", SpeechRecognition)
         | ("deepgram.speak_rest", SpeechSynthesis)
         | ("stepfun.images", ImageEdit)
         | ("xai.stt", SpeechRecognition)
@@ -1268,9 +1271,11 @@ pub fn try_default_protocol_registry() -> Result<ProtocolManifestRegistry, Invok
                     | "bedrock.anthropic_messages"
                     | "gemini.generate_text"
             ),
-            ProtocolExecutorKind::ModelInvoke | ProtocolExecutorKind::AsyncJob => {
+            ProtocolExecutorKind::ModelInvoke => {
                 request_registry.contains(&descriptor.protocol_id)
+                    || crate::voice::speech::is_registered_session_protocol(&descriptor.protocol_id)
             }
+            ProtocolExecutorKind::AsyncJob => request_registry.contains(&descriptor.protocol_id),
             ProtocolExecutorKind::RealtimeSession => realtime_registry.contains(&descriptor.protocol_id),
         };
         if !valid_executor {
@@ -1353,11 +1358,21 @@ pub fn protocol_manifest_for_model_connection(
     model_hint: Option<&str>,
     task: ModelTask,
 ) -> ModelProtocolManifestResponse {
+    let registry = default_protocol_registry();
+    protocol_manifest_with_registry(&registry, preset, base_url_hint, model_hint, task)
+}
+
+fn protocol_manifest_with_registry(
+    registry: &ProtocolManifestRegistry,
+    preset: &str,
+    base_url_hint: Option<&str>,
+    model_hint: Option<&str>,
+    task: ModelTask,
+) -> ModelProtocolManifestResponse {
     let selected = resolve_preset(preset, base_url_hint);
     let model_defaults = (task == Chat).then(|| model_hint.and_then(|model|
         crate::model_profiles::documented_model_defaults(&selected.platform, model))).flatten();
     let custom_scope = matches!(selected.platform.as_str(), "custom" | "new-api");
-    let registry = default_protocol_registry();
     let mut protocols = registry
         .descriptors()
         .filter(|descriptor| descriptor.supported_tasks.contains(&task))
@@ -1410,7 +1425,7 @@ pub fn protocol_manifest_for_model_connection(
     });
 
     let recommendation = if custom_scope {
-        generic_custom_protocol_recommendation(&registry, &selected, task)
+        generic_custom_protocol_recommendation(registry, &selected, task)
     } else if selected.platform == "nomifun-model-gateway" {
         // This catalog supplies its own explicit protocol per capability.
         None
@@ -2289,12 +2304,11 @@ mod tests {
         joined
     }
 
-    #[test]
-    fn every_preset_recommendation_has_a_stable_exact_composed_url_snapshot() {
+    fn recommendation_url_snapshot(registry: &ProtocolManifestRegistry) -> String {
         let mut lines = Vec::new();
         for preset in platform_presets() {
             for task in ALL_MODEL_TASKS {
-                let view = protocol_manifest_for(&preset.preset, task);
+                let view = protocol_manifest_with_registry(registry, &preset.preset, None, None, task);
                 if let Some(recommendation) = &view.recommendation {
                     let descriptor = view.protocols.iter().find(|protocol| protocol.protocol_id == recommendation.protocol_id)
                         .expect("recommended protocol descriptor");
@@ -2338,12 +2352,27 @@ mod tests {
                 }
             }
         }
-        let snapshot = lines.join("\n");
+        lines.join("\n")
+    }
+
+    #[test]
+    fn incremental_asr_is_explicit_and_preserves_existing_recommended_urls() {
+        let registry = default_protocol_registry();
+        let mut before_incremental_asr = registry.clone();
+        assert!(before_incremental_asr.by_id.remove("deepgram.listen_stream").is_some());
+        assert_eq!(recommendation_url_snapshot(&registry), recommendation_url_snapshot(&before_incremental_asr));
+        assert!(protocol_manifest_with_registry(&registry, "Deepgram", None, None, SpeechRecognition)
+            .recommendation.is_none_or(|value| value.protocol_id != "deepgram.listen_stream"));
+    }
+
+    #[test]
+    fn every_preset_recommendation_has_a_stable_exact_composed_url_snapshot() {
+        let snapshot = recommendation_url_snapshot(&default_protocol_registry());
         let hash = snapshot.bytes().fold(0xcbf29ce484222325_u64, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
         });
         assert_eq!(
-            hash, 15_772_525_078_110_188_208,
+            hash, 16_446_406_255_142_718_755,
             "recommendation URL snapshot changed:\n{snapshot}"
         );
     }

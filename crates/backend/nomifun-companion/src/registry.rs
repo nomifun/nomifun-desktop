@@ -230,6 +230,7 @@ impl CompanionRegistry {
                         let child_name = child.file_name().to_string_lossy().into_owned();
                         if child_type.is_symlink()
                             || (child_name != "config.json"
+                                && child_name != "config.pre-unified-agent.json"
                                 && child_name != crate::figure::FIGURE_FILE)
                         {
                             return Err(AppError::Internal(format!(
@@ -247,6 +248,7 @@ impl CompanionRegistry {
                             local_figure_path = Some(child_path);
                         }
                     }
+                    CompanionProfileConfig::transition_unified_agent_profile(&path, &dir_name)?;
                     let profile = match CompanionProfileConfig::load(&path) {
                         Ok(Some(profile)) => profile,
                         Ok(None) => {
@@ -752,6 +754,27 @@ mod tests {
 
     fn registry(dir: &std::path::Path) -> CompanionRegistry {
         scan_at(dir).unwrap()
+    }
+
+    #[tokio::test]
+    async fn current_generation_profile_transition_is_restart_safe_and_retains_original_choices() {
+        let dir = tempfile::tempdir().unwrap();
+        let initial = registry(dir.path());
+        let profile = initial.create("Unified", "ink").await.unwrap();
+        let profile_dir = dir.path().join("companions").join(&profile.companion_id);
+        let mut old = serde_json::to_value(&profile).unwrap();
+        old["robot"] = serde_json::json!({"model":null,"skills":{"enabled":["former-device-choice"]},"mcp_servers":["former-mcp"]});
+        let bytes = serde_json::to_vec_pretty(&old).unwrap();
+        std::fs::write(CompanionProfileConfig::config_path(&profile_dir), &bytes).unwrap();
+        drop(initial);
+        let transitioned = scan_at(dir.path()).unwrap();
+        assert_eq!(transitioned.get(&profile.companion_id).await.unwrap(), profile);
+        assert_eq!(std::fs::read(profile_dir.join("config.pre-unified-agent.json")).unwrap(), bytes);
+        drop(transitioned);
+        let reopened = scan_at(dir.path()).unwrap();
+        assert_eq!(reopened.get(&profile.companion_id).await.unwrap(), profile);
+        assert!(reopened.patch(&profile.companion_id, serde_json::json!({"robot":{}})).await.is_err(),
+            "retired configuration cannot be written through the current API");
     }
 
     struct CatalogRegistryFixture {

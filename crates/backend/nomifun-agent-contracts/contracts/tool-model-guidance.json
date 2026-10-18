@@ -522,7 +522,7 @@
     {
       "capability_id": "session.management",
       "action_id": "session.management/execution_answer_decision",
-      "description": "Submit the current authenticated physical Robot user utterance as the answer to the single already-presented ordinary question from this Companion's linked desktop task. The host reads the actual accepted input and exact presentation; do not invent or pass an answer or target. Call only for a clear answer to that question. Backchannels such as uh-huh, okay or yes alone do not approve an action. Explicit-click approvals remain on the desktop. An unavailable or stale question must not be guessed or answered from memory.",
+      "description": "Submit the current authenticated device user utterance as the answer to the single already-presented ordinary question from this Companion's linked background execution. The host reads the actual accepted input and exact presentation; do not invent or pass an answer or target. Call only for a clear answer to that question. Backchannels such as uh-huh or okay do not answer a task question or approve an action. Explicit-click approvals require their existing confirmation control. An unavailable or stale question must not be guessed or answered from memory.",
       "parameters": [],
       "examples": [
         {

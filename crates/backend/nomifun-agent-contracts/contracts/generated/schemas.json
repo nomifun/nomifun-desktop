@@ -5092,9 +5092,6 @@
           "companion.default": {
             "$ref": "#/$defs/OfficialPresetRoleCoverage"
           },
-          "companion.robot": {
-            "$ref": "#/$defs/OfficialPresetRoleCoverage"
-          },
           "creative-studio.default": {
             "$ref": "#/$defs/OfficialPresetRoleCoverage"
           },
@@ -5126,9 +5123,6 @@
             "$ref": "#/$defs/OfficialPresetSeed"
           },
           "companion.default": {
-            "$ref": "#/$defs/OfficialPresetSeed"
-          },
-          "companion.robot": {
             "$ref": "#/$defs/OfficialPresetSeed"
           },
           "creative-studio.default": {

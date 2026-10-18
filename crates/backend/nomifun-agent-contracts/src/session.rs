@@ -411,12 +411,7 @@ pub enum AgentInputSource {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         presented_question_id: Option<String>,
     },
-    DirectedDelegationResult {
-        report_message_id: String,
-        report_seq: u64,
-        execution_id: String,
-        source_turn_operation_id: OperationId,
-    },
+
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

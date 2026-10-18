@@ -1068,10 +1068,10 @@ impl CompanionService {
         self.companion()?.ensure_for_role(companion_id, role, robot_id, None).await
     }
 
-    pub async fn desktop_role_launch_configuration(
+    pub async fn companion_launch_configuration(
         &self, companion_id: &str,
-    ) -> Result<crate::CompanionRoleLaunchConfiguration, AppError> {
-        self.companion()?.desktop_role_launch_configuration(companion_id).await
+    ) -> Result<crate::CompanionLaunchConfiguration, AppError> {
+        self.companion()?.companion_launch_configuration(companion_id).await
     }
 
     pub async fn create_session_for_role(

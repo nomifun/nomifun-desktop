@@ -3713,10 +3713,15 @@ fn validate_exact_declarations(call:&ChatToolCall,plan:&AgentToolPlan,tools:&[no
 }
 
 async fn record_tool_admission(sink: &dyn AgentEventSink, step: u16, invocation: &crate::AgentToolInvocation) -> Result<bool, AgentEngineError> {
-    sink.admit_tool(AgentEngineEvent::ToolStarted {
+    let admitted = sink.admit_tool(AgentEngineEvent::ToolStarted {
         step, call_id: invocation.call.call_id.clone(), capability_id: invocation.binding.capability_id.clone(),
         action_id: invocation.binding.action_id.clone(),
-    }).await
+    }).await?;
+    // Once the owner admitted a tool, voice correction cannot withdraw this
+    // model step or replay its effects. Publish its exact public prefix now,
+    // while the potentially long tool operation is still running.
+    if admitted { sink.emit(AgentEngineEvent::PublicOutputCommitted { step, source: None }).await?; }
+    Ok(admitted)
 }
 
 async fn finish_tool_results_with_hold(

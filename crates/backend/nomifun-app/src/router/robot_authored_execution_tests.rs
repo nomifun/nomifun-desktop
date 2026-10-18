@@ -1,4 +1,5 @@
-//! Authored Robot grants use the ordinary collaboration/management owners.
+//! A unified Companion entered through a device uses ordinary collaboration
+//! and management grants from its single saved Agent.
 //! The installed execution scheduler is stopped to make command versions
 //! deterministic; no physical tool, playback or firmware is exercised.
 use super::*;
@@ -93,6 +94,9 @@ struct RobotFixture {
 impl RobotFixture {
     async fn new(server: &ModelServer, scenario: &str) -> Self {
         let fixture = Fixture::with_input_model(scenario,&server.url).await;
+        let corpus_version=nomifun_skill_library::builtin_skills_materialize_version(env!("CARGO_PKG_VERSION"));
+        nomifun_skill_library::materialize_if_needed(&fixture.services.data_dir,nomifun_skill_library::builtin_skills_corpus(),&corpus_version).await.unwrap();
+        assert!(fixture.services.data_dir.join("builtin-skills").is_dir(),"the installed fixture materializes its bundled Skill corpus before Companion launch");
         // This is the production owner with its background scheduling stopped,
         // rather than a replacement execution or Session port.
         fixture.voice_execution.shutdown().await.unwrap();
@@ -102,9 +106,9 @@ impl RobotFixture {
         let model = serde_json::to_value(projection.model.unwrap()).unwrap();
         let companion = api(router,"/api/companion/companions",json!({"name":scenario,"character":"ink"})).await;
         let companion = companion["companion_id"].as_str().unwrap().to_owned();
-        request(router,"PATCH",&format!("/api/companion/companions/{companion}"),json!({"model":model,"robot":{"model":model}})).await;
-        let editor = api(router,"/api/agent-presets/from-template/companion.robot",json!({
-            "reuse_existing":false,"display_name":"Explicit generic collaboration Robot","model":model,
+        request(router,"PATCH",&format!("/api/companion/companions/{companion}"),json!({"model":model})).await;
+        let editor = api(router,"/api/agent-presets/from-template/companion.default",json!({
+            "reuse_existing":false,"display_name":"Explicit unified Companion collaboration","model":model,
         })).await;
         let mut document = editor["draft"]["document"].clone();
         let capabilities = document["enabled_capabilities"].as_array_mut().unwrap();
@@ -115,8 +119,8 @@ impl RobotFixture {
                 "session.management/execution_status","session.management/execution_retry_step",
                 "session.management/execution_adjust","session.management/execution_cancel",
             ]);
-        let authored = api(router,"/api/agent-presets",json!({"display_name":"Authored Robot execution grants","document":document})).await;
-        request(router,"PUT",&format!("/api/product-agent-bindings/robot/{companion}"),json!({
+        let authored = api(router,"/api/agent-presets",json!({"display_name":"Authored unified Companion execution grants","document":document})).await;
+        request(router,"PUT",&format!("/api/product-agent-bindings/companion/{companion}"),json!({
             "selection":{"kind":"preset","preset_id":authored["preset"]["preset_id"]},
             "model":model,"resource_selections":[],
         })).await;
@@ -146,12 +150,16 @@ impl RobotFixture {
             robot_id:self.device.clone(),companion_id:self.companion.clone(),conversation_id:self.session.as_ref().into(),
             connection_id:self.connection.clone(),request_id:key.clone(),text:format!("Perform the explicitly requested {key} action."),
             presented_question_id:None,
+            captured_context:None,
         };
-        self.fixture.owner.send_robot_session_message_idempotent(owner,&input,&key,
+        let accepted=self.fixture.owner.send_robot_session_message_idempotent(owner,&input,&key,
             nomifun_api_types::SendMessageRequest {content:input.text.clone(),files:vec![],inject_skills:vec![],hidden:false,
                 origin:Some("robot".into()),channel_platform:Some("robot".into())}).await.unwrap();
-        let operation: OperationId = format!("turn:user:{owner}:{}:{key}",self.session.as_ref()).into();
         let store = self.fixture.owner.canonical().store();
+        let operation=tokio::time::timeout(Duration::from_secs(20),async {loop {
+            if let Some(claim)=store.session_input_claim(&self.session,&accepted.message_id.clone().into()).await.unwrap() {break claim.operation_id;}
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }}).await.expect("the accepted device input must acquire its exact canonical Turn");
         tokio::time::timeout(Duration::from_secs(20),async { loop {
             let receipt = store.read_turn_receipt(&self.session,&operation).await.unwrap();
             if receipt.status == nomifun_agent_session::TurnReceiptStatus::Completed { break; }
@@ -209,7 +217,15 @@ async fn robot_authored_fork_uses_the_generic_execution_path() {
     assert_eq!(execution.lead_conversation_id.as_deref(),Some(flow.session.as_ref()));
     let raw: String = sqlx::query_scalar("SELECT initial_plan_input FROM agent_executions WHERE execution_id=?")
         .bind(&execution.execution_id).fetch_one(flow.fixture.pool()).await.unwrap();
-    assert_eq!(serde_json::from_str::<Value>(&raw).unwrap()["mode"],"explicit");
+    let raw: Value=serde_json::from_str(&raw).unwrap();
+    assert_eq!(raw["mode"],"explicit");
+    assert_eq!(raw["source"]["agent_session_id"],flow.session.as_ref());
+    let source_operation=OperationId::from(raw["source"]["turn_operation_id"].as_str().unwrap());
+    assert_eq!(flow.fixture.owner.canonical().store().read_turn_receipt(&flow.session,&source_operation).await.unwrap().status,
+        nomifun_agent_session::TurnReceiptStatus::Completed);
+    let (_,accepted)=flow.fixture.owner.canonical().store().turn_accepted_input(&flow.session,&source_operation).await.unwrap();
+    assert!(accepted.0["content"].as_str().unwrap().contains("authored-robot-fork"));
+    assert!(!raw["source"]["effect_id"].as_str().unwrap().is_empty());
     flow.close().await;
     server.close().await;
 }

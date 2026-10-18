@@ -39,6 +39,7 @@ pub struct UplinkPipeline {
     mode: ListeningMode,
     active: bool,
     speech_started: bool,
+    decoded_frame: Option<Vec<i16>>,
 }
 
 impl UplinkPipeline {
@@ -51,6 +52,7 @@ impl UplinkPipeline {
             mode: ListeningMode::Auto,
             active: false,
             speech_started: false,
+            decoded_frame: None,
         })
     }
 
@@ -60,6 +62,7 @@ impl UplinkPipeline {
         self.active = true;
         self.pcm.clear();
         self.speech_started = false;
+        self.decoded_frame = None;
         self.vad.reset();
     }
 
@@ -73,8 +76,18 @@ impl UplinkPipeline {
         self.speech_started
     }
 
+    /// A single decoded packet, drained by the connection's bounded ASR tap.
+    /// This is captured during input, before a complete WAV exists.
+    pub(crate) fn take_decoded_frame(&mut self) -> Option<Vec<i16>> {
+        self.decoded_frame.take()
+    }
+
+    /// Continuous-listening onset can include the retained VAD lead-in once.
+    pub(crate) fn buffered_pcm(&self) -> &[i16] { &self.pcm }
+
     /// Feed one uplink Opus packet.
     pub fn push_packet(&mut self, packet: &[u8]) -> UplinkOutcome {
+        self.decoded_frame = None;
         if !self.active {
             // Wake-word audio arrives before `listen start`; it is not part of a
             // turn and must not be transcribed as one.
@@ -87,6 +100,7 @@ impl UplinkPipeline {
                 return UplinkOutcome::Continue;
             }
         };
+        self.decoded_frame = Some(frame.clone());
         self.pcm.extend_from_slice(&frame);
 
         // The listen window and an utterance have different lifetimes. In
@@ -147,6 +161,7 @@ impl UplinkPipeline {
         self.active = false;
         self.pcm.clear();
         self.speech_started = false;
+        self.decoded_frame = None;
         self.vad.reset();
     }
 
@@ -253,6 +268,21 @@ mod tests {
             p.finish().is_none(),
             "audio outside a listen window is not an utterance"
         );
+    }
+
+    #[test]
+    fn incremental_pcm_tap_is_available_before_a_complete_utterance() {
+        let mut pipeline=pipeline();
+        let packet=loud_packets(60).pop().unwrap();
+        pipeline.push_packet(&packet);
+        assert!(pipeline.take_decoded_frame().is_none(),"unadmitted wake-word audio has no ASR tap");
+        pipeline.begin(ListeningMode::Manual);
+        assert_eq!(pipeline.push_packet(&packet),UplinkOutcome::Continue);
+        assert_eq!(pipeline.take_decoded_frame().unwrap().len(),UPLINK_FRAME_SAMPLES);
+        assert!(pipeline.take_decoded_frame().is_none(),"a frame is only admitted once");
+        assert!(pipeline.finish().is_some(),"the complete WAV did not exist when the PCM tap was consumed");
+        pipeline.abort();
+        assert!(pipeline.take_decoded_frame().is_none());
     }
 
     #[test]
