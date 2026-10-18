@@ -5,11 +5,27 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.13 - 2026-10-18
+
+- Enable trusted global system capabilities: native global OS execution and
+  file semantics on Windows, with native file effects fenced and
+  authentication failures preserved, and trusted global OS capabilities on
+  Linux.
+- Decouple session input from background process lifecycles, keep session
+  preparation under one owner, preserve semantic text boundaries across
+  reasoning, and preserve waiting and cancellation across runtime consumers.
+- Make delegated companion task cancellation reliable, enforce spoken replies
+  across companion surfaces, keep silent robot actions responsive while
+  preserving continuous voice input, and recover retired robot registries
+  with reported endpoint failures.
 - Check the macOS install location together with the update check: when NomiFun
   runs from a disk image, an external volume or a translocated location, the
   update card names the specific cause and running path and offers manual
   download before any package is downloaded, instead of failing after the
   download with one generic message.
+- Refine the model configuration workspace and styling, restore model
+  management text contrast across themes, stop companion tooltips from being
+  clipped, and align the input handoff card with the chat background.
 
 ## v0.8.12 - 2026-10-17
 
