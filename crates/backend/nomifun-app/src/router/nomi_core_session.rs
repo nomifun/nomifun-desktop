@@ -10987,11 +10987,13 @@ async fn execute_initial_remote_turn(
     let initial_key = format!("remote-initial:{open_key}");
     let delivery = state
         .session_owner
-        .send_session_message_idempotent(
+        .dispatch_canonical_turn(
             owner.as_ref(),
-            session_id.as_ref(),
+            session_id,
             &initial_key,
             input,
+            false,
+            None,
         )
         .await;
 
@@ -16781,7 +16783,20 @@ pub(super) async fn prepare_app_agent_binding(
     existing_binding_id: Option<&str>,
 ) -> Result<AppAgentBindingChange, NomiCoreApiError> {
     let owner = UserId::from(owner_id.to_owned());
-    let mut binding = state.control_plane.resolve_agent_session_binding_with_model(&owner, agent_id, None).await?;
+    let official = state.control_plane.library(&owner).await?.official_presets.into_iter()
+        .find(|(_, preset)| preset.preset_id == agent_id);
+    let preset_id = if let Some((key, _)) = official {
+        let key = serde_json::to_value(key)?;
+        let template = key.as_str().ok_or_else(|| AppError::Internal("official Agent template key is not a string".into()))?;
+        // First use materializes an execution configuration through the same
+        // launch path as other official Agent consumers. It preserves saved
+        // official defaults and keeps inherited models in hidden variants.
+        state.control_plane.create_from_template(&owner, template, CreateAgentPresetFromTemplateRequest {
+            model: None, reuse_existing: true, display_name: template.to_owned(), description: None,
+            model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new(),
+        }).await?.preset.preset_id
+    } else { agent_id.to_owned() };
+    let mut binding = state.control_plane.resolve_agent_session_binding_with_model(&owner, &preset_id, None).await?;
     let (_, _, snapshot) = state.control_plane.saved_binding_artifacts(&owner, &binding).await?;
     let selections = snapshot.content.required_resource_kinds.iter().filter_map(|kind| {
         automatic_agent_resource_id(kind.as_ref()).map(|resource_id| AgentResourceSelectionDto {
@@ -17467,11 +17482,15 @@ async fn turn_nomi_core_remote(
         async move {
             let delivery = task_state
                 .session_owner
-                .send_session_message_idempotent(
+                // This exact Remote Session was authenticated above. Ordinary
+                // owner intake correctly refuses domain-owned Sessions.
+                .dispatch_canonical_turn(
                     task_owner.as_ref(),
-                    task_session_id.as_ref(),
+                    &task_session_id,
                     &task_key,
                     input,
+                    false,
+                    None,
                 )
                 .await?;
             record_remote_turn_delivery(
@@ -18290,7 +18309,7 @@ pub(super) fn bounded_turn_input(value: Value) -> Result<SendMessageRequest, Nom
         )
     })?;
     if ["idmm_decision", "idmm_notice", "input_source", "channel_source", "reply_to"].iter().any(|key| object.contains_key(*key))
-        || matches!(object.get("origin").and_then(Value::as_str), Some("idmm" | "robot" | "directed_delegation_result")) {
+        || matches!(object.get("origin").and_then(Value::as_str), Some("idmm" | "robot" | "directed_delegation_result" | "channel_guest")) {
         return Err(NomiCoreApiError::new(StatusCode::BAD_REQUEST,
             "NOMI_CORE_INVALID_REQUEST", "Input source metadata is reserved for its authenticated host"));
     }

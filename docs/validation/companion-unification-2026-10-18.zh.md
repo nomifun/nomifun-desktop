@@ -137,3 +137,14 @@ Request JSON 58311 bytes。新建设备 canonical Session 的一次本地观测�
 真实供应商端到端 ASR/TTS、实体麦克风、实际播放、机械动作完成、真实多设备网络、正式安装的 Tauri shell 与发布包均未验证。
 按用户调整后的口径，它们不阻塞本轮本地功能交付；若后续进行现场验收，需提供可用供应商配置、已配对实体设备及安装环境。
 取消只承诺阻止后续授权及隔离迟到结果，不撤销已发生的 Effect，也不把 writer 接受字节当作用户已听到或机械动作完成。
+
+## 发布前上游同步复验
+
+2026-10-19 用户授权 commit 与 push，重构先提交为 `686e082cd`。随后通过普通 merge 保留远程
+`6da8a3a11` 及其新增的 5 个提交，涵盖 Apps/Remote 派发、飞书 Skill 和 MCP 列表；合并无冲突。
+交叉会话派发代码经过独立复核，统一输入生命周期、完整 admission binding 和退休路线边界均保留。
+
+合并工作树的 `bun run check` 再次 exit 0；Apps 集成 3/3、设备配置集成 6/6、相关 UI 30/30 通过。
+日志为 `.tmp/companion-unified-publish-check.log`、`.tmp/companion-unified-publish-integration.log`
+和 `.tmp/companion-unified-publish-ui.log`。前述标准 binary 与进程报告仍对应重构验收时的构建，
+本次上游同步另以这些编译、集成和边界结果证明，不升级为正式安装或实体设备证据。

@@ -1,5 +1,7 @@
 import { appHosting } from '@/common/adapter/appHostingBridge';
 import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
+import { isConversationAgentTemplate } from '@/renderer/components/agent/conversationAgentCatalog';
+import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
 import type { AppEnvironmentReport, AppImportKind, AppSettings, HostedApp } from '@/common/types/appHosting';
 import { Alert, Button, Input, Radio, Select } from '@arco-design/web-react';
 import { useEffect, useState } from 'react';
@@ -27,7 +29,14 @@ export default function AppSettingsForm({ app, onSaved, compact = false, develop
   const [detecting, setDetecting] = useState(false);
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState('');
-  const { presets, error: agentError } = useAgentPresets();
+  const { library, presets, error: agentError } = useAgentPresets();
+  const agents = new Map<string, string>();
+  for (const template of library?.official_templates ?? []) {
+    if (!isConversationAgentTemplate(template)) continue;
+    const preset = library?.official_presets?.[template.template_key];
+    if (preset) agents.set(preset.preset_id, t(`agentSettings.template.${TEMPLATE_I18N_PATH[template.template_key]}.name`));
+  }
+  for (const preset of presets) agents.set(preset.preset_id, preset.display_name);
   useEffect(() => {
     if (!dirtyFields.has('name')) setName(app.name);
     if (!dirtyFields.has('description')) setDescription(app.description ?? '');
@@ -119,11 +128,11 @@ export default function AppSettingsForm({ app, onSaved, compact = false, develop
         <label>{t('appHosting.settings.environment')}<Input.TextArea value={environment} disabled={busy} onChange={(value) => { markDirty('environment'); setEnvironment(value); }} rows={4} placeholder={'PORT=4317\nDATA_DIR=./data'} aria-label={t('appHosting.settings.environment')} /></label>
         <p className={styles.muted}>{t('appHosting.settings.environmentHint')}</p>
         <label>{t('appHosting.settings.mcp_url')}<Input value={settings.mcp_url ?? ''} disabled={busy} onChange={(value) => change('mcp_url', value)} aria-label={t('appHosting.settings.mcp_url')} placeholder='http://127.0.0.1:4317/mcp' /></label>
-        <label>{t('appHosting.settings.agent_id')}<Select value={settings.agent_id || undefined} allowClear disabled={busy || app.state === 'running' || Boolean(app.operation)}
+        <div className={styles.agentField}><span>{t('appHosting.settings.agent_id')}</span><Select value={settings.agent_id || undefined} allowClear disabled={busy || app.state === 'running' || Boolean(app.operation)}
           onChange={(value: string | undefined) => change('agent_id', value ?? '')} aria-label={t('appHosting.settings.agent_id')} placeholder={t('appHosting.settings.noAgent')}>
-          {settings.agent_id && !presets.some((preset) => preset.preset_id === settings.agent_id) && <Select.Option value={settings.agent_id}>{t('appHosting.settings.unavailableAgent')}</Select.Option>}
-          {presets.map((preset) => <Select.Option key={preset.preset_id} value={preset.preset_id}>{preset.display_name}</Select.Option>)}
-        </Select></label>
+          {settings.agent_id && !agents.has(settings.agent_id) && <Select.Option value={settings.agent_id}>{t('appHosting.settings.unavailableAgent')}</Select.Option>}
+          {[...agents].map(([id, label]) => <Select.Option key={id} value={id}>{label}</Select.Option>)}
+        </Select></div>
         {agentError && <Alert type='warning' content={appErrorMessage(agentError)} />}
         {app.state === 'running' && <p className={styles.muted}>{t('appHosting.workspace.stopToBindAgent')}</p>}
         <p className={styles.muted}>{t('appHosting.settings.connectionHint')}</p>

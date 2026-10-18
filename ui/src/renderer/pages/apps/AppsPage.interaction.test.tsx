@@ -13,15 +13,17 @@ import type { AddressInfo } from 'node:net';
 import { agentPlatform } from '@/common/adapter/ipcBridge';
 import { appHosting } from '@/common/adapter/appHostingBridge';
 import type { HostedApp } from '@/common/types/appHosting';
+import { asAgentPresetId, type AgentPresetSummary, type OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import locale from '../../services/i18n/locales/en-US/appHosting.json';
 import common from '../../services/i18n/locales/en-US/common.json';
+import agentSettings from '../../services/i18n/locales/en-US/agentSettings.json';
 import AppsPage from './index';
 import AppSettingsForm from './AppSettingsForm';
 import AppWorkspace from './AppWorkspace';
 import AppImportForm from './AppImportForm';
 
 const i18n = createInstance();
-await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: { appHosting: locale, common } } }, interpolation: { escapeValue: false } });
+await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: { appHosting: locale, common, agentSettings } } }, interpolation: { escapeValue: false } });
 const app = (id: string, name: string): HostedApp => ({ id, name, description: '', tags: [], development_session_id: null, directory: `C:/host/apps/${id}`, import_kind: 'source',
   settings: { project_directory: '.', environment: {}, install_command: 'bun install', start_command: 'bun run start' },
   state: 'stopped', operation: null, last_error: null, output: '', pid: null, preview: false, prepared: false });
@@ -264,6 +266,48 @@ test('running apps expose a stop-first hint and disable runtime Agent rebinding'
   expect(view.getByText(locale.workspace.stopToBindAgent)).toBeTruthy();
   const picker = view.getByRole('combobox', { name: locale.settings.agent_id }) as HTMLElement;
   expect(picker.getAttribute('aria-disabled')).toBe('true');
+});
+
+test('app runtime Agent selection includes saved official configurations alongside personal Agents', async () => {
+  const official: AgentPresetSummary = { preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000101'),
+    source: 'official', display_name: 'chat.minimal', bound_target_count: 0 };
+  const personal: AgentPresetSummary = { ...official, preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000102'),
+    source: 'user', display_name: 'My text Agent' };
+  const companion: AgentPresetSummary = { ...official, preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000103'),
+    display_name: 'companion.default' };
+  spyOn(agentPlatform.library, 'invoke').mockResolvedValue({
+    official_templates: [{ template_key: 'chat.minimal' }, { template_key: 'companion.default' }] as OfficialPresetTemplate[],
+    official_presets: { 'chat.minimal': official, 'companion.default': companion }, user_presets: [personal], active_bindings: [],
+    fresh_start: { data_generation: 6, legacy_data_imported: false, user_preset_count: 1, official_template_count: 2 },
+  });
+  const original = app('official-runtime', 'Keyboard');
+  const update = spyOn(appHosting.update, 'invoke').mockResolvedValue({ ...original, settings: { ...original.settings, agent_id: official.preset_id } });
+  const view = render(<AppSettingsForm app={original} onSaved={() => {}} />, { wrapper });
+  const picker = view.getByRole('combobox', { name: locale.settings.agent_id });
+  // Arco renders a native input internally. An enclosing HTML label forwards
+  // another click to it in real browsers and immediately closes the popup.
+  expect(picker.closest('label')).toBeNull();
+  fireEvent.click(picker);
+  const option = await view.findByRole('option', { name: agentSettings.template.chat.minimal.name });
+  expect(view.getByRole('option', { name: personal.display_name })).toBeTruthy();
+  expect(view.queryByRole('option', { name: agentSettings.template.companion.default.name })).toBeNull();
+  fireEvent.click(option);
+  fireEvent.click(view.getByRole('button', { name: common.save }));
+  await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+  expect(update.mock.calls[0][0]).toEqual({ id: original.id, settings: { agent_id: official.preset_id } });
+});
+
+test('an already selected official Agent remains available without creating a personal copy', async () => {
+  const id = asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000104');
+  spyOn(agentPlatform.library, 'invoke').mockResolvedValue({ official_templates: [{ template_key: 'assistant.general' }] as OfficialPresetTemplate[],
+    official_presets: { 'assistant.general': { preset_id: id, source: 'official', display_name: 'assistant.general', bound_target_count: 0 } },
+    user_presets: [], active_bindings: [], fresh_start: { data_generation: 6, legacy_data_imported: false, user_preset_count: 0, official_template_count: 1 } });
+  const create = spyOn(agentPlatform.createFromTemplate, 'invoke');
+  const value = app('official-saved', 'Keyboard');
+  const view = render(<AppSettingsForm app={{ ...value, settings: { ...value.settings, agent_id: id } }} onSaved={() => {}} />, { wrapper });
+  await view.findByText(agentSettings.template.assistant.general.name);
+  expect(view.queryByText(locale.settings.unavailableAgent)).toBeNull();
+  expect(create).not.toHaveBeenCalled();
 });
 
 test('the unified start command is visibly used for preview while null install and build steps remain explicit skips', async () => {

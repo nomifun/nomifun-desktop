@@ -36,6 +36,7 @@
 .settings { display: flex; flex-direction: column; gap: 12px; }
 .settings h3 { margin: 0; font-size: 13px; font-weight: 500; line-height: 20px; }
 .settings label { display: flex; flex-direction: column; gap: 7px; font-size: 13px; color: var(--color-text-1); }
+.agentField { display: flex; flex-direction: column; gap: 7px; font-size: 13px; color: var(--color-text-1); line-height: 20px; }
 .settings :global(label.arco-radio) { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; }
 .settings :global(.arco-radio-group) { display: flex; flex-wrap: wrap; gap: 10px; }
 .settings details > summary, .details > summary { cursor: pointer; font-size: 13px; color: var(--color-text-2); }
