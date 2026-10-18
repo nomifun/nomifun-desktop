@@ -5,8 +5,10 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
-## v0.8.13 - 2026-10-18
+## v0.8.14 - 2026-10-18
 
+- Supersedes the retracted v0.8.13 with the same content plus consistent
+  session-process workspace path comparison.
 - Enable trusted global system capabilities: native global OS execution and
   file semantics on Windows, with native file effects fenced and
   authentication failures preserved, and trusted global OS capabilities on
@@ -26,6 +28,10 @@ notes at a high level rather than a complete historical log.
 - Refine the model configuration workspace and styling, restore model
   management text contrast across themes, stop companion tooltips from being
   clipped, and align the input handoff card with the chat background.
+
+## v0.8.13 - 2026-10-18 (retracted)
+
+- Retracted after publication; v0.8.14 carries the same content.
 
 ## v0.8.12 - 2026-10-17
 
