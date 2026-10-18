@@ -8,6 +8,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { INSTALL_NOT_ATTEMPTED_ERROR } from './tauriUpdateInstall';
 import { getUpdateErrorMessageKey } from '@/renderer/components/settings/updateErrorMessage';
+import { tauriUpdateCheck } from './tauriUpdater';
 
 const updaterSource = readFileSync(new URL('./tauriUpdater.ts', import.meta.url), 'utf8');
 const shellSource = readFileSync(new URL('./tauriShell.ts', import.meta.url), 'utf8');
@@ -25,6 +26,101 @@ const cloudReleaseSource = readFileSync(
 const capability = JSON.parse(
   readFileSync(new URL('../../../../apps/desktop/capabilities/default.json', import.meta.url), 'utf8')
 ) as { permissions: string[] };
+
+const WINDOWS_TARGETS_NOT_FOUND =
+  'None of the fallback platforms `["windows-x86_64-nsis", "windows-x86_64"]` were found in the response `platforms` object';
+
+async function withUpdaterCheck(
+  check: () => Promise<unknown>,
+  run: (calls: Array<{ command: string; args: unknown }>) => Promise<void>
+): Promise<void> {
+  const originalInternals = Object.getOwnPropertyDescriptor(window, '__TAURI_INTERNALS__');
+  const calls: Array<{ command: string; args: unknown }> = [];
+  Object.defineProperty(window, '__TAURI_INTERNALS__', {
+    configurable: true,
+    value: {
+      invoke: async (command: string, args: unknown) => {
+        calls.push({ command, args });
+        if (command === 'update_package_status') return { state: 'empty', version: null };
+        if (command === 'plugin:updater|check') return check();
+        if (command === 'plugin:resources|close') return;
+        throw new Error(`Unexpected native command: ${command}`);
+      },
+    },
+  });
+  try {
+    await run(calls);
+  } finally {
+    // Clear the cached result and close any metadata handle while IPC is present.
+    check = async () => null;
+    await tauriUpdateCheck(true);
+    if (originalInternals) Object.defineProperty(window, '__TAURI_INTERNALS__', originalInternals);
+    else Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
+  }
+}
+
+describe('platform-specific update availability', () => {
+  test.each([
+    WINDOWS_TARGETS_NOT_FOUND,
+    new Error(WINDOWS_TARGETS_NOT_FOUND),
+    'None of the fallback platforms `["darwin-aarch64-app", "darwin-aarch64"]` were found in the response `platforms` object',
+    'the platform `linux-x86_64` was not found in the response `platforms` object',
+  ])('a release without the current target is a cached no-update result: %s', async (error) => {
+    await withUpdaterCheck(async () => { throw error; }, async (calls) => {
+      expect(await tauriUpdateCheck(true)).toBeNull();
+      expect(await tauriUpdateCheck()).toBeNull();
+      const checks = calls.filter(({ command }) => command === 'plugin:updater|check');
+      expect(checks).toEqual([{ command: 'plugin:updater|check', args: { timeout: 8_000 } }]);
+    });
+  });
+
+  test('a forced recheck finds a package once the current platform is published', async () => {
+    let published = false;
+    await withUpdaterCheck(async () => {
+      if (!published) throw WINDOWS_TARGETS_NOT_FOUND;
+      return { rid: 42, currentVersion: '0.8.12', version: '0.8.14', body: 'Windows release' };
+    }, async () => {
+      expect(await tauriUpdateCheck(true)).toBeNull();
+      published = true;
+      expect(await tauriUpdateCheck(true)).toEqual({
+        currentVersion: '0.8.12', version: '0.8.14', releaseNotes: 'Windows release', releaseDate: undefined,
+      });
+    });
+  });
+
+  test('a missing target clears a previously available metadata handle', async () => {
+    let available = true;
+    await withUpdaterCheck(async () => {
+      if (!available) throw WINDOWS_TARGETS_NOT_FOUND;
+      return { rid: 43, currentVersion: '0.8.12', version: '0.8.13' };
+    }, async (calls) => {
+      expect((await tauriUpdateCheck(true))?.version).toBe('0.8.13');
+      available = false;
+      expect(await tauriUpdateCheck(true)).toBeNull();
+      expect(calls).toContainEqual({ command: 'plugin:resources|close', args: { rid: 43 } });
+      expect(await tauriUpdateCheck()).toBeNull();
+    });
+  });
+
+  test.each([
+    'error sending request for url: connection timed out',
+    'Could not fetch a valid release JSON from the remote',
+    'missing field `platforms`',
+    'invalid type: null, expected struct RemoteRelease',
+    new Error('signature verification failed'),
+  ])('real update failures still reject and can be retried: %s', async (error) => {
+    let failed = true;
+    await withUpdaterCheck(async () => {
+      if (failed) throw error;
+      return null;
+    }, async (calls) => {
+      await expect(tauriUpdateCheck(true)).rejects.toBe(error);
+      failed = false;
+      expect(await tauriUpdateCheck()).toBeNull();
+      expect(calls.filter(({ command }) => command === 'plugin:updater|check')).toHaveLength(2);
+    });
+  });
+});
 
 describe('desktop updater security boundary', () => {
   test('renderer exposes download but no raw updater install path', () => {
