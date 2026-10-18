@@ -347,9 +347,11 @@ impl NomiCoreWave2Host {
 
     pub(crate) async fn read_mcp_resource(&self, principal: PrincipalRef, session: AgentSessionId,
         operation_id: nomifun_agent_contracts::OperationId, resource: TypedResourceBinding,
-        operation: nomifun_mcp::McpResourceOperation) -> Result<StrictJsonValue, AppError> {
+        operation: nomifun_mcp::McpResourceOperation, control: nomifun_agent_kernel::InvocationControl,
+        turn_id: nomifun_agent_contracts::OperationId,
+        snapshot: nomifun_agent_contracts::ResolvedSnapshotRef) -> Result<StrictJsonValue, AppError> {
         self.mcp.as_ref().ok_or_else(|| AppError::Conflict("MCP owner is unavailable".into()))?
-            .resource(principal, session, operation_id, resource, operation).await
+            .resource(principal, session, operation_id, resource, operation, control, turn_id, snapshot).await
             .map_err(|error| AppError::Conflict(error.to_string()))
     }
 

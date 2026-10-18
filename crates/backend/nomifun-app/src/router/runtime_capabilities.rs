@@ -135,7 +135,7 @@ impl nomifun_engine_core::EngineResourcePort for HostPort {
                 return Err(fail("Resource dispatch paused for queued user input or closed turn".into()));
             }
             host.resources.start_mcp_resource_image(turn.journal.clone(), causality.clone(), generation,
-                call_id.to_owned(), request).map_err(|error| fail(error.to_string()))?
+                call_id.to_owned(), request, turn.cancellation.clone()).map_err(|error| fail(error.to_string()))?
         };
         task.result().await.map_err(|error| fail(error.to_string()))?
             .map_err(|error| fail(error.to_string()))
@@ -157,7 +157,7 @@ impl nomifun_engine_core::EngineResourcePort for HostPort {
             // Register synchronously under the steering/turn boundary,
             // then release it while the owned remote transaction runs.
             host.resources.start_mcp_resource(turn.journal.clone(), causality.clone(), generation,
-                call_id.to_owned(), request).map_err(|error| fail(error.to_string()))?
+                call_id.to_owned(), request, turn.cancellation.clone()).map_err(|error| fail(error.to_string()))?
         };
         task.result().await.map_err(|error| fail(error.to_string()))?
             .map_err(|error| fail(error.to_string()))

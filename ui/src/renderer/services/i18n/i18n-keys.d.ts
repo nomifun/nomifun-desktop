@@ -6364,7 +6364,6 @@ export type I18nKey =
   | 'settings.mcpErrorLocalServiceTimeout'
   | 'settings.mcpErrorLocalServiceUnavailable'
   | 'settings.mcpErrorNodeCommandNotFound'
-  | 'settings.mcpErrorPackageBootstrapTimeout'
   | 'settings.mcpErrorPackageDownloadFailed'
   | 'settings.mcpErrorPackageNotFound'
   | 'settings.mcpErrorProcessConfigurationRequired'

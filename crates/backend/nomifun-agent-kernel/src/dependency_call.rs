@@ -64,6 +64,7 @@ impl DependencyAncestor {
 }
 
 struct DependencyInvocation {
+    control: crate::InvocationControl,
     kernel: Weak<KernelRegistry>,
     snapshot: Arc<CompiledSnapshot>,
     active: Arc<ActiveCapabilitySetSnapshot>,
@@ -95,12 +96,14 @@ impl CapabilityDependencyCaller {
         snapshot: Arc<CompiledSnapshot>,
         active: Arc<ActiveCapabilitySetSnapshot>,
         ancestry: Arc<Vec<DependencyAncestor>>,
+        control: crate::InvocationControl,
     ) -> (Self, DependencyInvocationGuard) {
         let (open, receiver) = watch::channel(true);
         let kernel = Arc::new(kernel);
         (
             Self {
                 inner: Arc::new(DependencyInvocation {
+                    control,
                     kernel: Arc::downgrade(&kernel),
                     snapshot,
                     active,
@@ -282,6 +285,7 @@ impl CapabilityDependencyCaller {
             _ = open.changed() => Err(denied("DEPENDENCY_PARENT_CLOSED", "the parent ended while its dependency was running")),
             result = kernel.invoke_scoped(
                 Arc::clone(&inner.snapshot), Arc::clone(&inner.active), request, Arc::clone(&inner.ancestry),
+                inner.control.clone(),
             ) => result,
         }
     }

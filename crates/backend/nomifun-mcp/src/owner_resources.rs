@@ -49,7 +49,7 @@ pub struct McpResourceRequest {
 pub struct McpResourceResult {
     pub server_id: String,
     pub operation: McpResourceOperation,
-    /// An explicitly observed rejection, only published after cleanup succeeds.
+    /// An explicitly observed rejection, independent of local cleanup facts.
     /// This is not evidence of rollback, no effects or safe automatic replay.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<McpResourceFailure>,
@@ -91,88 +91,35 @@ impl McpResourceRequest {
 }
 
 impl McpOwner {
-    /// One bounded, explicitly authorized resource transaction. Hosts must
-    /// retain its task and reserve effect evidence before calling: initialize
-    /// or starting a configured stdio server is not guaranteed side-effect free.
-    pub async fn resource(
-        &self,
-        request: McpResourceRequest,
-    ) -> Result<McpResourceResult, McpOwnerError> {
-        request.validate()?;
-        let deadline = Instant::now() + self.timeout;
-        let mut session = match &request.server.transport {
-            McpServerTransport::Stdio { command, args, env } => McpSession::from_stdio(
-                stdio::StdioTransport::launch(command, args, env, self.timeout).await?,
-            ),
-            McpServerTransport::Http { url, headers }
-            | McpServerTransport::Sse { url, headers } => {
-                validate_http_endpoint(url)?;
-                let client = self.http_client.as_ref().map_err(Clone::clone)?.clone();
-                let credential = timeout_at(
-                    deadline,
-                    self.credentials.resolve(McpCredentialLookup {
-                        server_id: request.server.server_id.clone(),
-                        resource_id: request.server.resource_id.clone(),
-                        connection_config_ref: request.server.connection_config_ref.clone(),
-                        endpoint: url.clone(),
-                    }),
-                )
-                .await
-                .map_err(|_| owner_timeout_error(self.timeout))??;
-                let mut session = McpSession::new(
-                    client,
-                    url.clone(),
-                    build_headers(headers, credential.as_ref())?,
-                );
-                session.legacy_mode =
-                    matches!(&request.server.transport, McpServerTransport::Sse { .. });
-                session
-            }
+    pub async fn resource(&self, request: McpResourceRequest) -> Result<McpResourceResult, McpOwnerError> {
+        self.resource_controlled(request, McpInvocationControl::default()).await.into_result()
+    }
+
+    /// Resource operations are business requests too: no implicit time/silence
+    /// deadline. The host retains the admitted task and its canonical receipt.
+    pub async fn resource_controlled(
+        &self, request: McpResourceRequest, control: McpInvocationControl,
+    ) -> McpInvocationOutcome<McpResourceResult> {
+        if let Err(error) = request.validate() { return McpInvocationOutcome::rejected(error, &control); }
+        let setup = self.setup_policy.start();
+        let mut session = match self.prepare_session(&request.server, &setup, &control).await {
+            Ok(session) => session,
+            Err(error) => return startup_failure(error, &control),
         };
-        let local_started = session.stdio.is_some();
-        let deadline = if local_started { Instant::now() + self.timeout } else { deadline };
-        let outcome = timeout_at(deadline, async {
-            session.initialize().await?;
+        let phase = setup.phase("protocol_setup", protocol_setup_cap(&setup.policy, &request.server.transport));
+        if let Err(error) = controlled(session.initialize(), &control, Some(phase.deadline), || phase.error()).await {
+            return finish_session(session, Err(error), &control).await;
+        }
+        session.execution_phase = true;
+        let result = controlled(async {
             let (result, failure) = match session.observe_resource(&request).await? {
                 Observed::Available(value) => (value, None),
                 Observed::Rejected(failure) => (Value::Null, Some(failure)),
             };
-            Ok(McpResourceResult {
-                server_id: request.server.server_id.clone(),
-                operation: request.operation.clone(),
-                result,
-                failure,
-            })
-        })
-        .await
-        .unwrap_or_else(|_| Err(owner_timeout_error(self.timeout)));
-        // Independent cleanup budget, even after timeout/protocol rejection.
-        let budget = if session.stdio.is_some() {
-            stdio::CLEANUP_TIMEOUT
-        } else {
-            SESSION_CLEANUP_TIMEOUT
-        };
-        let cleanup = timeout(budget, session.close()).await.unwrap_or_else(|_| {
-            Err(McpOwnerError::new(
-                "MCP_SESSION_CLEANUP_FAILED",
-                "MCP resource session cleanup timed out",
-            ))
-        });
-        match (outcome, cleanup) {
-            (Ok(result), Ok(())) => Ok(result),
-            (_, Err(_)) => Err(McpOwnerError::new(
-                "MCP_SESSION_CLEANUP_FAILED",
-                "MCP resource session cleanup is unproven",
-            )),
-            (Err(error), Ok(())) if local_started => Err(McpOwnerError::new(
-                "MCP_OUTCOME_UNKNOWN",
-                format!(
-                    "MCP local server may have applied effects; do not replay ({})",
-                    error.code()
-                ),
-            )),
-            (Err(error), Ok(())) => Err(error),
-        }
+            Ok(McpResourceResult { server_id: request.server.server_id.clone(),
+                operation: request.operation.clone(), result, failure })
+        }, &control, control.execution_deadline, execution_deadline_error).await;
+        finish_session(session, result, &control).await
     }
 }
 

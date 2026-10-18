@@ -2,30 +2,23 @@ mod protocol;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(test)]
 use std::time::Duration;
 
 use nomifun_api_types::{McpConnectionTestErrorCode, McpConnectionTestResult};
 use tracing::{debug, warn};
 
 use crate::types::McpServerTransport;
+use crate::McpSetupPolicy;
 use protocol::{error_result, spawn_error_result, success_result};
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
-const PACKAGE_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Local prerequisite resolution did not contact an MCP server and cannot
 /// establish a connection or catalog fact about that server.
 pub(crate) fn is_local_runtime_failure(result: &McpConnectionTestResult) -> bool {
-    matches!(
-        result.details.as_ref()
-            .and_then(|details| details.get("owner_code"))
-            .and_then(serde_json::Value::as_str),
-        Some("MCP_RUNTIME_UNAVAILABLE" | "MCP_RUNTIME_RESOLUTION_TIMEOUT")
-    )
+    let Some(details) = result.details.as_ref() else { return false; };
+    let code = details.get("owner_code").and_then(serde_json::Value::as_str);
+    code == Some("MCP_RUNTIME_UNAVAILABLE") || (code == Some("MCP_TIMEOUT")
+        && details.get("phase").and_then(serde_json::Value::as_str) == Some("runtime_resolution"))
 }
 
 // ---------------------------------------------------------------------------
@@ -40,8 +33,7 @@ pub(crate) fn is_local_runtime_failure(result: &McpConnectionTestResult) -> bool
 #[derive(Clone)]
 pub struct McpConnectionTestService {
     http_client: HttpClientFactory,
-    timeout: Duration,
-    package_bootstrap_timeout: Duration,
+    setup_policy: McpSetupPolicy,
 }
 
 type HttpClientFactory =
@@ -52,8 +44,7 @@ impl McpConnectionTestService {
     pub fn new(http_client: reqwest::Client) -> Self {
         Self {
             http_client: Arc::new(move || Ok(http_client.clone())),
-            timeout: CONNECTION_TIMEOUT,
-            package_bootstrap_timeout: PACKAGE_BOOTSTRAP_TIMEOUT,
+            setup_policy: McpSetupPolicy::default(),
         }
     }
 
@@ -69,8 +60,7 @@ impl McpConnectionTestService {
                     )
                 })
             }),
-            timeout: CONNECTION_TIMEOUT,
-            package_bootstrap_timeout: PACKAGE_BOOTSTRAP_TIMEOUT,
+            setup_policy: McpSetupPolicy::default(),
         }
     }
 
@@ -78,14 +68,10 @@ impl McpConnectionTestService {
         (self.http_client)()
     }
 
-    /// Override the protocol timeout (default: 30s). Known sessions/processes
-    /// still receive a separate bounded cleanup phase after protocol timeout.
-    pub fn with_timeout(self, timeout: Duration) -> Self {
-        Self {
-            timeout,
-            package_bootstrap_timeout: timeout,
-            ..self
-        }
+    /// Discovery and actual execution share setup limits; this does not set a
+    /// tool execution timeout.
+    pub fn with_setup_policy(self, setup_policy: McpSetupPolicy) -> Self {
+        Self { setup_policy, ..self }
     }
 
     /// Test connectivity to an MCP server.
@@ -143,13 +129,7 @@ impl McpConnectionTestService {
         args: &[String],
         env: &HashMap<String, String>,
     ) -> McpConnectionTestResult {
-        let is_package_runner = protocol::is_package_runner(command, args);
-        let timeout = if is_package_runner {
-            self.package_bootstrap_timeout
-        } else {
-            self.timeout
-        };
-        match crate::owner::discover_stdio(command, args, env, timeout).await {
+        match crate::owner::discover_stdio(command, args, env, &self.setup_policy).await {
             Ok(catalog) => success_result(Some(catalog)),
             Err(error) => {
                 let kind = match error.code() {
@@ -165,21 +145,17 @@ impl McpConnectionTestService {
                     );
                 }
                 let (code, failure_kind) = match error.code() {
-                    "MCP_RUNTIME_RESOLUTION_TIMEOUT" => (
-                        McpConnectionTestErrorCode::Timeout,
-                        Some("runtime_resolution_timeout"),
-                    ),
                     "MCP_RUNTIME_UNAVAILABLE" => (
                         McpConnectionTestErrorCode::CommandStartFailed,
                         Some("runtime_unavailable"),
                     ),
+                    "MCP_PROCESS_START_UNCERTAIN" if error.setup_timeout_details().is_some() => (
+                        McpConnectionTestErrorCode::Timeout, Some("process_start_uncertain")),
+                    "MCP_PROCESS_START_UNCERTAIN" => (
+                        McpConnectionTestErrorCode::CommandStartFailed, Some("process_start_uncertain")),
                     "MCP_TIMEOUT" => (
                         McpConnectionTestErrorCode::Timeout,
-                        Some(if is_package_runner {
-                            "package_bootstrap_timeout"
-                        } else {
-                            "handshake_timeout"
-                        }),
+                        Some("setup_timeout"),
                     ),
                     "MCP_PACKAGE_NOT_FOUND" => (
                         McpConnectionTestErrorCode::CommandStartFailed,
@@ -212,20 +188,14 @@ impl McpConnectionTestService {
                 if let Some(failure_kind) = failure_kind {
                     details["failure_kind"] = serde_json::json!(failure_kind);
                 }
-                if matches!(error.code(), "MCP_RUNTIME_UNAVAILABLE" | "MCP_RUNTIME_RESOLUTION_TIMEOUT") {
+                if error.code() == "MCP_RUNTIME_UNAVAILABLE" {
                     details["phase"] = serde_json::json!("runtime_resolution");
                     details["retryable"] = serde_json::json!(true);
                 }
-                if code == McpConnectionTestErrorCode::Timeout {
-                    details["timeout_seconds"] = serde_json::json!(timeout.as_secs());
-                    details["phase"] =
-                        serde_json::json!(if error.code() == "MCP_RUNTIME_RESOLUTION_TIMEOUT" {
-                            "runtime_resolution"
-                        } else if is_package_runner {
-                            "package_bootstrap"
-                        } else {
-                            "handshake"
-                        });
+                if let Some(timeout_details) = error.setup_timeout_details() {
+                    if let Some(object) = timeout_details.as_object() {
+                        details.as_object_mut().expect("details object").extend(object.clone());
+                    }
                 }
                 error_result(code, error.message().to_owned(), Some(details))
             }
@@ -243,7 +213,7 @@ impl McpConnectionTestService {
             Ok(client) => client,
             Err(result) => return result,
         };
-        match crate::owner::discover_network(client, url, headers, legacy, self.timeout).await {
+        match crate::owner::discover_network(client, url, headers, legacy, &self.setup_policy).await {
             Ok(catalog) => success_result(Some(catalog)),
             Err(error) => {
                 if error.code() == "MCP_CREDENTIAL_REQUIRED" {
@@ -256,7 +226,7 @@ impl McpConnectionTestService {
                     return protocol::auth_result(&challenge_headers);
                 }
                 if error.code() == "MCP_TIMEOUT" {
-                    let mut result = protocol::timeout_result(self.timeout);
+                    let mut result = error_result(McpConnectionTestErrorCode::Timeout, error.message().to_owned(), error.setup_timeout_details());
                     add_endpoint_details(&mut result, url);
                     return result;
                 }
@@ -324,18 +294,18 @@ mod tests {
     }
 
     #[test]
-    fn service_with_timeout() {
+    fn service_with_setup_policy() {
         let svc = McpConnectionTestService::new(reqwest::Client::new())
-            .with_timeout(Duration::from_secs(5));
-        assert_eq!(svc.timeout, Duration::from_secs(5));
-        assert_eq!(svc.package_bootstrap_timeout, Duration::from_secs(5));
+            .with_setup_policy(McpSetupPolicy::uniform(Duration::from_secs(5)));
+        assert_eq!(svc.setup_policy.protocol_timeout, Duration::from_secs(5));
+        assert_eq!(svc.setup_policy.package_bootstrap_timeout, Duration::from_secs(5));
     }
 
     #[test]
     fn package_runner_gets_a_first_run_bootstrap_budget() {
         let svc = McpConnectionTestService::new(reqwest::Client::new());
-        assert_eq!(svc.timeout, Duration::from_secs(30));
-        assert_eq!(svc.package_bootstrap_timeout, Duration::from_secs(120));
+        assert_eq!(svc.setup_policy.protocol_timeout, Duration::from_secs(30));
+        assert_eq!(svc.setup_policy.package_bootstrap_timeout, Duration::from_secs(120));
     }
 
     #[test]
@@ -368,6 +338,8 @@ mod tests {
         let mut result = error_result(McpConnectionTestErrorCode::CommandStartFailed,
             "missing".into(), Some(serde_json::json!({"owner_code":"MCP_RUNTIME_UNAVAILABLE"})));
         assert!(is_local_runtime_failure(&result));
+        result.details = Some(serde_json::json!({"owner_code":"MCP_TIMEOUT", "phase":"runtime_resolution"}));
+        assert!(is_local_runtime_failure(&result));
         result.details = Some(serde_json::json!({"owner_code":"MCP_PROCESS_EXITED", "phase":"runtime_resolution"}));
         assert!(!is_local_runtime_failure(&result));
     }
@@ -393,8 +365,10 @@ mod tests {
             ],
             env: HashMap::new(),
         };
+        let mut setup_policy = McpSetupPolicy::uniform(Duration::from_secs(5));
+        setup_policy.protocol_timeout = Duration::from_millis(100);
         let svc = McpConnectionTestService::new(reqwest::Client::new())
-            .with_timeout(Duration::from_millis(100));
+            .with_setup_policy(setup_policy);
 
         let result = svc.test_connection("timeout-cleanup", &transport).await;
         assert!(!result.success);

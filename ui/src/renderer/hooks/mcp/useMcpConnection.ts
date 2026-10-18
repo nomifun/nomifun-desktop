@@ -131,23 +131,21 @@ const formatMcpErrorMessage = (t: TFunction, payload: McpErrorPayload): string =
         defaultValue: fallback,
       });
     case 'MCP_TIMEOUT':
-      if (details.phase === 'package_bootstrap') {
-        return t('settings.mcpErrorPackageBootstrapTimeout', {
-          command: details.command || 'command',
-          seconds: details.timeout_seconds ?? 120,
-          defaultValue: fallback,
-        });
+      // Only the owner knows which bounded setup phase expired. A missing
+      // measurement must not become an invented 30/120-second deadline.
+      if (typeof details.timeout_seconds !== 'number' || !Number.isFinite(details.timeout_seconds) || details.timeout_seconds < 0) {
+        return fallback;
       }
       if (details.endpoint_scope === 'local') {
         return t('settings.mcpErrorLocalServiceTimeout', {
           host: details.host || 'localhost',
           port: details.port || '',
-          seconds: details.timeout_seconds ?? 30,
+          seconds: details.timeout_seconds,
           defaultValue: fallback,
         });
       }
       return t('settings.mcpErrorTimeout', {
-        seconds: details.timeout_seconds ?? 30,
+        seconds: details.timeout_seconds,
         defaultValue: fallback,
       });
     case 'MCP_CONNECTION_FAILED':

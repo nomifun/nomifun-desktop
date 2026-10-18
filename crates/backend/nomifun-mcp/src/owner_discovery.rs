@@ -1,9 +1,9 @@
 //! Settings discovery shares the execution protocol, without tool-call
 //! authority. Caller-provided credentials are used only for this transaction.
 use std::collections::{BTreeSet, HashMap};
-use std::time::Duration;
 
-use super::{McpOwnerError, McpSession, SESSION_CLEANUP_TIMEOUT, validate_http_endpoint};
+use super::{McpOwnerError, McpSession, McpSetupPolicy, McpInvocationControl, McpCleanupStatus, validate_http_endpoint};
+use super::control::controlled;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 
 /// The client must have redirects disabled. A protocol deadline does not
@@ -13,36 +13,25 @@ pub(crate) async fn discover_network(
     endpoint: &str,
     configured_headers: &HashMap<String, String>,
     legacy: bool,
-    budget: Duration,
+    policy: &McpSetupPolicy,
 ) -> Result<serde_json::Value, McpOwnerError> {
     validate_http_endpoint(endpoint)?;
     let headers = discovery_headers(configured_headers)?;
     let mut session = McpSession::new(client, endpoint.to_owned(), headers);
     session.legacy_mode = legacy;
-    let outcome = tokio::time::timeout(budget, async {
+    let setup = policy.start();
+    let control = McpInvocationControl::default();
+    let phase = setup.phase("protocol_setup", policy.protocol_timeout);
+    let result = controlled(async {
         session.initialize().await?;
         let (_, tools) = session.read_catalog(None).await?;
         Ok(serde_json::json!({ "tools": tools }))
-    })
-    .await
-    .unwrap_or_else(|_| {
-        Err(McpOwnerError::new(
-            "MCP_TIMEOUT",
-            "MCP discovery timed out before its complete catalog was received",
-        ))
-    });
-    let cleanup = tokio::time::timeout(SESSION_CLEANUP_TIMEOUT, session.close())
-        .await
-        .unwrap_or_else(|_| {
-            Err(McpOwnerError::new(
-                "MCP_SESSION_CLEANUP_FAILED",
-                "MCP discovery cleanup exceeded its bounded deadline",
-            ))
-        });
-    // Never publish a successful catalog if explicit HTTP session cleanup is
-    // unsupported/unknown. Dropping a legacy stream does not stop the server.
-    cleanup?;
-    outcome
+    }, &control, Some(phase.deadline), || phase.error()).await;
+    let outcome = super::finish_session(session, result, &control).await;
+    if outcome.cleanup.local == McpCleanupStatus::Unproven || outcome.cleanup.remote == McpCleanupStatus::Unproven {
+        return Err(outcome.cleanup.error.expect("unproven cleanup has diagnostic"));
+    }
+    outcome.result
 }
 
 fn discovery_headers(configured: &HashMap<String, String>) -> Result<HeaderMap, McpOwnerError> {

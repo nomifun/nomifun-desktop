@@ -11,6 +11,7 @@ use nomifun_agent_contracts::{
     StrictJsonValue, TypedResourceBinding, digest_payload,
 };
 use nomifun_agent_domain_wave2::Wave2HostPortError;
+use nomifun_agent_kernel::InvocationControl;
 use nomifun_mcp::{
     MCP_CONNECT_OPERATION, MCP_INVOKE_OPERATION, MCP_SERVER_RESOURCE_KIND, McpOwner,
     McpOwnerError, McpServerBinding as OwnerMcpServerBinding, McpServerTransport,
@@ -156,34 +157,45 @@ pub(crate) struct McpOwnerAdapter {
 }
 
 impl McpOwnerAdapter {
-    pub(crate) async fn resource(&self, request: nomifun_mcp::McpResourceRequest) -> Result<StrictJsonValue, Wave2HostPortError> {
-        let result = self.owner.resource(request).await.map_err(map_mcp_owner_error)?;
-        serde_json::to_value(result).map(StrictJsonValue)
-            .map_err(|_| Wave2HostPortError::unavailable("MCP resource result cannot be encoded"))
+    pub(crate) async fn resource_controlled(
+        &self,
+        request: nomifun_mcp::McpResourceRequest,
+        control: InvocationControl,
+    ) -> nomifun_mcp::McpInvocationOutcome<StrictJsonValue> {
+        self.owner
+            .resource_controlled(request, owner_control(control))
+            .await
+            .try_map(|result| {
+                serde_json::to_value(result).map(StrictJsonValue).map_err(|_| {
+                    McpOwnerError::new("MCP_PROTOCOL_ERROR", "MCP resource result cannot be encoded")
+                })
+            })
     }
 
     pub(crate) fn new(owner: Arc<McpOwner>) -> Self {
         Self { owner }
     }
 
-    /// Invoke the exact frozen mapping and return the validated MCP result.
-    /// Ok may contain isError=true: persist that observed result first, then
-    /// use project_mcp_tool_result for the canonical execution-error channel.
-    ///
-    /// The lock, server facts, resource binding, remote tool facts, principal,
-    /// operation ID, and model arguments are all explicit fields of
-    /// [`McpOwnerInvocationInput`].
-    pub(crate) async fn invoke(
+    /// Preserve the owner's dispatch and cleanup facts through application
+    /// result projection. The host settles the original effect before mapping
+    /// any owner error into the model-facing error channel.
+    pub(crate) async fn invoke_controlled(
         &self,
         input: McpOwnerInvocationInput,
-    ) -> Result<StrictJsonValue, Wave2HostPortError> {
+        control: InvocationControl,
+    ) -> Result<nomifun_mcp::McpInvocationOutcome<StrictJsonValue>, Wave2HostPortError> {
         let request = build_mcp_tool_invocation_request(input)?;
-        let result = self
-            .owner
-            .invoke(request)
+        Ok(self.owner
+            .invoke_controlled(request, owner_control(control))
             .await
-            .map_err(map_mcp_owner_error)?;
-        Ok(StrictJsonValue(result.result))
+            .map(|result| StrictJsonValue(result.result)))
+    }
+}
+
+fn owner_control(control: InvocationControl) -> nomifun_mcp::McpInvocationControl {
+    nomifun_mcp::McpInvocationControl {
+        cancellation: control.cancellation(),
+        execution_deadline: None,
     }
 }
 
@@ -631,10 +643,12 @@ mod tests {
                 .expect("fixture HTTP client"),
         );
         let adapter = McpOwnerAdapter::new(Arc::new(owner));
-        let result = adapter
-            .invoke(input(&endpoint))
+        let outcome = adapter
+            .invoke_controlled(input(&endpoint), InvocationControl::default())
             .await
-            .expect("canonical MCP invocation");
+            .expect("valid canonical MCP binding");
+        assert!(outcome.execution.request_dispatched);
+        let result = outcome.result.expect("canonical MCP invocation");
         assert_eq!(result.0["content"][0]["text"], "fixture-result");
 
         let requests = state.requests.lock().await.clone();
@@ -679,18 +693,41 @@ mod tests {
                 .build()
                 .expect("fixture HTTP client"),
         )
-        .with_timeout(std::time::Duration::from_millis(200));
+        .with_setup_policy(nomifun_mcp::McpSetupPolicy::uniform(std::time::Duration::from_millis(200)));
         let adapter = McpOwnerAdapter::new(Arc::new(owner));
-        let error = adapter
-            .invoke(input(&endpoint))
+        let outcome = adapter
+            .invoke_controlled(input(&endpoint), InvocationControl::default())
             .await
-            .expect_err("unreachable MCP endpoint must fail");
+            .expect("valid canonical MCP binding");
+        assert!(!outcome.execution.request_dispatched);
+        let error = outcome.result.expect_err("unreachable MCP endpoint must fail");
 
         assert!(
-            matches!(error.code.as_str(), "MCP_CONNECTION_FAILED" | "MCP_TIMEOUT"),
+            matches!(error.code(), "MCP_CONNECTION_FAILED" | "MCP_TIMEOUT"),
             "expected a typed connection/deadline error, got {error}"
         );
-        assert!(error.message.starts_with("canonical MCP owner failed:"));
+        assert!(!error.message().is_empty());
+    }
+
+    #[tokio::test]
+    async fn adapter_forwards_cancellation_before_contacting_the_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let owner = McpOwner::new(
+            Arc::new(nomifun_mcp::AnonymousMcpCredentialAuthority),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+        let adapter = McpOwnerAdapter::new(Arc::new(owner));
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
+        let outcome = adapter.invoke_controlled(
+            input(&endpoint), InvocationControl::new(cancellation),
+        ).await.expect("valid canonical MCP binding");
+        assert!(!outcome.execution.request_dispatched);
+        assert!(!outcome.execution.local_process_started);
+        assert!(outcome.execution.cancellation_requested);
+        assert_eq!(outcome.result.unwrap_err().code(), "MCP_REQUEST_CANCELLED");
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(25), listener.accept()).await.is_err());
     }
 
 }

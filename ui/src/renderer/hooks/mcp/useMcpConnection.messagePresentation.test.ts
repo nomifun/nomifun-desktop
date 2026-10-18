@@ -19,7 +19,6 @@ describe('MCP connection check messages', () => {
 
   test('uses typed diagnostics instead of blaming every failure on MCP JSON', () => {
     expect(source).toMatch(/details\.endpoint_scope\s*===\s*["']local["']/);
-    expect(source).toMatch(/details\.phase\s*===\s*["']package_bootstrap["']/);
     expect(source).toMatch(/details\.failure_kind\s*===\s*["']process_exited["']/);
     expect(source.includes('Please review the MCP JSON configuration and test again.')).toBe(false);
   });

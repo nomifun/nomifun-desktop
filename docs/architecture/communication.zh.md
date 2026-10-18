@@ -134,6 +134,11 @@ Runtime 使用 typed `AgentEngineEvent`，由 `engine_journal` 写入同一 cano
 `nomifun-mcp::McpOwner`。Runtime 经
 `nomifun-engine-core::EngineToolInvoker` 与 `nomifun-agent-kernel` 调用工具。
 
+MCP 接入使用统一的累计与阶段预算，工具执行默认无总时长或静默期限。HTTP 建连期限不包住
+等待业务响应头和正文的时间。原调用的非序列化控制沿 Kernel 传递取消与可选显式执行期限，
+已派发任务由原 TaskGroup 保留到结果和本地清理结算；调用方停止等待不授权重放。
+效果观察与清理证明分别保存到同一 canonical Effect 链；取消送达不证明远端停止或回滚。
+
 MCP 服务器对外暴露引擎可调用的工具与资源。当前 `nomifun-app`
 二进制提供多个 stdio 桥子命令，而不是旧的单一 `mcp-bridge`：
 

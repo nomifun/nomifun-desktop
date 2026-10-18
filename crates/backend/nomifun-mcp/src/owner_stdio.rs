@@ -16,47 +16,71 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout, timeout_at};
 
-use super::{JsonRpcResponse, MAX_RESPONSE_BYTES, McpOwnerError, McpSession, stream};
+use super::{JsonRpcResponse, MAX_RESPONSE_BYTES, McpOwnerError, McpSession, McpSetupPolicy, McpInvocationControl, McpCleanupStatus, PeerTraffic, stream};
+use super::control::{SetupBudget, controlled};
 
 pub(super) const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
 const EOF_GRACE: Duration = Duration::from_millis(250);
-const MAX_TRANSACTION_BYTES: usize = 32 * 1024 * 1024;
-const MAX_FRAMES: usize = 4096;
 const MAX_STDERR_DIAGNOSTIC_BYTES: usize = 64 * 1024;
 pub(super) type Writer = Arc<Mutex<Option<ChildStdin>>>;
 
-/// Settings discovery uses the same process owner and full bounded catalog.
-/// Its timeout cannot skip cleanup or publish a catalog with unproven cleanup.
+struct CancelPendingLaunch(tokio_util::sync::CancellationToken);
+impl Drop for CancelPendingLaunch {
+    fn drop(&mut self) { self.0.cancel(); }
+}
+
+fn uncertain_launch() -> McpOwnerError {
+    McpOwnerError::new("MCP_PROCESS_START_UNCERTAIN",
+        "MCP process launch was interrupted; platform-owned cleanup has not returned proof")
+}
+
+fn accept_launched_process(
+    process: ManagedChildProcess, cancellation: &tokio_util::sync::CancellationToken, deadline: Instant,
+) -> Result<ManagedChildProcess, McpOwnerError> {
+    if cancellation.is_cancelled() || Instant::now() >= deadline {
+        // spawn_managed returns only after the platform Job/watchdog owns the
+        // exact tree. Drop transfers that authority to its existing cleanup
+        // relay (command_builder.rs), never to a raw PID or an unowned task.
+        // It is not a cleanup-completion receipt: the caller stays Unproven.
+        drop(process);
+        return Err(uncertain_launch());
+    }
+    Ok(process)
+}
+
+/// Discovery and execution use the same cumulative setup policy.
 pub(crate) async fn discover(
-    command: &str,
-    args: &[String],
-    env: &HashMap<String, String>,
-    budget: Duration,
+    command: &str, args: &[String], env: &HashMap<String, String>, policy: &McpSetupPolicy,
 ) -> Result<serde_json::Value, McpOwnerError> {
-    let transport = StdioTransport::launch(command, args, env, budget).await?;
-    let deadline = Instant::now() + budget;
+    let setup = policy.start();
+    let control = McpInvocationControl::default();
+    let transport = StdioTransport::launch(command, args, env, &setup, &control).await?;
     let mut session = McpSession::from_stdio(transport);
-    let outcome = timeout_at(deadline, async {
+    let cap = if is_package_runner(command, args) { policy.package_bootstrap_timeout } else { policy.protocol_timeout };
+    let phase = setup.phase("protocol_setup", cap);
+    let result = controlled(async {
         session.initialize().await?;
         let (_, tools) = session.read_catalog(None).await?;
         Ok(serde_json::json!({"tools": tools}))
-    })
-    .await
-    .unwrap_or_else(|_| {
-        Err(McpOwnerError::new(
-            "MCP_TIMEOUT",
-            "MCP catalog discovery timed out",
-        ))
-    });
-    timeout(CLEANUP_TIMEOUT, session.close())
-        .await
-        .map_err(|_| {
-            McpOwnerError::new(
-                "MCP_SESSION_CLEANUP_FAILED",
-                "MCP catalog process cleanup timed out; cleanup remains unproven",
-            )
-        })??;
-    outcome
+    }, &control, Some(phase.deadline), || phase.error()).await;
+    let outcome = super::finish_session(session, result, &control).await;
+    if outcome.cleanup.local == McpCleanupStatus::Unproven {
+        return Err(outcome.cleanup.error.expect("unproven cleanup has diagnostic"));
+    }
+    outcome.result
+}
+
+pub(crate) fn is_package_runner(command: &str, args: &[String]) -> bool {
+    let basename = command.rsplit(['/', '\\']).next().unwrap_or(command).to_ascii_lowercase();
+    let command = [".exe", ".cmd", ".bat"].iter().find_map(|suffix| basename.strip_suffix(suffix)).unwrap_or(&basename);
+    match command {
+        "npx" | "pnpx" | "bunx" | "uvx" | "pipx" => true,
+        "npm" => matches!(args.first().map(String::as_str), Some("exec") | Some("x")),
+        "pnpm" => matches!(args.first().map(String::as_str), Some("dlx")),
+        "bun" => matches!(args.first().map(String::as_str), Some("x")),
+        "uv" => matches!(args.first().map(String::as_str), Some("run") | Some("tool")),
+        _ => false,
+    }
 }
 
 pub(super) struct StdioTransport {
@@ -66,8 +90,7 @@ pub(super) struct StdioTransport {
     stdin: Writer,
     stdout: BufReader<ChildStdout>,
     pending: Vec<u8>,
-    received: usize,
-    frames: usize,
+    traffic: PeerTraffic,
     stderr_diagnostics: Arc<StdMutex<StdioDiagnostics>>,
     stderr_task: Option<JoinHandle<()>>,
 }
@@ -77,23 +100,28 @@ impl StdioTransport {
         command: &str,
         args: &[String],
         env: &HashMap<String, String>,
-        budget: Duration,
+        setup: &SetupBudget,
+        control: &McpInvocationControl,
     ) -> Result<Self, McpOwnerError> {
         validate_config(command, args, env)?;
         let cwd = std::env::current_dir().map_err(|cause| McpOwnerError::new(
             "MCP_PROCESS_START_FAILED", format!("MCP launch directory could not be read: {cause}")))?;
-        let prepared = timeout(Duration::from_secs(11 * 60),
-            nomifun_runtime::prepare_process_launch(command, args, &cwd, env))
-            .await.map_err(|_| McpOwnerError::new("MCP_RUNTIME_RESOLUTION_TIMEOUT", "Command environment preparation timed out before the MCP process started"))?
-            .map_err(|cause| runtime_resolution_error(&cause))?;
-        let deadline = Instant::now() + budget;
+        let preparation = setup.phase("runtime_resolution", setup.policy.runtime_preparation_timeout);
+        let prepared = controlled(async {
+            nomifun_runtime::prepare_process_launch(command, args, &cwd, env).await
+                .map_err(|cause| runtime_resolution_error(&cause))
+        }, control, Some(preparation.deadline), || preparation.error()).await?;
+        let starting = setup.phase("process_start", setup.policy.process_start_timeout);
+        let deadline = control.execution_deadline.map_or(starting.deadline, |explicit| starting.deadline.min(explicit));
+        let launch_guard = CancelPendingLaunch(control.cancellation.child_token());
+        let worker_cancellation = launch_guard.0.clone();
         // Resolution and platform spawn can block. If the waiter is cancelled
         // or times out, the task's result is dropped and ManagedChildProcess
-        // still owns cleanup. A startup timeout is never a no-effect proof.
+        // still owns cleanup. A timeout while spawn is in progress is never
+        // proof that no process started.
         let launch = tokio::task::spawn_blocking(move || {
-            if Instant::now() >= deadline {
-                return Err(startup_timeout());
-            }
+            if worker_cancellation.is_cancelled() { return Err(super::control::cancelled_error()); }
+            if Instant::now() >= deadline { return Err(if deadline == starting.deadline { starting.error() } else { super::control::execution_deadline_error() }); }
             let mut builder = ChildProcessBuilder::new(prepared.program);
             builder
                 .env_clear()
@@ -106,37 +134,31 @@ impl StdioTransport {
                 // non-secret categories below. Never merge it into stdout:
                 // stdout is the MCP JSON-RPC transport.
                 .stderr(Stdio::piped());
-            if Instant::now() >= deadline {
-                return Err(startup_timeout());
-            }
-            let mut process = builder.spawn_managed().map_err(|error| {
+            if worker_cancellation.is_cancelled() { return Err(super::control::cancelled_error()); }
+            if Instant::now() >= deadline { return Err(if deadline == starting.deadline { starting.error() } else { super::control::execution_deadline_error() }); }
+            let process = builder.spawn_managed().map_err(|error| {
                 let code = match error.kind() {
                     std::io::ErrorKind::NotFound => "MCP_COMMAND_NOT_FOUND",
                     std::io::ErrorKind::PermissionDenied => "MCP_COMMAND_PERMISSION_DENIED",
-                    _ => "MCP_PROCESS_START_FAILED",
+                    _ => "MCP_PROCESS_START_UNCERTAIN",
                 };
                 McpOwnerError::new(code, nomi_redact::redact_secrets_owned(format!("MCP configured stdio process could not be started: {error}")))
             })?;
-            let stdin = process.child_mut().stdin.take().ok_or_else(|| {
-                McpOwnerError::protocol_failed("MCP process stdin is unavailable")
-            })?;
-            let stdout = process.child_mut().stdout.take().ok_or_else(|| {
-                McpOwnerError::protocol_failed("MCP process stdout is unavailable")
-            })?;
-            let stderr = process.child_mut().stderr.take().ok_or_else(|| {
-                McpOwnerError::protocol_failed("MCP process stderr is unavailable")
-            })?;
+            let mut process = accept_launched_process(process, &worker_cancellation, deadline)?;
+            let stdin = process.child_mut().stdin.take().ok_or_else(uncertain_launch)?;
+            let stdout = process.child_mut().stdout.take().ok_or_else(uncertain_launch)?;
+            let stderr = process.child_mut().stderr.take().ok_or_else(uncertain_launch)?;
             Ok((process, stdin, stdout, stderr))
         });
-        let (process, stdin, stdout, stderr) = timeout_at(deadline, launch)
-            .await
-            .map_err(|_| startup_timeout())?
-            .map_err(|_| {
-                McpOwnerError::new(
-                    "MCP_PROCESS_START_FAILED",
-                    "MCP process launch owner did not return",
-                )
-            })??;
+        let (process, stdin, stdout, stderr) = tokio::select! {
+            biased;
+            _ = control.cancellation.cancelled() => return Err(uncertain_launch()),
+            result = timeout_at(deadline, launch) => result.map_err(|_| {
+                let mut error = uncertain_launch();
+                if deadline == starting.deadline { error.setup_timeout = Some((starting.phase, starting.timeout)); }
+                error
+            })?.map_err(|_| uncertain_launch())??,
+        };
         let stderr_diagnostics = Arc::new(StdMutex::new(StdioDiagnostics::default()));
         let stderr_task = tokio::spawn(drain_stderr(stderr, Arc::clone(&stderr_diagnostics)));
         Ok(Self {
@@ -144,8 +166,7 @@ impl StdioTransport {
             stdin: Arc::new(Mutex::new(Some(stdin))),
             stdout: BufReader::new(stdout),
             pending: Vec::new(),
-            received: 0,
-            frames: 0,
+            traffic: PeerTraffic::default(),
             stderr_diagnostics,
             stderr_task: Some(stderr_task),
         })
@@ -166,23 +187,13 @@ impl StdioTransport {
             let newline = bytes.iter().position(|byte| *byte == b'\n');
             let content = newline.unwrap_or(bytes.len());
             let consumed = content + usize::from(newline.is_some());
-            self.received = self.received.saturating_add(consumed);
-            if self.received > MAX_TRANSACTION_BYTES
-                || content > MAX_RESPONSE_BYTES.saturating_sub(self.pending.len())
-            {
-                return Err(McpOwnerError::protocol_failed(
-                    "MCP process output exceeds the frame or transaction byte limit",
-                ));
+            self.traffic.observe(consumed, false)?;
+            if content > MAX_RESPONSE_BYTES.saturating_sub(self.pending.len()) {
+                return Err(McpOwnerError::protocol_failed("MCP process output exceeds the single-frame byte limit"));
             }
             self.pending.extend_from_slice(&bytes[..content]);
             self.stdout.consume(consumed);
             if newline.is_some() {
-                self.frames += 1;
-                if self.frames > MAX_FRAMES {
-                    return Err(McpOwnerError::protocol_failed(
-                        "MCP process output exceeds the transaction frame limit",
-                    ));
-                }
                 let mut line = std::mem::take(&mut self.pending);
                 if line.last() == Some(&b'\r') {
                     line.pop();
@@ -191,6 +202,7 @@ impl StdioTransport {
                     McpOwnerError::protocol_failed("MCP process output is not UTF-8")
                 });
             }
+            tokio::task::yield_now().await;
         }
     }
 
@@ -414,8 +426,11 @@ pub(super) fn encode<T: Serialize>(message: &T) -> Result<Vec<u8>, McpOwnerError
 
 pub(super) async fn write_frame(writer: Writer, frame: Vec<u8>) -> Result<(), McpOwnerError> {
     let mut guard = writer.lock().await;
-    let stdin = guard
-        .as_mut()
+    // Take the pipe until the entire frame is flushed. Cancellation or I/O
+    // failure drops it and leaves None, so a later notification or server reply
+    // can never be appended to an unfinished JSON-RPC frame.
+    let mut stdin = guard
+        .take()
         .ok_or_else(|| McpOwnerError::connection_failed("MCP process input is closed"))?;
     stdin
         .write_all(&frame)
@@ -424,7 +439,9 @@ pub(super) async fn write_frame(writer: Writer, frame: Vec<u8>) -> Result<(), Mc
     stdin
         .flush()
         .await
-        .map_err(|_| McpOwnerError::connection_failed("MCP process input flush failed"))
+        .map_err(|_| McpOwnerError::connection_failed("MCP process input flush failed"))?;
+    *guard = Some(stdin);
+    Ok(())
 }
 
 pub(super) async fn read_response(
@@ -444,13 +461,6 @@ pub(super) async fn read_response(
             return Ok(response);
         }
     }
-}
-
-fn startup_timeout() -> McpOwnerError {
-    McpOwnerError::new(
-        "MCP_TIMEOUT",
-        "MCP process startup timed out; launch or cleanup may still be pending",
-    )
 }
 
 fn validate_config(
@@ -507,6 +517,50 @@ fn runtime_resolution_error(cause: &nomifun_runtime::ToolError) -> McpOwnerError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_write_closes_the_pipe_before_any_later_frame_can_append() {
+        use std::future::Future;
+        let mut builder = ChildProcessBuilder::new("/bin/sh");
+        builder.args(["-c", "sleep 60"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+        let mut process = builder.spawn_managed().unwrap();
+        let writer = Arc::new(Mutex::new(process.child_mut().stdin.take()));
+        let mut writing = Box::pin(write_frame(writer.clone(), vec![b'x'; 700 * 1024]));
+        std::future::poll_fn(|cx| {
+            assert!(writing.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        }).await;
+        drop(writing);
+        assert!(writer.lock().await.is_none());
+        assert_eq!(write_frame(writer, b"another frame\n".to_vec()).await.unwrap_err().code(), "MCP_CONNECTION_FAILED");
+        timeout(Duration::from_secs(5), process.shutdown()).await.unwrap().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn late_spawn_after_cancellation_or_deadline_retains_exact_platform_cleanup() {
+        for expired in [false, true] {
+            let mut builder = ChildProcessBuilder::new("/bin/sh");
+            builder.args(["-c", "sleep 60"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            let process = builder.spawn_managed().unwrap();
+            let proof = process.cleanup_receipt().expect("managed spawn registered the exact tree owner");
+            let control = McpInvocationControl::default();
+            if !expired { control.cancellation.cancel(); }
+            let deadline = if expired { Instant::now() } else { Instant::now() + Duration::from_secs(60) };
+            let error = match accept_launched_process(process, &control.cancellation, deadline) {
+                Ok(_) => panic!("late launched process escaped its interrupted owner"),
+                Err(error) => error,
+            };
+            let outcome: super::super::McpInvocationOutcome<()> = super::super::startup_failure(error, &control);
+            assert!(outcome.execution.local_process_started);
+            assert_eq!(outcome.cleanup.local, McpCleanupStatus::Unproven);
+            timeout(Duration::from_secs(5), proof.wait()).await.expect("platform reaper retained the late tree").unwrap();
+            // Completion here is an independently awaited platform proof. The
+            // earlier returned facts correctly do not retroactively claim it.
+            assert_eq!(outcome.cleanup.local, McpCleanupStatus::Unproven);
+        }
+    }
 
     #[tokio::test]
     async fn runtime_resolution_does_not_replace_explicit_user_stdio_paths() {
@@ -567,7 +621,7 @@ done
         let literal = format!("$(touch '{}'); & | >", marker.display());
         let environment = HashMap::from([("EXPECTED_LITERAL".into(), literal.clone())]);
         let catalog = discover(program.to_str().unwrap(), &["".into(), "中文 space".into(), "quote'\"".into(), literal],
-            &environment, Duration::from_secs(5)).await.unwrap();
+            &environment, &McpSetupPolicy::uniform(Duration::from_secs(5))).await.unwrap();
         assert_eq!(catalog["tools"], serde_json::json!([]));
         assert!(!marker.exists(), "native argv must never become shell code");
     }

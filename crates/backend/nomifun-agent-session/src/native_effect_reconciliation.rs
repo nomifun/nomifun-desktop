@@ -22,6 +22,10 @@ pub struct NativeEffectReconciliationRequest {
     pub expected_input_digest: DigestHex,
     pub outcome: NativeVerifiedOutcome,
     pub evidence: NativeOwnerEvidence,
+    /// Independent verification of the original MCP owner's unresolved
+    /// resource cleanup. Business-outcome evidence does not prove shutdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_attestation: Option<NativeOwnerEvidence>,
 }
 
 #[derive(serde::Serialize)]
@@ -57,6 +61,7 @@ impl AgentSessionStore {
     pub async fn reconcile_native_effect_by_owner(&self, owner: &PrincipalRef, session: &AgentSessionId,
         request: &NativeEffectReconciliationRequest) -> Result<SessionEventAck, SessionStoreError> {
         request.evidence.validate()?;
+        if let Some(cleanup) = &request.cleanup_attestation { cleanup.validate()?; }
         if request.call_id.as_ref().is_some_and(|id| id.is_empty() || id.len() > 256 || id.chars().any(char::is_control))
             || (request.call_id.is_some() && !request.effect_id.is_empty())
             || (request.call_id.is_none() && (request.effect_id.trim().is_empty() || request.effect_id.len() > 1024)) {
@@ -116,9 +121,43 @@ impl AgentSessionStore {
         let pending = effect.state == AgentEffectState::Pending;
         let terminal = effect.terminal_event_id.clone();
         if !pending && terminal.is_none() { return Err(SessionStoreError::InvalidEvent("uncertain effect has no uncertainty receipt".into())); }
+        if effect.owner_domain == "mcp" {
+            if pending {
+                // The original owner has not provided any cleanup return yet.
+                // A human may resolve the outcome only with an independent
+                // cleanup attestation; the live task still owns its guard.
+                request.cleanup_attestation.as_ref().ok_or_else(||SessionStoreError::Conflict(
+                    "Pending MCP execution needs independent owner cleanup verification".into()))?.validate()?;
+            }
+            // Follow only this Effect's canonical terminal causation chain.
+            // A business reconciliation cannot erase an earlier unresolved
+            // cleanup observation, including after a still-uncertain receipt.
+            let mut cleanup_receipt = terminal.clone();
+            let mut seen = std::collections::BTreeSet::new();
+            while let Some(id) = cleanup_receipt {
+                if seen.len() >= 256 || !seen.insert(id.clone()) {
+                    return Err(SessionStoreError::InvalidEvent("MCP cleanup receipt causation is invalid or exceeds its bound".into()));
+                }
+                let row = event_by_event_id_tx(&mut tx,id.as_ref()).await?
+                    .ok_or_else(||SessionStoreError::InvalidEvent("MCP cleanup receipt is missing".into()))?;
+                let event = event_from_row(row)?;
+                if event.agent_session_id != *session || event.correlation_id.as_ref() != effect.effect_id
+                    || !matches!(event.kind.0.as_str(), "effect/uncertain" | "effect/reconciled") {
+                    return Err(SessionStoreError::InvalidEvent("MCP cleanup receipt belongs to another effect".into()));
+                }
+                let payload = payload_value_for_event_tx(&mut tx,&event).await?;
+                if event.kind.0 == "effect/uncertain" && mcp_cleanup_attestation_required(&payload)? {
+                    request.cleanup_attestation.as_ref().ok_or_else(||SessionStoreError::Conflict(
+                        "MCP resource cleanup needs independent owner verification before its outcome can be reconciled".into()))?.validate()?;
+                }
+                if event.kind.0 == "effect/uncertain" { break; }
+                cleanup_receipt = event.causation_event_id;
+            }
+        }
         let audit = native_control_event(session,&request.operation_id,id.clone(),"runtime/effect-reconciliation-attested",authority_event.into(),
             json!({"request_digest":request_digest,"effect_id":effect.effect_id,"input_digest":effect.input_digest,
-                "authority":"session_owner_verified","verifier_digest":digest_payload(owner)?,"outcome":request.outcome,"evidence":request.evidence}));
+                "authority":"session_owner_verified","verifier_digest":digest_payload(owner)?,"outcome":request.outcome,"evidence":request.evidence,
+                "cleanup_attestation":request.cleanup_attestation}));
         let ack = required_ack(self.append_event_tx(&mut tx,&audit,None).await?)?;
         let outcome = match request.outcome {
             NativeVerifiedOutcome::ConfirmedSucceeded => EffectReconcileOutcome::ConfirmedSucceeded { receipt: json!({
@@ -156,4 +195,31 @@ impl AgentSessionStore {
         tx.commit().await?;
         Ok(ack)
     }
+}
+
+fn mcp_cleanup_attestation_required(payload: &Value) -> Result<bool, SessionStoreError> {
+    let Some(cleanup) = payload.get("cleanup") else {
+        // Current-generation historical receipts did not carry cleanup facts.
+        // Missing evidence cannot be upgraded to a successful owner cleanup.
+        return Ok(true);
+    };
+    let invalid = || SessionStoreError::InvalidEvent("MCP cleanup receipt is malformed".into());
+    let object = cleanup.as_object().ok_or_else(invalid)?;
+    if object.keys().any(|key| !matches!(key.as_str(), "local" | "remote" | "error")) {
+        return Err(invalid());
+    }
+    let status = |key| object.get(key).and_then(Value::as_str)
+        .filter(|value| matches!(*value, "not_required" | "confirmed" | "unsupported" | "unproven"))
+        .ok_or_else(invalid);
+    let local = status("local")?;
+    let remote = status("remote")?;
+    if let Some(error) = object.get("error").filter(|error| !error.is_null()) {
+        let error = error.as_object().ok_or_else(invalid)?;
+        if !error.get("code").is_some_and(Value::is_string)
+            || !error.get("message").is_some_and(Value::is_string)
+            || (local != "unproven" && remote != "unproven") {
+            return Err(invalid());
+        }
+    }
+    Ok(!matches!(local, "confirmed" | "not_required") || remote == "unproven")
 }

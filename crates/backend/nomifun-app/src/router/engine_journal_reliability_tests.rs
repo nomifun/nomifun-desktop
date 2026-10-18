@@ -18,6 +18,26 @@ fn owner(journal:&EngineTurnJournal) -> nomifun_agent_contracts::PrincipalRef {
 }
 
 #[tokio::test]
+async fn cancellation_keeps_original_execution_lease_alive_for_retained_settlement() {
+    let (journal, pool) = test_fixture().await;
+    sqlx::query("UPDATE agent_turns SET execution_lease_until=0 WHERE session_id=? AND operation_id=?")
+        .bind(journal.0.session.as_ref()).bind(journal.0.operation.as_ref()).execute(&pool).await.unwrap();
+    journal.0.cancellation.cancel();
+    journal.start_heartbeat();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let renewed: i64 = sqlx::query_scalar("SELECT execution_lease_until FROM agent_turns WHERE session_id=? AND operation_id=?")
+                .bind(journal.0.session.as_ref()).bind(journal.0.operation.as_ref()).fetch_one(&pool).await.unwrap();
+            if renewed > now_ms() { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("cancellation must not expire an owner still settling its effects");
+    journal.0.store.verify_native_execution(&journal.0.lease).await.unwrap();
+    assert!(journal.append(json!({"event":"unadmitted-progress"}).to_string(), None, EngineJournalWrite::Progress).await.is_err(),
+        "renewal permits settlement, not new progress after cancellation");
+}
+
+#[tokio::test]
 async fn shared_tool_bodies_preserve_journal_accounting_model_pairing_and_native_checkpoint_recovery() {
     use nomifun_agent_runtime::{AgentToolResult, AgentTurnRecovery, replay_closed_turn};
     use nomifun_chat_model_broker::{ChatContentPart,ChatMessage,ChatRole,ChatToolCall};

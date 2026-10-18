@@ -477,6 +477,17 @@ The owner commits one canonical transition after the same idle, cleanup and effe
 Bodies and resources use the same native frozen context reader; Skill hooks, shell, and forks do not
 execute or grant tools. Tool search is a built-in Runtime facility.
 
+MCP business execution has no default total or silence deadline; setup and
+cancellation/cleanup remain bounded separately. Cancellation fences new
+admission and targets the exact original request while the original TaskGroup
+retains execution and cleanup. The native lease remains renewable until owner
+settlement or an explicit fence, rather than treating a caller ending its wait
+as producer exit. Results, dispatch facts and local/remote cleanup observations
+remain on the original Event/Payload/Effect chain. An observed result survives
+unproven cleanup. Only a proved pre-effect rejection can settle as rejected;
+unknown effects still forbid replay. Memory owns mutual exclusion, not a second
+permanent unknown ledger; reconciliation must retain exact-instance cleanup proof.
+
 ## Consumers and deletion
 
 UI consumes current stream and Message projections directly. It has no marker-dependent local terminal-processing state machine or prose-based reclassification of old errors. Channel binds through its current owner; orphan rows without an authority binding produce a conflict instead of being automatically rebound.

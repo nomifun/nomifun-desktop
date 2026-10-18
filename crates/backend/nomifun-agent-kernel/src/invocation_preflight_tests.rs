@@ -62,6 +62,26 @@ async fn preflight_never_dispatches_and_invoke_rechecks_owner_authority() {
 }
 
 #[tokio::test]
+async fn cancelled_invocation_does_not_dispatch_or_change_frozen_authority() {
+    let (registry, compiled, owner) = fixture();
+    let active = SessionCapabilityState::new(&compiled).snapshot().unwrap();
+    let request = invocation(&compiled, owner, active.generation, "hello");
+    let frozen = compiled.envelope.clone();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    cancellation.cancel();
+    let error = registry.invoke_controlled(
+        &compiled,
+        &active,
+        request.clone(),
+        crate::InvocationControl::new(cancellation),
+    ).await.unwrap_err();
+    assert_eq!(error.canonical_code().as_ref(), "INVOCATION_CANCELLED");
+    assert_eq!(compiled.envelope, frozen);
+    let result = registry.invoke(&compiled, &active, request).await.unwrap();
+    assert_eq!(result.0["count"], json!(1), "cancelled admission must not execute the handler");
+}
+
+#[tokio::test]
 async fn preflight_rejects_owner_action_resource_and_active_drift_without_dispatch() {
     let (registry, compiled, owner) = fixture();
     let active = SessionCapabilityState::new(&compiled).snapshot().unwrap();

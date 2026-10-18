@@ -20,8 +20,8 @@ fn make_service() -> McpConnectionTestService {
     McpConnectionTestService::new(test_http_client())
 }
 
-fn make_service_with_timeout(timeout: Duration) -> McpConnectionTestService {
-    McpConnectionTestService::new(test_http_client()).with_timeout(timeout)
+fn make_service_with_setup_budget(timeout: Duration) -> McpConnectionTestService {
+    McpConnectionTestService::new(test_http_client()).with_setup_policy(nomifun_mcp::McpSetupPolicy::uniform(timeout))
 }
 
 #[cfg(windows)]
@@ -108,7 +108,7 @@ async fn stdio_nonexistent_command_returns_not_found_error() {
 
 #[tokio::test]
 async fn stdio_stderr_is_projected_as_a_typed_non_secret_failure() {
-    let svc = make_service_with_timeout(Duration::from_secs(3));
+    let svc = make_service_with_setup_budget(Duration::from_secs(3));
     let (command, args) = package_not_found_command();
     let transport = McpServerTransport::Stdio {
         command,
@@ -135,7 +135,7 @@ async fn stdio_stderr_is_projected_as_a_typed_non_secret_failure() {
 
 #[tokio::test]
 async fn http_unreachable_url_returns_connection_error() {
-    let svc = make_service_with_timeout(Duration::from_secs(5));
+    let svc = make_service_with_setup_budget(Duration::from_secs(5));
     let transport = McpServerTransport::Http {
         url: "http://127.0.0.1:1/mcp-unreachable".into(),
         headers: HashMap::new(),
@@ -154,7 +154,7 @@ async fn http_unreachable_url_returns_connection_error() {
 
 #[tokio::test]
 async fn sse_unreachable_url_returns_connection_error() {
-    let svc = make_service_with_timeout(Duration::from_secs(5));
+    let svc = make_service_with_setup_budget(Duration::from_secs(5));
     let transport = McpServerTransport::Sse {
         url: "http://127.0.0.1:1/sse-unreachable".into(),
         headers: HashMap::new(),
@@ -267,7 +267,7 @@ async fn sse_connection_test_round_trips_jsonrpc_ids() {
         }
     });
 
-    let svc = make_service_with_timeout(Duration::from_secs(5));
+    let svc = make_service_with_setup_budget(Duration::from_secs(5));
     let transport = McpServerTransport::Sse {
         url: format!("http://{}/sse", addr),
         headers: HashMap::new(),
@@ -433,7 +433,7 @@ async fn write_http_response(
 #[tokio::test]
 async fn stdio_timeout_returns_timeout_error() {
     // Use a platform-native command that produces no stdout so the protocol read blocks.
-    let svc = make_service_with_timeout(Duration::from_secs(1));
+    let svc = make_service_with_setup_budget(Duration::from_secs(1));
     let (command, args) = quiet_sleep_command();
     let transport = McpServerTransport::Stdio {
         command,
@@ -556,7 +556,7 @@ async fn http_custom_headers_are_sent() {
 async fn stdio_with_args_spawns_correctly() {
     // Use a platform-native echo command that exits immediately. Since it doesn't
     // speak MCP, we expect a protocol error rather than a spawn error.
-    let svc = make_service_with_timeout(Duration::from_secs(3));
+    let svc = make_service_with_setup_budget(Duration::from_secs(3));
     let (command, args) = echo_command();
     let transport = McpServerTransport::Stdio {
         command,

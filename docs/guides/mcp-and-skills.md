@@ -78,15 +78,38 @@ Failures distinguish missing runtimes, HTTP status, timeout, RPC, and protocol
 errors. URL-based servers enter the OAuth flow only after an explicit OAuth
 Bearer challenge, so API-key/header configurations are not treated as OAuth.
 
-Portable package runners (`npx`, `bunx`, `uvx`, and equivalent launcher
-forms) get a separate 120-second first-run bootstrap budget during a manual
-test; ordinary MCP handshakes keep the 30-second budget. Stdio children receive
+Connection tests and real invocations share one bounded setup policy. Runtime
+preparation, process launch, handshake and catalog verification have phase
+limits within a cumulative setup deadline; changing phases never renews it.
+Portable package runners (`npx`, `bunx`, `uvx`, and equivalent launcher forms)
+may take 120 seconds for first startup; ordinary protocol setup has a 30-second
+phase budget. Neither deadline includes subsequent tool execution.
+
+Tool execution has no default total or silence deadline. An HTTP service may
+wait until computation finishes before returning response headers. Business
+waiting ends on user cancellation, an explicit execution deadline, a real
+transport failure, a protocol/resource violation, or host shutdown. Logs, ping
+and missing progress do not prove a stalled tool. Notifications use bounded
+processing without a lifetime count that cuts off healthy long operations.
+Cancellation targets the original request and retains local cleanup ownership;
+disconnect, cancellation delivery and process exit do not prove absence of
+earlier effects. Unknown results are never automatically replayed. A caller
+ending its wait does not declare the tool failed.
+
+Stdio children receive
 only proxy-related variables from the parent or detected system proxy through
 the shared proxy policy (including its stale loopback-proxy guard), while API
 tokens and unrelated parent environment remain isolated. Raw child stderr is
 never returned or logged: it is drained and
 reduced to non-secret categories such as package-not-found, download/network,
 missing dependency, missing configuration, permission, or early process exit.
+
+A failed probe does not replace the same configuration's last fully verified
+tool catalog with an empty list. A hosted app's transient timeout or connection
+failure likewise retains the verified catalog for the same running process and
+address while reporting the failed probe honestly. New selections still require
+successful discovery. Existing frozen calls retain exact pre-dispatch schema
+verification; cached descriptors grant no new authority.
 
 An HTTP URL on `localhost` is only a client connection descriptor. NomiFun does
 not start the referenced application or Docker container. A failed local probe

@@ -211,6 +211,7 @@ impl KernelEngineToolInvoker {
     async fn invoke_kernel(
         &self,
         invocation: EngineToolInvocation,
+        cancellation: CancellationToken,
     ) -> Result<EngineToolResult, EngineToolError> {
         invocation
             .call
@@ -281,7 +282,12 @@ impl KernelEngineToolInvoker {
         };
         let output = self
             .registry
-            .invoke(&self.snapshot, &active, request)
+            .invoke_controlled(
+                &self.snapshot,
+                &active,
+                request,
+                nomifun_agent_kernel::InvocationControl::new(cancellation),
+            )
             .await
             .map_err(|error| {
                 kernel_error_for_action(error, is_process, is_file_write, is_computer_launch)
@@ -385,12 +391,15 @@ impl EngineToolInvoker for KernelEngineToolInvoker {
         // Once dispatched, cancellation must not drop an uncertain side
         // effect. The application must poll this inside its owned task group
         // and persist the result even if an engine stops waiting for it.
-        self.invoke_kernel(invocation).await
+        self.invoke_kernel(invocation, cancellation).await
     }
 }
 
 fn kernel_error(error: KernelError) -> EngineToolError {
     let code = error.canonical_code().0;
+    if code == "INVOCATION_CANCELLED" {
+        return EngineToolError::Cancelled;
+    }
     let message = match code.as_str() {
         "AGENT_EXECUTION_ALREADY_ACTIVE" => "This conversation already has an active AgentExecution. Do not start sibling collaboration calls; put all independent tasks in one agent/delegate request with strategy=parallel and use synthesize=true when a downstream Agent must combine them.".to_owned(),
         _ => error.capability_execution_failure().map(|failure| owner_failure_detail(&failure.message, 4096))

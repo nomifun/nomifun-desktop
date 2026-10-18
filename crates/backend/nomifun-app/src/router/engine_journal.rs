@@ -446,7 +446,10 @@ impl EngineTurnJournal {
         let task = tokio::spawn(async move {
             let mut ticks = tokio::time::interval(std::time::Duration::from_secs(30));
             loop {
-                tokio::select! { biased; _ = cancellation.cancelled() => break, _ = ticks.tick() => {} }
+                // User cancellation stops admission, not the retained owner's
+                // settlement authority. Renew until the original Turn is
+                // terminal, fenced, or its journal is actually released.
+                ticks.tick().await;
                 let Some(journal) = weak.upgrade() else { break; };
                 if journal.cursor.lock().await.terminal { break; }
                 match journal.store.heartbeat_native_execution(&journal.lease).await {

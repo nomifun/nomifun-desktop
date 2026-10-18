@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use axum::{extract::{Path, State}, routing::{get, post}, Json, Router};
-use nomifun_api_types::{ApiResponse, McpConnectionTestResult, McpToolResponse};
+use nomifun_api_types::{ApiResponse, McpConnectionTestErrorCode, McpConnectionTestResult, McpToolResponse};
 use nomifun_common::{AppError, TimestampMs, now_ms};
 use nomifun_db::{CreateMcpServerParams, DbError, IMcpServerRepository, UpdateMcpServerParams, models::McpServerRow};
 use nomifun_app_hosting::{AppRecord, AppState, HostingOwner};
@@ -17,7 +17,49 @@ struct Observation {
     url: String,
     pid: Option<u32>,
     revision: TimestampMs,
-    result: McpConnectionTestResult,
+    probe_succeeded: bool,
+    probe_error: Option<String>,
+    // One complete validated catalog, independent of the latest availability
+    // probe. A failed readiness check is not a new tool contract.
+    catalog: Option<Vec<McpToolResponse>>,
+    last_connected: Option<TimestampMs>,
+}
+
+impl Observation {
+    fn matches(&self, app: &AppRecord) -> bool {
+        app.state == AppState::Running && app.pid == self.pid
+            && app.settings.mcp_url.as_deref() == Some(self.url.as_str())
+    }
+
+    fn from_probe(app: &AppRecord, mut result: McpConnectionTestResult, previous: Option<Self>, revision: TimestampMs) -> Self {
+        let previous = previous.filter(|observation| observation.matches(app));
+        let preserve_catalog = !result.success && !result.needs_auth.unwrap_or(false)
+            && matches!(result.code, Some(McpConnectionTestErrorCode::Timeout | McpConnectionTestErrorCode::ConnectionFailed));
+        let (catalog, last_connected) = if result.success {
+            (result.tools.take(), Some(revision))
+        } else if preserve_catalog {
+            previous.map_or((None, None), |observation| (observation.catalog, observation.last_connected))
+        } else {
+            (None, None)
+        };
+        let mut observation = Self { url: app.settings.mcp_url.clone().unwrap_or_default(), pid: app.pid,
+            revision, probe_succeeded: result.success, probe_error: result.error, catalog, last_connected };
+        if observation.probe_succeeded {
+            // Validate before publication. Empty, malformed, or oversized new
+            // catalogs explicitly replace the old contract with a rejection.
+            let valid = AppMcpSources::row_with_observation(app, Some(&observation)).ok().flatten()
+                .and_then(|row| super::nomi_core_mcp_catalog::server_tools(row).ok())
+                .is_some_and(|tools| !tools.is_empty());
+            if !valid {
+                let count = observation.catalog.as_ref().map_or(0, Vec::len);
+                observation.probe_succeeded = false;
+                observation.catalog = None;
+                observation.last_connected = None;
+                observation.probe_error = Some(format!("Application MCP source {} returned {count} tools; its catalog is malformed, empty, or exceeds the current 256-tool source limit. Correct its schemas or expose fewer tools", app.id));
+            }
+        }
+        observation
+    }
 }
 
 pub(crate) struct AppMcpSources {
@@ -60,7 +102,7 @@ impl AppMcpSources {
     fn observation(&self, app: &AppRecord) -> Option<Observation> {
         if app.state != AppState::Running { return None; }
         self.observations.lock().ok()?.get(&app.id)
-            .filter(|observation| app.pid == observation.pid && app.settings.mcp_url.as_deref() == Some(observation.url.as_str())).cloned()
+            .filter(|observation| observation.matches(app)).cloned()
     }
 
     pub(crate) async fn refresh(&self, id: &str) -> Result<AppMcpSourceDto, AppError> {
@@ -73,7 +115,8 @@ impl AppMcpSources {
             self.remove_observation(id)?;
             return Ok(self.dto(&app, &url));
         }
-        let result = nomifun_mcp::McpConnectionTestService::new_dynamic().with_timeout(Duration::from_secs(3))
+        let result = nomifun_mcp::McpConnectionTestService::new_dynamic()
+            .with_setup_policy(nomifun_mcp::McpSetupPolicy::uniform(Duration::from_secs(3)))
             .test_connection(&app.name, &nomifun_mcp::McpServerTransport::Http { url: url.clone(), headers: Default::default() }).await;
         // A late probe must never publish a deleted, stopped, or edited source.
         let current = self.hosting.get(id).await.map_err(|error| AppError::NotFound(error.to_string()))?;
@@ -82,25 +125,10 @@ impl AppMcpSources {
             return Err(AppError::Conflict("Application MCP source changed during discovery; refresh it again".into()));
         }
         let mut observations = self.observations.lock().map_err(|_| AppError::Conflict("App MCP observations are unavailable".into()))?;
-        let revision = observations.get(id).map_or(now_ms(), |previous| now_ms().max(previous.revision.saturating_add(1)));
-        observations.insert(id.to_owned(), Observation { url: url.clone(), pid: current.pid, revision, result });
+        let previous = observations.remove(id);
+        let revision = previous.as_ref().map_or(now_ms(), |previous| now_ms().max(previous.revision.saturating_add(1)));
+        observations.insert(id.to_owned(), Observation::from_probe(&current, result, previous, revision));
         drop(observations);
-        // The existing Agent contract limits remain real. Reject this source
-        // atomically with a local diagnostic instead of truncating its tools.
-        if self.observation(&current).is_some_and(|value| value.result.success) {
-            let valid = self.row(&current).ok().flatten()
-                .and_then(|row| super::nomi_core_mcp_catalog::server_tools(row).ok())
-                .is_some_and(|tools| !tools.is_empty());
-            if !valid {
-                let mut observations = self.observations.lock().map_err(|_| AppError::Conflict("App MCP observations are unavailable".into()))?;
-                if let Some(observation) = observations.get_mut(id) {
-                    let count = observation.result.tools.as_ref().map_or(0,Vec::len);
-                    observation.result.success = false;
-                    observation.result.tools = None;
-                    observation.result.error = Some(format!("Application MCP source {id} returned {count} tools; its catalog is malformed, empty, or exceeds the current 256-tool source limit. Correct its schemas or expose fewer tools"));
-                }
-            }
-        }
         Ok(self.dto(&current, &url))
     }
 
@@ -116,27 +144,37 @@ impl AppMcpSources {
 
     fn dto(&self, app: &AppRecord, url: &str) -> AppMcpSourceDto {
         let observation = self.observation(app);
+        Self::dto_with_observation(app, url, observation.as_ref())
+    }
+
+    fn dto_with_observation(app: &AppRecord, url: &str, observation: Option<&Observation>) -> AppMcpSourceDto {
+        let observation = observation.filter(|observation| observation.matches(app));
         let status = if app.state != AppState::Running { "stopped" }
-            else if observation.as_ref().is_some_and(|value| value.result.success) { "connected" }
+            else if observation.is_some_and(|value| value.probe_succeeded) { "connected" }
             else if observation.is_some() { "error" } else { "untested" };
         AppMcpSourceDto { app_id: app.id.clone(), name: app.name.clone(), url: url.into(), state: app.state,
-            connection_status: status, tools: observation.as_ref().and_then(|value| value.result.tools.clone()).unwrap_or_default(),
-            reason: observation.and_then(|value| value.result.error) }
+            connection_status: status, tools: observation.and_then(|value| value.catalog.clone()).unwrap_or_default(),
+            reason: observation.and_then(|value| value.probe_error.clone()) }
     }
 
     fn row(&self, app: &AppRecord) -> Result<Option<McpServerRow>, DbError> {
-        let Some(url) = &app.settings.mcp_url else { return Ok(None); };
         let observed = self.observation(app);
-        let connected = observed.as_ref().is_some_and(|value| value.result.success);
-        let tools = observed.as_ref().and_then(|value| value.result.tools.as_ref())
+        Self::row_with_observation(app, observed.as_ref())
+    }
+
+    fn row_with_observation(app: &AppRecord, observed: Option<&Observation>) -> Result<Option<McpServerRow>, DbError> {
+        let Some(url) = &app.settings.mcp_url else { return Ok(None); };
+        let observed = observed.filter(|observation| observation.matches(app));
+        let connected = observed.is_some_and(|value| value.probe_succeeded);
+        let tools = observed.and_then(|value| value.catalog.as_ref())
             .map(serde_json::to_string).transpose().map_err(|error| DbError::Conflict(error.to_string()))?;
-        let revision = observed.as_ref().map_or(0, |value| value.revision);
+        let revision = observed.map_or(0, |value| value.revision);
         Ok(Some(McpServerRow { mcp_server_id: app.id.clone(), name: format!("App: {}", app.name),
             description: Some("Application-owned MCP source; configure its address in application settings".into()),
-            enabled: app.state == AppState::Running && connected,
+            enabled: tools.is_some(),
             transport_type: "http".into(), transport_config: json!({"url":url}).to_string(), tools,
-            last_test_status: if connected { "connected" } else { "disconnected" }.into(),
-            last_connected: connected.then_some(revision), original_json: None, builtin: true,
+            last_test_status: if connected { "connected" } else if observed.is_some() { "error" } else { "disconnected" }.into(),
+            last_connected: observed.and_then(|value| value.last_connected), original_json: None, builtin: true,
             deleted_at: None, created_at: 0, updated_at: revision }))
     }
 
@@ -216,6 +254,106 @@ mod tests {
     use nomifun_agent_control_plane::SessionCapabilitiesResolver;
     use nomifun_agent_contracts::UserId;
     use nomifun_app_hosting::{AppOperation, ImportKind, LocalConnection};
+
+    fn hosted_record() -> AppRecord {
+        AppRecord { id: "0190f5fe-7c00-7a00-8000-000000000001".into(), name: "Hosted tool".into(),
+            description: String::new(), tags: Vec::new(), development_session_id: None,
+            directory: "/fixture/hosted-tool".into(), import_kind: ImportKind::Source,
+            settings: nomifun_app_hosting::AppSettings { mcp_url: Some("http://127.0.0.1:43111/mcp".into()), ..Default::default() },
+            state: AppState::Running, operation: None, last_error: None, output: String::new(),
+            pid: Some(71), preview: false, prepared: true }
+    }
+
+    fn tool(name: &str) -> McpToolResponse {
+        McpToolResponse { name: name.into(), description: Some("Fixture tool".into()),
+            input_schema: Some(json!({"type":"object","properties":{"value":{"type":"number"}}})) }
+    }
+
+    fn successful_probe(tools: Vec<McpToolResponse>) -> McpConnectionTestResult {
+        McpConnectionTestResult { success: true, tools: Some(tools), error: None, code: None,
+            details: None, needs_auth: None, auth_method: None, www_authenticate: None }
+    }
+
+    fn failed_probe(code: McpConnectionTestErrorCode) -> McpConnectionTestResult {
+        McpConnectionTestResult { success: false, tools: None, error: Some("Fixture readiness failed".into()), code: Some(code),
+            details: None, needs_auth: None, auth_method: None, www_authenticate: None }
+    }
+
+    fn observed_row(app: &AppRecord, observation: &Observation) -> McpServerRow {
+        AppMcpSources::row_with_observation(app, Some(observation)).unwrap().unwrap()
+    }
+
+    #[test]
+    fn hosted_transient_probe_failure_keeps_contract_without_claiming_online_status() {
+        let app = hosted_record();
+        for code in [McpConnectionTestErrorCode::Timeout, McpConnectionTestErrorCode::ConnectionFailed] {
+            let good = Observation::from_probe(&app, successful_probe(vec![tool("echo")]), None, 10);
+            let original = observed_row(&app, &good);
+            let frozen = super::super::nomi_core_mcp_catalog::server_tools(original.clone()).unwrap().remove(0);
+            let failed = Observation::from_probe(&app, failed_probe(code), Some(good), 11);
+            let row = observed_row(&app, &failed);
+            assert!(row.enabled, "a failed readiness probe must not withdraw the validated contract");
+            assert_eq!(row.tools, original.tools);
+            assert_eq!(row.last_connected, Some(10));
+            assert_eq!(row.last_test_status, "error");
+            let still_frozen = super::super::nomi_core_mcp_catalog::server_tools(row).unwrap().remove(0);
+            assert_eq!(still_frozen.lock, frozen.lock);
+            assert_eq!(still_frozen.connection_config_ref, frozen.connection_config_ref);
+            let dto = AppMcpSources::dto_with_observation(&app, app.settings.mcp_url.as_deref().unwrap(), Some(&failed));
+            assert_eq!(dto.connection_status, "error");
+            assert_eq!(dto.reason.as_deref(), Some("Fixture readiness failed"));
+            assert_eq!(dto.tools.len(), 1);
+            let recovered = Observation::from_probe(&app, successful_probe(vec![tool("replacement")]), Some(failed), 12);
+            let row = observed_row(&app, &recovered);
+            assert!(row.enabled);
+            assert_eq!(row.last_test_status, "connected");
+            assert_eq!(recovered.catalog.unwrap()[0].name, "replacement");
+        }
+    }
+
+    #[test]
+    fn hosted_invalid_new_catalog_is_rejected_instead_of_resurrecting_last_good_tools() {
+        let app = hosted_record();
+        let mut malformed = tool("malformed");
+        malformed.input_schema = Some(json!("not an object schema"));
+        for tools in [vec![], vec![malformed], (0..257).map(|index| tool(&format!("tool{index}"))).collect()] {
+            let good = Observation::from_probe(&app, successful_probe(vec![tool("echo")]), None, 10);
+            let rejected = Observation::from_probe(&app, successful_probe(tools), Some(good), 11);
+            assert!(!rejected.probe_succeeded);
+            assert!(rejected.probe_error.as_deref().unwrap().contains("catalog is malformed, empty, or exceeds"));
+            let row = observed_row(&app, &rejected);
+            assert!(!row.enabled);
+            assert!(row.tools.is_none());
+            let later_timeout = Observation::from_probe(&app, failed_probe(McpConnectionTestErrorCode::Timeout), Some(rejected), 12);
+            assert!(!observed_row(&app, &later_timeout).enabled);
+            assert!(later_timeout.catalog.is_none());
+        }
+    }
+
+    #[test]
+    fn hosted_catalog_cannot_cross_stop_process_or_endpoint_changes() {
+        let app = hosted_record();
+        for change in ["stopped", "pid", "url"] {
+            let good = Observation::from_probe(&app, successful_probe(vec![tool("echo")]), None, 10);
+            let mut changed = app.clone();
+            match change {
+                "stopped" => changed.state = AppState::Stopped,
+                "pid" => changed.pid = Some(72),
+                _ => changed.settings.mcp_url = Some("http://127.0.0.1:43112/mcp".into()),
+            }
+            let row = observed_row(&changed, &good);
+            assert!(!row.enabled, "{change} must invalidate the previous contract");
+            assert!(row.tools.is_none());
+            let failed = Observation::from_probe(&changed, failed_probe(McpConnectionTestErrorCode::Timeout), Some(good), 11);
+            assert!(!observed_row(&changed, &failed).enabled);
+            assert!(failed.catalog.is_none());
+        }
+        let good = Observation::from_probe(&app, successful_probe(vec![tool("echo")]), None, 10);
+        let mut authentication = failed_probe(McpConnectionTestErrorCode::ConnectionFailed);
+        authentication.needs_auth = Some(true);
+        let rejected = Observation::from_probe(&app, authentication, Some(good), 11);
+        assert!(!observed_row(&app, &rejected).enabled, "authentication rejection is not a transient readiness failure");
+    }
 
     #[tokio::test]
     async fn real_hosted_mcp_is_discovered_selected_and_called_without_another_process_owner() {
