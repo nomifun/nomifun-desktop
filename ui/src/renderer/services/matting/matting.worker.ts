@@ -11,48 +11,17 @@
  * 消费方按 Vite 惯例创建（本仓库 Worker 首例，以此为准）：
  *   new Worker(new URL('./matting.worker.ts', import.meta.url), { type: 'module' })
  *
- * 消息协议：
- *   in:  { id: number; type: 'matte'; bitmap: ImageBitmap; mode: 'auto' | 'heuristic'; tolerance?: number }
- *   out: { id; type: 'progress'; phase: 'download' | 'infer' | 'process'; loaded?: number; total?: number }
- *        { id; type: 'done'; blob: Blob; aspect: number; headBox: { x; y; w }; method: 'passthrough' | 'ml' | 'heuristic' }
- *        { id; type: 'error'; message: string }   // message='MATTE_FAILED' 表示抠图失效，i18n 在 UI 层做
+ * 消息协议见 mattingProtocol.ts。主线程持有推理 watchdog：超时直接终止本 Worker，
+ * 才能中断同步 WASM 并释放 session；Worker 内不做无法取消后台推理的 Promise 竞速。
  */
 
 import { heuristicMatte, suggestHeadBox, type RawImage } from './heuristicMatte';
 import { mlMatte } from './onnxMatte';
-
-export interface MatteRequest {
-  id: number;
-  type: 'matte';
-  bitmap: ImageBitmap;
-  mode: 'auto' | 'heuristic';
-  tolerance?: number;
-}
-
-export type MatteMethod = 'passthrough' | 'ml' | 'heuristic';
-
-export type MatteResponse =
-  | {
-      id: number;
-      type: 'progress';
-      phase: 'download' | 'infer' | 'process';
-      loaded?: number;
-      total?: number;
-    }
-  | {
-      id: number;
-      type: 'done';
-      blob: Blob;
-      aspect: number;
-      headBox: { x: number; y: number; w: number };
-      method: MatteMethod;
-    }
-  | { id: number; type: 'error'; message: string };
+import type { MatteMethod, MatteRequest, MatteResponse } from './mattingProtocol';
 
 /** 抠图失效错误码（UI 层译为"无法识别背景，请提供透明底图或更简单背景"）。 */
 const MATTE_FAILED = 'MATTE_FAILED';
 
-const ML_TIMEOUT_MS = 30_000;
 /** 已有透明像素（alpha<250）占比超过 1% → 视为透明底图，原样直通。 */
 const TRANSPARENT_ALPHA = 250;
 const TRANSPARENT_RATIO = 0.01;
@@ -72,38 +41,27 @@ declare const self: {
   onmessage: ((ev: MessageEvent<MatteRequest>) => void) | null;
 };
 
-const post = (msg: MatteResponse): void => self.postMessage(msg);
+type Emit = (message: MatteResponse) => void;
 
-self.onmessage = (ev) => {
-  const req = ev.data;
-  if (!req || req.type !== 'matte') return;
-  void handle(req);
-};
-
-async function handle(req: MatteRequest): Promise<void> {
-  const { id } = req;
-  try {
-    const result = await matte(req);
-    post({ id, type: 'done', ...result });
-  } catch (err) {
-    post({ id, type: 'error', message: err instanceof Error ? err.message : String(err) });
-  }
+// A document context may import the handler in tests without installing a window listener.
+if (typeof document === 'undefined') {
+  let pending = Promise.resolve();
+  self.onmessage = (ev) => {
+    const req = ev.data;
+    if (!req || req.type !== 'matte') return;
+    // Never run two sessions concurrently in one WASM runtime.
+    pending = pending.then(() => handleMatteRequest(req, (message) => self.postMessage(message)));
+  };
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('ML matting timed out')), ms);
-    promise.then(
-      (v) => {
-        clearTimeout(timer);
-        resolve(v);
-      },
-      (e) => {
-        clearTimeout(timer);
-        reject(e);
-      }
-    );
-  });
+export async function handleMatteRequest(req: MatteRequest, emit: Emit): Promise<void> {
+  const { id } = req;
+  try {
+    const result = await matte(req, emit);
+    emit({ id, type: 'done', ...result });
+  } catch (err) {
+    emit({ id, type: 'error', message: err instanceof Error ? err.message : String(err) });
+  }
 }
 
 function transparentRatio(data: Uint8ClampedArray): number {
@@ -124,13 +82,13 @@ function isMatteInvalid(alpha: Uint8ClampedArray): boolean {
   return ratio > FG_MAX_RATIO || ratio < FG_MIN_RATIO;
 }
 
-async function matte(req: MatteRequest): Promise<{
+async function matte(req: MatteRequest, emit: Emit): Promise<{
   blob: Blob;
   aspect: number;
   headBox: { x: number; y: number; w: number };
   method: MatteMethod;
 }> {
-  const { id, bitmap, mode, tolerance } = req;
+  const { id, bitmap, mode, tolerance, model } = req;
   const w = bitmap.width;
   const h = bitmap.height;
   if (!w || !h) throw new Error('empty image');
@@ -151,20 +109,17 @@ async function matte(req: MatteRequest): Promise<{
     alpha = new Uint8ClampedArray(w * h);
     for (let i = 0; i < alpha.length; i++) alpha[i] = imageData.data[i * 4 + 3];
   } else {
-    // b. auto 先 ML（模型未就绪/推理异常/超时 → 降级启发式）；heuristic 直走泛洪。
-    //    模型由主线程经后端代理预先写入 Cache Storage，worker 只读不下载——故此超时
-    //    只覆盖「读缓存 + 建 session + 推理」（秒级），不再像旧实现那样把 25MB 下载
-    //    也套进 30s 里（那正是「首次必超时 → 死在抠图步」的根因）。
-    if (mode === 'auto') {
+    // b. auto uses only the explicit model Blob; heuristic never initializes ONNX.
+    if (mode === 'auto' && !model?.size) {
+      emit({ id, type: 'fallback', reason: 'model_unavailable' });
+      alpha = heuristicMatte(img, { tolerance });
+      method = 'heuristic';
+    } else if (mode === 'auto' && model) {
       try {
-        alpha = await withTimeout(
-          mlMatte(img, (phase) => post({ id, type: 'progress', phase })),
-          ML_TIMEOUT_MS
-        );
+        alpha = await mlMatte(img, model, (phase) => emit({ id, type: 'progress', phase }));
         method = 'ml';
       } catch (err) {
-        // 降级不可见会掩盖网络/模型问题（审查 I1）——留一条 warn 便于排障。
-        console.warn('[matting] ML failed, falling back to heuristic:', err);
+        emit({ id, type: 'fallback', reason: 'inference_failed', detail: err instanceof Error ? err.message : String(err) });
         alpha = heuristicMatte(img, { tolerance });
         method = 'heuristic';
       }
@@ -176,6 +131,7 @@ async function matte(req: MatteRequest): Promise<{
     // c. 失效检测：ML 失效降级启发式再试一次；启发式仍失效 → MATTE_FAILED。
     if (isMatteInvalid(alpha)) {
       if (method === 'ml') {
+        emit({ id, type: 'fallback', reason: 'unsuitable_image' });
         alpha = heuristicMatte(img, { tolerance });
         method = 'heuristic';
       }
@@ -187,7 +143,7 @@ async function matte(req: MatteRequest): Promise<{
     srcCtx.putImageData(imageData, 0, 0);
   }
 
-  post({ id, type: 'progress', phase: 'process' });
+  emit({ id, type: 'progress', phase: 'process' });
 
   // 包围盒（alpha > 10，外扩 8px）。
   let minX = w;

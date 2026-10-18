@@ -490,11 +490,15 @@ function redactForLog(value: unknown, depth = 0): unknown {
   );
 }
 
-export async function httpRequest<T>(
+/** Only transport reads use this wrapper; response decoding errors keep their original identity. */
+type TransportRead = <T>(operation: () => Promise<T>) => Promise<T>;
+
+async function requestWithReader<T>(
   method: string,
   path: string,
-  body?: unknown,
-  options?: HttpRequestOptions
+  body: unknown,
+  options: HttpRequestOptions | undefined,
+  readSuccess: (response: Response, read: TransportRead) => Promise<T>
 ): Promise<T> {
   const url = `${getBaseUrl()}${path}`;
   const safePath = redactSensitiveText(path);
@@ -541,13 +545,37 @@ export async function httpRequest<T>(
         ? setTimeout(() => controller.abort(), options.timeoutMs)
         : undefined;
 
-    let response: Response;
+    const read: TransportRead = async (operation) => {
+      try {
+        if (controller?.signal.aborted) throw new DOMException('Request aborted', 'AbortError');
+        return await operation();
+      } catch (e) {
+        if (options?.signal?.aborted) throw new DOMException('Request cancelled', 'AbortError');
+        if (controller?.signal.aborted) {
+          throw new BackendRequestError(
+            'timeout',
+            `Backend ${method} ${safePath} timed out after ${options?.timeoutMs}ms; the backend may be busy or unreachable`
+          );
+        }
+        const detail = redactSensitiveText(e instanceof Error ? e.message : String(e));
+        throw new BackendRequestError(
+          'network',
+          `Backend ${method} ${safePath} failed: backend unreachable (${detail})`
+        );
+      }
+    };
+
     try {
-      response = await fetch(url, {
+      const response = await read(() => fetch(url, {
         method,
         headers,
         body: options?.rawBody ?? (body !== undefined ? JSON.stringify(body) : undefined),
         signal: controller?.signal,
+        // Desktop authenticates cross-origin loopback requests with its trust
+        // header. WebUI authenticates same-origin requests with its cookie.
+        // Cross-origin cookies would require credentialed CORS and are never
+        // part of the backend transport contract.
+        credentials: 'same-origin',
         // Every GET issued through this bridge targets mutable application state
         // (conversation history, settings, catalogs, runtime status, ...).  The
         // same URL is intentionally reused when a view remounts, so allowing the
@@ -556,81 +584,77 @@ export async function httpRequest<T>(
         // the contract must be identical on macOS WKWebView, Windows WebView2 and
         // ordinary WebUI browsers: a bridge read always observes the backend.
         cache: method.toUpperCase() === 'GET' ? 'no-store' : undefined,
-      });
-    } catch (e) {
-      if (options?.signal?.aborted) throw new DOMException('Request cancelled', 'AbortError');
-      // No HTTP response was produced: our own timeout abort, or a transport
-      // failure (backend unreachable / connection reset). WKWebView renders the
-      // latter as an opaque "TypeError: Load failed"; rethrow something the UI
-      // and logs can actually act on.
-      if (controller?.signal.aborted) {
-        throw new BackendRequestError(
-          'timeout',
-          `Backend ${method} ${safePath} timed out after ${options?.timeoutMs}ms; the backend may be busy or unreachable`
-        );
+      }));
+
+      if (!response.ok) {
+        // Read the body exactly once. A `Response` body is a one-shot stream, so
+        // calling `.json()` then `.text()` (e.g. as a parse fallback) throws
+        // "body stream already read". Many error responses have an empty or
+        // non-JSON body (axum-default 404/405, plain-text 5xx), so read text first
+        // and opportunistically parse it as JSON.
+        const rawText = await read(() => response.text());
+        let errorBody: unknown;
+        try {
+          errorBody = rawText ? JSON.parse(rawText) : '';
+        } catch {
+          errorBody = rawText;
+        }
+
+        // CSRF self-healing: the backend re-seeds the csrf cookie on the very
+        // 403 that rejected us, so exactly one retry with rebuilt headers can
+        // succeed. The rejected mutation never executed server-side, making the
+        // retry safe. Guarded to WebUI browser mode where the double-submit
+        // cookie applies (audit 2026-07-30, finding B).
+        const isCsrfRejection =
+          response.status === 403 && bodyStringField(errorBody, 'error').includes('CSRF token validation failed');
+        if (isCsrfRejection && attempt === 0 && isWebUiBrowserMode() && MUTATING_METHODS.has(method.toUpperCase())) {
+          console.warn(`[httpBridge] ${method} ${safePath} → 403 CSRF; retrying once with re-seeded token`);
+          continue;
+        }
+
+        const authExpired = isAuthExpiredResponse(response.status, errorBody);
+        if (authExpired) {
+          handleHttpAuthExpired();
+        }
+        if (authExpired) {
+          if (isDebugEnabled('debug:http') && !isNoisyPath) {
+            console.debug(
+              `[httpBridge] ${method} ${safePath} → ${response.status} (auth-expired)`,
+              redactForLog(errorBody)
+            );
+          }
+        } else if (options?.silentStatuses?.includes(response.status)) {
+          console.debug(
+            `[httpBridge] ${method} ${safePath} → ${response.status} (silenced)`,
+            redactForLog(errorBody)
+          );
+        } else {
+          console.error(`[httpBridge] ${method} ${safePath} → ${response.status}`, redactForLog(errorBody));
+        }
+        throw new BackendHttpError({ method, path, status: response.status, body: errorBody });
       }
-      const detail = redactSensitiveText(e instanceof Error ? e.message : String(e));
-      throw new BackendRequestError(
-        'network',
-        `Backend ${method} ${safePath} failed: backend unreachable (${detail})`
-      );
+
+      if (isDebugEnabled('debug:http') && !isNoisyPath) {
+        console.debug(`[httpBridge] ${method} ${safePath} → ${response.status} OK`);
+      }
+
+      return await readSuccess(response, read);
     } finally {
+      // The deadline and caller cancellation cover the entire response body,
+      // including streamed downloads, rather than stopping at response headers.
       if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
       options?.signal?.removeEventListener('abort', cancel);
     }
+  }
+}
 
-    if (!response.ok) {
-      // Read the body exactly once. A `Response` body is a one-shot stream, so
-      // calling `.json()` then `.text()` (e.g. as a parse fallback) throws
-      // "body stream already read". Many error responses have an empty or
-      // non-JSON body (axum-default 404/405, plain-text 5xx), so read text first
-      // and opportunistically parse it as JSON.
-      const rawText = await response.text();
-      let errorBody: unknown;
-      try {
-        errorBody = rawText ? JSON.parse(rawText) : '';
-      } catch {
-        errorBody = rawText;
-      }
-
-      // CSRF self-healing: the backend re-seeds the csrf cookie on the very
-      // 403 that rejected us, so exactly one retry with rebuilt headers can
-      // succeed. The rejected mutation never executed server-side, making the
-      // retry safe. Guarded to WebUI browser mode where the double-submit
-      // cookie applies (audit 2026-07-30, finding B).
-      const isCsrfRejection =
-        response.status === 403 && bodyStringField(errorBody, 'error').includes('CSRF token validation failed');
-      if (isCsrfRejection && attempt === 0 && isWebUiBrowserMode() && MUTATING_METHODS.has(method.toUpperCase())) {
-        console.warn(`[httpBridge] ${method} ${safePath} → 403 CSRF; retrying once with re-seeded token`);
-        continue;
-      }
-
-      const authExpired = isAuthExpiredResponse(response.status, errorBody);
-      if (authExpired) {
-        handleHttpAuthExpired();
-      }
-      if (authExpired) {
-        if (isDebugEnabled('debug:http') && !isNoisyPath) {
-          console.debug(
-            `[httpBridge] ${method} ${safePath} → ${response.status} (auth-expired)`,
-            redactForLog(errorBody)
-          );
-        }
-      } else if (options?.silentStatuses?.includes(response.status)) {
-        console.debug(
-          `[httpBridge] ${method} ${safePath} → ${response.status} (silenced)`,
-          redactForLog(errorBody)
-        );
-      } else {
-        console.error(`[httpBridge] ${method} ${safePath} → ${response.status}`, redactForLog(errorBody));
-      }
-      throw new BackendHttpError({ method, path, status: response.status, body: errorBody });
-    }
-
-    if (isDebugEnabled('debug:http') && !isNoisyPath) {
-      console.debug(`[httpBridge] ${method} ${safePath} → ${response.status} OK`);
-    }
-
+export async function httpRequest<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  options?: HttpRequestOptions
+): Promise<T> {
+  return requestWithReader(method, path, body, options, async (response, read) => {
     const contentType = response.headers.get('Content-Type');
     if (!contentType?.includes('application/json')) {
       // A 2xx text/html answer to an API call is never data: it is the web
@@ -639,7 +663,7 @@ export async function httpRequest<T>(
       // server upgrade. Returning `undefined` here silently blanked views;
       // fail legibly instead (audit 2026-07-30, finding G).
       if (contentType?.includes('text/html')) {
-        console.error(`[httpBridge] ${method} ${safePath} → ${response.status} text/html (contract violation)`);
+        console.error(`[httpBridge] ${method} ${redactSensitiveText(path)} → ${response.status} text/html (contract violation)`);
         throw new BackendHttpError({
           method,
           path,
@@ -654,13 +678,82 @@ export async function httpRequest<T>(
       return undefined as T;
     }
 
-    const json = await response.json();
+    // Parse outside the transport wrapper so malformed JSON remains a decoding
+    // error rather than being mislabeled as a network failure.
+    const json = JSON.parse(await read(() => response.text()));
     // Backend wraps in { success, data, ... } — unwrap when present
     if (json && typeof json === 'object' && 'data' in json) {
       return json.data as T;
     }
     return json as T;
+  });
+}
+
+export type HttpBlobRequestOptions = HttpRequestOptions & {
+  /** Stop reading immediately when a download exceeds this byte limit. */
+  maxBytes?: number;
+  onProgress?: (loaded: number, total: number) => void;
+};
+
+/** Download a backend binary through the same authentication and error path as JSON APIs. */
+export async function httpBlobRequest(path: string, options?: HttpBlobRequestOptions): Promise<Blob> {
+  const maxBytes = options?.maxBytes;
+  if (maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || maxBytes < 0)) {
+    throw new RangeError('maxBytes must be a non-negative safe integer');
   }
+
+  return requestWithReader('GET', path, undefined, options, async (response, read) => {
+    const contentType = response.headers.get('Content-Type')?.split(';')[0]?.trim().toLowerCase();
+    if (contentType !== 'application/octet-stream') {
+      await response.body?.cancel().catch(() => {});
+      throw new BackendHttpError({
+        method: 'GET', path, status: response.status,
+        body: { code: 'NON_BINARY_RESPONSE', error: 'Backend answered without the expected application/octet-stream content type' },
+      });
+    }
+
+    const declaredLength = Number(response.headers.get('Content-Length'));
+    const total = Number.isSafeInteger(declaredLength) && declaredLength >= 0 ? declaredLength : 0;
+    const tooLarge = (receivedBytes: number) => new BackendHttpError({
+      method: 'GET', path, status: response.status,
+      body: {
+        code: 'BINARY_RESPONSE_TOO_LARGE',
+        error: `Backend binary response exceeds the ${maxBytes} byte limit`,
+        details: { maxBytes, receivedBytes },
+      },
+    });
+    if (maxBytes !== undefined && total > maxBytes) {
+      await response.body?.cancel().catch(() => {});
+      throw tooLarge(total);
+    }
+
+    if (!response.body) {
+      const blob = await read(() => response.blob());
+      if (maxBytes !== undefined && blob.size > maxBytes) throw tooLarge(blob.size);
+      options?.onProgress?.(blob.size, total || blob.size);
+      return blob;
+    }
+
+    const reader = response.body.getReader();
+    const chunks: BlobPart[] = [];
+    let loaded = 0;
+    try {
+      for (;;) {
+        const { done, value } = await read(() => reader.read());
+        if (done) break;
+        loaded += value.byteLength;
+        if (maxBytes !== undefined && loaded > maxBytes) throw tooLarge(loaded);
+        chunks.push(value);
+        options?.onProgress?.(loaded, total);
+      }
+      return new Blob(chunks, { type: 'application/octet-stream' });
+    } catch (error) {
+      await reader.cancel().catch(() => {});
+      throw error;
+    } finally {
+      reader.releaseLock();
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------

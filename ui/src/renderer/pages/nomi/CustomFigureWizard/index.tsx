@@ -11,8 +11,8 @@ import { Upload } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { IFigureMeta } from '@/common/adapter/ipcBridge';
 import { uploadFileViaHttp } from '@renderer/services/FileService';
-import { ensureMattingModel } from '@renderer/services/matting/modelCache';
-import type { MatteMethod, MatteRequest, MatteResponse } from '@renderer/services/matting/matting.worker';
+import { MattingClient, createBitmapClamped } from '@renderer/services/matting/mattingClient';
+import type { MatteFallbackReason, MatteMethod, MatteResponse } from '@renderer/services/matting/mattingProtocol';
 import FrameStep, { clampHeadBox, type HeadBox } from './FrameStep';
 
 /**
@@ -36,33 +36,24 @@ interface MatteOutcome {
 const ACCEPT = '.jpg,.jpeg,.png,.webp,.gif';
 const ACCEPT_EXT = ['jpg', 'jpeg', 'png', 'webp', 'gif'];
 const ACCEPT_MIME = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-/** Decode clamp: sources larger than 4096×4096 are downscaled before matting. */
-const MAX_SOURCE_EDGE = 4096;
 /** "Use original" path mirrors the worker's output clamp. */
 const MAX_OUTPUT_EDGE = 2048;
 const DEFAULT_TOLERANCE = 11;
 /** Below this cutout aspect (w/h) the figure is too narrow — warn, don't block. */
 const NARROW_ASPECT = 0.3;
 
+const FALLBACK_MESSAGES = {
+  model_unavailable: 'nomi.customFigure.modelUnavailable',
+  inference_failed: 'nomi.customFigure.inferenceFailed',
+  inference_timeout: 'nomi.customFigure.inferenceTimeout',
+  unsuitable_image: 'nomi.customFigure.unsuitableImage',
+} as const;
+
 const isAcceptedImage = (f: File): boolean => {
   if (ACCEPT_MIME.includes(f.type)) return true;
   const ext = f.name.split('.').pop()?.toLowerCase() ?? '';
   return ACCEPT_EXT.includes(ext);
 };
-
-/** Decode a file into an ImageBitmap, downscaling so both edges are ≤ maxEdge. */
-async function createBitmapClamped(file: File, maxEdge: number): Promise<ImageBitmap> {
-  const probe = await createImageBitmap(file);
-  if (probe.width <= maxEdge && probe.height <= maxEdge) return probe;
-  const scale = maxEdge / Math.max(probe.width, probe.height);
-  const resized = await createImageBitmap(probe, {
-    resizeWidth: Math.max(1, Math.round(probe.width * scale)),
-    resizeHeight: Math.max(1, Math.round(probe.height * scale)),
-    resizeQuality: 'high',
-  });
-  probe.close();
-  return resized;
-}
 
 /** "Use original" — encode the unmatted image (long edge ≤2048) as the figure. */
 async function encodeOriginal(file: File): Promise<{ blob: Blob; aspect: number }> {
@@ -71,10 +62,13 @@ async function encodeOriginal(file: File): Promise<{ blob: Blob; aspect: number 
   canvas.width = bitmap.width;
   canvas.height = bitmap.height;
   const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('canvas 2d context unavailable');
-  ctx.drawImage(bitmap, 0, 0);
   const aspect = bitmap.width / bitmap.height;
-  bitmap.close();
+  try {
+    if (!ctx) throw new Error('canvas 2d context unavailable');
+    ctx.drawImage(bitmap, 0, 0);
+  } finally {
+    bitmap.close();
+  }
   // Safari can't encode webp — it silently falls back to png, which the
   // backend ingest accepts too (magic-sniffed, extension stays .webp).
   const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/webp', 0.9));
@@ -100,8 +94,8 @@ const CustomFigureWizard: React.FC<CustomFigureWizardProps> = ({ open, onClose, 
   const [pickError, setPickError] = useState<string | null>(null);
   const [progress, setProgress] = useState<{ phase: 'download' | 'infer' | 'process'; loaded?: number; total?: number } | null>(null);
   const [matteFailed, setMatteFailed] = useState(false);
-  /** ML 抠图模型经后端代理也拉不到（离线/上游全挂）——已降级快速抠图，提示用户。 */
-  const [modelUnavailable, setModelUnavailable] = useState(false);
+  const [processingFailed, setProcessingFailed] = useState(false);
+  const [fallbackReason, setFallbackReason] = useState<MatteFallbackReason | null>(null);
   const [result, setResult] = useState<MatteOutcome | null>(null);
   const [tolerance, setTolerance] = useState(DEFAULT_TOLERANCE);
   const [headBox, setHeadBox] = useState<HeadBox>({ x: 0.35, y: 0, w: 0.3, h: 0.3 });
@@ -111,10 +105,12 @@ const CustomFigureWizard: React.FC<CustomFigureWizardProps> = ({ open, onClose, 
   const [name, setName] = useState('');
   const [frameError, setFrameError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [originalProcessing, setOriginalProcessing] = useState(false);
+  const originalBusyRef = useRef(false);
 
   const fileRef = useRef<File | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const workerRef = useRef<Worker | null>(null);
+  const clientRef = useRef<MattingClient | null>(null);
   /** Monotonic request id — stale worker responses and aborted decodes are ignored. */
   const reqIdRef = useRef(0);
 
@@ -142,6 +138,11 @@ const CustomFigureWizard: React.FC<CustomFigureWizardProps> = ({ open, onClose, 
         setProgress({ phase: msg.phase, loaded: msg.loaded, total: msg.total });
         return;
       }
+      if (msg.type === 'fallback') {
+        setFallbackReason(msg.reason);
+        if (msg.detail) console.warn(`[matting] ${msg.reason}:`, msg.detail);
+        return;
+      }
       if (msg.type === 'done') {
         setProgress(null);
         const url = URL.createObjectURL(msg.blob);
@@ -158,65 +159,29 @@ const CustomFigureWizard: React.FC<CustomFigureWizardProps> = ({ open, onClose, 
         setProgress(null);
         setMatteFailed(true); // stay on the matte step: re-matte or pick another image
       } else {
-        failBackToPick(msg.message);
+        console.warn('[matting] Processing failed:', msg.message);
+        setProgress(null);
+        setProcessingFailed(true);
       }
     },
-    [failBackToPick, swapResult]
+    [swapResult]
   );
   const handleWorkerMessageRef = useRef(handleWorkerMessage);
   handleWorkerMessageRef.current = handleWorkerMessage;
 
-  const ensureWorker = useCallback((): Worker => {
-    if (!workerRef.current) {
-      const worker = new Worker(new URL('../../../services/matting/matting.worker.ts', import.meta.url), {
-        type: 'module',
-      });
-      worker.onmessage = (ev: MessageEvent<MatteResponse>) => handleWorkerMessageRef.current(ev.data);
-      worker.onerror = (ev) => {
-        workerRef.current?.terminate();
-        workerRef.current = null;
-        failBackToPick(ev.message || 'worker error');
-      };
-      workerRef.current = worker;
-    }
-    return workerRef.current;
-  }, [failBackToPick]);
-
   const runMatte = useCallback(
-    async (file: File, mode: 'auto' | 'heuristic', tol: number) => {
+    (file: File, mode: 'auto' | 'heuristic', tol: number) => {
       setStep('matte');
       setMatteFailed(false);
+      setProcessingFailed(false);
+      setFallbackReason(null);
       swapResult(null);
       setProgress({ phase: 'process' });
       const id = ++reqIdRef.current;
-      try {
-        // ML 模式：先确保模型在 Cache Storage（主线程经后端代理下载，带进度、无硬
-        // 超时）。拿不到则降级快速抠图——worker 只读缓存，绝不在 worker 里下载。
-        let effectiveMode = mode;
-        if (mode === 'auto') {
-          try {
-            await ensureMattingModel((loaded, total) => {
-              if (id === reqIdRef.current) setProgress({ phase: 'download', loaded, total });
-            });
-          } catch {
-            effectiveMode = 'heuristic';
-            setModelUnavailable(true);
-          }
-          if (id !== reqIdRef.current) return;
-          setProgress({ phase: 'process' });
-        }
-        const bitmap = await createBitmapClamped(file, MAX_SOURCE_EDGE);
-        if (id !== reqIdRef.current) {
-          bitmap.close();
-          return;
-        }
-        const req: MatteRequest = { id, type: 'matte', bitmap, mode: effectiveMode, tolerance: tol };
-        ensureWorker().postMessage(req, [bitmap]);
-      } catch (err) {
-        if (id === reqIdRef.current) failBackToPick(err);
-      }
+      clientRef.current ??= new MattingClient();
+      clientRef.current.run({ id, file, mode, tolerance: tol }, msg => handleWorkerMessageRef.current(msg));
     },
-    [ensureWorker, failBackToPick, swapResult]
+    [swapResult]
   );
 
   const handleFile = useCallback(
@@ -239,8 +204,13 @@ const CustomFigureWizard: React.FC<CustomFigureWizardProps> = ({ open, onClose, 
 
   const useOriginal = useCallback(async () => {
     const file = fileRef.current;
-    if (!file) return;
+    if (!file || originalBusyRef.current) return;
+    originalBusyRef.current = true;
+    setOriginalProcessing(true);
+    clientRef.current?.cancel();
     setMatteFailed(false);
+    setProcessingFailed(false);
+    setFallbackReason(null);
     setProgress({ phase: 'process' });
     const id = ++reqIdRef.current;
     try {
@@ -252,15 +222,20 @@ const CustomFigureWizard: React.FC<CustomFigureWizardProps> = ({ open, onClose, 
       setStep('frame');
     } catch (err) {
       if (id === reqIdRef.current) failBackToPick(err);
+    } finally {
+      originalBusyRef.current = false;
+      setOriginalProcessing(false);
     }
   }, [failBackToPick, swapResult]);
 
   const backToPick = useCallback(() => {
     reqIdRef.current++;
+    clientRef.current?.cancel();
     swapResult(null);
     setProgress(null);
     setMatteFailed(false);
-    setModelUnavailable(false);
+    setProcessingFailed(false);
+    setFallbackReason(null);
     setPickError(null);
     setStep('pick');
   }, [swapResult]);
@@ -298,7 +273,8 @@ const CustomFigureWizard: React.FC<CustomFigureWizardProps> = ({ open, onClose, 
     setPickError(null);
     setProgress(null);
     setMatteFailed(false);
-    setModelUnavailable(false);
+    setProcessingFailed(false);
+    setFallbackReason(null);
     swapResult(null);
     setTolerance(DEFAULT_TOLERANCE);
     setSizeTier('m');
@@ -312,16 +288,16 @@ const CustomFigureWizard: React.FC<CustomFigureWizardProps> = ({ open, onClose, 
   useEffect(() => {
     if (open) return;
     reqIdRef.current++;
-    workerRef.current?.terminate();
-    workerRef.current = null;
+    clientRef.current?.dispose();
+    clientRef.current = null;
     // Free the matte blob + object URL right away — the wizard component stays
     // mounted in its host, so waiting for the next open-reset leaks MBs.
     swapResult(null);
   }, [open, swapResult]);
   useEffect(
     () => () => {
-      workerRef.current?.terminate();
-      workerRef.current = null;
+      clientRef.current?.dispose();
+      clientRef.current = null;
       setResult((prev) => {
         if (prev) URL.revokeObjectURL(prev.url);
         return null;
@@ -404,7 +380,8 @@ const CustomFigureWizard: React.FC<CustomFigureWizardProps> = ({ open, onClose, 
         </div>
       )}
       {!progress && matteFailed && <Alert type='error' content={t('nomi.customFigure.errMatteFailed')} />}
-      {!progress && modelUnavailable && <Alert type='warning' content={t('nomi.customFigure.modelUnavailable')} />}
+      {!progress && processingFailed && <Alert type='error' content={t('nomi.customFigure.errFailed')} />}
+      {!progress && fallbackReason && <Alert type='warning' content={t(FALLBACK_MESSAGES[fallbackReason])} />}
       {!progress && result && (
         <div className='flex gap-16px justify-center flex-wrap'>
           {/* light / dark twin previews — judge the cutout edge on both grounds */}
@@ -422,15 +399,21 @@ const CustomFigureWizard: React.FC<CustomFigureWizardProps> = ({ open, onClose, 
           </div>
         </div>
       )}
-      {!progress && result && (
+      {fileRef.current && (
         <div className='flex items-center gap-12px flex-wrap rd-12px bg-fill-2 px-14px py-10px'>
           <span className='text-13px text-t-secondary shrink-0'>{t('nomi.customFigure.tolerance')}</span>
-          <Slider min={4} max={32} value={tolerance} onChange={(v) => setTolerance(v as number)} style={{ width: 150 }} />
+          <Slider disabled={!!progress} min={4} max={32} value={tolerance} onChange={(v) => setTolerance(v as number)} style={{ width: 150 }} />
           <div className='flex-1' />
-          <Button size='small' onClick={redoHeuristic}>
+          <Button size='small' disabled={!!progress} onClick={() => {
+            const file = fileRef.current;
+            if (file) runMatte(file, 'auto', tolerance);
+          }}>
+            {t('nomi.customFigure.retryAi')}
+          </Button>
+          <Button size='small' disabled={!!progress} onClick={redoHeuristic}>
             {t('nomi.customFigure.redo')}
           </Button>
-          <Button size='small' onClick={() => void useOriginal()}>
+          <Button size='small' disabled={originalProcessing} loading={originalProcessing} onClick={() => void useOriginal()}>
             {t('nomi.customFigure.useOriginal')}
           </Button>
         </div>
