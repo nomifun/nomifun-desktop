@@ -1,11 +1,15 @@
 {
   "version": "0.8.14",
   "notes": "- Supersedes the retracted v0.8.13 with the same content plus consistent\n  session-process workspace path comparison.\n- Enable trusted global system capabilities: native global OS execution and\n  file semantics on Windows, with native file effects fenced and\n  authentication failures preserved, and trusted global OS capabilities on\n  Linux.\n- Decouple session input from background process lifecycles, keep session\n  preparation under one owner, preserve semantic text boundaries across\n  reasoning, and preserve waiting and cancellation across runtime consumers.\n- Make delegated companion task cancellation reliable, enforce spoken replies\n  across companion surfaces, keep silent robot actions responsive while\n  preserving continuous voice input, and recover retired robot registries\n  with reported endpoint failures.\n- Check the macOS install location together with the update check: when NomiFun\n  runs from a disk image, an external volume or a translocated location, the\n  update card names the specific cause and running path and offers manual\n  download before any package is downloaded, instead of failing after the\n  download with one generic message.\n- Refine the model configuration workspace and styling, restore model\n  management text contrast across themes, stop companion tooltips from being\n  clipped, and align the input handoff card with the chat background.",
-  "pub_date": "2026-10-18T07:11:07.474Z",
+  "pub_date": "2026-10-18T07:31:45.396Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOC9jVlI2RG9zTXdrTENTNVBJd2JFVXljMGNOTTFoV1ZlME5FdjJkY3lTR1FROGRoL2c1V21VdEI1SkxZOWRzQXArdDhWODg4aWpva0FJN3BNb3E2RFFBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMzA3NDA2CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6ClVJYUdUdjFNMWY2OXYvbTBKOHlad09Kd21nbmVSai83UjlZWlZab0JIa1NOekp5YzlHbFp5UjNhd2tNRHErMWdDaUVjQWhnTWIvYUdCenlCSy8wWUFnPT0K",
       "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.14/NomiFun.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODQvN0FNUk1rMkJsV2hqOVhvbVFjcGx2OVlBY2lBbGNaQWZyZFlnU3Q0dTRIMmJGREtNTTN3b2Qra2x4dTJSNXBmU1YxVkREaGdXMXNId29hekRsendjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMzA4NjI3CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CnYwS2svRUZGQnpkZGF4NExaTXpQdlRsZG9LY01lZDd4VUoxWG0ydGgwWkxuQzdnM0UwTVZlQXRZYU1MSy9UUXhDbUovU3EyN3JNcS9nTFZtbVFUN0J3PT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.14/NomiFun_0.8.14_x64.app.tar.gz"
     }
   }
 }
