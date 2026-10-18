@@ -1138,6 +1138,25 @@ pub struct CreateAgentSessionTurnRequestDto {
     pub idempotency_key: String,
 }
 
+/// Ordinary user input is acknowledged when its canonical message is stored.
+/// Runtime ownership and execution are scheduled separately by the Session host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptAgentSessionMessageRequestDto {
+    pub input: Value,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptAgentSessionMessageResponseDto {
+    pub agent_session_id: String,
+    pub message_id: String,
+    pub cursor: SessionCursorDto,
+    pub status: String,
+    pub replayed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentSessionTurnResponseDto {
@@ -1160,12 +1179,23 @@ pub struct CreateAgentSessionTurnResponseDto {
     pub result_error_retryable: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
 pub struct AgentWaitReplyTargetDto {
     pub turn_id: String,
     /// Cursor of the exact canonical waiting event, including requestless waits.
+    #[ts(type = "number")]
     pub wait_seq: u64,
+}
+
+/// The original committed question being referenced by an ordinary input.
+/// This association never grants execution or native recovery authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct AgentQuestionReplyTargetDto {
+    pub turn_id: String,
+    #[ts(type = "number")]
+    pub question_seq: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1173,6 +1203,8 @@ pub struct AgentWaitReplyTargetDto {
 pub struct SteerAgentSessionTurnRequestDto {
     pub input: Value,
     pub idempotency_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_wait: Option<AgentWaitReplyTargetDto>,
 }

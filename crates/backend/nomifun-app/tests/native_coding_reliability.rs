@@ -259,7 +259,7 @@ async fn scenario(template: &str, malformed_first: bool, selected_workspace: boo
             }
             let raw_step = round - usize::from(malformed_first) - usize::from(discovery_first) - usize::from(native_process);
             if native_process && raw_step == 1 {
-                return stream(Some(("bad-command-shape", "exec_command", json!({"command":"/bin/sh -c true"}))), "");
+                return stream(Some(("bad-command-shape", "start_process", json!({"command":"/bin/sh -c true"}))), "");
             }
             let step = raw_step - usize::from(native_process && raw_step > 1);
             if discovery_first {
@@ -285,9 +285,9 @@ async fn scenario(template: &str, malformed_first: bool, selected_workspace: boo
                 ]}), "tool_calls"),
                 1 if native_process => {
                     assert!(body.to_string().contains("output-token ceiling"), "continuation must retain the truncation notice");
-                    assert!(tools.iter().any(|tool| tool["function"]["name"] == "exec_command"));
+                    assert!(tools.iter().any(|tool| tool["function"]["name"] == "start_process"));
                     assert!(body.to_string().contains("PROCESS_NOT_STARTED"), "a proven failed spawn needs a typed repair observation");
-                    stream(Some(("read-game", "exec_command", json!({
+                    stream(Some(("read-game", "start_process", json!({
                         "cmd":"test -s gomoku/index.html && test \"$(cat gomoku/check.txt)\" = MAC_PROCESS_OK && printf MAC_PROCESS_VERIFIED"}))), "")
                 },
                 2 => {

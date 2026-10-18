@@ -37,6 +37,8 @@ pub struct AgentRejectedToolProposal {
 pub enum AgentModelResponseRejection {
     NonNativeMarkup,
     EmptyTaskTerminal,
+    /// A current blocked account still requires its explicit user-input declaration.
+    RequiredInputHandoff,
     ToolArguments { diagnostics: Vec<AgentRejectedToolProposal> },
     /// Existing current-generation facts did not record their precise reason.
     /// Reading them preserves that uncertainty instead of inspecting prose.

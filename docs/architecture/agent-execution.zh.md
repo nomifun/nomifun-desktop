@@ -47,7 +47,7 @@ Step 的自由文本 role 只作展示和路由提示；独立 typed tool policy
 
 正常结算、重启恢复和人工采纳共用 [canonical_output.rs](../../crates/backend/nomifun-agent-execution/src/canonical_output.rs)，在同一事务读取精确 Turn 的事件窗口与终态正文。产物必须来自该 Turn 已结算的文件或发布回执，并校验根、路径、长度与摘要；不扫描目录、读取 UI 消息或相信模型自称完成。同路径的后续变更按事件顺序决定可交付状态。
 
-Step spec 是任务输入；完成要求交给唯一 Runtime 的 typed requirements、completion 与 delivery。调度器不从自然语言文件名、格式或数量再猜一套验收规则。`request_user_input` 关闭本轮并交还输入，不代表 Step 完成；没有真实回复时不轮询模型，也不重放效果。
+Step spec 是任务输入；完成要求交给唯一 Runtime 的 typed requirements、completion 与 delivery。调度器不从自然语言文件名、格式或数量再猜一套验收规则。`request_user_input` 总是以 InputRequired 正常闭轮交还输入，原 Session 后台进程独立保留；交接不代表 Step 完成。问题即时交付；后台输出、退出及超时都不代替用户回复，不自动开启模型或重试命令。纯机器资源观察与人工交接分开，实际回复仍通过 canonical owner 和领域准入。
 
 取消先由 canonical owner 固定精确 Operation。StopTurn write-ahead intent 保存稳定取消身份与目标，迟到 StopTurn 不能命中后继 Turn。租约丢失、取消和其他任务结算必须能继续被调度循环处理。
 

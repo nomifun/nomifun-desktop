@@ -13,12 +13,33 @@ use nomifun_common::AppError;
 
 use super::{ActiveTurn, ConversationRuntimeHost, error};
 
+struct SteeringPreparationFailure {error:AppError,reason:Option<nomifun_agent_session::SessionInputBlockedReason>}
+impl From<AppError> for SteeringPreparationFailure {fn from(error:AppError)->Self {Self {error,
+    reason:Some(nomifun_agent_session::SessionInputBlockedReason::AttachmentPreparationFailed)}}}
+fn preparation_budget(error:AppError)->SteeringPreparationFailure {SteeringPreparationFailure {error,
+    reason:Some(nomifun_agent_session::SessionInputBlockedReason::InputBudgetExceeded)}}
+fn preparation_skill(error:AppError)->SteeringPreparationFailure {SteeringPreparationFailure {error,
+    reason:Some(nomifun_agent_session::SessionInputBlockedReason::SkillUnavailable)}}
+
+struct PreparedSteeringContent {
+    text:String,
+    files:Vec<String>,
+    inject_skills:Vec<String>,
+    prepared_images:Vec<nomifun_chat_model_broker::ChatContentPart>,
+    prepared_skill_instructions:Vec<String>,
+    next_image_bytes:usize,
+    next_image_count:usize,
+    next_skill_bytes:usize,
+}
+
 pub(super) struct Inbox {
     changed: std::sync::Arc<tokio::sync::Notify>,
     open: bool,
     generation: Option<u64>,
     seen: BTreeMap<String, AgentSteeringInput>,
     pending: Vec<AgentSteeringInput>,
+    retry_inputs:BTreeSet<String>,
+    deferred_inputs:BTreeSet<String>,
     immediate_receipts:BTreeSet<String>,
     admitted_model_steps:BTreeSet<u16>,
     prepared_image_bytes: usize,
@@ -33,6 +54,8 @@ impl Default for Inbox {
             generation: None,
             seen: BTreeMap::new(),
             pending: Vec::new(),
+            retry_inputs:BTreeSet::new(),
+            deferred_inputs:BTreeSet::new(),
             immediate_receipts:BTreeSet::new(),
             admitted_model_steps:BTreeSet::new(),
             prepared_image_bytes: 0,
@@ -84,6 +107,120 @@ pub(super) fn admitted(
 }
 
 impl ConversationRuntimeHost {
+    pub(super) async fn wake_session_input(&self,retry_input:Option<String>)->Result<(),AppError> {
+        let mut active=self.active.lock().await;
+        if let Some(turn)=active.as_mut() {
+            if let Some(input)=retry_input {
+                if turn.steering.retry_inputs.len()<64 {turn.steering.retry_inputs.insert(input);}
+            }
+            turn.steering.changed.notify_waiters();
+        }
+        Ok(())
+    }
+
+    async fn claim_pending_session_inputs_locked(&self,turn:&mut ActiveTurn)->Result<(),AppError> {
+        if !turn.steering.open || turn.cleanup_started || turn.cancellation.is_cancelled() {return Ok(());}
+        let owner=self.session_host.session_owner()?;
+        let session=self.options.conversation_id.clone().into();
+        if owner.require_ordinary_owner_input(&self.principal,&session).await.is_err() {return Ok(());}
+        let store=self.session_host.canonical_store()?;
+        if store.has_unsettled_effects(&session).await.map_err(error)? {return Ok(());}
+        let(_,root)=store.turn_accepted_input(&session,&turn.operation.clone().into()).await.map_err(error)?;
+        let receiver=nomifun_agent_contracts::ChannelInputSource::from_input(&root.0).map_err(error)?;
+        let mut inputs=store.pending_session_inputs(&session,None).await.map_err(error)?;
+        for id in std::mem::take(&mut turn.steering.retry_inputs) {
+            inputs.extend(store.pending_session_inputs(&session,Some(&id.into())).await.map_err(error)?);
+        }
+        inputs.sort_by_key(|input|input.event.seq);let mut seen=BTreeSet::new();
+        for original in inputs {
+            if !seen.insert(original.event.event_id.clone()) || original.input.0.get("reply_to").is_some()
+                || turn.steering.deferred_inputs.contains(original.event.event_id.as_ref()) {continue;}
+            let incoming=nomifun_agent_contracts::ChannelInputSource::from_input(&original.input.0).map_err(error)?;
+            if !nomifun_agent_contracts::ChannelInputSource::same_destination(receiver.as_ref(),incoming.as_ref()) {continue;}
+            let text=original.input.0.get("content").and_then(serde_json::Value::as_str).ok_or_else(||error("accepted input lost its original text"))?.to_owned();
+            let files=super::super::runtime_attachments::references(&original.input.0)?;
+            let skills=super::super::runtime_attachments::selected_skills(&original.input.0)?;
+            let prepared=match self.prepare_steer_content_locked(turn,text.clone(),files.clone(),skills.clone()).await {
+                Ok(prepared)=>prepared,
+                Err(failure)=>{
+                    if failure.reason==Some(nomifun_agent_session::SessionInputBlockedReason::InputBudgetExceeded) {
+                        turn.steering.deferred_inputs.insert(original.event.event_id.as_ref().into());continue;
+                    }
+                    if let Some(reason)=failure.reason {
+                        store.mark_session_input_blocked(&session,&original.event.event_id,reason).await.map_err(error)?;
+                        let _=owner.publish_session_input_delivery(&self.principal.principal_id,&session,&original.event.event_id).await;
+                    }
+                    continue;
+                },
+            };
+            turn.journal.verify_execution_lease().await.map_err(error)?;
+            let claim=store.claim_session_input_as_steering(&self.principal,&session,&original.event.event_id,&turn.operation.clone().into()).await.map_err(error)?;
+            let ack=claim.ack.ok_or_else(||error("input claim has no original acknowledgement"))?;
+            // The Store has just checked the exact original input and target
+            // under its transaction; the active mutex still owns this scope.
+            // No second DB read or cancellation point may split that claim
+            // from its prepared inbox entry. Exact domain steering continues
+            // to use its independent receipt validation below.
+            let input=AgentSteeringInput {receipt_operation_id:ack.event_id.as_ref().to_owned(),
+                message_id:original.event.event_id.as_ref().to_owned(),text:prepared.text,
+                files:prepared.files,inject_skills:prepared.inject_skills,image_count:prepared.prepared_images.len(),
+                prepared_images:prepared.prepared_images,prepared_skill_instructions:prepared.prepared_skill_instructions};
+            turn.steering.generation=Some(turn.epoch as u64);
+            turn.steering.prepared_image_bytes=prepared.next_image_bytes;
+            turn.steering.prepared_image_count=prepared.next_image_count;
+            turn.steering.prepared_skill_bytes=prepared.next_skill_bytes;
+            turn.steering.seen.insert(input.receipt_operation_id.clone(),input.journal_record());
+            turn.steering.pending.push(input);
+            turn.event_buffer.narration_boundary();
+            #[cfg(test)]
+            super::reliability_tests::session_input_claim_cutpoint(&self.options.conversation_id).await;
+        }
+        Ok(())
+    }
+
+    async fn take_session_inputs_owned(&self,causality:ChatCausality,close_if_empty:bool)
+        ->Result<Vec<AgentSteeringInput>,AgentEngineError> {
+        let mut active=self.active.lock().await;
+        let turn=active.as_mut().ok_or_else(||engine_error("no active turn"))?;
+        admitted(turn,self,&causality)?;
+        let result=async {
+            self.claim_pending_session_inputs_locked(turn).await.map_err(engine_error)?;
+            if turn.steering.pending.is_empty() {
+                if close_if_empty {turn.steering.open=false;}
+                return Ok(Vec::new());
+            }
+            let capabilities=self.capability_state.snapshot().map_err(engine_error)?;
+            for input in &turn.steering.pending {
+                self.skills.validate_active(&input.inject_skills,&capabilities.active).map_err(engine_error)?;
+                if input.prepared_skill_instructions!=self.skills.explicit_instructions(&input.inject_skills).map_err(engine_error)? {
+                    return Err(engine_error("queued Skill body differs from frozen active selection"));
+                }
+            }
+            turn.steering.open=false;
+            self.flush_steering_buffer(turn).await.map_err(engine_error)?;
+            let payload=serde_json::to_string(&AgentEngineEvent::SteeringInputs {
+                inputs:turn.steering.pending.iter().map(AgentSteeringInput::journal_record).collect(),
+            }).map_err(engine_error)?;
+            self.append_locked_record(turn,payload,None,false).await.map_err(engine_error)?;
+            let inputs=std::mem::take(&mut turn.steering.pending);
+            turn.steering.immediate_receipts.clear();turn.steering.open=true;
+            Ok(inputs)
+        }.await;
+        if result.is_err() {
+            // An uncertain native write cannot authorize subsequent effects.
+            // Pending content is retained for exact cleanup/recovery; a claim
+            // alone is never projected as delivery to the Runtime boundary.
+            turn.steering.open=false;turn.cancellation.cancel();
+        }
+        let delivered=result.as_ref().ok().map(|inputs|inputs.iter().map(|input|input.message_id.clone()).collect::<Vec<_>>()).unwrap_or_default();
+        drop(active);
+        if let Ok(owner)=self.session_host.session_owner() {
+            let session=self.options.conversation_id.clone().into();
+            for input in delivered {let _=owner.publish_session_input_delivery(&self.principal.principal_id,&session,&input.into()).await;}
+        }
+        result
+    }
+
     pub(super) async fn restore_recovery_steering(&self) -> Result<(), AppError> {
         let mut active = self.active.lock().await;
         let turn = active.as_mut().ok_or_else(|| error("recovery has no active Turn"))?;
@@ -113,15 +250,15 @@ impl ConversationRuntimeHost {
         }
         for event in facts.events.iter().filter(|event| event.kind.0 == "turn/steer-accepted" && event.correlation_id.as_ref() == turn.operation) {
             if turn.steering.seen.contains_key(event.event_id.as_ref()) { continue; }
-            let value = facts.event_payloads.get(event.event_id.as_ref()).and_then(|value| value.get("input"))
-                .ok_or_else(|| error("recovery steering receipt has no input"))?;
+            let(original_input,value)=nomifun_agent_session::canonical_steering_input(&facts,event).map_err(error)?;
+            let value=&value.0;
             let text = value.get("content").and_then(serde_json::Value::as_str).ok_or_else(|| error("recovery steering text is missing"))?;
             let files = super::super::runtime_attachments::references(value)?;
             let inject_skills = super::super::runtime_attachments::selected_skills(value)?;
             self.skills.validate_active(&inject_skills, &capabilities.active)?;
             let prepared_skill_instructions = self.skills.explicit_instructions(&inject_skills)?;
             let images = super::super::runtime_attachments::prepare_images(&files, &self.options.extra, self.route_image_input).await?;
-            let input = AgentSteeringInput { receipt_operation_id: event.event_id.as_ref().to_owned(), message_id: event.event_id.as_ref().to_owned(),
+            let input = AgentSteeringInput { receipt_operation_id: event.event_id.as_ref().to_owned(), message_id: original_input.as_ref().to_owned(),
                 text: text.to_owned(), files, inject_skills, image_count: images.len(), prepared_images: images,
                 prepared_skill_instructions };
             input.validate().map_err(error)?;
@@ -228,15 +365,93 @@ impl ConversationRuntimeHost {
         &self,
         delivery: RuntimeSteerDelivery,
     ) -> Result<bool, AppError> {
-        if delivery.receipt_operation_id.len() > 1024 || delivery.text.len() > 16 * 1024 {
-            return Err(error(
-                "steering requires bounded receipt identity and text <=16 KiB",
-            ));
-        }
         let mut active = self.active.lock().await;
         let Some(turn) = active.as_mut() else {
             return Ok(false);
         };
+        self.accept_steer_locked(turn,delivery,None,None).await
+    }
+
+    pub(super) async fn admit_steer_atomic(&self,admission:nomifun_ai_agent::RuntimeSteerAdmission)
+        ->Result<nomifun_ai_agent::RuntimeSteerAdmissionOutcome,AppError> {
+        let host=self.self_reference.upgrade().ok_or_else(||error("input admission owner has shut down"))?;
+        // The existing resource task group retains the join witness. Dropping
+        // an HTTP waiter cannot cut between durable acceptance and inbox push.
+        let operation=self.resources.own_input_operation(async move {host.admit_steer_owned(admission).await})?;
+        operation.result().await.map_err(|_|AppError::Internal("owned input operation ended without a confirmed result; retry the original key".into()))?
+    }
+
+    async fn admit_steer_owned(&self,admission:nomifun_ai_agent::RuntimeSteerAdmission)
+        ->Result<nomifun_ai_agent::RuntimeSteerAdmissionOutcome,AppError> {
+        let mut active=self.active.lock().await;
+        let turn=active.as_mut().ok_or_else(||error("no live input scope before steering admission"))?;
+        if !turn.steering.open || turn.cleanup_started || turn.cancellation.is_cancelled()
+            || self.activation_failed.load(std::sync::atomic::Ordering::Acquire) || turn.journal.sequence()==0
+            || turn.wire_id!=admission.wire_turn_id || turn.epoch as u64!=admission.turn_generation {
+            return Err(error("the exact Runtime input scope closed or changed before admission"));
+        }
+        let prepared=self.prepare_steer_content_locked(turn,admission.text,admission.files,admission.inject_skills).await.map_err(|failure|failure.error)?;
+        turn.journal.verify_execution_lease().await.map_err(error)?;
+        // take(true), tool admission and cleanup use this same mutex. The
+        // canonical write cannot fall into a closed-memory/open-DB window.
+        let committed=admission.commit.await?;
+        let delivery=if committed.delivery.wire_turn_id!=turn.wire_id
+            || committed.delivery.turn_generation!=turn.epoch as u64
+            || committed.acknowledgement.agent_session_id.as_ref()!=self.options.conversation_id
+            || committed.acknowledgement.cursor.agent_session_id!=committed.acknowledgement.agent_session_id
+            || committed.acknowledgement.seq!=committed.acknowledgement.cursor.seq
+            || committed.acknowledgement.event_id.as_ref()!=committed.delivery.receipt_operation_id {
+            Err(error("committed steering differs from its exact admission scope"))
+        } else {self.accept_steer_locked(turn,committed.delivery,Some(&committed.acknowledgement),Some(prepared)).await};
+        Ok(nomifun_ai_agent::RuntimeSteerAdmissionOutcome {acknowledgement:committed.acknowledgement,
+            duplicate:committed.duplicate,delivery})
+    }
+
+    async fn prepare_steer_content_locked(&self,turn:&ActiveTurn,text:String,files:Vec<String>,inject_skills:Vec<String>)
+        ->Result<PreparedSteeringContent,SteeringPreparationFailure> {
+        if text.len()>16*1024 || (text.trim().is_empty()&&files.is_empty()&&inject_skills.is_empty()) {
+            return Err(preparation_budget(error("steering requires nonempty content and text <=16 KiB")));
+        }
+        // The empty identities below reserve only wire size; they are never
+        // accepted, persisted or delivered as a receipt. The writer supplies
+        // two UUID identities (36 bytes each) after successful preparation.
+        #[derive(serde::Serialize)]
+        struct Envelope<'a> {receipt_operation_id:&'a str,message_id:&'a str,text:&'a str,
+            #[serde(skip_serializing_if="Vec::is_empty")] files:&'a Vec<String>,
+            #[serde(skip_serializing_if="Vec::is_empty")] inject_skills:&'a Vec<String>,image_count:usize}
+        let envelope=serde_json::to_vec(&Envelope {receipt_operation_id:"",message_id:"",text:&text,
+            files:&files,inject_skills:&inject_skills,image_count:0}).map_err(error)?;
+        if envelope.len().saturating_add(72)>64*1024 {return Err(preparation_budget(error("steering input exceeds its bounded receipt envelope")));}
+        let value=serde_json::json!({"files":files,"inject_skills":inject_skills});
+        let files=super::super::runtime_attachments::references(&value)?;
+        let inject_skills=super::super::runtime_attachments::selected_skills(&value)?;
+        if turn.steering.seen.len()>=16 {return Err(preparation_budget(error("turn steering limit reached (16 inputs)")));}
+        let capabilities=self.capability_state.snapshot().map_err(|failure|preparation_skill(error(failure)))?;
+        self.skills.validate_active(&inject_skills,&capabilities.active).map_err(preparation_skill)?;
+        let prepared_skill_instructions=self.skills.explicit_instructions(&inject_skills).map_err(preparation_skill)?;
+        let prepared_images=tokio::select! { biased;
+            _=turn.cancellation.cancelled()=>return Err(SteeringPreparationFailure {error:error("Turn cancelled before steering preparation completed"),reason:None}),
+            result=tokio::time::timeout(std::time::Duration::from_secs(10),
+                super::super::runtime_attachments::prepare_images(&files,&self.options.extra,self.route_image_input))=>
+                result.map_err(|_|error("steering image preparation timed out before input admission"))??,
+        };
+        let image_bytes=prepared_images.iter().map(|part|match part {
+            nomifun_chat_model_broker::ChatContentPart::Image {data_base64,..}=>data_base64.len(),_=>0,
+        }).sum::<usize>();
+        let next_image_bytes=turn.steering.prepared_image_bytes.saturating_add(image_bytes);
+        let next_image_count=turn.steering.prepared_image_count.saturating_add(prepared_images.len());
+        let next_skill_bytes=turn.steering.prepared_skill_bytes.saturating_add(prepared_skill_instructions.iter().map(String::len).sum::<usize>());
+        if next_image_bytes>4*1024*1024 || next_image_count>4 || next_skill_bytes>24*1024 {
+            return Err(preparation_budget(error("turn steering attachment or selected Skill context budget exceeded before input admission")));
+        }
+        Ok(PreparedSteeringContent {text,files,inject_skills,prepared_images,prepared_skill_instructions,
+            next_image_bytes,next_image_count,next_skill_bytes})
+    }
+
+    async fn accept_steer_locked(&self,turn:&mut ActiveTurn,delivery:RuntimeSteerDelivery,ack:Option<&nomifun_agent_contracts::SessionEventAck>,prepared:Option<PreparedSteeringContent>)->Result<bool,AppError> {
+        if delivery.receipt_operation_id.len()>1024 || delivery.text.len()>16*1024 {
+            return Err(error("steering requires bounded receipt identity and text <=16 KiB"));
+        }
         if !turn.steering.open
             || self
                 .activation_failed
@@ -270,13 +485,10 @@ impl ConversationRuntimeHost {
                     && event.correlation_id.as_ref() == turn.operation
             })
             .ok_or_else(|| error("no admitted steering receipt for this turn"))?;
-        let value = facts
-            .event_payloads
-            .get(steering.event_id.as_ref())
-            .and_then(|payload| payload.get("input"))
-            .cloned()
-            .ok_or_else(|| error("canonical steering receipt has no bounded input"))?;
-        let message_id = steering.event_id.as_ref().to_owned();
+        if ack.is_some_and(|ack|ack.seq!=steering.seq) {return Err(error("steering acknowledgement cursor differs from its original event"));}
+        let(original_input,value)=nomifun_agent_session::canonical_steering_input(&facts,steering).map_err(error)?;
+        let value=value.0;
+        let message_id=original_input.as_ref().to_owned();
         if value.get("content").and_then(|v| v.as_str()) != Some(delivery.text.as_str())
             || delivery.wire_turn_id != turn.wire_id
             || delivery.turn_generation != turn.epoch as u64
@@ -294,68 +506,22 @@ impl ConversationRuntimeHost {
         if files != delivery.files || inject_skills != delivery.inject_skills {
             return Err(error("steering context differs from its committed receipt"));
         }
-        let capabilities = self.capability_state.snapshot().map_err(error)?;
-        self.skills.validate_active(&inject_skills, &capabilities.active)?;
-        let prepared_skill_instructions = self.skills.explicit_instructions(&inject_skills)?;
-        let mut input = AgentSteeringInput {
-            receipt_operation_id: delivery.receipt_operation_id,
-            message_id,
-            text: delivery.text,
-            files,
-            inject_skills,
-            image_count: 0,
-            prepared_images: Vec::new(),
-            prepared_skill_instructions,
+        if let Some(previous)=turn.steering.seen.get(&delivery.receipt_operation_id) {
+            return if previous.message_id==message_id && previous.text==delivery.text && previous.files==files
+                && previous.inject_skills==inject_skills {Ok(true)} else {Err(error("steering identity was reused"))};
+        }
+        let prepared=match prepared {
+            Some(prepared)=>prepared,
+            None=>self.prepare_steer_content_locked(turn,delivery.text.clone(),files.clone(),inject_skills.clone()).await.map_err(|failure|failure.error)?,
         };
+        if prepared.text!=delivery.text || prepared.files!=files || prepared.inject_skills!=inject_skills {
+            return Err(error("committed steering differs from its prepared input"));
+        }
+        let input=AgentSteeringInput {receipt_operation_id:delivery.receipt_operation_id,message_id,
+            text:prepared.text,files:prepared.files,inject_skills:prepared.inject_skills,
+            image_count:prepared.prepared_images.len(),prepared_images:prepared.prepared_images,
+            prepared_skill_instructions:prepared.prepared_skill_instructions};
         input.validate().map_err(error)?;
-        if let Some(previous) = turn.steering.seen.get(&input.receipt_operation_id) {
-            return if previous.same_delivery(&input) {
-                Ok(true)
-            } else {
-                Err(error("steering identity was reused"))
-            };
-        }
-        if turn.steering.seen.len() >= 16 {
-            return Err(error("turn steering limit reached (16 inputs)"));
-        }
-        let vision_active = self.route_image_input;
-        // Keep the same inbox lock as tool admission and finish: no tool may
-        // race past an input while the platform is preparing its attachments.
-        // This is read-only, bounded local preparation, not a new tool grant.
-        input.prepared_images = tokio::select! {
-            biased;
-            _ = turn.cancellation.cancelled() => return Ok(false),
-            result = tokio::time::timeout(std::time::Duration::from_secs(10),
-                super::super::runtime_attachments::prepare_images(&input.files, &self.options.extra, vision_active)) =>
-                result.map_err(|_| error("steering image preparation timed out; input was not queued"))??,
-        };
-        input.image_count = input.prepared_images.len();
-        input.validate().map_err(error)?;
-        let image_bytes = input
-            .prepared_images
-            .iter()
-            .map(|part| match part {
-                nomifun_chat_model_broker::ChatContentPart::Image { data_base64, .. } => {
-                    data_base64.len()
-                }
-                _ => 0,
-            })
-            .sum::<usize>();
-        let next_image_bytes = turn
-            .steering
-            .prepared_image_bytes
-            .saturating_add(image_bytes);
-        let next_image_count = turn
-            .steering
-            .prepared_image_count
-            .saturating_add(input.image_count);
-        let next_skill_bytes = turn.steering.prepared_skill_bytes.saturating_add(
-            input.prepared_skill_instructions.iter().map(String::len).sum::<usize>());
-        if next_image_bytes > 4 * 1024 * 1024 || next_image_count > 4 || next_skill_bytes > 24 * 1024 {
-            return Err(error(
-                "turn steering attachment or selected Skill context budget exceeded; input was not queued",
-            ));
-        }
         // Attachment reads may outlive a database-side stop. Recheck the
         // durable receipt/turn authority before the in-memory acknowledgement.
         let still_admitted = store
@@ -374,9 +540,9 @@ impl ConversationRuntimeHost {
         // Receipt was already committed by the Conversation owner. No await
         // between queue insertion and acknowledgement; read failures queued nothing.
         turn.steering.generation = Some(delivery.turn_generation);
-        turn.steering.prepared_image_bytes = next_image_bytes;
-        turn.steering.prepared_image_count = next_image_count;
-        turn.steering.prepared_skill_bytes = next_skill_bytes;
+        turn.steering.prepared_image_bytes = prepared.next_image_bytes;
+        turn.steering.prepared_image_count = prepared.next_image_count;
+        turn.steering.prepared_skill_bytes = prepared.next_skill_bytes;
         let recorded = input.journal_record();
         turn.steering
             .seen
@@ -449,44 +615,14 @@ impl AgentInputPort for HostPort {
             .0
             .upgrade()
             .ok_or_else(|| engine_error("Session host has shut down"))?;
-        let mut active = host.active.lock().await;
-        let turn = active
-            .as_mut()
-            .ok_or_else(|| engine_error("no active turn"))?;
-        admitted(turn, &host, causality)?;
-        if turn.steering.pending.is_empty() {
-            if close_if_empty {
-                turn.steering.open = false;
-            }
-            return Ok(Vec::new());
-        }
-        let capabilities = host.capability_state.snapshot().map_err(engine_error)?;
-        for input in &turn.steering.pending {
-            host.skills.validate_active(&input.inject_skills, &capabilities.active).map_err(engine_error)?;
-            if input.prepared_skill_instructions != host.skills.explicit_instructions(&input.inject_skills).map_err(engine_error)? {
-                return Err(engine_error("queued Skill body differs from frozen active selection"));
-            }
-        }
-        turn.steering.open = false; // remains closed if a journal write fails
-        host.flush_steering_buffer(turn)
-            .await
-            .map_err(engine_error)?;
-        let payload = serde_json::to_string(&AgentEngineEvent::SteeringInputs {
-            inputs: turn
-                .steering
-                .pending
-                .iter()
-                .map(AgentSteeringInput::journal_record)
-                .collect(),
-        })
-        .map_err(engine_error)?;
-        host.append_locked_record(turn, payload, None, false)
-            .await
-            .map_err(engine_error)?;
-        let inputs = std::mem::take(&mut turn.steering.pending);
-        turn.steering.immediate_receipts.clear();
-        turn.steering.open = true;
-        Ok(inputs)
+        let causality=causality.clone();let owned_host=host.clone();
+        // Closing/claiming/delivering is one owned safe-boundary operation.
+        // Cancelling the model waiter cannot strand a durable claim between
+        // the canonical Store and its native SteeringInputs reference.
+        let operation=host.resources.own_input_operation(async move {
+            owned_host.take_session_inputs_owned(causality,close_if_empty).await
+        }).map_err(engine_error)?;
+        operation.result().await.map_err(engine_error)?
     }
 
     async fn has_pending(&self, causality: &ChatCausality) -> Result<bool, AgentEngineError> {
@@ -499,7 +635,20 @@ impl AgentInputPort for HostPort {
             .as_ref()
             .ok_or_else(|| engine_error("no active turn"))?;
         admitted(turn, &host, causality)?;
-        Ok(!turn.steering.pending.is_empty())
+        if !turn.steering.pending.is_empty() {return Ok(true);}
+        if !turn.steering.open {return Ok(false);}
+        let session=host.options.conversation_id.clone().into();let store=host.session_host.canonical_store().map_err(engine_error)?;
+        if store.has_unsettled_effects(&session).await.map_err(engine_error)? {return Ok(false);}
+        if host.session_host.session_owner().map_err(engine_error)?.require_ordinary_owner_input(&host.principal,&session).await.is_err() {return Ok(false);}
+        let inputs=store.pending_session_inputs(&session,None).await.map_err(engine_error)?;
+        let(_,root)=store.turn_accepted_input(&session,&turn.operation.clone().into()).await.map_err(engine_error)?;
+        let receiver=nomifun_agent_contracts::ChannelInputSource::from_input(&root.0).map_err(engine_error)?;
+        for input in inputs {
+            let incoming=nomifun_agent_contracts::ChannelInputSource::from_input(&input.input.0).map_err(engine_error)?;
+            if input.input.0.get("reply_to").is_none() && !turn.steering.deferred_inputs.contains(input.event.event_id.as_ref())
+                && nomifun_agent_contracts::ChannelInputSource::same_destination(receiver.as_ref(),incoming.as_ref()) {return Ok(true);}
+        }
+        Ok(!turn.steering.retry_inputs.is_empty())
     }
 }
 
@@ -517,7 +666,7 @@ impl nomifun_agent_runtime::AgentWaitPort for HostPort {
             (turn.steering.changed.clone(), turn.operation.clone())
         };
         if cancellation.is_cancelled() { return Err(AgentEngineError::Cancelled); }
-        host.resources.yield_browser_for_input(&operation, &cancellation).await
+        host.resources.yield_browser_for_parked_wait(&operation, &cancellation).await
             .map_err(|_| AgentEngineError::WaitOwnerUnavailable)?;
         loop {
             // Enable the notification before checking the durable receipt-backed
@@ -530,7 +679,7 @@ impl nomifun_agent_runtime::AgentWaitPort for HostPort {
             tokio::select! { biased;
                 _ = cancellation.cancelled() => return Err(AgentEngineError::Cancelled),
                 _ = &mut notified => {},
-                observed = host.resources.wait_processes(&operation, &request.processes, cancellation.clone()), if !request.processes.is_empty() => {
+                observed = host.resources.wait_processes(&operation, &request.processes, request.wake_policy, cancellation.clone()), if !request.processes.is_empty() => {
                     return observed.map(nomifun_agent_runtime::AgentWaitWake::ProcessesChanged)
                         .map_err(|_| AgentEngineError::WaitOwnerUnavailable);
                 },

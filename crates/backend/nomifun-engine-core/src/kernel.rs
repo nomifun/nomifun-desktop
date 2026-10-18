@@ -340,7 +340,7 @@ fn process_host_os_mapping_error(
     if !is_process
         || !matches!(
             action_id,
-            "workspace.process/exec" | "workspace.process/start"
+            "workspace.process/start"
         )
     {
         return None;

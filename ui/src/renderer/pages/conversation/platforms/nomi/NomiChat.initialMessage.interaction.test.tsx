@@ -7,7 +7,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { SWRConfig } from 'swr';
 import { ipcBridge } from '@/common';
 import { appHosting } from '@/common/adapter/appHostingBridge';
-import { mcpService, type IResponseMessage, type ISendMessageResult } from '@/common/adapter/ipcBridge';
+import { mcpService, type IResponseMessage, type IAcceptMessageResult } from '@/common/adapter/ipcBridge';
 import type { TChatConversation, TProviderWithModel } from '@/common/config/storage';
 import { configService } from '@/common/config/configService';
 import { ThemeProvider } from '@/renderer/hooks/context/ThemeContext';
@@ -82,10 +82,11 @@ beforeEach(() => {
   spyOn(ipcBridge.fs.listWorkspaceFiles, 'invoke').mockResolvedValue([]);
   spyOn(ipcBridge.database.getUserConversations, 'invoke').mockResolvedValue({ items: [], total: 0, has_more: false });
   spyOn(ipcBridge.database.getConversationMessages, 'invoke').mockResolvedValue({ items: [], total: 0, has_more: false });
-  spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ id: conversationId, name: input,
+  spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ ...conversation, id: conversationId, name: input,
     type: 'nomi', status: 'finished', extra: { workspace: '' },
     runtime: { state: 'idle', is_processing: false, can_send_message: true },
   } as TChatConversation);
+  spyOn(ipcBridge.conversation.turnFiles, 'invoke').mockResolvedValue([]);
   spyOn(ipcBridge.conversation.taskPlan, 'invoke').mockResolvedValue({
     conversation_id: conversationId, sequence: 0, turn_id: null, plan: null, turn_status: null,
   });
@@ -207,7 +208,7 @@ test.each([false, true])('shared chat renders Agent switches immediately with lo
 test('slow preparation and acceptance keep the real transcript mounted without a skeleton or a duplicate first message', async () => {
   const capabilities = deferred<AgentSessionCapabilitySelectionState>();
   spyOn(ipcBridge.agentPlatform.sessions.getCapabilitySelection, 'invoke').mockReturnValue(capabilities.promise);
-  const accepted = deferred<ISendMessageResult>();
+  const accepted = deferred<IAcceptMessageResult>();
   const send = spyOn(ipcBridge.conversation.sendMessage, 'invoke').mockReturnValue(accepted.promise);
   const warmup = spyOn(ipcBridge.conversation.warmup, 'invoke').mockResolvedValue(undefined);
   const streams = new Set<(event: IResponseMessage) => void>();
@@ -233,13 +234,12 @@ test('slow preparation and acceptance keep the real transcript mounted without a
   expect(page.getByTestId('initial-message-preparing')).toBeTruthy();
   expect(page.queryByTestId('message-list-skeleton')).toBeNull();
   expect(warmup).not.toHaveBeenCalled();
-  spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ id: conversationId, name: input,
+  spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ ...conversation, id: conversationId, name: input,
     type: 'nomi', status: 'running', extra: { workspace: '' }, runtime: {
       state: 'running', is_processing: true, can_send_message: false, active_turn_id: messageId,
     },
   } as TChatConversation);
-  await act(async () => { accepted.resolve({ msg_id: messageId, replayed: false, completed: false,
-    result_ok: null, result_text: null, result_error: null, result_error_code: null, result_error_retryable: null }); });
+  await act(async () => { accepted.resolve({ msg_id: messageId, replayed: false }); });
   await waitFor(() => expect(page.pending()).toBeNull());
   expect(page.getByTestId('message-list-scroller')).toBe(scroller);
   expect(page.getAllByTestId('message-text-content')).toHaveLength(1);
@@ -267,7 +267,7 @@ test('a rejected first send clears preparation and leaves the guarded delivery a
 
 test.each([false, true])('a user-created event before the send receipt cannot leave an empty progress row (strict=%p)', async (strict) => {
   spyOn(ipcBridge.agentPlatform.sessions.getCapabilitySelection, 'invoke').mockResolvedValue(capabilitySelection);
-  const accepted = deferred<ISendMessageResult>();
+  const accepted = deferred<IAcceptMessageResult>();
   const send = spyOn(ipcBridge.conversation.sendMessage, 'invoke').mockReturnValue(accepted.promise);
   let userCreated!: Parameters<typeof ipcBridge.conversation.userCreated.on>[0];
   spyOn(ipcBridge.conversation.userCreated, 'on').mockImplementation(listener => { userCreated = listener; return () => {}; });
@@ -288,22 +288,20 @@ test.each([false, true])('a user-created event before the send receipt cannot le
   expect(page.getByTestId('message-list-scroller')).toBe(scroller);
   const runtime = deferred<TChatConversation>();
   spyOn(ipcBridge.conversation.get, 'invoke').mockReturnValue(runtime.promise);
-  await act(async () => accepted.resolve({ msg_id: messageId, replayed: false, completed: false,
-    result_ok: null, result_text: null, result_error: null, result_error_code: null, result_error_retryable: null }));
-  await waitFor(() => expect(page.container.textContent).toContain('Worked for'));
-  expect(page.container.querySelector('.turn-process-disclosure__header') === header).toBe(true);
+  await act(async () => accepted.resolve({ msg_id: messageId, replayed: false }));
+  await waitFor(() => expect(page.pending()).toBeNull());
+  expect(page.container.textContent).not.toContain('Worked for');
   expect(page.getAllByTestId('message-text-content')).toHaveLength(1);
-  const turnId = parseMessageId('0190f5fe-7c00-7a00-8000-000000001405');
+  const turnId = messageId;
   await act(async () => runtime.resolve({ id: conversationId, name: input, type: 'nomi', status: 'running',
     extra: { workspace: '' }, runtime: { state: 'running', is_processing: true, can_send_message: false,
       active_turn_id: turnId, processing_started_at: Date.now() },
   } as TChatConversation));
   await waitFor(() => expect(page.container.querySelector(`#message-turn-disclosure-${turnId}`)).not.toBeNull());
-  expect(page.container.querySelector('.turn-process-disclosure__header') === header).toBe(true);
+  expect(page.container.textContent).toContain('Worked for');
   act(() => streams.forEach(listener => listener({ conversation_id: conversationId, msg_id: messageId,
     turn_id: turnId, type: 'thinking', created_at: Date.now(), data: { content: 'Inspecting the request', status: 'thinking' } })));
   await waitFor(() => expect(page.container.textContent).toContain(conversationLocale.thinking.label));
-  expect(page.container.querySelector('.turn-process-disclosure__header') === header).toBe(true);
   expect(page.getByTestId('message-list-scroller')).toBe(scroller);
   expect(page.getAllByTestId('message-text-content')).toHaveLength(1);
   expect(send).toHaveBeenCalledTimes(1);
@@ -326,7 +324,7 @@ test.each([false, true])('Turn completion preserves an active composer and IME d
   const refresh = deferred<AgentSessionCapabilitySelectionState>();
   const capabilities = spyOn(ipcBridge.agentPlatform.sessions.getCapabilitySelection, 'invoke')
     .mockResolvedValueOnce(capabilitySelection).mockReturnValue(refresh.promise);
-  const accepted = deferred<ISendMessageResult>();
+  const accepted = deferred<IAcceptMessageResult>();
   const send = spyOn(ipcBridge.conversation.sendMessage, 'invoke').mockReturnValue(accepted.promise);
   const completions = new Set<Parameters<typeof ipcBridge.conversation.turnCompleted.on>[0]>();
   spyOn(ipcBridge.conversation.turnCompleted, 'on').mockImplementation(listener => {
@@ -365,10 +363,10 @@ test.each([false, true])('Turn completion preserves an active composer and IME d
   expect(editor.value).toBe(imeBuffer);
 
   authority = { ...authority, status: 'finished', runtime: { state: 'idle', is_processing: false,
-    can_send_message: true, } };
+    can_send_message: true } };
   act(() => completions.forEach(listener => listener({ conversation_id: sessionId, turn_id: turnId,
     status: 'finished', state: 'ai_waiting_input', detail: '', can_send_message: true,
-    runtime: { state: 'idle', is_processing: false, can_send_message: true, },
+    runtime: { state: 'idle', is_processing: false, can_send_message: true },
     workspace: '', model: { platform: 'openai', name: 'Test provider', use_model: 'test-model' },
     last_message: { content: 'Task finished', created_at: Date.now() },
   })));
@@ -388,23 +386,16 @@ test.each([false, true])('Turn completion preserves an active composer and IME d
   await act(async () => { await new Promise<void>(resolve => requestAnimationFrame(() => resolve())); });
   expect(editor.value).toBe(committedDraft);
   const sendButton = page.getByTestId('sendbox-send-btn') as HTMLButtonElement;
-  expect(sendButton.disabled).toBe(true);
-  fireEvent.keyDown(editor, { key: 'Enter' });
-  fireEvent.click(sendButton);
-  await act(async () => {});
-  expect(send).not.toHaveBeenCalled();
-  expect(editor.value).toBe(committedDraft);
-
-  await act(async () => refresh.resolve({ ...capabilitySelection, binding_version: 2 }));
-  await waitFor(() => expect(sendButton.disabled).toBe(false));
-  expect(page.getByTestId('sendbox-input')).toBe(editor);
-  expect(document.activeElement).toBe(editor);
-  expect(editor.value).toBe(committedDraft);
+  expect(sendButton.disabled).toBe(false);
   fireEvent.click(sendButton);
   await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
   expect(send.mock.calls[0][0]).toMatchObject({ conversation_id: sessionId, input: committedDraft });
-  await act(async () => accepted.resolve({ msg_id: messageId, replayed: false, completed: false,
-    result_ok: null, result_text: null, result_error: null, result_error_code: null, result_error_retryable: null }));
+  expect(editor.value).toBe(committedDraft);
+  await act(async () => refresh.resolve({ ...capabilitySelection, binding_version: 2 }));
+  expect(page.getByTestId('sendbox-input')).toBe(editor);
+  expect(document.activeElement).toBe(editor);
+  expect(send).toHaveBeenCalledTimes(1);
+  await act(async () => accepted.resolve({ msg_id: messageId, replayed: false }));
   await waitFor(() => expect(editor.value).toBe(''));
 });
 

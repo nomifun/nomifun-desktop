@@ -429,12 +429,15 @@ impl Runner {
                     _ => return Err(invalid("unsupported process transport".into())),
                 };
                 let mut policy = ProcessPolicy::default();
+                policy.expire_on_idle = request["expire_on_idle"].as_bool().unwrap_or(true);
                 policy.output_limit_bytes = request["output_limit_bytes"]
                     .as_u64()
                     .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
                     .unwrap_or(policy.output_limit_bytes);
-                if let Some(timeout) = request["timeout_ms"].as_u64() {
-                    policy.deadline = Instant::now().checked_add(Duration::from_millis(timeout));
+                if let Some(value) = request.get("timeout_ms").filter(|value|!value.is_null()) {
+                    let timeout=value.as_u64().filter(|timeout|*timeout>0).ok_or_else(||invalid("process timeout must be a positive integer".into()))?;
+                    policy.deadline=Some(Instant::now().checked_add(Duration::from_millis(timeout))
+                        .ok_or_else(||invalid("process deadline overflows the native monotonic clock".into()))?);
                 }
                 let normalized = normalize_request(
                     ProcessRequest {
@@ -471,6 +474,17 @@ impl Runner {
                 let owner = owner(&request).map_err(invalid)?;
                 let session = session(&request).map_err(invalid)?;
                 match op {
+                    "observe" => {
+                        let observation = self.supervisor.observe_if_changed(
+                            &owner, &session, cursor(&request), request["include_output"].as_bool().unwrap_or(false),
+                        ).map_err(process_error)?;
+                        let observation = observation.map(|value| match value {
+                            PollResult::Running { snapshot, output: out } =>
+                                json!({"state":"running","pid":snapshot.pid,"output":output(&out)}),
+                            PollResult::Finished(value) => outcome(&value),
+                        });
+                        Ok(json!({"observation":observation}))
+                    }
                     "terminal" => {
                         let terminal = self
                             .supervisor
@@ -483,12 +497,12 @@ impl Runner {
                             + Duration::from_millis(
                                 request["yield_ms"].as_u64().unwrap_or(0).min(30_000),
                             );
-                        match self
-                            .supervisor
-                            .poll_until_activity(&owner, &session, cursor(&request), until)
-                            .await
-                            .map_err(process_error)?
-                        {
+                        let polled = if request["break_on_output"].as_bool().unwrap_or(true) {
+                            self.supervisor.poll_until_activity(&owner, &session, cursor(&request), until).await
+                        } else {
+                            self.supervisor.poll(&owner, &session, cursor(&request), until).await
+                        }.map_err(process_error)?;
+                        match polled {
                             PollResult::Running {
                                 snapshot,
                                 output: out,
@@ -645,6 +659,26 @@ mod tests {
         json!({"op":op,"invocation_id":"00000000-0000-0000-0000-000000000001","call_id":"00000000-0000-0000-0000-000000000002"})
     }
     #[test]
+    fn native_runner_rejects_invalid_deadlines_before_spawn_and_accepts_explicit_long_workloads() {
+        let runner=Runner::new();let dir=tempfile::tempdir().unwrap();
+        let marker=dir.path().join("must-not-start");
+        let mut invalid_values=vec![json!(0),json!(-1),json!("not-a-duration")];
+        if Instant::now().checked_add(Duration::from_millis(u64::MAX)).is_none(){invalid_values.push(json!(u64::MAX));}
+        for timeout in invalid_values {
+            let mut request=base("start");request["cwd"]=json!(dir.path());request["timeout_ms"]=timeout;
+            request["command"]=json!({"kind":"program","program":"/usr/bin/touch","args":[marker]});
+            let result=runner.call(request.to_string().as_bytes());
+            assert_eq!(result["ok"],false,"{result}");
+            assert_eq!(result["error"]["details"]["user_code_not_started"],true);
+            assert!(!marker.exists());
+        }
+        let mut request=base("start");request["cwd"]=json!(dir.path());request["timeout_ms"]=json!(3_600_000);
+        request["command"]=json!({"kind":"program","program":"/bin/sh","args":["-c","exit 0"]});
+        let result=runner.call(request.to_string().as_bytes());assert_eq!(result["ok"],true,"{result}");
+        let mut stop=base("cancel");stop["session_id"]=result["result"]["session_id"].clone();
+        assert_eq!(runner.call(stop.to_string().as_bytes())["result"]["cleanup"]["reaped"],true);
+    }
+    #[test]
     fn native_runner_retains_literal_arguments_and_real_user_environment() {
         let runner = Runner::new();
         let dir = tempfile::tempdir().unwrap();
@@ -793,5 +827,42 @@ mod tests {
         assert_eq!(text, "final-output");
         let again = runner.call(request.to_string().as_bytes());
         assert_eq!(again["result"]["terminal"], terminal);
+    }
+
+    #[test]
+    fn native_owner_observation_exposes_running_output_and_preserves_hard_deadline() {
+        let runner = Runner::new();
+        let dir = tempfile::tempdir().unwrap();
+        let mut start = base("start");
+        start["cwd"] = json!(dir.path());
+        start["timeout_ms"] = json!(200);
+        start["command"] = json!({"kind":"shell","script":"printf 'verification-link'; IFS= read -r answer"});
+        let started = runner.call(start.to_string().as_bytes());
+        assert_eq!(started["ok"], true, "{started}");
+        let mut request = base("observe");
+        request["session_id"] = started["result"]["session_id"].clone();
+        request["include_output"] = json!(true);
+        let until = Instant::now() + Duration::from_secs(3);
+        let mut saw_running = false;
+        loop {
+            let value = runner.call(request.to_string().as_bytes());
+            assert_eq!(value["ok"], true, "{value}");
+            let observed = &value["result"]["observation"];
+            if observed["state"] == "running" {
+                saw_running = true;
+                assert!(observed["output"]["next_cursor"].as_u64().unwrap() > 0);
+                let mut terminal_only = request.clone();
+                terminal_only["include_output"] = json!(false);
+                let hidden = runner.call(terminal_only.to_string().as_bytes());
+                assert!(hidden["result"]["observation"].is_null() || hidden["result"]["observation"]["state"] == "timed_out");
+            } else if observed["state"] == "timed_out" {
+                assert!(saw_running, "the first output must be visible before expiry");
+                assert_eq!(observed["cleanup"]["reaped"], true);
+                assert!(observed["output"]["chunks"].as_array().unwrap().iter().any(|chunk| chunk["text"] == "verification-link"));
+                break;
+            }
+            assert!(Instant::now() < until, "read-only observations must not renew the hard deadline");
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }

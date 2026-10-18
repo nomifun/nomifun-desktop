@@ -40,7 +40,6 @@ type TConversationRuntimeStateKind = 'idle' | 'starting' | 'running' | 'waiting'
 type TConversationRuntimeSummary = {
   state: TConversationRuntimeStateKind;
   can_send_message: boolean;
-  can_steer?: boolean;
   is_processing: boolean;
   turn_outcome?: import('../protocolBindings/AgentTurnOutcome').AgentTurnOutcome;
   /** Exact backend turn currently owning this runtime. This is lifecycle

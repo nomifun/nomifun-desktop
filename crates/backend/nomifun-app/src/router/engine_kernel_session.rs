@@ -1233,6 +1233,13 @@ impl EngineKernelSession {
                 receipt.operation_id(),
                 &self.workspace,
                 journal.clone(),
+                super::engine_process_host::ProcessAuthority {
+                    snapshot: self.compiled.snapshot_ref().clone(),
+                    actions: self.compiled.policy(&"workspace.process".into()).ok_or_else(|| failure("process policy missing"))?.allowed_actions.clone(),
+                    resources: self.compiled.target_resource_bindings.iter().filter(|binding|
+                        self.compiled.policy(&"workspace.process".into()).is_some_and(|policy| policy.resource_binding_ids.contains(&binding.binding_id)))
+                        .cloned().collect(),
+                },
             )?;
         }
         let capture_generation = journal.generation();
@@ -1245,9 +1252,16 @@ impl EngineKernelSession {
         Ok(())
     }
 
+    /// Session teardown retains the join witness even if an input caller drops.
+    pub(super) fn own_input_operation<T:Send+'static>(&self,operation:impl std::future::Future<Output=T>+Send+'static)
+        ->Result<nomifun_ai_agent::engine_sdk::EngineOwnedTask<T>,AppError> {
+        self.resource_tasks.spawn(operation)
+    }
+
     /// Model parking retains the original process owner and deadlines.
     pub(super) async fn wait_processes(&self, operation: &str,
-        processes: &[nomifun_agent_runtime::AgentWaitProcess], cancellation: tokio_util::sync::CancellationToken)
+        processes: &[nomifun_agent_runtime::AgentWaitProcess], wake_policy: nomifun_agent_runtime::AgentWaitWakePolicy,
+        cancellation: tokio_util::sync::CancellationToken)
         -> Result<Vec<nomifun_agent_runtime::AgentOwnedProcessObservation>, AppError> {
         {
             let state = self.state.lock().map_err(|_| failure("resource state poisoned"))?;
@@ -1255,13 +1269,17 @@ impl EngineKernelSession {
                 return Err(failure("wait differs from the original live resource Turn"));
             }
         }
-        self.wave2.wait_runtime_processes(&self.principal.principal_id, self.session_id.as_ref(), operation, processes, cancellation).await
+        self.wave2.wait_runtime_processes(&self.principal.principal_id, self.session_id.as_ref(), operation, processes, wake_policy, cancellation).await
     }
 
-    /// Release only Browser ownership for a human action, preserving all
-    /// process handles. The next Browser invocation obtains a fresh run and
-    /// must observe again; prior observation refs belong to the retired run.
-    pub(super) async fn yield_browser_for_input(&self, operation: &str,
+    pub(super) async fn process_retention(&self) ->Result<Option<nomifun_agent_contracts::NativeSessionProcessRetention>,AppError> {
+        self.wave2.runtime_process_retention(&self.principal.principal_id,self.session_id.as_ref()).await
+    }
+
+    /// A canonical parked machine/intervention boundary releases Browser
+    /// ownership while preserving Session process handles. A later Browser
+    /// invocation uses a fresh run and must obtain new observations.
+    pub(super) async fn yield_browser_for_parked_wait(&self, operation: &str,
         cancellation: &tokio_util::sync::CancellationToken) -> Result<(), AppError> {
         #[cfg(feature = "browser-use")]
         {
@@ -1310,7 +1328,7 @@ impl EngineKernelSession {
             || state.tools.as_ref().map(|tools| tools.execution_window_near_limit()).transpose()?.unwrap_or(false))
     }
 
-    async fn settle_owned(&self, tools: &EngineToolHost) -> Result<(), AppError> {
+    async fn settle_owned(&self, tools: &EngineToolHost, release_session: bool) -> Result<(), AppError> {
         let admission = tools.close_turn();
         #[cfg(feature = "browser-use")]
         let browser_turn = self
@@ -1331,12 +1349,23 @@ impl EngineKernelSession {
         };
         // Catch each owner separately: the outer retained task alone would
         // preserve failure, but an unwind would skip all subsequent owners.
-        let processes = guard_effect_settlement(|| {
-            self.wave2
-                .cleanup_runtime_session(&self.principal.principal_id, self.session_id.as_ref())
+        let processes = guard_effect_settlement(|| async {
+            if release_session {
+                self.wave2.cleanup_runtime_session(&self.principal.principal_id, self.session_id.as_ref()).await
+            } else {
+                let operation = self.state.lock().map_err(|_| failure("resource state poisoned"))?
+                    .turn.as_ref().map(|turn| turn.operation.clone());
+                match operation { Some(operation) => self.wave2.finish_runtime_process_turn(
+                    &self.principal.principal_id, self.session_id.as_ref(), &operation), None => Ok(()) }
+            }
         })
         .await;
         let tasks = guard_effect_settlement(|| tools.join()).await;
+        let retained_processes = guard_effect_settlement(|| async {
+            if release_session { Ok(()) } else {
+                self.wave2.ensure_runtime_processes_retained(&self.principal.principal_id, self.session_id.as_ref()).await
+            }
+        }).await;
         #[cfg(feature = "browser-use")]
         let browser = guard_effect_settlement(|| async {
             match browser_turn.as_deref() {
@@ -1377,6 +1406,7 @@ impl EngineKernelSession {
         browser_cancel?;
         processes?;
         tasks?;
+        retained_processes?;
         #[cfg(feature = "browser-use")]
         browser?;
         resource_tasks?;
@@ -1391,7 +1421,7 @@ impl EngineKernelSession {
 
     /// The whole resource cleanup is owned, not only Kernel release. Dropping
     /// a waiter leaves process cleanup and settlement running with one witness.
-    pub async fn cleanup_turn(self: &Arc<Self>, root_message_id: &str) -> Result<(), AppError> {
+    pub async fn cleanup_turn(self: &Arc<Self>, root_message_id: &str, quiesce_processes: bool) -> Result<(), AppError> {
         let done = {
             let mut state = self
                 .state
@@ -1422,7 +1452,7 @@ impl EngineKernelSession {
                 let owner = self.clone();
                 let executor = tokio::runtime::Handle::try_current().map_err(failure)?;
                 let task = executor.spawn(async move {
-                    owner.settle_owned(&tools).await.map_err(|error| error.to_string())?;
+                    owner.settle_owned(&tools, quiesce_processes).await.map_err(|error| error.to_string())?;
                     let file_capture = {
                         let mut state = owner.state.lock().map_err(|_| "resource state poisoned".to_owned())?;
                         state.turn.as_mut().and_then(|turn| turn.file_capture.take())
@@ -1454,7 +1484,7 @@ impl EngineKernelSession {
 
     /// Pending/success reuse the exact flight. A completed pre-release
     /// failure may retry owned settlement; consumed Kernel release never does.
-    pub async fn cleanup_session(self: &Arc<Self>) -> Result<(), AppError> {
+    pub async fn cleanup_session(self: &Arc<Self>, quiesce_processes: bool) -> Result<(), AppError> {
         let done = {
             let mut state = self
                 .state
@@ -1482,7 +1512,7 @@ impl EngineKernelSession {
                     };
                     let settled = match &tools {
                         Some(tools) => owner
-                            .settle_owned(tools)
+                            .settle_owned(tools, quiesce_processes)
                             .await
                             .map_err(|error| error.to_string()),
                         None => Ok(()),
@@ -1518,6 +1548,11 @@ impl EngineKernelSession {
             }
         };
         done.await.map_err(failure)?;
+        if quiesce_processes {
+            // Also covers a previously completed soft Runtime recycle and a
+            // fresh Runtime with no ToolHost but retained Session processes.
+            self.wave2.cleanup_runtime_session(&self.principal.principal_id,self.session_id.as_ref()).await?;
+        }
         *self
             .creation_turn_root
             .lock()
@@ -1738,18 +1773,20 @@ mod workspace_module_tests {
         assert!(!constraints_allow_action(
             read_only,
             nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID,
-            "workspace.process/exec",
+            "workspace.process/start",
         ));
 
         let read_shell = constraints(AgentToolPolicy::ReadShell);
         assert!(constraints_allow_action(
             read_shell,
             nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID,
-            "workspace.process/exec",
+            "workspace.process/start",
         ));
         for action in [
-            "workspace.process/start",
+            "workspace.process/poll",
             "workspace.process/input",
+            "workspace.process/close_stdin",
+            "workspace.process/resize",
             "workspace.process/cancel",
         ] {
             assert!(!constraints_allow_action(

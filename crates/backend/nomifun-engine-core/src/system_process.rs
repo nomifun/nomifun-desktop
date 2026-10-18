@@ -99,7 +99,7 @@ impl SystemEngineOwner {
         // The returned handle or the exact quiesce fence owns its settlement.
         let result = client.call(json!({"op":"start","invocation_id":invocation_id.to_string(),"call_id":call_id.to_string(),
             "command":command,"cwd":cwd,"env":environment,"transport":transport,
-            "timeout_ms":request.timeout_ms,"output_limit_bytes":request.output_limit_bytes})).await;
+            "timeout_ms":request.timeout_ms,"expire_on_idle":false,"output_limit_bytes":request.output_limit_bytes})).await;
         let value = result.map_err(|error| {
             let not_started = error.details.get("user_code_not_started").and_then(Value::as_bool) == Some(true);
             let cleanup = not_started || error.details.get("cleanup_proven").and_then(Value::as_bool) == Some(true);
@@ -157,9 +157,19 @@ impl SystemEngineSession {
 
 pub(crate) async fn poll(session:&mut EngineProcessSession, cursor:u64, wait:Duration,
     cancellation:CancellationToken) -> Result<EngineProcessPoll,EngineProcessError> {
+    poll_with_policy(session, cursor, wait, true, cancellation).await
+}
+
+pub(crate) async fn initial_observation(session: &mut EngineProcessSession, wait: Duration,
+    cancellation: CancellationToken) -> Result<EngineProcessPoll, EngineProcessError> {
+    poll_with_policy(session, 0, wait, false, cancellation).await
+}
+
+async fn poll_with_policy(session:&mut EngineProcessSession, cursor:u64, wait:Duration, break_on_output: bool,
+    cancellation:CancellationToken) -> Result<EngineProcessPoll,EngineProcessError> {
     if cancellation.is_cancelled() { return cancel(session).await; }
     let system=session.system.as_ref().expect("system session required");
-    let call=system.client.call(system.request("poll",json!({"cursor":cursor,"yield_ms":wait.as_millis().min(30000) as u64})));
+    let call=system.client.call(system.request("poll",json!({"cursor":cursor,"yield_ms":wait.as_millis().min(30000) as u64,"break_on_output":break_on_output})));
     let value=tokio::select! {
         _ = cancellation.cancelled() => return cancel(session).await,
         result=call => result.map_err(|error| failure(format!("{}: {}",error.code,error.message)))?,
@@ -189,6 +199,22 @@ pub(crate) async fn terminal_if_ready(session: &mut EngineProcessSession, cancel
     let result = convert(session,native.clone())?;
     session.cursor = saved_cursor;
     if !result.is_terminal() { return Err(failure("system runner returned running state as a terminal receipt")); }
+    Ok(Some(result))
+}
+
+pub(crate) async fn observe_if_changed(session: &mut EngineProcessSession, cursor: u64,
+    include_output: bool, cancellation: CancellationToken) -> Result<Option<EngineProcessPoll>, EngineProcessError> {
+    let system = session.system.as_ref().expect("system session required");
+    let call = system.client.call(system.request("observe", json!({"cursor":cursor,"include_output":include_output})));
+    let receipt = tokio::select! {
+        _ = cancellation.cancelled() => return Err(EngineProcessError::Cancelled),
+        result = call => result.map_err(|error| failure(format!("{}: {}",error.code,error.message)))?,
+    };
+    let value = receipt.get("observation").ok_or_else(|| failure("system runner omitted owner observation"))?;
+    if value.is_null() { return Ok(None); }
+    let saved_cursor = session.cursor;
+    let result = convert(session, value.clone())?;
+    session.cursor = saved_cursor;
     Ok(Some(result))
 }
 

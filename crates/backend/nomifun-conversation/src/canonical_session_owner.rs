@@ -47,6 +47,24 @@ pub enum PreparedAgentSessionDelete {
 }
 
 impl CanonicalAgentSessionOwner {
+    pub async fn session_input_by_key(&self,owner:&PrincipalRef,session:&AgentSessionId,key:&str)
+        ->Result<Option<nomifun_agent_session::PendingSessionInput>,AppError> {
+        let key=IdempotencyKey::from(format!("{}:input",scoped_key(owner,key,session.as_ref())?));
+        self.store.session_input_by_key(owner,session,&"session_api".into(),&key).await.map_err(store_error)
+    }
+
+    pub async fn accept_session_input(&self,owner:&PrincipalRef,session:&AgentSessionId,key:&str,input:Value)
+        ->Result<nomifun_agent_session::SessionEventAppendResult,AppError> {
+        let key=IdempotencyKey::from(format!("{}:input",scoped_key(owner,key,session.as_ref())?));
+        self.store.accept_session_input(owner,session,"session_api".into(),key,StrictJsonValue(input)).await.map_err(store_error)
+    }
+
+    pub async fn accept_initial_session_input(&self,owner:&PrincipalRef,session:&AgentSessionId,key:&str,input:Value)
+        ->Result<nomifun_agent_session::SessionEventAppendResult,AppError> {
+        let key=IdempotencyKey::from(format!("{}:input",scoped_key(owner,key,session.as_ref())?));
+        self.store.accept_initial_session_input(owner,session,"session_api".into(),key,StrictJsonValue(input)).await.map_err(store_error)
+    }
+
     pub async fn from_pool(pool: nomifun_db::SqlitePool) -> Result<Self, AppError> {
         Ok(Self {
             store: AgentSessionStore::from_pool(pool)
@@ -287,7 +305,7 @@ impl CanonicalAgentSessionOwner {
     ) -> Result<Vec<MessageProjection>, AppError> {
         self.require_owner(owner, session_id).await?;
         self.store
-            .messages_after(session_id, after_seq)
+            .messages_with_turns_after(session_id, after_seq)
             .await
             .map_err(store_error)
     }
@@ -398,63 +416,38 @@ impl CanonicalAgentSessionOwner {
         })
     }
 
-    pub async fn steer(
-        &self,
-        owner: &PrincipalRef,
-        session_id: &AgentSessionId,
-        idempotency_key: &str,
-        input: Value,
-    ) -> Result<AgentMutationReceipt, AppError> {
-        self.steer_with_wait_target(owner,session_id,idempotency_key,input,None).await
+    /// Reconfirm only a previously accepted exact input. Unlike fresh steering,
+    /// this does not require an executable/currently ordinary Session owner.
+    pub async fn read_steer_receipt(&self,owner:&PrincipalRef,session:&AgentSessionId,key:&str,
+        target:Option<&OperationId>,input:&Value,expected_wait:Option<(&str,u64)>)->Result<Option<AgentMutationReceipt>,AppError> {
+        let key=IdempotencyKey::from(format!("{}:steer",scoped_key(owner,key,session.as_ref())?));
+        let ack=self.store.read_steering_receipt(owner,session,target,&EventProducerId::from("session_api"),&key,
+            &StrictJsonValue(input.clone()),expected_wait,None).await.map_err(store_error)?;
+        Ok(ack.map(|(target,ack)|AgentMutationReceipt {target_operation_id:target,event_id:ack.event_id,cursor:ack.cursor,duplicate:true}))
     }
 
-    pub async fn steer_for_wait(&self, owner: &PrincipalRef, session_id: &AgentSessionId,
-        idempotency_key: &str, input: Value, expected_turn_id: &str, expected_wait_seq: u64)
-        -> Result<AgentMutationReceipt,AppError> {
-        self.steer_with_wait_target(owner,session_id,idempotency_key,input,Some((expected_turn_id,expected_wait_seq))).await
+    pub async fn read_native_steer_receipt(&self,owner:&PrincipalRef,session:&AgentSessionId,key:&str,target:&OperationId,
+        input:&Value,fence:&nomifun_agent_session::NativeTurnMutationFence,immediate:bool)->Result<Option<AgentMutationReceipt>,AppError> {
+        let key=IdempotencyKey::from(format!("{}:steer",scoped_key(owner,key,session.as_ref())?));
+        let ack=self.store.read_steering_receipt(owner,session,Some(target),&EventProducerId::from("session_api"),&key,
+            &StrictJsonValue(input.clone()),None,Some((fence,immediate))).await.map_err(store_error)?;
+        Ok(ack.map(|(target,ack)|AgentMutationReceipt {target_operation_id:target,event_id:ack.event_id,cursor:ack.cursor,duplicate:true}))
     }
 
-    async fn steer_with_wait_target(&self, owner: &PrincipalRef, session_id: &AgentSessionId,
-        idempotency_key: &str, input: Value, expected_wait: Option<(&str,u64)>)
-        -> Result<AgentMutationReceipt,AppError> {
-        self.require_executable(owner, session_id).await?;
-        let key = scoped_key(owner, idempotency_key, session_id.as_ref())?;
-        let idempotency=IdempotencyKey::from(format!("{key}:steer"));
+    /// Called inside the original Runtime input mutex. Unlike a late control
+    /// no-op, a closed Turn's terminal is never an accepted user-input receipt.
+    pub async fn admit_exact_steer(&self,owner:&PrincipalRef,session:&AgentSessionId,key:&str,target:&OperationId,
+        input:Value,expected_wait:Option<(&str,u64)>)->Result<AgentMutationReceipt,AppError> {
+        self.require_executable(owner,session).await?;
+        let key=IdempotencyKey::from(format!("{}:steer",scoped_key(owner,key,session.as_ref())?));
         let producer=EventProducerId::from("session_api");
-        let (target_operation_id,result)=match expected_wait {
-            Some((turn,wait_seq))=>self.store.steer_active_turn_for_wait(session_id,idempotency,producer,StrictJsonValue(input),turn,wait_seq).await,
-            None=>self.store.steer_active_turn(session_id,idempotency,producer,StrictJsonValue(input)).await,
+        let (target,result)=match expected_wait {
+            Some((source,seq))=>self.store.steer_exact_turn_for_wait(session,target,key,producer,StrictJsonValue(input),source,seq).await,
+            None=>self.store.steer_exact_turn(session,target,key,producer,StrictJsonValue(input)).await,
         }.map_err(store_error)?;
-        let event_id = result
-            .record
-            .as_ref()
-            .map(|record| record.event_id.clone())
-            .ok_or_else(|| AppError::Conflict("canonical steer produced no durable event".to_owned()))?;
-        Ok(AgentMutationReceipt {
-            target_operation_id,
-            event_id,
-            cursor: result.cursor,
-            duplicate: result.duplicate,
-        })
-    }
-
-    pub async fn steer_exact_turn(
-        &self,
-        owner: &PrincipalRef,
-        session_id: &AgentSessionId,
-        idempotency_key: &str,
-        target_operation_id: &OperationId,
-        input: Value,
-    ) -> Result<AgentMutationReceipt, AppError> {
-        self.require_executable(owner, session_id).await?;
-        let key = scoped_key(owner, idempotency_key, session_id.as_ref())?;
-        let (target_operation_id, result) = self.store.steer_exact_turn(
-            session_id, target_operation_id, IdempotencyKey::from(format!("{key}:steer")),
-            EventProducerId::from("session_api"), StrictJsonValue(input),
-        ).await.map_err(store_error)?;
-        let event_id = result.record.as_ref().map(|record| record.event_id.clone())
-            .ok_or_else(|| AppError::Conflict("canonical steering has no durable Turn receipt".into()))?;
-        Ok(AgentMutationReceipt { target_operation_id, event_id, cursor: result.cursor, duplicate: result.duplicate })
+        let record=result.record.ok_or_else(||AppError::Internal("canonical steering has no committed receipt".into()))?;
+        if record.kind.0!="turn/steer-accepted" {return Err(AppError::Conflict("the observed Turn closed before this input was accepted".into()));}
+        Ok(AgentMutationReceipt {target_operation_id:target,event_id:record.event_id,cursor:result.cursor,duplicate:result.duplicate})
     }
 
     pub async fn cancel(
@@ -518,7 +511,8 @@ impl CanonicalAgentSessionOwner {
         fence:&nomifun_agent_session::NativeTurnMutationFence)->Result<AgentMutationReceipt,AppError> {
         self.require_executable(owner,session_id).await?;let key=scoped_key(owner,key,session_id.as_ref())?;
         let (target_operation_id,result)=self.store.steer_exact_native_turn(session_id,target,format!("{key}:steer").into(),"session_api".into(),StrictJsonValue(input),fence).await.map_err(store_error)?;
-        let event_id=result.record.as_ref().map(|record|record.event_id.clone()).ok_or_else(||AppError::Conflict("canonical steering has no durable Turn receipt".into()))?;
+        if result.record.as_ref().is_some_and(|record|record.kind.0!="turn/steer-accepted") {return Err(AppError::Conflict("native input target closed before admission".into()));}
+        let event_id=result.record.as_ref().map(|record|record.event_id.clone()).ok_or_else(||AppError::Internal("canonical steering has no durable Turn receipt".into()))?;
         Ok(AgentMutationReceipt {target_operation_id,event_id,cursor:result.cursor,duplicate:result.duplicate})
     }
 
@@ -526,6 +520,7 @@ impl CanonicalAgentSessionOwner {
         fence:&nomifun_agent_session::NativeTurnMutationFence)->Result<AgentMutationReceipt,AppError> {
         self.require_executable(owner,session_id).await?;let key=scoped_key(owner,key,session_id.as_ref())?;
         let (target_operation_id,result)=self.store.steer_exact_native_immediate_turn(session_id,target,format!("{key}:steer").into(),"session_api".into(),StrictJsonValue(input),fence).await.map_err(store_error)?;
+        if result.record.as_ref().is_some_and(|record|record.kind.0!="turn/steer-accepted") {return Err(AppError::Conflict("native input target closed before admission".into()));}
         let event_id=result.record.as_ref().map(|record|record.event_id.clone()).ok_or_else(||AppError::Conflict("canonical voice steering has no durable Turn receipt".into()))?;
         Ok(AgentMutationReceipt {target_operation_id,event_id,cursor:result.cursor,duplicate:result.duplicate})
     }
@@ -558,7 +553,7 @@ impl CanonicalAgentSessionOwner {
             .map(|event| event.seq).max().unwrap_or(0);
         let mut messages = facts.fork_context.as_ref().map(|snapshot| snapshot.base_context(context_floor))
             .transpose().map_err(store_error)?.unwrap_or_default();
-        messages.extend(canonical_context_messages(&facts.events, &facts.event_payloads,
+        messages.extend(canonical_context_messages(&facts.session.owner_ref,&facts.events, &facts.event_payloads,
             context_floor, parent_through_seq, before_seq).map_err(store_error)?);
         let depth = facts.fork_context.as_ref().map_or(0, |snapshot| snapshot.fork_depth)
             .checked_add(1).ok_or_else(|| AppError::Conflict("fork ancestry depth is exhausted".into()))?;
@@ -922,35 +917,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_steer_replay_and_first_late_delivery_cannot_inject_a_successor_turn() {
-        let database = nomifun_db::init_database_memory().await.unwrap();
-        let service = CanonicalAgentSessionOwner::from_pool(database.pool().clone()).await.unwrap();
-        let opened = service.open(owner(), binding(), None, Vec::new(), "steer-isolation", 1).await.unwrap();
-        let session = &opened.session.agent_session_id;
-        let original = service.start_turn(&owner(), session, "original", json!({"content":"first"})).await.unwrap();
-        let input = json!({"content":"focus on this original task","files":[],"inject_skills":[]});
-        let accepted = service.steer_exact_turn(&owner(), session, "original-steer", &original.operation_id, input.clone()).await.unwrap();
-        let repeated = service.steer_exact_turn(&owner(), session, "original-steer", &original.operation_id, input.clone()).await.unwrap();
-        assert!(repeated.duplicate);
-        assert_eq!(repeated.event_id, accepted.event_id);
-        service.cancel_exact_turn(&owner(), session, "original-stop", &original.operation_id).await.unwrap();
-        let original_terminal = service.turn_receipt(&owner(), session, &original.operation_id).await.unwrap().terminal_event.unwrap();
-        let successor = service.start_turn(&owner(), session, "successor", json!({"content":"second"})).await.unwrap();
-        let before = service.store.head(session).await.unwrap();
-        let replay = service.steer_exact_turn(&owner(), session, "original-steer", &original.operation_id, input.clone()).await.unwrap();
-        assert_eq!(replay.event_id, accepted.event_id);
-        assert!(replay.duplicate);
-        let late = service.steer_exact_turn(&owner(), session, "first-late-steer", &original.operation_id, input.clone()).await.unwrap();
-        assert_eq!(late.event_id, original_terminal.event_id);
-        assert!(late.duplicate);
-        assert!(service.steer_exact_turn(&owner(), session, "original-steer", &successor.operation_id, input.clone()).await.is_err());
-        assert!(service.steer_exact_turn(&owner(), session, "original-steer", &original.operation_id, json!({"content":"changed"})).await.is_err());
-        assert!(service.steer_exact_turn(&owner(), session, "missing-target", &"missing".into(), input).await.is_err());
-        assert_eq!(service.store.head(session).await.unwrap(), before);
-        assert_eq!(before.active_turn_id.as_deref(), Some(successor.operation_id.as_ref()));
-        let count: i64 = nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='turn/steer-accepted'")
-            .bind(session.as_ref()).fetch_one(database.pool()).await.unwrap();
-        assert_eq!(count, 1);
+    async fn steering_receipt_query_is_exact_read_only_and_never_treats_a_terminal_as_input() {
+        let database=nomifun_db::init_database_memory().await.unwrap();
+        let service=CanonicalAgentSessionOwner::from_pool(database.pool().clone()).await.unwrap();
+        let opened=service.open(owner(),binding(),None,Vec::new(),"read-steer",1).await.unwrap();
+        let session=&opened.session.agent_session_id;
+        let original=service.start_turn(&owner(),session,"first",json!({"content":"first task"})).await.unwrap();
+        let input=json!({"content":"keep this on the original task"});
+        assert!(service.read_steer_receipt(&owner(),session,"reply",Some(&original.operation_id),&input,None).await.unwrap().is_none());
+        let accepted=service.admit_exact_steer(&owner(),session,"reply",&original.operation_id,input.clone(),None).await.unwrap();
+        service.cancel_exact_turn(&owner(),session,"end-first",&original.operation_id).await.unwrap();
+        let successor=service.start_turn(&owner(),session,"next",json!({"content":"independent task"})).await.unwrap();
+        let before=service.store.head(session).await.unwrap();
+        for target in [Some(&original.operation_id),None] {
+            let ack=service.read_steer_receipt(&owner(),session,"reply",target,&input,None).await.unwrap().unwrap();
+            assert_eq!(ack.event_id,accepted.event_id);assert_eq!(ack.target_operation_id,original.operation_id);assert!(ack.duplicate);
+        }
+        assert!(service.read_steer_receipt(&owner(),session,"reply",Some(&successor.operation_id),&input,None).await.is_err());
+        assert!(service.read_steer_receipt(&owner(),session,"reply",Some(&original.operation_id),&json!({"content":"changed"}),None).await.is_err());
+        assert!(service.read_steer_receipt(&owner(),session,"reply",Some(&original.operation_id),&input,Some((Uuid::now_v7().to_string().as_str(),10))).await.is_err());
+        let foreign=PrincipalRef {principal_kind:"user".into(),principal_id:Uuid::now_v7().to_string()};
+        assert!(service.read_steer_receipt(&foreign,session,"reply",Some(&original.operation_id),&input,None).await.is_err());
+        assert!(service.admit_exact_steer(&owner(),session,"first-late-input",&original.operation_id,input.clone(),None).await.is_err());
+        assert!(service.read_steer_receipt(&owner(),session,"first-late-input",Some(&original.operation_id),&input,None).await.unwrap().is_none());
+        assert_eq!(service.store.head(session).await.unwrap(),before);
     }
 
     #[tokio::test]
@@ -1139,32 +1129,32 @@ mod tests {
         assert_eq!(open_while_running.cursor, opened.cursor);
 
         let steer = owner_service
-            .steer(
+            .admit_exact_steer(
                 &owner(),
                 &opened.session.agent_session_id,
-                "steer-1",
-                json!({"content":"add tests"}),
+                "steer-1", &turn.operation_id,
+                json!({"content":"add tests"}), None,
             )
             .await
             .unwrap();
         assert_eq!(steer.target_operation_id, turn.operation_id);
         assert!(owner_service
-            .steer(
+            .admit_exact_steer(
                 &owner(),
                 &opened.session.agent_session_id,
-                "steer-1",
-                json!({"content":"add tests"}),
+                "steer-1", &turn.operation_id,
+                json!({"content":"add tests"}), None,
             )
             .await
             .unwrap()
             .duplicate);
         assert!(matches!(
             owner_service
-                .steer(
+                .admit_exact_steer(
                     &owner(),
                     &opened.session.agent_session_id,
-                    "steer-1",
-                    json!({"content":"changed"}),
+                    "steer-1", &turn.operation_id,
+                    json!({"content":"changed"}), None,
                 )
                 .await,
             Err(AppError::Conflict(_))

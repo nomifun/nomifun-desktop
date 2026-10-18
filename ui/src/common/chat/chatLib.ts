@@ -34,6 +34,7 @@ import { normalizeAgentTurnOutcome, mergeAgentTurnOutcome } from './turnOutcome'
 import type { MessageTimeline } from '../protocolBindings/MessageTimeline';
 import type { RuntimeToolHoldReason } from '../protocolBindings/RuntimeToolHoldReason';
 import { normalizeMessageTimeline, preferMessageTimeline } from './messageTimeline';
+import { normalizeInputDelivery, preferInputDelivery, type InputDelivery } from './inputDelivery';
 
 export { joinLocalPath as joinPath } from '../utils/localPath';
 
@@ -130,6 +131,8 @@ export type IMessageText = IMessage<
     display_at_ms?: number;
     /** Read-only paths derived by the authenticated canonical Session projection. */
     managed_file_paths?: Record<string, string>;
+    /** Saving input and scheduling it are distinct canonical facts. */
+    input_delivery?: InputDelivery;
     idmm_decision?: IdmmDecisionExplanation;
     /** Canonical typed output-limit continuation, never inferred from text. */
     continuation_of_message_id?: MessageId;
@@ -590,7 +593,8 @@ export const preferTextMessageVersion = (primary: IMessageText, secondary: IMess
     const observations = (preferred.content.observations?.length ?? 0) >= (fallback.content.observations?.length ?? 0)
       ? preferred.content.observations : fallback.content.observations;
     const managedFilePaths = primary.content.managed_file_paths ?? secondary.content.managed_file_paths;
-    if (!interaction && !observations && !decision && !managedFilePaths && !timeline) return preferred;
+    const inputDelivery = preferInputDelivery(primary.content.input_delivery, secondary.content.input_delivery);
+    if (!interaction && !observations && !decision && !managedFilePaths && !timeline && !inputDelivery) return preferred;
     return {
       ...preferred,
       content: {
@@ -600,6 +604,7 @@ export const preferTextMessageVersion = (primary: IMessageText, secondary: IMess
         ...(decision ? { idmm_decision: decision } : {}),
         ...(observations ? { observations } : {}),
         ...(managedFilePaths ? { managed_file_paths: managedFilePaths } : {}),
+        ...(inputDelivery ? { input_delivery: inputDelivery } : {}),
       },
     };
   };
@@ -1174,6 +1179,7 @@ export const transformUserCreatedEvent = (
 ): IMessageText | undefined => {
   if (event.hidden || event.conversation_id !== conversationId || !event.msg_id) return undefined;
   const decision = normalizeIdmmDecisionExplanation(event.idmm_decision);
+  const inputDelivery = normalizeInputDelivery(event.input_delivery);
   return {
     id: uuid(),
     type: 'text',
@@ -1188,9 +1194,27 @@ export const transformUserCreatedEvent = (
         ? { display_at_ms: event.display_at_ms } : {}),
       ...(event.interaction ? { interaction: event.interaction } : {}),
       ...(decision ? { idmm_decision: decision } : {}),
+      ...(inputDelivery ? { input_delivery: inputDelivery } : {}),
     },
   };
 };
+
+/** Accepted user bodies are complete; later canonical facts update metadata. */
+export const mergeUserTextMessage = (existing: IMessageText, incoming: IMessageText): IMessageText => ({
+  ...existing,
+  ...incoming,
+  id: existing.id,
+  message_id: existing.message_id ?? incoming.message_id,
+  turn_id: incoming.turn_id ?? existing.turn_id,
+  created_at: existing.created_at ?? incoming.created_at,
+  content: {
+    ...existing.content,
+    ...incoming.content,
+    content: existing.content.content,
+    input_delivery: preferInputDelivery(incoming.content.input_delivery, existing.content.input_delivery),
+    idmm_decision: incoming.content.idmm_decision ?? existing.content.idmm_decision,
+  },
+});
 
 /**
  * @description 将消息合并到消息列表中
@@ -1204,6 +1228,17 @@ export const composeMessage = (
   if (!list?.length) {
     messageHandler('insert', message);
     return [message];
+  }
+  if (message.type === 'text' && message.position === 'right' && message.msg_id) {
+    const index = list.findIndex(item => item.type === 'text' && item.position === 'right' && item.msg_id === message.msg_id);
+    const existing = list[index];
+    if (existing?.type === 'text') {
+      const updated = mergeUserTextMessage(existing, message);
+      messageHandler('update', updated);
+      const result = list.slice();
+      result[index] = updated;
+      return result;
+    }
   }
   const last = list[list.length - 1];
 

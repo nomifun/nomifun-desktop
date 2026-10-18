@@ -13,7 +13,7 @@ describe('SendBox stop interaction', () => {
     expect(source.includes("title={t(isStopping ? 'conversation.stop.stopping' : 'conversation.stop.button')}")).toBe(true);
     expect(composerSource.includes("aria-label={title ?? t('common.send')}")).toBe(true);
     expect(source.includes('<ComposerSendButton')).toBe(true);
-    expect(source.includes("aria-label={t('conversation.steer.button')}")).toBe(true);
+    expect(source.includes('steerMessageHandler')).toBe(false);
   });
 
   test('deduplicates stop clicks and blocks send/steer until stop settles', () => {
@@ -24,7 +24,6 @@ describe('SendBox stop interaction', () => {
     expect(source.includes('setIsStopping(true);')).toBe(true);
     expect(source.includes('setIsStopping(false);')).toBe(true);
     expect(source.includes('if (isUploading || isStopping) return;')).toBe(true);
-    expect(source.includes('if (!onSteer || isUploading || isStopping) return;')).toBe(true);
     expect(source.includes("data-testid='sendbox-stop-btn'")).toBe(true);
     expect(source.includes('disabled={isStopping}')).toBe(true);
     expect(source.includes('loading={isStopping}')).toBe(true);

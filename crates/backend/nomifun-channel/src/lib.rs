@@ -17,6 +17,7 @@ pub mod plugins;
 pub mod queue_drain;
 pub mod routes;
 mod session_port;
+mod input_observer;
 pub mod session;
 pub mod stream_relay;
 pub mod think_filter;
@@ -32,5 +33,6 @@ pub use agent_capability::{
 };
 pub use session_port::{
     ChannelCompletedTurnReceipt, ChannelSessionPort, ChannelTurnDelivery,
-    ChannelTurnDeliveryReceipt, ChannelTurnReceiptState,
+    ChannelTurnDeliveryReceipt, ChannelTurnReceiptState, ChannelQuestionDelivery, ChannelInputObservation,
+    RecoverableChannelInput,ChannelInputDeliveryDisposition,
 };

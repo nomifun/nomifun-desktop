@@ -19,12 +19,14 @@ import type {
   TMessage,
 } from '@/common/chat/chatLib';
 import { toDisplayText } from '@/common/chat/displayText';
+import { normalizeInputDelivery } from '@/common/chat/inputDelivery';
 import { normalizeIdmmDecisionExplanation, normalizeIdmmDecisionNotice } from '@/common/types/idmm';
 import { OFFICIAL_PRESET_KEYS, type OfficialPresetKey } from '@/common/types/agentPlatform';
 import {
   composeMessage,
   mergeToolCallContent,
   mergeTextMessageContent,
+  mergeUserTextMessage,
   mergeAgentStatusContent,
   mergeTipsContent,
   normalizeToolCallContent,
@@ -215,16 +217,11 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
           };
           return newList;
         }
-        // User messages (right position) are complete — skip if already exists to prevent duplicates
+        // Bodies are complete; canonical input progress can still advance.
         if (message.position === 'right') {
-          if (message.content.idmm_decision) {
-            const newList = list.slice();
-            newList[existingIdx] = { ...existingMsg, content: {
-              ...existingMsg.content, idmm_decision: message.content.idmm_decision,
-            } };
-            return newList;
-          }
-          return list;
+          const newList = list.slice();
+          newList[existingIdx] = mergeUserTextMessage(existingMsg, message);
+          return newList;
         }
         // Complete inter-Agent messages are not streaming chunks — skip if already present.
         if ((message.content as { agentMessage?: boolean })?.agentMessage) {
@@ -698,6 +695,8 @@ const normalizeDecodedTextMetadata = (parsed: Record<string, unknown>): Partial<
     ...(typeof parsed.senderName === 'string' ? { senderName: parsed.senderName } : {}),
     ...(typeof parsed.senderAgentType === 'string' ? { senderAgentType: parsed.senderAgentType } : {}),
   };
+  const inputDelivery = normalizeInputDelivery(parsed.input_delivery);
+  if (inputDelivery) metadata.input_delivery = inputDelivery;
 
   if (typeof parsed.senderConversationId === 'string') {
     try {

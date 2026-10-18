@@ -34,6 +34,8 @@ pub enum AgentStreamEvent {
     CanonicalTimeline(Vec<nomifun_agent_contracts::MessageTimelineUpdate>),
     /// The canonical task-plan snapshot changed; this is not a chat message.
     TaskPlanChanged,
+    /// An exact committed question, visible before finite input handoff.
+    InputQuestion(InputQuestionEventData),
     SkillSuggest(SkillSuggestEventData),
     CronTrigger(CronTriggerEventData),
     /// Emitted once at the end of a turn with aggregate metrics so the UI can
@@ -45,6 +47,12 @@ pub enum AgentStreamEvent {
     System(serde_json::Value),
     RequestTrace(serde_json::Value),
     SessionAssigned(SessionAssignedEventData),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputQuestionEventData {
+    pub request: nomifun_agent_contracts::AgentUserInputRequest,
+    pub target: nomifun_api_types::AgentQuestionReplyTargetDto,
 }
 
 /// Data for the `Start` event.

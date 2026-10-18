@@ -166,7 +166,7 @@ fn missing_original_live_owner_terminal_cannot_republish_old_authorization_quest
 }
 
 #[test]
-fn original_owner_terminal_before_crash_explicitly_retires_wait_without_inventing_answer() {
+fn original_owner_terminal_before_crash_resolves_resource_without_answering_question() {
     let mut tail = interrupted_live_wait();
     tail.push(AgentEngineEvent::OwnedProcessObserved { model_steps: 2, observation: crate::AgentOwnedProcessObservation {
         process_id: "owned".into(), poll: nomifun_engine_core::EngineProcessPoll::TimedOut {
@@ -177,13 +177,13 @@ fn original_owner_terminal_before_crash_explicitly_retires_wait_without_inventin
         },
     } });
     let result = reconcile_execution_tail(&checkpoint(), 1, &tail, &BTreeSet::from(["launch".into()]), &BTreeMap::new(), &Default::default()).unwrap();
-    assert!(result.checkpoint.pending_user_input.is_none());
+    assert!(result.checkpoint.pending_user_input.is_some());
     assert!(result.checkpoint.work.running_processes.is_empty());
     assert_eq!(result.checkpoint.work.failed_commands, 1);
     assert!(result.observations.iter().any(|event| matches!(event, AgentEngineEvent::TurnWaitResolved { model_steps: 2 })));
     assert!(!result.observations.iter().any(|event| matches!(event, AgentEngineEvent::SteeringInputs { .. } | AgentEngineEvent::TurnInputRequired { .. })));
     tail.extend(result.observations);
-    assert!(crate::user_input_request::recorded_pending(&tail).unwrap().is_none());
+    assert!(crate::user_input_request::recorded_pending(&tail).unwrap().is_some());
 }
 
 #[test]

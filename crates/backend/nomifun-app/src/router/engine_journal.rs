@@ -223,6 +223,7 @@ impl EngineTurnJournal {
     }
 
     pub(super) fn turn_operation(&self) -> &OperationId { &self.0.operation }
+    pub(super) fn canonical_store(&self) -> AgentSessionStore { self.0.store.clone() }
     pub(super) async fn require_claimed_model(
         &self,
         causality: &ChatCausality,

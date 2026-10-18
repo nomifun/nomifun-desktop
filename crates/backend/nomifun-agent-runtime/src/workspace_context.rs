@@ -564,7 +564,7 @@ impl ScopedInstructions {
             // frozen schema. Only actions with the formal identity selector
             // can request privileged instruction acquisition.
             let identity = if matches!(binding.action_id.as_ref(),
-                "workspace.files/read" | "workspace.process/exec" | "workspace.process/start") {
+                "workspace.files/read" | "workspace.process/start") {
                 InstructionIdentity::from_arguments(value)?
             } else { InstructionIdentity::CurrentUser };
             let mut paths = Vec::new();
@@ -618,7 +618,7 @@ impl ScopedInstructions {
                         }
                     }
                 }
-                "workspace.process/exec" | "workspace.process/start" => {
+                "workspace.process/start" => {
                     // A shell command is opaque. cwd instructions are known;
                     // arbitrary paths embedded in shell text are not inferred.
                     if value.get("process_id").is_none() {

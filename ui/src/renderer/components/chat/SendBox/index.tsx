@@ -18,7 +18,7 @@ import type { FileOrFolderItem } from '@/renderer/utils/file/fileTypes';
 import { filterWorkspaceMentionItems } from '@/renderer/utils/file/workspaceMentions';
 import { Button, Tag } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
-import { CloseSmall, Lightning, Quote } from '@icon-park/react';
+import { CloseSmall, Quote } from '@icon-park/react';
 import { theme } from '@/platform';
 import React, { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -147,11 +147,6 @@ const SendBox: React.FC<{
   onChange?: (value: string) => void;
   onSend: (message: string) => Promise<void>;
   onStop?: () => Promise<void>;
-  /** When provided AND a turn is running AND there is a draft, a secondary
-   *  "steer now" action is offered alongside the (enqueue) send button. */
-  onSteer?: (message: string) => Promise<void>;
-  /** Gate the steer affordance (e.g. only for the Nomi native engine). */
-  steerAvailable?: boolean;
   /** Recall a sent prompt for revision. Submission creates a new canonical Turn;
    *  the original message and its history remain immutable. */
   onEditResubmit?: (msgId: MessageId, createdAt: number, message: string) => Promise<void>;
@@ -182,7 +177,6 @@ const SendBox: React.FC<{
   commandPanel?: ComposerCommandPanel;
   commandTargetKey?: string;
   allowSendWhileLoading?: boolean;
-  compactActions?: boolean;
   compactStacked?: boolean;
   selectedWorkspaceItems?: FileSelectionItem[];
   onSelectedWorkspaceItemsChange?: (items: FileSelectionItem[]) => void;
@@ -192,8 +186,6 @@ const SendBox: React.FC<{
 }> = ({
   onSend,
   onStop,
-  onSteer,
-  steerAvailable,
   onEditResubmit,
   prefix,
   renderAttachments,
@@ -221,7 +213,6 @@ const SendBox: React.FC<{
   commandPanel,
   commandTargetKey,
   allowSendWhileLoading = false,
-  compactActions = false,
   compactStacked = false,
   selectedWorkspaceItems,
   onSelectedWorkspaceItemsChange,
@@ -244,6 +235,9 @@ const SendBox: React.FC<{
   const measurementCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const warmedConversationRef = useRef<ConversationId | undefined>(undefined);
   const warmupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (warmupTimerRef.current) clearTimeout(warmupTimerRef.current);
+  }, []);
   const latestInputRef = useLatestRef(input);
   const setInputRef = useLatestRef(setInput);
   const messageList = useMessageList();
@@ -982,7 +976,7 @@ const SendBox: React.FC<{
         .then(() => {
           setEditingMsgId(null);
           editPrevDraftRef.current = null;
-          setInput('');
+          if (latestInputRef.current === finalMessage) setInputRef.current('');
         })
         .catch(() => {})
         .finally(() => {
@@ -1042,26 +1036,6 @@ const SendBox: React.FC<{
       });
   };
 
-  const steerMessageHandler = () => {
-    if (commandController.dispatchInput()) return;
-    if (disabled || submitDisabled) return;
-    if (!onSteer || isUploading || isStopping) return;
-    if (isLoading) return;
-    // The draft is cleared eagerly so an in-flight steer cannot overwrite text
-    // the user types while it resolves. Recovery on failure is the handler's
-    // job, not this layer's: the Nomi handler diverts a failed interjection into
-    // the persisted command queue, which survives navigation in a way restoring
-    // local state would not.
-    const finalMessage = composeAndClear();
-    if (finalMessage == null) return;
-    setIsLoading(true);
-    onSteer(finalMessage)
-      .catch(() => {})
-      .finally(() => {
-        setIsLoading(false);
-      });
-  };
-
   const stopHandler = async () => {
     if (!onStop || isStoppingRef.current) return;
     isStoppingRef.current = true;
@@ -1109,24 +1083,6 @@ const SendBox: React.FC<{
     ></Button>
   );
 
-  // Secondary "steer now" action — interjects the draft into the running turn
-  // instead of enqueuing it. Mirrors sendButton's visual language.
-  const steerButton = (
-    <Button
-      shape='circle'
-      type='primary'
-      disabled={isButtonDisabled}
-      className='send-button-custom sendbox-steer-button'
-      title={t('conversation.steer.button')}
-      aria-label={t('conversation.steer.button')}
-      icon={<Lightning theme='filled' size='14' fill='white' strokeWidth={5} />}
-      onClick={() => {
-        steerMessageHandler();
-      }}
-      data-testid='sendbox-steer-btn'
-    />
-  );
-
   const pausedCancelButton = <Button type='secondary' onClick={stopHandler}
     data-testid='sendbox-paused-cancel-btn' aria-label={t('conversation.stop.endPausedTurn')}>
     {t('conversation.stop.endPausedTurn')}
@@ -1138,7 +1094,9 @@ const SendBox: React.FC<{
     if (commandController.hasCommandInput) return <div className='flex items-center gap-2'>
       {paused ? pausedCancelButton : loading && onStop ? stopButton : null}{sendButton}
     </div>;
-    if (paused) return pausedCancelButton;
+    if (paused) return <div className='flex items-center gap-2'>
+      {pausedCancelButton}{hasDraftToSend && !submitDisabled ? sendButton : null}
+    </div>;
     if (allowSendWhileLoading && loading) {
       // Stop is an independent safety action. A non-empty draft must never
       // replace or hide it: users may need to cancel the current turn even
@@ -1146,18 +1104,10 @@ const SendBox: React.FC<{
       if (!hasDraftToSend || disabled || submitDisabled || isUploading) {
         return stopButton;
       }
-      const queuedActions = compactActions ? (
-        sendButton
-      ) : (
-        <>
-          {onSteer && steerAvailable ? steerButton : null}
-          {sendButton}
-        </>
-      );
       return (
         <div className='flex items-center gap-2' data-testid='sendbox-busy-actions'>
           {stopButton}
-          {queuedActions}
+          {sendButton}
         </div>
       );
     }
@@ -1376,21 +1326,6 @@ const SendBox: React.FC<{
                   sendMessageHandler,
                   (event) => {
                     if (handleAtFileMenuKeyDown(event) || commandController.onKeyDown(event) || handleHistoryKeyDown(event)) {
-                      return true;
-                    }
-                    // Mod(Ctrl/Cmd)+Enter steers the draft into the running turn
-                    // instead of enqueuing it. Only in 'enter' mode — in 'mod-enter'
-                    // mode Mod+Enter IS the submit gesture. Opt-in via onSteer + steerAvailable.
-                    if (
-                      sendKey === 'enter' &&
-                      onSteer &&
-                      steerAvailable &&
-                      event.key === 'Enter' &&
-                      !event.shiftKey &&
-                      (event.metaKey || event.ctrlKey)
-                    ) {
-                      event.preventDefault();
-                      steerMessageHandler();
                       return true;
                     }
                     return false;

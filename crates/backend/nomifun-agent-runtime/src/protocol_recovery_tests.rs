@@ -169,3 +169,23 @@ fn empty_reply_correction_allows_text_and_replays_the_same_constraint() {
         }
     }
 }
+
+#[test]
+fn required_input_handoff_reuses_the_same_committed_protocol_budget_after_replay() {
+    let mut recovery=ProtocolRecovery::default();let mut events=vec![];
+    for step in 1..=3 {
+        begin(&mut recovery,step,&mut events);
+        let prepared=recovery.prepare_rejection(step,vec![],AgentModelResponseRejection::RequiredInputHandoff,
+            Some("request_user_input".into()),true).unwrap();
+        assert_eq!(prepared.continuation(),step<=2);events.push(prepared.event().clone());
+        let feedback=recovery.commit_rejection(prepared).unwrap();
+        assert!(format!("{feedback:?}").contains("blocked work"));
+    }
+    let mut restored=ProtocolRecovery::default();restored.restore(events.iter()).unwrap();assert_eq!(restored,recovery);
+    assert!(restored.continuation_stopped(),"native resume alone cannot buy another model response");
+    let mut with_input=restored.clone();with_input.observe_new_input();assert!(!with_input.continuation_stopped());
+    begin(&mut restored,4,&mut events);
+    assert!(!restored.prepare_rejection(4,vec![],AgentModelResponseRejection::RequiredInputHandoff,Some("request_user_input".into()),true).unwrap().continuation());
+    assert!(ProtocolRecovery::default().prepare_rejection(1,vec!["not-a-text-stop".into()],
+        AgentModelResponseRejection::RequiredInputHandoff,None,true).is_err());
+}

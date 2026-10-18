@@ -60,7 +60,6 @@ pub(super) async fn load(
             break;
         }
         bytes = bytes.saturating_add(turn.serialized_bytes);
-        let receipt = turn.request_payload_json;
         let events = decode_turn_events(turn.records, &turn.receipt_status, turn.unstarted_terminal)?;
         if let Some(events) = &events {
         let Some(AgentEngineEvent::TurnStarted {
@@ -94,9 +93,7 @@ pub(super) async fn load(
             ));
         }
         }
-        let receipt: serde_json::Value =
-            serde_json::from_str(&receipt).map_err(|error| fail(error.to_string()))?;
-        let files = super::runtime_attachments::references(&receipt)?;
+        let files = super::runtime_attachments::references(&root)?;
         let mut content = Vec::new();
         if !text.is_empty() {
             content.push(ChatContentPart::Text { text: text.into() });
@@ -104,21 +101,7 @@ pub(super) async fn load(
         if let Some(description) = super::runtime_attachments::description(&files, true) {
             content.push(description);
         }
-        let unresolved = if let Some(events) = &events { unresolved_steering(events).await? } else { Vec::new() };
-        let extra_bytes = unresolved
-            .iter()
-            .map(|message| serde_json::to_vec(message).map(|raw| raw.len()))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| fail(error.to_string()))?
-            .into_iter()
-            .sum::<usize>();
-        if bytes.saturating_add(extra_bytes) > replay_budget {
-            if closed_turns.is_empty() {
-                return Err(fail("latest turn steering exceeds replay budget".into()));
-            }
-            break;
-        }
-        bytes = bytes.saturating_add(extra_bytes);
+        if let Some(events)=&events { validate_input_scope(events)?; }
         if closed_turns.is_empty() {
             // Latest only. Read-only history may cross an explicitly verified
             // model/Agent transition; importing its task ledger still requires
@@ -131,25 +114,25 @@ pub(super) async fn load(
                 .transpose().map_err(|error| fail(error.to_string()))?.flatten();
         }
         closed_turns.push((
-            turn.source_seq,
+            turn.claim_seq,
             ChatMessage {
                 role: ChatRole::User,
                 content,
                 provider_round_id: None,
             },
             events,
-            unresolved,
+            Vec::new(),
             turn.receipt_status,
         ));
     }
     let mut history = Vec::new();
     let mut replay_turns: Vec<(ChatMessage, Vec<AgentEngineEvent>, Vec<ChatMessage>)> = Vec::new();
-    for (source_seq, requirement, events, unresolved, status) in closed_turns.into_iter().rev() {
-        while context.peek().is_some_and(|(seq, _)| *seq < source_seq) {
+    for (claim_seq, requirement, events, following_context, status) in closed_turns.into_iter().rev() {
+        while context.peek().is_some_and(|(seq, _)| *seq < claim_seq) {
             append_context(&mut history, &mut replay_turns, context.next().expect("peeked context").1);
         }
         if let Some(events) = events {
-            replay_turns.push((requirement, events, unresolved));
+            replay_turns.push((requirement, events, following_context));
         } else {
             // The canonical owner may reject/cancel admission before Runtime
             // starts. Keep the accepted input and that terminal fact as data;
@@ -279,32 +262,14 @@ fn bounded_context_messages(
     Ok(messages)
 }
 
-/// After an unexpected exit the inbox can be gone even when the permanent
-/// receipt says delivery was queued. Preserve that uncertainty as historical
-/// data; never enqueue it into a replacement turn or invent execution evidence.
-async fn unresolved_steering(
-    events: &[AgentEngineEvent],
-) -> Result<Vec<ChatMessage>, AppError> {
-    let scopes = events
-        .iter()
-        .filter_map(|event| match event {
-            AgentEngineEvent::TurnInputScope { wire_turn_id } => Some(wire_turn_id),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let [wire] = scopes.as_slice() else {
-        return if scopes.is_empty() {
-            Ok(Vec::new())
-        } else {
-            Err(AppError::Conflict("duplicate Nomi input scope".into()))
-        };
-    };
-    // Canonical steering admission is represented by `turn/steer-accepted`
-    // facts and the Runtime records only durable delivery/deferral decisions.
-    // An absent Runtime control record is deliberately not converted into a
-    // prompt: replaying an ambiguous steer would duplicate user intent.
-    let _ = wire;
-    Ok(Vec::new())
+/// Transport scope is unique. Input consumption is reconstructed from its
+/// canonical claim and Runtime delivery; no lost inbox is imported into a new
+/// Turn as another user instruction.
+fn validate_input_scope(events:&[AgentEngineEvent])->Result<(),AppError> {
+    if events.iter().filter(|event|matches!(event,AgentEngineEvent::TurnInputScope {..})).count()>1 {
+        return Err(AppError::Conflict("duplicate Nomi input scope".into()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

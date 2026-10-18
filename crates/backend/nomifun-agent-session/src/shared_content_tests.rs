@@ -2,7 +2,7 @@ use super::*;
 
 async fn context(store: &AgentSessionStore, key: &str) -> (AgentSessionLiveRecord, EventId) {
     let (session, _) = create_ready(store, key).await;
-    let (_, started) = store.start_turn(&session.agent_session_id, "session-api".into(), key.into(), key.into(),
+    let (_, started) = store.start_turn(&session.agent_session_id, "session_api".into(), key.into(), key.into(),
         StrictJsonValue(json!({"content":"Inspect the saved source"}))).await.unwrap();
     (session, started.ack.unwrap().event_id)
 }
@@ -184,4 +184,35 @@ async fn shared_leaves_are_session_private_and_purged_only_with_their_session() 
     assert_eq!(leaves(&store,&other.agent_session_id).await.0,1);
     let facts=store.chat_causality_facts(&other.agent_session_id,&"shared-retained".into()).await.unwrap();
     assert_eq!(facts.event_payloads["shared-retained-result"]["event"],event);
+}
+
+#[tokio::test]
+async fn unified_runtime_input_references_original_body_and_rejects_changed_or_foreign_sources() {
+    let store=AgentSessionStore::open_in_memory().await.unwrap();
+    let (session,started)=context(&store,"shared-v2-input").await;
+    let sid=&session.agent_session_id;
+    let body=json!({"content":"唯一输入正文😀".repeat(100),"files":["user-file.txt"],"inject_skills":["selected-skill"]});
+    let accepted=store.accept_session_input(&session.owner_ref,sid,"session_api".into(),"v2-input".into(),StrictJsonValue(body.clone())).await.unwrap();
+    let input_id=accepted.record.unwrap().event_id;
+    let claim=store.claim_session_input_as_steering(&session.owner_ref,sid,&input_id,&"shared-v2-input".into()).await.unwrap().record.unwrap();
+    let delivered=json!({"receipt_operation_id":claim.event_id,"message_id":input_id,"text":body["content"],
+        "files":body["files"],"inject_skills":body["inject_skills"],"image_count":0});
+    let event=progress(sid,&started,"shared-v2-input","v2-delivered",1,json!({"event":"steering_inputs","inputs":[delivered]}));
+    store.append_event(&event).await.unwrap();
+    let raw:String=sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE event_id=?")
+        .bind(event.event_id.as_ref()).fetch_one(store.test_pool()).await.unwrap();
+    assert!(!raw.contains("唯一输入正文") && !raw.contains("user-file.txt") && !raw.contains("selected-skill"));
+    assert!(raw.contains("input_sources"));
+    let payload=store.resolved_event_payloads(sid,&[event.event_id.clone()]).await.unwrap();
+    let SessionEventPayloadRef::InlineJson(original)=&event.semantic_event.payload else {unreachable!()};
+    assert_eq!(payload[event.event_id.as_ref()],original.0);
+    assert!(store.append_event(&event).await.unwrap().duplicate,"retry compares hydrated semantic content");
+    let mut bad=event.clone();bad.event_id="v2-changed".into();bad.idempotency_key="v2-changed".into();
+    let SessionEventPayloadRef::InlineJson(value)=&mut bad.semantic_event.payload else {unreachable!()};
+    value.0["event"]["inputs"][0]["text"]=json!("A fabricated different input");
+    assert!(store.append_event(&bad).await.is_err());
+    // A broken source cannot be reconstructed from the old Runtime body.
+    sqlx::query("UPDATE agent_events SET inline_json=json_set(inline_json,'$.input_event_id',?) WHERE session_id=? AND event_id=?")
+        .bind(uuid::Uuid::now_v7().to_string()).bind(sid.as_ref()).bind(claim.event_id.as_ref()).execute(store.test_pool()).await.unwrap();
+    assert!(store.resolved_event_payloads(sid,&[event.event_id.clone()]).await.is_err());
 }

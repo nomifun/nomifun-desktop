@@ -161,7 +161,7 @@ pub fn reconcile_execution_tail(
             },
             AgentEngineEvent::UserInputRequested { step: current, request } => {
                 let Some((source_step, call)) = calls.get(&request.request_id) else { return Err(invalid("input handoff has no exact proposal")); };
-                if next.pending_user_input.is_some() || next.completion_review.is_report_only() || *current != step
+                if next.pending_user_input.is_some() || *current != step
                     || source_step != current || crate::user_input_request::from_call(call).as_ref() != Ok(request)
                     || proposed.len() != 1 || admitted.contains(&request.request_id)
                     { return Err(invalid("input handoff differs from its native source question")); }
@@ -172,7 +172,7 @@ pub fn reconcile_execution_tail(
                 if next.work.running_processes.is_empty() { return Err(invalid("live wait has no original owned processes")); }
                 live_wait_unresolved = true;
             }
-            AgentEngineEvent::TurnWaitResolved { .. } => { next.pending_user_input = None; live_wait_unresolved = false; },
+            AgentEngineEvent::TurnWaitResolved { .. } => { live_wait_unresolved = false; },
             AgentEngineEvent::OwnedProcessObserved { observation, .. } => {
                 observation.validate()?;
                 next.work.observe_owned_process(observation)?;
@@ -241,10 +241,8 @@ pub fn reconcile_execution_tail(
         if !next.work.running_processes.is_empty() {
             return Err(invalid("the original live wait owner has no reaped terminal observation; keep this Turn paused for reconciliation instead of republishing its old user-input request"));
         }
-        // A real original-owner terminal can precede a crash at the wake
-        // publication boundary. Retire the old wait explicitly, retaining the
-        // source question and owner observation as immutable historical data.
-        next.pending_user_input = None;
+        // Resolve only the machine observation boundary. A process result
+        // cannot resolve an independent question or manufacture user input.
         observations.push(AgentEngineEvent::TurnWaitResolved { model_steps: step });
     }
     let discard_last = !keep_batch;

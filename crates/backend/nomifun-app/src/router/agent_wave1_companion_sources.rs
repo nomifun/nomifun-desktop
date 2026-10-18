@@ -23,11 +23,6 @@ struct CanonicalInput {
     input_source: Option<AgentInputSource>,
 }
 
-#[derive(Deserialize)]
-struct CanonicalSteering {
-    target_operation_id: nomifun_agent_contracts::OperationId,
-    input: CanonicalInput,
-}
 
 fn is_human(input: &CanonicalInput, origin: Option<&CompanionSessionOrigin>, companion: &str) -> bool {
     if input.hidden { return false; }
@@ -150,17 +145,16 @@ pub(super) async fn resolve(
     let mut steering_count = 0;
     for event in &facts.events {
         if event.kind.0 != "turn/steer-accepted" || event.seq >= causation.tool_call.seq { continue; }
-        if event.kind_version != 1 || event.producer_id.as_ref() != "session_api"
+        if !matches!(event.kind_version,1|2) || event.producer_id.as_ref() != "session_api"
             || event.correlation_id.as_ref() != effect.turn_id.as_ref() {
             return Err(invalid("steering source does not belong to this exact Turn"));
         }
         steering_count += 1;
         if steering_count > 16 { return Err(invalid("memory source has too many accepted steering inputs")); }
-        let steer: CanonicalSteering = serde_json::from_value(facts.event_payloads
-            .get(event.event_id.as_ref()).cloned().ok_or_else(|| invalid("steering payload is unavailable"))?).map_err(invalid)?;
-        if steer.target_operation_id != effect.turn_id { return Err(invalid("steering target changed")); }
-        if is_human(&steer.input, origin.as_ref(), companion) {
-            sources.insert((context.agent_session_id.as_ref().to_owned(), event.event_id.as_ref().to_owned()));
+        let (source_id, payload) = nomifun_agent_session::canonical_steering_input(&facts,event).map_err(invalid)?;
+        let input:CanonicalInput=serde_json::from_value(payload.0).map_err(invalid)?;
+        if is_human(&input, origin.as_ref(), companion) {
+            sources.insert((context.agent_session_id.as_ref().to_owned(), source_id.as_ref().to_owned()));
         }
     }
     if sources.is_empty() || sources.len() > 64 { return Err(invalid("memory source cannot prove a bounded human input set")); }

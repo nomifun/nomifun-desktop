@@ -64,7 +64,7 @@ describe('conversation command queue runtime recovery', () => {
       'return onExecute(nextCommand, { isCurrent: isExecutionCurrent });',
       currentFence
     );
-    const accepted = source.indexOf('.then(async (deliveryDisposition) => {', execute);
+    const accepted = source.indexOf('.then(async () => {', execute);
     const acceptedFence = source.indexOf('if (!isExecutionCurrent()) return;', accepted);
     const acceptedUpdater = source.indexOf('await updateState((state) =>', acceptedFence);
     const acceptedUpdaterFence = source.indexOf('isExecutionCurrent()', acceptedUpdater);
@@ -82,22 +82,14 @@ describe('conversation command queue runtime recovery', () => {
     expect(remove > acceptedUpdaterFence).toBe(true);
   });
 
-  test('a completed replay releases the queue without waiting for a new turn', () => {
-    const accepted = source.indexOf('.then(async (deliveryDisposition) => {');
-    const replay = source.indexOf(
-      "if (deliveryDisposition === 'replayed_completed')",
-      accepted
-    );
-    const release = source.indexOf(
-      'executionGateRef.current = IDLE_EXECUTION_GATE;',
-      replay
-    );
-    const freshReconcile = source.indexOf('void reconcileActiveExecution();', release);
-
+  test('acceptance leaves execution status to canonical runtime reconciliation', () => {
+    const accepted = source.indexOf('.then(async () => {');
+    const remove = source.indexOf('items: removeQueuedCommand(state.items, nextCommand.id)', accepted);
+    const reconcile = source.indexOf('void reconcileActiveExecution();', remove);
     expect(accepted >= 0).toBe(true);
-    expect(replay > accepted).toBe(true);
-    expect(release > replay).toBe(true);
-    expect(freshReconcile > release).toBe(true);
+    expect(remove > accepted).toBe(true);
+    expect(reconcile > remove).toBe(true);
+    expect(source.includes('replayed_completed')).toBe(false);
   });
 
   test('stale execution outcomes cannot reconcile, restore, pause, or warn', () => {

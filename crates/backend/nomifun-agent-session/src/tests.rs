@@ -48,6 +48,12 @@ mod companion_scope_tests;
 mod knowledge_writeback_tests;
 #[path = "turn_outcome_history_tests.rs"]
 mod turn_outcome_history_tests;
+#[path = "channel_input_delivery_tests.rs"]
+mod channel_input_delivery_tests;
+#[path = "channel_input_observation_tests.rs"]
+mod channel_input_observation_tests;
+#[path = "session_process_owner_tests.rs"]
+mod session_process_owner_tests;
 #[path = "message_timeline_history_tests.rs"]
 mod message_timeline_history_tests;
 #[path = "turn_accepted_input_tests.rs"]
@@ -4422,3 +4428,6 @@ async fn turn_output_facts_resolve_payloads_only_inside_the_exact_terminal_bound
     assert!(matches!(store.turn_output_facts(&session.agent_session_id, &OperationId::from("missing-turn")).await,
         Err(SessionStoreError::NotFound(_))));
 }
+
+#[path = "session_input_tests.rs"]
+mod session_input_tests;

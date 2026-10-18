@@ -964,7 +964,6 @@
   },
   "notFound": "Conversation not found or has been deleted",
   "steer": {
-    "button": "Send now (interject into the running reply)",
     "fallbackQueued": "Steering delivery was not confirmed. Text and attachments are saved for review; the queue will not run automatically. Check the conversation before editing to resend or removing this draft.",
     "reviewDelivery": "Review delivery"
   },
@@ -988,5 +987,13 @@
     "title": "Waiting for your input",
     "remainingWork": "Remaining work",
     "addInput": "Add information"
+  },
+  "inputDelivery": {
+    "pending": "Saved, waiting to be processed",
+    "blocked": "This input was saved but not processed. Check the issue before sending it again.",
+    "attachment": "Check that the attachments are available.",
+    "skill": "Check that the selected skills are available.",
+    "budget": "Shorten the message or reduce the attachments.",
+    "discarded": "No longer pending after the context was cleared"
   }
 }

@@ -4311,6 +4311,248 @@
     "title": "CapabilityCatalogEntry",
     "type": "object"
   },
+  "channel_input_delivery_state": {
+    "$defs": {
+      "ChannelInputDeliveryPhase": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "state": {
+                "const": "started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "provider_message_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "state": {
+                "const": "confirmed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "provider_message_ids"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "state": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ChannelInputDeliverySubject": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "question",
+                "type": "string"
+              },
+              "question_seq": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "question_seq"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "terminal",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ChannelInputSource": {
+        "additionalProperties": false,
+        "description": "Trusted ingress identity carried by the one original accepted input.\nThe Channel Session id is the actual transport binding row, not an Agent\nSession mirror; revocation or rebinding invalidates automatic delivery.",
+        "properties": {
+          "channel_plugin_id": {
+            "type": "string"
+          },
+          "channel_session_id": {
+            "type": "string"
+          },
+          "chat_id": {
+            "type": "string"
+          },
+          "inbound_message_key": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "channel_plugin_id",
+          "chat_id",
+          "channel_session_id",
+          "inbound_message_key"
+        ],
+        "type": "object"
+      },
+      "PrincipalRef": {
+        "additionalProperties": false,
+        "properties": {
+          "principal_id": {
+            "type": "string"
+          },
+          "principal_kind": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "principal_kind",
+          "principal_id"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Write-ahead observation of external transport delivery. Content remains in\nits original input/Turn; this fact never grants another execution or retry.",
+    "properties": {
+      "agent_session_id": {
+        "type": "string"
+      },
+      "input_event_id": {
+        "type": "string"
+      },
+      "operation_id": {
+        "type": "string"
+      },
+      "owner_ref": {
+        "$ref": "#/$defs/PrincipalRef"
+      },
+      "phase": {
+        "$ref": "#/$defs/ChannelInputDeliveryPhase"
+      },
+      "source": {
+        "$ref": "#/$defs/ChannelInputSource"
+      },
+      "subject": {
+        "$ref": "#/$defs/ChannelInputDeliverySubject"
+      }
+    },
+    "required": [
+      "agent_session_id",
+      "owner_ref",
+      "input_event_id",
+      "operation_id",
+      "source",
+      "subject",
+      "phase"
+    ],
+    "title": "ChannelInputDeliveryStateV1",
+    "type": "object"
+  },
+  "channel_input_question_delivered": {
+    "$defs": {
+      "PrincipalRef": {
+        "additionalProperties": false,
+        "properties": {
+          "principal_id": {
+            "type": "string"
+          },
+          "principal_kind": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "principal_kind",
+          "principal_id"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "agent_session_id": {
+        "type": "string"
+      },
+      "channel_plugin_id": {
+        "type": "string"
+      },
+      "chat_id": {
+        "type": "string"
+      },
+      "operation_id": {
+        "type": "string"
+      },
+      "owner_ref": {
+        "$ref": "#/$defs/PrincipalRef"
+      },
+      "platform": {
+        "type": "string"
+      },
+      "provider_message_id": {
+        "type": "string"
+      },
+      "question_seq": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "request_id": {
+        "type": "string"
+      },
+      "source_message_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "agent_session_id",
+      "owner_ref",
+      "operation_id",
+      "source_message_id",
+      "question_seq",
+      "request_id",
+      "platform",
+      "channel_plugin_id",
+      "chat_id",
+      "provider_message_id"
+    ],
+    "title": "ChannelInputQuestionDeliveredV1",
+    "type": "object"
+  },
   "context_cleared_payload": {
     "$defs": {
       "AgentHandoffBindingRefV1": {
@@ -7712,6 +7954,119 @@
       "entries"
     ],
     "title": "SessionEventRegistryPayload",
+    "type": "object"
+  },
+  "session_process_owner_released": {
+    "$defs": {
+      "NativeRetainedProcess": {
+        "additionalProperties": false,
+        "properties": {
+          "creator_call_id": {
+            "type": "string"
+          },
+          "creator_turn_id": {
+            "type": "string"
+          },
+          "pid": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "process_id": {
+            "type": "string"
+          },
+          "resolved_snapshot_ref": {
+            "$ref": "#/$defs/ResolvedSnapshotRef"
+          },
+          "resource_binding_digest": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "process_id",
+          "pid",
+          "creator_turn_id",
+          "creator_call_id",
+          "resolved_snapshot_ref",
+          "resource_binding_digest"
+        ],
+        "type": "object"
+      },
+      "NativeSessionProcessRetention": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "owner_generation": {
+            "type": "string"
+          },
+          "owner_ref": {
+            "$ref": "#/$defs/PrincipalRef"
+          },
+          "processes": {
+            "items": {
+              "$ref": "#/$defs/NativeRetainedProcess"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "agent_session_id",
+          "owner_ref",
+          "owner_generation",
+          "processes"
+        ],
+        "type": "object"
+      },
+      "PrincipalRef": {
+        "additionalProperties": false,
+        "properties": {
+          "principal_id": {
+            "type": "string"
+          },
+          "principal_kind": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "principal_kind",
+          "principal_id"
+        ],
+        "type": "object"
+      },
+      "ResolvedSnapshotRef": {
+        "additionalProperties": false,
+        "properties": {
+          "snapshot_digest": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "snapshot_digest"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "reaped": {
+        "type": "boolean"
+      },
+      "retention": {
+        "$ref": "#/$defs/NativeSessionProcessRetention"
+      }
+    },
+    "required": [
+      "retention",
+      "reaped"
+    ],
+    "title": "SessionProcessOwnerReleasedV1",
     "type": "object"
   },
   "target_package_inventory": {

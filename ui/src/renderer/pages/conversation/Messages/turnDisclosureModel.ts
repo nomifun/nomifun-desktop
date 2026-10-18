@@ -320,7 +320,8 @@ function buildSegmentOutput(
 
   // A result receipt may precede its message rows in history. Membership is
   // exact and independent of arrival order, timestamps, or an empty tail row.
-  const isVisibleAssistant = (index: number) => isClosed && publicResultIds.has(segment[index].id);
+  const isVisibleAssistant = (index: number) => publicResultIds.has(segment[index].id)
+    && (isClosed || Boolean(segment[index].userInputRequestId));
   const stateOptions = { isClosed };
 
   const processItems = segment.filter((entry, index) => {

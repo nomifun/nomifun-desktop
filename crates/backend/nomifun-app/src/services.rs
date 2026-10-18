@@ -1386,6 +1386,9 @@ impl AppServices {
             Ok(Err(error)) => { errors.push(format!("Agent runtime cleanup failed: {error}")); false }
             Err(_) => { errors.push("Agent runtime cleanup timed out".into()); false }
         };
+        if let Err(error)=self.official_runtime.shutdown_session_processes().await {
+            errors.push(format!("Session background process cleanup failed: {error}"));
+        }
         match tokio::time::timeout(
             Duration::from_secs(5),
             self.terminal_service.shutdown_cleanup(),

@@ -230,15 +230,15 @@ mod tests {
     fn workspace_process_terminal_failure_is_model_visible_without_legacy_identity() {
         assert!(is_workspace_process_action(
             &CapabilityId::from("workspace.process"),
-            &ActionId::from("workspace.process/exec"),
+            &ActionId::from("workspace.process/start"),
         ));
         assert!(!is_workspace_process_action(
-            &CapabilityId::from("workspace.process/exec"),
+            &CapabilityId::from("workspace.process/start"),
             &ActionId::from("process.exec.invoke"),
         ));
         assert!(process_result_is_error(
             true,
-            "workspace.process/exec",
+            "workspace.process/start",
             &json!({"state":"exited", "success":false, "exit_code":7}),
         ));
         assert!(!process_result_is_error(
@@ -268,7 +268,7 @@ mod tests {
         ));
         assert!(process_result_is_error(
             true,
-            "workspace.process/exec",
+            "workspace.process/start",
             &json!({"state":"cancelled", "success":false, "cleanup":{"reaped":true}}),
         ));
     }
@@ -278,7 +278,7 @@ mod tests {
         let actual = std::env::consts::OS;
         let mismatched = if actual == "windows" { "macos" } else { "windows" };
         let definition = |host: &str| ChatToolDefinition {
-            name: "exec_command".into(),
+            name: "start_process".into(),
             description: format!(
                 "{PROCESS_HOST_OS_DESCRIPTION_PREFIX}{host}. Execute a command."
             ),
@@ -288,7 +288,7 @@ mod tests {
         let call_id = ToolCallId::from("host-os-call");
         assert!(process_host_os_mapping_error(
             true,
-            "workspace.process/exec",
+            "workspace.process/start",
             &definition(actual),
             &call_id,
         )
@@ -303,7 +303,7 @@ mod tests {
 
         let result = process_host_os_mapping_error(
             true,
-            "workspace.process/exec",
+            "workspace.process/start",
             &definition(mismatched),
             &call_id,
         )

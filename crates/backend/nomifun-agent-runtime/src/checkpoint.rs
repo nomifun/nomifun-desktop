@@ -27,6 +27,9 @@ pub struct AgentExecutionCheckpoint {
     #[serde(default)]
     pub control_rejections: crate::AgentControlRejectionState,
     pub completion_review: crate::AgentCompletionReviewState,
+    /// Native crash reconciliation can preserve a source question whose
+    /// canonical terminal was not committed. Ordinary input handoff does not
+    /// save a checkpoint or use native resume to accept the next message.
     pub pending_user_input: Option<nomifun_agent_contracts::AgentUserInputRequest>,
 }
 
@@ -45,10 +48,9 @@ impl AgentExecutionCheckpoint {
         self.control_rejections.validate()?;
         if let Some(request) = &self.pending_user_input {
             request.validate().map_err(AgentEngineError::InvalidContract)?;
-            if self.completion_review.is_report_only() || self.completion_review.account_repair
-                || self.completion_review.delivery_pending || !self.patch_recovery.targets.is_empty()
+            if !self.patch_recovery.targets.is_empty()
                 || !self.patch_recovery.unresolved_targets.is_empty() || self.patch_recovery.target_budget_exceeded {
-                return Err(AgentEngineError::InvalidContract("unsettled patch or locked completion review cannot carry an input handoff".into()));
+                return Err(AgentEngineError::InvalidContract("unsettled patch recovery cannot close an input handoff".into()));
             }
         }
         if !self.completion_review.valid_for(self.accepted_input_count) {

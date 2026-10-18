@@ -245,7 +245,7 @@ impl SourceEvent {
     }
 
     fn value(&self, session_id: &str) -> Result<Value, AppError> {
-        if self.kind_version != 1 || self.seq <= 0 {
+        if (self.kind_version != 1 && !(self.kind == "turn/steer-accepted" && self.kind_version == 2)) || self.seq <= 0 {
             return Err(failure("unsupported canonical context event"));
         }
         if let Some(raw) = &self.inline_json {
@@ -286,6 +286,7 @@ impl SourceEvent {
         &self,
         session_id: &str,
         origin: &CompanionSessionOrigin,
+        principal:&PrincipalRef,
     ) -> Result<Option<Value>, AppError> {
         let payload = self.value(session_id)?;
         let mut result = json!({
@@ -329,7 +330,7 @@ impl SourceEvent {
                     payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(payload.clone())),
                 };
                 let contexts = nomifun_agent_session::canonical_context_messages(
-                    &[event],
+                    principal, &[event],
                     &std::collections::BTreeMap::from([(self.event_id.clone(), payload)]),
                     0,
                     0,
@@ -507,8 +508,8 @@ async fn recent_context(
             .bind(id.as_ref()).fetch_one(&mut *tx).await.map_err(failure)?;
         // Inputs and results have independent slots. A burst of progress or
         // terminal notices cannot push the user's latest statement out.
-        let inputs = source_rows(&mut tx, id.as_ref(), floor, true).await?;
-        let results = source_rows(&mut tx, id.as_ref(), floor, false).await?;
+        let inputs = source_rows(&mut tx, id.as_ref(), floor, true,principal).await?;
+        let results = source_rows(&mut tx, id.as_ref(), floor, false,principal).await?;
         let source_payloads_truncated:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_events e \
             LEFT JOIN agent_payloads p ON p.payload_id=e.payload_id WHERE e.session_id=? AND e.seq>? \
             AND e.kind IN ('message/user-accepted','turn/steer-accepted','message/assistant-projected') \
@@ -528,7 +529,7 @@ async fn recent_context(
             {
                 continue;
             }
-            if let Some(observation) = source.observation(id.as_ref(), &origin)? {
+            if let Some(observation) = source.observation(id.as_ref(), &origin,principal)? {
                 visible_inputs.push(observation);
             }
             if visible_inputs.len() >= RECENT_INPUT_LIMIT as usize {
@@ -567,7 +568,7 @@ async fn recent_context(
                     continue;
                 }
             }
-            if let Some(observation) = result.observation(id.as_ref(), &origin)? {
+            if let Some(observation) = result.observation(id.as_ref(), &origin,principal)? {
                 visible_results.push(observation);
             }
         }
@@ -618,6 +619,7 @@ async fn source_rows(
     id: &str,
     floor: i64,
     inputs: bool,
+    principal:&PrincipalRef,
 ) -> Result<Vec<SourceEvent>, AppError> {
     let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
         "WITH sources AS (SELECT e.seq,e.event_id,e.kind,e.kind_version,e.correlation_id, \
@@ -639,9 +641,16 @@ async fn source_rows(
         .push_bind(MAX_SOURCE_PAYLOAD_BYTES)
         .push(")) SELECT * FROM sources WHERE ");
     if inputs {
-        query.push("kind IN ('message/user-accepted','turn/steer-accepted') \
+        query.push("(kind='message/user-accepted' OR (kind='turn/steer-accepted' AND kind_version=1)) \
             AND COALESCE(json_extract(source_json,CASE WHEN kind='turn/steer-accepted' THEN '$.input.hidden' ELSE '$.hidden' END),0)=0 \
             AND COALESCE(json_extract(source_json,CASE WHEN kind='turn/steer-accepted' THEN '$.input.origin' ELSE '$.origin' END),'') IN ('','robot')");
+        let namespace=nomifun_agent_session::session_input_namespace(principal,&AgentSessionId::from(id));
+        query.push(" AND (kind='turn/steer-accepted' OR NOT (producer_id='session_api' AND correlation_id=event_id AND substr(idempotency_key,1,")
+            .push_bind(namespace.len() as i64).push(")=").push_bind(namespace.clone())
+            .push(" AND length(idempotency_key)=").push_bind(namespace.len() as i64+64)
+            .push(" AND substr(idempotency_key,").push_bind(namespace.len() as i64+1).push(") NOT GLOB '*[^0-9a-f]*') OR EXISTS(SELECT 1 FROM agent_turns t WHERE t.session_id=")
+            .push_bind(id).push(" AND t.source_message_id=sources.event_id) OR EXISTS(SELECT 1 FROM agent_events claim LEFT JOIN agent_payloads cp ON cp.payload_id=claim.payload_id WHERE claim.session_id=")
+            .push_bind(id).push(" AND claim.kind='turn/steer-accepted' AND claim.kind_version=2 AND COALESCE(json_extract(claim.inline_json,'$.input_event_id'),json_extract(CAST(cp.body AS TEXT),'$.value.input_event_id'))=sources.event_id))");
     } else {
         query.push("kind IN ('message/assistant-projected','turn/completed','turn/failed','turn/cancelled')");
     }

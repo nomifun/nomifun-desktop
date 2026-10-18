@@ -597,6 +597,9 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
     add_schema::<AgentStoreSchemaManifestPayload>(&mut schemas, "agent_store_schema_manifest")?;
     add_schema::<SessionEventRegistryPayload>(&mut schemas, "session_event_registry")?;
     add_schema::<TurnWorkspaceFilesObservedV1>(&mut schemas, "turn_workspace_files_observed")?;
+    add_schema::<nomifun_agent_contracts::ChannelInputQuestionDeliveredV1>(&mut schemas, "channel_input_question_delivered")?;
+    add_schema::<nomifun_agent_contracts::ChannelInputDeliveryStateV1>(&mut schemas, "channel_input_delivery_state")?;
+    add_schema::<nomifun_agent_contracts::SessionProcessOwnerReleasedV1>(&mut schemas, "session_process_owner_released")?;
     add_schema::<KnowledgeWritebackStartedV1>(&mut schemas, "turn_knowledge_writeback_started")?;
     add_schema::<KnowledgeWritebackSettledV1>(&mut schemas, "turn_knowledge_writeback_settled")?;
     add_schema::<CanonicalErrorRegistryPayload>(&mut schemas, "canonical_error_registry")?;

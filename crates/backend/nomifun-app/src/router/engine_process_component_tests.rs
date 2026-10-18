@@ -17,7 +17,7 @@ async fn component_preparation_rejections_do_not_dispatch_user_processes() {
         assert!(!observation.to_string().contains("conflicting-value"));
     }
     let state = scope.state.lock().await;
-    assert!(state.operations.is_empty());
+    assert!(!state.unregistered_start);
     assert!(state.sessions.is_empty());
     assert!(state.is_quiescent());
 }
@@ -43,7 +43,7 @@ async fn component_cancellation_is_unstarted_and_does_not_close_other_suppliers(
     assert_eq!(observation["state"], "not_started");
     assert_eq!(observation["code"], "CANCELLED");
     assert_eq!(observation["user_code_started"], false);
-    assert!(scope.state.lock().await.operations.is_empty());
+    assert!(scope.state.lock().await.sessions.is_empty());
 }
 
 #[tokio::test]
@@ -59,7 +59,7 @@ async fn component_cannot_change_existing_process_controls_or_mix_launch_targets
         let failure = scope.invoke(StrictJsonValue(input), "invalid-component").await.unwrap_err();
         assert_eq!(failure.code, "INVALID_PAYLOAD");
     }
-    assert!(scope.state.lock().await.operations.is_empty());
+    assert!(scope.state.lock().await.sessions.is_empty());
 }
 
 #[cfg(unix)]
@@ -116,7 +116,7 @@ async fn real_component_office_pptx_ignores_same_named_path_program() {
         assert_eq!(output["cleanup"]["reaped"], true);
     }
     assert!(!root.path().join("WRONG_OFFICECLI_EXECUTED").exists());
-    let operations_before = scope.state.lock().await.operations.len();
+    let creators_before = scope.state.lock().await.sessions.values().map(|entry|entry.creator_call.clone()).collect::<BTreeSet<_>>();
     let full_environment: BTreeMap<_, _> = (0..128).map(|index| (format!("FLAG_{index}"), "keep".to_owned())).collect();
     let rejected = scope.invoke(StrictJsonValue(serde_json::json!({
         "component":"officecli", "args":["--version"], "env":full_environment,
@@ -124,7 +124,7 @@ async fn real_component_office_pptx_ignores_same_named_path_program() {
     assert_eq!(rejected["state"], "not_started");
     assert_eq!(rejected["user_code_started"], false);
     assert_eq!(rejected["code"], "INVALID_PAYLOAD");
-    assert_eq!(scope.state.lock().await.operations.len(), operations_before);
+    assert_eq!(scope.state.lock().await.sessions.values().map(|entry|entry.creator_call.clone()).collect::<BTreeSet<_>>(), creators_before);
     let file = std::fs::File::open(root.path().join("managed.pptx")).unwrap();
     let mut archive = zip::ZipArchive::new(file).unwrap();
     assert_eq!(archive.file_names().filter(|name| name.starts_with("ppt/slides/slide") && name.ends_with(".xml")).count(), 2);

@@ -82,6 +82,7 @@ pub(super) async fn reconcile(
     let _operation_guard = state.session_owner.session_operation_lock(session.as_ref()).write_owned().await;
     let ack = state.session_owner.canonical().store().reconcile_native_effect_by_owner(
         &authenticated_principal(&owner), &session, &request).await.map_err(agent_session_store_error)?;
+    state.session_owner.schedule_session_input_drain(owner.as_ref().to_owned(),session,None);
     Ok(Json(ApiResponse::ok(ack)))
 }
 
@@ -114,6 +115,18 @@ pub(in crate::router) async fn resume(
 }
 
 impl NomiCoreSessionOwner {
+    pub(in crate::router) async fn require_ordinary_owner_input(&self,owner:&PrincipalRef,session:&AgentSessionId) -> Result<(),AppError> {
+        let observed=self.canonical.get(owner,session).await?;
+        let attempt:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversation_execution_links WHERE conversation_id=? AND active=1 AND relation IN ('attempt','automation'))")
+            .bind(session.as_ref()).fetch_one(&self.pool).await.map_err(|error|AppError::Internal(error.to_string()))?;
+        if observed.session.metadata.purpose != nomifun_agent_contracts::SessionPurpose::Conversation
+            || observed.session.remote_binding_provenance.is_some() || attempt
+            || self.is_companion_associated_task(&owner.principal_id,session).await? {
+            return Err(AppError::Conflict("This Session's inputs require their exact domain authority".into()));
+        }
+        Ok(())
+    }
+
     async fn prepare_native_resume(&self, owner: &PrincipalRef, session: &AgentSessionId,
         request: &NativeResumeRequest) -> Result<NativeResumePreparation, AppError> {
         let reject = |message: &str| AppError::Conflict(format!("Native resume: {message}"));
@@ -127,13 +140,6 @@ impl NomiCoreSessionOwner {
             || saved.revision != request.expected_checkpoint_revision || saved.digest != request.expected_checkpoint_digest
             || pause.revision != request.expected_pause_revision {
             return Err(reject("pause/checkpoint/owner changed"));
-        }
-        if pause.reason=="PLUGIN_CURRENT_CONVERSATION_PENDING" {
-            let linked:bool=sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM conversation_execution_links link JOIN agent_executions e ON e.execution_id=link.execution_id WHERE link.conversation_id=? AND link.relation='lead' AND link.active=1 AND e.user_id=? AND e.deleted_at IS NULL AND e.status NOT IN ('completed','completed_with_failures','failed','cancelled'))"
-            ).bind(session.as_ref()).bind(&owner.principal_id).fetch_one(&self.pool).await
-                .map_err(|error|AppError::Internal(error.to_string()))?;
-            if linked { return Err(reject("finish the linked AgentExecution before rebuilding this conversation's Plugin tools")); }
         }
         if pause.reason.contains("NO_PROGRESS") && !request.budget.retry_stall_guards {
             return Err(reject("the owner must explicitly acknowledge retrying the stalled execution"));

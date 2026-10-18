@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(capabilities.iter().map(|entry| entry["capability"]["id"].as_str().unwrap()).collect::<Vec<_>>(),
             ["workspace.files", "workspace.process"]);
         assert_eq!(capabilities[0]["action_count"], 6);
-        assert_eq!(capabilities[1]["action_count"], 7);
+        assert_eq!(capabilities[1]["action_count"], 6);
         for key in ["skills", "mcp_tools", "roles"] {
             assert_eq!(value["data"][key], serde_json::json!([]));
         }

@@ -17,8 +17,10 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::protocol::events::{
-    AgentStreamEvent, TextEventData, ThinkingEventData, ToolCallEventData, ToolCallStatus,
+    AgentStreamEvent, TextEventData, ThinkingEventData,
 };
+#[cfg(test)]
+use crate::protocol::events::ToolCallStatus;
 use crate::protocol::send_error::AgentSendError;
 use crate::engine_sdk::{EngineProgress, EngineSessionDriver, EngineTurnOutcome, EngineTurnOutput, EngineTurnTerminal, HostedAgentRuntime};
 use crate::types::{AgentRuntimeBuildOptions, SendMessageData};
@@ -51,6 +53,13 @@ pub trait UnifiedRuntimeHost: Send + Sync {
     }
     async fn queue_steer(&self, _delivery: crate::RuntimeSteerDelivery) -> Result<bool, AppError> {
         Err(AppError::BadRequest("Nomi host does not support receipt-bound steering".into()))
+    }
+    async fn validate_session_input(&self,_files:Vec<String>,_skills:Vec<String>)->Result<(),AppError> {Err(AppError::Conflict("Runtime does not support Session input preparation".into()))}
+
+    async fn session_input_changed(&self,_retry_input:Option<String>)->Result<(),AppError> {Ok(())}
+
+    async fn admit_steer(&self,_admission:crate::RuntimeSteerAdmission)->Result<crate::RuntimeSteerAdmissionOutcome,AppError> {
+        Err(AppError::BadRequest("Nomi host has no atomic steering admission owner".into()))
     }
     /// Return the same canonical active set used by tool admission. A host
     /// without a materialized Snapshot must explicitly return None.
@@ -104,11 +113,11 @@ pub trait UnifiedRuntimeHost: Send + Sync {
 
     /// Required on every exit, including preparation failure and cancellation.
     /// Success proves turn-scoped tools/processes are quiescent.
-    async fn cleanup_turn(&self, message: &SendMessageData) -> Result<(), AppError>;
+    async fn cleanup_turn(&self, message: &SendMessageData, terminal: &EngineTurnTerminal) -> Result<(), AppError>;
 
     /// Required, idempotent proof that all Session-owned resources have exited.
     /// A failure retains the registry's teardown quarantine.
-    async fn cleanup_session(&self) -> Result<(), AppError>;
+    async fn cleanup_session(&self, reason: Option<AgentKillReason>) -> Result<(), AppError>;
 }
 
 fn contract_error(error: AgentEngineError) -> AppError {
@@ -166,10 +175,7 @@ impl UnifiedAgentRuntime {
     }
 }
 
-struct PendingToolProjection {
-    public: ToolCallEventData,
-    arguments: serde_json::Value,
-}
+use crate::tool_delivery_projection::PendingToolProjection;
 
 struct TurnProjection {
     host: Arc<dyn UnifiedRuntimeHost>,
@@ -304,8 +310,15 @@ impl TurnProjection {
         let projected = match event {
             // The host has committed the full plan. Re-read the canonical
             // snapshot, including lifecycle and reset state, for presentation.
-            AgentEngineEvent::PlanUpdated { .. } | AgentEngineEvent::TurnWaiting { .. }
-                | AgentEngineEvent::TurnWaitResolved { .. } => Some(EngineProgress::TaskPlanChanged),
+            AgentEngineEvent::PlanUpdated { .. } => Some(EngineProgress::TaskPlanChanged),
+            AgentEngineEvent::UserInputRequested { request, .. } => event_seq.map(|question_seq| {
+                self.output.publish(EngineProgress::TaskPlanChanged);
+                EngineProgress::InputQuestion(crate::protocol::events::InputQuestionEventData {
+                    request, target: nomifun_api_types::AgentQuestionReplyTargetDto {
+                        turn_id: self.message.source_message_id.as_deref().unwrap_or(&self.message.msg_id).to_owned(), question_seq,
+                    },
+                })}),
+            AgentEngineEvent::TurnWaiting { .. } | AgentEngineEvent::TurnWaitResolved { .. } => Some(EngineProgress::TaskPlanChanged),
             AgentEngineEvent::TurnStarted { .. } | AgentEngineEvent::ExecutionResumed { .. } => Some(EngineProgress::Started),
             AgentEngineEvent::OutputTextDelta { step, text, .. } | AgentEngineEvent::CompletionDelivered { step, text } => {
                 Some(EngineProgress::Text(TextEventData { content: text, step: Some(step), timeline: None }))
@@ -319,90 +332,10 @@ impl TurnProjection {
                     status: Some("thinking".into()),
                 }))
             }
-            AgentEngineEvent::ToolCallCompleted { call, .. } => {
-                self.calls.lock().unwrap_or_else(|e| e.into_inner()).insert(
-                    call.call_id.as_ref().to_owned(),
-                    PendingToolProjection {
-                        public: ToolCallEventData {
-                            identity: Default::default(),
-                            call_id: call.call_id.as_ref().to_owned(),
-                            description: nomifun_engine_core::tool_display_target(None, None, &call.name, &call.arguments.0),
-                            name: call.name,
-                            status: ToolCallStatus::Running,
-                            artifacts: Vec::new(),
-                        },
-                        arguments: call.arguments.0,
-                    },
-                );
-                None
-            }
-            AgentEngineEvent::ModelOutputTruncated { discarded_tool_call_ids, .. }
-            | AgentEngineEvent::ModelResponseRejected { discarded_tool_call_ids, .. }
-            | AgentEngineEvent::VoiceModelStepSuperseded {discarded_tool_call_ids,..} => {
-                let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
-                for id in discarded_tool_call_ids { calls.remove(id.as_ref()); }
-                None
-            }
-            AgentEngineEvent::ToolStarted { call_id, capability_id, action_id, .. } => {
-                let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
-                calls.get_mut(call_id.as_ref())
-                    .filter(|call| !call.public.call_id.starts_with("agent-instructions:"))
-                    .filter(|call| call.public.name != nomifun_agent_runtime::FINISH_WITHOUT_REPLY_TOOL_NAME)
-                    .map(|pending| {
-                        let call = &mut pending.public;
-                        call.identity.capability_id = Some(capability_id.as_ref().to_owned());
-                        call.identity.action_id = Some(action_id.as_ref().to_owned());
-                        call.description = nomifun_engine_core::tool_display_target(
-                            Some(capability_id.as_ref()), Some(action_id.as_ref()), &call.name, &pending.arguments);
-                        call.identity.display.operation = nomifun_engine_core::tool_display_operation(Some(capability_id.as_ref()), &pending.arguments);
-                        EngineProgress::ToolCall(call.clone())
-                    })
-            }
-            AgentEngineEvent::ToolCompleted { result, runtime_hold, .. } => {
-                let pending = self
-                    .calls
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(result.call_id.as_ref())
-                    .ok_or_else(|| {
-                        AgentEngineError::InvalidModelEvent(
-                            "tool result has no admitted call".to_owned(),
-                        )
-                    })?;
-                let mut call = pending.public;
-                // These are engine-owned instruction preflight reads, not
-                // model-selected work. Keep their durable observations but do
-                // not flood the conversation with synthetic read/error rows.
-                if call.call_id.starts_with("agent-instructions:")
-                    || call.name == nomifun_agent_runtime::FINISH_WITHOUT_REPLY_TOOL_NAME {
-                    return Ok(());
-                }
-                call.status = if result.is_error {
-                    ToolCallStatus::Error
-                } else {
-                    ToolCallStatus::Completed
-                };
-                call.identity.result_seq = event_seq;
-                call.identity.runtime_hold = runtime_hold;
-                call.identity.permission_required = nomifun_engine_core::project_system_permission_required(
-                    call.identity.capability_id.as_deref(), call.identity.action_id.as_deref(),
-                    result.is_error, &result.output_text(),
-                );
-                call.identity.error_code = call.identity.permission_required.as_ref()
-                    .map(|_| nomifun_engine_core::SYSTEM_PERMISSION_REQUIRED.to_owned());
-                let operation = call.identity.display.operation.take();
-                call.identity.display = nomifun_engine_core::tool_result_display(
-                    call.identity.capability_id.as_deref(), call.identity.action_id.as_deref(), &result);
-                call.identity.display.operation = operation;
-                if call.identity.runtime_hold.is_some() || call.identity.permission_required.is_some() { call.identity.display.error = None; }
-                if call.identity.display.cancelled { call.status = ToolCallStatus::Canceled; }
-                call.identity.display.denied_stop_conversation_id = nomifun_engine_core::tool_denied_stop_target(
-                    &call.name, &pending.arguments, &result);
-                if let Some(target) = nomifun_engine_core::tool_result_target(
-                    call.identity.capability_id.as_deref(), call.identity.action_id.as_deref(), &result) {
-                    call.description = Some(target);
-                }
-                Some(EngineProgress::ToolCall(call))
+            event if crate::tool_delivery_projection::is_tool_projection_event(&event) => {
+                crate::tool_delivery_projection::project_tool_event(
+                    &mut self.calls.lock().unwrap_or_else(|e|e.into_inner()),event,event_seq)?
+                    .map(EngineProgress::ToolCall)
             }
             // Semantics are recorded above even when there is no UI projection.
             _ => None,
@@ -499,8 +432,15 @@ impl EngineSessionDriver for UnifiedSessionDriver {
     async fn queue_steer(&self, delivery: crate::RuntimeSteerDelivery) -> Result<bool, AppError> {
         self.host.queue_steer(delivery).await
     }
-    async fn cleanup_turn(&self, message: &SendMessageData) -> Result<(), AppError> {
-        self.host.cleanup_turn(message).await
+    async fn validate_session_input(&self,files:Vec<String>,skills:Vec<String>)->Result<(),AppError> {self.host.validate_session_input(files,skills).await}
+
+    async fn session_input_changed(&self,retry_input:Option<String>)->Result<(),AppError> {self.host.session_input_changed(retry_input).await}
+
+    async fn admit_steer(&self,admission:crate::RuntimeSteerAdmission)->Result<crate::RuntimeSteerAdmissionOutcome,AppError> {
+        self.host.admit_steer(admission).await
+    }
+    async fn cleanup_turn(&self, message: &SendMessageData, terminal: &EngineTurnTerminal) -> Result<(), AppError> {
+        self.host.cleanup_turn(message,terminal).await
     }
     async fn suspend_after_cleanup_failure(&self, message: &SendMessageData) -> Result<bool,AppError> {
         self.closed_terminal.store(false, std::sync::atomic::Ordering::Release);
@@ -516,7 +456,7 @@ impl EngineSessionDriver for UnifiedSessionDriver {
             std::sync::atomic::Ordering::Release);
         Ok(())
     }
-    async fn cleanup_session(&self) -> Result<(), AppError> { self.host.cleanup_session().await }
+    async fn cleanup_session(&self, reason: Option<AgentKillReason>) -> Result<(), AppError> { self.host.cleanup_session(reason).await }
 }
 
 fn model_turn_failure(error: AgentEngineError) -> (String, nomifun_agent_runtime::AgentTurnFailure) {
@@ -578,6 +518,13 @@ impl OfficialAgentRuntime for UnifiedAgentRuntime {
     fn supports_steering_context(&self) -> bool { self.runtime.supports_steering_context() }
     async fn steer_with_receipt(&self, delivery: crate::RuntimeSteerDelivery) -> Result<bool, AppError> {
         self.runtime.steer_with_receipt(delivery).await
+    }
+    async fn validate_session_input(&self,files:Vec<String>,skills:Vec<String>)->Result<(),AppError> {self.runtime.validate_session_input(files,skills).await}
+
+    async fn session_input_changed(&self,retry_input:Option<String>)->Result<(),AppError> {self.runtime.session_input_changed(retry_input).await}
+
+    async fn admit_steer(&self,admission:crate::RuntimeSteerAdmission)->Result<crate::RuntimeSteerAdmissionOutcome,AppError> {
+        self.runtime.admit_steer(admission).await
     }
     fn kill_and_wait(&self, reason: Option<AgentKillReason>) -> RuntimeTeardown { self.runtime.kill_and_wait(reason) }
 }
@@ -724,6 +671,8 @@ mod tests {
         events: Mutex<Vec<AgentEngineEvent>>,
         cleanup_turns: AtomicUsize,
         cleanup_sessions: AtomicUsize,
+        cleanup_terminals: Mutex<Vec<EngineTurnTerminal>>,
+        cleanup_reasons: Mutex<Vec<Option<AgentKillReason>>>,
         fail_cleanup: AtomicBool,
         pending_preparation: AtomicBool,
         prepare_failure_at: AtomicUsize,
@@ -748,6 +697,8 @@ mod tests {
                 events: Mutex::new(Vec::new()),
                 cleanup_turns: AtomicUsize::new(0),
                 cleanup_sessions: AtomicUsize::new(0),
+                cleanup_terminals: Mutex::new(Vec::new()),
+                cleanup_reasons: Mutex::new(Vec::new()),
                 fail_cleanup: AtomicBool::new(false),
                 pending_preparation: AtomicBool::new(false),
                 prepare_failure_at: AtomicUsize::new(usize::MAX),
@@ -877,7 +828,8 @@ mod tests {
             }
             Ok(self.timelines.lock().unwrap().clone())
         }
-        async fn cleanup_turn(&self, _message: &SendMessageData) -> Result<(), AppError> {
+        async fn cleanup_turn(&self, _message: &SendMessageData, terminal: &EngineTurnTerminal) -> Result<(), AppError> {
+            self.cleanup_terminals.lock().unwrap().push(terminal.clone());
             if self.block_cleanup.load(Ordering::Acquire) {
                 self.cleanup_entered.notify_one();
                 self.cleanup_release.acquire().await.unwrap().forget();
@@ -888,7 +840,8 @@ mod tests {
             }
             Ok(())
         }
-        async fn cleanup_session(&self) -> Result<(), AppError> {
+        async fn cleanup_session(&self, reason: Option<AgentKillReason>) -> Result<(), AppError> {
+            self.cleanup_reasons.lock().unwrap().push(reason);
             self.cleanup_sessions.fetch_add(1, Ordering::SeqCst);
             if self.fail_cleanup.load(Ordering::Acquire) {
                 return Err(AppError::Conflict("process has not exited".to_owned()));
@@ -1024,11 +977,12 @@ mod tests {
         drop(recorded);
         assert_eq!(runtime.status(), Some(ConversationStatus::Finished));
         assert!(runtime.requires_turn_boundary_recycle(), "recorded InputRequired closes this Turn before the next input admission");
+        assert!(matches!(host.cleanup_terminals.lock().unwrap().as_slice(),[EngineTurnTerminal::InputRequired {..}]));
         runtime.kill_and_wait(None).await.unwrap();
     }
 
     #[tokio::test]
-    async fn input_required_cleanup_or_terminal_record_failure_never_publishes_the_question_or_releases_input() {
+    async fn input_required_cleanup_or_terminal_failure_keeps_committed_question_without_a_false_terminal() {
         for fail_cleanup in [true, false] {
             let host = Host::new();
             host.recycle_completed_turns.store(true, Ordering::Release);
@@ -1039,6 +993,7 @@ mod tests {
             runtime.send_message(message()).await.unwrap();
             let received = input_request_events(&mut events).await;
             assert!(matches!(received.last(), Some(AgentStreamEvent::Error(_))));
+            assert!(received.iter().any(|event|matches!(event,AgentStreamEvent::InputQuestion(_))),"a committed source question is visible independently of later cleanup");
             assert!(!received.iter().any(|event| matches!(event, AgentStreamEvent::Tips(data) if data.user_input_request.is_some())));
             assert!(!host.events.lock().unwrap().iter().any(|event| matches!(event, AgentEngineEvent::TurnInputRequired { .. })));
             assert!(!runtime.is_transport_healthy());
@@ -1253,6 +1208,33 @@ mod tests {
         assert_eq!(visible.len(), 2, "only the real device running/result rows are user-facing");
         assert!(visible.iter().all(|event| matches!(event, AgentStreamEvent::ToolCall(call) if call.call_id=="motion")));
         assert!(projection.calls.lock().unwrap().is_empty(), "hidden controls still settle their pending projection entries");
+    }
+
+    #[tokio::test]
+    async fn input_question_publishes_its_exact_committed_source_before_finite_handoff() {
+        let host = Host::new();
+        let state = AgentRuntimeState::new(SESSION, "projection-workspace", 32);
+        let turn = state.reset_for_new_turn(ConversationStatus::Running);
+        let projection = TurnProjection {
+            host: host.clone(), message: message(), output: EngineTurnOutput::new(state.clone(), turn),
+            calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
+            last_model_step: std::sync::atomic::AtomicU16::new(0),
+            pending_text: Mutex::new(VecDeque::new()), text_timeline: Mutex::new(None),
+        };
+        let mut events = state.subscribe();
+        let request = nomifun_agent_contracts::AgentUserInputRequest { request_id: "authorization".into(),
+            question: "Complete the authorization and reply here.".into(), remaining_work: "Verify the configured account.".into() };
+        let question = AgentEngineEvent::UserInputRequested { step: 1, request: request.clone() };
+        host.fail_record.store(true, Ordering::Release);
+        assert!(projection.emit(question.clone()).await.is_err());
+        assert!(events.try_recv().is_err(), "an uncommitted question has no presentation identity");
+        host.fail_record.store(false, Ordering::Release);
+        projection.emit(question).await.unwrap();
+        assert!(matches!(events.try_recv().unwrap(), AgentStreamEvent::TaskPlanChanged));
+        assert!(matches!(events.try_recv().unwrap(), AgentStreamEvent::InputQuestion(actual)
+            if actual.request == request && actual.target.question_seq == 1
+                && actual.target.turn_id == message().source_message_id.unwrap_or(message().msg_id)));
+        assert!(events.try_recv().is_err(), "no TurnWaiting or live-wait descriptor is required");
     }
 
     #[tokio::test]
@@ -1679,6 +1661,7 @@ mod tests {
             if recycle {
                 assert_eq!(observed[0].cleanup_sessions.load(Ordering::Acquire), 1,
                     "the old owner must finish cleanup before the successor is built");
+                assert_eq!(observed[0].cleanup_reasons.lock().unwrap().as_slice(),[Some(AgentKillReason::TurnBoundaryRecycle)]);
             }
             registry.terminate_and_wait_result(SESSION, None).await.unwrap();
         }

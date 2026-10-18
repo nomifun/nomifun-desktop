@@ -83,7 +83,7 @@ async fn idmm_notice_is_canonical_metadata_and_never_changes_question_or_runtime
     let rebuilt = reduce_agent_messages(None, &event, &payload).unwrap();
     assert_eq!(&rebuilt, projected);
     let payloads = BTreeMap::from([(event.event_id.0.clone(), payload)]);
-    assert!(crate::canonical_context_messages(&[event], &payloads, 0, u64::MAX, u64::MAX).unwrap().is_empty());
+    assert!(crate::canonical_context_messages(&session.owner_ref,&[event], &payloads, 0, u64::MAX, u64::MAX).unwrap().is_empty());
 }
 
 #[tokio::test]

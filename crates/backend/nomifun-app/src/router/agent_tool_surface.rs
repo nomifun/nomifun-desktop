@@ -482,7 +482,7 @@ mod tests {
     }
 
     fn guided_workspace_exposures(host_os: &str) -> Vec<AgentToolExposure> {
-        tool_model_guides().iter().map(|guide| {
+        tool_model_guides().iter().filter(|guide| nomifun_agent_domain_wave2::WORKSPACE_EXECUTION_CAPABILITY_IDS.contains(&guide.capability_id.as_str())).map(|guide| {
             let schema = canonical_workspace_schema(&guide.capability_id, &guide.action_id);
             standard_tool_exposure(&guide.capability_id.as_str().into(), &guide.action_id.as_str().into(),
                 &schema, host_os, Some(guide)).unwrap()
@@ -506,11 +506,11 @@ mod tests {
 
     #[test]
     fn all_guides_render_formal_schemas_and_valid_examples_without_constraint_copies() {
-        assert_eq!(tool_model_guides().len(),20);
+        assert_eq!(tool_model_guides().len(),22);
         for host_os in ["windows","macos","linux"] {
             let mut names=BTreeSet::new();
             let mut actions=BTreeSet::new();
-            for guide in tool_model_guides() {
+            for guide in tool_model_guides().iter().filter(|guide| nomifun_agent_domain_wave2::WORKSPACE_EXECUTION_CAPABILITY_IDS.contains(&guide.capability_id.as_str())) {
                 let canonical=canonical_workspace_schema(&guide.capability_id,&guide.action_id);
                 let original=canonical.clone();
                 let rendered=guide.render(&canonical,host_os).unwrap();
@@ -529,8 +529,8 @@ mod tests {
 
     #[test]
     fn annotation_restoration_does_not_hide_a_real_description_parameter_constraint() {
-        let guide=tool_model_guide("workspace.process","workspace.process/exec").unwrap();
-        let mut canonical=canonical_process_schema("workspace.process/exec");
+        let guide=tool_model_guide("workspace.process","workspace.process/start").unwrap();
+        let mut canonical=canonical_process_schema("workspace.process/start");
         canonical.0["properties"]["description"]=json!({"type":"string","minLength":4});
         let rendered=guide.render(&canonical,std::env::consts::OS).unwrap();
         assert_eq!(restore_guide_annotations(&rendered.input_schema,&canonical,guide),canonical);
@@ -602,7 +602,7 @@ mod tests {
     fn rendered_launch_rules_cover_three_targets_and_the_actual_native_shell() {
         for host_os in ["windows","macos","linux"] {
             let tools=guided_workspace_exposures(host_os);
-            for name in ["exec_command","start_process"] {
+            for name in ["start_process"] {
                 let definition=&tools.iter().find(|tool|tool.definition.name==name).unwrap().definition;
                 let schema=&definition.input_schema.0;
                 assert_eq!(schema["oneOf"].as_array().unwrap().len(),3);
@@ -641,10 +641,11 @@ mod tests {
             json!({"process_id":"owned","input":"你好 MAC-B\n","append_newline":false}),
             json!({"process_id":"owned","input":"你好 MAC-B\n","append_newline":true})] {assert!(validator.is_valid(&input));}
         assert_eq!(stdin["properties"]["append_newline"]["default"],false);
-        assert!(definition("exec_command").description.contains("does not return a live handle"));
-        assert!(definition("start_process").description.contains("same Turn"));
+        assert!(!tools.iter().any(|tool|tool.definition.name=="exec_command"));
+        assert!(definition("start_process").description.contains("Session-owned"));
+        assert!(definition("start_process").description.contains("same process_id"));
         assert!(definition("start_process").description.contains("Never use shell backgrounding"));
-        assert!(definition("start_process").description.contains("close_process_stdin"));
+        assert!(definition("close_process_stdin").description.contains("Close stdin"));
         assert_eq!(definition("start_process").input_schema.0["properties"]["wait_ms"]["maximum"],30000,
             "current canonical start wait bounds must not inherit the retired model template's zero limit");
         assert_eq!(definition("resize_process").input_schema.0["properties"]["cols"]["maximum"],32767);
@@ -670,7 +671,7 @@ mod tests {
         }
         let search=&tools.iter().find(|tool|tool.definition.name=="search_files").unwrap().definition.input_schema.0;
         assert!(search["properties"]["path"]["description"].as_str().unwrap().contains("Session default working directory"));
-        for name in ["exec_command","start_process"] {
+        for name in ["start_process"] {
             let schema=&tools.iter().find(|tool|tool.definition.name==name).unwrap().definition.input_schema.0;
             let cwd=schema["properties"]["cwd"]["description"].as_str().unwrap();
             assert!(cwd.contains("Native absolute directory"),"{name}: absolute cwd guidance lost");
@@ -742,7 +743,7 @@ mod tests {
                 selected,&["workspace","process_session"]);
             let active=nomifun_agent_kernel::SessionCapabilityState::new(&snapshot).snapshot().unwrap();
             let plan=compile(&snapshot,&active,&registry,&UnselectedSchemas,&UnselectedSchemas,&BTreeSet::new()).await.unwrap();
-            assert_eq!(plan.len(),if selected.len()==4 {20} else {1});
+            assert_eq!(plan.len(),if selected.len()==4 {19} else {1});
             for definition in plan.model_definitions() {
                 let binding=plan.binding(&definition.name).unwrap();
                 let cap=registry.capability(&binding.capability_id).unwrap();
@@ -761,7 +762,7 @@ mod tests {
 
     #[test]
     fn missing_or_cross_action_guide_cannot_fall_back_to_generic_standard_tool_data() {
-        let canonical=canonical_process_schema("workspace.process/exec");
+        let canonical=canonical_process_schema("workspace.process/start");
         assert!(standard_tool_exposure(&"workspace.process".into(),&"workspace.process/exec".into(),&canonical,
             std::env::consts::OS,None).unwrap_err().to_string().contains("no current model guide"));
         assert!(standard_tool_exposure(&"workspace.process".into(),&"workspace.process/exec".into(),&canonical,
@@ -772,16 +773,16 @@ mod tests {
     async fn rendered_foreign_host_fact_preserves_the_actual_owner_pre_dispatch_guard() {
         use nomifun_engine_core::{EngineToolInvoker,KernelEngineToolInvoker};
         let (snapshot,materialized,registry)=platform_snapshot(vec![nomifun_agent_domain_wave2::workspace_execution_registration().unwrap()],
-            &[("workspace.process",&["workspace.process/exec"])],&["process_session"]);
+            &[("workspace.process",&["workspace.process/start"])],&["process_session"]);
         let active=std::sync::Arc::new(nomifun_agent_kernel::SessionCapabilityState::new(&snapshot));
         let observed=active.snapshot().unwrap();
-        let canonical=canonical_process_schema("workspace.process/exec");
+        let canonical=canonical_process_schema("workspace.process/start");
         let foreign=if std::env::consts::OS=="windows" {"linux"} else {"windows"};
-        let exposure=standard_tool_exposure(&"workspace.process".into(),&"workspace.process/exec".into(),&canonical,
-            foreign,tool_model_guide("workspace.process","workspace.process/exec")).unwrap();
+        let exposure=standard_tool_exposure(&"workspace.process".into(),&"workspace.process/start".into(),&canonical,
+            foreign,tool_model_guide("workspace.process","workspace.process/start")).unwrap();
         assert!(exposure.definition.description.starts_with(&format!("Workspace process host OS: {foreign}.")));
         let plan=compile_agent_tool_plan(&snapshot,&observed,&materialized,[exposure]).unwrap();
-        let binding=plan.binding("exec_command").unwrap().clone();
+        let binding=plan.binding("start_process").unwrap().clone();
         let owner=snapshot.envelope.actor.clone();
         let session=nomifun_agent_contracts::AgentSessionId::from("host-fact-fixture");
         let port=KernelEngineToolInvoker::for_session(registry,std::sync::Arc::new(snapshot.clone()),active,
@@ -790,7 +791,7 @@ mod tests {
             agent_session_id:session,principal:owner,resolved_snapshot_ref:snapshot.snapshot_ref().clone(),
             active_set_generation:observed.generation,turn_operation_id:"host-fact-turn".into(),operation_id:"host-fact-operation".into(),
             idempotency_key:"host-fact-invocation".into(),correlation_id:"host-fact-call".into(),
-            call:nomifun_chat_model_broker::ChatToolCall {call_id:"host-fact-call".into(),name:"exec_command".into(),
+            call:nomifun_chat_model_broker::ChatToolCall {call_id:"host-fact-call".into(),name:"start_process".into(),
                 arguments:StrictJsonValue(json!({"cmd":"THIS_MUST_NOT_RUN"})),provider_metadata:None},binding,
         },tokio_util::sync::CancellationToken::new()).await.unwrap();
         assert!(result.is_error);

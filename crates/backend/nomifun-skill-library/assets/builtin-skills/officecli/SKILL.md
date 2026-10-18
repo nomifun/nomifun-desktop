@@ -10,7 +10,7 @@ AI-friendly CLI for .docx, .xlsx, .pptx. Single binary, no dependencies, no Offi
 ## Managed component setup
 
 Use NomiFun's approved **iOfficeAI/OfficeCLI 1.0.156** through an already-authorized
-`workspace.process/exec` or `workspace.process/start` tool with `component=officecli`
+`workspace.process/start` tool with `component=officecli`
 and literal `args`. The Host verifies the executable and sets its required
 environment. Follow [the shared runtime instructions](references/runtime.md) before
 running any example. Every `officecli` example means this component target;

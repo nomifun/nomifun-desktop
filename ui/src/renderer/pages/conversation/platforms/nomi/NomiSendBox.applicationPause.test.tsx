@@ -62,8 +62,7 @@ function mountPausedComposer(conversation: TChatConversation, initialPaused = fa
   spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue(conversation);
   spyOn(ipcBridge.conversation.taskPlan, 'invoke').mockResolvedValue({ conversation_id: conversation.id, sequence: 0, turn_id: null, turn_status: null, plan: null });
   const send = spyOn(ipcBridge.conversation.sendMessage, 'invoke').mockResolvedValue({
-    msg_id: parseMessageId(uuidv7()), replayed: false, completed: false,
-    result_ok: true, result_text: null, result_error: null, result_error_code: null, result_error_retryable: null,
+    msg_id: parseMessageId(uuidv7()), replayed: false,
   });
   function Composer() {
     const [paused, setPaused] = useState(initialPaused); pause = setPaused;
@@ -106,7 +105,7 @@ test('commands retain the paused Turn cancellation control and cannot clear its 
   spyOn(ipcBridge.database.getConversationMessages, 'invoke').mockResolvedValue({ items: [], total: 0, has_more: false });
   const clear = spyOn(ipcBridge.conversation.clearContext, 'invoke').mockResolvedValue();
   const warning = spyOn(Message, 'warning').mockImplementation(() => () => {});
-  const pausedActivity = { ...activity, pauseNotice: { turnId: parseMessageId(uuidv7()) } } as NomiMessageRuntime;
+  const pausedActivity = { ...activity, pauseNotice: { turnId: parseMessageId(uuidv7()), reason: undefined, cleanupProven: true, pausedAt: undefined } } as NomiMessageRuntime;
   const composer = mountPausedComposer(conversation, false, undefined, pausedActivity);
   const input = composer.view.getByTestId('sendbox-input') as HTMLTextAreaElement;
   await waitFor(() => expect(input.disabled).toBe(false));

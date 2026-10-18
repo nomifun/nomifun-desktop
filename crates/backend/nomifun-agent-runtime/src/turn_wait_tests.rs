@@ -4,6 +4,7 @@ struct ParkTestPort {
     wake: Notify,
     observation: std::sync::Mutex<Option<crate::AgentOwnedProcessObservation>>,
     calls: AtomicUsize,
+    policies: std::sync::Mutex<Vec<crate::AgentWaitWakePolicy>>,
 }
 
 #[async_trait]
@@ -13,6 +14,7 @@ impl crate::AgentWaitPort for ParkTestPort {
         assert_eq!(request.processes.len(), 1);
         assert_eq!(request.processes[0].process_id, "owned");
         assert_eq!(request.processes[0].output_cursor, 5);
+        self.policies.lock().unwrap().push(request.wake_policy);
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.entered.notify_one();
         tokio::select! { biased;
@@ -40,44 +42,115 @@ fn parked_timeout() -> crate::AgentOwnedProcessObservation {
 }
 
 #[tokio::test]
-async fn live_user_action_wait_stops_sampling_and_timeout_keeps_task_paused() {
+async fn user_question_finishes_computation_with_live_process_and_never_samples_a_restart() {
+    // The trailing proposal deliberately tries to relaunch with a new call ID.
+    // No prompt instruction is needed: the Host cannot reach it without input.
     let model = Arc::new(ObservingModel { requests: Default::default(), steps: std::sync::Mutex::new(vec![
         wait_ledger_step(), plan_step("in_progress", "inspect"),
         control_step("launch", "start_process", json!({"command":"helper", "wait_ms":0})),
         input_step("authorization"),
-        control_step("blocked", "report_completion", json!({"summary":"The installation remains available; authorization must be restarted by the user.",
-            "observed_command_failure_count":1,
-            "criteria":[{"disposition":"blocked","rationale":"The original authorization process expired while waiting for the user."}]})),
-        text_step("must not sample again"),
+        control_step("unsolicited-restart", "start_process", json!({"command":"helper", "wait_ms":0})),
     ]) });
     let journal = Arc::new(SettlementJournal::default());
     let wait = Arc::new(ParkTestPort::default());
-    let tools = Arc::new(SettlementTool::default());
-    let token = CancellationToken::new();
-    let task = tokio::spawn(run_turn(binding(), model.clone(), tools.clone(), journal.clone(),
-        input_request(settlement_tool_plan()).with_wait_port(wait.clone()), AgentContextBudget::default(), token));
-    tokio::time::timeout(Duration::from_secs(2), wait.entered.notified()).await.unwrap();
-    assert_eq!(model.requests.lock().unwrap().len(), 4, "parking must stop model sampling");
-    assert!(!task.is_finished(), "waiting must not return a terminal to SDK cleanup");
-    assert!(journal.events.lock().unwrap().iter().any(|event| matches!(event, AgentEngineEvent::TurnWaiting {
-        request_id: Some(id), reason: nomifun_agent_contracts::AgentWaitReason::UserInput, .. } if id == "authorization")));
-    assert!(!journal.events.lock().unwrap().iter().any(|event| matches!(event,
-        AgentEngineEvent::TurnFailed { .. } | AgentEngineEvent::TurnCompleted { .. } | AgentEngineEvent::TurnPaused { .. })));
     *wait.observation.lock().unwrap() = Some(parked_timeout());
-    wait.wake.notify_one();
-    let result = tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap().unwrap();
-    assert!(matches!(result.terminal, AgentTurnTerminal::Paused { reason } if reason == "EXECUTION_DEPENDENCY_BLOCKED"));
-    assert_eq!(model.requests.lock().unwrap().len(), 5);
+    let tools = Arc::new(SettlementTool::default());
+    let result = tokio::time::timeout(Duration::from_secs(2), run_turn(binding(), model.clone(), tools.clone(), journal.clone(),
+        input_request(settlement_tool_plan()).with_wait_port(wait.clone()), AgentContextBudget::default(), CancellationToken::new()))
+        .await.unwrap().unwrap();
+    assert!(matches!(&result.terminal, AgentTurnTerminal::InputRequired { request } if request.request_id.as_ref() == "authorization"));
+    assert_eq!(model.requests.lock().unwrap().len(), 4);
+    assert_eq!(model.steps.lock().unwrap().len(), 1, "background timeout cannot drive another model step");
+    assert_eq!(wait.calls.load(Ordering::SeqCst), 0, "a human question never enters the process wait loop");
     let events = journal.events.lock().unwrap();
-    let work = events.iter().rev().find_map(|event| match event { AgentEngineEvent::WorkStatus { status } => Some(status), _ => None }).unwrap();
-    assert!(work.running_processes.is_empty());
-    assert_eq!(work.failed_commands, 1);
-    assert_eq!(work.failed_tools, 0, "a host observation is not a failed tool call");
-    assert!(!events.iter().any(|event| matches!(event, AgentEngineEvent::TurnFailed { .. })));
-    assert!(crate::user_input_request::recorded_pending(&events).unwrap().is_none());
-    assert!(events.iter().any(|event| matches!(event, AgentEngineEvent::OwnedProcessObserved { .. })));
-    assert_eq!(tools.calls.lock().unwrap().iter().map(|(_, name)| name.as_str()).collect::<Vec<_>>(), ["read_file", "read_file", "start_process"], "no replay, cancellation or synthetic poll");
-    assert!(journal.checkpoints.lock().unwrap().iter().all(|checkpoint| checkpoint.work.running_processes.is_empty()));
+    assert!(events.iter().any(|event| matches!(event, AgentEngineEvent::TurnInputRequired { .. })));
+    assert!(!events.iter().any(|event| matches!(event, AgentEngineEvent::TurnWaiting { .. } | AgentEngineEvent::TurnWaitResolved { .. }
+        | AgentEngineEvent::OwnedProcessObserved { .. } | AgentEngineEvent::TurnCompleted { .. } | AgentEngineEvent::TurnFailed { .. })));
+    assert_eq!(crate::user_input_request::recorded_pending(&events).unwrap().unwrap().request_id.as_ref(), "authorization");
+    assert_eq!(tools.calls.lock().unwrap().iter().map(|(_, name)| name.as_str()).collect::<Vec<_>>(), ["read_file", "read_file", "start_process"]);
+    assert!(journal.checkpoints.lock().unwrap().iter().all(|checkpoint| checkpoint.pending_user_input.is_none()
+        && checkpoint.work.running_processes.is_empty()), "normal questions do not create executable recovery state");
+}
+
+#[test]
+fn process_wait_resolution_does_not_answer_a_pending_human_question() {
+    let call = ChatToolCall { call_id:"question".into(), name:"request_user_input".into(),
+        arguments:StrictJsonValue(json!({"question":"Please authorize in the browser.","remaining_work":"Verify actual login."})),provider_metadata:None };
+    let question = crate::user_input_request::from_call(&call).unwrap();
+    let events = vec![AgentEngineEvent::ModelStepStarted {step:1,operation_id:"model-1".into(),correction_source:None},
+        AgentEngineEvent::ToolCallCompleted {step:1,call}, AgentEngineEvent::UserInputRequested {step:1,request:question.clone()},
+        AgentEngineEvent::TurnWaitResolved {model_steps:1}];
+    assert_eq!(crate::user_input_request::recorded_pending(&events).unwrap(), Some(question));
+}
+
+fn blocked_without_timeout() -> Vec<Result<ChatModelEvent,ChatModelError>> {
+    control_step("blocked-decision","report_completion",json!({"summary":"The observed files remain available; a user decision is still required.",
+        "criteria":[{"disposition":"blocked","rationale":"The user must supply the remaining choice."}]}))
+}
+
+#[tokio::test]
+async fn ordinary_blocked_account_rejects_text_stop_and_requires_a_real_input_declaration() {
+    let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+        wait_ledger_step(),blocked_without_timeout(),text_step("This text cannot answer the pending user decision."),input_step("real-decision")])});
+    let journal=Arc::new(SettlementJournal::default());
+    let result=run_turn(binding(),model.clone(),Arc::new(SettlementTool::default()),journal.clone(),
+        input_request(settlement_tool_plan()),AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
+    assert!(matches!(result.terminal,AgentTurnTerminal::InputRequired {request} if request.request_id.as_ref()=="real-decision"));
+    let events=journal.events.lock().unwrap();
+    assert!(events.iter().any(|event|matches!(event,AgentEngineEvent::ModelResponseRejected {step:3,
+        rejection:Some(AgentModelResponseRejection::RequiredInputHandoff),continuation:true,..})));
+    assert!(events.iter().any(|event|matches!(event,AgentEngineEvent::ModelStepStarted {step:4,correction_source:Some(3),..})));
+    assert!(!events.iter().any(|event|matches!(event,AgentEngineEvent::TurnCompleted {..}|AgentEngineEvent::TurnFailed {..}|AgentEngineEvent::TurnPaused {..})));
+    assert_eq!(model.requests.lock().unwrap().len(),4);
+    assert!(!result.output_text.contains("This text cannot answer"));
+}
+
+#[tokio::test]
+async fn repeated_plain_text_cannot_complete_a_blocked_account_or_extend_its_correction_budget() {
+    let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+        wait_ledger_step(),blocked_without_timeout(),text_step("First unaccepted text stop"),text_step("Second unaccepted text stop"),
+        text_step("Third unaccepted text stop"),input_step("must-not-get-an-extra-model-step")])});
+    let journal=Arc::new(SettlementJournal::default());
+    let result=run_turn(binding(),model.clone(),Arc::new(SettlementTool::default()),journal.clone(),
+        input_request(settlement_tool_plan()),AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
+    assert!(matches!(result.terminal,AgentTurnTerminal::Paused {ref reason} if reason=="EXECUTION_INTERVENTION_REQUIRED"));
+    assert_eq!(model.requests.lock().unwrap().len(),5);
+    let events=journal.events.lock().unwrap();
+    let continuations=events.iter().filter_map(|event|match event {AgentEngineEvent::ModelResponseRejected {
+        rejection:Some(AgentModelResponseRejection::RequiredInputHandoff),continuation,..}=>Some(*continuation),_=>None}).collect::<Vec<_>>();
+    assert_eq!(continuations,[true,true,false]);
+    assert!(!events.iter().any(|event|matches!(event,AgentEngineEvent::TurnCompleted {..}|AgentEngineEvent::TurnFailed {..})));
+    let mut restored=crate::protocol_recovery::ProtocolRecovery::default();restored.restore(events.iter()).unwrap();
+    assert!(restored.correction_source().is_none(),"native recovery cannot buy a continuing correction after the original rejection exhausted its budget");
+    assert!(restored.continuation_stopped());
+}
+
+#[tokio::test]
+async fn unknown_or_unreaped_owner_terminal_keeps_the_wait_fenced_without_model_polling() {
+    for lost in [false,true] {
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            wait_ledger_step(),plan_step("in_progress","inspect"),
+            control_step("launch","start_process",json!({"command":"authorization-helper","wait_ms":0})),
+            text_step("The helper is running."),text_step("The helper has not exited."),text_step("must not sample an unknown terminal")])});
+        let wait=Arc::new(ParkTestPort::default());
+        let journal=Arc::new(SettlementJournal::default());
+        let task=tokio::spawn(run_turn(binding(),model.clone(),Arc::new(SettlementTool::default()),journal.clone(),
+            input_request(settlement_tool_plan()).with_wait_port(wait.clone()),AgentContextBudget::default(),CancellationToken::new()));
+        tokio::time::timeout(Duration::from_secs(2),wait.entered.notified()).await.unwrap();
+        let nomifun_engine_core::EngineProcessPoll::TimedOut {output,mut cleanup}=parked_timeout().poll else {unreachable!()};
+        cleanup.reaped=lost;
+        cleanup.errors=if lost {Vec::new()} else {vec!["original owner cleanup is unconfirmed".into()]};
+        *wait.observation.lock().unwrap()=Some(crate::AgentOwnedProcessObservation {process_id:"owned".into(),
+            poll:if lost {nomifun_engine_core::EngineProcessPoll::Lost {pid:1,output,cleanup}}
+                else {nomifun_engine_core::EngineProcessPoll::TimedOut {output,cleanup}}});
+        wait.wake.notify_one();
+        assert!(matches!(tokio::time::timeout(Duration::from_secs(2),task).await.unwrap().unwrap(),Err(AgentEngineError::WaitOwnerUnavailable)));
+        assert_eq!(wait.calls.load(Ordering::SeqCst),1);
+        assert_eq!(model.requests.lock().unwrap().len(),5);
+        let events=journal.events.lock().unwrap();
+        assert_eq!(events.iter().filter(|event|matches!(event,AgentEngineEvent::OwnedProcessObserved {..})).count(),1);
+        assert!(!events.iter().any(|event|matches!(event,AgentEngineEvent::TurnWaitResolved {..}|AgentEngineEvent::TurnCompleted {..}|AgentEngineEvent::TurnInputRequired {..}|AgentEngineEvent::TurnFailed {..})));
+    }
 }
 
 #[tokio::test]
@@ -110,11 +183,58 @@ async fn live_stop_without_wait_intent_parks_for_intervention_and_cancels_exactl
         input_request(settlement_tool_plan()).with_wait_port(wait.clone()), AgentContextBudget::default(), token.clone()));
     tokio::time::timeout(Duration::from_secs(2), wait.entered.notified()).await.unwrap();
     assert_eq!(model.requests.lock().unwrap().len(), 5);
+    assert_eq!(*wait.policies.lock().unwrap(), [crate::AgentWaitWakePolicy::OutputOrTerminal]);
     assert!(journal.events.lock().unwrap().iter().any(|event| matches!(event, AgentEngineEvent::TurnWaiting {
-        request_id: None, reason: nomifun_agent_contracts::AgentWaitReason::InterventionRequired, .. })));
+        request_id: None, reason: nomifun_agent_contracts::AgentWaitReason::ExternalResource, .. })));
     token.cancel();
     assert!(matches!(tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap(), Err(AgentEngineError::Cancelled)));
     assert!(!journal.events.lock().unwrap().iter().any(|event| matches!(event, AgentEngineEvent::TurnFailed { .. })));
+}
+
+#[derive(Debug,Default)]
+struct LateAuthorizationOutput {
+    calls:AtomicUsize,
+}
+
+#[async_trait]
+impl crate::AgentWaitPort for LateAuthorizationOutput {
+    async fn wait(&self,_:&ChatCausality,request:&crate::AgentWaitRequest,_cancellation:CancellationToken)
+        -> Result<crate::AgentWaitWake,AgentEngineError> {
+        let call=self.calls.fetch_add(1,Ordering::SeqCst);
+        if call==0 {
+            assert_eq!(request.wake_policy,crate::AgentWaitWakePolicy::OutputOrTerminal);
+            assert_eq!(request.processes[0].output_cursor,5);
+            return Ok(crate::AgentWaitWake::ProcessesChanged(vec![crate::AgentOwnedProcessObservation {
+                process_id:"owned".into(),poll:nomifun_engine_core::EngineProcessPoll::Running {
+                    pid:1,
+                    output:nomifun_engine_core::EngineProcessOutput {text:"Open the authorization page to continue".into(),next_cursor:64,
+                        retained_bytes:64,dropped_bytes:0,source_encoding:"utf-8".into(),decode_errors:0},
+                },
+            }]));
+        }
+        panic!("the question must finish the Turn before a second resource wait: {call}");
+    }
+}
+
+#[tokio::test]
+async fn late_authorization_output_wakes_once_then_the_question_waits_without_more_model_sampling() {
+    let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+        wait_ledger_step(),plan_step("in_progress","inspect"),
+        control_step("launch","start_process",json!({"command":"authorization-helper","wait_ms":0})),
+        text_step("The helper is starting."),text_step("The helper has not completed."),input_step("authorization"),
+        text_step("must not sample while the user is authorizing")])});
+    let wait=Arc::new(LateAuthorizationOutput::default());
+    let journal=Arc::new(SettlementJournal::default());
+    let result=tokio::time::timeout(Duration::from_secs(2), run_turn(binding(),model.clone(),Arc::new(SettlementTool::default()),journal.clone(),
+        input_request(settlement_tool_plan()).with_wait_port(wait.clone()),AgentContextBudget::default(),CancellationToken::new())).await.unwrap().unwrap();
+    assert!(matches!(result.terminal,AgentTurnTerminal::InputRequired {..}));
+    assert_eq!(model.requests.lock().unwrap().len(),6);
+    assert!(model.requests.lock().unwrap()[5].input.messages.iter().flat_map(|message|&message.content).any(|part|
+        matches!(part,ChatContentPart::Text {text} if text.contains("Open the authorization page"))));
+    assert_eq!(wait.calls.load(Ordering::SeqCst),1);
+    let events=journal.events.lock().unwrap();
+    assert_eq!(events.iter().filter(|event|matches!(event,AgentEngineEvent::OwnedProcessObserved {..})).count(),1);
+    assert!(!events.iter().any(|event|matches!(event,AgentEngineEvent::TurnFailed {..}|AgentEngineEvent::TurnCompleted {..})));
 }
 
 struct ParkBoundaryJournal { journal: SettlementJournal, input: Arc<OneSteer> }
@@ -124,7 +244,7 @@ impl std::fmt::Debug for ParkBoundaryJournal {
 #[async_trait]
 impl AgentEventSink for ParkBoundaryJournal {
     async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
-        if matches!(event, AgentEngineEvent::TurnWaiting { .. }) {
+        if matches!(event, AgentEngineEvent::UserInputRequested { .. }) {
             *self.input.input.lock().unwrap() = Some(crate::AgentSteeringInput { receipt_operation_id: "authorize-reply".into(),
                 message_id: "authorize-reply-message".into(), text: "Authorization is complete; continue the original task.".into(),
                 files: Vec::new(), inject_skills: Vec::new(), image_count: 0, prepared_images: Vec::new(), prepared_skill_instructions: Vec::new() });
@@ -134,7 +254,7 @@ impl AgentEventSink for ParkBoundaryJournal {
 }
 
 #[tokio::test]
-async fn accepted_reply_at_park_publication_boundary_is_consumed_before_waiting() {
+async fn accepted_reply_at_question_publication_is_consumed_before_finite_handoff() {
     let input = Arc::new(OneSteer { input: Default::default() });
     let journal = Arc::new(ParkBoundaryJournal { journal: SettlementJournal::default(), input: input.clone() });
     let wait = Arc::new(ParkTestPort::default());
@@ -159,7 +279,7 @@ async fn owner_success_wakes_original_turn_then_real_poll_supplies_completion_ev
     let model = Arc::new(ObservingModel { requests: Default::default(), steps: std::sync::Mutex::new(vec![
         wait_ledger_step(), plan_step("in_progress", "inspect"),
         control_step("launch", "start_process", json!({"command":"helper", "wait_ms":0})),
-        input_step("authorization"),
+        text_step("The helper is running."),text_step("The helper has not exited."),
         control_step("original-poll", "poll_process", json!({"process_id":"owned", "cursor":5})),
         control_step("done", "report_completion", json!({"summary":"The original helper exited successfully after authorization.",
             "criteria":[{"disposition":"supported","evidence_call_ids":["original-poll"],"rationale":"The real original-owner poll returned exit zero and reaped cleanup."}]})),
@@ -179,7 +299,7 @@ async fn owner_success_wakes_original_turn_then_real_poll_supplies_completion_ev
     assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
     assert_eq!(tools.calls.lock().unwrap().iter().map(|(_, name)| name.as_str()).collect::<Vec<_>>(), ["read_file", "read_file", "start_process", "poll_process"]);
     let events = journal.events.lock().unwrap();
-    assert!(crate::user_input_request::recorded_pending(&events).unwrap().is_none(), "owner-first wake retires the source request without inventing an answer");
+    assert!(crate::user_input_request::recorded_pending(&events).unwrap().is_none(), "a resource-only wait never creates a user question");
     assert!(!events.iter().any(|event| matches!(event, AgentEngineEvent::TurnFailed { .. })));
     let work = events.iter().rev().find_map(|event| match event { AgentEngineEvent::WorkStatus { status } => Some(status), _ => None }).unwrap();
     assert_eq!(work.successful_commands, 1);
@@ -192,9 +312,44 @@ async fn owner_success_wakes_original_turn_then_real_poll_supplies_completion_ev
 }
 
 #[tokio::test]
+async fn start_only_grant_settles_from_the_original_owner_without_minting_a_poll_call() {
+    let plan=AgentToolPlan::new([tool_binding("start_process","workspace.process","workspace.process/start",AgentEffectClass::ManagedEffect,false)]).unwrap();
+    assert!(plan.model_name_for_action("workspace.process","workspace.process/poll").is_none());
+    let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+        control_step("launch","start_process",json!({"command":"helper","wait_ms":0})),
+        text_step("The original helper is still running."),text_step("The original helper has not exited yet."),
+        control_step("done","report_completion",json!({"summary":"The original helper exited successfully.",
+            "criteria":[{"disposition":"supported","evidence_call_ids":["launch"],"rationale":"The original process owner confirmed exit zero and reaped cleanup for that exact launch."}]}))])});
+    let tools=Arc::new(SettlementTool::default());
+    let wait=Arc::new(ParkTestPort::default());
+    let journal=Arc::new(SettlementJournal::default());
+    let turn=input_request(plan).with_wait_port(wait.clone()).with_max_model_steps(2)
+        .with_execution_segments(crate::AgentSegmentPolicy {max_segments:4,max_no_progress_segments:2});
+    let task=tokio::spawn(run_turn(binding(),model.clone(),tools.clone(),journal.clone(),turn,AgentContextBudget::default(),CancellationToken::new()));
+    tokio::time::timeout(Duration::from_secs(2),wait.entered.notified()).await.unwrap();
+    assert_eq!(model.requests.lock().unwrap().len(),3,"a passive owner wait survives the soft window without a control grant");
+    let nomifun_engine_core::EngineProcessPoll::TimedOut {mut output,cleanup}=parked_timeout().poll else {unreachable!()};
+    output.text="HELPER_EXITED_OK".into();
+    *wait.observation.lock().unwrap()=Some(crate::AgentOwnedProcessObservation {process_id:"owned".into(),
+        poll:nomifun_engine_core::EngineProcessPoll::Exited {exit_code:Some(0),signal:None,output,cleanup}});
+    wait.wake.notify_one();
+    let result=tokio::time::timeout(Duration::from_secs(2),task).await.unwrap().unwrap().unwrap();
+    assert!(matches!(result.terminal,AgentTurnTerminal::Completed {..}));
+    assert_eq!(tools.calls.lock().unwrap().iter().map(|(_,name)|name.as_str()).collect::<Vec<_>>(),["start_process"]);
+    let requests=model.requests.lock().unwrap();
+    assert_eq!(requests.len(),4);
+    assert!(requests.iter().all(|request|!request.input.tools.iter().any(|tool|tool.name=="poll_process")));
+    assert!(requests[3].input.instructions.iter().any(|text|text.contains("original_process_owner")&&text.contains("HELPER_EXITED_OK")));
+    let events=journal.events.lock().unwrap();
+    assert_eq!(events.iter().filter(|event|matches!(event,AgentEngineEvent::ToolStarted {..})).count(),1);
+    assert_eq!(events.iter().filter(|event|matches!(event,AgentEngineEvent::OwnedProcessObserved {..})).count(),1);
+    assert!(!events.iter().any(|event|matches!(event,AgentEngineEvent::TurnFailed {..}|AgentEngineEvent::TurnPaused {..})));
+}
+
+#[tokio::test]
 async fn successful_owner_then_four_invalid_completion_reports_pauses_without_task_failure() {
     let mut steps = vec![wait_ledger_step(), plan_step("in_progress", "inspect"),
-        control_step("launch", "start_process", json!({"command":"helper", "wait_ms":0})), input_step("authorization"),
+        control_step("launch", "start_process", json!({"command":"helper", "wait_ms":0})), text_step("The helper is running."),text_step("The helper has not exited."),
         control_step("original-poll", "poll_process", json!({"process_id":"owned", "cursor":5})), plan_step("completed", "inspect")];
     for index in 0..4 {
         steps.push(control_step(&format!("invalid-report-{index}"), "report_completion", json!({"summary":"The original helper exited successfully."})));
@@ -214,7 +369,7 @@ async fn successful_owner_then_four_invalid_completion_reports_pauses_without_ta
     wait.wake.notify_one();
     let result = tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap().unwrap();
     assert!(matches!(result.terminal, AgentTurnTerminal::Paused { reason } if reason == "EXECUTION_INTERVENTION_REQUIRED"));
-    assert_eq!(model.requests.lock().unwrap().len(), 10);
+    assert_eq!(model.requests.lock().unwrap().len(), 11);
     assert_eq!(model.steps.lock().unwrap().len(), 1);
     let events = journal.events.lock().unwrap();
     assert!(!events.iter().any(|event| matches!(event, AgentEngineEvent::TurnFailed { .. } | AgentEngineEvent::TurnCompleted { .. })));
@@ -245,6 +400,8 @@ async fn exhausted_completion_controls_keep_live_owner_until_reaped_then_pause_w
     let task = tokio::spawn(run_turn(binding(), model.clone(), tools.clone(), journal.clone(),
         input_request(settlement_tool_plan()).with_wait_port(wait.clone()), AgentContextBudget::default(), CancellationToken::new()));
     tokio::time::timeout(Duration::from_secs(2), wait.entered.notified()).await.unwrap();
+    assert_eq!(*wait.policies.lock().unwrap(),[crate::AgentWaitWakePolicy::TerminalOnly],
+        "exhausted declarations cannot churn the canonical wait journal on spinner output");
     assert_eq!(model.requests.lock().unwrap().len(), 7);
     assert!(!task.is_finished(), "control budget exhaustion cannot return to SDK cleanup while the original owner is live");
     assert!(!journal.events.lock().unwrap().iter().any(|event| matches!(event, AgentEngineEvent::TurnFailed { .. } | AgentEngineEvent::TurnPaused { .. })));

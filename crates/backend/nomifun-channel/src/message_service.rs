@@ -13,7 +13,7 @@ use nomifun_db::IChannelRepository;
 use nomifun_db::models::{
     CHANNEL_CHAT_KIND_DIRECT, CHANNEL_CHAT_KIND_GROUP,
     CHANNEL_OWNER_DOMAIN_COMPANION, CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE,
-    CHANNEL_USER_AUTHORIZATION_AUTO_GROUP, ChannelSessionRow,
+    CHANNEL_USER_AUTHORIZATION_APPROVED, CHANNEL_USER_AUTHORIZATION_AUTO_GROUP, ChannelSessionRow,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::{RwLock, broadcast};
@@ -186,6 +186,15 @@ pub struct ChannelMessageService {
     /// Session release removes them without clearing a newer replacement.
     agent_session_ingress:
         Arc<RwLock<HashMap<String, AgentSessionIngressBinding>>>,
+    pub(crate) input_observers: Arc<crate::input_observer::InputObserverRegistry>,
+}
+
+fn trusted_input_source(session:&ChannelSessionRow,platform:PluginType,key:&str)->Result<nomifun_agent_contracts::ChannelInputSource,ChannelError> {
+    let source=nomifun_agent_contracts::ChannelInputSource {platform:platform.to_string(),
+        channel_plugin_id:session.channel_plugin_id.clone().ok_or_else(||ChannelError::MessageSendFailed("Channel input has no plugin identity".into()))?,
+        chat_id:session.chat_id.clone().ok_or_else(||ChannelError::MessageSendFailed("Channel input has no chat identity".into()))?,
+        channel_session_id:session.channel_session_id.clone(),inbound_message_key:key.into()};
+    source.validate().map_err(ChannelError::MessageSendFailed)?;Ok(source)
 }
 
 impl ChannelMessageService {
@@ -205,6 +214,7 @@ impl ChannelMessageService {
             stop_confirmations: crate::pending_decision::ChannelStopConfirmationStore::new(),
             asset_resolver: None,
             agent_session_ingress: Arc::new(RwLock::new(HashMap::new())),
+            input_observers: Arc::new(crate::input_observer::InputObserverRegistry::default()),
         }
     }
 
@@ -458,6 +468,80 @@ impl ChannelMessageService {
         self.sessions.is_busy(conversation_id).await
     }
 
+    /// Called only after the existing authenticated Channel route has resolved
+    /// this Session. A live wait reply belongs to its original relay and Turn;
+    /// ordinary busy messages retain their explicit FIFO behavior.
+    pub async fn try_reply_to_question(&self, session: &ChannelSessionRow, conversation_id: &str,
+        text: &str, reply_to_message_id: Option<&str>, platform: PluginType, idempotency_key: &str) -> Result<Option<SendResult>, ChannelError> {
+        if !matches!(session.chat_kind.as_str(), CHANNEL_CHAT_KIND_DIRECT | CHANNEL_CHAT_KIND_GROUP) {
+            return Err(ChannelError::UserNotAuthorized("channel chat kind is unknown; wait reply refused".into()));
+        }
+        let user = self.repo.get_user(&session.channel_user_id).await?
+            .ok_or_else(|| ChannelError::UserNotFound(session.channel_user_id.clone()))?;
+        if user.authorization_kind != CHANNEL_USER_AUTHORIZATION_APPROVED {
+            return Ok(None);
+        }
+        let original_target = match (reply_to_message_id, session.channel_plugin_id.as_deref(), session.chat_id.as_deref()) {
+            (Some(message_id), Some(plugin), Some(chat)) => self.sessions.resolve_question_delivery(&self.owner_user_id, conversation_id,
+                &platform.to_string(), plugin, chat, message_id).await.map_err(|error| ChannelError::MessageSendFailed(error.to_string()))?,
+            _ => None,
+        };
+        let Some(target) = original_target else { return Ok(None); };
+        let request = SendMessageRequest { content: text.to_owned(), files: vec![], inject_skills: vec![],
+            hidden: false, origin: None, channel_platform: Some(platform.to_string()) };
+        let source=trusted_input_source(session,platform,idempotency_key)?;
+        let delivery = self.sessions.accept_input(&self.owner_user_id, conversation_id, idempotency_key, request, source,Some(target)).await
+            .map_err(|error| ChannelError::MessageSendFailed(error.to_string()))?;
+        let message_id=delivery.delivery.message_id;
+        Ok(Some(SendResult {conversation_id:conversation_id.into(),message_id:message_id.clone(),
+            stream_rx:delivery.events, observer_input_id:Some(message_id)}))
+    }
+
+    pub(crate) async fn observe_input(&self, session_id:&str, input_id:&str)
+        -> Result<crate::session_port::ChannelInputObservation,ChannelError> {
+        self.sessions.observe_input(&self.owner_user_id,session_id,input_id).await
+            .map_err(|error|match error {nomifun_common::AppError::NotFound(message)=>ChannelError::SessionNotFound(message),
+                nomifun_common::AppError::Forbidden(message)=>ChannelError::UserNotAuthorized(message),
+                other=>ChannelError::MessageSendFailed(other.to_string())})
+    }
+
+    pub(crate) async fn begin_input_delivery(&self,session:&str,input:&str,turn:&str,
+        subject:nomifun_agent_contracts::ChannelInputDeliverySubject)->Result<crate::ChannelInputDeliveryDisposition,ChannelError> {
+        self.sessions.begin_input_delivery(&self.owner_user_id,session,input,turn,subject).await
+            .map_err(|error|ChannelError::MessageSendFailed(error.to_string()))
+    }
+
+    pub(crate) async fn finish_input_delivery(&self,session:&str,input:&str,turn:&str,
+        subject:nomifun_agent_contracts::ChannelInputDeliverySubject,confirmed:bool,provider_ids:Vec<String>)->Result<(),ChannelError> {
+        self.sessions.finish_input_delivery(&self.owner_user_id,session,input,turn,subject,confirmed,provider_ids).await
+            .map_err(|error|ChannelError::MessageSendFailed(error.to_string()))
+    }
+
+    pub(crate) async fn recover_inputs(&self)->Result<Vec<crate::RecoverableChannelInput>,ChannelError> {
+        let inputs=self.sessions.recover_inputs(&self.owner_user_id).await
+            .map_err(|error|ChannelError::MessageSendFailed(error.to_string()))?;
+        let mut allowed=Vec::new();
+        for input in inputs {
+            let source=&input.source;
+            let Some(session)=self.repo.get_session(&source.channel_session_id).await? else {continue;};
+            if session.conversation_id.as_deref()!=Some(input.session_id.as_str()) || session.chat_id.as_deref()!=Some(source.chat_id.as_str())
+                || session.channel_plugin_id.as_deref()!=Some(source.channel_plugin_id.as_str()) || !self.is_approved_session(&session).await? {continue;}
+            let Some(plugin)=self.repo.get_plugin(&source.channel_plugin_id).await? else {continue;};
+            if !plugin.enabled || plugin.r#type!=source.platform || plugin.owner_domain!=CHANNEL_OWNER_DOMAIN_COMPANION {continue;}
+            allowed.push(input);
+        }
+        Ok(allowed)
+    }
+
+    pub(crate) async fn is_approved_session(&self,session:&ChannelSessionRow)->Result<bool,ChannelError> {
+        Ok(self.repo.get_user(&session.channel_user_id).await?.is_some_and(|user|user.authorization_kind==CHANNEL_USER_AUTHORIZATION_APPROVED))
+    }
+
+    pub async fn record_question_delivery(&self, session_id: &str, delivery: crate::session_port::ChannelQuestionDelivery) -> Result<(), ChannelError> {
+        self.sessions.record_question_delivery(&self.owner_user_id, session_id, delivery).await
+            .map_err(|error| ChannelError::MessageSendFailed(error.to_string()))
+    }
+
     // ── Busy-time pending prompt queue (spec D1) ─────────────────────
 
     /// Persist a prompt that arrived while its conversation was busy. The
@@ -674,6 +758,10 @@ impl ChannelMessageService {
         let channel_platform = uses_shared_companion_session.then(|| platform.to_string());
         let guest_creation_key = auto_group_guest.then(|| group_guest_creation_key(
             &self.owner_user_id, session));
+        if !auto_group_guest && session.conversation_id.as_deref()!=Some(conversation_id.as_str()) {
+            self.repo.update_session_conversation(&session.channel_session_id,&conversation_id).await?;
+        }
+        let source=if auto_group_guest {None}else{Some(trusted_input_source(session,platform,idempotency_key)?)};
         self.dispatch_to_conversation(
             &session.channel_session_id,
             conversation_id,
@@ -681,6 +769,7 @@ impl ChannelMessageService {
             channel_platform,
             idempotency_key,
             guest_creation_key.as_deref(),
+            source,
         )
             .await
     }
@@ -698,6 +787,7 @@ impl ChannelMessageService {
         channel_platform: Option<String>,
         idempotency_key: &str,
         guest_creation_key: Option<&str>,
+        source:Option<nomifun_agent_contracts::ChannelInputSource>,
     ) -> Result<SendResult, ChannelError> {
         // `msg_id` is server-generated inside the service; channel plugins that
         // need to correlate the user message back to the conversation should use
@@ -720,7 +810,8 @@ impl ChannelMessageService {
         let delivery = if let Some(creation_key) = guest_creation_key {
             self.sessions.send_group_guest_turn(user_id, &conversation_id, idempotency_key, req, creation_key).await
         } else {
-            self.sessions.send_turn(user_id, &conversation_id, idempotency_key, req).await
+            self.sessions.accept_input(user_id, &conversation_id, idempotency_key, req,
+                source.ok_or_else(||ChannelError::MessageSendFailed("approved Channel input lost its trusted source".into()))?,None).await
         };
         let turn = match delivery {
             Ok(delivery) => delivery,
@@ -751,8 +842,9 @@ impl ChannelMessageService {
 
         Ok(SendResult {
             conversation_id,
-            message_id,
+            message_id:message_id.clone(),
             stream_rx,
+            observer_input_id: guest_creation_key.is_none().then_some(message_id),
         })
     }
 
@@ -939,6 +1031,11 @@ impl ChannelMessageService {
                 restart_attempt: data.restart_attempt,
             }),
             AgentStreamEvent::Text(data) => Some(StreamAction::AppendText(data.content.clone())),
+            AgentStreamEvent::InputQuestion(data) => match data.request.validate() {
+                Ok(()) if data.target.question_seq > 0 => Some(StreamAction::InputQuestion(data.clone())),
+                Ok(()) => Some(StreamAction::Error("The live input wait has no canonical waiting identity.".into())),
+                Err(_) => Some(StreamAction::Error("The live input wait has invalid structured metadata; no question was delivered.".into())),
+            },
             AgentStreamEvent::Tips(data) if data.user_input_request.is_some() => {
                 let request = data.user_input_request.as_ref().expect("matched input request");
                 match request.validate() {
@@ -1162,6 +1259,8 @@ pub struct SendResult {
     /// `None` when the Agent runtime could not be found after sending
     /// (should not happen in normal flow).
     pub stream_rx: Option<broadcast::Receiver<AgentStreamEvent>>,
+    /// The canonical input to observe; not a second dispatch queue.
+    pub observer_input_id: Option<String>,
 }
 
 /// Actions derived from agent stream events.
@@ -1176,6 +1275,8 @@ pub enum StreamAction {
     AppendText(String),
     /// A committed Turn's question; unfinished work remains unfinished.
     UserInputRequest(nomifun_agent_contracts::AgentUserInputRequest),
+    /// The original owner is live and the canonical question needs a reply now.
+    InputQuestion(nomifun_ai_agent::protocol::events::InputQuestionEventData),
     /// Streaming finished.
     Finish,
     /// Normal reply boundary awaiting a human answer, never task completion.

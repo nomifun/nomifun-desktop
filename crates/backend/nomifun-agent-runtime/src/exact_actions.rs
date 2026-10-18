@@ -78,7 +78,7 @@ pub(crate) fn schema() -> serde_json::Value {
         "items":{"type":"object","additionalProperties":false,"required":["id","source","tool","expected_arguments"],
             "properties":{"id":{"type":"string","minLength":1,"maxLength":64},"source":crate::requirements::citation_schema(),
                 "tool":{"type":"string","minLength":1,"maxLength":128,
-                    "enum":["write_file","apply_patch","exec_command","start_process","read_file","delete_path","write_process_stdin"]},
+                    "enum":["write_file","apply_patch","start_process","read_file","delete_path","write_process_stdin"]},
                 "receiver_ref":{"type":"string","minLength":1,"maxLength":64,"description":"stdin only: ID of an earlier start_process exact action. Declare start+stdin before launching; the host binds only its real running receipt. Mutually exclusive with expected_arguments.process_id. No placeholder handle or new authority."},
                 "expected_arguments":{"type":"object","minProperties":1,"maxProperties":8,
                     "description":"Frozen tool fields: path/content; files; command/args/cmd/tty/wait_ms/timeout_ms/cwd; path/format/missing_ok/expected_sha256; stdin input/append_newline plus either current process_id or receiver_ref. No env. receiver_ref omits process_id until the actual native call. Supplied values/arrays match exactly, including guards; guard-dependent declarations wait for the real source receipt."}}}})
@@ -105,7 +105,7 @@ impl ExactActionInput {
         crate::stream_limits::serialized_size(&self.expected_arguments,48*1024).map_err(|_|"Exact action parameters exceed the existing 48 KiB plan budget")?;
         let allowed:&[&str]=match self.tool.as_str() {
             "write_file"=>&["path","content"],"apply_patch"=>&["files"],
-            "exec_command"|"start_process"=>&["command","args","cmd","tty","wait_ms","timeout_ms","cwd"],
+            "start_process"=>&["command","args","cmd","tty","wait_ms","timeout_ms","cwd"],
             "read_file"=>&["path","format","missing_ok","expected_sha256"],
             "delete_path"=>&["path"],"write_process_stdin"=>&["process_id","input","append_newline"],
             _=>return Err("Exact actions support only the listed workspace file/process tools; cleanup and unknown tools need ordinary owner controls".into()),
@@ -165,7 +165,7 @@ pub(crate) fn close_receivers(actions:&mut [AgentExactAction]) {
 }
 
 pub(crate) fn proven_nonstart(call:&ChatToolCall,result:&crate::AgentToolResult)->bool {
-    matches!(call.name.as_str(),"exec_command"|"start_process")
+    matches!(call.name.as_str(),"start_process")
         && serde_json::from_str::<serde_json::Value>(&result.output_text()).is_ok_and(|value|
             value["schema"]=="nomifun.process-start-observation.v1"&&value["state"]=="not_started"
                 &&value["user_code_started"]==false&&value["success"]==false&&value.get("process_id").is_none())
@@ -186,11 +186,11 @@ pub(crate) fn owner_succeeded(call:&ChatToolCall,result:&crate::AgentToolResult)
                     &&request["hunks"].as_array().is_some_and(|hunks|file["hunks_applied"].as_u64()==Some(hunks.len() as u64))))),
         "delete_path"=>value["deleted"]==true&&value["path"]==call.arguments.0["path"],
         "read_file"=>value["path"]==call.arguments.0["path"]&&(hash(&value["sha256"])||value["kind"]=="workspace_file_absent"),
-        "exec_command"|"start_process"|"write_process_stdin"=>{
+        "start_process"|"write_process_stdin"=>{
             let bound=value["process_id"].as_str().is_some_and(|id|!id.is_empty())
                 &&(call.name!="write_process_stdin"||value["process_id"]==call.arguments.0["process_id"]);
             let exited=value["state"]=="exited"&&value["exit_code"]==0&&value["cleanup"]["reaped"]==true&&value["success"]==true;
-            let running=call.name!="exec_command"&&value["state"]=="running"&&value.get("control_applied")!=Some(&serde_json::Value::Bool(false))
+            let running=value["state"]=="running"&&value.get("control_applied")!=Some(&serde_json::Value::Bool(false))
                 &&value["pid"].as_u64().is_some_and(|pid|pid>0&&pid<=u32::MAX as u64)
                 &&value["output"]["text"].is_string()&&value["output"]["next_cursor"].is_u64()
                 &&value.get("success")!=Some(&serde_json::Value::Bool(false));
@@ -226,6 +226,21 @@ mod tests {
         assert!(serde_json::from_value::<crate::AgentEngineEvent>(old.clone()).is_err());
         old["plan"]["exact_actions"][0]["settled"] = serde_json::Value::Null;
         assert!(serde_json::from_value::<crate::AgentEngineEvent>(old).is_err());
+    }
+
+    #[test]
+    fn retired_exec_commitment_is_readable_history_but_cannot_author_new_work() {
+        let mut historical = serde_json::to_value(action("start_process", serde_json::json!({"command":"program"}))).unwrap();
+        historical["tool"] = serde_json::json!("exec_command");
+        let decoded: AgentExactAction = serde_json::from_value(historical.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), historical);
+        let input = ExactActionInput { id:"retired".into(), source:crate::AgentInputCitation {input:0,quote:"Exact requested bytes".into()},
+            tool:"exec_command".into(), expected_arguments:serde_json::json!({"command":"program"}),receiver_ref:None };
+        assert!(input.compile(&[crate::context_lifecycle::text_message(ChatRole::User,"Exact requested bytes".into())]).is_err());
+        let result = crate::AgentToolResult::text("proposed".into(),serde_json::json!({
+            "process_id":"historical-owner","state":"exited","exit_code":0,"cleanup":{"reaped":true},"success":true
+        }).to_string(),false);
+        assert!(!owner_succeeded(&call("exec_command",serde_json::json!({"command":"program"})), &result));
     }
 
     #[test]

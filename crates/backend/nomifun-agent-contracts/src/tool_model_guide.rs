@@ -150,7 +150,7 @@ impl ToolModelGuide {
         }
         validate_text(&self.description)?;
         let process_launch = self.capability_id == "workspace.process"
-            && matches!(self.action_id.as_str(), "workspace.process/exec" | "workspace.process/start");
+            && self.action_id == "workspace.process/start";
         if self.host_os_fact != process_launch {
             return Err("Process launch guidance must declare its exact Host OS fact".into());
         }
@@ -268,12 +268,13 @@ mod tests {
 
     #[test]
     fn data_is_complete_and_preserves_registered_names_without_a_second_schema() {
-        assert_eq!(tool_model_guides().len(), 23);
+        assert_eq!(tool_model_guides().len(), 22);
         for guide in tool_model_guides() {
             assert!(tool_presentation(&guide.capability_id, &guide.action_id).is_some());
             assert!(guide.examples.iter().all(|example| example.label.starts_with("Syntax only;")));
         }
         assert!(tool_model_guide("workspace.files", "workspace.process/exec").is_none());
+        assert!(tool_model_guide("workspace.process", "workspace.process/exec").is_none());
         for phrase in ["do not copy paths or environment from Skill", "takes precedence over Skill",
             "one-shot", "resident session", "start watch", "prepared automatically", "cancellation", "actual preparation failure",
             "same-named ambient program", "grants no tools or permissions"] {
@@ -336,7 +337,7 @@ mod tests {
 
     #[test]
     fn process_host_fact_uses_the_host_argument_and_does_not_restore_two_target_rules() {
-        for action in ["workspace.process/exec", "workspace.process/start"] {
+        for action in ["workspace.process/start"] {
             let guide = tool_model_guide("workspace.process", action).unwrap();
             let schema = StrictJsonValue(json!({"type":"object","properties":guide.parameters.iter()
                 .map(|parameter| (parameter.pointer.trim_start_matches("/properties/").to_owned(), json!({"type":"string"})))

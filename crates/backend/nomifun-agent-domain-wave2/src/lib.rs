@@ -173,7 +173,6 @@ pub const WORKSPACE_VCS_ACTION_IDS: &[&str] = &[
     "workspace.vcs/push",
 ];
 pub const WORKSPACE_PROCESS_ACTION_IDS: &[&str] = &[
-    "workspace.process/exec",
     "workspace.process/start",
     "workspace.process/poll",
     "workspace.process/input",
@@ -417,7 +416,6 @@ pub enum Wave2TypedCapabilityOperation {
     WorkspaceVcsStage { input: StrictJsonValue },
     WorkspaceVcsCommit { input: StrictJsonValue },
     WorkspaceVcsPush { input: StrictJsonValue },
-    WorkspaceProcessExec { input: StrictJsonValue },
     WorkspaceProcessStart { input: StrictJsonValue },
     WorkspaceProcessPoll { input: StrictJsonValue },
     WorkspaceProcessInput { input: StrictJsonValue },
@@ -457,8 +455,7 @@ impl Wave2TypedCapabilityOperation {
             | Self::WorkspaceVcsStage { .. }
             | Self::WorkspaceVcsCommit { .. }
             | Self::WorkspaceVcsPush { .. } => WORKSPACE_VCS_MODULE_ID,
-            Self::WorkspaceProcessExec { .. }
-            | Self::WorkspaceProcessStart { .. }
+            Self::WorkspaceProcessStart { .. }
             | Self::WorkspaceProcessPoll { .. }
             | Self::WorkspaceProcessInput { .. }
             | Self::WorkspaceProcessCloseStdin { .. }
@@ -497,7 +494,6 @@ impl Wave2TypedCapabilityOperation {
             Self::WorkspaceVcsStage { .. } => "workspace.vcs/stage",
             Self::WorkspaceVcsCommit { .. } => "workspace.vcs/commit",
             Self::WorkspaceVcsPush { .. } => "workspace.vcs/push",
-            Self::WorkspaceProcessExec { .. } => "workspace.process/exec",
             Self::WorkspaceProcessStart { .. } => "workspace.process/start",
             Self::WorkspaceProcessPoll { .. } => "workspace.process/poll",
             Self::WorkspaceProcessInput { .. } => "workspace.process/input",
@@ -537,7 +533,6 @@ impl Wave2TypedCapabilityOperation {
             | Self::WorkspaceVcsStage { input }
             | Self::WorkspaceVcsCommit { input }
             | Self::WorkspaceVcsPush { input }
-            | Self::WorkspaceProcessExec { input }
             | Self::WorkspaceProcessStart { input }
             | Self::WorkspaceProcessPoll { input }
             | Self::WorkspaceProcessInput { input }
@@ -933,7 +928,6 @@ const WORKSPACE_VCS_ACTIONS: &[ActionDefinition] = &[
 ];
 
 const WORKSPACE_PROCESS_ACTIONS: &[ActionDefinition] = &[
-    ActionDefinition::function("workspace.process/exec", EffectClass::ExecuteLocal),
     ActionDefinition::function("workspace.process/start", EffectClass::ExecuteLocal),
     ActionDefinition::function("workspace.process/poll", EffectClass::ReadLocal),
     ActionDefinition::function("workspace.process/input", EffectClass::ExecuteLocal),
@@ -2006,9 +2000,6 @@ pub fn typed_operation_for(
         }
         (WORKSPACE_VCS_MODULE_ID, "workspace.vcs/push") => {
             Wave2TypedCapabilityOperation::WorkspaceVcsPush { input }
-        }
-        (WORKSPACE_PROCESS_MODULE_ID, "workspace.process/exec") => {
-            Wave2TypedCapabilityOperation::WorkspaceProcessExec { input }
         }
         (WORKSPACE_PROCESS_MODULE_ID, "workspace.process/start") => {
             Wave2TypedCapabilityOperation::WorkspaceProcessStart { input }

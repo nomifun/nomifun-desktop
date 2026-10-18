@@ -115,6 +115,7 @@ impl QueueDrain {
         // may already be idle, in which case no completion event will come.
         drain.expire_and_notify().await;
         drain.sweep().await;
+        drain.recover_input_observers().await;
 
         let mut tick = tokio::time::interval(drain.sweep_interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -136,18 +137,26 @@ impl QueueDrain {
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         warn!(skipped, "queue drain lagged behind the event bus; sweeping all queued conversations");
                         drain.sweep().await;
+                        drain.recover_input_observers().await;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
                 _ = tick.tick() => {
                     drain.expire_and_notify().await;
                     drain.sweep().await;
+                    drain.recover_input_observers().await;
                 }
             }
         }
         drain.shutdown.cancel();
         drain.join_child_tasks().await;
         info!("channel queue drain stopped (event bus closed)");
+    }
+
+    async fn recover_input_observers(&self) {
+        for task in crate::input_observer::recover_input_observers(self.message_service.clone(),self.sender.clone(),self.shutdown.clone()).await {
+            self.track_child_task(task).await;
+        }
     }
 
     async fn track_child_task(&self, task: JoinHandle<()>) {
@@ -437,29 +446,16 @@ impl QueueDrain {
                     attempts = head.attempts,
                     "queued prompt dispatched"
                 );
-                // Relay the reply to the originating chat exactly like a live
-                // inbound message would.
-                if let Some(rx) = send_result.stream_rx.take() {
-                    let relay = ChannelStreamRelay::new(
-                        RelayConfig {
-                            platform,
-                            plugin_id: head.channel_plugin_id.clone(),
-                            chat_id: head.chat_id.clone(),
-                            throttle_ms: 500,
-                            conversation_id: send_result.conversation_id.clone(),
-                        },
-                        Arc::clone(&self.sender),
-                        self.message_service.stop_confirmations(),
-                        self.message_service.asset_resolver(),
-                    );
-                    let shutdown = self.shutdown.clone();
-                    self.track_child_task(tokio::spawn(async move {
-                        tokio::select! {
-                            _ = shutdown.cancelled() => {}
-                            _ = relay.run(rx) => {}
-                        }
-                    }))
-                    .await;
+                let config=RelayConfig {platform,plugin_id:head.channel_plugin_id.clone(),chat_id:head.chat_id.clone(),
+                    throttle_ms:500,conversation_id:send_result.conversation_id.clone()};
+                if let Some(key)=send_result.observer_input_id.as_deref() {
+                    if let Some(task)=crate::input_observer::register_input_observer(self.message_service.clone(),config,
+                        self.sender.clone(),key.to_owned(),self.shutdown.clone()) {self.track_child_task(task).await;}
+                } else if let Some(rx)=send_result.stream_rx.take() {
+                    let relay=ChannelStreamRelay::new(config,self.sender.clone(),self.message_service.stop_confirmations(),self.message_service.asset_resolver())
+                        .with_input_question_delivery(self.message_service.clone());
+                    let shutdown=self.shutdown.clone();
+                    self.track_child_task(tokio::spawn(async move {tokio::select! {_=shutdown.cancelled()=>{},_=relay.run(rx)=>{}}})).await;
                 }
                 // Deliberately NOT settled here: the durable receipt outcome
                 // (observed on the turn's completion) settles delivered /

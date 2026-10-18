@@ -80,7 +80,7 @@ mod tests {
             Ok(NomiRuntimeTurnOutcome::cancelled(0))
         }
 
-        async fn cleanup_turn(&self, _message: &SendMessageData) -> Result<(), AppError> {
+        async fn cleanup_turn(&self, _message: &SendMessageData, _terminal: &EngineTurnTerminal) -> Result<(), AppError> {
             self.turn_cleanup_count.fetch_add(1, Ordering::AcqRel);
             if self.fail_turn_cleanup.load(Ordering::Acquire) {
                 return Err(AppError::Conflict(self.cleanup_error.clone()));
@@ -101,7 +101,7 @@ mod tests {
             Ok(())
         }
 
-        async fn cleanup_session(&self) -> Result<(), AppError> {
+        async fn cleanup_session(&self, _reason: Option<nomifun_common::AgentKillReason>) -> Result<(), AppError> {
             self.session_cleanup_count.fetch_add(1, Ordering::AcqRel);
             Ok(())
         }

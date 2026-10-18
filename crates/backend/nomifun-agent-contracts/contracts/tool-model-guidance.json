@@ -263,96 +263,8 @@
     },
     {
       "capability_id": "workspace.process",
-      "action_id": "workspace.process/exec",
-      "description": "Run a local process synchronously: this call waits for exit/timeout and does not return a live handle for a later stdin write. If the process needs later input or EOF, use start_process with wait_ms=0 and tty=false, then poll/input/close/poll instead; do not choose exec_command merely to obtain READY. Choose exactly one launch target: component for an approved host component, command for a literal executable, or cmd for shell script text. For managed Office file operations use {\"component\":\"officecli\",\"args\":[\"help\",\"batch\"]}; component=bun or component=node chooses those approved host components. For an ordinary executable use {\"command\":\"program\",\"args\":[\"literal\",\"tokens\"]}, for example {\"command\":\"git\",\"args\":[\"status\",\"--short\"]}. For shell syntax use {\"cmd\":\"script text\"}, omitting args. component or command accepts a literal args array; do not mix either target with cmd or with one another. Never put a whole command line in command, or supply args as a JSON-encoded string. Use read_file/search_files for local file contents, source digests and literal text search; instruction_scope reports instruction locations, not directory entries or OS file attributes. Inspect truncated/incomplete_reasons before claiming a complete or absent search result. Do not substitute a shell wildcard such as .\\**\\* for a recursive workspace search. Never suppress stderr, catch and ignore errors, or redirect errors to null to manufacture a successful empty search; preserve errors and narrow the requested path. Shell exit 0 alone does not prove complete search coverage. A zero exit is an observation, not proof that verification passed. The following command examples describe input syntax only. Run them only when the accepted task requires their operation; do not add a directory listing, cwd probe or other preflight solely to prepare an exact-path file task. For a required system administrator operation, select execution_identity=administrator on this same tool. Native authentication may require user interaction; cancellation, refusal, unavailable platform execution and unknown effects remain actual outcomes. Do not treat every denied access as requiring administrator identity.",
-      "parameters": [
-        {
-          "pointer": "/properties/component",
-          "description": "Approved host component ID: officecli, bun or node. The host resolves its verified executable and required environment. Choose exactly one of component, command or cmd; pass each literal argument in args without shell quoting or expansion. Follow the managed launch notice for one-shot Office use and unavailable-component handling."
-        },
-        {
-          "pointer": "/properties/cmd",
-          "description": "Shell-script form only: supply {\"cmd\":\"script text\"} and omit both command and component. Omit args for shell script text; never use cmd for an executable plus literal argument tokens.",
-          "host_os": {
-            "windows": "Runs script text directly through Windows PowerShell 5.1. PowerShell cmdlets such as Copy-Item, Move-Item, Remove-Item and New-Item are shell operations, not executables: use cmd, not command=Copy-Item or tokenized powershell.exe -Command arguments. For example {\"cmd\":\"Copy-Item -LiteralPath 'a path/source.txt' -Destination 'a path/copy.txt' -ErrorAction Stop\"}. Keep each quoted literal path in this script and preserve errors. Do not add mkdir when the accepted task says the directory already exists. Preserve native absolute or Session-default-directory relative paths without a project-name prefix. Do not prefix cmd with powershell.exe or pwsh. Do not assume PowerShell 7-only syntax such as ??, ??=, ?:, &&, or ||. Command Prompt syntax such as dir /b requires command=cmd.exe with args beginning [\"/d\",\"/c\"]. Ordinary executables such as bun/git use command plus args. Never combine the forms.",
-            "macos": "Use cmd only when shell semantics such as pipelines, redirection, globbing, compound syntax, or a shell script are required. Runs through /bin/sh -c on this process host. For an ordinary single executable use command plus args. Never combine the forms.",
-            "linux": "Use cmd only when shell semantics such as pipelines, redirection, globbing, compound syntax, or a shell script are required. Runs through /bin/sh -c on this process host. For an ordinary single executable use command plus args. Never combine the forms."
-          }
-        },
-        {
-          "pointer": "/properties/command",
-          "description": "Executable form: supply {\"command\":\"program\",\"args\":[...]} and omit cmd and component. This field is the executable name or path only. Never include arguments such as git status in this field.",
-          "host_os": {
-            "windows": "Examples are git, bun, powershell.exe, or cmd.exe. PowerShell cmdlets such as Copy-Item and Move-Item need cmd script text, not a literal executable or tokenized -Command arguments.",
-            "macos": "Examples are git, bun, or /bin/ls.",
-            "linux": "Examples are git, bun, or /usr/bin/ls."
-          }
-        },
-        {
-          "pointer": "/properties/args",
-          "description": "Valid with command or component, never as shell arguments for cmd. Literal separate argument tokens as an actual JSON array value, never a JSON-encoded string. Omit when empty; do not send null. Quoting, wildcards, environment references and substitution text are passed literally for component/command.",
-          "host_os": {
-            "windows": "Examples: [\"status\",\"--short\"] for git, or [\"/d\",\"/c\",\"echo ready\"] for command=cmd.exe. PowerShell cmdlets need cmd script text instead of tokenized -Command arguments.",
-            "macos": "Examples: [\"status\",\"--short\"] for git, [\"-a\"] for command=/bin/ls, or [\"help\",\"batch\"] for component=officecli.",
-            "linux": "Examples: [\"status\",\"--short\"] for git, [\"-a\"] for command=/usr/bin/ls, or [\"help\",\"batch\"] for component=officecli."
-          }
-        },
-        {
-          "pointer": "/properties/cwd",
-          "description": "Native absolute directory or path relative to the Session default working directory. Omit cwd or use \".\" for the default. Parent traversal, platform-native separators, legal links, Windows drive/UNC paths on Windows and mounted directories are supported. The default directory is not a local access boundary."
-        },
-        {
-          "pointer": "/properties/timeout_ms",
-          "description": "Total owned process lifetime in milliseconds, starting at launch. Default 30000; polling does not reset it. Choose an explicit duration when the accepted task requires longer interaction or waiting. The owner terminates and cleans up on expiration; timeout is distinct from user cancellation."
-        },
-        {
-          "pointer": "/properties/tty",
-          "description": "false (or omitted) uses pipe; true uses PTY. For a requested pipe stdin/EOF lifecycle use start_process with tty=false and wait_ms=0. PTY is not a substitute for pipe close_stdin, and exec_command still waits for exit regardless of tty."
-        },
-        {
-          "pointer": "/properties/execution_identity",
-          "description": "Use current_user for ordinary execution; choose administrator only when the requested operation actually requires system administrator identity. The host uses the platform native authentication and execution path, preserving the real login user environment and task lifecycle. This selects this operation execution context, not a user permission mode. Administrator identity does not grant independent privacy or desktop permissions. Inspect partial effects before retrying a denied operation; never blindly replay an entire installation. Desktop, accessibility, screenshot, browser, media and Apple Events calls normally stay in the real login user App chain; an administrator service is not an interactive desktop and does not inherit the App privacy grants."
-        }
-      ],
-      "examples": [
-        {
-          "label": "Syntax only; Managed Office help; no ambient executable lookup",
-          "arguments": {
-            "component": "officecli",
-            "args": [
-              "help",
-              "batch"
-            ]
-          }
-        },
-        {
-          "label": "Syntax only; Literal Git arguments",
-          "arguments": {
-            "command": "git",
-            "args": [
-              "status",
-              "--short"
-            ]
-          }
-        },
-        {
-          "label": "Syntax only; Windows quoted-path shell operation",
-          "arguments": {
-            "cmd": "Copy-Item -LiteralPath 'a path/source.txt' -Destination 'a path/copy.txt' -ErrorAction Stop"
-          }
-        }
-      ],
-      "host_os": {
-        "windows": "The JSON field cmd is a Windows PowerShell 5.1 script, NOT cmd.exe. For workspace text and literal search, use read_file/search_files. Windows PowerShell 5.1 Get-Content without -Encoding can decode a BOM-less UTF-8 file as the local ANSI code page: correct hash/line counts do not prove correct decoded text. If a native shell read of a known UTF-8 file is required, use Get-Content -LiteralPath 'path' -Encoding UTF8 -Raw; use -Encoding UTF8 for Select-String too. Do not guess an unknown file encoding. Do not use cd && dir /a, &&, ||, ??, ??=, or ?: in that field. For the exact current directory use {\"cmd\":\"(Get-Location).Path\"}; plain Get-Location prints a table that can truncate the path. For root entries and their actual flags use {\"cmd\":\"Get-ChildItem -LiteralPath . -Force | ForEach-Object { [pscustomobject]@{Name=$_.Name;Attributes=$_.Attributes.ToString();Hidden=[bool]($_.Attributes -band [IO.FileAttributes]::Hidden);System=[bool]($_.Attributes -band [IO.FileAttributes]::System);LinkType=$_.LinkType} } | ConvertTo-Json -Compress\"}. Attributes is a flags enum: test each Hidden/System bit with a Boolean cast or compare the bitwise result to zero. FileAttributes.Normal is 128, not zero; comparing a masked Hidden bit to Normal incorrectly marks every entry hidden. Keep the shown Boolean-mask example. Include all returned names; describe Hidden/System only from those flags. A dot-prefixed Archive-only file is not hidden on Windows. A names-only listing cannot prove attributes. Do not recurse or follow links unless requested. For Command Prompt scripts use {\"command\":\"cmd.exe\",\"args\":[\"/d\",\"/c\",\"cd & dir /a\"]}. Do not prefix cmd with powershell.exe or pwsh. command plus args invokes a literal executable.",
-        "macos": "cmd invokes /bin/sh -c; command plus args invokes a literal executable. For the physical current directory, use {\"command\":\"/bin/pwd\",\"args\":[\"-P\"]}. For a top-level listing including dot entries, use {\"command\":\"/bin/ls\",\"args\":[\"-a\"]}. These are executable forms; omit cmd. Do not put the entire command line in command. Omit . and .. from business entry counts.",
-        "linux": "cmd invokes /bin/sh -c; command plus args invokes a literal executable. For the physical current directory, use {\"command\":\"/usr/bin/pwd\",\"args\":[\"-P\"]}. For a top-level listing including dot entries, use {\"command\":\"/usr/bin/ls\",\"args\":[\"-a\"]}. These are executable forms; omit cmd. Do not put the entire command line in command. Omit . and .. from business entry counts."
-      },
-      "host_os_fact": true
-    },
-    {
-      "capability_id": "workspace.process",
       "action_id": "workspace.process/start",
-      "description": "Start one turn-owned background or interactive process and return its live handle with the requested bounded initial wait. For immediate interactive admission, use wait_ms=0; the formal start contract also permits a bounded nonzero initial wait. For READY/input/EOF prefer wait_ms=0,tty=false (pipe), then poll_process, write_process_stdin, close_process_stdin and poll to exit; PTY is not pipe EOF. The process lifetime defaults to 30 seconds; polling does not renew this deadline. For a user-requested longer interaction or wait, set timeout_ms explicitly to cover that requested duration (maximum 600000 ms). A timeout ends the owned process and triggers cleanup; it is not a user stop. For a start/wait/stop lifecycle, call start_process once with wait_ms=0, then make at least one distinct poll_process call until the expected output, then cancel_process with the exact returned process_id, all in the same Turn. Even when a start receipt already contains output, do not skip poll_process. Do not pre-read a user-specified existing executable or manually probe instruction files solely to launch it; the host injects applicable workspace instructions. Do not run ls, pwd, test -x, or another process preflight solely for that launch; the owner validates executable and cwd. Never use shell backgrounding, raw PID or temporary-log indirection, or split the lifecycle across AgentExecution steps. Turn-owned transient processes do not survive turn cleanup. User-requested persistent services or scheduled tasks must use the platform native service facility; verify its registered state separately. Choose exactly one target: approved component, literal command, or shell cmd. component and command take literal args arrays; do not combine targets. The following command examples describe input syntax only. Run them only when the accepted task requires their operation; do not add a directory listing, cwd probe or other preflight solely to prepare an exact-path file task. For a required system administrator operation, select execution_identity=administrator on this same tool. Native authentication may require user interaction; cancellation, refusal, unavailable platform execution and unknown effects remain actual outcomes. Do not treat every denied access as requiring administrator identity.",
+      "description": "Run one local command as a Session-owned process with a bounded initial observation. This is the single launch tool for ordinary, long-running and interactive commands. The initial wait defaults to 1000 ms (0..30000); return either the actual terminal result or running with the exact process_id and retained output. Running means only that launch succeeded, never command completion or authorization. Do not launch again because a result is running. Read later output through the original owner; wait for genuine output or terminal changes without repetitive model polling. When output requires a human answer or external user action, show the actual needed information through request_user_input alone; the host closes the current Turn and retains the original process in this Session. After the user replies, inspect that same process_id; background output or exit does not create a new model call. A user saying done is not an authorization receipt: inspect the original process result. For immediate READY/input/EOF workflows use wait_ms=0,tty=false, then the exact authorized poll/input/close/poll controls. PTY is not pipe EOF. timeout_ms is an optional explicit hard execution deadline, distinct from the initial observation. Omit it when no actual task deadline is required, especially for human authorization. There is no default process deadline or idle expiration. An explicit deadline terminates and cleans up the original process on expiry; asking the user never extends it. Never use shell backgrounding, raw PID or temporary-log indirection, or split a live process across AgentExecution steps. Session-owned processes survive ordinary Turn closure, including user-input handoff, until they exit, are explicitly cancelled, reach an explicit deadline, or the Session is torn down. Process handles never survive application restart; user-requested persistent services must use and verify the platform native service facility. Choose exactly one target: approved component, literal command, or shell cmd. component and command take literal args arrays. For managed Office operations use component=officecli; for one ordinary executable use command plus args; use cmd only for shell syntax. Do not pre-read a user-specified executable or run ls/pwd/test preflights solely to launch it; the owner validates executable and cwd and injects applicable instructions. Use read_file/search_files for file contents and literal search, inspect truncation and errors, and never suppress stderr to manufacture an empty successful result. A zero exit only describes this command and does not prove the entire task. For a required administrator operation choose execution_identity=administrator; native authentication may need user action and does not grant unrelated desktop/privacy permissions. The following examples illustrate syntax only and authorize no extra actions.",
       "parameters": [
         {
           "pointer": "/properties/component",
@@ -391,15 +303,15 @@
         },
         {
           "pointer": "/properties/timeout_ms",
-          "description": "Total owned process lifetime in milliseconds, starting at launch. Default 30000; polling does not reset it. Choose an explicit duration when the accepted task requires longer interaction or waiting. The owner terminates and cleans up on expiration; timeout is distinct from user cancellation."
+          "description": "Optional positive hard execution deadline in milliseconds from launch. The value must fit the native monotonic clock. Omit when the accepted task has no actual deadline; do not invent a deadline for human authorization. No default deadline or idle expiry applies. Observing, asking or replying never extends an explicit deadline; expiry terminates and cleans up the original process."
         },
         {
           "pointer": "/properties/tty",
-          "description": "false (or omitted) uses pipe; true uses PTY. For a requested pipe stdin/EOF lifecycle use start_process with tty=false and wait_ms=0. PTY is not a substitute for pipe close_stdin, and exec_command still waits for exit regardless of tty."
+          "description": "false (or omitted) uses pipe; true uses PTY. For a requested pipe stdin/EOF lifecycle use tty=false and wait_ms=0. PTY is not a substitute for pipe close_stdin. Either transport returns running after the bounded observation when the process remains live."
         },
         {
           "pointer": "/properties/wait_ms",
-          "description": "Initial bounded wait after starting the turn-owned process. Use 0 for immediate admission in READY/input/EOF workflows, then use poll_process with the exact process_id for each output wait. A nonzero initial wait is permitted by the formal contract; it does not replace a distinct poll when the task explicitly asks for start/poll/stop."
+          "description": "Initial observation window in milliseconds, default 1000, maximum 30000. A bounded nonzero initial wait is permitted; 0 admits immediately for READY/input/EOF workflows. Expiring this observation returns running with the original process_id and output, without killing the process or renewing timeout_ms. A task explicitly requesting a distinct poll still requires that poll."
         },
         {
           "pointer": "/properties/execution_identity",
@@ -415,8 +327,7 @@
               "interactive"
             ],
             "tty": false,
-            "wait_ms": 0,
-            "timeout_ms": 120000
+            "wait_ms": 0
           }
         },
         {
@@ -426,8 +337,7 @@
             "args": [
               "server.mjs"
             ],
-            "wait_ms": 1,
-            "timeout_ms": 120000
+            "wait_ms": 1
           }
         }
       ],
@@ -441,7 +351,7 @@
     {
       "capability_id": "workspace.process",
       "action_id": "workspace.process/poll",
-      "description": "Poll a turn-owned process from a bounded output cursor and observe its current state/cleanup evidence. For each following poll, copy the previous receipt's output.next_cursor into cursor and use wait_ms for bounded waiting. Omitting cursor means 0 and replays retained output; unread output returns immediately even with wait_ms=30000, so it cannot serve as a wait loop. After start_process, use poll_process with the exact process_id to wait for expected output before cancellation; do not infer readiness from a PID or temporary file. Report readiness once, then wait without repeating the same running-status narration. A terminal state=cancelled with cleanup.reaped=true is a successful poll observation, not a tool failure.",
+      "description": "Poll a Session-owned process from a bounded output cursor and observe its current state/cleanup evidence. For each following poll, copy the previous receipt's output.next_cursor into cursor and use wait_ms for bounded waiting. Omitting cursor means 0 and replays retained output; unread output returns immediately even with wait_ms=30000, so it cannot serve as a wait loop. After start_process, use poll_process with the exact process_id to wait for expected output before cancellation; do not infer readiness from a PID or temporary file. Report readiness once, then wait without repeating the same running-status narration. A terminal state=cancelled with cleanup.reaped=true is a successful poll observation, not a tool failure.",
       "parameters": [
         {
           "pointer": "/properties/cursor",
@@ -466,7 +376,7 @@
     {
       "capability_id": "workspace.process",
       "action_id": "workspace.process/input",
-      "description": "Write bounded input to a turn-owned process without trimming or normalization. For exactly one trailing LF, either use input without the LF and append_newline=true, or include the LF in input and omit append_newline/set it false. Combining a final LF in input with true sends two LFs, not one. This is an effect and invalidates older workspace evidence.",
+      "description": "Write bounded input to a Session-owned process without trimming or normalization. For exactly one trailing LF, either use input without the LF and append_newline=true, or include the LF in input and omit append_newline/set it false. Combining a final LF in input with true sends two LFs, not one. This is an effect and invalidates older workspace evidence.",
       "parameters": [
         {
           "pointer": "/properties/input",
@@ -491,7 +401,7 @@
     {
       "capability_id": "workspace.process",
       "action_id": "workspace.process/close_stdin",
-      "description": "Close stdin for a turn-owned process and then poll it for a terminal observation.",
+      "description": "Close stdin for a Session-owned process and then poll it for a terminal observation.",
       "parameters": [],
       "examples": [
         {
@@ -505,7 +415,7 @@
     {
       "capability_id": "workspace.process",
       "action_id": "workspace.process/resize",
-      "description": "Resize the PTY of a turn-owned interactive process.",
+      "description": "Resize the PTY of a Session-owned interactive process.",
       "parameters": [],
       "examples": [
         {
@@ -521,7 +431,7 @@
     {
       "capability_id": "workspace.process",
       "action_id": "workspace.process/cancel",
-      "description": "Cancel a turn-owned process and obtain cleanup evidence. For an explicit stop request, state=cancelled with cleanup.reaped=true is successful stop evidence, not a task failure; cancellation is not rollback.",
+      "description": "Cancel a Session-owned process and obtain cleanup evidence. For an explicit stop request, state=cancelled with cleanup.reaped=true is successful stop evidence, not a task failure; cancellation is not rollback.",
       "parameters": [],
       "examples": [
         {

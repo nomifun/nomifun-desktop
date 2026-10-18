@@ -236,7 +236,9 @@ impl Timeline {
         if fact.kind == "runtime/progress-recorded" && fact.producer_id != "runtime_supervisor" {
             return Ok(());
         }
-        if fact.kind_version != 1 { return Err(invalid("unsupported canonical event version")); }
+        if fact.kind_version != 1 && !(fact.kind == "turn/steer-accepted" && fact.kind_version == 2) {
+            return Err(invalid("unsupported canonical event version"));
+        }
         if fact.kind=="runtime/progress-recorded" && fact.correlation_id==self.operation {
             if fact.tool_name.as_deref()==Some("finish_without_reply")
                 && matches!(fact.runtime_kind.as_deref(),Some("tool_call_delta"|"tool_call_completed")) {
@@ -723,14 +725,17 @@ mod tests {
 
     #[test]
     fn human_steering_separates_process_groups_without_a_narration_body() {
-        let mut timeline=Timeline::new(&turn());
-        for event in [tool(2,"tool_call_completed","before"),tool(3,"tool_started","before"),
-            fact(4,"turn/steer-accepted","turn-operation",None),tool(5,"tool_call_completed","after"),tool(6,"tool_started","after")] {
-            timeline.accept(&event).unwrap();
+        for version in [1,2] {
+            let mut timeline=Timeline::new(&turn());
+            let mut claim=fact(4,"turn/steer-accepted","turn-operation",None);claim.kind_version=version;
+            for event in [tool(2,"tool_call_completed","before"),tool(3,"tool_started","before"),
+                claim,tool(5,"tool_call_completed","after"),tool(6,"tool_started","after")] {
+                timeline.accept(&event).unwrap();
+            }
+            let updates=timeline.finish(&turn(),6).unwrap();
+            assert_eq!(updates.iter().find(|update|update.call_id.as_deref()==Some("before")).unwrap().timeline.segments[0].group_id,format!("process:{ROOT}"));
+            assert_eq!(updates.iter().find(|update|update.call_id.as_deref()==Some("after")).unwrap().timeline.segments[0].group_id,"process:event-4");
         }
-        let updates=timeline.finish(&turn(),6).unwrap();
-        assert_eq!(updates.iter().find(|update|update.call_id.as_deref()==Some("before")).unwrap().timeline.segments[0].group_id,format!("process:{ROOT}"));
-        assert_eq!(updates.iter().find(|update|update.call_id.as_deref()==Some("after")).unwrap().timeline.segments[0].group_id,"process:event-4");
     }
 
     #[test]

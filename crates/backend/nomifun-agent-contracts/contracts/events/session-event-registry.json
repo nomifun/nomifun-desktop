@@ -248,6 +248,31 @@
       "replay_rule": "rebuild_projection"
     },
     {
+      "kind": "turn/steer-accepted",
+      "version": 2,
+      "persistence": "persistent",
+      "payload_schema": "events/turn-steer-accepted/v2",
+      "producer": {
+        "allowed": [
+          "session_api",
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "message/user-accepted"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
       "kind": "turn/follow-up-accepted",
       "version": 1,
       "persistence": "persistent",
@@ -326,6 +351,30 @@
         "reducers": [
           "message-projection"
         ]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "message/input-blocked",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/message-input-blocked/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "message/user-accepted"
+        ]
+      },
+      "correlation": "message",
+      "idempotency": "producer_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
       },
       "replay_rule": "rebuild_projection"
     },
@@ -1241,6 +1290,66 @@
         ]
       },
       "correlation": "message",
+      "idempotency": "producer_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "no_effect"
+    },
+    {
+      "kind": "channel/input-question-delivered",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/channel-input-question-delivered/v1",
+      "producer": {
+        "allowed": [
+          "session_api"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "runtime/progress-recorded"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "producer_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "no_effect"
+    },
+    {
+      "kind": "channel/input-delivery-state",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/channel-input-delivery-state/v1",
+      "producer": { "allowed": ["session_api"] },
+      "predecessor": { "mode": "any_of", "kinds": ["message/user-accepted"] },
+      "correlation": "turn",
+      "idempotency": "producer_scoped_required",
+      "projector": { "required": false, "reducers": [] },
+      "replay_rule": "no_effect"
+    },
+    {
+      "kind": "session/process-owner-released",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/session-process-owner-released/v1",
+      "producer": {
+        "allowed": [
+          "session_api"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "runtime/progress-recorded"
+        ]
+      },
+      "correlation": "session",
       "idempotency": "producer_scoped_required",
       "projector": {
         "required": false,

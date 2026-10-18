@@ -1,9 +1,10 @@
-//! Platform-owned, turn-scoped interactive process sessions. Called only after
+//! Platform-owned, Session-scoped interactive process sessions. Called only after
 //! Wave2/Kernel authority and canonical workspace checks, never by the engine.
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::engine_journal::{EngineJournalWrite, EngineTurnJournal};
@@ -83,13 +84,19 @@ fn with_component_identity(
 #[serde(rename_all = "snake_case")]
 enum Operation {
     #[default]
-    Exec,
     Start,
     Poll,
     Stdin,
     CloseStdin,
     Resize,
     Cancel,
+}
+
+impl Operation {
+    fn action_id(self) -> nomifun_agent_contracts::ActionId {
+        format!("workspace.process/{}", match self { Self::Start => "start", Self::Poll => "poll", Self::Stdin => "input",
+            Self::CloseStdin => "close_stdin", Self::Resize => "resize", Self::Cancel => "cancel" }).into()
+    }
 }
 
 #[derive(Deserialize)]
@@ -120,7 +127,7 @@ struct Params {
 }
 
 fn poll_wait(params: &Params) -> Duration {
-    Duration::from_millis(params.wait_ms.unwrap_or(0))
+    Duration::from_millis(params.wait_ms.unwrap_or(if params.operation == Operation::Start { 1000 } else { 0 }))
 }
 
 fn stdin_bytes(
@@ -154,15 +161,34 @@ fn pty_dimension_out_of_range(params: &Params) -> bool {
 pub(crate) struct EngineProcessScope {
     owner: ManagedEngineProcessOwner,
     state: Mutex<ProcessState>,
-    journal: EngineTurnJournal,
+    turn: std::sync::Mutex<Option<Arc<ProcessTurn>>>,
     cancellation: CancellationToken,
     closed: AtomicBool,
+    session_id: String,
+    owner_id: String,
+    owner_generation: String,
+    canonical: std::sync::OnceLock<nomifun_agent_session::AgentSessionStore>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ProcessAuthority {
+    pub snapshot: nomifun_agent_contracts::ResolvedSnapshotRef,
+    pub actions: BTreeSet<nomifun_agent_contracts::ActionId>,
+    pub resources: nomifun_agent_contracts::TypedResourceBindings,
+}
+
+struct ProcessTurn {
+    operation: String,
+    journal: EngineTurnJournal,
+    authority: Option<ProcessAuthority>,
+    operations: std::sync::Mutex<BTreeSet<String>>,
+    closed: AtomicBool,
+    cancellation: CancellationToken,
 }
 
 #[derive(Default)]
 struct ProcessState {
     sessions: HashMap<String, ProcessEntry>,
-    operations: BTreeSet<String>,
     /// Set across spawn until the returned handle is registered. An error or
     /// panic cannot turn an unaccounted spawn into proof from an empty map.
     unregistered_start: bool,
@@ -186,6 +212,9 @@ struct ProcessEntry {
     session: EngineProcessSession,
     terminal: Option<EngineProcessPoll>,
     component_identity: Option<StrictJsonValue>,
+    creator_operation: String,
+    creator_call: String,
+    authority: Option<ProcessAuthority>,
 }
 
 /// A single invocation's local preparation, never a Session binding or checkpoint.
@@ -206,23 +235,39 @@ async fn next_process_change(mut receiver: tokio::sync::watch::Receiver<u64>)
     Ok(receiver)
 }
 
+async fn prepare_while_turn_open<T>(session:&CancellationToken,turn:&CancellationToken,preparation:impl std::future::Future<Output=T>) ->Option<T> {
+    tokio::select! {biased;
+        _=session.cancelled()=>None,
+        _=turn.cancelled()=>None,
+        result=preparation=>Some(result),
+    }
+}
+
 impl EngineProcessScope {
-    /// Wait on retained owner terminals. No tool admission, stdout reader,
+    /// Wait on retained owner output/terminals. No tool admission, stdout reader,
     /// process lease renewal or change to the original deadline occurs here.
     pub(crate) async fn wait_for_changes(&self, processes: &[nomifun_agent_runtime::AgentWaitProcess],
+        wake_policy: nomifun_agent_runtime::AgentWaitWakePolicy,
         cancellation: CancellationToken) -> Result<Vec<nomifun_agent_runtime::AgentOwnedProcessObservation>, Wave2HostPortError> {
         if processes.is_empty() || processes.len() > 64 { return Err(error("wait requires exact owned process identities")); }
+        let include_output = wake_policy == nomifun_agent_runtime::AgentWaitWakePolicy::OutputOrTerminal;
         let mut changes = futures_util::stream::FuturesUnordered::new();
         let mut has_system = false;
+        let mut notification_closed = false;
         {
             let state = self.state.lock().await;
             let mut seen = BTreeSet::new();
             for process in processes {
                 if !seen.insert(&process.process_id) { return Err(error("duplicate process wait identity")); }
-                let entry = state.sessions.get(&process.process_id).ok_or_else(|| error("wait process is not owned by this exact Turn"))?;
+                let entry = state.sessions.get(&process.process_id).ok_or_else(|| error("wait process is not owned by this exact Session"))?;
                 if let Some(receiver) = entry.session.terminal_changes() {
                     changes.push(next_process_change(receiver));
                 } else { has_system = true; }
+                if include_output {
+                    if let Some(receiver) = self.owner.output_changes(&entry.session).map_err(outcome_unknown)? {
+                        changes.push(next_process_change(receiver));
+                    }
+                }
             }
         }
         loop {
@@ -232,20 +277,28 @@ impl EngineProcessScope {
                 let mut state = self.state.lock().await;
                 for process in processes {
                     let entry = state.sessions.get_mut(&process.process_id).ok_or_else(|| error("wait process ownership changed"))?;
-                    if let Some(poll) = self.owner.terminal_observation_if_ready(&mut entry.session, self.cancellation.clone()).await.map_err(outcome_unknown)? {
+                    if let Some(poll) = self.owner.observe_if_changed(&mut entry.session, process.output_cursor,
+                        include_output, self.cancellation.clone()).await.map_err(outcome_unknown)? {
+                        if poll.is_terminal() && !cleanup_is_proven(&poll) {
+                            return Err(outcome_unknown("the original process wait has no proven cleanup receipt"));
+                        }
                         if cleanup_is_proven(&poll) { entry.terminal = Some(poll.clone()); }
                         observations.push(nomifun_agent_runtime::AgentOwnedProcessObservation { process_id: process.process_id.clone(), poll });
                     }
                 }
             }
             if !observations.is_empty() { return Ok(observations); }
+            if notification_closed { return Err(outcome_unknown("original process lifecycle closed without a terminal observation")); }
             tokio::select! { biased;
                 _ = cancellation.cancelled() => return Err(error("process wait cancelled")),
                 _ = self.cancellation.cancelled() => return Err(error("process scope closed")),
                 receiver = changes.next(), if !changes.is_empty() => {
                     match receiver {
                         Some(Ok(receiver)) => changes.push(next_process_change(receiver)),
-                        Some(Err(_)) => return Err(outcome_unknown("original process lifecycle closed without a terminal observation")),
+                        // A retired registry can close its output watch after
+                        // freezing the terminal. Inspect its retained witness
+                        // once before classifying this as an owner loss.
+                        Some(Err(_)) => notification_closed = true,
                         None => return Err(outcome_unknown("original process lifecycle owner is unavailable")),
                     }
                 },
@@ -257,35 +310,153 @@ impl EngineProcessScope {
     pub(crate) fn close_admission(&self) {
         self.closed.store(true, Ordering::Release);
         self.cancellation.cancel();
+        if let Some(turn)=self.turn.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref(){turn.cancellation.cancel();}
     }
 
     pub(crate) fn workspace_root(&self) -> &Path {
         self.owner.workspace_root()
     }
-    pub(crate) fn new(root: &Path, journal: EngineTurnJournal) -> Result<Self, Wave2HostPortError> {
+    pub(crate) fn owner_generation(&self) -> &str { &self.owner_generation }
+    pub(crate) fn new_session(root: &Path, owner_id: &str, session_id: &str) -> Result<Self, Wave2HostPortError> {
         Ok(Self {
             owner: ManagedEngineProcessOwner::new(root, Default::default()).map_err(error)?,
             state: Mutex::new(ProcessState::default()),
-            journal,
+            turn: std::sync::Mutex::new(None),
             cancellation: CancellationToken::new(),
             closed: false.into(),
+            session_id: session_id.into(), owner_id: owner_id.into(), owner_generation: uuid::Uuid::now_v7().to_string(),
+            canonical: std::sync::OnceLock::new(),
         })
     }
 
+    pub(crate) fn open_turn(&self, operation: &str, journal: EngineTurnJournal, authority: Option<ProcessAuthority>)
+        -> Result<(), Wave2HostPortError> {
+        let mut turn = self.turn.lock().map_err(error)?;
+        if self.closed.load(Ordering::Acquire) || turn.is_some() { return Err(error("previous process Turn is not closed")); }
+        let _ = self.canonical.set(journal.canonical_store());
+        *turn = Some(Arc::new(ProcessTurn { operation: operation.into(), journal, authority,
+            operations: Default::default(), closed: false.into(), cancellation:CancellationToken::new() }));
+        Ok(())
+    }
+
+    pub(crate) fn finish_turn(&self, operation: &str) -> Result<(), Wave2HostPortError> {
+        let mut turn = self.turn.lock().map_err(error)?;
+        let Some(current) = turn.as_ref() else { return Ok(()); };
+        if current.operation != operation { return Err(error("process Turn closure targets a different owner")); }
+        current.closed.store(true, Ordering::Release);
+        current.cancellation.cancel();
+        *turn = None;
+        Ok(())
+    }
+
+    pub(crate) fn require_turn(&self, operation: &str) -> Result<(), Wave2HostPortError> {
+        self.admitted_turn(Some(operation)).map(|_| ())
+    }
+
+    /// This proves live ownership, never process success or tree cleanup.
+    /// Unregistered starts and native unknown cleanup keep the Session fenced.
+    pub(crate) async fn ensure_retained(&self) -> Result<(), Wave2HostPortError> {
+        let mut state = self.state.lock().await;
+        if state.unregistered_start || state.cleanup_panicked { return Err(outcome_unknown("Session process ownership is unproven")); }
+        for entry in state.sessions.values_mut() {
+            if let Some(poll) = self.owner.terminal_observation_if_ready(&mut entry.session, self.cancellation.clone()).await.map_err(outcome_unknown)? {
+                if !cleanup_is_proven(&poll) { return Err(outcome_unknown(format!("creator {} process cleanup is unproven", entry.creator_call))); }
+                entry.terminal = Some(poll);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn retention(&self) -> Result<nomifun_agent_contracts::NativeSessionProcessRetention, Wave2HostPortError> {
+        let mut state = self.state.lock().await;
+        if state.unregistered_start || state.cleanup_panicked { return Err(outcome_unknown("Session process ownership is unproven")); }
+        self.retire_confirmed_terminals(&mut state).await?;
+        let mut processes = state.sessions.iter().map(|(id, entry)| {
+            let authority = entry.authority.as_ref().ok_or_else(|| error("retained process has no original frozen authority"))?;
+            Ok(nomifun_agent_contracts::NativeRetainedProcess { process_id: id.clone(), pid: entry.session.pid(),
+                creator_turn_id: entry.creator_operation.as_str().into(), creator_call_id: entry.creator_call.as_str().into(),
+                resolved_snapshot_ref: authority.snapshot.clone(), resource_binding_digest: nomifun_agent_contracts::digest_payload(&authority.resources).map_err(error)? })
+        }).collect::<Result<Vec<_>,Wave2HostPortError>>()?;
+        processes.sort_by(|left,right|left.process_id.cmp(&right.process_id));
+        let retention = nomifun_agent_contracts::NativeSessionProcessRetention { agent_session_id:self.session_id.as_str().into(),
+            owner_ref:nomifun_agent_contracts::PrincipalRef {principal_kind:"user".into(),principal_id:self.owner_id.clone()},
+            owner_generation:self.owner_generation.clone(), processes };
+        retention.validate().map_err(error)?;
+        Ok(retention)
+    }
+
+    /// Native terminal handles are only a cache once the original first-party
+    /// result proves both their identity and reap in the canonical Session.
+    /// A missing/failed durable settlement keeps the handle and its quota.
+    async fn retire_confirmed_terminals(&self, state: &mut ProcessState) -> Result<(), Wave2HostPortError> {
+        let Some(store) = self.canonical.get() else { return Ok(()); };
+        let processes = state.sessions.iter().map(|(id, entry)| {
+            if !entry.terminal.as_ref().is_some_and(cleanup_is_proven) { return Ok(None); }
+            let Some(authority) = entry.authority.as_ref() else { return Ok(None); };
+            Ok(Some(nomifun_agent_contracts::NativeRetainedProcess { process_id: id.clone(), pid: entry.session.pid(),
+                creator_turn_id: entry.creator_operation.as_str().into(), creator_call_id: entry.creator_call.as_str().into(),
+                resolved_snapshot_ref: authority.snapshot.clone(),
+                resource_binding_digest: nomifun_agent_contracts::digest_payload(&authority.resources).map_err(error)? }))
+        }).collect::<Result<Vec<_>,Wave2HostPortError>>()?.into_iter().flatten().collect::<Vec<_>>();
+        if processes.is_empty() { return Ok(()); }
+        let retention = nomifun_agent_contracts::NativeSessionProcessRetention { agent_session_id: self.session_id.as_str().into(),
+            owner_ref: nomifun_agent_contracts::PrincipalRef { principal_kind: "user".into(), principal_id: self.owner_id.clone() },
+            owner_generation: self.owner_generation.clone(), processes };
+        let confirmed = store.confirmed_reaped_session_processes(&retention).await.map_err(error)?;
+        state.sessions.retain(|id, _| !confirmed.contains(id));
+        Ok(())
+    }
+
+    pub(crate) async fn release_receipt(&self) -> Result<nomifun_agent_contracts::SessionProcessOwnerReleasedV1,Wave2HostPortError> {
+        if !self.closed.load(Ordering::Acquire) || !self.state.lock().await.is_quiescent() {
+            return Err(outcome_unknown("Session process owner has not proved tree cleanup"));
+        }
+        let receipt=nomifun_agent_contracts::SessionProcessOwnerReleasedV1 {retention:self.retention().await?,reaped:true};
+        Ok(receipt)
+    }
+
+    fn admitted_turn(&self, operation: Option<&str>) -> Result<Arc<ProcessTurn>, Wave2HostPortError> {
+        self.turn.lock().map_err(error)?.as_ref().filter(|turn| !turn.closed.load(Ordering::Acquire)
+            && operation.is_none_or(|operation| turn.operation == operation)).cloned()
+            .ok_or_else(|| error("no admitted process Turn for this exact operation"))
+    }
+
+    pub(crate) fn authorize(&self, context: &nomifun_agent_domain_wave2::Wave2HostContext) -> Result<(), Wave2HostPortError> {
+        let turn = self.admitted_turn(Some(context.turn_id.as_ref()))?;
+        let authority = turn.authority.as_ref().ok_or_else(|| error("process Turn has no frozen authority"))?;
+        if authority.snapshot != context.resolved_snapshot_ref || !authority.actions.contains(&context.action_id)
+            || authority.resources != context.resource_bindings { return Err(error("process invocation differs from the frozen Session authority")); }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new(root: &Path, journal: EngineTurnJournal) -> Result<Self, Wave2HostPortError> {
+        let scope = Self::new_session(root,"0190f5fe-7c00-7a00-8000-000000000001","0190f5fe-7c00-7a00-8000-000000000002")?;
+        scope.open_turn("fixture-turn", journal, None)?;
+        Ok(scope)
+    }
+
+    #[cfg(test)]
     pub(crate) async fn invoke(
         &self,
         input: StrictJsonValue,
         operation_id: &str,
     ) -> Result<StrictJsonValue, Wave2HostPortError> {
+        self.invoke_for_turn(input, operation_id, None).await
+    }
+
+    pub(crate) async fn invoke_for_turn(&self, input: StrictJsonValue, operation_id: &str, turn_id: Option<&str>)
+        -> Result<StrictJsonValue, Wave2HostPortError> {
+        let turn = self.admitted_turn(turn_id)?;
         let params: Params = serde_json::from_value(input.0)
             .map_err(|e| Wave2HostPortError::new("INVALID_PAYLOAD", e.to_string()))?;
         if params.component.is_some() {
-            return match self.prepare_component_params(params).await? {
-                PreparedWave2Invocation::Invoke(prepared) => self.invoke_prepared(prepared, operation_id).await,
+            return match self.prepare_component_params(params,&turn.cancellation).await? {
+                PreparedWave2Invocation::Invoke(prepared) => self.invoke_params(prepared.params, Some((prepared.component, prepared.prepared)), operation_id, turn).await,
                 PreparedWave2Invocation::Return(observation) => Ok(observation),
             };
         }
-        self.invoke_params(params, None, operation_id).await
+        self.invoke_params(params, None, operation_id, turn).await
     }
 
     /// Run only after the original Effect reader has ruled out replay/unknown results.
@@ -293,17 +464,20 @@ impl EngineProcessScope {
     pub(crate) async fn prepare_component(
         &self,
         input: StrictJsonValue,
+        turn_id: &str,
     ) -> Result<PreparedWave2Invocation<PreparedProcessInvocation>, Wave2HostPortError> {
+        let turn=self.admitted_turn(Some(turn_id))?;
         let params = serde_json::from_value(input.0)
             .map_err(|e| Wave2HostPortError::new("INVALID_PAYLOAD", e.to_string()))?;
-        self.prepare_component_params(params).await
+        self.prepare_component_params(params,&turn.cancellation).await
     }
 
     async fn prepare_component_params(
         &self,
         params: Params,
+        cancellation: &CancellationToken,
     ) -> Result<PreparedWave2Invocation<PreparedProcessInvocation>, Wave2HostPortError> {
-        if !matches!(params.operation, Operation::Exec | Operation::Start)
+        if params.operation != Operation::Start
             || params.command.is_some() || params.cmd.is_some()
             || params.process_id.is_some() || params.input.is_some()
             || params.cursor.is_some() || params.append_newline.is_some()
@@ -317,7 +491,7 @@ impl EngineProcessScope {
                 name, "COMPONENT_NOT_DECLARED", "Choose an exact approved component id: officecli, bun or node.",
             )));
         };
-        if self.closed.load(Ordering::Acquire) || self.cancellation.is_cancelled() {
+        if self.closed.load(Ordering::Acquire) || self.cancellation.is_cancelled() || cancellation.is_cancelled() {
             return Ok(PreparedWave2Invocation::Return(component_not_started(
                 name, "CANCELLED", "Component preparation cancelled before the requested program started.",
             )));
@@ -327,7 +501,7 @@ impl EngineProcessScope {
         request.cwd = params.cwd.clone();
         request.env = params.env.clone();
         request.execution_identity = params.execution_identity;
-        request.timeout_ms = params.timeout_ms.unwrap_or(30_000);
+        request.timeout_ms = params.timeout_ms;
         request.transport = if params.tty {
             EngineProcessTransport::Pty { cols: params.cols.unwrap_or(120), rows: params.rows.unwrap_or(40) }
         } else { EngineProcessTransport::Pipe };
@@ -343,13 +517,12 @@ impl EngineProcessScope {
         }
         let environment = params.env.iter().map(|(key, value)| (key.clone(), value.clone())).collect();
         let cwd = self.workspace_root().join(params.cwd.as_deref().unwrap_or("."));
-        let preparation = tokio::select! {
-            biased;
-            _ = self.cancellation.cancelled() => return Ok(PreparedWave2Invocation::Return(component_not_started(
+        let Some(preparation) = prepare_while_turn_open(&self.cancellation,cancellation,
+            tokio::time::timeout(COMPONENT_PREPARATION_WAIT,
+                nomifun_runtime::prepare_component_launch(component, &environment, &cwd))).await else {
+            return Ok(PreparedWave2Invocation::Return(component_not_started(
                 name, "CANCELLED", "Component preparation cancelled before the requested program started.",
-            ))),
-            result = tokio::time::timeout(COMPONENT_PREPARATION_WAIT,
-                nomifun_runtime::prepare_component_launch(component, &environment, &cwd)) => result,
+            )));
         };
         let prepared = match preparation {
             Ok(Ok(prepared)) => prepared,
@@ -361,7 +534,7 @@ impl EngineProcessScope {
                 name, "COMPONENT_PREPARATION_TIMEOUT", "The component preparation wait expired; the requested program did not start.",
             ))),
         };
-        if self.closed.load(Ordering::Acquire) || self.cancellation.is_cancelled() {
+        if self.closed.load(Ordering::Acquire) || self.cancellation.is_cancelled() || cancellation.is_cancelled() {
             return Ok(PreparedWave2Invocation::Return(component_not_started(
                 name, "CANCELLED", "Component preparation cancelled before the requested program started.",
             )));
@@ -381,12 +554,10 @@ impl EngineProcessScope {
         Ok(PreparedWave2Invocation::Invoke(PreparedProcessInvocation { params, component, prepared }))
     }
 
-    pub(crate) async fn invoke_prepared(
-        &self,
-        invocation: PreparedProcessInvocation,
-        operation_id: &str,
-    ) -> Result<StrictJsonValue, Wave2HostPortError> {
-        self.invoke_params(invocation.params, Some((invocation.component, invocation.prepared)), operation_id).await
+    pub(crate) async fn invoke_prepared_for_turn(&self, invocation: PreparedProcessInvocation, operation_id: &str, turn_id: Option<&str>)
+        -> Result<StrictJsonValue, Wave2HostPortError> {
+        let turn = self.admitted_turn(turn_id)?;
+        self.invoke_params(invocation.params, Some((invocation.component, invocation.prepared)), operation_id, turn).await
     }
 
     async fn invoke_params(
@@ -394,7 +565,11 @@ impl EngineProcessScope {
         params: Params,
         component: Option<(nomifun_runtime::ToolId, nomifun_runtime::PreparedComponentLaunch)>,
         operation_id: &str,
+        turn: Arc<ProcessTurn>,
     ) -> Result<StrictJsonValue, Wave2HostPortError> {
+        if turn.authority.as_ref().is_some_and(|authority| !authority.actions.contains(&params.operation.action_id())) {
+            return Err(error("process action is outside the current Turn's frozen grant ceiling"));
+        }
         if params.wait_ms.is_some_and(|wait| wait > 30_000)
             || stdin_input_exceeds_budget(&params)
             || pty_dimension_out_of_range(&params)
@@ -402,7 +577,7 @@ impl EngineProcessScope {
             return Err(error("process wait/input/PTY dimension budget exceeded"));
         }
         let mut state = self.state.lock().await;
-        if self.closed.load(Ordering::Acquire) || state.unregistered_start || state.cleanup_panicked
+        if self.closed.load(Ordering::Acquire) || turn.closed.load(Ordering::Acquire) || state.unregistered_start || state.cleanup_panicked
         {
             if let Some((id, _)) = &component {
                 if !state.unregistered_start && !state.cleanup_panicked {
@@ -411,15 +586,18 @@ impl EngineProcessScope {
             }
             return Err(error("process turn is closed"));
         }
+        let ordinal = {
+        let mut operations = turn.operations.lock().map_err(error)?;
         if operation_id.is_empty()
             || operation_id.len() > 1024
             || operation_id.chars().any(char::is_control)
-            || state.operations.len() >= 512
-            || !state.operations.insert(operation_id.to_owned())
+            || operations.len() >= 512
+            || !operations.insert(operation_id.to_owned())
         {
             return Err(error("invalid, duplicate or excessive process operation"));
         }
-        let ordinal = state.operations.len() as u16;
+        operations.len() as u16
+        };
         let intent = serde_json::to_string(&ProcessWitness::Dispatch {
             operation_id: operation_id.to_owned(),
             ordinal,
@@ -427,15 +605,14 @@ impl EngineProcessScope {
         .map_err(error)?;
         // Hold the same scope lock through effect and barrier. A later spawn
         // cannot race ahead of an earlier all-handles-reaped observation.
-        if let Err(cause) = self
-            .journal
+        if let Err(cause) = turn.journal
             .append(intent, None, EngineJournalWrite::Progress)
             .await
         {
             self.close_admission();
             return Err(error(cause));
         }
-        let result = self.invoke_owned(params, component, &mut state).await;
+        let result = self.invoke_owned(params, component, &mut state, &turn, operation_id).await;
         if state.is_quiescent() {
             let witness = serde_json::to_string(&ProcessWitness::Quiescent {
                 operation_id: operation_id.to_owned(),
@@ -443,8 +620,7 @@ impl EngineProcessScope {
                 process_count: state.sessions.len(),
             })
             .map_err(error)?;
-            if let Err(cause) = self
-                .journal
+            if let Err(cause) = turn.journal
                 .append(witness, None, EngineJournalWrite::Settlement)
                 .await
             {
@@ -460,10 +636,13 @@ impl EngineProcessScope {
         params: Params,
         component: Option<(nomifun_runtime::ToolId, nomifun_runtime::PreparedComponentLaunch)>,
         state: &mut ProcessState,
+        turn: &ProcessTurn,
+        operation_id: &str,
     ) -> Result<StrictJsonValue, Wave2HostPortError> {
         let poll_delay = poll_wait(&params);
+        let launch = params.operation == Operation::Start;
+        if launch { self.retire_confirmed_terminals(state).await?; }
         let sessions = &mut state.sessions;
-        let launch = matches!(params.operation, Operation::Exec | Operation::Start);
         if params.cursor.is_some() && params.operation != Operation::Poll {
             return Err(error("cursor is only valid for poll"));
         }
@@ -472,7 +651,7 @@ impl EngineProcessScope {
         }
         let id = if launch {
             if sessions.len() >= 64 {
-                return Err(error("turn process limit reached (64 launches)"));
+                return Err(error("Session process limit reached (64 live or unconfirmed native handles)"));
             }
             if params.process_id.is_some() || params.input.is_some() {
                 return Err(error(
@@ -484,7 +663,7 @@ impl EngineProcessScope {
                 "digest":prepared.tool.digest, "source":prepared.tool.source,
             })));
             let mut request = if let Some((id, prepared)) = &component {
-                if self.cancellation.is_cancelled() {
+                if self.cancellation.is_cancelled() || turn.cancellation.is_cancelled() {
                     return Ok(component_not_started(id.as_str(), "CANCELLED", "The requested program did not start."));
                 }
                 if let Err(cause) = prepared.validate_for_start() {
@@ -512,7 +691,7 @@ impl EngineProcessScope {
             request.cwd = params.cwd;
             if component.is_none() { request.env = params.env; }
             request.execution_identity = params.execution_identity;
-            request.timeout_ms = params.timeout_ms.unwrap_or(30_000);
+            request.timeout_ms = params.timeout_ms;
             request.output_limit_bytes = 256 * 1024;
             request.transport = if params.tty {
                 EngineProcessTransport::Pty {
@@ -525,11 +704,11 @@ impl EngineProcessScope {
             // Obvious input errors are rejected before the uncertain spawn
             // window. Errors returned by the owner may still require repair.
             request.validate().map_err(error)?;
-            resolve_managed_program(&mut request, &self.cancellation, self.workspace_root()).await?;
+            resolve_managed_program(&mut request, &turn.cancellation, self.workspace_root()).await?;
             state.unregistered_start = true;
             let session = match self
                 .owner
-                .start_with_evidence(request, self.cancellation.clone())
+                .start_with_evidence(request, turn.cancellation.clone())
                 .await
             {
                 Ok(session) => session,
@@ -543,6 +722,9 @@ impl EngineProcessScope {
                     session,
                     terminal: None,
                     component_identity: identity,
+                    creator_operation: turn.operation.clone(),
+                    creator_call: operation_id.into(),
+                    authority: turn.authority.clone(),
                 },
             );
             state.unregistered_start = false;
@@ -569,11 +751,18 @@ impl EngineProcessScope {
                 "schema":"nomifun.process-control-observation.v1",
                 "state":"not_executed", "success":false, "control_applied":false,
                 "operation":params.operation, "code":"PROCESS_REFERENCE_INVALID",
-                "message":"The process_id is not available in this exact turn. No process control was applied. Copy the exact process_id from start_process or its later receipt, then correct this call. Process capability remains available. Do not start a replacement merely to recover a mistyped reference; the original process may still be running."
+                "message":"The process_id is not available in this exact Session. No process control was applied. Copy the exact process_id from start_process or its later receipt, then correct this call. Process capability remains available. Do not start a replacement merely to recover a mistyped reference; the original process may still be running."
             }))),
-            None => return Err(error("process_id is not owned by this exact turn")),
+            None => return Err(error("process_id is not owned by this exact Session")),
         };
         let input_control = matches!(params.operation, Operation::Stdin | Operation::CloseStdin | Operation::Resize);
+        if !launch && entry.creator_operation != turn.operation {
+            match (&entry.authority, &turn.authority) {
+                (Some(creator), Some(current)) if creator.resources == current.resources
+                    && creator.actions.contains(&params.operation.action_id()) => {},
+                _ => return Err(error("process control exceeds its creator's frozen resource or action ceiling")),
+            }
+        }
         if input_control && entry.terminal.is_none() {
             // A deadline can settle in the owner between model steps. Read its
             // frozen terminal before attempting input; do not consume running
@@ -603,7 +792,7 @@ impl EngineProcessScope {
                     params.append_newline.unwrap_or(false),
                 )?;
                 self.owner
-                    .write_stdin(session, &bytes, self.cancellation.clone())
+                    .write_stdin(session, &bytes, turn.cancellation.clone())
                     .await
                     .map_err(outcome_unknown)?
             }
@@ -629,8 +818,8 @@ impl EngineProcessScope {
                 .map_err(outcome_unknown)?,
             _ => {}
         }
-        let poll = match params.operation {
-            Operation::Exec => self.owner.wait(session, self.cancellation.clone()).await,
+        let observed = async { match params.operation {
+            Operation::Start => self.owner.initial_observation(session, poll_delay, self.cancellation.clone()).await,
             Operation::Cancel => self.owner.cancel(session).await,
             Operation::Poll => {
                 self.owner
@@ -651,8 +840,17 @@ impl EngineProcessScope {
                     )
                     .await
             }
-        }
-        .map_err(outcome_unknown)?;
+        }};
+        let poll = if params.operation == Operation::Cancel { observed.await } else {
+            let settled=tokio::select! {biased;
+                _=turn.cancellation.cancelled()=>None,
+                result=observed=>Some(result),
+            };
+            match settled {Some(result)=>result,None=>{
+                let cursor=params.cursor.unwrap_or(session.cursor());
+                self.owner.poll_from(session,cursor,Duration::ZERO,self.cancellation.clone()).await
+            }}
+        }.map_err(outcome_unknown)?;
         if cleanup_is_proven(&poll) {
             entry.terminal = Some(poll.clone());
         }
@@ -818,6 +1016,212 @@ fn process_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn turn_stop_releases_component_preparation_wait_without_closing_session() {
+        let root=tempfile::tempdir().unwrap();
+        let(journal,pool)=super::super::engine_journal::test_fixture().await;
+        let scope=Arc::new(EngineProcessScope::new(root.path(),journal).unwrap());
+        let turn=scope.admitted_turn(None).unwrap();
+        let waiting=scope.clone();let token=turn.cancellation.clone();
+        let entered=CancellationToken::new();let enter=entered.clone();
+        let worker=tokio::spawn(async move {
+            prepare_while_turn_open(&waiting.cancellation,&token,async {enter.cancel();std::future::pending::<()>().await}).await
+        });
+        entered.cancelled().await;
+        scope.finish_turn("fixture-turn").unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(1),worker).await.unwrap().unwrap().is_none());
+        assert!(!scope.cancellation.is_cancelled());
+        assert!(scope.state.lock().await.sessions.is_empty());
+        scope.cleanup().await.unwrap();drop(turn);drop(scope);pool.close().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn turn_stop_interrupts_initial_observation_but_retains_the_registered_child() {
+        let root=tempfile::tempdir().unwrap();
+        let(journal,pool)=super::super::engine_journal::test_fixture().await;
+        let scope=Arc::new(EngineProcessScope::new(root.path(),journal).unwrap());
+        let launching=scope.clone();
+        let worker=tokio::spawn(async move {launching.invoke(StrictJsonValue(serde_json::json!({
+            "operation":"start","cmd":"printf 'READY' > initial-observation-ready; IFS= read -r answer","wait_ms":30000
+        })),"stop-during-initial-observation").await});
+        // The real child reaches its pipe read while the owner remains inside
+        // the long initial observation. A Turn stop must not send it a signal.
+        tokio::time::timeout(Duration::from_secs(5),async {
+            while !root.path().join("initial-observation-ready").exists(){tokio::time::sleep(Duration::from_millis(5)).await;}
+        }).await.unwrap();
+        scope.finish_turn("fixture-turn").unwrap();
+        let observed=tokio::time::timeout(Duration::from_secs(5),worker).await.unwrap().unwrap().unwrap().0;
+        assert_eq!(observed["state"],"running");
+        assert!(observed["process_id"].as_str().is_some());
+        assert!(!scope.cancellation.is_cancelled());
+        assert!(!scope.state.lock().await.is_quiescent());
+        scope.cleanup().await.unwrap();drop(scope);pool.close().await;
+    }
+
+    fn session_process_authority(actions: &[&str]) -> ProcessAuthority {
+        ProcessAuthority {
+            snapshot: nomifun_agent_contracts::ResolvedSnapshotRef { snapshot_id: "snapshot".into(), snapshot_digest: "b".repeat(64).into() },
+            actions: actions.iter().map(|action| format!("workspace.process/{action}").into()).collect(),
+            resources: vec![nomifun_agent_contracts::TypedResourceBinding {
+                binding_id: "process-binding".into(), resource_kind: "process_session".into(), resource_id: "managed-process-session".into(),
+                owner_id: "owner".into(), operations: BTreeSet::from(["execute".into()]), connection_config_ref: None, typed_parameters: BTreeMap::new(),
+            }],
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn more_than_sixty_four_short_commands_retire_only_canonical_reaped_handles() {
+        let root = tempfile::tempdir().unwrap();
+        let (journal, pool) = super::super::engine_journal::test_fixture().await;
+        let scope = EngineProcessScope::new_session(root.path(),
+            "0190f5fe-7c00-7a00-8000-000000000001", "0190f5fe-7c00-7a00-8000-000000000002").unwrap();
+        scope.open_turn("turn", journal.clone(), Some(session_process_authority(&["start", "poll"]))).unwrap();
+        let mut identities = BTreeSet::new();
+        let mut last = String::new();
+        for index in 0..70 {
+            let operation = format!("short-command-{index}");
+            let call = format!("short-call-{index}");
+            journal.append(serde_json::json!({"event":"host_tool_dispatch", "dispatch":{
+                "operation_id":operation, "call_id":call, "capability_id":"workspace.process",
+                "action_id":"workspace.process/start", "model_name":"start_process"}}).to_string(),
+                None, EngineJournalWrite::Progress).await.unwrap();
+            let output = scope.invoke_for_turn(StrictJsonValue(serde_json::json!({"operation":"start",
+                "command":"/usr/bin/printf", "args":["short-result"], "wait_ms":1000})), &operation, Some("turn")).await.unwrap();
+            assert_eq!(output.0["state"], "exited");
+            assert_eq!(output.0["cleanup"]["reaped"], true);
+            assert_eq!(output.0["output"]["text"], "short-result");
+            last = output.0["process_id"].as_str().unwrap().to_owned();
+            assert!(identities.insert(last.clone()), "a retired terminal cannot be replaced by a replayed process");
+            assert_eq!(scope.state.lock().await.sessions.len(), 1,
+                "the previous canonical terminal must not consume a lifetime Session quota");
+            // A native exit alone is not a durable receipt. Until the real
+            // result is committed the handle must remain owned and retained.
+            assert!(scope.retention().await.unwrap().processes.iter().any(|process| process.process_id == last));
+            let result = nomifun_engine_core::EngineToolResult::text(call.clone().into(), output.0.to_string(), false);
+            journal.append(serde_json::json!({"event":"host_tool_settled", "operation_id":operation,
+                "call_id":call, "result":result, "error":null}).to_string(), None, EngineJournalWrite::Settlement).await.unwrap();
+        }
+        assert_eq!(identities.len(), 70);
+        assert!(scope.retention().await.unwrap().processes.is_empty());
+        let retired = scope.invoke_for_turn(StrictJsonValue(serde_json::json!({"operation":"poll", "process_id":last})),
+            "observe-retired-command", Some("turn")).await.unwrap();
+        assert_eq!(retired.0["code"], "PROCESS_REFERENCE_INVALID");
+        assert!(scope.state.lock().await.sessions.is_empty(), "a retired reference cannot start or recreate a process");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='host_tool_settled'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 70, "every retired result stays in the original canonical history");
+        scope.cleanup().await.unwrap();
+        drop(scope);
+        drop(journal);
+        pool.close().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn same_session_process_survives_turn_handoff_and_accepts_original_handle_in_successor() {
+        let root = tempfile::tempdir().unwrap();
+        let (first, first_pool) = super::super::engine_journal::test_fixture().await;
+        let scope = EngineProcessScope::new_session(root.path(),"0190f5fe-7c00-7a00-8000-000000000001","0190f5fe-7c00-7a00-8000-000000000002").unwrap();
+        let authority = session_process_authority(&["start", "poll", "input", "cancel"]);
+        scope.open_turn("first", first, Some(authority.clone())).unwrap();
+        let launched = scope.invoke_for_turn(StrictJsonValue(serde_json::json!({
+            "operation":"start", "cmd":"printf 'READY\\n'; IFS= read -r answer; printf 'ANSWER:%s\\n' \"$answer\"", "wait_ms":0
+        })), "original-launch", Some("first")).await.unwrap().0;
+        let id = launched["process_id"].as_str().unwrap().to_owned();
+        let pid = launched["pid"].as_u64().unwrap();
+        scope.finish_turn("first").unwrap();
+        scope.ensure_retained().await.unwrap();
+        assert!(!scope.state.lock().await.is_quiescent());
+        assert!(scope.invoke_for_turn(StrictJsonValue(serde_json::json!({"operation":"cancel","process_id":id})),
+            "late-old-call", Some("first")).await.is_err());
+        let (second, second_pool) = super::super::engine_journal::test_fixture().await;
+        scope.open_turn("second", second, Some(authority)).unwrap();
+        let observed = scope.invoke_for_turn(StrictJsonValue(serde_json::json!({"operation":"poll","process_id":id})),
+            "successor-observation", Some("second")).await.unwrap().0;
+        assert_eq!(observed["process_id"], id);
+        assert_eq!(observed["pid"], pid);
+        assert_eq!(observed["state"], "running");
+        let sent = scope.invoke_for_turn(StrictJsonValue(serde_json::json!({"operation":"stdin","process_id":id,
+            "input":"accepted", "append_newline":true})), "successor-answer", Some("second")).await.unwrap().0;
+        let (terminal,text)=tokio::time::timeout(Duration::from_secs(5),async {
+            let mut observed=sent;let mut text=String::new();let mut ordinal=0;
+            loop {
+                text.push_str(observed["output"]["text"].as_str().unwrap());
+                if observed["state"]!="running" {break (observed,text);}
+                let cursor=observed["output"]["next_cursor"].as_u64().unwrap();
+                observed=scope.invoke_for_turn(StrictJsonValue(serde_json::json!({"operation":"poll","process_id":id,"cursor":cursor,"wait_ms":1000})),
+                    &format!("successor-terminal-{ordinal}"),Some("second")).await.unwrap().0;
+                ordinal+=1;
+            }
+        }).await.unwrap();
+        assert_eq!(terminal["state"], "exited");
+        assert!(text.contains("ANSWER:accepted"));
+        let state = scope.state.lock().await;
+        assert_eq!(state.sessions.len(), 1, "a successor must never relaunch the command");
+        assert_eq!(state.sessions[&id].creator_operation, "first");
+        assert_eq!(state.sessions[&id].creator_call, "original-launch");
+        drop(state);
+        scope.cleanup().await.unwrap();
+        drop(scope); first_pool.close().await; second_pool.close().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn successor_process_controls_keep_creator_grants_and_session_teardown_reaps_background() {
+        for rejected_ceiling in ["creator_grant", "current_grant", "resource"] {
+        let root = tempfile::tempdir().unwrap();
+        let (first, first_pool) = super::super::engine_journal::test_fixture().await;
+        let scope = EngineProcessScope::new_session(root.path(),"0190f5fe-7c00-7a00-8000-000000000001","0190f5fe-7c00-7a00-8000-000000000002").unwrap();
+        let creator = session_process_authority(if rejected_ceiling == "creator_grant" { &["start"] } else { &["start","input"] });
+        scope.open_turn("first", first, Some(creator.clone())).unwrap();
+        let launched = scope.invoke_for_turn(StrictJsonValue(serde_json::json!({"operation":"start", "cmd":"IFS= read -r answer", "wait_ms":0})),
+            "launch-grant-only", Some("first")).await.unwrap().0;
+        let id = launched["process_id"].as_str().unwrap().to_owned();
+        scope.finish_turn("first").unwrap();
+        let (second, second_pool) = super::super::engine_journal::test_fixture().await;
+        let mut current = session_process_authority(if rejected_ceiling == "current_grant" { &["start","poll"] } else { &["start","poll","input","cancel"] });
+        if rejected_ceiling == "resource" { current.resources[0].resource_id = "different-process-resource".into(); }
+        scope.open_turn("second", second, Some(current)).unwrap();
+        assert!(scope.invoke_for_turn(StrictJsonValue(serde_json::json!({"operation":"stdin","process_id":id,"input":"forbidden"})),
+            "reject-expanded-control", Some("second")).await.is_err());
+        scope.ensure_retained().await.unwrap();
+        scope.finish_turn("second").unwrap();
+        scope.cleanup().await.unwrap();
+        let state = scope.state.lock().await;
+        assert!(state.is_quiescent());
+        assert!(matches!(state.sessions[&id].terminal, Some(EngineProcessPoll::Cancelled { .. })));
+        drop(state); drop(scope); first_pool.close().await; second_pool.close().await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_exit_between_turns_only_retains_terminal_until_next_explicit_observation() {
+        let root = tempfile::tempdir().unwrap();
+        let (first, first_pool) = super::super::engine_journal::test_fixture().await;
+        let scope = EngineProcessScope::new_session(root.path(),"0190f5fe-7c00-7a00-8000-000000000001","0190f5fe-7c00-7a00-8000-000000000002").unwrap();
+        let authority = session_process_authority(&["start","poll"]);
+        scope.open_turn("first", first, Some(authority.clone())).unwrap();
+        let launched = scope.invoke_for_turn(StrictJsonValue(serde_json::json!({"operation":"start", "cmd":"sleep 0.1; printf 'BACKGROUND_DONE'", "wait_ms":0})),
+            "finite-third-party-work", Some("first")).await.unwrap().0;
+        let id = launched["process_id"].as_str().unwrap().to_owned();
+        scope.finish_turn("first").unwrap();
+        let original_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events").fetch_one(&first_pool).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_events").fetch_one(&first_pool).await.unwrap(), original_count,
+            "background output and exit cannot synthesize a Turn/model event");
+        let (second, second_pool) = super::super::engine_journal::test_fixture().await;
+        scope.open_turn("second", second, Some(authority)).unwrap();
+        let observed = scope.invoke_for_turn(StrictJsonValue(serde_json::json!({"operation":"poll","process_id":id,"wait_ms":1000})),
+            "observe-real-terminal", Some("second")).await.unwrap().0;
+        assert_eq!(observed["state"], "exited");
+        assert_eq!(observed["output"]["text"], "BACKGROUND_DONE");
+        assert_eq!(observed["cleanup"]["reaped"], true);
+        scope.cleanup().await.unwrap(); drop(scope); first_pool.close().await; second_pool.close().await;
+    }
     use nomifun_engine_core::{EngineCleanupReport, EngineProcessOutput};
     include!("engine_process_component_tests.rs");
 
@@ -904,7 +1308,7 @@ mod tests {
         let scope = EngineProcessScope::new(root.path(), journal).unwrap();
         for (index, command) in ["/bin/ls -a", "ls -a"].into_iter().enumerate() {
             let rejected = scope.invoke(StrictJsonValue(serde_json::json!({
-                "operation":"exec", "command":command, "env":{"PATH":"/usr/bin:/bin"}, "timeout_ms":5000
+                "operation":"start", "wait_ms":1000, "command":command, "env":{"PATH":"/usr/bin:/bin"}, "timeout_ms":5000
             })), &format!("reject-unsplit-command-{index}")).await.unwrap().0;
             assert_eq!(rejected["code"], "PROCESS_NOT_STARTED");
             assert_eq!(rejected["state"], "not_started");
@@ -917,7 +1321,7 @@ mod tests {
         }
 
         let corrected = scope.invoke(StrictJsonValue(serde_json::json!({
-            "operation":"exec", "command":"/bin/ls", "args":["-a"], "timeout_ms":5000
+            "operation":"start", "wait_ms":1000, "command":"/bin/ls", "args":["-a"], "timeout_ms":5000
         })), "correct-literal-argv").await.unwrap().0;
         assert_eq!(corrected["state"], "exited");
         assert_eq!(corrected["exit_code"], 0);
@@ -939,6 +1343,72 @@ mod tests {
 
     #[tokio::test]
     #[cfg(unix)]
+    async fn bounded_launch_finishes_short_commands_and_yields_interactive_output_without_relaunch() {
+        let root = tempfile::tempdir().unwrap();
+        let (journal, pool) = super::super::engine_journal::test_fixture().await;
+        let scope = EngineProcessScope::new(root.path(), journal).unwrap();
+        let short = scope.invoke(StrictJsonValue(serde_json::json!({
+            "command":"/bin/sh", "args":["-c","printf short"]
+        })), "short-launch").await.unwrap().0;
+        assert_eq!(short["state"], "exited");
+        assert_eq!(short["success"], true);
+        let began = tokio::time::Instant::now();
+        let interactive = tokio::time::timeout(Duration::from_secs(3), scope.invoke(StrictJsonValue(serde_json::json!({
+            "command":"/bin/sh", "args":["-c","printf 'verification-link'; IFS= read -r answer; printf 'confirmed:%s' \"$answer\""],
+            "timeout_ms":5000
+        })), "interactive-launch")).await.unwrap().unwrap().0;
+        assert!(began.elapsed() < Duration::from_secs(3));
+        assert_eq!(interactive["state"], "running");
+        assert!(interactive["success"].is_null());
+        assert_eq!(interactive["output"]["text"], "verification-link");
+        let id = interactive["process_id"].as_str().unwrap();
+        scope.invoke(StrictJsonValue(serde_json::json!({
+            "operation":"stdin", "process_id":id,"input":"accepted","append_newline":true
+        })), "real-user-input").await.unwrap();
+        let processes = [nomifun_agent_runtime::AgentWaitProcess {process_id:id.into(),output_cursor:0}];
+        let observed = scope.wait_for_changes(&processes, nomifun_agent_runtime::AgentWaitWakePolicy::TerminalOnly,
+            CancellationToken::new()).await.unwrap();
+        assert!(matches!(&observed[0].poll, EngineProcessPoll::Exited {exit_code:Some(0),output,cleanup,..}
+            if cleanup.reaped && output.text == "verification-linkconfirmed:accepted"));
+        assert_eq!(scope.state.lock().await.sessions.len(),2,"only the original two launches ran");
+        assert!(scope.invoke(StrictJsonValue(serde_json::json!({"operation":"exec","command":"/bin/true"})), "retired-exec").await.is_err());
+        scope.cleanup().await.unwrap();drop(scope);pool.close().await;
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn owner_wait_observes_delayed_output_but_human_wait_ignores_later_logs() {
+        use nomifun_agent_runtime::{AgentWaitProcess, AgentWaitWakePolicy};
+        let root = tempfile::tempdir().unwrap();
+        let (journal, pool) = super::super::engine_journal::test_fixture().await;
+        let scope = EngineProcessScope::new(root.path(), journal).unwrap();
+        let started = scope.invoke(StrictJsonValue(serde_json::json!({"operation":"start","wait_ms":0,
+            "command":"/bin/sh","args":["-c","sleep 0.1; printf 'verification-link'; sleep 0.1; printf 'still-waiting'; IFS= read -r answer"],
+            "timeout_ms":5000})), "delayed-output-launch").await.unwrap().0;
+        assert_eq!(started["state"],"running");
+        assert_eq!(started["output"]["text"],"");
+        let id = started["process_id"].as_str().unwrap();
+        let mut processes = [AgentWaitProcess {process_id:id.into(),output_cursor:0}];
+        let observed = tokio::time::timeout(Duration::from_secs(2),scope.wait_for_changes(&processes,
+            AgentWaitWakePolicy::OutputOrTerminal,CancellationToken::new())).await.unwrap().unwrap();
+        let EngineProcessPoll::Running {output,..} = &observed[0].poll else {panic!("delayed output must wake a live owner")};
+        assert!(output.text.contains("verification-link"));
+        processes[0].output_cursor = output.next_cursor;
+        assert!(tokio::time::timeout(Duration::from_millis(350),scope.wait_for_changes(&processes,
+            AgentWaitWakePolicy::TerminalOnly,CancellationToken::new())).await.is_err(),
+            "later logs cannot wake the model while it is waiting for a human");
+        let state = scope.state.lock().await;
+        assert_eq!(state.sessions[id].session.cursor(),0,"read-only owner observations do not consume tool output");
+        drop(state);
+        scope.invoke(StrictJsonValue(serde_json::json!({"operation":"stdin","process_id":id,"input":"done\n"})),"answer-original-owner").await.unwrap();
+        let finished = tokio::time::timeout(Duration::from_secs(2),scope.wait_for_changes(&processes,
+            AgentWaitWakePolicy::TerminalOnly,CancellationToken::new())).await.unwrap().unwrap();
+        assert!(matches!(&finished[0].poll,EngineProcessPoll::Exited {exit_code:Some(0),cleanup,..} if cleanup.reaped));
+        scope.cleanup().await.unwrap();drop(scope);pool.close().await;
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
     async fn parked_owner_wait_wakes_for_any_process_and_preserves_the_original_deadline() {
         let root = tempfile::tempdir().unwrap();
         let (journal, pool) = super::super::engine_journal::test_fixture().await;
@@ -951,13 +1421,13 @@ mod tests {
             })), &format!("start-parked-{index}")).await.unwrap().0;
             processes.push(nomifun_agent_runtime::AgentWaitProcess {process_id:started["process_id"].as_str().unwrap().into(),output_cursor:0});
         }
-        let observed = tokio::time::timeout(Duration::from_secs(3), scope.wait_for_changes(&processes,CancellationToken::new())).await.unwrap().unwrap();
+        let observed = tokio::time::timeout(Duration::from_secs(3), scope.wait_for_changes(&processes,nomifun_agent_runtime::AgentWaitWakePolicy::TerminalOnly,CancellationToken::new())).await.unwrap().unwrap();
         assert!(observed.iter().any(|event|event.process_id==processes[1].process_id && matches!(event.poll,EngineProcessPoll::TimedOut {..})));
         assert!(scope.state.lock().await.sessions[&processes[0].process_id].terminal.is_none(),"unrelated live process must remain owned");
-        let already_finished=scope.wait_for_changes(&processes[1..],CancellationToken::new()).await.unwrap();
+        let already_finished=scope.wait_for_changes(&processes[1..],nomifun_agent_runtime::AgentWaitWakePolicy::TerminalOnly,CancellationToken::new()).await.unwrap();
         assert_eq!(observed,already_finished,"terminal-before-registration remains observable");
         let cancellation=CancellationToken::new();cancellation.cancel();
-        assert!(scope.wait_for_changes(&processes[..1],cancellation).await.is_err());
+        assert!(scope.wait_for_changes(&processes[..1],nomifun_agent_runtime::AgentWaitWakePolicy::TerminalOnly,cancellation).await.is_err());
         scope.cleanup().await.unwrap();drop(scope);pool.close().await;
     }
 
@@ -1029,7 +1499,7 @@ mod tests {
         let scope = EngineProcessScope::new(root.path(), journal).unwrap();
         let script = "process.stdout.write(Buffer.from([0xd6,0xd0,0xce,0xc4,10])); await Bun.sleep(40); const e=Buffer.from('UTF8:中文🙂\\n'); process.stderr.write(e.subarray(0,12)); await Bun.sleep(40); process.stderr.write(e.subarray(12));";
         let result = scope.invoke(StrictJsonValue(serde_json::json!({
-            "operation":"exec", "command":"bun", "args":["-e",script], "timeout_ms":5000
+            "operation":"start", "wait_ms":1000, "command":"bun", "args":["-e",script], "timeout_ms":5000
         })), "mixed-code-page-exec").await.unwrap().0;
         assert_eq!(result["state"], "exited");
         assert_eq!(result["exit_code"], 0);
@@ -1105,7 +1575,7 @@ mod tests {
         let (journal, pool) = super::super::engine_journal::test_fixture().await;
         let scope = EngineProcessScope::new(root.path(), journal).unwrap();
         let result = scope.invoke(StrictJsonValue(serde_json::json!({
-            "operation":"exec","command":"cmd.exe","args":["/d","/s","/c","start \"\" /b bun child.mjs & bun await-child.mjs"],"timeout_ms":10000
+            "operation":"start", "wait_ms":1000,"command":"cmd.exe","args":["/d","/s","/c","start \"\" /b bun child.mjs & bun await-child.mjs"],"timeout_ms":10000
         })), "cmd-background-child").await.unwrap().0;
         assert_eq!(result["state"], "exited");
         assert_eq!(result["exit_code"], 0);
@@ -1142,7 +1612,7 @@ mod tests {
         let (journal, pool) = super::super::engine_journal::test_fixture().await;
         let scope = EngineProcessScope::new(root.path(), journal).unwrap();
         let result = scope.invoke(StrictJsonValue(serde_json::json!({
-            "operation":"exec", "command":"net.exe", "args":["session"], "timeout_ms":5000
+            "operation":"start", "wait_ms":1000, "command":"net.exe", "args":["session"], "timeout_ms":5000
         })), "standard-user-admin-query").await.unwrap().0;
         assert_eq!(result["state"], "exited", "permission denial is not a spawn failure");
         assert_eq!(result["exit_code"], 2);
@@ -1229,7 +1699,7 @@ mod tests {
             ("/bin/sh", vec!["-c", "IFS= read -r line; printf 'ORIGINAL:%s\\n' \"$line\""])
         };
         let started = scope.invoke(StrictJsonValue(serde_json::json!({
-            "operation":"start", "command":command, "args":args, "timeout_ms":10000, "wait_ms":0
+            "operation":"start", "command":command, "args":args, "wait_ms":0
         })), "start-original").await.unwrap();
         let id = started.0["process_id"].as_str().unwrap().to_owned();
         let rejected = scope.invoke(StrictJsonValue(serde_json::json!({
@@ -1458,9 +1928,9 @@ mod tests {
         if let EngineProcessPoll::Cancelled { cleanup, .. } = &mut poll {
             cleanup.reaped = true;
         }
-        let interrupted_exec = process_output("process-1", &poll, Operation::Exec)
+        let interrupted_launch = process_output("process-1", &poll, Operation::Start)
             .unwrap()
             .0;
-        assert_eq!(interrupted_exec["success"], false);
+        assert_eq!(interrupted_launch["success"], false);
     }
 }

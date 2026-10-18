@@ -198,6 +198,15 @@ fn push_answer_to_local_remote(project: &std::path::Path, remote_path: &std::pat
 
 #[tokio::test(flavor="multi_thread", worker_threads=4)]
 async fn owner_pause_resume_keeps_one_turn_and_one_write_across_generations() {
+    owner_pause_resume(false).await;
+}
+
+#[tokio::test(flavor="multi_thread", worker_threads=4)]
+async fn ordinary_paused_message_is_saved_without_implicit_resume_or_budget_grant() {
+    owner_pause_resume(true).await;
+}
+
+async fn owner_pause_resume(with_input: bool) {
     let root = tempfile::tempdir().unwrap();
     let fixture_root = root.path().canonicalize().unwrap();
     let project = fixture_root.join("project");
@@ -221,11 +230,12 @@ async fn owner_pause_resume_keeps_one_turn_and_one_write_across_generations() {
                 },
                 1 => {
                     assert!(body.to_string().contains("write-once"),"resume lost completed write");
+                    if with_input { assert!(body.to_string().contains("CONTINUE_ORIGINAL_TASK"),"resume lost accepted user input"); }
                     stream_body(Some(("replan","update_plan",json!({"explanation":"Confirm current workspace after pause","plan":[{"step":"Verify saved file","status":"in_progress"}]}))),"")
                 },
                 2 => stream_body(Some(("verify-current","read_file",json!({"path":"answer.txt"}))),""),
                 3 => stream_body(Some(("close-plan","update_plan",json!({"explanation":"Fresh read confirms file","plan":[{"step":"Verify saved file","status":"completed"}]}))),""),
-                4 => stream_body(Some(("report","report_completion",json!({"summary":"Verified current file","criteria":[{"step":"Verify saved file","disposition":"supported","evidence_call_ids":["verify-current"],"requirement_ids":["input_0"],"rationale":"Fresh read confirms all requested content"}]}))),""),
+                4 => stream_body(Some(("report","report_completion",json!({"summary":"Verified current file","criteria":[{"step":"Verify saved file","disposition":"supported","evidence_call_ids":["verify-current"],"requirement_ids":if with_input {json!(["input_0","input_1"])} else {json!(["input_0"])},"rationale":"Fresh read confirms all requested content"}]}))),""),
                 _ => panic!("unexpected resumed model request {round}"),
             };
             ([(axum::http::header::CONTENT_TYPE,"text/event-stream")], data)
@@ -279,19 +289,38 @@ async fn owner_pause_resume_keeps_one_turn_and_one_write_across_generations() {
     assert_eq!(projection["status"],"running");
     let runtime:ConversationRuntimeSummary=serde_json::from_value(projection["runtime"].clone()).unwrap();
     assert_eq!(runtime.state,ConversationRuntimeStateKind::Paused);
-    assert!(!runtime.can_send_message);assert!(!runtime.can_steer);assert!(!runtime.is_processing);
+    assert!(runtime.can_send_message);assert!(!runtime.is_processing);
     assert!(runtime.active_turn_id.is_some());
     assert!(matches!(runtime.turn_outcome,Some(nomifun_agent_contracts::AgentTurnOutcome::Paused {..})));
     assert_eq!(std::fs::read_to_string(project.join("answer.txt")).unwrap(),"PAUSE_RESUME_OK");
     assert_eq!(requests.load(Ordering::SeqCst),1);
     let (status,_) = response(&router,"POST",&format!("/api/agent-sessions/{id}/turns"),json!({"idempotency_key":"must-not-start","input":{"content":"Replace the task"}})).await;
     assert!(status.is_client_error());
+    let source:String=sqlx::query_scalar("SELECT source_message_id FROM agent_turns WHERE session_id=? AND operation_id=?")
+        .bind(id).bind(paused["operation_id"].as_str().unwrap()).fetch_one(app.database.pool()).await.unwrap();
+    let plain_steer_path=format!("/api/agent-sessions/{id}/turns/steer");
+    assert!(response(&router,"POST",&plain_steer_path,json!({"idempotency_key":"cannot-steer-paused","expected_turn_id":source,
+        "input":{"content":"This cannot bypass native resume"}})).await.0.is_client_error());
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='turn/steer-accepted'")
+        .bind(id).fetch_one(app.database.pool()).await.unwrap(),0,"rejected paused steer must not save undeliverable input");
     let resume = json!({"operation_id":paused["operation_id"],"idempotency_key":"resume-once",
         "expected_pause_revision":paused["pause"]["revision"],"expected_checkpoint_revision":paused["checkpoint_revision"],
         "expected_checkpoint_digest":paused["checkpoint_digest"],"budget":{}});
     let mut stale = resume.clone(); stale["expected_checkpoint_digest"] = json!("f".repeat(64));
     assert!(response(&router,"POST",&format!("{execution}/resume"),stale).await.0.is_client_error());
-    let resume_path = format!("{execution}/resume");
+    if with_input {
+        let input=json!({"idempotency_key":"ordinary-pause-input","input":{"content":"CONTINUE_ORIGINAL_TASK: continue the original task without changing any requirements."}});
+        let path=format!("/api/agent-sessions/{id}/messages");
+        let accepted=call(&router,"POST",&path,input.clone()).await;
+        let duplicate=call(&router,"POST",&path,input).await;
+        assert_eq!(accepted["status"],"accepted");
+        assert_eq!(accepted["message_id"],duplicate["message_id"]);
+        assert_eq!(duplicate["replayed"],true);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(requests.load(Ordering::SeqCst),1,"acceptance cannot authorize native execution");
+        assert_eq!(call(&router,"GET",&execution,Value::Null).await["state"],"paused");
+    }
+    let resume_path=format!("{execution}/resume");
     let (authorized,duplicate) = tokio::join!(call(&router,"POST",&resume_path,resume.clone()),call(&router,"POST",&resume_path,resume.clone()));
     assert_ne!(authorized["duplicate"],duplicate["duplicate"]);
     assert_eq!(authorized["authorization_event_id"],duplicate["authorization_event_id"]);
@@ -309,6 +338,11 @@ async fn owner_pause_resume_keeps_one_turn_and_one_write_across_generations() {
         let actual: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind=?").bind(id).bind(kind).fetch_one(app.database.pool()).await.unwrap();
         assert_eq!(actual,count,"{kind}");
     }
+    let input_count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='turn/steer-accepted'").bind(id).fetch_one(app.database.pool()).await.unwrap();
+    assert_eq!(input_count,if with_input {1}else{0},"safe delivery claims the original accepted input once");
+    let accepted_count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='message/user-accepted'")
+        .bind(id).fetch_one(app.database.pool()).await.unwrap();
+    assert_eq!(accepted_count,if with_input {2}else{1},"native resume cannot duplicate a saved message");
     let writes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='tool_started' AND json_extract(inline_json,'$.event.action_id')='workspace.files/write'")
         .bind(id).fetch_one(app.database.pool()).await.unwrap();
     assert_eq!(writes,1);
@@ -328,6 +362,12 @@ async fn owner_pause_resume_keeps_one_turn_and_one_write_across_generations() {
         .bind(id).fetch_one(app.database.pool()).await.unwrap(),event_count,
         "terminal resume attempts cannot append canonical events");
     assert_eq!(call(&router,"GET",&execution,Value::Null).await["state"],"completed");
+    let (late_status,late)=response(&router,"POST",&plain_steer_path,json!({"idempotency_key":"late-first-input","expected_turn_id":source,
+        "input":{"content":"A late message must retain its draft"}})).await;
+    assert_eq!(late_status,StatusCode::CONFLICT);
+    assert_eq!(late["code"],"INPUT_NOT_ACCEPTED");
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_events WHERE session_id=?")
+        .bind(id).fetch_one(app.database.pool()).await.unwrap(),event_count,"a closed target must not falsely acknowledge an unaccepted input");
     drop(router);
     app.shutdown_browser_platform().await.unwrap(); app.database.close().await;
     server.abort(); let _ = server.await;
@@ -760,7 +800,7 @@ async fn startup_recovery_scenario(
         let projection=call(&restored_router,"GET",&format!("/api/agent-sessions/{id}/projection"),Value::Null).await;
         let runtime:ConversationRuntimeSummary=serde_json::from_value(projection["runtime"].clone()).unwrap();
         assert_eq!(runtime.state,ConversationRuntimeStateKind::Paused);
-        assert!(!runtime.can_send_message);assert!(!runtime.can_steer);assert!(!runtime.is_processing);
+        assert!(runtime.can_send_message);assert!(!runtime.is_processing);
         assert_eq!(runtime.active_turn_id.as_deref(),paused_event.event.data["turn_id"].as_str());
 
         let effect_id = pending_effect_id.as_ref().unwrap();

@@ -5,7 +5,8 @@ pub(crate) enum StopResolution { Complete, Review, Park, Pause }
 
 pub(crate) struct StopFacts {
     pub needs_account: bool,
-    pub account_current: bool,
+    /// A current, valid blocked account still forbids task completion.
+    pub account_allows_completion: bool,
     pub plan_open: bool,
     pub running_processes: bool,
     pub review_used: bool,
@@ -13,7 +14,7 @@ pub(crate) struct StopFacts {
 }
 
 pub(crate) fn resolve(facts: StopFacts) -> StopResolution {
-    let unfinished = facts.running_processes || facts.needs_account && (facts.plan_open || !facts.account_current);
+    let unfinished = facts.running_processes || facts.needs_account && (facts.plan_open || !facts.account_allows_completion);
     if !unfinished { return StopResolution::Complete; }
     if !facts.review_used && facts.can_review { return StopResolution::Review; }
     attention(facts.running_processes)
@@ -31,10 +32,10 @@ mod tests {
     #[test]
     fn incomplete_work_never_becomes_failure_or_success_from_a_provider_stop() {
         for running_processes in [false, true] {
-            let mut facts = StopFacts { needs_account: true, account_current: false, plan_open: true,
+            let mut facts = StopFacts { needs_account: true, account_allows_completion: false, plan_open: true,
                 running_processes, review_used: false, can_review: true };
             assert_eq!(resolve(facts), StopResolution::Review);
-            facts = StopFacts { needs_account: true, account_current: false, plan_open: true,
+            facts = StopFacts { needs_account: true, account_allows_completion: false, plan_open: true,
                 running_processes, review_used: true, can_review: true };
             assert_eq!(resolve(facts), if running_processes { StopResolution::Park } else { StopResolution::Pause });
         }

@@ -1,184 +1,76 @@
-/**
- * @license
- * Copyright 2025-2026 NomiFun (nomifun.com)
- * SPDX-License-Identifier: Apache-2.0
- */
-
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { parseConversationId, parseMessageId } from '@/common/types/ids';
+import { parseConversationId } from '@/common/types/ids';
 import { conversation } from './ipcBridge';
 
 const source = readFileSync(new URL('./ipcBridge.ts', import.meta.url), 'utf8');
-const sendStart = source.indexOf('  sendMessage: {');
-const sendEnd = source.indexOf('  steer:', sendStart);
-const sendMessageSource = source.slice(sendStart, sendEnd);
 const realFetch = globalThis.fetch;
+const session = parseConversationId('0190f5fe-7c00-7a00-8000-000000000211');
+const message = '0190f5fe-7c00-7a00-8000-000000000219';
+afterEach(() => { globalThis.fetch = realFetch; });
 
-describe('conversation send-message wire contract', () => {
-  test('a wait reply preserves its exact target while ordinary steering omits the guard', async () => {
-    const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000211');
-    const turnId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000212');
+describe('ordinary message intake wire contract', () => {
+  test('keeps the first-input constraint on the existing strict header without a second body field', async () => {
+    globalThis.fetch = (async (url, init) => {
+      expect(String(url)).toContain(`/api/agent-sessions/${session}/messages`);
+      expect(new Headers(init?.headers).get('X-Nomifun-Initial-Delivery')).toBe('1');
+      const body = JSON.parse(String(init?.body));
+      expect(body).toEqual({ idempotency_key: 'initial-key', input: { content: 'Initial request' } });
+      return new Response(JSON.stringify({ success: true, data: {
+        agent_session_id: session, message_id: message, status: 'accepted', replayed: false,
+      } }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    await conversation.sendMessage.invoke({ conversation_id: session, input: 'Initial request',
+      idempotency_key: 'initial-key', initial_only: true });
+  });
+
+  test('saves ordinary input through one endpoint without selecting execution or recovery', async () => {
     const requests: Array<Record<string, unknown>> = [];
-    try {
-      globalThis.fetch = (async (_url, init) => {
-        requests.push(JSON.parse(String(init?.body)));
-        return new Response(JSON.stringify({ success: true,
-          data: { message_id: '0190f5fe-7c00-7a00-8000-000000000213', duplicate: false } }),
-          { status: 200, headers: { 'Content-Type': 'application/json' } });
-      }) as typeof fetch;
-      for (const waitSeq of [41, 52]) await conversation.steer.invoke({ conversation_id: conversationId,
-        input: 'done', idempotency_key: `reply-${waitSeq}`, expected_wait: { turn_id: turnId, wait_seq: waitSeq } });
-      await conversation.steer.invoke({ conversation_id: conversationId, input: 'adjust the task', idempotency_key: 'ordinary' });
-      expect(requests[0].expected_wait).toEqual({ turn_id: turnId, wait_seq: 41 });
-      expect(requests[1].expected_wait).toEqual({ turn_id: turnId, wait_seq: 52 });
-      expect(requests[2].expected_wait).toBeUndefined();
-      expect(requests.every(request => typeof request.input === 'object')).toBe(true);
-    } finally { globalThis.fetch = realFetch; }
+    globalThis.fetch = (async (url, init) => {
+      expect(String(url)).toContain(`/api/agent-sessions/${session}/messages`);
+      requests.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ success: true, data: {
+        agent_session_id: session, message_id: message, cursor: { seq: 99 }, status: 'accepted', replayed: true,
+      } }), { status: 202, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    const receipt = await conversation.sendMessage.invoke({ conversation_id: session,
+      input: 'The dependency is ready', files: ['/work/brief.txt'], inject_skills: ['office'], idempotency_key: 'same-input-key' });
+    expect(receipt).toEqual({ msg_id: message, replayed: true });
+    expect(requests[0]).toEqual({ idempotency_key: 'same-input-key', input: {
+      content: 'The dependency is ready', files: ['/work/brief.txt'], inject_skills: ['office'],
+    } });
+    expect(source.includes('resumeInput:')).toBe(false);
+    expect(source.includes('normalizeConversationInputAction')).toBe(false);
   });
 
-  test('uses the canonical AgentSession turn DTO', () => {
-    expect(sendStart).toBeGreaterThan(-1);
-    expect(sendEnd).toBeGreaterThan(sendStart);
-    expect(sendMessageSource.includes('content: p.input')).toBe(true);
-    expect(sendMessageSource.includes('files: p.files')).toBe(true);
-    expect(sendMessageSource.includes('inject_skills: p.inject_skills')).toBe(true);
-    expect(sendMessageSource.includes('initial_only:')).toBe(false);
-    expect(sendMessageSource.includes('loading_id:')).toBe(false);
-    expect(sendMessageSource.includes('idempotency_key: idempotencyKey')).toBe(true);
-    expect(sendMessageSource.includes('input: {')).toBe(true);
-    expect(sendMessageSource.includes('/api/agent-sessions/${p.conversation_id}/turns')).toBe(true);
+  test.each([
+    { agent_session_id: session, message_id: message, replayed: false },
+    { agent_session_id: session, message_id: message, status: 'running', replayed: false },
+    { agent_session_id: 'foreign', message_id: message, status: 'accepted', replayed: false },
+    { agent_session_id: session, message_id: message, status: 'accepted' },
+  ])('does not acknowledge a response without exact accepted-message authority', async data => {
+    globalThis.fetch = (async () => new Response(JSON.stringify({ success: true, data }),
+      { status: 202, headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+    expect(conversation.sendMessage.invoke({ conversation_id: session, input: 'Hello', idempotency_key: 'test-key' }))
+      .rejects.toThrow('canonical accepted-message receipt');
   });
 
-  test('requires idempotency_key and never falls back to a body or loading id', () => {
-    expect(source.includes('idempotency_key: string;')).toBe(true);
-    expect(source.includes('loading_id?: string;')).toBe(false);
-    expect(
-      sendMessageSource.includes(
-        'const idempotencyKey = requireConversationIdempotencyKey(p.idempotency_key);'
-      )
-    ).toBe(true);
-    expect(sendMessageSource.includes('p.loading_id')).toBe(false);
-    expect(
-      sendMessageSource.includes(
-        '{ idempotencyKey, initialOnly: p.initial_only === true }'
-      )
-    ).toBe(true);
+  test('rejects a missing idempotency key before making a request', async () => {
+    let requests = 0;
+    globalThis.fetch = (async () => { requests++; throw new Error('must not request'); }) as typeof fetch;
+    await expect(conversation.sendMessage.invoke({ conversation_id: session, input: 'Hello', idempotency_key: '' })).rejects.toThrow();
+    expect(requests).toBe(0);
   });
 
-  test('preserves durable replay and terminal result metadata', async () => {
-    const msgId = '0190f5fe-7c00-7a00-8000-000000000201';
-    try {
-      globalThis.fetch = (() =>
-        Promise.resolve(
-          new Response(
-            JSON.stringify({
-              success: true,
-              data: {
-                message_id: msgId,
-                replayed: true,
-                completed: true,
-                result_ok: false,
-                result_text: 'terminal result',
-                result_error: 'provider failed',
-                result_error_code: 'output_truncated',
-                result_error_retryable: true,
-              },
-            }),
-            { status: 202, headers: { 'Content-Type': 'application/json' } }
-          )
-        )) as unknown as typeof fetch;
-
-      const result = await conversation.sendMessage.invoke({
-        input: 'retry',
-        conversation_id: parseConversationId('0190f5fe-7c00-7a00-8000-000000000202'),
-        idempotency_key: '0190f5fe-7c00-7a00-8000-000000000203',
-      });
-
-      expect(result).toEqual({
-        msg_id: msgId,
-        replayed: true,
-        completed: true,
-        result_ok: false,
-        result_text: 'terminal result',
-        result_error: 'provider failed',
-        result_error_code: 'output_truncated',
-        result_error_retryable: true,
-      });
-    } finally {
-      globalThis.fetch = realFetch;
-    }
-  });
-
-  test('maps the canonical steer receipt without a legacy edit mutation', async () => {
-    const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000207');
-    const canonicalMessageId = '0190f5fe-7c00-7a00-8000-000000000209';
-    const expected = {
-      msg_id: canonicalMessageId,
-      replayed: true,
-      completed: false,
-      result_ok: null,
-      result_text: null,
-      result_error: null,
-      result_error_code: null,
-      result_error_retryable: null,
-    };
-    try {
-      globalThis.fetch = (() =>
-        Promise.resolve(
-          new Response(
-            JSON.stringify({
-              success: true,
-              data: { message_id: canonicalMessageId, duplicate: true },
-            }),
-            { status: 202, headers: { 'Content-Type': 'application/json' } }
-          )
-        )) as unknown as typeof fetch;
-
-      const steerResult = await conversation.steer.invoke({
-        input: 'retry steer',
-        conversation_id: conversationId,
-        idempotency_key: '0190f5fe-7c00-7a00-8000-000000000210',
-      });
-      expect(steerResult).toEqual(expected);
-      expect(source.includes('editResubmit:')).toBe(false);
-    } finally {
-      globalThis.fetch = realFetch;
-    }
-  });
-
-  test('fails closed when a legacy response omits replay authority', async () => {
-    const msgId = '0190f5fe-7c00-7a00-8000-000000000204';
-    try {
-      globalThis.fetch = (() =>
-        Promise.resolve(
-          new Response(
-            JSON.stringify({
-              success: true,
-              data: { message_id: msgId, replayed: true, completed: false },
-            }),
-            { status: 202, headers: { 'Content-Type': 'application/json' } }
-          )
-        )) as unknown as typeof fetch;
-
-      const result = await conversation.sendMessage.invoke({
-        input: 'legacy retry',
-        conversation_id: parseConversationId('0190f5fe-7c00-7a00-8000-000000000205'),
-        idempotency_key: '0190f5fe-7c00-7a00-8000-000000000206',
-      });
-
-      expect(result).toEqual({
-        msg_id: msgId,
-        replayed: true,
-        completed: false,
-        result_ok: null,
-        result_text: null,
-        result_error: null,
-        result_error_code: null,
-        result_error_retryable: null,
-      });
-    } finally {
-      globalThis.fetch = realFetch;
-    }
+  test('keeps explicit domain Turn delivery separate from ordinary input acceptance', async () => {
+    globalThis.fetch = (async (url) => {
+      expect(String(url)).toContain(`/api/agent-sessions/${session}/turns`);
+      return new Response(JSON.stringify({ success: true, data: { message_id: message, replayed: true, completed: true,
+        result_ok: false, result_error: 'provider failed', result_error_code: 'output_truncated', result_error_retryable: true } }),
+      { status: 202, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    const receipt = await conversation.sendTurn.invoke({ conversation_id: session, input: 'Domain work', idempotency_key: 'domain-key' });
+    expect(receipt.completed).toBe(true);
+    expect(receipt.result_error_code).toBe('output_truncated');
   });
 });

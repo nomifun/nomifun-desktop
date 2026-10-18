@@ -840,7 +840,7 @@ impl SpokenReplyReducer {
                 }
                 Vec::new()
             }
-            AgentStreamEvent::CanonicalTimeline(_) => Vec::new(),
+            AgentStreamEvent::CanonicalTimeline(_) | AgentStreamEvent::InputQuestion(_) => Vec::new(),
             AgentStreamEvent::TaskPlanChanged
             | AgentStreamEvent::ToolCall(_)
             | AgentStreamEvent::ToolGroup(_) => {
