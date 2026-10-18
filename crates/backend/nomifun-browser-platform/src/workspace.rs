@@ -87,6 +87,20 @@ impl NativeInputGate for RuntimeSlot {
         }
         Ok(())
     }
+    async fn prepare_agent_operation(&self) -> Result<(), RunAdmissionError> {
+        let state = self.inner.lock().await;
+        if let Some(runtime) = &state.runtime {
+            runtime.prepare_agent_operation().await?;
+        }
+        Ok(())
+    }
+    async fn try_release_for_user(&self) -> Result<bool, RunAdmissionError> {
+        let state = self.inner.lock().await;
+        match &state.runtime {
+            Some(runtime) => runtime.try_release_for_user().await,
+            None => Ok(true),
+        }
+    }
     async fn unlock_user_input(&self) -> Result<(), RunAdmissionError> {
         let mut state = self.inner.lock().await;
         if !state.closed {
@@ -267,6 +281,20 @@ impl BrowserWorkspace {
         Ok(run)
     }
 
+    /// Borrow the browser for one interaction, preserving valid observations
+    /// while the Agent continues other work between browser calls.
+    pub async fn begin_interaction(self: &Arc<Self>) -> Result<BrowserRunGuard, WorkspaceError> {
+        if self.closing.load(Ordering::Acquire) {
+            return Err(WorkspaceError::WorkspaceClosed);
+        }
+        let run = self.coordinator.begin_interaction().await?;
+        if self.closing.load(Ordering::Acquire) {
+            self.coordinator.finish(&run).await?;
+            return Err(WorkspaceError::WorkspaceClosed);
+        }
+        Ok(run)
+    }
+
     pub async fn settle_failed_start(self: &Arc<Self>) -> Result<(), WorkspaceError> {
         let state = self.slot.inner.lock().await;
         if state.closed && state.runtime.is_none() { return Ok(()); }
@@ -288,6 +316,10 @@ impl BrowserWorkspace {
     pub async fn finish_run(&self, run: &BrowserRunGuard) -> Result<(), WorkspaceError> {
         self.coordinator.finish(run).await?;
         Ok(())
+    }
+
+    pub async fn finish_interaction(&self, run: &BrowserRunGuard) -> Result<bool, WorkspaceError> {
+        Ok(self.coordinator.finish_interaction(run).await?)
     }
 
     pub async fn settle_run(&self, run: &BrowserRunGuard) -> Result<(), WorkspaceError> {
@@ -491,6 +523,7 @@ impl std::ops::Deref for BrowserResource {
 impl BrowserResource {
     pub fn workspace(&self) -> &Arc<BrowserWorkspace> { &self.workspace }
     pub async fn begin_run(self: &Arc<Self>) -> Result<BrowserRunGuard, WorkspaceError> { self.workspace.begin_run().await }
+    pub async fn begin_interaction(self: &Arc<Self>) -> Result<BrowserRunGuard, WorkspaceError> { self.workspace.begin_interaction().await }
     pub async fn user_command(self: &Arc<Self>, command: BrowserTabCommand) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
         self.workspace.user_command(command).await
     }

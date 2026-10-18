@@ -1236,8 +1236,8 @@ impl NativeInputGate for DesktopBrowserRuntime {
                 error = Some(RunAdmissionError::InputGateFailed);
             }
         }
-        // Seal existing OOPIFs and the policy used by newly attached ones at
-        // run admission, even if this turn never calls a Browser Tool.
+        // Seal existing OOPIFs and the policy used by newly attached ones when
+        // browser interaction is admitted.
         for tab in tabs {
             if tab.metadata.lock().unwrap_or_else(|error|error.into_inner()).lifecycle == BrowserTabLifecycle::Crashed { continue; }
             if tab.automation.lock().await.configure_file_choosers(&tab.view, true).await.is_err() {
@@ -1248,40 +1248,20 @@ impl NativeInputGate for DesktopBrowserRuntime {
     }
     async fn release_pressed_input(&self) -> Result<(), RunAdmissionError> {
         self.settle_pending_work().await?;
-        let sources: Vec<_> = self.state.lock().await.tabs.values().cloned().collect();
-        for tab in sources {
-            let _settled = tab.popup_work.lock().await;
+        self.settle_native_agent_input(false).await
+    }
+    async fn prepare_agent_operation(&self) -> Result<(), RunAdmissionError> {
+        // The prior interaction already settled pressed/focus state. Native
+        // input policy acknowledgement above is sufficient for reacquisition;
+        // terminal release would expire the observation or cancel a dialog.
+        Ok(())
+    }
+    async fn try_release_for_user(&self) -> Result<bool, RunAdmissionError> {
+        if !self.ready_for_user_handoff().await? {
+            return Ok(false);
         }
-        // Do not hold the tab registry while waiting for an input callback.
-        // Native popup handling needs that registry to settle the callback.
-        let tabs: Vec<_> = self.state.lock().await.tabs.values().cloned().collect();
-        let mut failure = None;
-        for tab in tabs {
-            if windows::popup::settle_view(&tab.view).await.is_err() {
-                failure = Some(RunAdmissionError::InputGateFailed);
-            }
-            if windows::user_downloads::settle_agent(&tab.view).await.is_err() {
-                failure = Some(RunAdmissionError::InputGateFailed);
-            }
-            let mut automation=tab.automation.lock().await;
-            if tab.metadata.lock().unwrap_or_else(|error|error.into_inner()).lifecycle==BrowserTabLifecycle::Crashed {
-                // ProcessFailed proved the old document and its pressed/focus
-                // state are gone. New protocol cleanup cannot reach that process.
-                *automation=Default::default();
-                continue;
-            }
-            if automation.settle_agent(&tab.view).await.is_err() {
-                failure = Some(RunAdmissionError::InputGateFailed);
-            }
-        }
-        if failure.is_none() {
-            let mut state = self.state.lock().await;
-            for file in &state.download_files {
-                if file.close().is_err() { failure = Some(RunAdmissionError::InputGateFailed); }
-            }
-            if failure.is_none() { state.download_files.clear(); }
-        }
-        failure.map_or(Ok(()), Err)
+        self.settle_native_agent_input(true).await?;
+        Ok(true)
     }
     async fn unlock_user_input(&self) -> Result<(), RunAdmissionError> {
         let mut state = self.state.lock().await;
@@ -1310,6 +1290,50 @@ impl NativeInputGate for DesktopBrowserRuntime {
         state.input_enabled = true;
         self.input_locked.store(false, Ordering::Release);
         Ok(())
+    }
+}
+
+impl DesktopBrowserRuntime {
+    async fn settle_native_agent_input(&self, preserve_observation: bool) -> Result<(), RunAdmissionError> {
+        let sources: Vec<_> = self.state.lock().await.tabs.values().cloned().collect();
+        for tab in sources {
+            let _settled = tab.popup_work.lock().await;
+        }
+        // Do not hold the tab registry while waiting for an input callback.
+        // Native popup handling needs that registry to settle the callback.
+        let tabs: Vec<_> = self.state.lock().await.tabs.values().cloned().collect();
+        let mut failure = None;
+        for tab in tabs {
+            if windows::popup::settle_view(&tab.view).await.is_err() {
+                failure = Some(RunAdmissionError::InputGateFailed);
+            }
+            if windows::user_downloads::settle_agent(&tab.view).await.is_err() {
+                failure = Some(RunAdmissionError::InputGateFailed);
+            }
+            let mut automation=tab.automation.lock().await;
+            if tab.metadata.lock().unwrap_or_else(|error|error.into_inner()).lifecycle==BrowserTabLifecycle::Crashed {
+                // ProcessFailed proved the old document and its pressed/focus
+                // state are gone. New protocol cleanup cannot reach that process.
+                *automation=Default::default();
+                continue;
+            }
+            let settled = if preserve_observation {
+                automation.handoff_agent(&tab.view).await
+            } else {
+                automation.settle_agent(&tab.view).await
+            };
+            if settled.is_err() {
+                failure = Some(RunAdmissionError::InputGateFailed);
+            }
+        }
+        if failure.is_none() {
+            let mut state = self.state.lock().await;
+            for file in &state.download_files {
+                if file.close().is_err() { failure = Some(RunAdmissionError::InputGateFailed); }
+            }
+            if failure.is_none() { state.download_files.clear(); }
+        }
+        failure.map_or(Ok(()), Err)
     }
 }
 

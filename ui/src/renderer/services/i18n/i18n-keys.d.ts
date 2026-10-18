@@ -941,6 +941,8 @@ export type I18nKey =
   | 'browserWorkspace.clearSiteDataTitle'
   | 'browserWorkspace.clearSiteDataWarning'
   | 'browserWorkspace.closeAllPages'
+  | 'browserWorkspace.closeBrowser'
+  | 'browserWorkspace.closeBrowserFailed'
   | 'browserWorkspace.closePage'
   | 'browserWorkspace.closePanel'
   | 'browserWorkspace.copyAddress'

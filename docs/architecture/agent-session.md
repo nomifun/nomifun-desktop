@@ -438,18 +438,20 @@ requires no Agent Browser Module or resource binding. Opening and retrying never
 Authorized managed Agent wrappers borrow the user's real page while enforcing the frozen Snapshot, exact Provider,
 typed resource and BrowserRunGuard. Attached Chrome remains a separate connected resource.
 
-Turn preparation freezes Browser authority without locking the managed browser. The first actual managed browser
-invocation acquires the current Workspace's native input gate and guard for the remainder of that Turn. Tool completion,
-ordinary tool failure, model thinking and unrelated subsequent tools do not release ownership. Settlement drains native
-operations while retaining the hardware input gate; normal terminal settlement requires the exact durable Turn terminal
-followed by successful finish before final release. A committed same-Turn human wait is another explicit handoff:
-the original Store verifies the exact owner, active Operation, `waiting` outcome and absence of pending/unknown Effects
-both before and after settlement. Only Browser ownership is released; original process owners and deadlines remain.
-The next Browser action obtains a fresh lazy admission and observation under the frozen grants. Earlier observations
-cannot be reused, and an ordinary model stop never grants a release. Failed settlement, uncertain native cleanup and terminal-write or finish failures retain the gate
-for the original Turn's recovery. User APIs use the actual coordinator gate, without deriving ownership from Session
-running or paused, model prose or configured Browser permissions. Turns that never invoke the managed browser,
-including chat, file work, attached Chrome and background rendering, leave it available to the user.
+Turn preparation freezes Browser authority without locking the managed browser. Each actual managed browser
+invocation acquires the current Workspace's native input gate and guard for its browser work. After native work,
+pressed-input cleanup and any applicable Effect result recording settle, the invocation releases ownership while
+the same Turn may continue thinking or using unrelated tools. A pending browser dialog or other retained native work
+keeps the gate until safe completion. Failed acquisition, uncertain cleanup and Effect-result persistence failure
+retain the original recovery owner; cancellation or a dropped caller is not completion proof. Normal local release
+does not require a durable Turn terminal and does not mutate canonical Turn state or Effect facts.
+A committed same-Turn human wait can settle remaining Browser ownership: the original Store verifies the exact owner,
+active Operation, `waiting` outcome and absence of pending/unknown Effects before and after settlement. Original
+process owners and deadlines remain. The next Browser invocation binds the current Workspace generation under the
+frozen grants; native target, document and observation checks continue to reject stale references. Terminal cleanup
+still drains retained work and retries failed releases. User APIs use the actual coordinator gate, without deriving
+ownership from Session running or paused, model prose or configured Browser permissions. Chat, file work, attached
+Chrome and isolated background rendering leave the managed browser available whenever it has no active browser owner.
 User profiles use owner/Session identity independent of grant definitions: Windows uses
 `browser-v4/agent-sessions/<hash>/`; macOS 14+ uses a separate persistent
 WKWebsiteDataStore with a stable derived identifier and does not read former directory profiles. Session deletion includes this browser and its

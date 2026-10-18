@@ -822,7 +822,7 @@ impl ConversationRuntimeHost {
         *self.unstarted_cancelled_root.lock().map_err(|_| error("unstarted cancellation state poisoned"))? = None;
         drop(active);
         // Register frozen resource authority before later preflight can fail.
-        // Browser input is claimed only by its first interactive invocation.
+        // Browser input is claimed only during actual interactive invocations.
         self.resources.open_turn(&admitted, journal.clone()).await
             .map_err(|error| self.preparation_error(root, "resource_open", error))?;
         // Publish the exact journal before the next awaited budget/read so
@@ -861,7 +861,8 @@ impl ConversationRuntimeHost {
             *self.last_terminal_root.lock().map_err(|_| error("terminal root state poisoned"))? = Some(root.to_owned());
             *active = None;
             drop(active);
-            // The terminal append above is the canonical release boundary.
+            // Retire Turn authority and any browser work still awaiting final
+            // cleanup. Completed browser calls have already released input.
             // A failed native release retains Browser owner state for retry.
             self.resources.finish_browser_turn(root).await?;
         }

@@ -2951,7 +2951,7 @@ impl UserEventSink for NullUserEvents {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
     use std::future::Future;
@@ -3006,7 +3006,7 @@ mod tests {
         }
     }
 
-    fn test_state_handle() -> Wave2StateHandle {
+    pub(in crate::router) fn test_state_handle() -> Wave2StateHandle {
         static HANDLE: OnceLock<Wave2StateHandle> = OnceLock::new();
         HANDLE.get_or_init(capture_state_handle).clone()
     }

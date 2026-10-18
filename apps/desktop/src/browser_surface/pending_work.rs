@@ -139,6 +139,20 @@ impl DesktopBrowserRuntime {
         }
         Ok(())
     }
+    /// Awaiting-dialog work continues to own native execution even though the
+    /// tool returned a receipt. A handoff must neither cancel nor replay it.
+    pub(super) async fn ready_for_user_handoff(&self) -> Result<bool, RunAdmissionError> {
+        for pending in self.owned_tasks().await {
+            if !pending.finished.load(Ordering::Acquire) {
+                return Ok(false);
+            }
+            if uncertain(&pending.wait().await) {
+                return Err(RunAdmissionError::InputGateFailed);
+            }
+            self.clear_pending(&pending).await;
+        }
+        Ok(self.current_dialog().await.is_none())
+    }
     pub(super) async fn cancel_pending_for_close(&self) {
         for pending in self.owned_tasks().await {
             pending.cancel.cancel();

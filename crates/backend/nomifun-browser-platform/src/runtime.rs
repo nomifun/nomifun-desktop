@@ -28,7 +28,7 @@ pub enum WorkspaceError {
     ActionInterrupted,
     #[error("A browser input is waiting for a website dialog response. Respond to that dialog before issuing another browser action.")]
     DialogPending,
-    #[error("The requested action is unsupported by this browser or target. Do not retry the same action; use the reported interaction capabilities. If manual input is needed, stop the Agent and wait for input to unlock.")]
+    #[error("The requested action is unsupported by this browser or target. Do not retry the same action; use the reported interaction capabilities. Manual input becomes available after the current browser operation and cleanup release input.")]
     UnsupportedAction,
     #[error("The browser observation exceeds its size limit.")]
     ObservationLimit,
@@ -978,7 +978,7 @@ impl BrowserInteractionCapabilities {
                 "Click uses DOM click for a single left click; type replaces a standard input or textarea value; select uses exact option labels; scroll uses DOM scrolling. Observe again after each action.",
                 "Semantic DOM actions do not create trusted input or user activation. Canvas, pointer capture, complex editors and user-activation-only controls are not supported.",
                 "Only the main document is observed. Iframes and inaccessible shadow content are not action targets; unobserved_frames reports uncovered frames.",
-                "BROWSER_UNSUPPORTED_ACTION is not retryable with the same action. For manual input, stop the Agent and wait for cleanup and input unlock; do not bypass the run lock.",
+                "BROWSER_UNSUPPORTED_ACTION is not retryable with the same action. For manual input, wait for the current browser operation and cleanup to release input; do not bypass the browser input lock.",
             ],
         }
     }

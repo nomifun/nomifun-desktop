@@ -1557,6 +1557,9 @@ async fn session_resource_replacement_rejects_unsettled_effects_for_changed_kind
         let store = AgentSessionStore::open_in_memory().await.unwrap();
         let key = if unknown { "unknown-resource" } else { "pending-resource" };
         let session = settled_resource_effect_session(&store, key).await;
+        let binding_id = ResourceBindingId::from(format!("process_session:{key}"));
+        assert!(!store.has_unsettled_effects_for_binding(&session.agent_session_id, &binding_id).await.unwrap(),
+            "a completed effect must not retain its resource");
         let operation = OperationId::from(format!("unsettled-turn-{key}"));
         let (_, turn) = store.start_turn(&session.agent_session_id, "session_api".into(),
             format!("unsettled-turn-{key}").into(), operation.clone(),
@@ -1587,6 +1590,13 @@ async fn session_resource_replacement_rejects_unsettled_effects_for_changed_kind
                 causation_event_id: Some(started), recorded_at: 2010, ..request
             }, EffectTerminalState::Uncertain).await.unwrap();
         }
+        assert!(store.has_unsettled_effects_for_binding(&session.agent_session_id, &binding_id).await.unwrap(),
+            "both pending and unknown effects retain their exact resource");
+        assert!(!store.has_unsettled_effects_for_binding(&session.agent_session_id, &"browser:managed-browser".into()).await.unwrap(),
+            "an unrelated process effect must not retain browser input");
+        let (other_session, _) = create_ready(&store, &format!("other-{key}")).await;
+        assert!(!store.has_unsettled_effects_for_binding(&other_session.agent_session_id, &binding_id).await.unwrap(),
+            "resource ownership is scoped to the exact Session");
         store.append_event(&append(&session.agent_session_id, &format!("unsettled-turn-terminal-{key}"),
             "runtime-supervisor", &format!("unsettled-turn-terminal-{key}"), "turn/failed", operation.as_ref(),
             Some(turn_started), json!({"error":"interrupted before effect outcome was confirmed"}))).await.unwrap();

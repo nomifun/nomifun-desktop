@@ -29,7 +29,7 @@ pub enum RunAdmissionError {
     Cancelled,
     #[error("Native browser input could not be safely changed.")]
     InputGateFailed,
-    #[error("Browser input is locked until Agent cleanup completes.")]
+    #[error("Browser input is locked while an Agent browser operation or its cleanup is active.")]
     UserInputLocked,
     #[error("Browser lifecycle worker failed; input remains locked.")]
     WorkerFailed,
@@ -42,6 +42,17 @@ pub trait NativeInputGate: Send + Sync {
     async fn lock_user_input(&self) -> Result<(), RunAdmissionError>;
     async fn release_pressed_input(&self) -> Result<(), RunAdmissionError>;
     async fn unlock_user_input(&self) -> Result<(), RunAdmissionError>;
+    /// Prepare a new browser interaction without retiring the preceding
+    /// observation. Terminal cleanup continues to use `release_pressed_input`.
+    async fn prepare_agent_operation(&self) -> Result<(), RunAdmissionError> {
+        self.release_pressed_input().await
+    }
+    /// Settle a completed interaction for human input. A yielded dialog or
+    /// other still-owned native work retains the lock and its run authority.
+    async fn try_release_for_user(&self) -> Result<bool, RunAdmissionError> {
+        self.release_pressed_input().await?;
+        Ok(true)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -217,12 +228,21 @@ impl BrowserRunCoordinator {
     /// The returned guard must be retained until `finish` succeeds.
     pub async fn begin(self: &Arc<Self>) -> Result<BrowserRunGuard, RunAdmissionError> {
         let coordinator = Arc::clone(self);
-        tokio::spawn(async move { coordinator.begin_inner().await })
+        tokio::spawn(async move { coordinator.begin_inner(false).await })
             .await
             .map_err(|_| RunAdmissionError::WorkerFailed)?
     }
 
-    async fn begin_inner(self: &Arc<Self>) -> Result<BrowserRunGuard, RunAdmissionError> {
+    /// Acquire input only for browser work, retaining observation references
+    /// from a previous completed interaction on the same document.
+    pub async fn begin_interaction(self: &Arc<Self>) -> Result<BrowserRunGuard, RunAdmissionError> {
+        let coordinator = Arc::clone(self);
+        tokio::spawn(async move { coordinator.begin_inner(true).await })
+            .await
+            .map_err(|_| RunAdmissionError::WorkerFailed)?
+    }
+
+    async fn begin_inner(self: &Arc<Self>, interaction: bool) -> Result<BrowserRunGuard, RunAdmissionError> {
         let _transition = self.transition.lock().await;
         let _operation = self.operation.lock().await;
         {
@@ -240,7 +260,11 @@ impl BrowserRunCoordinator {
             self.changes.bump();
         }
         self.gate.lock_user_input().await?;
-        self.gate.release_pressed_input().await?;
+        if interaction {
+            self.gate.prepare_agent_operation().await?;
+        } else {
+            self.gate.release_pressed_input().await?;
+        }
         let run = Arc::new(Run {
             cancelled: CancellationToken::new(),
         });
@@ -267,6 +291,44 @@ impl BrowserRunCoordinator {
         tokio::spawn(async move { coordinator.finish_inner(&run).await })
             .await
             .map_err(|_| RunAdmissionError::WorkerFailed)?
+    }
+
+    /// Release a completed browser call after its result/effects are recorded.
+    /// Returning false keeps the exact authority alive for a dialog response;
+    /// this path must not cancel its still-owned native continuation.
+    pub async fn finish_interaction(self: &Arc<Self>, run: &BrowserRunGuard) -> Result<bool, RunAdmissionError> {
+        self.require_current(&run.0.run).await?;
+        let coordinator = self.clone();
+        let run = run.0.run.clone();
+        tokio::spawn(async move {
+            let _transition = coordinator.transition.lock().await;
+            let _operation = coordinator.operation.lock().await;
+            coordinator.require_current(&run).await?;
+            let gate_was_failed = {
+                let mut state = coordinator.state.lock().await;
+                let gate_was_failed = state.gate_failed;
+                state.gate_failed = true;
+                state.revision += 1;
+                coordinator.changes.bump();
+                gate_was_failed
+            };
+            if !coordinator.gate.try_release_for_user().await? {
+                let mut state = coordinator.state.lock().await;
+                // A pending dialog proves no cleanup success. Preserve any
+                // earlier failed handoff until a full retry succeeds.
+                state.gate_failed = gate_was_failed;
+                state.revision += 1;
+                coordinator.changes.bump();
+                return Ok(false);
+            }
+            coordinator.gate.unlock_user_input().await?;
+            let mut state = coordinator.state.lock().await;
+            state.gate_failed = false;
+            state.active = None;
+            state.revision += 1;
+            coordinator.changes.bump();
+            Ok(true)
+        }).await.map_err(|_| RunAdmissionError::WorkerFailed)?
     }
 
     /// Drain browser work before publishing the Agent terminal, keeping hardware

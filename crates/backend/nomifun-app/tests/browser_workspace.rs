@@ -461,8 +461,8 @@ async fn user_api_authorizes_sessions_and_locks_only_for_active_browser_runs() {
     assert_eq!(stale_close_all["code"], "BROWSER_STALE_TARGET");
     assert_eq!(factory.created.lock().unwrap().len(), 1, "stale commands must not initialize a replacement runtime");
 
-    // The same Turn now starts browser work. Its gate must survive all tool
-    // gaps and cleanup until the trusted owner has published the Turn terminal.
+    // The same Turn starts browser work. Input stays locked until its trusted
+    // browser owner has acknowledged native cleanup and input release.
     let guard = user.begin_run().await.unwrap();
     let current_target = serde_json::json!({ "tab_id": "owned-control-tab", "runtime_generation": next_generation, "document_generation": 2 });
     let accepted_commands = factory.executed.lock().unwrap().len();
@@ -484,7 +484,7 @@ async fn user_api_authorizes_sessions_and_locks_only_for_active_browser_runs() {
     assert_eq!(blocked_close["code"], "BROWSER_USER_INPUT_LOCKED");
     let locked = router.clone().oneshot(request(owner_id, "GET", base.clone(), "")).await.unwrap();
     let locked: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(locked.into_body(), 64 * 1024).await.unwrap()).unwrap();
-    assert_eq!(locked["data"]["run"]["input_state"], "agent_running", "a browser Turn remains locked between tool invocations");
+    assert_eq!(locked["data"]["run"]["input_state"], "agent_running", "active browser work retains its input gate");
     let already_locked = router.clone().oneshot(request(owner_id, "POST", base.clone(), "{}")).await.unwrap();
     assert_eq!(already_locked.status(), StatusCode::OK, "a first pane may attach to a genuinely locked browser during chat");
     let locked: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(already_locked.into_body(), 64 * 1024).await.unwrap()).unwrap();
@@ -495,9 +495,17 @@ async fn user_api_authorizes_sessions_and_locks_only_for_active_browser_runs() {
     user.settle_run(&guard).await.unwrap();
     let settled = router.clone().oneshot(request(owner_id, "GET", base.clone(), "")).await.unwrap();
     let settled: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(settled.into_body(), 64 * 1024).await.unwrap()).unwrap();
-    assert_eq!(settled["data"]["run"]["input_state"], "agent_running", "settled browser tools remain locked until the Turn terminal is published");
+    assert_eq!(settled["data"]["run"]["input_state"], "agent_running", "native settlement still requires an explicit input release acknowledgement");
     let blocked_close = router.clone().oneshot(request(owner_id, "DELETE", base.clone(), &close_body)).await.unwrap();
-    assert_eq!(blocked_close.status(), StatusCode::CONFLICT, "native cleanup alone cannot release the active Turn's browser");
+    assert_eq!(blocked_close.status(), StatusCode::CONFLICT, "settlement alone cannot bypass the native input owner");
+
+    user.finish_run(&guard).await.unwrap();
+    let released = router.clone().oneshot(request(owner_id, "GET", base.clone(), "")).await.unwrap();
+    let released: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(released.into_body(), 64 * 1024).await.unwrap()).unwrap();
+    assert_eq!(released["data"]["run"]["input_state"], "user_ready", "browser cleanup can release input while the Agent Turn is still running");
+    assert_eq!(sessions.get(&owner, &session).await.unwrap().head.status, "running");
+    let closed = router.clone().oneshot(request(owner_id, "DELETE", base.clone(), &close_body)).await.unwrap();
+    assert_eq!(closed.status(), StatusCode::OK, "a released browser may close before the Agent Turn finishes");
 
     let started = sessions.turn_receipt(&owner, &session, &active_turn.operation_id).await.unwrap().started_event.unwrap();
     let store = nomifun_agent_session::AgentSessionStore::from_pool(db.pool().clone()).await.unwrap();
@@ -513,13 +521,7 @@ async fn user_api_authorizes_sessions_and_locks_only_for_active_browser_runs() {
     assert!(observation.head.active_turn_id.is_none());
     let terminal = router.clone().oneshot(request(owner_id, "GET", base.clone(), "")).await.unwrap();
     let terminal: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(terminal.into_body(), 64 * 1024).await.unwrap()).unwrap();
-    assert_eq!(terminal["data"]["run"]["input_state"], "agent_running", "the browser gate stays owned until the trusted Turn owner acknowledges finish");
-    user.finish_run(&guard).await.unwrap();
-    let released = router.clone().oneshot(request(owner_id, "GET", base.clone(), "")).await.unwrap();
-    let released: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(released.into_body(), 64 * 1024).await.unwrap()).unwrap();
-    assert_eq!(released["data"]["run"]["input_state"], "user_ready", "the trusted owner releases input after the canonical Turn terminal and browser cleanup");
-    let closed = router.oneshot(request(owner_id, "DELETE", base, &close_body)).await.unwrap();
-    assert_eq!(closed.status(), StatusCode::OK, "a released browser may close after the Agent Turn finishes");
+    assert_eq!(terminal["data"]["run"]["input_state"], "user_ready", "the Turn terminal does not reclaim a closed browser");
     resources.shutdown().await.unwrap();
     db.close().await;
 }

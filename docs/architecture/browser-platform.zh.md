@@ -12,7 +12,9 @@
 打开、重试与用户地址栏命令不写入 Agent binding，不赋予 Agent 工具权限，也不新建第二个 Session。
 旧全局浏览器管理页、设置 Tab、侧栏库存和浏览器设置重定向仍保持退役。
 
-页面由原生嵌入 WebView 承载，不使用 iframe、截图流、canvas viewer 或 JPEG 传输充当浏览器。用户和 Agent 操作同一个真实页面。Agent 首次使用此浏览器后，原生用户输入及会改变页面的浏览器栏操作持续锁定，直到本回合结束并完成清理；从未使用此浏览器的回合保持用户操作可用。没有用户接管或交还模式。
+页面由原生嵌入 WebView 承载，不使用 iframe、截图流、canvas viewer 或 JPEG 传输充当浏览器。用户和 Agent 操作同一个真实页面。仅在 Agent 持有实际浏览器工作及原生清理时，锁定用户输入和会改变页面的浏览器栏操作。本次浏览器工作结算并释放门禁后，即使 Agent 仍在思考或使用其他工具，用户也可浏览、关闭标签或关闭浏览器 runtime。用户不能夺取仍在执行的浏览器工作。
+
+菜单中的“关闭浏览器”在当前没有浏览器占用时销毁 runtime，确认关闭后收起面板；顶部“收起浏览器”仅隐藏面板。
 
 隐藏面板不销毁标签页。同一用户与 Session 只持有一个 managed 原生 runtime、Profile 和输入协调器；
 Agent 的资源定义 ID 改变不会选择新页面或 Profile。`BrowserResource` 只封装 frozen Agent authority，
@@ -25,16 +27,18 @@ Agent 选择 attached Chrome 不改变用户的内置浏览器，也不会把用
 
 空间预留与展开侧栏后的自动关闭只注册给 Browser：关闭只隐藏并 detach 面板，保留网页、runtime 和输入所有权，不销毁标签或释放 Agent 输入锁。Preview 沿用原有侧栏折叠策略，不把会清空标签和未保存编辑的 `closePreview` 交给布局让位回调；Browser 与 Preview 互相切换时同步交接侧栏管理。布局、原生输入与运行中 Stop 的证据范围分别见[持续验收](../validation/browser-platform.zh.md)。
 
-Turn 预备阶段只冻结 Browser 授权，不取得 managed 浏览器输入锁。实际已授权的 managed Browser
-调用在原生工作前取得当前 Workspace 与 guard。首次调用后持续占用至本 Turn 结束；在此占用下首次创建的
-原生 child 从一开始就禁用用户输入。单次浏览器工具完成、普通工具失败、模型思考、后续无关工具及暂停
-均不释放门禁。未真实调用此浏览器的普通聊天、文件任务、attached Chrome 及后台渲染不锁内置浏览器；
-已配置的 Browser 权限和模型正文也不构成占用依据。
+Turn 预备阶段只冻结 Browser 授权，不取得 managed 浏览器输入锁。每次实际已授权的 managed Browser
+调用在原生工作前取得当前 Workspace 与 guard；在此占用下首次创建的原生 child 从一开始就禁用用户输入。
+retained invocation owner 排空原生操作、释放按下的输入，持久化本次适用的 Effect 结果后，释放浏览器门禁。
+模型思考、无关工具及 Session 的 running/paused 状态不延长已完成浏览器操作的占用。普通聊天、文件任务、
+attached Chrome 与隔离后台渲染不取得此锁；已配置的 Browser 权限和模型正文也不构成占用依据。
 
-retained owner 在保持输入锁的情况下结算原生操作；只有 exact Turn 终态持久化且 finish 成功后才释放所有权。
-等待中的导航或对话框、未结算或未知效果、回执持久化失败及原生清理不确定继续受原 Turn 恢复边界保护。
-取得输入锁失败而未发出 guard 时，仍分为排空与终态后的 failed-start recovery。
-单次工具或原生操作完成均不授权回合内解锁。
+等待中的浏览器对话框或其他 retained 原生工作保留原 owner，直到完成并安全清理。取得输入锁失败、
+原生清理不确定及 Effect 结果持久化失败继续由原 owner 恢复；丢弃调用 future 或请求取消不证明工作已经结束。
+Turn 结算仍须排空保留的浏览器工作，终态恢复可以重试失败的 release。正常的局部浏览器 release 不要求
+整个 Agent Turn 结束，也不改写该 Turn 的 canonical 状态或 Effect 事实。后续 Browser 调用在同一冻结授权下
+绑定当前 Workspace generation。安全输入清理保留下一调用需要的观察；已有 target、document 与 observation
+检查继续拒绝页面导航、标签关闭或 runtime 重建后的旧引用。
 
 用户 API 校验认证 owner 与 canonical Session 后，只按 Workspace coordinator 准入；Session 的 running 或
 paused 本身不构成浏览器输入锁。Browser snapshot 只报告实际输入所有权与 gate failure，不从全局 Agent 状态
@@ -76,8 +80,10 @@ HTTP(S)，并且 Browser child 无 Tauri capability、local trust、backend cred
 后台 `web.research` / render 仍是不同消费者，保留严格公网 DNS/IP pinning，不与可见浏览器混用。
 
 浏览器菜单的“重新打开浏览器”需要明确确认：关闭所有网页并丢弃未保存网页内容，但不清空会话消息或项目文件。
-后端持有同一 Session 的 operation fence，校验 exact runtime generation，并通过 coordinator 的实际空闲门禁关闭。
-从未使用此浏览器的回合不阻止关闭；回合一旦取得浏览器所有权，即使后续进行无关工作也不能关闭，用户关闭不能取消或夺取其 guard。
+后端持有浏览器调用的 operation fence，校验 canonical Session 的认证 owner 与 exact runtime generation，
+并通过 coordinator 的实际空闲门禁关闭。
+只要本次浏览器工作已释放所有权，即使同一回合之前用过浏览器、现在仍在运行，也允许关闭。
+浏览器工作期间发出的关闭请求立即拒绝，不在工作结束后重放；用户关闭不能取消或夺取仍在执行的 guard。
 若 final unlock 失败，恢复关闭仍必须确认同一 Operation 的 canonical 终态、已完成的 native settlement
 与对应旧 Workspace 身份。`turn/paused` 保留同一 active Operation 与 native checkpoint 恢复权，不能替代这里的
 最终终态证明。仍保留所有权时，用户须先经正式 Stop/cancel 终结该 Operation，并取得 Runtime 清理证明后，
@@ -144,8 +150,8 @@ macOS conformance 可以在初始化 Engine 时选择不可变的 `NativeWebKit`
 | 独立持久登录态、会话删除与站点清理 | macOS 14+ 独立 WKWebsiteDataStore | 保留目录 Profile |
 
 `semantic_dom` 不伪造 `isTrusted`，也不是 user activation；DOM API 或事件分发完成不代表网站已完成业务操作，
-Agent 必须重新观察结果。网站要求真实用户激活时，应等待本回合结束或停止 Agent，并在清理及 final release
-完成后手动操作；单次浏览器工具完成不会恢复用户输入。
+Agent 必须重新观察结果。网站要求真实用户激活时，可在本次浏览器操作及清理释放输入后手动操作，
+不必等待整个回合结束；仍在等待网站对话框或原生操作的调用继续保持输入锁。
 工具观察与用户工作区携带 `interaction_capabilities`，工具 schema 的动作全集不代表每个平台均支持。
 不支持错误明确禁止同动作重试；单项不支持不会关闭普通浏览能力。浏览器菜单同时说明常见限制。
 

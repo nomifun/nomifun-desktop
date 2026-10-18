@@ -508,6 +508,14 @@ impl NativeInputGate for DesktopBrowserRuntime {
         for tab in tabs { tab.automation.lock().await.invalidate_observation(); }
         Ok(())
     }
+    async fn prepare_agent_operation(&self) -> Result<(), RunAdmissionError> {
+        // WebKit semantic operations do not retain pressed pointer/key state.
+        // Reacquisition must preserve the previous observation references.
+        Ok(())
+    }
+    async fn try_release_for_user(&self) -> Result<bool, RunAdmissionError> {
+        self.ready_for_user_handoff().await
+    }
     async fn unlock_user_input(&self) -> Result<(), RunAdmissionError> {
         let mut state = self.state.lock().await;
         if state.closed { return Ok(()); }
