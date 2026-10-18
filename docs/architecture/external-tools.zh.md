@@ -77,6 +77,11 @@ Node 使用完整官方发行目录，包含 npm、npx、模块和启动器；�
 每次启动组合调用方环境、当前持久用户 CLI 目录与已验证运行时，不改写多线程宿主的全局环境。
 显式 PATH 与已有可用工具链优先，保留真实 HOME/USERPROFILE、npm 配置、代理与证书配置。
 受管 npm 缺省安装到独立于可替换运行时缓存的持久用户工具目录，用户原有 prefix 仍优先。
+每个子进程获得宿主派生的只读位置提示 `NOMIFUN_USER_CLI_ROOT`，指向
+`dirs::data_local_dir()/nomifun-user-tools/npm`，所有 Agent 和工作目录共用。
+需要固定安装位置的 Skill 显式将它作为 npm 的 `--prefix`；该提示不改变用户 npm prefix。
+其命令目录（Windows 为根目录，macOS/Linux 为 `bin`）排在用户命令目录之后；
+该目录与用户自定义 npm prefix 中的 CLI 都能在缺少 Node 时触发现役运行时准备。
 运行时升级与 Agent 数据清理不拥有这些已安装工具。托管应用按已识别项目元数据或内建静态预设备齐必需 Node/Bun，自定义 Node 优先，准备等待接入原操作取消；任意 Shell 文本不被改写。
 
 Terminal 保留现有 Windows PowerShell shim 适配。Windows Agent/MCP 的通用 `.cmd`/`.bat`

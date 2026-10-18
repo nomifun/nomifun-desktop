@@ -76,6 +76,13 @@ the multi-threaded host environment. Explicit PATH and available user toolchains
 precedence. The real HOME/USERPROFILE, user npm configuration, proxy and certificate
 settings remain available. Managed npm defaults to durable user tools outside the
 replaceable runtime cache, while an existing user prefix remains authoritative.
+Each child receives the host-derived, read-only `NOMIFUN_USER_CLI_ROOT` location
+hint for `dirs::data_local_dir()/nomifun-user-tools/npm`. It is shared across
+Agents and working directories. Skills that need a fixed installation location
+pass it explicitly as npm's `--prefix`; the hint does not change the user's npm
+prefix. Its command directory (the root on Windows, `bin` on macOS/Linux) is
+included after user command directories, and CLIs in either this root or a user
+npm prefix remain eligible for missing-Node preparation.
 Runtime upgrades and Agent data reset do not own the installed user tools. Hosted applications prepare required Node/Bun from recognized project metadata or their built-in static preset, with custom Node taking priority and cancellation attached to the original operation. Arbitrary shell text is preserved.
 
 Terminal retains its existing Windows PowerShell shim adapter. The Windows native

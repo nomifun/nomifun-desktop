@@ -146,6 +146,15 @@
       "scenario_tags": ["document"]
     },
     {
+      "name": "lark-cli",
+      "name_i18n": { "zh-CN": "飞书 CLI" },
+      "description_i18n": {
+        "zh-CN": "通过飞书官方 lark-cli 连接飞书 / Lark，支持消息、云文档、云空间、多维表格、电子表格、日历、任务、邮箱和知识库，并引导安装、账号授权、版本检查与原位置更新。"
+      },
+      "audience_tags": ["office", "general"],
+      "scenario_tags": ["document", "spreadsheet", "setup"]
+    },
+    {
       "name": "skill-creator",
       "name_i18n": { "zh-CN": "skill-creator" },
       "description_i18n": {

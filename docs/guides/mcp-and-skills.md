@@ -158,6 +158,49 @@ Custom and bundled Skills use the same Session capture and native context reader
 
 The Skill Market Add action is owned by the Skill Library service: the backend validates the market identity, downloads and safely extracts the archive, and imports it into the user skill directory. It neither creates an Agent Session nor executes a command supplied by the market; installation and later Session use are separate phases.
 
+### Official Feishu / Lark CLI skill
+
+The bundled **Feishu CLI** (`lark-cli`, displayed as **飞书 CLI** in Chinese) skill uses the
+[official Lark CLI](https://github.com/larksuite/cli/blob/main/README.zh.md) for messages, cloud
+documents, Drive, Base, spreadsheets, calendars, tasks, mail and wikis. View it in `/skills`
+and select it from the conversation's skill picker. It is not auto-injected. Example requests
+include summarizing a linked Feishu document, reading next week's agenda, or updating a specified Base table.
+
+On first use, the Agent discovers and reuses an existing `lark-cli` installation. Only when none
+exists does it install the official `@larksuite/cli` npm package into the current OS user's shared,
+durable tool directory. Local Agents, sessions and workspaces reuse the same absolute launcher;
+they do not install copies in projects, temporary directories or npx caches. The Host supplies
+the actual prefix through `NOMIFUN_USER_CLI_ROOT`. Typical locations are:
+
+| Platform | Install prefix | Launcher |
+| --- | --- | --- |
+| Windows | `%LOCALAPPDATA%\nomifun-user-tools\npm` | `lark-cli.cmd` under the prefix |
+| macOS | `~/Library/Application Support/nomifun-user-tools/npm` | `bin/lark-cli` under the prefix |
+| Linux | `${XDG_DATA_HOME:-~/.local/share}/nomifun-user-tools/npm` | `bin/lark-cli` under the prefix |
+
+Installation explicitly targets that prefix, independently of Node versions or npm's default prefix.
+Runtime upgrades and Agent-data cleanup retain it. Existing user installations are reused in place;
+the Agent does not install another copy to standardize location or automatically move/delete them.
+
+For initial account setup, the Agent checks existing configuration and provides login links
+and QR codes. Complete authorization in the
+browser and tell the Agent when finished so it can continue. Existing installations and account
+configuration are reused. The skill uses the Agent's existing process and file tools; selection
+does not grant tools or Feishu permissions. Access depends on application scopes, user consent
+and resource permissions.
+
+The CLI dependency is prepared when first needed and is not embedded in the NomiFun package.
+No separate MCP server or upstream skill installation into another agent's directories is required.
+Feishu channel bot configuration is managed separately from this skill's Agent-initiated operations.
+
+With this skill selected, ask “Check for Feishu CLI updates” or “Update Feishu CLI to the latest version.”
+The first request only reports installed/available versions and the installation path. The second
+checks first, installs the exact target version at the original prefix, and verifies the same
+launcher afterward, preserving account configuration and authorization. An already-current version
+does not trigger installation. The skill supplies no background auto-updater or separate update
+button; upstream notices during ordinary work do not authorize changing the installation.
+NomiFun's bundled skill instructions update with application releases; the CLI can update independently.
+
 ## Skill API
 
 | Operation | Endpoint |

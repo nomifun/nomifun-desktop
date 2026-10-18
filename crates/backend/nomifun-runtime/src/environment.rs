@@ -133,6 +133,14 @@ fn npm_user_prefix_configured(environment: &HashMap<String, String>) -> bool {
     npm_prefix_setting(environment).is_some()
 }
 
+fn npm_bin_dir(prefix: &Path) -> PathBuf {
+    if cfg!(windows) {
+        prefix.to_owned()
+    } else {
+        prefix.join("bin")
+    }
+}
+
 fn configured_npm_bin(environment: &HashMap<String, String>) -> Option<PathBuf> {
     let mut prefix = npm_prefix_setting(environment)?;
     for _ in 0..32 {
@@ -159,11 +167,14 @@ fn configured_npm_bin(environment: &HashMap<String, String>) -> Option<PathBuf> 
     if !prefix.is_absolute() {
         return None;
     }
-    Some(if cfg!(windows) {
-        prefix
-    } else {
-        prefix.join("bin")
-    })
+    Some(npm_bin_dir(&prefix))
+}
+
+fn is_user_npm_cli(program: &Path, environment: &HashMap<String, String>) -> bool {
+    configured_npm_bin(environment)
+        .into_iter()
+        .chain(user_cli_root().map(|root| npm_bin_dir(&root)))
+        .any(|bin| program.starts_with(bin))
 }
 
 fn executable_in_path(command: &str, path: &str, cwd: Option<&Path>) -> Option<PathBuf> {
@@ -266,12 +277,19 @@ pub(crate) fn process_environment_in(
         bins.push(bin);
     }
     let user_root = user_cli_root();
+    // If no native user-data location is available, omit the hint rather than
+    // retaining an inherited or caller-supplied substitute installation root.
+    environment.retain(|key, _| !same_key(key, "NOMIFUN_USER_CLI_ROOT"));
     if let Some(root) = &user_root {
-        bins.push(if cfg!(windows) {
-            root.clone()
-        } else {
-            root.join("bin")
-        });
+        // This location hint is derived by the host, not a second configurable
+        // npm prefix. All Agents can explicitly install into the same durable
+        // location while the user's normal npm configuration stays untouched.
+        insert(
+            &mut environment,
+            "NOMIFUN_USER_CLI_ROOT",
+            root.to_string_lossy().into_owned(),
+        );
+        bins.push(npm_bin_dir(root));
     }
     // Check the user's own Node before adding the managed fallback. A genuine
     // user toolchain keeps npm's own prefix/config semantics.
@@ -378,14 +396,6 @@ pub async fn prepare_process_launch(
         None
     };
     if let Some(native) = &native {
-        let default_bin = user_cli_root().map(|root| {
-            if cfg!(windows) {
-                root
-            } else {
-                root.join("bin")
-            }
-        });
-        let npm_bin = configured_npm_bin(&environment).or(default_bin);
         let node_ready = executable_in_path(
             "node",
             value(&environment, "PATH").unwrap_or_default(),
@@ -398,7 +408,7 @@ pub async fn prepare_process_launch(
         // A durable npm CLI still needs Node after runtime-cache cleanup. Its
         // install directory identifies the ecosystem without rewriting argv or
         // guessing arbitrary command text.
-        if npm_bin.is_some_and(|bin| native.starts_with(bin)) && !node_ready {
+        if is_user_npm_cli(native, &environment) && !node_ready {
             crate::managed::prepare_managed_tool(ToolId::Node).await?;
             let configured_owned = configured.clone();
             let local_cwd = cwd.to_owned();
@@ -752,5 +762,51 @@ mod tests {
                 .any(|part| part.as_os_str() == "nomifun-user-tools")
         );
         assert!(!root.starts_with(crate::runtime_root().unwrap()));
+    }
+
+    #[test]
+    fn shared_cli_location_is_stable_across_task_environments_and_working_directories() {
+        let host_hint = std::env::var_os("NOMIFUN_USER_CLI_ROOT");
+        let root = user_cli_root().unwrap();
+        assert!(root.is_absolute());
+        let tasks = tempfile::tempdir().unwrap();
+        let first = tasks.path().join("first-agent");
+        let second = tasks.path().join("second-agent");
+        let configured_prefix = tasks.path().join("user-npm-prefix");
+        let prefix = configured_prefix.to_string_lossy().into_owned();
+        for cwd in [&first, &second] {
+            let configured = HashMap::from([
+                ("PATH".into(), cwd.to_string_lossy().into_owned()),
+                ("HOME".into(), cwd.to_string_lossy().into_owned()),
+                ("USERPROFILE".into(), cwd.to_string_lossy().into_owned()),
+                ("NPM_CONFIG_PREFIX".into(), prefix.clone()),
+                ("NOMIFUN_USER_CLI_ROOT".into(), cwd.join("different-tools").to_string_lossy().into_owned()),
+            ]);
+            let environment = process_environment_in(&configured, Some(cwd)).unwrap();
+            assert_eq!(value(&environment, "NOMIFUN_USER_CLI_ROOT"), root.to_str());
+            assert_eq!(value(&environment, "NPM_CONFIG_PREFIX"), Some(prefix.as_str()));
+            let bins: Vec<_> = std::env::split_paths(value(&environment, "PATH").unwrap()).collect();
+            assert_eq!(bins.first(), Some(cwd));
+            assert!(bins.contains(&npm_bin_dir(&root)));
+            assert!(bins.iter().position(|bin| bin == &npm_bin_dir(&configured_prefix)).unwrap()
+                < bins.iter().position(|bin| bin == &npm_bin_dir(&root)).unwrap());
+        }
+        assert!(!first.exists());
+        assert!(!second.exists());
+        assert_eq!(std::env::var_os("NOMIFUN_USER_CLI_ROOT"), host_hint);
+    }
+
+    #[test]
+    fn custom_npm_prefix_keeps_shared_cli_eligible_for_node_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let prefix = directory.path().join("custom-prefix");
+        let environment = HashMap::from([(
+            "NPM_CONFIG_PREFIX".into(),
+            prefix.to_string_lossy().into_owned(),
+        )]);
+        let filename = if cfg!(windows) { "lark-cli.cmd" } else { "lark-cli" };
+        assert!(is_user_npm_cli(&npm_bin_dir(&prefix).join(filename), &environment));
+        assert!(is_user_npm_cli(&npm_bin_dir(&user_cli_root().unwrap()).join(filename), &environment));
+        assert!(!is_user_npm_cli(&directory.path().join("unrelated-cli").join(filename), &environment));
     }
 }
