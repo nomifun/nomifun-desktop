@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
+import { DEFAULT_THEME_ID, PRESET_THEMES } from '../settings/DisplaySettings/presets';
 
 type Rgb = [number, number, number];
 
@@ -7,10 +8,7 @@ const workspaceCss = readFileSync(
   new URL('./AgentCapabilityWorkspace.module.css', import.meta.url),
   'utf8'
 );
-const defaultThemeCss = readFileSync(
-  new URL('../settings/DisplaySettings/presets/rhythm-dark.css', import.meta.url),
-  'utf8'
-);
+const defaultThemeCss = PRESET_THEMES.find((theme) => theme.id === DEFAULT_THEME_ID)!.css;
 
 const colorsFor = (token: string): Rgb[] => [...defaultThemeCss.matchAll(
   new RegExp(`--${token}:\\s*#([0-9a-f]{6})`, 'gi')

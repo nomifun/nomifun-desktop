@@ -307,10 +307,7 @@
     "default": "Default",
     "presets": {
       "codexNeutral": "Classic",
-      "rhythmDark": "Rhythm Dark",
-      "neonRainbow": "Neon Night",
-      "frostedGlass": "Frosted Glass",
-      "sunsetAfterglow": "Sunset Afterglow"
+      "frostedGlass": "Frosted Glass"
     },
     "addToPreset": "Add Theme",
     "editTheme": "Edit Theme",
