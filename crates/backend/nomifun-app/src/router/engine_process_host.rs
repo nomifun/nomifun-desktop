@@ -1060,6 +1060,7 @@ mod tests {
         scope.cleanup().await.unwrap();drop(scope);pool.close().await;
     }
 
+    #[cfg(unix)]
     fn session_process_authority(actions: &[&str]) -> ProcessAuthority {
         ProcessAuthority {
             snapshot: nomifun_agent_contracts::ResolvedSnapshotRef { snapshot_id: "snapshot".into(), snapshot_digest: "b".repeat(64).into() },

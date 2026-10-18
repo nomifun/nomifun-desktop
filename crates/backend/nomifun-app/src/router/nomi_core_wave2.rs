@@ -26,7 +26,7 @@ use nomifun_agent_domain_wave2::{
 };
 use nomifun_ai_agent::ContextContributor;
 use nomifun_api_types::TypedResourceBindingDto;
-use nomifun_common::AppError;
+use nomifun_common::{AppError, paths::paths_equivalent};
 use nomifun_file::{
     AgentSessionWorkspaceBinding, WORKSPACE_DELETE_OPERATION,
     WORKSPACE_RESOURCE_KIND, WORKSPACE_ROOT_PARAMETER,
@@ -415,7 +415,7 @@ impl NomiCoreWave2Host {
             std::collections::hash_map::Entry::Vacant(entry) => entry.insert(Arc::new(
                 super::engine_process_host::EngineProcessScope::new_session(&root,user,session).map_err(|error| AppError::Conflict(error.to_string()))?)),
         };
-        if scope.workspace_root() != root { return Err(AppError::Conflict("Session process workspace authority changed".into())); }
+        if !paths_equivalent(scope.workspace_root(), &root) { return Err(AppError::Conflict("Session process workspace authority changed".into())); }
         scope.open_turn(operation, journal, Some(authority)).map_err(|error| AppError::Conflict(error.to_string()))
     }
 
@@ -803,12 +803,7 @@ impl Wave2HostPort for NomiCoreWave2Host {
                 scope.authorize(&request.context)?;
                 if let Some(observation)=self.unavailable_process_owner(&request.context.principal,&request.context.agent_session_id,scope.owner_generation(),
                     request.context.action_id.as_ref()).await? {return Ok(observation);}
-                // The process runtime uses native canonical paths (including
-                // Windows extended prefixes); compare like representations.
-                let native_root = std::fs::canonicalize(&root).or_else(|error| {
-                    if error.kind() == std::io::ErrorKind::NotFound { Ok(root.clone()) } else { Err(error) }
-                }).map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?;
-                if scope.workspace_root() != native_root.as_path() { return Err(Wave2HostPortError::unavailable("process workspace authority changed")); }
+                if !paths_equivalent(scope.workspace_root(), &root) { return Err(Wave2HostPortError::unavailable("process workspace authority changed")); }
                 let owner_input = process_owner_input(request.context.action_id.as_ref(), input)?;
                 if request.context.action_id.as_ref() == "workspace.process/poll" {
                     return scope
@@ -1259,6 +1254,10 @@ impl nomifun_ai_agent::NomiPlatformBuiltinToolSchemaResolver
         )
     }
 }
+
+#[cfg(test)]
+#[path = "nomi_core_wave2_process_tests.rs"]
+mod process_tests;
 
 #[cfg(test)]
 mod tests {
