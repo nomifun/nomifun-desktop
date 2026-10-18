@@ -1,7 +1,7 @@
 {
   "version": "0.8.14",
   "notes": "- Supersedes the retracted v0.8.13 with the same content plus consistent\n  session-process workspace path comparison.\n- Enable trusted global system capabilities: native global OS execution and\n  file semantics on Windows, with native file effects fenced and\n  authentication failures preserved, and trusted global OS capabilities on\n  Linux.\n- Decouple session input from background process lifecycles, keep session\n  preparation under one owner, preserve semantic text boundaries across\n  reasoning, and preserve waiting and cancellation across runtime consumers.\n- Make delegated companion task cancellation reliable, enforce spoken replies\n  across companion surfaces, keep silent robot actions responsive while\n  preserving continuous voice input, and recover retired robot registries\n  with reported endpoint failures.\n- Check the macOS install location together with the update check: when NomiFun\n  runs from a disk image, an external volume or a translocated location, the\n  update card names the specific cause and running path and offers manual\n  download before any package is downloaded, instead of failing after the\n  download with one generic message.\n- Refine the model configuration workspace and styling, restore model\n  management text contrast across themes, stop companion tooltips from being\n  clipped, and align the input handoff card with the chat background.",
-  "pub_date": "2026-10-18T09:19:47.278Z",
+  "pub_date": "2026-10-18T11:47:59.262Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOC9jVlI2RG9zTXdrTENTNVBJd2JFVXljMGNOTTFoV1ZlME5FdjJkY3lTR1FROGRoL2c1V21VdEI1SkxZOWRzQXArdDhWODg4aWpva0FJN3BNb3E2RFFBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMzA3NDA2CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6ClVJYUdUdjFNMWY2OXYvbTBKOHlad09Kd21nbmVSai83UjlZWlZab0JIa1NOekp5YzlHbFp5UjNhd2tNRHErMWdDaUVjQWhnTWIvYUdCenlCSy8wWUFnPT0K",
@@ -14,6 +14,22 @@
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOC9rbzE2azZraFFBY0lJTW5kK1Z6bUhTV0dJUWVkdjZXK2JlQXhpYmlrUWVaS0hidEMyNGVCbkpXR3ZwNENsTE41RE55bTVrZ3B6QzJTbGppY2RRZEFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMzE1MTUyCWZpbGU6Tm9taUZ1bl8wLjguMTRfeDY0LXNldHVwLmV4ZQpMTUJvMCtwZW5VcFVCS1JueWVLdDd6T0dDZlRCOXV5cnVzYTBncmVaS05ZMEd4elAreFJDVFgvUHFhd2dDcFJpU2d2Mk9tUGkrZnZnS3pFWFdQbEpBQT09Cg==",
       "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.14/NomiFun_0.8.14_x64-setup.exe"
+    },
+    "linux-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODZCQllYUnJQOVptVmZvck5mMWVIeEF2bFFYdEtzYWJRRVlQZlU3N3JJa1RDODQ5aHF3Y1ZwODlOZlB0M0JZQ3BldVhROGF3ZGtlNHc1SjBQMlc4OWdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMzI0MDc3CWZpbGU6Tm9taUZ1bl8wLjguMTRfYW1kNjQuQXBwSW1hZ2UKYTRPVm9za3dQWEFWVWw1OFFmb05zYVJhM0VpRlNnQzk1Y1Q2Mkx0SW1kU2pEUXE3Nk9raXZDQjF3b05GN1ZvWXQvakhzaU9QYy9OV0tVYjBuZlB2QXc9PQo=",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.14/NomiFun_0.8.14_amd64.AppImage"
+    },
+    "linux-x86_64-appimage": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODZCQllYUnJQOVptVmZvck5mMWVIeEF2bFFYdEtzYWJRRVlQZlU3N3JJa1RDODQ5aHF3Y1ZwODlOZlB0M0JZQ3BldVhROGF3ZGtlNHc1SjBQMlc4OWdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMzI0MDc3CWZpbGU6Tm9taUZ1bl8wLjguMTRfYW1kNjQuQXBwSW1hZ2UKYTRPVm9za3dQWEFWVWw1OFFmb05zYVJhM0VpRlNnQzk1Y1Q2Mkx0SW1kU2pEUXE3Nk9raXZDQjF3b05GN1ZvWXQvakhzaU9QYy9OV0tVYjBuZlB2QXc9PQo=",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.14/NomiFun_0.8.14_amd64.AppImage"
+    },
+    "linux-x86_64-rpm": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODZrSFNMVVdXQUxDc3ZTdUZYMStJUHRIQ05CRnUzeFBBd0xIQ3d4Yy9jNDNUejJVcDMwVDR1a1RhU1kwQ1p4ZVJrMG5zVk1UTXZ0R2J1OTBKWHlZUlFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMzI0MDc3CWZpbGU6Tm9taUZ1bi0wLjguMTQtMS54ODZfNjQucnBtCmZoY25zcVdYUUpkbTBjOGYrY2YyamgzUW9yNStrWUxJd3gzWS9lQnBSVWE1aUVVUzJubFB2NnJoVDUrUmN6dzdLdDVvV1hlU0YxV2VuOTlYNTRGbkJ3PT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.14/NomiFun-0.8.14-1.x86_64.rpm"
+    },
+    "linux-x86_64-deb": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODR0UThmR1BqMU0xZlB1Y3h6NVNZK1ZhTU5taytPYUtoNnRnREYwT1Ewc2JPV0d4ODRST3FhV2lWSzVsYXA3VlRzR0VsNFJFYlpOVHcxVktVa0tGZnc0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMzI0MDc3CWZpbGU6Tm9taUZ1bl8wLjguMTRfYW1kNjQuZGViCkVyQzJVR1NMcGt2MEpBNzRBQWgxb2dzQm5PWjJWNW8rRnZiNmdUZlZoM1gzTzVUSEJxcnNrTCtTSko3cmFDNTZXQnhZY1VnQlgyWUJRRUgvQUNEcEFnPT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.14/NomiFun_0.8.14_amd64.deb"
     }
   }
 }
