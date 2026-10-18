@@ -11,10 +11,12 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { NomiSettingSection } from '@/renderer/components/base/NomiSettingLayout';
 import { useSessionCapabilitySelection } from '@/renderer/components/chat/SessionCapabilityPicker/useSessionCapabilitySelection';
+import { useMcpDisplayName } from '@/renderer/services/mcp/useMcpDisplayName';
 
 const SessionMcpSelection = ({ sessionId }: { sessionId: string }) => {
   const { t } = useTranslation();
   const selection = useSessionCapabilitySelection(sessionId);
+  const getDisplayName = useMcpDisplayName();
   const [servers, setServers] = useState<Awaited<ReturnType<typeof ipcBridge.mcpService.listServers.invoke>>>([]);
   const [loadError, setLoadError] = useState<Error>();
   const [reload, setReload] = useState(0);
@@ -31,7 +33,7 @@ const SessionMcpSelection = ({ sessionId }: { sessionId: string }) => {
     <Select aria-label={t('agentSettings.resources.kinds.mcpConnection')} mode='multiple' allowClear
       loading={selection.loading} disabled={selection.state?.editable !== true || selection.saving || Boolean(loadError)}
       value={selection.draft.mcpServerIds}
-      options={servers.filter((server) => !server.builtin).map((server) => ({ value: server.mcp_server_id, label: server.name, disabled: !server.enabled }))}
+      options={servers.filter((server) => !server.builtin).map((server) => ({ value: server.mcp_server_id, label: getDisplayName(server), disabled: !server.enabled }))}
       onChange={(ids: string[]) => {
         selection.setDraft({ ...selection.draft, mcpServerIds: ids });
         void selection.applyBeforeSend().catch((cause) => Message.error(cause instanceof Error ? cause.message : String(cause)));

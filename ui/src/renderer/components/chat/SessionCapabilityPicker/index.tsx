@@ -1,5 +1,6 @@
 import type { IMcpServer } from '@/common/config/storage';
 import { useSkillDisplay } from '@/renderer/services/skills/useSkillDisplay';
+import { useMcpDisplayName } from '@/renderer/services/mcp/useMcpDisplayName';
 import { Button, Checkbox, Spin, Tooltip } from '@arco-design/web-react';
 import { autoUpdate, flip, FloatingFocusManager, FloatingPortal, offset, shift, size, useDismiss, useFloating, useInteractions, useRole } from '@floating-ui/react';
 import { CheckOne, CloseSmall, Lightning, Puzzle, Right } from '@icon-park/react';
@@ -90,6 +91,7 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
 }) => {
   const { t, i18n } = useTranslation();
   const getSkillDisplay = useSkillDisplay(i18n.language);
+  const getMcpDisplayName = useMcpDisplayName();
   const navigate = useNavigate();
   const toolsContext = useContext(SessionComposerToolsContext);
   const [localOpen, setLocalOpen] = useState<PickerKind>();
@@ -227,6 +229,7 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
             })
           ) : (
             <>{catalog.appSourceError && <p role='status'>{t('appHosting.tools.error')}: {catalog.appSourceError}</p>}{catalog.mcpServers.map((server) => {
+              const displayName = getMcpDisplayName(server);
               const checked = selectedMcp.has(server.mcp_server_id);
               const status = mcpStatus(server);
               const locked = lockedMcpServerIds.has(server.mcp_server_id);
@@ -241,12 +244,12 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
                 >
                   <CapabilityCheckbox
                     checked={checked}
-                    label={server.name}
+                    label={displayName}
                     disabled={rowDisabled}
                     onChange={(value) => toggleMcp(server, value)}
                   />
                   <span className={styles.copy}>
-                    <strong>{server.name}</strong>
+                    <strong>{displayName}</strong>
                     {server.appSource && <small>{t('appHosting.tools.title')}</small>}
                     <CapabilityDescription>{server.description || t('conversation.capabilityPicker.toolCount', {
                       count: server.tools?.length ?? 0,

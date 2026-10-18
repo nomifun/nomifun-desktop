@@ -20,7 +20,7 @@ import settings from '@/renderer/services/i18n/locales/en-US/settings.json';
 import common from '@/renderer/services/i18n/locales/en-US/common.json';
 import conversation from '@/renderer/services/i18n/locales/en-US/conversation.json';
 import McpPage from './index';
-import { getMcpMarketOrigin } from './McpMarketSettings';
+import { getMcpMarketOrigin } from '@/renderer/services/mcp/mcpMarket';
 
 const locale = createInstance();
 const restore: Array<() => void> = [];
@@ -51,7 +51,7 @@ function fixture() {
     [localStorage, 'nomifun.mcpMarket.rankings.v1', JSON.stringify({
       items: [{
         id: 'mcpworld:alpha',
-        name: 'alpha',
+        name: '网页内容抓取服务器',
         source: 'mcpworld',
         rank: 1,
         description: '',
@@ -161,7 +161,7 @@ function fixture() {
     };
     const checkbox = async () => {
       openPicker();
-      return await view.findByRole('checkbox', { name: 'alpha' }) as HTMLInputElement;
+      return await view.findByRole('checkbox', { name: '网页内容抓取服务器' }) as HTMLInputElement;
     };
     const installed = () => within(view.getByTestId('mcp-installed-surface'));
     const check = async () => {
@@ -175,12 +175,14 @@ function fixture() {
       await act(async () => fireEvent.click(view.getByTestId('btn-add-market-skill-mcpworld-alpha')));
       await act(async () => fireEvent.click(view.getByRole('button', { name: settings.mcpMarket.confirmOk })));
       await view.findByTestId('mcp-installed-surface');
-      await installed().findByRole('switch', { name: 'Enable alpha' });
+      await installed().findByRole('switch', { name: 'Enable 网页内容抓取服务器' });
       const item = await checkbox();
       expect(item.disabled).toBe(true);
       expect(picker().getByText(conversation.capabilityPicker.disabled)).toBeTruthy();
       expect(importing).toHaveBeenCalledTimes(1);
       expect(getMcpMarketOrigin(importing.mock.calls[0]![0].servers[0]!)).toBe('mcpworld:alpha');
+      expect(importing.mock.calls[0]![0].servers[0]!.name).toBe('alpha');
+      expect(JSON.parse(persisted[0]!.original_json)._nomifun_market.name).toBe('网页内容抓取服务器');
       expect(persisted[0]!.enabled).toBe(false);
       expect(testing).not.toHaveBeenCalled();
       expect(toggling).not.toHaveBeenCalled();
@@ -327,13 +329,13 @@ describe('MCP market import to session selection with mounted catalogs', () => {
     await act(async () => fireEvent.click(v.installed().getByRole('switch')));
     await waitFor(() => expect(v.picker().getByText(conversation.capabilityPicker.loadFailed)).toBeTruthy());
     expect(v.catalog()[0]!.enabled).toBe(true);
-    expect(v.picker().queryByRole('checkbox', { name: 'alpha' })).toBeNull();
+    expect(v.picker().queryByRole('checkbox', { name: '网页内容抓取服务器' })).toBeNull();
     expect(v.draft()).toEqual({ skillNames: [existingSkillName], mcpServerIds: [] });
 
     const finishRead = f.deferCatalogReads();
     await act(async () => fireEvent.click(v.picker().getByRole('button', { name: common.retry })));
     expect(v.picker().getByText(conversation.capabilityPicker.loadFailed)).toBeTruthy();
-    expect(v.picker().queryByRole('checkbox', { name: 'alpha' })).toBeNull();
+    expect(v.picker().queryByRole('checkbox', { name: '网页内容抓取服务器' })).toBeNull();
     await act(async () => finishRead());
 
     await waitFor(() => expect(v.catalog()[0]?.enabled).toBe(false));

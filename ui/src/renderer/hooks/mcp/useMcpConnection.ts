@@ -10,6 +10,7 @@ import { buildMcpConnectionTestRequest } from '@/common/adapter/mcpRequest';
 import type { IMcpServer } from '@/common/config/storage';
 import { getMcpConfigurationFields, supportsMcpOAuthLogin } from './mcpAuthConfig';
 import { notifyMcpCatalogChanged } from './catalog';
+import { resolveMcpDisplayName } from '@/renderer/services/mcp/mcpMarket';
 
 /**
  * 截断过长的错误消息，保持可读性
@@ -218,14 +219,15 @@ export const useMcpConnection = (
   const handleTestMcpConnection = useCallback(
     async (server: IMcpServer, options?: TestOptions) => {
       const notify = options?.notify ?? true;
+      const displayName = resolveMcpDisplayName(server);
       const configurationFields = getMcpConfigurationFields(server.transport);
       if (configurationFields.length > 0) {
         if (notify) {
           Message.warning({
             content: t('settings.mcpConfigurationRequired', {
-              name: server.name,
+              name: displayName,
               fields: configurationFields.join(', '),
-              defaultValue: `${server.name}: Complete these configuration fields before testing: ${configurationFields.join(', ')}`,
+              defaultValue: `${displayName}: Complete these configuration fields before testing: ${configurationFields.join(', ')}`,
             }),
             duration: 5000,
           });
@@ -247,7 +249,7 @@ export const useMcpConnection = (
             isCurrent: () => active.current,
             onProgress: (snapshot: RuntimeToolSnapshot) => {
               if (notify && active.current) closePreparation = Message.loading({ id: preparationId,
-                content: `${server.name}: ${formatRuntimePreparation(snapshot, t)}`, duration: 0 });
+                content: `${displayName}: ${formatRuntimePreparation(snapshot, t)}`, duration: 0 });
             },
           });
         if (!active.current) return;
@@ -260,10 +262,10 @@ export const useMcpConnection = (
           if (notify) {
             Message.warning({
               content: canUseOAuth
-                ? `${server.name}: ${t('settings.mcpAuthRequired') || 'Authentication required'}`
+                ? `${displayName}: ${t('settings.mcpAuthRequired') || 'Authentication required'}`
                 : t('settings.mcpHeaderAuthRequired', {
-                    name: server.name,
-                    defaultValue: `${server.name}: The server requires credentials. Add the required HTTP authorization header in its MCP JSON.`,
+                    name: displayName,
+                    defaultValue: `${displayName}: The server requires credentials. Add the required HTTP authorization header in its MCP JSON.`,
                   }),
               duration: 3000,
             });
@@ -284,7 +286,7 @@ export const useMcpConnection = (
         if (result.success) {
           if (notify) {
             Message.success({
-              content: `${server.name}: ${t('settings.mcpTestConnectionSuccess')}`,
+              content: `${displayName}: ${t('settings.mcpTestConnectionSuccess')}`,
               duration: 3000,
             });
           }
@@ -294,9 +296,9 @@ export const useMcpConnection = (
           if (notify) {
             Message.error({
               content: t('settings.mcpTestConnectionFailedWithHint', {
-                name: server.name,
+                name: displayName,
                 error: errorMsg,
-                defaultValue: `${server.name}: ${errorMsg}`,
+                defaultValue: `${displayName}: ${errorMsg}`,
               }),
               duration: 8000,
             });
@@ -311,9 +313,9 @@ export const useMcpConnection = (
         if (notify) {
           Message.error({
             content: t('settings.mcpTestConnectionFailedWithHint', {
-              name: server.name,
+              name: displayName,
               error: errorMsg,
-              defaultValue: `${server.name}: ${errorMsg}`,
+              defaultValue: `${displayName}: ${errorMsg}`,
             }),
             duration: 8000,
           });
