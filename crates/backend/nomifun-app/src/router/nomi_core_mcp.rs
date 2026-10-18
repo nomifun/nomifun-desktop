@@ -23,7 +23,7 @@ use super::agent_wave2_mcp::{
 
 const MAX_CATALOG_BYTES: usize = 1024 * 1024;
 const MAX_TOOLS: usize = 256;
-const MAX_UNCERTAIN_SESSIONS: usize = 1024;
+const MAX_ACTIVE_SESSIONS: usize = 1024;
 
 fn error(code: &str, message: &str) -> Wave2HostPortError {
     Wave2HostPortError::new(code, message)
@@ -278,46 +278,22 @@ impl McpRuntimeBindingSource for NomiCoreMcpRuntimeBindingSource {
 }
 
 type SessionKey = (String, String);
-#[derive(Default)]
-struct SessionState {
-    active: bool,
-    uncertain: bool,
-}
-
-/// A dropped invocation cannot become an apparent cleanup success. Healthy
-/// entries are removed; uncertain entries remain fenced in memory as well as
-/// in the durable owner receipts used by cross-boot reconciliation.
+/// This registry owns in-flight invocation exclusion only. Uncertain outcomes
+/// remain in the canonical Effect chain, including after a task is dropped.
+/// An exact instance identity prevents old cleanup from releasing a successor.
 struct InvocationGuard<'a> {
-    sessions: &'a Mutex<BTreeMap<SessionKey, SessionState>>,
+    sessions: &'a Mutex<BTreeMap<SessionKey, Arc<()>>>,
     key: SessionKey,
-    settled: bool,
-}
-
-impl InvocationGuard<'_> {
-    fn settle(mut self, uncertain: bool) {
-        if let Ok(mut sessions) = self.sessions.lock() {
-            if uncertain {
-                if let Some(state) = sessions.get_mut(&self.key) {
-                    state.active = false;
-                    state.uncertain = true;
-                }
-            } else {
-                sessions.remove(&self.key);
-            }
-            self.settled = true;
-        }
-    }
+    invocation: Arc<()>,
 }
 
 impl Drop for InvocationGuard<'_> {
     fn drop(&mut self) {
-        if !self.settled
-            && let Ok(mut sessions) = self.sessions.lock()
+        if let Ok(mut sessions) = self.sessions.lock()
+            && sessions.get(&self.key)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.invocation))
         {
-            if let Some(state) = sessions.get_mut(&self.key) {
-                state.active = false;
-                state.uncertain = true;
-            }
+            sessions.remove(&self.key);
         }
     }
 }
@@ -326,7 +302,7 @@ pub(crate) struct NomiCoreMcpHost {
     receipts: super::mcp_effect_receipts::McpEffectReceipts,
     source: NomiCoreMcpRuntimeBindingSource,
     owner: McpOwnerAdapter,
-    sessions: Mutex<BTreeMap<SessionKey, SessionState>>,
+    sessions: Mutex<BTreeMap<SessionKey, Arc<()>>>,
 }
 
 /// Only MCP authority facts cross this boundary; the remote owner never
@@ -334,6 +310,9 @@ pub(crate) struct NomiCoreMcpHost {
 pub(crate) struct McpExecutionContext {
     principal: PrincipalRef,
     agent_session_id: nomifun_agent_contracts::AgentSessionId,
+    turn_id: nomifun_agent_contracts::OperationId,
+    resolved_snapshot_ref: nomifun_agent_contracts::ResolvedSnapshotRef,
+    control: nomifun_agent_kernel::InvocationControl,
     operation_id: nomifun_agent_contracts::OperationId,
     capability_id: nomifun_agent_contracts::CapabilityId,
     resource_bindings: Vec<TypedResourceBinding>,
@@ -344,6 +323,9 @@ impl From<nomifun_agent_kernel::CapabilityInvocationContext> for McpExecutionCon
         Self {
             principal: context.principal,
             agent_session_id: context.agent_session_id,
+            turn_id: context.turn_id,
+            resolved_snapshot_ref: context.resolved_snapshot_ref,
+            control: context.control,
             operation_id: context.operation_id,
             capability_id: context.capability_id,
             resource_bindings: context.resource_bindings,
@@ -363,6 +345,9 @@ impl NomiCoreMcpHost {
         operation_id: nomifun_agent_contracts::OperationId,
         resource: TypedResourceBinding,
         operation: nomifun_mcp::McpResourceOperation,
+        control: nomifun_agent_kernel::InvocationControl,
+        turn_id: nomifun_agent_contracts::OperationId,
+        snapshot: nomifun_agent_contracts::ResolvedSnapshotRef,
     ) -> Result<StrictJsonValue, Wave2HostPortError> {
         let server = self.source.resource_server(&principal, &resource).await?;
         let digest = digest_payload(&("nomi-mcp-resource-v1", &principal, &session, &operation_id))
@@ -386,6 +371,8 @@ impl NomiCoreMcpHost {
             )
         })?;
         let guard = self.claim_session(&principal.principal_id, session.as_ref())?;
+        self.receipts.ensure_settled(&principal.principal_id, session.as_ref()).await
+            .map_err(|_| error("MCP_SESSION_UNCERTAIN", "MCP has an unresolved canonical outcome"))?;
         let receipt = match self
             .receipts
             .begin(
@@ -393,6 +380,8 @@ impl NomiCoreMcpHost {
                 session.as_ref(),
                 operation_id.as_ref(),
                 super::mcp_effect_receipts::MCP_SERVER_RESOURCE_EFFECT,
+                &turn_id,
+                &snapshot,
             )
             .await
         {
@@ -401,26 +390,21 @@ impl NomiCoreMcpHost {
                 // No protocol owner was entered. A potentially committed SQL
                 // reservation remains durably fenced, but local budget/input
                 // rejection must not invent an in-memory remote transaction.
-                guard.settle(false);
+                drop(guard);
                 return Err(error(
                     "MCP_EFFECT_RECEIPT_UNAVAILABLE",
                     "MCP resource transaction has no durable turn authority",
                 ));
             }
         };
-        let result = self.owner.resource(request).await;
-        // Ok includes typed resource rejection after successful cleanup.
-        // Settlement records the observed return, never successful data or rollback.
-        if let Ok(value) = &result {
-            self.receipts.settle(receipt, &value.0).await.map_err(|_| {
-                error(
-                    "MCP_EFFECT_SETTLEMENT_UNCERTAIN",
-                    "MCP resource settlement is unproven",
-                )
-            })?;
-        }
-        guard.settle(result.is_err());
-        result
+        let outcome = self.owner.resource_controlled(request, control).await;
+        // The original task owns protocol shutdown and durable settlement.
+        // Cleanup uncertainty preserves any observed result in that receipt.
+        self.receipts.settle(receipt, &outcome).await.map_err(|_| {
+            error("MCP_EFFECT_SETTLEMENT_UNCERTAIN", "MCP resource settlement is unproven")
+        })?;
+        drop(guard);
+        project_owner_outcome(outcome)
     }
 
     fn claim_session(
@@ -433,23 +417,18 @@ impl NomiCoreMcpHost {
             .sessions
             .lock()
             .map_err(|_| error("MCP_SESSION_UNCERTAIN", "MCP session state is poisoned"))?;
-        if sessions.contains_key(&key) || sessions.len() >= MAX_UNCERTAIN_SESSIONS {
+        if sessions.contains_key(&key) || sessions.len() >= MAX_ACTIVE_SESSIONS {
             return Err(error(
                 "MCP_SESSION_UNCERTAIN",
-                "MCP session is busy, fenced, or uncertainty bound exhausted",
+                "MCP session is busy or the active invocation bound is exhausted",
             ));
         }
-        sessions.insert(
-            key.clone(),
-            SessionState {
-                active: true,
-                uncertain: false,
-            },
-        );
+        let invocation = Arc::new(());
+        sessions.insert(key.clone(), invocation.clone());
         Ok(InvocationGuard {
             sessions: &self.sessions,
             key,
-            settled: false,
+            invocation,
         })
     }
 
@@ -532,6 +511,8 @@ impl NomiCoreMcpHost {
             &context.principal.principal_id,
             context.agent_session_id.as_ref(),
         )?;
+        self.receipts.ensure_settled(&context.principal.principal_id, context.agent_session_id.as_ref()).await
+            .map_err(|_| error("MCP_SESSION_UNCERTAIN", "MCP has an unresolved canonical outcome"))?;
         let receipt = match self
             .receipts
             .begin(
@@ -539,6 +520,8 @@ impl NomiCoreMcpHost {
                 context.agent_session_id.as_ref(),
                 context.operation_id.as_ref(),
                 context.capability_id.as_ref(),
+                &context.turn_id,
+                &context.resolved_snapshot_ref,
             )
             .await
         {
@@ -546,28 +529,22 @@ impl NomiCoreMcpHost {
             Err(_) => {
                 // No owner was entered; keep possible pending SQL evidence,
                 // but do not invent an in-memory unknown remote transaction.
-                guard.settle(false);
+                drop(guard);
                 return Err(error(
                     "MCP_EFFECT_RECEIPT_UNAVAILABLE",
                     "MCP dispatch has no durable live-turn authority",
                 ));
             }
         };
-        let result = self.owner.invoke(input).await;
-        if let Ok(value) = &result {
-            self.receipts.settle(receipt, &value.0).await.map_err(|_| {
-                error(
-                    "MCP_EFFECT_SETTLEMENT_UNCERTAIN",
-                    "MCP result could not be durably settled; do not replay",
-                )
-            })?;
-        }
-        // Conservatively fence any owner failure, even initialize/credential
-        // failures: a transport may have allocated an unseen remote session or
-        // started a local process. Local catalog/input rejection preceded this guard.
-        // Narrower retry admission needs an explicit no-effect receipt.
-        guard.settle(result.is_err());
-        result.and_then(super::agent_wave2_mcp::project_mcp_tool_result)
+        let outcome = match self.owner.invoke_controlled(input, context.control).await {
+            Ok(outcome) => outcome,
+            Err(failure) => local_rejection(failure),
+        };
+        self.receipts.settle(receipt, &outcome).await.map_err(|_| {
+            error("MCP_EFFECT_SETTLEMENT_UNCERTAIN", "MCP result could not be durably settled; do not replay")
+        })?;
+        drop(guard);
+        project_owner_outcome(outcome).and_then(super::agent_wave2_mcp::project_mcp_tool_result)
     }
 
     /// Observation after the engine tool task group has joined. Never clear
@@ -582,16 +559,40 @@ impl NomiCoreMcpHost {
             .sessions
             .lock()
             .map_err(|_| AppError::Conflict("MCP session state is poisoned".into()))?;
-        if sessions
-            .get(&(owner.to_owned(), session.to_owned()))
-            .is_some_and(|state| state.active || state.uncertain)
-        {
+        if sessions.contains_key(&(owner.to_owned(), session.to_owned())) {
             return Err(AppError::Conflict(
-                "MCP execution or cleanup has no settled outcome; Session remains fenced".into(),
+                "MCP execution or cleanup is still owned by an active task".into(),
             ));
         }
         Ok(())
     }
+}
+
+fn local_rejection(failure: Wave2HostPortError) -> nomifun_mcp::McpInvocationOutcome<StrictJsonValue> {
+    let code = failure.canonical_code().as_ref().to_owned();
+    nomifun_mcp::McpInvocationOutcome {
+        result: Err(nomifun_mcp::McpOwnerError::new(code, failure.message)),
+        execution: nomifun_mcp::McpExecutionFacts {
+            request_dispatched: false, local_process_started: false, cancellation_requested: false,
+        },
+        cleanup: nomifun_mcp::McpCleanupFacts {
+            local: nomifun_mcp::McpCleanupStatus::NotRequired,
+            remote: nomifun_mcp::McpCleanupStatus::NotRequired,
+            error: None,
+        },
+    }
+}
+
+fn project_owner_outcome(
+    outcome: nomifun_mcp::McpInvocationOutcome<StrictJsonValue>,
+) -> Result<StrictJsonValue, Wave2HostPortError> {
+    if matches!(outcome.cleanup.local, nomifun_mcp::McpCleanupStatus::Unproven)
+        || matches!(outcome.cleanup.remote, nomifun_mcp::McpCleanupStatus::Unproven)
+    {
+        return Err(error("MCP_SESSION_CLEANUP_FAILED",
+            "MCP owner cleanup is unproven. Any returned observation was recorded with the original effect; do not replay the call."));
+    }
+    outcome.result.map_err(super::agent_wave2_mcp::map_mcp_owner_error)
 }
 
 #[cfg(test)]
@@ -651,3 +652,7 @@ mod binding_tests {
             "MCP_CONNECTION_CONFIG_STALE");
     }
 }
+
+#[cfg(test)]
+#[path = "nomi_core_mcp_outcome_tests.rs"]
+mod outcome_tests;

@@ -28,6 +28,8 @@ pub use oauth_service::McpOAuthService;
 pub use owner::{
     AnonymousMcpCredentialAuthority, McpCredential, McpCredentialAuthority, McpCredentialLookup,
     McpOwner, McpOwnerError, McpServerBinding, McpToolBinding, McpToolInvocationRequest,
+    McpInvocationControl, McpInvocationOutcome, McpExecutionFacts, McpCleanupFacts,
+    McpCleanupStatus, McpSetupPolicy,
     McpToolInvocationResult, OAuthMcpCredentialAuthority, MCP_CONNECT_OPERATION,
     McpResourceFailure, McpResourceOperation, McpResourceRequest, McpResourceResult,
     MCP_INVOKE_OPERATION, MCP_READ_OPERATION, MCP_SERVER_RESOURCE_KIND,

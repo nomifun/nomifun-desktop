@@ -634,7 +634,9 @@ canonical 窄机器人且该字段未设置时，Host 可在现役 Turn 模型�
 普通新建页与已开启会话共用协作配置控件和 AgentExecution 提交路径。模型池、方案和策略在发送前是按会话隔离的 UI 草稿，创建成功后保留该会话的后续输入配置；发送时沿用现有协作请求准入，将配置写入实际 Execution。默认单模型自动策略继续发送普通 Turn。协作草稿不修改当前 Session Snapshot、不改变已运行的 Execution，也不影响已排队的普通输入；新的协作请求等待当前回合、协作任务和队列释放。活动任务的调整继续使用原有 Execution 命令。
 
 MCP 与 Skill 是所有 Agent 共用的全局能力，预设不持有扩展总开关。创建或空闲时明确更新会话选择，
-host 捕获全局技能库；应用 MCP 来源必须由 Agent/会话明确选择，默认不全局注入。将选中的 MCP 工具编译到同一 Session-only Revision/Snapshot；变体只使用
+host 捕获全局技能库；所有 MCP 来源都必须由 Agent/会话明确选择，全局启用或连接成功不构成默认选择。
+省略会话扩展选择时保留默认技能与 Agent 已明确保存的 MCP 授权，不加入其它已安装来源。
+将选中的 MCP 工具编译到同一 Session-only Revision/Snapshot；变体只使用
 现有 Agent Store，不创建另一份绑定或权限台账。Library Skill 冻结正文、辅助资源、来源与摘要，
 `selected` 控制默认输入注入；Package Skill 保留现役精确锁与原 JSON 合同。
 
@@ -647,6 +649,12 @@ Provider mount 保持冻结。不先重编译旧完整扩展选择，因此删�
 Owner 在同一个空闲、清理与效果结算边界提交一次 canonical transition。
 技能正文只从 Session 冻结内容读取，大正文和辅助资源由同一个 native context reader 按需读取，
 不执行 Skill hooks、shell 或 fork，不增加工具权限。工具搜索由 Runtime 自动提供。
+
+MCP 工具执行默认无总时长或静默期限，接入与取消/清理仍各自有界。取消只停止新准入并控制
+确切原请求，原 TaskGroup 保留执行与清理任务；原生租约续期持续到原 owner 结算或明确被围栏，
+不以用户停止等待当作 producer 已退出。结果、是否派发及本地/远端清理事实沿原 Event/Payload/Effect
+记录；有返回结果但清理未知时保留真实观察。只有已证明未进入效果的拒绝可以安全拒绝结算，
+未知效果继续阻断重放；内存互斥不另存永久未知事实，人工对账仍须结合原实例的清理证明。
 
 ## 消费端边界
 

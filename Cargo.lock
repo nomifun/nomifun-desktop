@@ -5895,6 +5895,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -6708,6 +6709,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-util",
  "toml 0.8.2",
  "tracing",
 ]

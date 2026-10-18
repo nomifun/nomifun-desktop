@@ -75,6 +75,9 @@ pub struct CapabilityOperationRequest {
 
 #[derive(Clone)]
 pub struct CapabilityInvocationContext {
+    /// Cooperative lifetime supplied by the execution owner, never the model
+    /// or a serialized Snapshot. Dispatched work retains its cleanup owner.
+    pub control: crate::InvocationControl,
     /// Invocation-scoped access to declared, already-authorized dependencies.
     /// It cannot outlive this handler invocation or manufacture Session authority.
     pub dependencies: crate::CapabilityDependencyCaller,

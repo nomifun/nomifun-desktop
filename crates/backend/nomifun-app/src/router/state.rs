@@ -568,7 +568,6 @@ async fn build_nomi_core_agent_api_state(
         owner: nomifun_agent_contracts::UserId::from(services.authoritative_user_id.as_ref().to_owned()),
         skills: Arc::clone(&services.skill_paths),
         mcp: services.app_mcp_sources.clone(),
-        app_mcp: services.app_mcp_sources.clone(),
     });
     let control_plane = Arc::new(AgentControlPlane::new(
         store.clone(),

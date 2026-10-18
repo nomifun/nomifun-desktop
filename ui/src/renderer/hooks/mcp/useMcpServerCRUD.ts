@@ -6,6 +6,7 @@ import { mcpService } from '@/common/adapter/ipcBridge';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import type { IMcpServer } from '@/common/config/storage';
 import { notifyMcpCatalogChanged, toBackendMcpPayload } from './catalog';
+import { preserveMcpMarketOrigin } from '@/renderer/services/mcp/mcpMarket';
 
 const replaceUserServer = (servers: IMcpServer[], nextServer: IMcpServer) => {
   const remainingServers = servers.filter((server) => server.builtin === true || server.mcp_server_id !== nextServer.mcp_server_id);
@@ -110,7 +111,10 @@ export const useMcpServerCRUD = (
       try {
         let persisted = await mcpService.updateServer.invoke({
           mcp_server_id: editingMcpServer.mcp_server_id,
-          data: toBackendMcpPayload(serverData),
+          data: toBackendMcpPayload({
+            ...serverData,
+            original_json: preserveMcpMarketOrigin(serverData.original_json, editingMcpServer),
+          }),
         });
         persisted = await persistEnabledState(persisted, serverData.enabled);
 

@@ -11,6 +11,7 @@ import { parseMcpServerId } from '@/common/types/ids';
 import settings from '@/renderer/services/i18n/locales/en-US/settings.json';
 import { subscribeMcpCatalogChanged } from './catalog';
 import { useMcpServerCRUD } from './useMcpServerCRUD';
+import { attachMcpMarketOrigin, getMcpMarketOrigin, resolveMcpDisplayName } from '@/renderer/services/mcp/mcpMarket';
 
 const locale = createInstance();
 const restores: Array<() => void> = [];
@@ -144,6 +145,32 @@ describe('MCP enabled state persistence', () => {
     expect(observedAtNotification).toEqual([[persisted]]);
     expect(toggle).not.toHaveBeenCalled();
     expect(f.tests).not.toHaveBeenCalled();
+  });
+
+  test('replacing edited JSON preserves the market title and config identity', async () => {
+    const previous = server({ original_json: attachMcpMarketOrigin('{}', {
+      id: 'mcpworld:fetch', name: '网页内容抓取服务器',
+    }) });
+    const replacement = JSON.stringify({ mcpServers: { alpha: { command: 'edited-command' } } });
+    const update = spyOn(mcpService.updateServer, 'invoke').mockImplementation(async ({ data }) => ({
+      ...previous, ...data, updated_at: 2,
+    }));
+    const success = spyOn(Message, 'success').mockReturnValue(() => {});
+    restores.push(() => update.mockRestore(), () => success.mockRestore());
+    const f = fixture(previous);
+
+    await act(async () => {
+      await f.result.current.handleEditMcpServer(previous, {
+        ...previous, original_json: replacement, transport: { type: 'stdio', command: 'edited-command' },
+      });
+    });
+
+    const request = update.mock.calls[0]![0];
+    expect(request.mcp_server_id).toBe(previous.mcp_server_id);
+    expect(request.data.name).toBe(previous.name);
+    expect(JSON.parse(request.data.original_json ?? '{}').mcpServers).toEqual({ alpha: { command: 'edited-command' } });
+    expect(getMcpMarketOrigin(f.servers[0]!)).toBe('mcpworld:fetch');
+    expect(resolveMcpDisplayName(f.servers[0]!, [])).toBe('网页内容抓取服务器');
   });
 
   test.each([

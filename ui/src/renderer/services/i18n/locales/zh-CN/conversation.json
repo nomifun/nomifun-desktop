@@ -973,7 +973,6 @@
     "builtin": "内置",
     "installed": "已安装",
     "available": "可用",
-    "disabled": "已停用",
     "error": "异常",
     "toolCount_other": "{{count}} 个工具",
     "selectedCount_other": "已选 {{count}} 项",

@@ -1,11 +1,12 @@
 import '../../../../../../../test/setup-dom.ts';
-import { cleanup, render, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import { parseCompanionId, parseConversationId, parseMcpServerId } from '@/common/types/ids';
 import CompanionMcpSettings from './CompanionMcpSettings';
+import { notifyMcpCatalogChanged } from '@/renderer/hooks/mcp/catalog';
 
 const i18n = createInstance();
 await i18n.init({ lng: 'en', keySeparator: false, resources: { en: { translation: {
@@ -29,4 +30,34 @@ test.each([true, false])('management uses canonical session selection and respec
   await waitFor(() => expect(view.getByRole('combobox', { name: 'MCP connection' }).textContent).toContain('Shared MCP'));
   const select = view.getByRole('combobox', { name: 'MCP connection' });
   expect(select.getAttribute('aria-disabled') === 'true').toBe(!editable);
+});
+
+test('session management hides disabled choices and follows the shared MCP catalog on refresh', async () => {
+  const companionId = parseCompanionId('019b0000-0000-7000-8000-000000000001');
+  const conversationId = parseConversationId('019b0000-0000-7000-8000-000000000002');
+  const enabledId = parseMcpServerId('019b0000-0000-7000-8000-000000000003');
+  const disabledId = parseMcpServerId('019b0000-0000-7000-8000-000000000004');
+  const enabled = { mcp_server_id: enabledId, name: 'Available MCP', enabled: true };
+  const stopped = { mcp_server_id: disabledId, name: 'Stopped MCP', enabled: false };
+  track(spyOn(ipcBridge.agentPlatform.sessions.onAgentChanged, 'on').mockImplementation(() => () => {}));
+  track(spyOn(ipcBridge.agentPlatform.sessions.onCapabilitiesChanged, 'on').mockImplementation(() => () => {}));
+  track(spyOn(ipcBridge.companion.getCompanionSession, 'invoke').mockResolvedValue({ conversation_id: conversationId }));
+  const listing = track(spyOn(ipcBridge.mcpService.listServers, 'invoke').mockResolvedValue([enabled, stopped] as any));
+  track(spyOn(ipcBridge.agentPlatform.sessions.getCapabilitySelection, 'invoke').mockResolvedValue({
+    selection: { skill_names: [], mcp_server_ids: [enabledId, disabledId] }, binding_version: 2, editable: true,
+  }));
+  const put = track(spyOn(ipcBridge.agentPlatform.sessions.putCapabilitySelection, 'invoke'));
+  const view = render(<I18nextProvider i18n={i18n}><CompanionMcpSettings companionId={companionId} /></I18nextProvider>);
+  await waitFor(() => expect(view.getByRole('combobox', { name: 'MCP connection' }).textContent).toContain(enabled.name));
+  const select = view.getByRole('combobox', { name: 'MCP connection' });
+  expect(select.textContent).not.toContain(stopped.name);
+  expect(select.textContent).not.toContain(disabledId);
+  fireEvent.click(select);
+  expect(view.queryByText(stopped.name)).toBeNull();
+
+  listing.mockResolvedValue([{ ...enabled, enabled: false }, stopped] as any);
+  await act(async () => notifyMcpCatalogChanged());
+  await waitFor(() => expect(select.textContent).not.toContain(enabled.name));
+  expect(view.queryByText(enabled.name)).toBeNull();
+  expect(put).not.toHaveBeenCalled();
 });

@@ -5,7 +5,6 @@ use nomifun_api_types::{
 };
 use serde::Deserialize;
 
-use std::time::Duration;
 
 #[derive(Debug, Deserialize)]
 struct ToolsListResult {
@@ -79,14 +78,6 @@ pub(super) fn error_result(
     }
 }
 
-pub(super) fn timeout_result(duration: Duration) -> McpConnectionTestResult {
-    error_result(
-        McpConnectionTestErrorCode::Timeout,
-        format!("Connection test timed out after {}s", duration.as_secs()),
-        Some(serde_json::json!({ "timeout_seconds": duration.as_secs() })),
-    )
-}
-
 pub(super) fn spawn_error_result(command: &str, error: &std::io::Error) -> McpConnectionTestResult {
     match error.kind() {
         std::io::ErrorKind::NotFound => {
@@ -144,21 +135,6 @@ pub(super) fn command_runtime(command: &str) -> &'static str {
     }
 }
 
-pub(super) fn is_package_runner(command: &str, args: &[String]) -> bool {
-    let command_name = command_basename(command);
-    match command_name.as_str() {
-        "npx" | "pnpx" | "bunx" | "uvx" | "pipx" => true,
-        "npm" => matches!(args.first().map(String::as_str), Some("exec") | Some("x")),
-        "pnpm" => matches!(args.first().map(String::as_str), Some("dlx")),
-        "bun" => matches!(args.first().map(String::as_str), Some("x")),
-        "uv" => matches!(
-            args.first().map(String::as_str),
-            Some("run") | Some("tool")
-        ),
-        _ => false,
-    }
-}
-
 pub(super) fn auth_result(headers: &reqwest::header::HeaderMap) -> McpConnectionTestResult {
     let www_authenticate = headers
         .get("www-authenticate")
@@ -195,6 +171,7 @@ fn detect_auth_method(www_authenticate: &str) -> McpAuthMethod {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::owner::is_package_runner;
 
     // -- Auth detection ---------------------------------------------------
 
@@ -296,14 +273,6 @@ mod tests {
         assert_eq!(result.details.unwrap()["stage"], "initialize");
         assert!(result.tools.is_none());
         assert!(result.needs_auth.is_none());
-    }
-
-    #[test]
-    fn timeout_result_message() {
-        let result = timeout_result(Duration::from_secs(30));
-        assert!(!result.success);
-        assert!(result.error.as_deref().unwrap().contains("30s"));
-        assert_eq!(result.code, Some(McpConnectionTestErrorCode::Timeout));
     }
 
     #[test]

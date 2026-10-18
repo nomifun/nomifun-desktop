@@ -4,7 +4,7 @@
  * 设计意图：Apple 视觉语言的毛玻璃高级感。亮色以薰衣草雾 #f3f0fa 为底，body 铺一层
  * 极淡的紫罗兰→冰蓝固定氛围渐变；侧栏/面板/弹层用半透明白 + backdrop-filter 玻璃化，
  * 1px 半透明内描边 + 柔和大阴影勾出玻璃边缘。主色紫罗兰 #6c5ce7（刻意偏紫，
- * 与 default 主题的近白底+蓝主色拉开辨识度）。
+ * 与经典主题的近白底+中性主色拉开辨识度）。
  * 暗色换成石墨紫黑 #15141f 底 + 深色玻璃 rgba(32,30,48,0.68)，主色提亮至 #9d8cff。
  * fill / 边框全系列走半透明白/紫，让下层渐变透出来——玻璃必须有东西可透。
  * 侧栏整面 blur 16px saturate 1.3（控制合成成本），弹层/模态框 blur 20px。
@@ -14,8 +14,8 @@
  * sider and popups are translucent white glass (sider blur 16px saturate 1.3
  * for compositing cost, popups/modals blur 20px) with a 1px translucent inner
  * stroke and soft large shadows. Primary is violet #6c5ce7 — deliberately
- * purple-shifted so the preset thumbnail reads apart from the default theme's
- * near-white + blue. Dark mode swaps to graphite violet-black #15141f with
+ * purple-shifted so the preset thumbnail reads apart from Classic's
+ * near-white + neutral accent. Dark mode swaps to graphite violet-black #15141f with
  * dark glass rgba(32,30,48,0.68) and a lifted primary #9d8cff.
  * Fills and borders are translucent throughout so the gradient beneath
  * stays visible — glass only reads as glass when something shows through.

@@ -1967,7 +1967,7 @@ export const mcpService = {
       www_authenticate?: string;
     },
     McpConnectionTestRequest
-  >('/api/mcp/test-connection', undefined, { timeoutMs: 13 * 60_000 }),
+  >('/api/mcp/test-connection'),
   checkOAuthStatus: httpPost<{ authenticated: boolean }, { server_url: string }>('/api/mcp/oauth/check-status'),
   loginMcpOAuth: httpPost<{ success: boolean; error?: string }, { server_url: string }>('/api/mcp/oauth/login'),
   logoutMcpOAuth: httpPost<void, { server_url: string }>('/api/mcp/oauth/logout'),

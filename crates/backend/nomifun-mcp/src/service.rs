@@ -262,8 +262,14 @@ impl McpConfigService {
             return Ok(());
         }
         let _guard = self.mutation_lock.lock().await;
-        let tools = if result.success { result.tools.as_ref() } else { None };
-        let tools_json = tools.map(serde_json::to_string).transpose()?;
+        // A failed availability probe did not withdraw the last complete tool
+        // contract. Preserve it; config edits still explicitly invalidate it.
+        let tools_json = if result.success {
+            result.tools.as_ref().map(serde_json::to_string).transpose()?
+        } else {
+            self.repo.find_by_id(probe.server_id.as_str()).await?
+                .and_then(|row| row.tools)
+        };
         let applied = self.repo.update_probe_if_revision(
             probe.server_id.as_str(), probe.revision,
             if result.success { "connected" } else { "error" },
@@ -273,36 +279,6 @@ impl McpConfigService {
             return Err(McpError::StaleProbe);
         }
         self.publish_catalog().await
-    }
-
-    /// Legacy trusted-caller persistence. HTTP probes use begin/finish_probe.
-    pub async fn persist_test_result(
-        &self,
-        mcp_server_id: &McpServerId,
-        result: &McpConnectionTestResult,
-    ) -> Result<(), McpError> {
-        if crate::connection_test::is_local_runtime_failure(result) {
-            return Ok(());
-        }
-        if self.catalog.is_some() {
-            return Err(McpError::InvalidEdit("Live catalogs require a revision-fenced connection probe".into()));
-        }
-        let _guard = self.mutation_lock.lock().await;
-        let status = if result.success { "connected" } else { "error" };
-        let last_connected = if result.success { Some(now_ms()) } else { None };
-        let tools_json = result.tools.as_ref().map(serde_json::to_string).transpose()?;
-
-        self.repo
-            .update_status(mcp_server_id.as_str(), status, last_connected)
-            .await?;
-        let tools_result = self.repo
-            .update_tools(mcp_server_id.as_str(), tools_json.as_deref())
-            .await;
-        // Even a partial write changed the connection revision. Republish it
-        // before returning the database error; never pretend this rolled back.
-        self.publish_catalog().await?;
-        tools_result?;
-        Ok(())
     }
 
     async fn upsert_server(
@@ -507,6 +483,19 @@ mod tests {
             }
             servers[idx].updated_at = Self::now();
             Ok(servers[idx].clone())
+        }
+
+        async fn update_probe_if_revision(
+            &self, id: &str, revision: nomifun_common::TimestampMs, status: &str,
+            connected: Option<nomifun_common::TimestampMs>, tools: Option<&str>,
+        ) -> Result<bool, DbError> {
+            let mut rows = self.servers.lock().unwrap();
+            let Some(row) = rows.iter_mut().find(|row| row.mcp_server_id == id && row.deleted_at.is_none() && row.updated_at == revision) else { return Ok(false); };
+            row.last_test_status = status.into();
+            row.last_connected = connected.or(row.last_connected);
+            row.tools = tools.map(str::to_owned);
+            row.updated_at = Self::now().max(row.updated_at + 1);
+            Ok(true)
         }
 
         async fn delete(&self, mcp_server_id: &str) -> Result<(), DbError> {
@@ -1121,8 +1110,14 @@ mod tests {
         assert!(results.is_empty());
     }
 
+    async fn finish_current_probe(svc: &McpConfigService, id: &McpServerId, result: &McpConnectionTestResult) -> Result<(), McpError> {
+        let saved = svc.get_server(id).await?;
+        let probe = svc.begin_probe(id, &saved.name, &McpServerTransport::from(saved.transport)).await?.expect("saved probe");
+        svc.finish_probe(probe, result).await
+    }
+
     #[tokio::test]
-    async fn persist_test_result_records_success_status_and_tools() {
+    async fn completed_probe_records_success_status_and_tools() {
         let svc = make_service();
         let created = svc.add_server(stdio_create_req("persist-success")).await.unwrap();
         let result = McpConnectionTestResult {
@@ -1140,7 +1135,7 @@ mod tests {
             www_authenticate: None,
         };
 
-        svc.persist_test_result(&created.mcp_server_id, &result).await.unwrap();
+        finish_current_probe(&svc, &created.mcp_server_id, &result).await.unwrap();
 
         let updated = svc.get_server(&created.mcp_server_id).await.unwrap();
         assert_eq!(updated.last_test_status, nomifun_common::McpServerStatus::Connected);
@@ -1149,7 +1144,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persist_test_result_records_error_and_clears_tools() {
+    async fn failed_probe_records_availability_without_withdrawing_last_good_tools() {
         let svc = make_service();
         let created = svc.add_server(stdio_create_req("persist-error")).await.unwrap();
 
@@ -1167,7 +1162,7 @@ mod tests {
             auth_method: None,
             www_authenticate: None,
         };
-        svc.persist_test_result(&created.mcp_server_id, &success).await.unwrap();
+        finish_current_probe(&svc, &created.mcp_server_id, &success).await.unwrap();
 
         let failure = McpConnectionTestResult {
             success: false,
@@ -1179,11 +1174,11 @@ mod tests {
             auth_method: None,
             www_authenticate: None,
         };
-        svc.persist_test_result(&created.mcp_server_id, &failure).await.unwrap();
+        finish_current_probe(&svc, &created.mcp_server_id, &failure).await.unwrap();
 
         let updated = svc.get_server(&created.mcp_server_id).await.unwrap();
         assert_eq!(updated.last_test_status, nomifun_common::McpServerStatus::Error);
-        assert!(updated.tools.is_none());
+        assert_eq!(updated.tools.unwrap().len(), 1);
         assert!(updated.last_connected.is_some());
     }
 
@@ -1199,7 +1194,7 @@ mod tests {
             error: None, code: None, details: None, needs_auth: None,
             auth_method: None, www_authenticate: None,
         };
-        svc.persist_test_result(&created.mcp_server_id, &success).await.unwrap();
+        finish_current_probe(&svc, &created.mcp_server_id, &success).await.unwrap();
         let before = svc.get_server(&created.mcp_server_id).await.unwrap();
         let transport = McpServerTransport::from(before.transport.clone());
         let probe = svc.begin_probe(&before.mcp_server_id, &before.name, &transport)
@@ -1214,7 +1209,6 @@ mod tests {
             needs_auth: None, auth_method: None, www_authenticate: None,
         };
         svc.finish_probe(probe, &missing).await.unwrap();
-        svc.persist_test_result(&created.mcp_server_id, &missing).await.unwrap();
         let after = svc.get_server(&created.mcp_server_id).await.unwrap();
         assert_eq!(serde_json::to_value(after).unwrap(), serde_json::to_value(before).unwrap());
     }

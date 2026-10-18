@@ -78,15 +78,38 @@ Failures distinguish missing runtimes, HTTP status, timeout, RPC, and protocol
 errors. URL-based servers enter the OAuth flow only after an explicit OAuth
 Bearer challenge, so API-key/header configurations are not treated as OAuth.
 
-Portable package runners (`npx`, `bunx`, `uvx`, and equivalent launcher
-forms) get a separate 120-second first-run bootstrap budget during a manual
-test; ordinary MCP handshakes keep the 30-second budget. Stdio children receive
+Connection tests and real invocations share one bounded setup policy. Runtime
+preparation, process launch, handshake and catalog verification have phase
+limits within a cumulative setup deadline; changing phases never renews it.
+Portable package runners (`npx`, `bunx`, `uvx`, and equivalent launcher forms)
+may take 120 seconds for first startup; ordinary protocol setup has a 30-second
+phase budget. Neither deadline includes subsequent tool execution.
+
+Tool execution has no default total or silence deadline. An HTTP service may
+wait until computation finishes before returning response headers. Business
+waiting ends on user cancellation, an explicit execution deadline, a real
+transport failure, a protocol/resource violation, or host shutdown. Logs, ping
+and missing progress do not prove a stalled tool. Notifications use bounded
+processing without a lifetime count that cuts off healthy long operations.
+Cancellation targets the original request and retains local cleanup ownership;
+disconnect, cancellation delivery and process exit do not prove absence of
+earlier effects. Unknown results are never automatically replayed. A caller
+ending its wait does not declare the tool failed.
+
+Stdio children receive
 only proxy-related variables from the parent or detected system proxy through
 the shared proxy policy (including its stale loopback-proxy guard), while API
 tokens and unrelated parent environment remain isolated. Raw child stderr is
 never returned or logged: it is drained and
 reduced to non-secret categories such as package-not-found, download/network,
 missing dependency, missing configuration, permission, or early process exit.
+
+A failed probe does not replace the same configuration's last fully verified
+tool catalog with an empty list. A hosted app's transient timeout or connection
+failure likewise retains the verified catalog for the same running process and
+address while reporting the failed probe honestly. New selections still require
+successful discovery. Existing frozen calls retain exact pre-dispatch schema
+verification; cached descriptors grant no new authority.
 
 An HTTP URL on `localhost` is only a client connection descriptor. NomiFun does
 not start the referenced application or Docker container. A failed local probe
@@ -109,14 +132,17 @@ Every Agent preset can use the same installed Skill Library and global MCP catal
 no Skill, MCP, or tool-search master switch. The two icons beside the composer select what this Session
 uses, without editing the Agent preset or global installation state.
 
-New Sessions select auto-injected Skills and enabled MCP servers with successful discovery and a
-nonempty tool catalog by default. Users can deselect defaults and choose other installed Skills or ready
-servers. Global Skill bodies and supporting text/images are captured as immutable reference data.
+New Sessions select auto-injected Skills by default. MCP servers require an explicit choice; enabling
+or successfully testing a server never selects it for a Session. The Session picker shows enabled MCP
+sources only; disabled sources remain available on the MCP management page. Users can deselect default
+Skills and choose other installed Skills or ready servers. Global Skill bodies and supporting text/images
+are captured as immutable reference data.
 Selected instructions accompany accepted input; long bodies and supporting resources use the native
 context reader. Skill scripts, hooks, and tool declarations grant no additional permissions.
 
-Creation accepts top-level `session_capabilities` with `skill_names` and `mcp_server_ids`. Omission uses
-global defaults; explicit empty arrays select none. Existing Sessions use
+Creation accepts top-level `session_capabilities` with `skill_names` and `mcp_server_ids`. Omission keeps
+default Skills and the Agent's explicitly saved MCP grants without adding other enabled sources;
+explicit empty arrays select none. Existing Sessions use
 `GET` / `PUT /api/agent-sessions/{id}/capability-selection` with `expected_binding_version`.
 Sending waits for selection admission; failures preserve input and selection for an explicit retry.
 

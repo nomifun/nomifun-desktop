@@ -371,7 +371,7 @@ async fn pending_effect_attestation_preserves_uncertainty_audit_and_never_reopen
     store.cancel_active_turn(&session.agent_session_id, "cancel".into(), "session-api".into()).await.unwrap();
     let request = NativeEffectReconciliationRequest { operation_id: effect.turn_id.clone(), expected_pause_revision: 0,
         idempotency_key: "owner-verified".into(), effect_id: effect.effect_id.clone(), call_id: None,
-        expected_input_digest: effect.input_digest.clone(), outcome: NativeVerifiedOutcome::ConfirmedSucceeded, evidence: evidence() };
+        expected_input_digest: effect.input_digest.clone(), outcome: NativeVerifiedOutcome::ConfirmedSucceeded, evidence: evidence(), cleanup_attestation: None };
     let mut bad = request.clone(); bad.expected_input_digest = digest('e');
     assert!(store.reconcile_native_effect_by_owner(&owner(), &session.agent_session_id, &bad).await.is_err());
     let ack = store.reconcile_native_effect_by_owner(&owner(), &session.agent_session_id, &request).await.unwrap();
@@ -431,7 +431,7 @@ async fn actual_owner_and_human_reconciliation_race_keep_one_audited_outcome() {
     let unknown = store.read_effect(&session.agent_session_id, &effect.effect_id).await.unwrap().unwrap();
     let request = NativeEffectReconciliationRequest { operation_id:effect.turn_id.clone(),expected_pause_revision:1,
         idempotency_key:"human-race".into(),effect_id:effect.effect_id.clone(),call_id:None,
-        expected_input_digest:effect.input_digest.clone(),outcome:NativeVerifiedOutcome::ConfirmedSucceeded,evidence:evidence() };
+        expected_input_digest:effect.input_digest.clone(),outcome:NativeVerifiedOutcome::ConfirmedSucceeded,evidence:evidence(),cleanup_attestation:None };
     let original_owner = EffectEventRequest { event_id:"actual-owner-reconciliation".into(),producer_id:"actual-owner".into(),
         causation_event_id:unknown.terminal_event_id, ..effect.clone() };
     let principal = owner();

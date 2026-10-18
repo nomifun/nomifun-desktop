@@ -10,6 +10,7 @@ import { getAgents } from '@/renderer/hooks/agent/useAgents';
 import { useMcpConnection,useMcpModal,useMcpOAuth,useMcpServerCRUD } from '@/renderer/hooks/mcp';
 import { mcpServerUiKey } from '@/renderer/hooks/mcp/mcpUiKey';
 import { supportsMcpOAuthLogin } from '@/renderer/hooks/mcp/mcpAuthConfig';
+import { resolveMcpDisplayName } from '@/renderer/services/mcp/mcpMarket';
 import AddMcpServerModal from '@/renderer/pages/settings/components/AddMcpServerModal';
 import { ENHANCED_TOOLS_SURFACE_CLASS } from '@/renderer/pages/settings/enhancedToolsLayout';
 import McpServerItem from '@/renderer/pages/settings/ToolsSettings/McpServerItem';
@@ -90,13 +91,14 @@ const ModalMcpManagementSection: React.FC<{
 
   const handleOAuthLogin = useCallback(
     async (server: IMcpServer) => {
+      const displayName = resolveMcpDisplayName(server);
       const result = await login(server);
 
       if (result.success) {
-        message.success(`${server.name}: ${t('settings.mcpOAuthLoginSuccess') || 'Login successful'}`);
+        message.success(`${displayName}: ${t('settings.mcpOAuthLoginSuccess') || 'Login successful'}`);
         void handleTestMcpConnection(server);
       } else {
-        message.error(`${server.name}: ${result.error || t('settings.mcpOAuthLoginFailed') || 'Login failed'}`);
+        message.error(`${displayName}: ${result.error || t('settings.mcpOAuthLoginFailed') || 'Login failed'}`);
       }
     },
     [login, message, t, handleTestMcpConnection]

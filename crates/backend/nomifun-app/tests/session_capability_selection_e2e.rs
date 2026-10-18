@@ -320,8 +320,8 @@ async fn hosted_mcp_is_selected_by_the_saved_agent_and_stopped_sources_do_not_bl
     let minimal = fixture.preset(false).await;
     let ordinary = fixture.create(&minimal, None, false).await;
     let ordinary_id = ordinary["agent_session_id"].as_str().unwrap();
-    assert!(!fixture.state(ordinary_id).await["selection"]["mcp_server_ids"].as_array().unwrap().contains(&json!(app_id)),
-        "the backend must exclude App tools from global defaults even when the UI does not supply a selection");
+    assert_eq!(fixture.state(ordinary_id).await["selection"]["mcp_server_ids"], json!([]),
+        "the backend must not select installed or App MCP sources when the UI omits a selection");
     let source_id = nomifun_api_types::McpServerId::parse(app_id).unwrap();
     let capability = nomifun_mcp::canonical_mcp_tool_capability_id(&source_id, "lookup").unwrap();
     let action = nomifun_mcp::canonical_mcp_tool_action_id(&capability).unwrap();
@@ -482,19 +482,41 @@ async fn minimal_personal_preset_launches_selected_mcp_and_skill_without_preset_
 }
 
 #[tokio::test]
-async fn omitted_selection_uses_global_ready_servers_and_auto_skills_explicit_empty_narrows() {
+async fn omitted_selection_keeps_mcp_empty_and_auto_skills_explicit_empty_narrows() {
     let fixture = Fixture::new().await;
     let preset = fixture.preset(false).await;
     let default = fixture.create(&preset, None, false).await;
     let state = fixture.state(default["agent_session_id"].as_str().unwrap()).await;
-    let mut servers = vec![fixture.server_a.clone(), fixture.server_b.clone()];
-    servers.sort();
-    assert_eq!(state["selection"]["mcp_server_ids"], json!(servers));
+    assert_eq!(state["selection"]["mcp_server_ids"], json!([]),
+        "enabled and tested MCP servers must still require explicit selection");
+    assert!(default["agent_binding"]["typed_resource_bindings"].as_array().unwrap().is_empty(),
+        "omitting selection must not grant MCP resource authority");
     assert!(state["selection"]["skill_names"].as_array().unwrap().contains(&json!(AUTO_SKILL)));
     assert!(!state["selection"]["skill_names"].as_array().unwrap().contains(&json!(SKILL_A)));
     let narrowed = fixture.create(&preset, Some(selection(&[], &[])), false).await;
     assert_eq!(fixture.state(narrowed["agent_session_id"].as_str().unwrap()).await["selection"], selection(&[], &[]));
     assert!(narrowed["agent_binding"]["typed_resource_bindings"].as_array().unwrap().is_empty());
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn saved_agent_mcp_selection_does_not_select_other_ready_servers() {
+    let fixture = Fixture::new().await;
+    let minimal = fixture.preset(false).await;
+    let server_id = nomifun_api_types::McpServerId::parse(&fixture.server_a).unwrap();
+    let capability = nomifun_mcp::canonical_mcp_tool_capability_id(&server_id, "lookup").unwrap();
+    let action = nomifun_mcp::canonical_mcp_tool_action_id(&capability).unwrap();
+    let mut document = minimal["draft"]["document"].clone();
+    document["enabled_capabilities"] = json!([{ "capability": { "id": capability }, "action_allowlist": [action] }]);
+    let selected_agent = call(&fixture.router, "POST", "/api/agent-presets", json!({
+        "display_name": "Agent with an explicitly selected MCP source", "document": document
+    })).await;
+    let selected_session = fixture.create(&selected_agent, None, false).await;
+    let selected_id = selected_session["agent_session_id"].as_str().unwrap();
+    assert_eq!(fixture.state(selected_id).await["selection"]["mcp_server_ids"], json!([fixture.server_a]),
+        "saved Agent grants are explicit; unrelated enabled sources must remain unselected");
+    let empty_session = fixture.create(&selected_agent, Some(selection(&[], &[])), false).await;
+    assert_eq!(fixture.state(empty_session["agent_session_id"].as_str().unwrap()).await["selection"], selection(&[], &[]));
     fixture.finish().await;
 }
 

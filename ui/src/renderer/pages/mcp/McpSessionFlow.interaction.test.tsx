@@ -8,6 +8,7 @@ import { I18nextProvider } from 'react-i18next';
 import { Message } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
 import { mcpService } from '@/common/adapter/ipcBridge';
+import { appHosting } from '@/common/adapter/appHostingBridge';
 import type { IMcpServer } from '@/common/config/storage';
 import { parseMcpServerId } from '@/common/types/ids';
 import * as agentHooks from '@/renderer/hooks/agent/useAgents';
@@ -20,7 +21,7 @@ import settings from '@/renderer/services/i18n/locales/en-US/settings.json';
 import common from '@/renderer/services/i18n/locales/en-US/common.json';
 import conversation from '@/renderer/services/i18n/locales/en-US/conversation.json';
 import McpPage from './index';
-import { getMcpMarketOrigin } from './McpMarketSettings';
+import { getMcpMarketOrigin } from '@/renderer/services/mcp/mcpMarket';
 
 const locale = createInstance();
 const restore: Array<() => void> = [];
@@ -51,7 +52,7 @@ function fixture() {
     [localStorage, 'nomifun.mcpMarket.rankings.v1', JSON.stringify({
       items: [{
         id: 'mcpworld:alpha',
-        name: 'alpha',
+        name: '网页内容抓取服务器',
         source: 'mcpworld',
         rank: 1,
         description: '',
@@ -117,6 +118,7 @@ function fixture() {
     is_custom: true,
   }]));
   track(spyOn(ipcBridge.fs.listBuiltinAutoSkills, 'invoke').mockResolvedValue([]));
+  track(spyOn(appHosting.mcpSources, 'invoke').mockResolvedValue([]));
   track(spyOn(agentHooks, 'getAgents').mockResolvedValue([]));
   track(spyOn(themeContext, 'useThemeContext').mockReturnValue({
     theme: 'light', colorScheme: 'default', fontScale: 1,
@@ -161,7 +163,15 @@ function fixture() {
     };
     const checkbox = async () => {
       openPicker();
-      return await view.findByRole('checkbox', { name: 'alpha' }) as HTMLInputElement;
+      return await view.findByRole('checkbox', { name: '网页内容抓取服务器' }) as HTMLInputElement;
+    };
+    const expectHidden = async () => {
+      openPicker();
+      await waitFor(() => {
+        expect(picker().queryByRole('checkbox', { name: '网页内容抓取服务器' })).toBeNull();
+        expect(picker().queryByRole('checkbox', { name: serverId })).toBeNull();
+        expect(pickerTrigger.getAttribute('aria-label')).toBe('MCP · 0');
+      });
     };
     const installed = () => within(view.getByTestId('mcp-installed-surface'));
     const check = async () => {
@@ -175,18 +185,19 @@ function fixture() {
       await act(async () => fireEvent.click(view.getByTestId('btn-add-market-skill-mcpworld-alpha')));
       await act(async () => fireEvent.click(view.getByRole('button', { name: settings.mcpMarket.confirmOk })));
       await view.findByTestId('mcp-installed-surface');
-      await installed().findByRole('switch', { name: 'Enable alpha' });
-      const item = await checkbox();
-      expect(item.disabled).toBe(true);
-      expect(picker().getByText(conversation.capabilityPicker.disabled)).toBeTruthy();
+      await installed().findByRole('switch', { name: 'Enable 网页内容抓取服务器' });
+      await waitFor(() => expect(catalog()[0]?.enabled).toBe(false));
+      await expectHidden();
       expect(importing).toHaveBeenCalledTimes(1);
       expect(getMcpMarketOrigin(importing.mock.calls[0]![0].servers[0]!)).toBe('mcpworld:alpha');
+      expect(importing.mock.calls[0]![0].servers[0]!.name).toBe('alpha');
+      expect(JSON.parse(persisted[0]!.original_json)._nomifun_market.name).toBe('网页内容抓取服务器');
       expect(persisted[0]!.enabled).toBe(false);
       expect(testing).not.toHaveBeenCalled();
       expect(toggling).not.toHaveBeenCalled();
       expect(draft()).toEqual({ skillNames: [existingSkillName], mcpServerIds: [] });
     };
-    return { ...view, draft, catalog, picker, checkbox, installed, check, toggle, importFromMarket, pickerTrigger };
+    return { ...view, draft, catalog, picker, checkbox, expectHidden, installed, check, toggle, importFromMarket, pickerTrigger };
   };
 
   return {
@@ -207,7 +218,7 @@ function fixture() {
 }
 
 describe('MCP market import to session selection with mounted catalogs', () => {
-  test('import stays disabled; check then enable refreshes selection; disabling allows explicit removal', async () => {
+  test('import stays hidden until enabled; disabling clears the local selection and re-enabling does not select it', async () => {
     const f = fixture();
     const v = await f.mount();
     await v.importFromMarket();
@@ -217,27 +228,28 @@ describe('MCP market import to session selection with mounted catalogs', () => {
     expect(f.testing.mock.calls[0]![0].mcp_server_id).toBe(serverId);
     expect(v.catalog()[0]!.tools).toHaveLength(1);
     expect(v.catalog()[0]!.enabled).toBe(false);
-    expect((await v.checkbox()).disabled).toBe(true);
+    await v.expectHidden();
     expect(f.toggling).not.toHaveBeenCalled();
 
     await v.toggle(true);
     await waitFor(async () => expect((await v.checkbox()).disabled).toBe(false));
     expect(v.picker().getByText(conversation.capabilityPicker.available)).toBeTruthy();
     expect(v.draft().mcpServerIds).toEqual([]);
+    expect((await v.checkbox()).checked).toBe(false);
     fireEvent.click(await v.checkbox());
     expect(v.draft()).toEqual({ skillNames: [existingSkillName], mcpServerIds: [serverId] });
 
     await v.toggle(false);
     await waitFor(() => expect(v.catalog()[0]!.enabled).toBe(false));
-    expect(v.picker().getByText(conversation.capabilityPicker.disabled)).toBeTruthy();
-    expect(v.draft().mcpServerIds).toEqual([serverId]);
-    expect((await v.checkbox()).disabled).toBe(false);
-    fireEvent.click(await v.checkbox());
+    await v.expectHidden();
+    await waitFor(() => expect(v.draft()).toEqual({ skillNames: [existingSkillName], mcpServerIds: [] }));
+    await v.toggle(true);
+    await waitFor(async () => expect((await v.checkbox()).disabled).toBe(false));
+    expect((await v.checkbox()).checked).toBe(false);
     expect(v.draft()).toEqual({ skillNames: [existingSkillName], mcpServerIds: [] });
-    expect((await v.checkbox()).disabled).toBe(true);
     expect(v.getByTestId('session-mcp-trigger')).toBe(v.pickerTrigger);
     expect(f.testing).toHaveBeenCalledTimes(1);
-    expect(f.toggling).toHaveBeenCalledTimes(2);
+    expect(f.toggling).toHaveBeenCalledTimes(3);
   });
 
   test('enable before check waits for tool discovery; a failed recheck refreshes the picker and blocks reselection', async () => {
@@ -268,7 +280,7 @@ describe('MCP market import to session selection with mounted catalogs', () => {
     expect(f.toggling).toHaveBeenCalledTimes(1);
   });
 
-  test('failed enable leaves a checked-but-disabled import unselectable and can be retried', async () => {
+  test('failed enable keeps the tested import hidden and can be retried', async () => {
     const f = fixture();
     const v = await f.mount();
     await v.importFromMarket();
@@ -280,7 +292,7 @@ describe('MCP market import to session selection with mounted catalogs', () => {
     await waitFor(() => expect(f.errors).toHaveBeenCalled());
     expect(v.installed().getByRole('switch').getAttribute('aria-checked')).toBe('false');
     expect(v.catalog()[0]!.enabled).toBe(false);
-    expect((await v.checkbox()).disabled).toBe(true);
+    await v.expectHidden();
     expect(v.draft()).toEqual({ skillNames: [existingSkillName], mcpServerIds: [] });
 
     await v.toggle(true);
@@ -290,7 +302,7 @@ describe('MCP market import to session selection with mounted catalogs', () => {
     expect(f.toggling).toHaveBeenCalledTimes(2);
   });
 
-  test('a lost disable response still reloads the saved disabled state without clearing the selected draft', async () => {
+  test('a lost disable response still hides the saved disabled entry and clears its local selection', async () => {
     const f = fixture();
     const v = await f.mount();
     await v.importFromMarket();
@@ -304,13 +316,11 @@ describe('MCP market import to session selection with mounted catalogs', () => {
     await waitFor(() => expect(v.catalog()[0]?.enabled).toBe(false));
     expect(f.errors).toHaveBeenCalled();
     expect(v.installed().getByRole('switch').getAttribute('aria-checked')).toBe('false');
-    expect(v.picker().getByText(conversation.capabilityPicker.disabled)).toBeTruthy();
-    expect(v.draft()).toEqual({ skillNames: [existingSkillName], mcpServerIds: [serverId] });
-    expect((await v.checkbox()).disabled).toBe(false);
-    fireEvent.click(await v.checkbox());
-    expect((await v.checkbox()).disabled).toBe(true);
-    fireEvent.click(await v.checkbox());
-    expect(v.draft()).toEqual({ skillNames: [existingSkillName], mcpServerIds: [] });
+    await v.expectHidden();
+    await waitFor(() => expect(v.draft()).toEqual({ skillNames: [existingSkillName], mcpServerIds: [] }));
+    await v.toggle(true);
+    await waitFor(async () => expect((await v.checkbox()).disabled).toBe(false));
+    expect((await v.checkbox()).checked).toBe(false);
     expect(f.testing).toHaveBeenCalledTimes(1);
   });
 
@@ -327,18 +337,17 @@ describe('MCP market import to session selection with mounted catalogs', () => {
     await act(async () => fireEvent.click(v.installed().getByRole('switch')));
     await waitFor(() => expect(v.picker().getByText(conversation.capabilityPicker.loadFailed)).toBeTruthy());
     expect(v.catalog()[0]!.enabled).toBe(true);
-    expect(v.picker().queryByRole('checkbox', { name: 'alpha' })).toBeNull();
+    expect(v.picker().queryByRole('checkbox', { name: '网页内容抓取服务器' })).toBeNull();
     expect(v.draft()).toEqual({ skillNames: [existingSkillName], mcpServerIds: [] });
 
     const finishRead = f.deferCatalogReads();
     await act(async () => fireEvent.click(v.picker().getByRole('button', { name: common.retry })));
     expect(v.picker().getByText(conversation.capabilityPicker.loadFailed)).toBeTruthy();
-    expect(v.picker().queryByRole('checkbox', { name: 'alpha' })).toBeNull();
+    expect(v.picker().queryByRole('checkbox', { name: '网页内容抓取服务器' })).toBeNull();
     await act(async () => finishRead());
 
     await waitFor(() => expect(v.catalog()[0]?.enabled).toBe(false));
-    expect((await v.checkbox()).disabled).toBe(true);
-    expect(v.picker().getByText(conversation.capabilityPicker.disabled)).toBeTruthy();
+    await v.expectHidden();
     expect(v.draft()).toEqual({ skillNames: [existingSkillName], mcpServerIds: [] });
   });
 });

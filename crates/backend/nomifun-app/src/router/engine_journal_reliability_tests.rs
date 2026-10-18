@@ -18,6 +18,26 @@ fn owner(journal:&EngineTurnJournal) -> nomifun_agent_contracts::PrincipalRef {
 }
 
 #[tokio::test]
+async fn cancellation_keeps_original_execution_lease_alive_for_retained_settlement() {
+    let (journal, pool) = test_fixture().await;
+    sqlx::query("UPDATE agent_turns SET execution_lease_until=0 WHERE session_id=? AND operation_id=?")
+        .bind(journal.0.session.as_ref()).bind(journal.0.operation.as_ref()).execute(&pool).await.unwrap();
+    journal.0.cancellation.cancel();
+    journal.start_heartbeat();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let renewed: i64 = sqlx::query_scalar("SELECT execution_lease_until FROM agent_turns WHERE session_id=? AND operation_id=?")
+                .bind(journal.0.session.as_ref()).bind(journal.0.operation.as_ref()).fetch_one(&pool).await.unwrap();
+            if renewed > now_ms() { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("cancellation must not expire an owner still settling its effects");
+    journal.0.store.verify_native_execution(&journal.0.lease).await.unwrap();
+    assert!(journal.append(json!({"event":"unadmitted-progress"}).to_string(), None, EngineJournalWrite::Progress).await.is_err(),
+        "renewal permits settlement, not new progress after cancellation");
+}
+
+#[tokio::test]
 async fn shared_tool_bodies_preserve_journal_accounting_model_pairing_and_native_checkpoint_recovery() {
     use nomifun_agent_runtime::{AgentToolResult, AgentTurnRecovery, replay_closed_turn};
     use nomifun_chat_model_broker::{ChatContentPart,ChatMessage,ChatRole,ChatToolCall};
@@ -104,7 +124,7 @@ async fn large_process_stdout_keeps_typed_exit_timeout_and_cleanup_after_durable
         let mut metadata=original.clone();metadata["output"]["text"]=Value::Null;persisted["output"]["text"]=Value::Null;
         assert_eq!(persisted,metadata,"all owner state/cursor/truncation/cleanup metadata must remain unchanged");
         for event in [json!({"event":"host_tool_dispatch","dispatch":{"operation_id":call,"call_id":call,
-            "capability_id":"workspace.process","action_id":"workspace.process/exec","model_name":"exec_command"}}),
+            "capability_id":"workspace.process","action_id":"workspace.process/start","model_name":"start_process"}}),
             json!({"event":"host_tool_settled","operation_id":call,"call_id":call,"result":bounded,"error":null})] {
             journal.append(event.to_string(),None,EngineJournalWrite::Progress).await.unwrap();
         }
@@ -120,7 +140,7 @@ async fn large_process_stdout_keeps_typed_exit_timeout_and_cleanup_after_durable
             (result.get("call_id").and_then(Value::as_str)==Some(call)).then(||serde_json::from_value::<AgentToolResult>(result.clone()).unwrap())
         }).unwrap();
         assert_eq!(result,bounded,"host and Runtime persist the exact same bounded JSON bytes");
-        let display=nomifun_engine_core::tool_result_display(Some("workspace.process"),Some("workspace.process/exec"),&result);
+        let display=nomifun_engine_core::tool_result_display(Some("workspace.process"),Some("workspace.process/start"),&result);
         if timed_out {assert_eq!(display.command_timed_out,Some(true));assert_eq!(display.command_exit_code,None);}
         else {assert_eq!(display.command_exit_code,Some(7));assert_eq!(display.non_fatal_failure,Some(true));}
         let public=serde_json::to_string(&display).unwrap();

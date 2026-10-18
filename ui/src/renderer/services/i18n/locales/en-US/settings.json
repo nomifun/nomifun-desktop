@@ -307,10 +307,7 @@
     "default": "Default",
     "presets": {
       "codexNeutral": "Classic",
-      "rhythmDark": "Rhythm Dark",
-      "neonRainbow": "Neon Night",
-      "frostedGlass": "Frosted Glass",
-      "sunsetAfterglow": "Sunset Afterglow"
+      "frostedGlass": "Frosted Glass"
     },
     "addToPreset": "Add Theme",
     "editTheme": "Edit Theme",
@@ -1042,8 +1039,7 @@
   "mcpErrorProcessDependencyMissing": "{{command}} started but a required local program or module is missing. Install the prerequisites documented by this MCP project.",
   "mcpErrorProcessConfigurationRequired": "{{command}} started but required environment variables, credentials, or local configuration are missing. Complete the MCP project's setup.",
   "mcpErrorProcessExited": "{{command}} started but exited before the MCP handshake completed. Check this MCP project's runtime dependencies and launch configuration.",
-  "mcpErrorPackageBootstrapTimeout": "{{command}} did not finish its first dependency download and MCP startup within {{seconds}}s. Check the system proxy or package-registry network and retry; later starts are usually faster.",
-  "mcpErrorTimeout": "The MCP handshake timed out after {{seconds}}s. Confirm that the service is running and remains responsive.",
+  "mcpErrorTimeout": "MCP connection setup timed out after {{seconds}}s. Confirm that the service is running and can complete initialization.",
   "mcpErrorLocalServiceTimeout": "The local MCP service at {{host}}:{{port}} did not respond within {{seconds}}s. Start its program or Docker service first.",
   "mcpErrorLocalServiceUnavailable": "No local MCP service is reachable at {{host}}:{{port}}. The market imports connection configuration only; start the program or Docker service described by that project first.",
   "mcpErrorConnectionFailed": "Nomi could not reach the remote MCP service. Check the network, DNS, system proxy, and service address.",

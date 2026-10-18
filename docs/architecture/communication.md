@@ -97,6 +97,15 @@ The application host binds admitted MCP tool plans to `nomifun-mcp::McpOwner`
 through its MCP adapter. The Runtime calls tools through
 `nomifun-engine-core::EngineToolInvoker` and `nomifun-agent-kernel`.
 
+MCP setup shares cumulative and phase budgets; business execution has no
+default total or silence deadline. HTTP connection setup limits do not cover
+waiting for business response headers or bodies. Non-serialized invocation
+control carries cancellation and an optional explicit execution deadline through
+the Kernel. The original TaskGroup retains dispatched work through its result
+and local cleanup; ending a caller's wait never authorizes replay. Execution
+observations and cleanup proof remain distinct facts in the same canonical
+Effect chain. Cancellation delivery proves neither remote stop nor rollback.
+
 MCP injection differs by session and by caller:
 
 - user MCP rows and OAuth-backed HTTP servers come from `nomifun-mcp`,

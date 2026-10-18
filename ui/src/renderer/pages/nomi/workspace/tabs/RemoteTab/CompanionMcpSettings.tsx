@@ -11,27 +11,27 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { NomiSettingSection } from '@/renderer/components/base/NomiSettingLayout';
 import { useSessionCapabilitySelection } from '@/renderer/components/chat/SessionCapabilityPicker/useSessionCapabilitySelection';
+import { withoutDisabledMcpSelections } from '@/renderer/components/chat/SessionCapabilityPicker/model';
+import { useMcpServers } from '@/renderer/hooks/mcp/useMcpServers';
+import { useMcpDisplayName } from '@/renderer/services/mcp/useMcpDisplayName';
 
 const SessionMcpSelection = ({ sessionId }: { sessionId: string }) => {
   const { t } = useTranslation();
   const selection = useSessionCapabilitySelection(sessionId);
-  const [servers, setServers] = useState<Awaited<ReturnType<typeof ipcBridge.mcpService.listServers.invoke>>>([]);
-  const [loadError, setLoadError] = useState<Error>();
-  const [reload, setReload] = useState(0);
+  const getDisplayName = useMcpDisplayName();
+  const { mcpServers: servers, isMcpServersLoading, mcpServersLoadFailed, retryMcpServers } = useMcpServers();
+  const visibleDraft = withoutDisabledMcpSelections(selection.draft, servers);
   useEffect(() => {
-    let cancelled = false;
-    setLoadError(undefined);
-    void ipcBridge.mcpService.listServers.invoke().then((next) => { if (!cancelled) setServers(next); })
-      .catch((cause) => { if (!cancelled) setLoadError(cause instanceof Error ? cause : new Error(String(cause))); });
-    return () => { cancelled = true; };
-  }, [reload]);
-  const error = selection.error ?? loadError;
+    if (isMcpServersLoading || mcpServersLoadFailed || selection.loading || selection.saving || selection.error || selection.state?.editable !== true) return;
+    if (visibleDraft !== selection.draft) selection.setDraft(visibleDraft);
+  }, [isMcpServersLoading, mcpServersLoadFailed, selection, visibleDraft]);
+  const error = selection.error?.message ?? (mcpServersLoadFailed ? t('settings.mcpPage.loadFailed') : undefined);
   return <>
-    {error && <div role='alert'>{error.message}<Button onClick={() => { selection.retry(); setReload((value) => value + 1); }}>{t('common.retry')}</Button></div>}
+    {error && <div role='alert'>{error}<Button onClick={() => { selection.retry(); retryMcpServers(); }}>{t('common.retry')}</Button></div>}
     <Select aria-label={t('agentSettings.resources.kinds.mcpConnection')} mode='multiple' allowClear
-      loading={selection.loading} disabled={selection.state?.editable !== true || selection.saving || Boolean(loadError)}
-      value={selection.draft.mcpServerIds}
-      options={servers.filter((server) => !server.builtin).map((server) => ({ value: server.mcp_server_id, label: server.name, disabled: !server.enabled }))}
+      loading={selection.loading || isMcpServersLoading} disabled={selection.state?.editable !== true || selection.saving || isMcpServersLoading || mcpServersLoadFailed}
+      value={visibleDraft.mcpServerIds}
+      options={servers.filter((server) => !server.builtin && server.enabled).map((server) => ({ value: server.mcp_server_id, label: getDisplayName(server) }))}
       onChange={(ids: string[]) => {
         selection.setDraft({ ...selection.draft, mcpServerIds: ids });
         void selection.applyBeforeSend().catch((cause) => Message.error(cause instanceof Error ? cause.message : String(cause)));
