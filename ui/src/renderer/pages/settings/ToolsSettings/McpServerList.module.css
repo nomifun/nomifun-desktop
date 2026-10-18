@@ -1,0 +1,132 @@
+.surface {
+  box-sizing: border-box;
+  margin-top: 4px;
+  padding: 0 18px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 18px;
+  background: transparent;
+}
+
+.list {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.item:global(.arco-collapse) {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.item + .item {
+  border-top: 1px solid var(--color-border-2);
+}
+
+.item :global(.arco-collapse-item) {
+  border-bottom: 0;
+}
+
+.item :global(.arco-collapse-item-header) {
+  min-height: 64px;
+  padding: 14px 0 14px 24px;
+  border: 0;
+  background: transparent;
+}
+
+.item :global(.arco-collapse-item-header-title) {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  font-weight: 400;
+}
+
+.item :global(.arco-collapse-item-icon-hover) {
+  left: 0;
+}
+
+.item :global(.arco-collapse-item-header-icon) {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.item :global(.arco-collapse-item-content) {
+  background: transparent;
+}
+
+.item :global(.arco-collapse-item-content-box) {
+  padding: 0 0 16px 24px;
+}
+
+.header {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.summary {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 24px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status {
+  display: inline-flex;
+  width: 20px;
+  height: 24px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+}
+
+.controls {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+.iconButton:global(.arco-btn) {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 8px;
+  color: var(--text-secondary);
+}
+
+.iconButton :global(.arco-btn-icon) {
+  display: inline-flex;
+  align-items: center;
+}
+
+.stateAction:global(.arco-btn) {
+  height: 24px;
+  flex: none;
+  border-radius: 6px;
+}
+
+.stateAction :global(.arco-btn-icon) {
+  display: inline-flex;
+  align-items: center;
+}
