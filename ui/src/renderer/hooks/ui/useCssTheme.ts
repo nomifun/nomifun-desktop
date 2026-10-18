@@ -7,13 +7,8 @@
 import { configService } from '@/common/config/configService';
 import type { ICssTheme } from '@/common/config/storage';
 import { uuid } from '@/common/utils';
-import {
-  BACKGROUND_BLOCK_START,
-  backgroundCssBlockNeedsUpgrade,
-  injectBackgroundCssBlock,
-} from '@renderer/pages/settings/DisplaySettings/backgroundUtils';
-import { DEFAULT_THEME_ID, getCssThemeDisplayName, PRESET_THEMES } from '@renderer/pages/settings/DisplaySettings/presets';
-import { resolveCssByActiveTheme } from '@renderer/utils/theme/themeCssSync';
+import { getCssThemeDisplayName } from '@renderer/pages/settings/DisplaySettings/presets';
+import { computeCssSyncDecision, normalizeCssTheme, resolveCssThemeState } from '@renderer/utils/theme/themeCssSync';
 import { Message } from '@arco-design/web-react';
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -21,36 +16,11 @@ import { useTranslation } from 'react-i18next';
 /**
  * useCssTheme — the single source of truth for the CSS skin/preset axis.
  *
- * The light/dark axis lives in ThemeContext; the CSS preset axis (rhythm-dark,
- * neon-rainbow, …) historically lived only inside `CssThemeSettings`. This hook
- * extracts that axis so EVERY surface (the Display settings page AND the sider
- * footer quick-switcher) shares one apply path: resolve preset CSS → write
- * `customCss` + `css.activeThemeId` → dispatch `custom-css-updated` (which
- * `Layout` listens for to inject + cross-window broadcast). Writes go through a
- * single module-level serial queue so concurrent applies from different surfaces
- * can never interleave against the same config keys.
+ * ThemeContext owns light/dark mode. This hook manages the preset catalog and
+ * user themes, sharing selection/default/background resolution with
+ * AppThemeRuntime. Theme writes are batched and serialized before notifying
+ * the runtime to inject and broadcast the CSS.
  */
-
-/** A theme that carries a `cover` image gets a background-image CSS block appended. */
-const ensureBackgroundCss = <T extends { cover?: string; css: string }>(theme: T): T => {
-  if (
-    theme.cover &&
-    (!theme.css || !theme.css.includes(BACKGROUND_BLOCK_START) || backgroundCssBlockNeedsUpgrade(theme.css))
-  ) {
-    return { ...theme, css: injectBackgroundCssBlock(theme.css || '', theme.cover) };
-  }
-  return theme;
-};
-
-const normalizeUserThemes = (themes: ICssTheme[]): { normalized: ICssTheme[]; updated: boolean } => {
-  let updated = false;
-  const normalized = themes.map((theme) => {
-    const next = ensureBackgroundCss(theme);
-    if (next !== theme) updated = true;
-    return next;
-  });
-  return { normalized, updated };
-};
 
 const dispatchCustomCssUpdated = (css: string) => {
   window.dispatchEvent(new CustomEvent('custom-css-updated', { detail: { customCss: css } }));
@@ -68,7 +38,7 @@ const notifyCssThemesChanged = (): void => {
 
 // Module-level serial queue — all preset applies (footer control or settings
 // page) are processed in strict order against the same config keys, eliminating
-// client-side async interleaving. True atomicity would need a single batched RPC.
+// client-side async interleaving. Each apply uses one batched settings RPC.
 let applyQueue: Promise<void> = Promise.resolve();
 
 /**
@@ -79,13 +49,17 @@ let applyQueue: Promise<void> = Promise.resolve();
 const applyCssThemeRaw = (css: string, themeId: string): Promise<void> => {
   const task = async () => {
     try {
-      await Promise.all([configService.set('customCss', css), configService.set('css.activeThemeId', themeId)]);
+      await configService.setBatch({ customCss: css, 'css.activeThemeId': themeId });
       dispatchCustomCssUpdated(css);
     } catch (error) {
       console.error('Failed to apply theme (IPC/Storage). Recovering from storage:', error);
       try {
-        const realCss = configService.get('customCss') || '';
-        dispatchCustomCssUpdated(realCss);
+        await configService.reload();
+        const { activeTheme } = resolveCssThemeState(
+          configService.get('css.activeThemeId') || '',
+          configService.get('css.themes') || []
+        );
+        dispatchCustomCssUpdated(activeTheme.css);
       } catch (syncError) {
         console.error('Theme recovery sync failed:', syncError);
       }
@@ -103,66 +77,41 @@ export interface UseCssThemeResult {
   activeThemeId: string;
   /** Apply a theme by object; shows a toast. Used by every switcher surface. */
   selectTheme: (theme: ICssTheme) => Promise<void>;
-  /** Reload the merged list + heal `customCss`/`css.activeThemeId` drift. */
-  reload: () => Promise<void>;
-  /** Optimistically replace the local list (settings page add/edit/delete). */
-  setThemes: React.Dispatch<React.SetStateAction<ICssTheme[]>>;
   /** Add a new user theme, or update an existing one (editing a preset stores a copy). */
-  saveUserTheme: (data: Omit<ICssTheme, 'id' | 'created_at' | 'updated_at' | 'is_preset'>, editing: ICssTheme | null) => Promise<void>;
-  /** Delete a user theme; clears the active CSS if the deleted theme was active. */
+  saveUserTheme: (data: Omit<ICssTheme, 'id' | 'is_preset'>, editing: ICssTheme | null) => Promise<void>;
+  /** Delete a user theme; immediately applies the default if it was active. */
   deleteUserTheme: (themeId: string) => Promise<void>;
 }
 
 export const useCssTheme = (): UseCssThemeResult => {
   const { t } = useTranslation();
-  const [themes, setThemes] = useState<ICssTheme[]>([]);
-  const [activeThemeId, setActiveThemeId] = useState<string>('');
+  const [{ themes, activeThemeId }, setThemeState] = useState(() => {
+    const { themes, activeTheme } = resolveCssThemeState(
+      configService.get('css.activeThemeId') || '',
+      configService.get('css.themes') || []
+    );
+    return { themes, activeThemeId: activeTheme.id };
+  });
 
   const reload = useCallback(async () => {
     try {
-      const savedThemes = (configService.get('css.themes') || []) as ICssTheme[];
-      const { normalized, updated } = normalizeUserThemes(savedThemes);
-      const activeId = configService.get('css.activeThemeId');
-
-      if (updated) {
-        await configService.set(
-          'css.themes',
-          normalized.filter((th) => !th.is_preset)
-        );
+      await configService.whenReady();
+      const decision = computeCssSyncDecision({
+        savedCss: configService.get('customCss') || '',
+        activeThemeId: configService.get('css.activeThemeId') || '',
+        savedThemes: configService.get('css.themes') || [],
+      });
+      if (configService.isInitialized() && Object.keys(decision.configUpdates).length) {
+        await configService.setBatch(decision.configUpdates);
       }
-
-      const normalizedPresets = PRESET_THEMES.map((th) => ensureBackgroundCss(th));
-
-      // Merge & dedupe by id (first occurrence wins): built-in ? user.
-      const seen = new Set<string>();
-      const all: ICssTheme[] = [];
-      for (const th of [...normalizedPresets, ...normalized.filter((x) => !x.is_preset)]) {
-        if (!th?.id || seen.has(th.id)) continue;
-        seen.add(th.id);
-        all.push(th);
-      }
-
-      const resolvedActiveId = activeId || DEFAULT_THEME_ID;
-      let effectiveActiveId = resolvedActiveId;
-      if (!all.find((th) => th.id === resolvedActiveId) && resolvedActiveId !== DEFAULT_THEME_ID) {
-        // Active theme vanished (e.g. extension removed) → fall back + persist.
-        effectiveActiveId = DEFAULT_THEME_ID;
-        await configService.set('css.activeThemeId', effectiveActiveId);
-      }
-
-      setThemes(all);
-      setActiveThemeId(effectiveActiveId);
-
-      // Self-heal split-brain (activeThemeId ≠ customCss) from partial write failures.
-      const expectedCss = resolveCssByActiveTheme(
-        effectiveActiveId,
-        normalized.filter((x) => !x.is_preset)
+      // A newer choice may have completed while reconciliation was persisting.
+      const current = resolveCssThemeState(
+        configService.get('css.activeThemeId') || '',
+        configService.get('css.themes') || []
       );
-      const savedCustomCss = configService.get('customCss') || '';
-      if (savedCustomCss !== expectedCss) {
-        await configService.set('customCss', expectedCss);
-        dispatchCustomCssUpdated(expectedCss);
-      }
+      if (current.activeTheme.id !== decision.activeThemeId || current.activeTheme.css !== decision.effectiveCss) return;
+      setThemeState({ themes: current.themes, activeThemeId: current.activeTheme.id });
+      if (decision.configUpdates.customCss !== undefined) dispatchCustomCssUpdated(decision.effectiveCss);
     } catch (error) {
       console.error('Failed to load CSS themes:', error);
     }
@@ -173,7 +122,13 @@ export const useCssTheme = (): UseCssThemeResult => {
 
     // Keep activeThemeId reactive: any surface that applies a preset dispatches
     // `custom-css-updated` after persisting, so re-read the id from config.
-    const onCssUpdated = () => setActiveThemeId(configService.get('css.activeThemeId') || '');
+    const onCssUpdated = () => {
+      const { themes, activeTheme } = resolveCssThemeState(
+        configService.get('css.activeThemeId') || '',
+        configService.get('css.themes') || []
+      );
+      setThemeState({ themes, activeThemeId: activeTheme.id });
+    };
     // The user theme LIST changed elsewhere → reload the merged set.
     const onThemesChanged = () => void reload();
 
@@ -188,57 +143,51 @@ export const useCssTheme = (): UseCssThemeResult => {
   const selectTheme = useCallback(
     async (theme: ICssTheme) => {
       try {
-        const css = resolveCssByActiveTheme(
+        const { activeTheme } = resolveCssThemeState(
           theme.id,
-          themes.filter((x) => !x.is_preset)
+          configService.get('css.themes') || []
         );
-        await applyCssThemeRaw(css, theme.id);
-        Message.success(t('settings.cssTheme.applied', { name: getCssThemeDisplayName(theme, t) }));
+        await applyCssThemeRaw(activeTheme.css, activeTheme.id);
+        Message.success(t('settings.cssTheme.applied', { name: getCssThemeDisplayName(activeTheme, t) }));
       } catch {
         Message.error(t('settings.cssTheme.applyFailed'));
       }
     },
-    [themes, t]
+    [t]
   );
 
   const saveUserTheme = useCallback(
-    async (data: Omit<ICssTheme, 'id' | 'created_at' | 'updated_at' | 'is_preset'>, editing: ICssTheme | null) => {
-      const now = Date.now();
-      const normalized = ensureBackgroundCss(data);
+    async (data: Omit<ICssTheme, 'id' | 'is_preset'>, editing: ICssTheme | null) => {
+      const normalized = normalizeCssTheme(data);
+      const { userThemes } = resolveCssThemeState('', configService.get('css.themes') || []);
       let updated: ICssTheme[];
       if (editing && !editing.is_preset) {
-        updated = themes.map((th) => (th.id === editing.id ? { ...th, ...normalized, updated_at: now } : th));
+        updated = userThemes.map((th) => (th.id === editing.id ? { ...th, ...normalized } : th));
       } else {
         // New theme (also covers "edit a preset" → saved as a fresh user copy).
-        const created: ICssTheme = { id: uuid(), ...normalized, is_preset: false, created_at: now, updated_at: now };
-        updated = [...themes, created];
+        const created: ICssTheme = { id: uuid(), ...normalized, is_preset: false };
+        updated = [...userThemes, created];
       }
-      await configService.set(
-        'css.themes',
-        updated.filter((th) => !th.is_preset)
-      );
-      setThemes(updated);
+      await configService.set('css.themes', updated);
       notifyCssThemesChanged();
     },
-    [themes]
+    []
   );
 
   const deleteUserTheme = useCallback(
     async (themeId: string) => {
-      const updated = themes.filter((th) => th.id !== themeId);
-      await configService.set(
-        'css.themes',
-        updated.filter((th) => !th.is_preset)
-      );
-      // Deleting the active theme clears the applied CSS (reload then falls back to default).
-      if (activeThemeId === themeId) {
-        await applyCssThemeRaw('', '');
-      }
-      setThemes(updated);
+      const savedThemes = configService.get('css.themes') || [];
+      const decision = computeCssSyncDecision({
+        savedCss: configService.get('customCss') || '',
+        activeThemeId: configService.get('css.activeThemeId') || '',
+        savedThemes: savedThemes.filter((th) => th.id !== themeId),
+      });
+      await configService.setBatch({ ...decision.configUpdates, 'css.themes': decision.themes.filter((th) => !th.is_preset) });
+      dispatchCustomCssUpdated(decision.effectiveCss);
       notifyCssThemesChanged();
     },
-    [themes, activeThemeId]
+    []
   );
 
-  return { themes, activeThemeId, selectTheme, reload, setThemes, saveUserTheme, deleteUserTheme };
+  return { themes, activeThemeId, selectTheme, saveUserTheme, deleteUserTheme };
 };

@@ -62,7 +62,7 @@ struct UpdatePreferencesParams {
     /// Keys must be non-empty and at most 255 characters.
     ///
     /// Common keys (non-exhaustive):
-    ///   "theme" (string: "light" | "dark" | "rhythm-dark" | …),
+    ///   "theme" (string: "light" | "dark"),
     ///   "ui.zoomFactor" (number: 0.5–2.0),
     ///   "system.closeToTray" (bool),
     ///   "system.keepAwake" (bool),

@@ -9,7 +9,7 @@ import { ensureThemeControlContract } from '@renderer/utils/theme/themeControlCo
 
 /**
  * Inject the active ambiance-preset CSS into a STANDALONE window that does not
- * mount {@link Layout} (the desktop companion). Mirrors Layout's injection (same
+ * mount AppThemeRuntime (the desktop companion). Mirrors its injection (same
  * `<style id>`, same `!important` wrapping via {@link processCustomCss}, appended
  * last in `<head>` so it wins the cascade), with one companion-specific guard:
  *

@@ -45,6 +45,9 @@ it changes native control borders and existing CSS throughout the renderer.
 
 ## Theme presets
 
+The built-in presets are Classic (the default) and Frosted Glass. Custom CSS
+themes remain available alongside them.
+
 Theme mode and color scheme are separate concerns. Prefer semantic tokens in
 [styles/themes](../../ui/src/renderer/styles/themes); `--aou-1..10` is the
 current brand scale's compatibility name.
