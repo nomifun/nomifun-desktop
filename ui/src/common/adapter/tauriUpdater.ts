@@ -90,6 +90,17 @@ async function nativeActiveVersion(): Promise<string | null> {
   }
 }
 
+function isUpdateTargetUnavailable(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  // Tauri serializes TargetNotFound / TargetsNotFound as strings. Match only
+  // those errors: a release for another platform is normal during a staged
+  // rollout, while network failures and malformed manifests must still reject.
+  return (
+    /^the platform `[^`\r\n]+` was not found in the response `platforms` object$/.test(message) ||
+    /^None of the fallback platforms `\[[^`\r\n]*\]` were found in the response `platforms` object$/.test(message)
+  );
+}
+
 async function runCheck(): Promise<TauriUpdateInfo | null> {
   const { check } = await import('@tauri-apps/plugin-updater');
   // Free the previous handle before replacing it (releases the Rust resource).
@@ -103,15 +114,21 @@ async function runCheck(): Promise<TauriUpdateInfo | null> {
     }
     pendingUpdate = null;
   }
-  const update = (await check({ timeout: UPDATE_CHECK_TIMEOUT_MS })) as TauriUpdate | null;
+  let update: TauriUpdate | null;
+  try {
+    update = (await check({ timeout: UPDATE_CHECK_TIMEOUT_MS })) as TauriUpdate | null;
+  } catch (error) {
+    if (isUpdateTargetUnavailable(error)) return null;
+    throw error;
+  }
   pendingUpdate = update;
   return update ? infoFromHandle(update) : null;
 }
 
 /**
- * Check for an available update. Resolves to `null` when up to date (or outside
- * the desktop shell). `force` bypasses the memoized result (retry / reopen) but
- * still serializes behind any in-flight check.
+ * Check for an available update. Resolves to `null` when no update is available
+ * for this platform (or outside the desktop shell). `force` bypasses the
+ * memoized result (retry / reopen) but still serializes behind any in-flight check.
  */
 export async function tauriUpdateCheck(force = false): Promise<TauriUpdateInfo | null> {
   if (!isTauriRuntime()) return null;

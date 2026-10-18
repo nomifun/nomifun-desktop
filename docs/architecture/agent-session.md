@@ -165,6 +165,9 @@ consumed at that safe boundary. No wait table, question ledger or copied task st
 
 Processes belong to their original Session owner and retain their immutable creator Turn, call,
 Effect, resource and frozen authority. Later controls require both current and creator grants.
+Turn opening and process actions use the same shared comparison for canonical workspace paths.
+Ordinary Windows paths and native `\\?\` paths for the same directory preserve authority;
+a different directory cannot reuse the original owner.
 `wait_ms` bounds one observation and returns the same handle without killing or relaunching it.
 `timeout_ms` is an optional actual workload deadline; omission imposes neither a default 5/10-minute
 limit nor an idle lease derived from human silence. An explicit deadline remains enforceable.

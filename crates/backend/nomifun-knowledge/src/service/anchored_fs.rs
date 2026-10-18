@@ -1,5 +1,3 @@
-use std::io::Read as _;
-
 use cap_fs_ext::{
     DirExt, FollowSymlinks, OpenOptionsFollowExt,
 };
