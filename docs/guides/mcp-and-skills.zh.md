@@ -102,13 +102,15 @@ agent 配置。
 所有 Agent 预设共享已安装的技能库和全局 MCP 目录，Agent 工作台不提供技能、MCP 或工具搜索的总开关。
 输入框旁的技能与 MCP 图标用于选择本会话使用哪些项目，不改变全局安装、启停状态，也不修改 Agent 预设。
 
-新会话默认选中自动注入技能，以及已启用、连接测试成功且有工具的 MCP 服务器。用户可以取消默认选择，
+新会话默认选中自动注入技能；MCP 服务器需要明确勾选，启用或连接成功不会自动选入会话。
+会话选择列表只显示已启用的 MCP，停用项仍可在 MCP 管理页查看。用户可以取消默认技能，
 或增加其它已安装技能和可用服务器。所有全局技能的正文与资源都冻结为会话可用的参考库存；选中的技能
 随正式输入提供正文，较长的正文和辅助资源通过同一个原生上下文资源读取接口按需读取。
 技能中的脚本、hooks 和工具声明不会增加 Agent 权限。
 
-创建请求使用顶层 `session_capabilities`（`skill_names`、`mcp_server_ids`）；省略使用全局默认，
-显式空数组表示不选。已有会话通过 `GET` / `PUT /api/agent-sessions/{id}/capability-selection`
+创建请求使用顶层 `session_capabilities`（`skill_names`、`mcp_server_ids`）；省略时使用默认技能，
+MCP 只保留 Agent 已明确保存的选择，不自动加入其它已启用服务器；显式空数组表示不选。
+已有会话通过 `GET` / `PUT /api/agent-sessions/{id}/capability-selection`
 读取和更新选择，更新必须携带 `expected_binding_version`。输入框在下次发送前等待配置保存成功；
 失败时保留输入与选择并显示重试入口。
 

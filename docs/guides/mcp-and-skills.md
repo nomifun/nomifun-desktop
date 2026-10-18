@@ -132,14 +132,17 @@ Every Agent preset can use the same installed Skill Library and global MCP catal
 no Skill, MCP, or tool-search master switch. The two icons beside the composer select what this Session
 uses, without editing the Agent preset or global installation state.
 
-New Sessions select auto-injected Skills and enabled MCP servers with successful discovery and a
-nonempty tool catalog by default. Users can deselect defaults and choose other installed Skills or ready
-servers. Global Skill bodies and supporting text/images are captured as immutable reference data.
+New Sessions select auto-injected Skills by default. MCP servers require an explicit choice; enabling
+or successfully testing a server never selects it for a Session. The Session picker shows enabled MCP
+sources only; disabled sources remain available on the MCP management page. Users can deselect default
+Skills and choose other installed Skills or ready servers. Global Skill bodies and supporting text/images
+are captured as immutable reference data.
 Selected instructions accompany accepted input; long bodies and supporting resources use the native
 context reader. Skill scripts, hooks, and tool declarations grant no additional permissions.
 
-Creation accepts top-level `session_capabilities` with `skill_names` and `mcp_server_ids`. Omission uses
-global defaults; explicit empty arrays select none. Existing Sessions use
+Creation accepts top-level `session_capabilities` with `skill_names` and `mcp_server_ids`. Omission keeps
+default Skills and the Agent's explicitly saved MCP grants without adding other enabled sources;
+explicit empty arrays select none. Existing Sessions use
 `GET` / `PUT /api/agent-sessions/{id}/capability-selection` with `expected_binding_version`.
 Sending waits for selection admission; failures preserve input and selection for an explicit retry.
 

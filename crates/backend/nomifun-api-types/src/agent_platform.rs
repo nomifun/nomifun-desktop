@@ -908,8 +908,9 @@ pub enum SessionReasoningEffortDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentSessionRequestDto {
-    /// Global extensions chosen for this Session. Omitted uses installation
-    /// defaults; explicit empty lists select none. Never an Agent module gate.
+    /// Global extensions chosen for this Session. Omitted keeps default Skills
+    /// and saved Agent MCP grants; explicit empty lists select none.
+    /// Never an Agent module gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_capabilities: Option<SessionCapabilitySelectionDto>,
     /// Launch requirements can only narrow admission; they never grant modules.

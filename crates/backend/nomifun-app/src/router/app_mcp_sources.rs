@@ -416,7 +416,7 @@ http.createServer((req,res)=>{
         };
         let owner: UserId = "owner".into();
         let resolver = super::super::session_capabilities::GlobalSessionCapabilities {
-            owner: owner.clone(), skills: Arc::new(paths), mcp: sources.clone(), app_mcp: sources.clone(),
+            owner: owner.clone(), skills: Arc::new(paths), mcp: sources.clone(),
         };
         assert!(resolver.resolve(&owner, None).await.unwrap().mcp_server_ids.is_empty(), "a new application must not enter every ordinary Agent Session");
         let selected = nomifun_api_types::SessionCapabilitySelectionDto { skill_names: vec![], mcp_server_ids: vec![app.id.clone()] };

@@ -1558,7 +1558,6 @@ export type I18nKey =
   | 'conversation.capabilityPicker.available'
   | 'conversation.capabilityPicker.builtin'
   | 'conversation.capabilityPicker.createApplyNote'
-  | 'conversation.capabilityPicker.disabled'
   | 'conversation.capabilityPicker.empty'
   | 'conversation.capabilityPicker.error'
   | 'conversation.capabilityPicker.installed'

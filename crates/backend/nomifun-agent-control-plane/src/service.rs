@@ -713,7 +713,7 @@ impl AgentControlPlane {
 
     /// Resolve a trusted physical-role launch before global defaults can replace
     /// its authored Skill choices. Ordinary Agent launches retain their existing
-    /// installation-wide discovery and default-selection behavior.
+    /// installation-wide Skill discovery and default-selection behavior.
     pub async fn resolve_companion_robot_session_binding_with_model(
         &self,
         owner: &UserId,
@@ -800,8 +800,8 @@ impl AgentControlPlane {
         });
         let mut resolved = resolver.resolve(owner, requested_library.as_ref()).await?;
         let mut authored_only_servers = BTreeSet::new();
-        // App sources are excluded from global defaults. An Agent's saved MCP
-        // grants are explicit choices and survive normal Session compilation.
+        // An Agent's saved MCP grants are explicit choices and survive normal
+        // Session compilation without selecting other installed sources.
         if selection.is_none() && !source_snapshot.content.mcp_tool_locks.is_empty() {
             let mut selected = resolved.mcp_server_ids.clone();
             for lock in &source_snapshot.content.mcp_tool_locks {

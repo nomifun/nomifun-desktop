@@ -4,10 +4,10 @@ import { useMcpDisplayName } from '@/renderer/services/mcp/useMcpDisplayName';
 import { Button, Checkbox, Spin, Tooltip } from '@arco-design/web-react';
 import { autoUpdate, flip, FloatingFocusManager, FloatingPortal, offset, shift, size, useDismiss, useFloating, useInteractions, useRole } from '@floating-ui/react';
 import { CheckOne, CloseSmall, Lightning, Puzzle, Right } from '@icon-park/react';
-import React, { useContext, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import type { SessionCapabilityCatalog, SessionCapabilityDraft, SessionSkillOption } from './model';
+import { withoutDisabledMcpSelections, type SessionCapabilityCatalog, type SessionCapabilityDraft, type SessionSkillOption } from './model';
 import styles from './styles.module.css';
 import { SessionComposerToolsContext } from './ComposerLayout';
 
@@ -36,7 +36,6 @@ type SessionCapabilityPickerProps = {
 export { ComposerToolRail, SessionCapabilityComposerLayout } from './ComposerLayout';
 
 const mcpStatus = (server: IMcpServer) => {
-  if (!server.enabled) return 'disabled';
   if (server.last_test_status === 'error') return 'error';
   if (server.last_test_status !== 'connected' || !server.tools?.length) return 'unavailable';
   return 'available';
@@ -129,7 +128,15 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
   const role = useRole(context, { role: 'dialog' });
   const { getReferenceProps, getFloatingProps } = useInteractions([dismiss, role]);
   const selectedSkills = useMemo(() => new Set(draft.skillNames), [draft.skillNames]);
-  const selectedMcp = useMemo(() => new Set(draft.mcpServerIds), [draft.mcpServerIds]);
+  const visibleMcpServers = useMemo(() => catalog.mcpServers.filter((server) => server.enabled), [catalog.mcpServers]);
+  const visibleDraft = useMemo(() => withoutDisabledMcpSelections(draft, catalog.mcpServers), [draft, catalog.mcpServers]);
+  const selectedMcp = useMemo(() => new Set(visibleDraft.mcpServerIds), [visibleDraft.mcpServerIds]);
+  const mcpReadOnly = readOnlyKinds.includes('mcp');
+  useEffect(() => {
+    if (loading || loadFailed || disabled || mcpReadOnly) return;
+    const next = withoutDisabledMcpSelections(draft, catalog.mcpServers, lockedMcpServerIds);
+    if (next !== draft) onChange(next);
+  }, [draft, catalog.mcpServers, disabled, loading, loadFailed, mcpReadOnly, lockedMcpServerIds, onChange]);
   const defaultApplyNote = applyMode === 'create'
     ? t('conversation.capabilityPicker.createApplyNote', { defaultValue: '新会话 · 创建时应用' })
     : t('conversation.capabilityPicker.nextSendApplyNote', { defaultValue: '本会话 · 下次发送时应用' });
@@ -155,8 +162,8 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
   const panel = (kind: PickerKind) => {
     const applyNote = typeof customApplyNote === 'function' ? customApplyNote(kind) : customApplyNote ?? defaultApplyNote;
     const isSkills = kind === 'skills';
-    const selectedCount = isSkills ? draft.skillNames.length : draft.mcpServerIds.length;
-    const rows = isSkills ? catalog.skills : catalog.mcpServers;
+    const selectedCount = isSkills ? draft.skillNames.length : selectedMcp.size;
+    const rows = isSkills ? catalog.skills : visibleMcpServers;
     const missing = isSkills
       ? draft.skillNames.filter((name) => !catalog.skills.some((skill) => skill.name === name))
       : draft.mcpServerIds.filter((id) => !catalog.mcpServers.some((server) => server.mcp_server_id === id));
@@ -228,12 +235,12 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
               );
             })
           ) : (
-            <>{catalog.appSourceError && <p role='status'>{t('appHosting.tools.error')}: {catalog.appSourceError}</p>}{catalog.mcpServers.map((server) => {
+            <>{catalog.appSourceError && <p role='status'>{t('appHosting.tools.error')}: {catalog.appSourceError}</p>}{visibleMcpServers.map((server) => {
               const displayName = getMcpDisplayName(server);
               const checked = selectedMcp.has(server.mcp_server_id);
               const status = mcpStatus(server);
               const locked = lockedMcpServerIds.has(server.mcp_server_id);
-              const rowDisabled = disabled || readOnlyKinds.includes('mcp') || locked || (status !== 'available' && !checked);
+              const rowDisabled = disabled || mcpReadOnly || locked || (status !== 'available' && !checked);
               return (
                 <div
                   key={server.mcp_server_id}
@@ -259,7 +266,7 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
                   <span className={`${styles.status} ${styles[status]}`}>
                     {status === 'available' && <CheckOne theme='outline' size={12} fill='currentColor' />}
                     {t(`conversation.capabilityPicker.${status}` as const, {
-                      defaultValue: status === 'available' ? '可用' : status === 'disabled' ? '已停用' : status === 'unavailable' ? '不可用' : '异常',
+                      defaultValue: status === 'available' ? '可用' : status === 'unavailable' ? '不可用' : '异常',
                     })}
                   </span>
                 </div>
@@ -306,7 +313,7 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
 
   const trigger = (kind: PickerKind) => {
     const isSkills = kind === 'skills';
-    const count = isSkills ? draft.skillNames.length : draft.mcpServerIds.length;
+    const count = isSkills ? draft.skillNames.length : selectedMcp.size;
     const title = isSkills ? t('common.skills') : 'MCP';
     return (
       <button

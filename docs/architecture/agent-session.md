@@ -516,7 +516,10 @@ See the [browser architecture](browser-platform.md).
 
 Skills and MCP are shared installation capabilities without a preset master gate. Creation or an explicit
 idle update captures the global Skill inventory and compiles selected MCP tools into the same
-Session-only Revision/Snapshot. Variants use the existing Agent Store, with no second binding or
+Session-only Revision/Snapshot. All MCP sources require an explicit Agent or Session choice; enabling
+or testing an installed source never selects it by default. Omitting Session selection keeps default
+Skills and the Agent's saved MCP grants without adding other installed sources.
+Variants use the existing Agent Store, with no second binding or
 permission ledger. Library locks freeze bodies, supporting resources, sources, and digests; `selected`
 controls default input injection. Current Package locks retain their exact JSON contract.
 

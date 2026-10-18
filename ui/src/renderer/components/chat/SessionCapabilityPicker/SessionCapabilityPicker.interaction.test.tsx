@@ -1,5 +1,5 @@
 import '../../../../../test/setup-dom.ts';
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, expect, test } from 'bun:test';
 import { useState } from 'react';
 import { MemoryRouter } from 'react-router-dom';
@@ -17,12 +17,34 @@ await i18n.init({ lng: 'en', keySeparator: false, resources: { en: { translation
 afterEach(() => cleanup());
 const skill = { name: 'my-skill', description: 'My instructions', location: '', source: 'custom' as const, is_custom: true, auto: false };
 const server = { mcp_server_id: '019b0000-0000-7000-8000-000000000003', name: 'Global MCP', enabled: true, last_test_status: 'connected', tools: [{ name: 'query' }] } as any;
+const removedServerId = '019b0000-0000-7000-8000-000000000004';
 const catalog = { skills: [skill], autoSkillNames: new Set<string>(), mcpServers: [server] };
-function View({ disabled = false, missing = false, unavailable = false, selected = false, unreadyMcp = false, selectedMcp = false }: { disabled?: boolean; missing?: boolean; unavailable?: boolean; selected?: boolean; unreadyMcp?: boolean; selectedMcp?: boolean }) {
-  const [draft, setDraft] = useState<SessionCapabilityDraft>({ skillNames: missing ? ['removed-skill'] : selected ? ['my-skill'] : [], mcpServerIds: selectedMcp ? [server.mcp_server_id] : [] });
-  const currentCatalog = unavailable ? { ...catalog, skills: [{ ...skill, session_available: false, session_error: 'Resource is a symlink outside this package' }] } : unreadyMcp ? { ...catalog, mcpServers: [{ ...server, tools: [] }] } : catalog;
+function View({ disabled = false, missing = false, unavailable = false, selected = false, unreadyMcp = false, selectedMcp = false, globallyDisabledMcp = false, missingMcp = false, readOnlyMcp = false, lockedMcp = false, loading = false, loadFailed = false }: {
+  disabled?: boolean;
+  missing?: boolean;
+  unavailable?: boolean;
+  selected?: boolean;
+  unreadyMcp?: boolean;
+  selectedMcp?: boolean;
+  globallyDisabledMcp?: boolean;
+  missingMcp?: boolean;
+  readOnlyMcp?: boolean;
+  lockedMcp?: boolean;
+  loading?: boolean;
+  loadFailed?: boolean;
+}) {
+  const [draft, setDraft] = useState<SessionCapabilityDraft>({
+    skillNames: missing ? ['removed-skill'] : selected ? ['my-skill'] : [],
+    mcpServerIds: [...(selectedMcp ? [server.mcp_server_id] : []), ...(missingMcp ? [removedServerId] : [])],
+  });
+  const currentCatalog = {
+    ...catalog,
+    skills: unavailable ? [{ ...skill, session_available: false, session_error: 'Resource is a symlink outside this package' }] : catalog.skills,
+    mcpServers: [{ ...server, enabled: !globallyDisabledMcp, tools: unreadyMcp ? [] : server.tools }],
+  };
   return <MemoryRouter><I18nextProvider i18n={i18n}><SessionCapabilityComposerLayout picker={<SessionCapabilityPicker catalog={currentCatalog}
-    draft={draft} onChange={setDraft} applyMode='next-send' disabled={disabled} />}><textarea aria-label='Message' /></SessionCapabilityComposerLayout>
+    draft={draft} onChange={setDraft} applyMode='next-send' disabled={disabled} loading={loading} loadFailed={loadFailed}
+    readOnlyKinds={readOnlyMcp ? ['mcp'] : []} lockedMcpServerIds={lockedMcp ? new Set([server.mcp_server_id]) : undefined} />}><textarea aria-label='Message' /></SessionCapabilityComposerLayout>
     <output>{JSON.stringify(draft)}</output>
   </I18nextProvider></MemoryRouter>;
 }
@@ -84,4 +106,48 @@ test.each([false, true])('an MCP without tested tools cannot be newly selected b
   expect((checkbox as HTMLInputElement).disabled).toBe(!selectedMcp);
   fireEvent.click(checkbox);
   expect(view.getByRole('status').textContent).toBe('{"skillNames":[],"mcpServerIds":[]}');
+});
+
+test('globally disabled MCPs disappear and leave the editable draft without affecting Skills or genuinely removed selections', async () => {
+  const view = render(<View selected selectedMcp globallyDisabledMcp missingMcp />);
+  await waitFor(() => expect(view.getByRole('status').textContent).toBe(JSON.stringify({ skillNames: ['my-skill'], mcpServerIds: [removedServerId] })));
+  fireEvent.click(view.getByRole('button', { name: 'MCP · 1' }));
+  expect(view.queryByRole('checkbox', { name: 'Global MCP' })).toBeNull();
+  expect(view.queryByRole('checkbox', { name: server.mcp_server_id })).toBeNull();
+  const removed = await view.findByRole('checkbox', { name: removedServerId });
+  expect((removed as HTMLInputElement).checked).toBe(true);
+  fireEvent.click(removed);
+  expect(view.getByRole('button', { name: 'MCP · 0' })).toBeTruthy();
+
+  view.rerender(<View selected selectedMcp missingMcp />);
+  const available = await view.findByRole('checkbox', { name: 'Global MCP' });
+  expect((available as HTMLInputElement).checked).toBe(false);
+  expect(view.getByRole('status').textContent).toBe('{"skillNames":["my-skill"],"mcpServerIds":[]}');
+});
+
+test('enabling an MCP makes it available without selecting it', async () => {
+  const view = render(<View globallyDisabledMcp />);
+  fireEvent.click(view.getByRole('button', { name: 'MCP · 0' }));
+  expect(view.queryByRole('checkbox', { name: 'Global MCP' })).toBeNull();
+  view.rerender(<View />);
+  const checkbox = await view.findByRole('checkbox', { name: 'Global MCP' });
+  expect((checkbox as HTMLInputElement).checked).toBe(false);
+  expect((checkbox as HTMLInputElement).disabled).toBe(false);
+  expect(view.getByRole('button', { name: 'MCP · 0' })).toBeTruthy();
+});
+
+test.each(['active', 'read-only', 'locked'] as const)('globally disabled selected MCPs are hidden and uncounted without mutating %s selections', async (mode) => {
+  const view = render(<View selectedMcp globallyDisabledMcp disabled={mode === 'active'} readOnlyMcp={mode === 'read-only'} lockedMcp={mode === 'locked'} />);
+  await act(async () => fireEvent.click(view.getByRole('button', { name: 'MCP · 0' })));
+  expect(view.queryByRole('checkbox', { name: 'Global MCP' })).toBeNull();
+  expect(view.queryByRole('checkbox', { name: server.mcp_server_id })).toBeNull();
+  expect(view.getByRole('status').textContent).toBe(JSON.stringify({ skillNames: [], mcpServerIds: [server.mcp_server_id] }));
+});
+
+test.each(['loading', 'failed'] as const)('a %s catalog cannot clear an MCP selection before a successful read', async (phase) => {
+  const view = render(<View selectedMcp globallyDisabledMcp loading={phase === 'loading'} loadFailed={phase === 'failed'} />);
+  expect(view.getByRole('status').textContent).toBe(JSON.stringify({ skillNames: [], mcpServerIds: [server.mcp_server_id] }));
+  view.rerender(<View selectedMcp globallyDisabledMcp />);
+  await waitFor(() => expect(view.getByRole('status').textContent).toBe('{"skillNames":[],"mcpServerIds":[]}'));
+  expect(view.getByRole('button', { name: 'MCP · 0' })).toBeTruthy();
 });

@@ -8,7 +8,6 @@ pub(crate) struct GlobalSessionCapabilities {
     pub owner: UserId,
     pub skills: Arc<nomifun_skill_library::SkillPaths>,
     pub mcp: Arc<dyn nomifun_db::IMcpServerRepository>,
-    pub app_mcp: Arc<super::app_mcp_sources::AppMcpSources>,
 }
 
 impl GlobalSessionCapabilities {
@@ -70,13 +69,7 @@ impl SessionCapabilitiesResolver for GlobalSessionCapabilities {
         }
         let mcp_server_ids = match selection {
             Some(selection) => canonical_names(&selection.mcp_server_ids,"MCP sources").map_err(failure)?,
-            None => {
-                let mut defaults = BTreeSet::new();
-                for id in &ready {
-                    if !self.app_mcp.is_app_source(id).await { defaults.insert(id.clone()); }
-                }
-                defaults
-            },
+            None => BTreeSet::new(),
         };
         if !mcp_server_ids.is_subset(&ready) {
             return Err(failure("a selected MCP server is disabled or has no tested tools; test its connection or deselect it".into()));

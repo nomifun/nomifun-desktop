@@ -973,7 +973,6 @@
     "builtin": "Built in",
     "installed": "Installed",
     "available": "Available",
-    "disabled": "Disabled",
     "error": "Unavailable",
     "toolCount_one": "{{count}} tool",
     "toolCount_other": "{{count}} tools",

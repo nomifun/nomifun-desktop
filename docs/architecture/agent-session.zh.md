@@ -634,7 +634,9 @@ canonical 窄机器人且该字段未设置时，Host 可在现役 Turn 模型�
 普通新建页与已开启会话共用协作配置控件和 AgentExecution 提交路径。模型池、方案和策略在发送前是按会话隔离的 UI 草稿，创建成功后保留该会话的后续输入配置；发送时沿用现有协作请求准入，将配置写入实际 Execution。默认单模型自动策略继续发送普通 Turn。协作草稿不修改当前 Session Snapshot、不改变已运行的 Execution，也不影响已排队的普通输入；新的协作请求等待当前回合、协作任务和队列释放。活动任务的调整继续使用原有 Execution 命令。
 
 MCP 与 Skill 是所有 Agent 共用的全局能力，预设不持有扩展总开关。创建或空闲时明确更新会话选择，
-host 捕获全局技能库；应用 MCP 来源必须由 Agent/会话明确选择，默认不全局注入。将选中的 MCP 工具编译到同一 Session-only Revision/Snapshot；变体只使用
+host 捕获全局技能库；所有 MCP 来源都必须由 Agent/会话明确选择，全局启用或连接成功不构成默认选择。
+省略会话扩展选择时保留默认技能与 Agent 已明确保存的 MCP 授权，不加入其它已安装来源。
+将选中的 MCP 工具编译到同一 Session-only Revision/Snapshot；变体只使用
 现有 Agent Store，不创建另一份绑定或权限台账。Library Skill 冻结正文、辅助资源、来源与摘要，
 `selected` 控制默认输入注入；Package Skill 保留现役精确锁与原 JSON 合同。
 

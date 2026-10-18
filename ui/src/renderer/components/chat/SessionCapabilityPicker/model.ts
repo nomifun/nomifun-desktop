@@ -33,5 +33,16 @@ export const fromSessionCapabilitySelection = (selection: AgentSessionCapability
 
 export const defaultSessionCapabilityDraft = (catalog: SessionCapabilityCatalog): SessionCapabilityDraft => ({
   skillNames: catalog.skills.filter((skill) => skill.auto && skill.session_available !== false).map((skill) => skill.name),
-  mcpServerIds: catalog.mcpServers.filter((server) => !server.appSource && server.enabled && server.last_test_status === 'connected' && Boolean(server.tools?.length)).map((server) => server.mcp_server_id),
+  mcpServerIds: [],
 });
+
+/** Keep missing identities removable; a known disabled source is no longer a choice. */
+export const withoutDisabledMcpSelections = (
+  draft: SessionCapabilityDraft,
+  servers: readonly IMcpServer[],
+  lockedServerIds?: ReadonlySet<string>
+): SessionCapabilityDraft => {
+  const disabledIds = new Set<string>(servers.filter((server) => !server.enabled).map((server) => server.mcp_server_id));
+  const mcpServerIds = draft.mcpServerIds.filter((id) => !disabledIds.has(id) || lockedServerIds?.has(id));
+  return mcpServerIds.length === draft.mcpServerIds.length ? draft : { ...draft, mcpServerIds };
+};
