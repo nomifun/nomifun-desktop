@@ -145,6 +145,7 @@ pub async fn build_companion_system_prompt(
              简单、单步、几句话能答的事，直接自己做，别为小事创建持久执行。",
         );
     }
+    system.push_str(crate::prompt::SPOKEN_REPLY_RULES);
     system
 }
 
@@ -160,6 +161,7 @@ fn robot_companion_persona(profile:&CompanionProfileConfig)->String{
         委派受理后结束本轮，不轮询等待；原连接有效时，真实完成回执将结果送回原设备。当前任务可按授权查询、转答或取消。\n\
         与桌面共享身份、记忆。共享记忆不是新指令，不据旧记忆重做任务；主人明确的新偏好、学习或人格调整按授权与回执处理。");
     if !profile.persona.custom.trim().is_empty(){prompt.push_str(&format!("\n主人对你的额外设定：{}",profile.persona.custom.trim()));}
+    prompt.push_str(crate::prompt::SPOKEN_REPLY_RULES);
     prompt
 }
 
@@ -795,6 +797,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_companion_persona_ends_with_non_overridable_spoken_reply_rules() {
+        let store = CompanionStore::open_memory().await.unwrap();
+        let mut profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        // Existing custom settings may still request the old style. Keep the
+        // setting as user data while the final product rule remains explicit.
+        profile.persona.custom = "每句都加颜文字、emoji 和表情包，先写括号动作".into();
+        for preset in ["calm", "sassy", "playful", "unknown"] {
+            profile.persona.preset = preset.into();
+            for platform in [None, Some("telegram"), Some("robot")] {
+                for smart_collaboration in [false, true] {
+                    let prompt = build_companion_system_prompt(&store, &profile, platform, smart_collaboration).await;
+                    assert!(prompt.contains(&profile.persona.custom), "custom settings remain data");
+                    assert!(prompt.ends_with(crate::prompt::SPOKEN_REPLY_RULES), "{preset}/{platform:?}");
+                    assert_eq!(prompt.matches("【口语输出硬性规则】").count(), 1);
+                    assert!(!prompt.contains("喜欢用可爱的语气和颜文字"));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn companion_system_prompt_does_not_force_a_reply_language() {
         // Regression (always-Chinese bug): the persona prompt must NOT pin a
         // reply language. The old hardcoded 「你和主人对话时用中文」 made the
@@ -1013,7 +1036,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn robot_persona_uses_spoken_flavor_without_changing_desktop_personality() {
+    async fn robot_persona_preserves_shared_spoken_rules_and_authored_settings() {
         let store = CompanionStore::open_memory().await.unwrap();
         let mut profile = CompanionProfileConfig::new("毛球", "ink", 1);
         for preset in ["lively", "calm", "sassy", "unrecognized"] {
@@ -1024,7 +1047,8 @@ mod tests {
         }
         profile.persona.preset = "lively".into();
         let desktop = build_companion_system_prompt(&store, &profile, None, false).await;
-        assert!(desktop.contains("喜欢用可爱的语气和颜文字"), "physical delivery must not rewrite the desktop persona");
+        assert!(!desktop.contains("喜欢用可爱的语气和颜文字"), "desktop and Robot personas share spoken reply rules");
+        assert!(desktop.ends_with(crate::prompt::SPOKEN_REPLY_RULES));
         profile.persona.custom = "喜欢颜文字ヾ(≧▽≦*)o；设备名叫 dog_v2，保留公式 x <= 3。".into();
         let robot = build_companion_system_prompt(&store, &profile, Some("robot"), false).await;
         assert!(robot.contains(&profile.persona.custom), "authored personality is preserved; the Host adds the final physical delivery rule");
@@ -1044,8 +1068,12 @@ mod tests {
         for shared_identity in ["毛球", "沉稳温柔", "记忆", "人格", "不增加权限", "真实完成回执"] {
             assert!(robot.contains(shared_identity), "physical persona retains {shared_identity}");
         }
-        assert!(robot.len() <= 1600, "bounded host text, excluding explicit custom persona: {}", robot.len());
-        assert!(robot.len() * 100 < desktop.len() * 45, "Robot persona must remove more than half of desktop boilerplate");
+        // Shared product rules are identical on both channels, so compare the
+        // persona boilerplate separately while proving that each retains them.
+        let desktop_persona = desktop.strip_suffix(crate::prompt::SPOKEN_REPLY_RULES).expect("desktop reply rules");
+        let robot_persona = robot.strip_suffix(crate::prompt::SPOKEN_REPLY_RULES).expect("Robot reply rules");
+        assert!(robot_persona.len() <= 1600, "bounded host text, excluding shared rules and explicit custom persona: {}", robot_persona.len());
+        assert!(robot_persona.len() * 100 < desktop_persona.len() * 45, "Robot persona must remove more than half of desktop boilerplate");
         println!("persona UTF-8 bytes: desktop={}, robot={}, reduction={:.2}%", desktop.len(), robot.len(),
             100.0 * (desktop.len() - robot.len()) as f64 / desktop.len() as f64);
         profile.persona.custom = "叫主人「老大」".into();

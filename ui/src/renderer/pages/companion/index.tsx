@@ -13,6 +13,7 @@ import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { isTauriRuntime } from '@/common/adapter/tauriRuntime';
 import type { ICompanionProfile, ICompanionWithStatus } from '@/common/adapter/ipcBridge';
 import MarkdownView from '@/renderer/components/Markdown';
+import { stripCompanionReplyDecorations } from './companionReplyDecorations';
 import LocalImageView from '@/renderer/components/media/LocalImageView';
 import { usePasteService } from '@/renderer/hooks/file/usePasteService';
 import { imageExts, type FileMetadata } from '@/renderer/services/FileService';
@@ -303,8 +304,10 @@ const CompanionPage: React.FC = () => {
       if (sessionRunningRef.current) return;
       const cfg = profileRef.current;
       if (cfg && inQuietHours(cfg.appearance.quiet_start, cfg.appearance.quiet_end)) return;
+      const presentation = stripCompanionReplyDecorations(text);
+      if (!presentation) return;
       clearCompletedSessionBubble();
-      setBubble(text);
+      setBubble(presentation);
       armBubbleDismiss(BUBBLE_MS, () => setBubble(''));
     },
     [armBubbleDismiss, clearCompletedSessionBubble]
@@ -770,7 +773,9 @@ const CompanionPage: React.FC = () => {
       if (!companionId || m.companion_id !== companionId) return;
       if (m.source !== 'chat') return;
       if (sessionRunningRef.current) return;
-      const brief = m.content.length > 40 ? `${m.content.slice(0, 40)}…` : m.content;
+      const content = stripCompanionReplyDecorations(m.content);
+      if (!content) return;
+      const brief = content.length > 40 ? `${content.slice(0, 40)}…` : content;
       popBubble(t('nomi.companion.memorySavedToast', { brief }));
     });
     return () => {
@@ -1816,7 +1821,7 @@ const CompanionPage: React.FC = () => {
                       customFigure={customFigureMetaOf(profile)}
                     />
                   )}
-                  <span>{entry.text}</span>
+                  <span>{entry.role === 'companion' ? stripCompanionReplyDecorations(entry.text) : entry.text}</span>
                 </div>
               )) : (
                 <div className='nomi-companion-quick__empty'>

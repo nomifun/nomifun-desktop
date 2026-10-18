@@ -37,12 +37,10 @@
     "resume": "Resume",
     "resumeOk": "Collaborative task resumed",
     "resumeError": "Failed to resume: {{error}}",
-    "cancel": "Stop",
-    "cancelOk": "Collaborative task stopped",
+    "cancel": "Stop collaboration",
+    "stopping": "Stopping…",
+    "cancelOk": "Collaborative task cancelled",
     "cancelError": "Failed to stop: {{error}}",
-    "cancelConfirm": "Stop this collaborative task? Work in progress will be cancelled.",
-    "confirm": "Stop",
-    "back": "Back",
     "activeParticipants": "{{count}} collaborator(s) active"
   },
   "adjust": {
@@ -159,6 +157,14 @@
     "submit": "Submit decision",
     "ok": "Decision submitted",
     "error": "Failed to submit decision: {{error}}"
+  },
+  "recovery": {
+    "title": "Previous result is unconfirmed",
+    "task": "Task “{{title}}” has an unconfirmed previous result",
+    "description": "The previous turn was interrupted and its result could not be confirmed. Replying cannot resume this task because repeating its operations could duplicate effects.",
+    "hint": "Review the task record, or stop this collaboration. Stopping does not undo actions that may already have happened.",
+    "settledHint": "This collaboration has ended. Actions that may have happened before the interruption still need to be checked.",
+    "details": "View interruption details"
   },
   "steer": {
     "placeholder": "Add guidance for the collaborator while it is working…",

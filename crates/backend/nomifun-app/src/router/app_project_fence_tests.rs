@@ -32,6 +32,36 @@ async fn cold_default_coding_session_creates_and_warms_its_owned_directory_witho
     fixture.finish().await;
 }
 
+#[tokio::test]
+async fn missing_frozen_workspace_keeps_owner_binding_read_fence_and_unbound_runtime_anchor() {
+    let fixture = Fixture::new().await;
+    let store = fixture.state.session_owner.canonical().store();
+    let binding = store.get_live_session(&fixture.session).await.unwrap().agent_binding;
+    let facts = canonical_fact_bytes(&fixture, &fixture.session).await;
+    let frozen = fixture.app.directory.clone();
+    let retained = frozen.with_file_name(format!("retained-{}", Uuid::now_v7()));
+    assert!(frozen.is_absolute() && retained.is_absolute()); assert_eq!(frozen.parent(), retained.parent());
+    std::fs::rename(&frozen, &retained).unwrap();
+    let read = fixture.state.session_owner.guard_binding_workspace_read(&fixture.principal.principal_id, &binding).unwrap();
+    let resolved = fixture.state.session_owner.materialize_workspace_for_binding(
+        &fixture.principal.principal_id, &fixture.session, &binding).await.unwrap().unwrap();
+    assert_eq!(std::path::Path::new(&resolved), frozen);
+    assert!(super::app_project_fences::directory_lock(&fixture.state.session_owner,
+        &fixture.principal.principal_id, &frozen).try_write_owned().is_err(), "the original root's read fence must remain held");
+    let projection = fixture.state.session_owner.canonical_conversation_projection(
+        &fixture.principal.principal_id, &fixture.session).await.unwrap().unwrap();
+    let options = runtime_options_from_session(&fixture.principal.principal_id, projection, None).unwrap().0;
+    assert_eq!(std::path::Path::new(&options.workspace), frozen);
+    assert!(options.workspace_binding_lease.as_ref().unwrap().matches_workspace(&frozen).unwrap());
+    assert!(!frozen.exists(), "preflight cannot repair the missing directory on the user's behalf");
+    assert_eq!(canonical_fact_bytes(&fixture, &fixture.session).await, facts);
+    assert_eq!(store.get_live_session(&fixture.session).await.unwrap().agent_binding, binding);
+    assert!(fixture.state.session_owner.materialize_workspace_for_binding("different-owner", &fixture.session, &binding).await.is_err());
+    drop(options); drop(read);
+    std::fs::rename(&retained, &frozen).unwrap();
+    fixture.finish().await;
+}
+
 async fn second_session(fixture: &Fixture) -> AgentSessionId {
     let conversation = resolve_app_development_session_selection(&fixture.state, &fixture.principal.principal_id,
         &fixture.app, None, Some(SECOND_CREATION_KEY), None, None).await.unwrap();
@@ -303,10 +333,16 @@ async fn canonical_fact_bytes(fixture: &Fixture, session: &AgentSessionId) -> BT
 async fn personal_app_developer_project_opening_releases_idle_cache_without_becoming_an_official_editor() {
     let fixture = Fixture::new().await;
     let owner = AuthenticatedOwner(UserId::from(fixture.principal.principal_id.clone()));
+    let source = fixture.state.session_owner.canonical().store().get_live_session(&fixture.session).await.unwrap();
+    let binding = agent_binding_dto(&source.agent_binding).unwrap();
+    let (_, revision, _) = fixture.state.control_plane.saved_binding_artifacts(&owner.0, &binding).await.unwrap();
+    let route = &revision.payload.chat_route_records[nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT].primary;
     // A current-generation personal copy is a real User Preset. Matching the
     // official display name or seed configuration cannot confer its identity.
+    // Its executable model is selected explicitly; authored presets do not
+    // acquire an installation default just because an official seed had one.
     let personal = fixture.state.control_plane.create_from_template(&owner.0, "app.developer",
-        CreateAgentPresetFromTemplateRequest { model: None, reuse_existing: false, display_name: "app.developer".into(),
+        CreateAgentPresetFromTemplateRequest { model: Some(AgentChatModelSelectionDto { provider_id: route.provider_id.clone(), model: route.model.clone() }), reuse_existing: false, display_name: "app.developer".into(),
             description: None, model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new() }).await.unwrap();
     assert_eq!(personal.preset.source, nomifun_api_types::AgentPresetSourceDto::User);
     let preset_id = personal.preset.preset_id.clone();

@@ -32,6 +32,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 14px;
+  flex-wrap: wrap;
   flex-shrink: 0;
   min-height: 44px;
   padding: 6px 12px 6px 16px;
@@ -84,6 +85,7 @@
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+  flex-wrap: wrap;
 }
 
 /* A single banner action pill (rerun / steer trigger / return). The focusable
@@ -293,3 +295,13 @@
 .questionActions :global(.arco-textarea-wrapper) {
   flex: 1;
 }
+
+.recoveryDetails {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.recoveryDetails summary { cursor: pointer; }
+.recoveryDetails p { white-space: pre-wrap; }

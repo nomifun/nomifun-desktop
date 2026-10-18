@@ -28,7 +28,7 @@ pub enum EngineToolError {
     #[error("tool plan could not be compiled: {0}")]
     ToolPlan(String),
     #[error("Capability Kernel rejected tool ({code}): {message}")]
-    CapabilityKernel { code: String, message: String },
+    CapabilityKernel { code: String, message: String, details: Option<serde_json::Value> },
     #[error("tool invocation failed: {0}")]
     ToolInvocation(String),
     #[error("tool invocation was cancelled before dispatch")]

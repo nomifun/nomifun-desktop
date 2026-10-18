@@ -17,6 +17,8 @@ pub struct AgentInstructionScopeRequest {
     pub path: String,
     #[serde(default)]
     pub recursive: bool,
+    #[serde(default)]
+    pub path_semantics: nomi_native_files::NativePathSemantics,
 }
 
 #[derive(Serialize)]
@@ -27,6 +29,8 @@ pub struct AgentInstructionScope {
     pub canonical_path: String,
     pub kind: &'static str,
     pub recursive: bool,
+    #[serde(skip_serializing_if = "nomi_native_files::NativePathSemantics::is_follow")]
+    pub path_semantics: nomi_native_files::NativePathSemantics,
     /// Ancestor loading is engine policy; these are directories to inspect.
     pub directories: BTreeSet<String>,
     pub complete: bool,
@@ -67,8 +71,8 @@ impl FileService {
             let _permit = permit;
             let root = std::fs::canonicalize(&root).unwrap_or(root);
             let access = WorkspaceDirectoryAccess { authority };
-            let native = nomi_native_files::acquire_instruction_scope_with_access(
-                &target, request.recursive, &access, before_metadata, after_metadata, before_listing, after_listing,
+            let native = nomi_native_files::acquire_instruction_scope_with_semantics_and_access(
+                &target, request.recursive, request.path_semantics, &access, before_metadata, after_metadata, before_listing, after_listing,
             ).map_err(crate::native_file_acquisition_error)?;
             project_agent_instruction_scope(request, native, &root)
         }).await.map_err(|error| AppError::Internal(format!("instruction discovery failed: {error}")))?
@@ -97,7 +101,9 @@ pub fn project_agent_instruction_scope(
     };
     let canonical = Path::new(&native.canonical_path);
     let base = if native.kind == "directory" { canonical } else { canonical.parent().ok_or_else(invalid)? };
-    if request.recursive != native.recursive || !matches!(native.kind.as_str(), "file" | "directory" | "missing")
+    if request.recursive != native.recursive || request.path_semantics != native.path_semantics
+        || !(matches!(native.kind.as_str(), "file" | "directory" | "missing")
+            || (native.kind == "link" && native.path_semantics == nomi_native_files::NativePathSemantics::Entry))
         || !valid_path(&native.canonical_path) || native.directories.is_empty() || native.directories.len() > 65
         || native.entries_scanned > 20_001 || (!native.recursive && native.entries_scanned != 0)
         || native.complete != native.incomplete_reasons.is_empty()
@@ -105,15 +111,15 @@ pub fn project_agent_instruction_scope(
         || native.directories.iter().any(|path| !valid_path(path)
             || (Path::new(path) != base && !(native.recursive && native.kind == "directory" && Path::new(path).starts_with(base))))
     { return Err(invalid()); }
-    let kind = match native.kind.as_str() { "file" => "file", "directory" => "directory", _ => "missing" };
+    let kind = match native.kind.as_str() { "file" => "file", "directory" => "directory", "link" => "link", _ => "missing" };
     let result = AgentInstructionScope {
         observation_kind: "instruction_scope", is_directory_listing: false, path: request.path,
         canonical_path: crate::path_safety::session_path_label(workspace_root, canonical)?, kind,
-        recursive: native.recursive,
+        recursive: native.recursive, path_semantics: native.path_semantics,
         directories: native.directories.into_iter().map(|path| crate::path_safety::session_path_label(workspace_root, Path::new(&path)))
             .collect::<Result<BTreeSet<_>, _>>()?,
         complete: native.complete, incomplete_reasons: native.incomplete_reasons, entries_scanned: native.entries_scanned,
-        notice: "Instruction-location metadata, not a filesystem entry listing, snapshot, permission grant or proof of shell access scope. entries_scanned counts discovery traversal; nonrecursive metadata has zero scans even for a nonempty directory. complete describes instruction discovery, not directory contents. Load ancestor AGENTS.override.md/AGENTS.md for each directory. Recursive discovery includes hidden/ignored directories, never follows descendant symlinks and reports them as incomplete. Use canonical paths and refresh applicable instruction discovery when needed after effects; external concurrent renames remain possible.",
+        notice: "Instruction-location metadata, not a filesystem entry listing, snapshot, permission grant or proof of shell access scope. entries_scanned counts discovery traversal; nonrecursive metadata has zero scans even for a nonempty directory. complete describes instruction discovery, not directory contents. Load ancestor AGENTS.override.md/AGENTS.md for each directory. Follow semantics resolve the final link and report descendant links as incomplete. Entry semantics address the final link itself; recursive directory-entry mutations count child links without traversing their targets. Hidden/ignored real directories remain included. Use canonical paths and refresh applicable instruction discovery when needed after effects; external concurrent renames remain possible.",
     };
     if !crate::agent_text_read::fits_text_result(&result, 0)? {
         return Err(AppError::BadRequest("Instruction scope result exceeds the bounded envelope; narrow the path".into()));
@@ -124,8 +130,11 @@ pub fn project_agent_instruction_scope(
 struct WorkspaceDirectoryAccess { authority: crate::PathAuthority }
 impl nomi_native_files::NativeDirectoryAccess for WorkspaceDirectoryAccess {
     fn canonicalize(&self, path: &Path) -> Result<PathBuf, nomi_native_files::NativeFileError> {
-        crate::path_safety::validate_path_authority(&path.to_string_lossy(), &self.authority)
+        crate::path_safety::validate_native_read_path_authority(&path.to_string_lossy(), &self.authority)
             .map_err(crate::native_acquisition::owner_error_to_native)
+    }
+    fn canonicalize_entry(&self, path: &Path) -> Result<PathBuf, nomi_native_files::NativeFileError> {
+        crate::path_safety::canonical_native_read_entry(path, &self.authority).map_err(crate::native_acquisition::owner_error_to_native)
     }
     fn metadata(&self, path: &Path) -> Result<Option<nomi_native_files::NativeEntryKind>, nomi_native_files::NativeFileError> {
         crate::workspace_read_dir::metadata(path, &self.authority).map_err(crate::native_acquisition::owner_error_to_native)
@@ -141,7 +150,9 @@ impl nomi_native_files::NativeDirectoryAccess for WorkspaceDirectoryAccess {
         let entries = crate::workspace_read_dir::read_directory(path, &self.authority).map_err(crate::native_acquisition::owner_error_to_native)?;
         Ok(Box::new(entries.map(|entry| {
             let entry = entry.map_err(|error| nomi_native_files::NativeFileError::io("enumerating native instruction entry", error))?;
-            let kind = entry.file_type().map_err(|error| nomi_native_files::NativeFileError::io("classifying native instruction entry", std::io::Error::new(error.kind(), error.to_string())))?;
+            let kind = entry.file_type().map_err(|error| nomi_native_files::NativeFileError::io("classifying native instruction entry",
+                error.raw_os_error().map(std::io::Error::from_raw_os_error)
+                    .unwrap_or_else(|| std::io::Error::new(error.kind(), error.to_string()))))?;
             Ok(nomi_native_files::NativeDirectoryEntry { path: entry.path(),
                 kind: if kind.is_symlink() { nomi_native_files::NativeEntryKind::Link }
                 else if kind.is_dir() { nomi_native_files::NativeEntryKind::Directory }
@@ -194,7 +205,7 @@ mod tests {
         let binding = crate::workspace_binding(nomifun_common::generate_id(), "binding", "workspace", "owner", [WORKSPACE_READ_OPERATION], &root).unwrap();
         let service = FileService::new(Arc::new(NullEvents), vec![]);
         let result = service.instruction_scope_with_all_hooks(&binding,
-            AgentInstructionScopeRequest { path: "parent/target".into(), recursive: false }, before, after, |_| {}, |_| {}).await;
+            AgentInstructionScopeRequest { path: "parent/target".into(), recursive: false, path_semantics: Default::default() }, before, after, |_| {}, |_| {}).await;
         if let Ok(observed) = &result {
             if observed.kind != "file" {
                 fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(observed).unwrap()).unwrap();
@@ -204,7 +215,7 @@ mod tests {
         assert_eq!(fs::read(parent.join("target")).unwrap(), b"inside file");
         assert!(outside.join("target").is_dir());
         let observed = service.instruction_scope_for_agent_session(&binding,
-            AgentInstructionScopeRequest { path: "parent/target".into(), recursive: false }).await.unwrap();
+            AgentInstructionScopeRequest { path: "parent/target".into(), recursive: false, path_semantics: Default::default() }).await.unwrap();
         assert_eq!(observed.kind, "file");
         assert_eq!(observed.directories, BTreeSet::from(["parent".into()]));
     }
@@ -222,7 +233,7 @@ mod tests {
         let scope = crate::workspace_binding(nomifun_common::generate_id(), "binding", "workspace", "owner", [WORKSPACE_READ_OPERATION], &root).unwrap();
         let service = FileService::new(Arc::new(NullEvents), vec![]);
         for (path, recursive) in [("./nested", true), ("nested/AGENTS.md", false), ("future/nested/file", false), ("nested/alias", false)] {
-            let request = AgentInstructionScopeRequest { path: path.into(), recursive };
+            let request = AgentInstructionScopeRequest { path: path.into(), recursive, path_semantics: Default::default() };
             let ordinary = service.instruction_scope_for_agent_session(&scope, request.clone()).await.unwrap();
             let target = scope.resolve_path(path).unwrap();
             let native = nomi_native_files::acquire_instruction_scope(&target, recursive).unwrap();
@@ -242,7 +253,7 @@ mod tests {
         for (path, kind, directory) in [(".", "directory", ""), ("directory", "directory", "directory"),
             ("source.txt", "file", ""), ("future/nested/new.txt", "missing", "future/nested")] {
             let observed = service.instruction_scope_for_agent_session(&binding,
-                AgentInstructionScopeRequest { path: path.into(), recursive: false }).await.unwrap();
+                AgentInstructionScopeRequest { path: path.into(), recursive: false, path_semantics: Default::default() }).await.unwrap();
             assert_eq!(observed.kind, kind, "{path}");
             assert_eq!(observed.directories, BTreeSet::from([directory.into()]));
             assert!(observed.complete);
@@ -253,7 +264,7 @@ mod tests {
         }
         for path in ["source.txt/child", "bad\0path"] {
             assert!(service.instruction_scope_for_agent_session(&binding,
-                AgentInstructionScopeRequest { path: path.into(), recursive: false }).await.is_err(), "{path}");
+                AgentInstructionScopeRequest { path: path.into(), recursive: false, path_semantics: Default::default() }).await.is_err(), "{path}");
         }
         assert!(!root.path().join("future").exists());
     }
@@ -299,18 +310,20 @@ mod tests {
         let after = { let restore = restore.clone(); move |_: &Path| restore() };
         let requested = if replace_root { "." } else { "parent" };
         let result = files.instruction_scope_with_hooks(&scope,
-            AgentInstructionScopeRequest { path: requested.into(), recursive: true }, before, after).await;
+            AgentInstructionScopeRequest { path: requested.into(), recursive: true, path_semantics: Default::default() }, before, after).await;
         restore();
         if let Ok(observed) = &result {
             fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(observed).unwrap()).unwrap();
             panic!("instruction scope accepted outside metadata; retained fixture: {}", fixture.keep().display());
         }
-        assert!(matches!(result, Err(AppError::Conflict(_) | AppError::Forbidden(_))));
+        assert!(matches!(result, Err(AppError::NativeFileAcquisition {
+            code: "FILE_CHANGED_DURING_READ", kind: None, raw_os_error: None, ..
+        })), "instruction namespace replacement must retain the typed Changed observation");
         assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
         assert_eq!(fs::read_dir(&outside).unwrap().count(), 13);
         fs::write(target.join("AGENTS.md"), b"local instructions").unwrap();
         let observed = files.instruction_scope_for_agent_session(&scope,
-            AgentInstructionScopeRequest { path: requested.into(), recursive: true }).await.unwrap();
+            AgentInstructionScopeRequest { path: requested.into(), recursive: true, path_semantics: Default::default() }).await.unwrap();
         assert!(observed.complete);
         assert_eq!(observed.entries_scanned, 1);
         assert_eq!(observed.directories, BTreeSet::from([if replace_root { "".into() } else { "parent".into() }]));
@@ -345,7 +358,7 @@ mod tests {
             [WORKSPACE_READ_OPERATION], root.path()).unwrap();
         let files = FileService::new(Arc::new(NullEvents), vec![]);
         let observed = files.instruction_scope_for_agent_session(&scope,
-            AgentInstructionScopeRequest { path: ".".into(), recursive: true }).await.unwrap();
+            AgentInstructionScopeRequest { path: ".".into(), recursive: true, path_semantics: Default::default() }).await.unwrap();
         assert!(!observed.complete);
         assert_eq!(observed.incomplete_reasons, BTreeSet::from(["symlink_entry".into()]));
         assert_eq!(observed.directories, BTreeSet::from(["".into(), ".hidden/空 格🐱".into(), "ignored".into()]));
@@ -370,7 +383,7 @@ mod tests {
         let observed = files
             .instruction_scope_for_agent_session(
                 &scope,
-                AgentInstructionScopeRequest { path: ".".into(), recursive: true },
+                AgentInstructionScopeRequest { path: ".".into(), recursive: true, path_semantics: Default::default() },
             )
             .await
             .unwrap();
@@ -381,5 +394,36 @@ mod tests {
         assert!(observed.complete);
         assert!(observed.directories.contains(""));
         assert!(scope.resolve_path(".").is_ok());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn entry_scope_and_canonical_unlink_keep_the_junction_target_intact() {
+        use nomi_native_files::NativePathSemantics::{Entry, Follow};
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&workspace).unwrap(); std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("AGENTS.md"), b"outside rules").unwrap();
+        std::fs::write(outside.join("value"), b"preserved").unwrap();
+        let link = workspace.join("link"); junction::create(&outside, &link).unwrap();
+        let binding = crate::workspace_binding(nomifun_common::generate_id(), "binding", "workspace", "owner",
+            [WORKSPACE_READ_OPERATION, crate::WORKSPACE_DELETE_OPERATION, crate::WORKSPACE_WRITE_OPERATION], &workspace).unwrap();
+        let files = FileService::new(Arc::new(NullEvents), vec![]);
+        let request = |path: &str, recursive, path_semantics| AgentInstructionScopeRequest { path: path.into(), recursive, path_semantics };
+        let entry = files.instruction_scope_for_agent_session(&binding, request("link", true, Entry)).await.unwrap();
+        assert_eq!(entry.kind, "link"); assert_eq!(entry.canonical_path, "link");
+        assert_eq!(entry.directories, BTreeSet::from([String::new()])); assert!(entry.complete);
+        let followed = files.instruction_scope_for_agent_session(&binding, request("link", false, Follow)).await.unwrap();
+        assert_eq!(followed.kind, "directory");
+        assert_eq!(Path::new(&followed.canonical_path), std::fs::canonicalize(&outside).unwrap());
+        let tree = files.instruction_scope_for_agent_session(&binding, request(".", true, Entry)).await.unwrap();
+        assert!(tree.complete); assert_eq!(tree.directories, BTreeSet::from([String::new()]));
+        let renamed = files.rename_entry_for_agent_session(&binding, "link", "renamed").await.unwrap();
+        assert!(std::fs::symlink_metadata(&renamed).unwrap().file_type().is_symlink());
+        files.remove_entry_for_agent_session(&binding, &renamed).await.unwrap();
+        assert!(!link.exists());
+        assert_eq!(std::fs::read(outside.join("value")).unwrap(), b"preserved");
+        assert_eq!(std::fs::read(outside.join("AGENTS.md")).unwrap(), b"outside rules");
     }
 }

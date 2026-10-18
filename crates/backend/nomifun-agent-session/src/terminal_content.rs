@@ -79,6 +79,7 @@ pub(super) async fn effect_observation(
     let started = event(tx, &row.started_event_id, &row.session_id, &row.effect_id).await?;
     let start = payload_value_for_event_tx(tx, &started).await?;
     effect_identity(row, &start)?;
+    effect_native_targets::from_payload(&start)?;
     if started.kind.0 != "effect/started" || start.get("recorded_at").and_then(Value::as_i64) != Some(row.created_at) {
         return Err(SessionStoreError::InvalidEvent("Effect start differs from its lifecycle index".into()));
     }
@@ -96,6 +97,7 @@ pub(super) async fn effect_observation(
     }
     let payload = payload_value_for_event_tx(tx, &terminal).await?;
     effect_identity(row, &payload)?;
+    effect_native_targets::validate_settlement(&start, &payload)?;
     let state = match terminal.kind.0.as_str() {
         "effect/succeeded" => "returned",
         "effect/failed" => "rejected",

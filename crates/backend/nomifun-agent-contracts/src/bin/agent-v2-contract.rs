@@ -8,7 +8,7 @@ use nomifun_agent_contracts::{
     AgentPresetRevisionPayload, AgentSessionAggregate, ArtifactEnvelope,
     AgentStoreSchemaManifestPayload,
     IdmmDecisionExplanation, IdmmDecisionNotice, ContextClearedPayloadV1, AgentTurnOutcome,
-    MessageTimeline, MessageTimelineUpdate, RuntimeToolHoldReason,
+    MessageTimeline, MessageTimelineUpdate, RuntimeToolHoldReason, SystemExecutionFailure,
     TurnWorkspaceFilesObservedV1, KnowledgeWritebackStartedV1, KnowledgeWritebackSettledV1,
     CanonicalAgentStoreSchemaManifestPayload, CanonicalApiInventoryPayload, CanonicalHttpMethod,
     CanonicalErrorRegistryPayload,
@@ -299,6 +299,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     let outcome_binding = AgentTurnOutcome::export_to_string(&ts_rs::Config::default())?
         .replace("\r\n", "\n").replace('\r', "\n");
     let outcome_binding = format!("{}\n", outcome_binding.lines().map(str::trim_end).collect::<Vec<_>>().join("\n"));
+    let system_error_binding_path = root.join("../../../ui/src/common/protocolBindings/SystemExecutionFailure.ts");
+    let system_error_binding = SystemExecutionFailure::export_to_string(&ts_rs::Config::default())?
+        .replace("\r\n", "\n").replace('\r', "\n");
+    let system_error_binding = format!("{}\n", system_error_binding.lines().map(str::trim_end).collect::<Vec<_>>().join("\n"));
     if mode == "write" {
         fs::create_dir_all(&generated)?;
         write_json(&seed_path, &seed)?;
@@ -307,6 +311,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             fs::write(generated.join(name), contents)?;
         }
         fs::write(&outcome_binding_path, &outcome_binding)?;
+        fs::write(&system_error_binding_path, &system_error_binding)?;
     } else {
         check_json(&seed_path, &seed)?;
         check_json(&platform_path, &platform)?;
@@ -325,6 +330,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         if fs::read_to_string(&outcome_binding_path)?.replace("\r\n", "\n") != outcome_binding {
             return Err(format!("generated artifact drift: {}; run agent-v2-contract write",
                 outcome_binding_path.display()).into());
+        }
+        if fs::read_to_string(&system_error_binding_path)?.replace("\r\n", "\n") != system_error_binding {
+            return Err(format!("generated artifact drift: {}; run agent-v2-contract write",
+                system_error_binding_path.display()).into());
         }
     }
 
@@ -619,6 +628,7 @@ fn generated_display_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>
     add_schema::<MessageTimeline>(&mut schemas, "message_timeline")?;
     add_schema::<MessageTimelineUpdate>(&mut schemas, "message_timeline_update")?;
     add_schema::<RuntimeToolHoldReason>(&mut schemas, "runtime_tool_hold_reason")?;
+    add_schema::<SystemExecutionFailure>(&mut schemas, "system_execution_failure")?;
     Ok(schemas)
 }
 
@@ -765,7 +775,7 @@ mod display_schema_tests {
     fn display_views_do_not_change_the_persisted_schema_contract() {
         let storage = generated_schemas().unwrap();
         let display = generated_display_schemas().unwrap();
-        assert_eq!(display.len(), 3);
+        assert_eq!(display.len(), 4);
         assert!(display.keys().all(|key| !storage.contains_key(key)));
         let published: Value = serde_json::from_str(include_str!(
             "../../contracts/generated/canonical-agent-store-schema-manifest.envelope.json")).unwrap();

@@ -37,12 +37,10 @@
     "resume": "继续",
     "resumeOk": "协作任务已继续",
     "resumeError": "继续失败：{{error}}",
-    "cancel": "终止",
-    "cancelOk": "协作任务已终止",
-    "cancelError": "终止失败：{{error}}",
-    "cancelConfirm": "确定终止当前协作任务吗？进行中的任务会被取消。",
-    "confirm": "终止",
-    "back": "返回",
+    "cancel": "停止协作",
+    "stopping": "正在停止…",
+    "cancelOk": "协作任务已取消",
+    "cancelError": "停止失败：{{error}}",
     "activeParticipants": "{{count}} 位协作者进行中"
   },
   "adjust": {
@@ -159,6 +157,14 @@
     "submit": "提交决定",
     "ok": "决定已提交",
     "error": "提交决定失败：{{error}}"
+  },
+  "recovery": {
+    "title": "上次执行结果未确认",
+    "task": "任务「{{title}}」的上次执行结果未确认",
+    "description": "上次执行在中断后未能确认最终结果。为避免重复操作，无法通过回复决定继续此任务。",
+    "hint": "你可以检查任务记录，或停止本次协作。停止不会撤销中断前可能已发生的操作。",
+    "settledHint": "本次协作已结束。中断前可能已发生的操作仍需要核实。",
+    "details": "查看中断详情"
   },
   "steer": {
     "placeholder": "向正在执行的协作者补充说明…",

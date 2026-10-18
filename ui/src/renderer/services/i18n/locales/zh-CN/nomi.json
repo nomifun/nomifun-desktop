@@ -576,6 +576,8 @@
     "add": "添加机器人",
     "addTitle": "添加机器人",
     "otaStep": "1. 打开机器人的配网页，在「高级设置」里把 OTA 地址填成下面任意一个：",
+    "endpointLoading": "正在读取机器人连接信息…",
+    "endpointLoadFailed": "读取机器人连接信息失败，请重试。",
     "otaNone": "还没有可用的局域网地址。",
     "codeStep": "2. 机器人开机后会在屏幕上显示并读出 6 位激活码，把它填在这里：",
     "codePlaceholder": "6 位数字",

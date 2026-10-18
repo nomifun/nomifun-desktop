@@ -8,10 +8,28 @@ mod source;
 mod scope;
 #[cfg(unix)]
 mod unix_directory;
+/// Native handle operations shared with the login-user file owner. They do
+/// not confer authority; the handle always uses the caller's OS token.
+#[cfg(windows)]
+#[path = "windows_directory.rs"]
+pub mod windows;
 pub use source::{acquire_source_path, acquire_source_with_hooks, acquire_source_with_adapter};
-pub use scope::{NativeDirectoryAccess, NativeDirectoryEntry, NativeEntryKind, acquire_instruction_scope, acquire_instruction_scope_with_access};
+pub use scope::{NativeDirectoryAccess, NativeDirectoryEntry, NativeEntryKind, acquire_instruction_scope, acquire_instruction_scope_with_access, acquire_instruction_scope_with_semantics, acquire_instruction_scope_with_semantics_and_access};
 
 pub const MAX_SOURCE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Content observations follow the final link. Entry mutations address the
+/// directory entry itself; descendant links are never part of that subtree.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativePathSemantics {
+    #[default]
+    Follow,
+    Entry,
+}
+impl NativePathSemantics {
+    pub fn is_follow(&self) -> bool { *self == Self::Follow }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum NativeFileError {
@@ -57,7 +75,7 @@ pub struct NativeFileFailure {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeReadRequest {
     Source { path: String, max_bytes: usize },
-    InstructionScope { path: String, recursive: bool },
+    InstructionScope { path: String, recursive: bool, #[serde(default, skip_serializing_if = "NativePathSemantics::is_follow")] path_semantics: NativePathSemantics },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -98,6 +116,8 @@ pub struct NativeInstructionScope {
     pub canonical_path: String,
     pub kind: String,
     pub recursive: bool,
+    #[serde(default, skip_serializing_if = "NativePathSemantics::is_follow")]
+    pub path_semantics: NativePathSemantics,
     pub directories: BTreeSet<String>,
     pub complete: bool,
     pub incomplete_reasons: BTreeSet<String>,
@@ -108,7 +128,7 @@ pub fn acquire(request: NativeReadRequest) -> Result<NativeReadAcquisition, Nati
     match request {
         NativeReadRequest::Source { path, max_bytes } => acquire_source_path(Path::new(&path), max_bytes)
             .map(|source| NativeReadAcquisition::Source { source }),
-        NativeReadRequest::InstructionScope { path, recursive } => acquire_instruction_scope(Path::new(&path), recursive)
+        NativeReadRequest::InstructionScope { path, recursive, path_semantics } => acquire_instruction_scope_with_semantics(Path::new(&path), recursive, path_semantics)
             .map(|scope| NativeReadAcquisition::InstructionScope { scope }),
     }
 }
@@ -118,6 +138,8 @@ pub(crate) fn validate_path(path: &Path) -> Result<(), NativeFileError> {
     if path_text.is_empty() || path_text.len() > 4096 || path_text.contains('\0') || !path.is_absolute() {
         return Err(NativeFileError::InvalidInput("native acquisition requires a bounded absolute path without NUL".into()));
     }
+    #[cfg(windows)]
+    windows::normalize_path(path).map_err(|error| NativeFileError::io("validating native Windows file path", error))?;
     Ok(())
 }
 pub(crate) fn path_string(path: &Path) -> Result<String, NativeFileError> {
@@ -128,7 +150,7 @@ pub(crate) fn path_string(path: &Path) -> Result<String, NativeFileError> {
 /// dangling link, non-directory ancestor or failed lookup is never absence.
 pub(crate) fn resolve_missing(path: &Path, max_missing_depth: usize, canonicalize: impl Fn(&Path) -> Result<PathBuf, NativeFileError>) -> Result<(PathBuf, bool), NativeFileError> {
     let mut candidate = path;
-    let mut suffix = Vec::new();
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
     loop {
         match std::fs::symlink_metadata(candidate) {
             Ok(_) => {
@@ -137,13 +159,28 @@ pub(crate) fn resolve_missing(path: &Path, max_missing_depth: usize, canonicaliz
                     return Err(NativeFileError::InvalidInput("native read ancestor is not a directory".into()));
                 }
                 let absent = !suffix.is_empty();
-                for part in suffix.into_iter().rev() { real.push(part); }
+                for part in suffix.into_iter().rev() {
+                    #[cfg(windows)]
+                    { real = windows::join_component(&real, &part).map_err(|error| NativeFileError::io("joining native missing path", error))?; }
+                    #[cfg(not(windows))]
+                    real.push(part);
+                }
                 return Ok((real, absent));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 if suffix.len() >= max_missing_depth { return Err(NativeFileError::InvalidInput("native missing path depth exceeds the acquisition budget".into())); }
-                suffix.push(candidate.file_name().ok_or_else(|| NativeFileError::InvalidInput("native path has no resolvable ancestor".into()))?.to_owned());
-                candidate = candidate.parent().ok_or_else(|| NativeFileError::InvalidInput("native path has no parent".into()))?;
+                // A removed UNC share or unavailable drive has no existing
+                // filesystem root from which absence can be proved. Preserve
+                // that real lookup failure; the requested path was valid and
+                // this is neither InvalidInput nor a successful Source None.
+                let Some(name) = candidate.file_name() else {
+                    return Err(NativeFileError::io("resolving native read root", error));
+                };
+                suffix.push(name.to_owned());
+                let Some(parent) = candidate.parent() else {
+                    return Err(NativeFileError::io("resolving native read ancestor", error));
+                };
+                candidate = parent;
             }
             Err(error) => return Err(NativeFileError::io("inspecting native read path", error)),
         }

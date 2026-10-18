@@ -170,6 +170,9 @@ fn canvas_operation_error(error: AppError) -> String {
         }
         AppError::NotFound(_) => "Creative Studio Canvas not found".to_owned(),
         AppError::BadRequest(_) => "Invalid Creative Studio Canvas request".to_owned(),
+        AppError::NativeSystemAccessDenied { .. }
+        | AppError::NativeFileAcquisition { code: "SYSTEM_ACCESS_DENIED", .. } => "Operating system access was denied for the Creative Studio Canvas operation".to_owned(),
+        AppError::SystemExecution(_) => "Operating system execution failed for the Creative Studio Canvas operation".to_owned(),
         AppError::Conflict(_) => {
             "Creative Studio Canvas request conflicts with current state".to_owned()
         }
@@ -185,6 +188,7 @@ fn canvas_operation_error(error: AppError) -> String {
         }
         AppError::RateLimited => "Creative Studio Canvas operation was rate limited".to_owned(),
         AppError::Internal(_)
+        | AppError::NativeFileAcquisition { .. }
         | AppError::KnowledgeExportDestinationInvalid(_)
         | AppError::KnowledgeExportDestinationExists(_)
         | AppError::KnowledgeExportIo { .. } => "Creative Studio Canvas operation failed".to_owned(),
@@ -195,7 +199,6 @@ fn canvas_operation_error(error: AppError) -> String {
         }
         AppError::Unauthorized(_) => "Creative Studio Canvas access is unauthorized".to_owned(),
         AppError::Forbidden(_) => "Creative Studio Canvas access is forbidden".to_owned(),
-        AppError::NativeSystemAccessDenied { .. } => "Operating system access was denied for the Creative Studio Canvas operation".to_owned(),
         AppError::WorkspacePathEdgeWhitespace(_)
         | AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported(_)
         | AppError::WorkspaceDirectoryUnavailable(_)

@@ -9,6 +9,8 @@ use nomifun_app::cli::{Cli, Command};
 use nomifun_app::{bootstrap, commands};
 
 fn main() -> Result<ExitCode> {
+    #[cfg(windows)]
+    if let Some(code) = nomifun_app::windows_system_execution_entry() { return Ok(code); }
     let mut cli = Cli::parse();
 
     // mcp-* subcommands route into short-lived stdio helpers that live entirely

@@ -162,9 +162,13 @@ Agent 必须重新观察结果。网站要求真实用户激活时，应等待�
 
 macOS Agent 上传仍为已批准 WKWebView 功能降级中的明确 `UnsupportedAction`。这是实现缺口，不是系统权限拒绝；人工文件选择走自己的原生路径。
 
-Windows 的可选 `browser.upload` 只消费已观察的可见标准 file input，或由当前页真实原生 chooser 事件产生的输入；实际调用继续校验已冻结的上传 Action。全局文件来源改造尚未完成：`engine_browser_tools.rs` 仍把 Session 默认 workspace 交给 `BrowserUploadScope`，其 `root: Dir`、`relative_components` 与 no-follow walk 拒绝本机绝对路径、`..`、链接及 junction。这是待 Windows 设计、实现、编译及原生验证的应用限制，不是新产品合同，也不表示操作系统不支持。[Windows 接续任务](../handoffs/global-os-windows.zh.md)要求支持 Session 默认目录相对路径、本机绝对路径、合法链接、UNC 与跨卷来源，并验证目录句柄并发替换、ACL、来源身份和读取前后 metadata；regular-file 类型检查、取消和快照保留必须继续可靠。宿主继续保留名称、字节和修改时间的快照；单次最多 16 文件/64 MiB，每 Runtime 保留最多 128 文件/256 MiB，直到真实原生关闭后释放。工具返回或页面重置不能使仍被网页持有的 File 对象失效。
+Windows 的可选 `browser.upload` 只消费已观察的可见标准 file input，或由当前页真实原生 chooser 事件产生的输入；实际调用继续校验已冻结的上传 Action。`BrowserUploadScope` 只保存 Session 默认目录，来源接受本机绝对路径、相对路径、合法 `..`、链接、junction、盘符、UNC 和卷；默认目录后来删除不阻断独立绝对来源。旧 `root: Dir` containment 和 portable relative-components 拒绝规则已经退役。Windows 复用 `nomi-native-files` 的 no-follow 源句柄和真实 handle 路径检查，快照期间拒绝其他写入/删除 open；Unix 保留真实父目录句柄和 final no-follow。每次复制验证来源别名、文件身份、前后 metadata 和二次内容摘要，变化和真实 OS 读取失败分别返回，worker 内取消且返回前 join。来源没有被收编为项目文件。Windows 普通 trailing-dot/space alias 使用实际 Win32 名称；显式 verbatim 名称在快照创建后核对真实 handle 路径并保留原拼写。ADS 来源的 colon 名称不能作为普通快照目录项无损交付相同 File.name，故复制前返回 BROWSER_UPLOAD_SOURCE_NAME_UNSUPPORTED，不建立临时 ADS、不修改原文件或暗改上传名。宿主保留真实名称、字节和修改时间的快照；单次最多 16 文件/64 MiB，每 Runtime 保留最多 128 文件/256 MiB，直到真实原生关闭后释放。工具返回或页面重置不能使仍被网页持有的 File 对象失效。定向测试与 WebView2 原生页面验收仍分别记账，不能从来源 worker 测试推断 file input/chooser、UNC 或未提供卷已经验收。
 
 WebView2 通过 `DOM.setFileInputFiles` 交付，不伪造 input/change；空列表拒绝。Frame/document/Session/当前请求身份先于交付校验，新 iframe 首段脚本前安装 chooser 策略。未知路由、策略失败或失效观察不授予文件权。目录上传、File System Access、Agent 下载/沙箱发布及完整异常退出回收仍须独立交付与验收。
+
+来源准备阶段的 `BROWSER_UPLOAD_SOURCE_CHANGED`、`BROWSER_UPLOAD_SOURCE_NAME_UNSUPPORTED` 属于实际 file input 派发前的拒绝；原 Effect 沿现役 owner 回执确认未应用。原生交付后失联或结果不确定仍保留 unknown，不因快照已经创建而允许自动再上传。公开观察中的 `load`、`content_url` 为可选元数据；验收将正式导航的 URL 回执与同一 tab/runtime/document 的可见唯一夹具标记、最新元素引用及网页真实回执关联，不能把未返回的地址字段当作观测证明。
+
+Browser 不替用户删除原来源。原生验收的唯一临时 junction 和来源目录仍经同一 Agent 的 canonical 文件动作清理：`workspace.files/read(format=instruction_scope,path_semantics=entry)` 观察删除/重命名所操作的目录项；最终链接只加载其父目录规则，真实目录的递归扫描计入子链接但不遍历目标。普通读取、写入、进程 cwd 和搜索保持默认 follow，不能借用 entry 的扫描结果跳过内容侧指令。Entry 必须由冻结的 read schema 明确声明，旧 strict schema 在原合同演进完成前拒绝预检且不向 owner 派发、不降级。验收先删除 junction，独立核对目标源目录及已知文件 metadata/hash 原样，再删除临时根；这不等于释放 Browser 持有的快照，后者仍要求实际原生 runtime 销毁证明。
 
 用户 Open/Save 对话框由隔离 helper 通过有界私有协议拥有。只允许可见、活动、闲置标签申请；隐藏、导航和 Agent 取得此浏览器所有权时撤销未确认选择，取消等待真实进程树退出。HTML `accept` 在 Windows 只提供安全解析的原生筛选提示并保留所有文件选项；macOS 公开 WK API 不提供相同筛选信息。筛选不成为文件授权或内容校验。
 

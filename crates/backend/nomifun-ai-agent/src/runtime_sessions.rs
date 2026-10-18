@@ -2017,6 +2017,23 @@ mod tests {
             !registry.has_owned_runtime("conv-unleased-knowledge"),
             "a rejected bypass must not allocate a runtime slot"
         );
+
+        // A missing default may now carry its genuine unbound anchor lease,
+        // but that lease still cannot authorize physical knowledge metadata.
+        let parent = tempfile::tempdir().unwrap();
+        let missing = std::fs::canonicalize(parent.path()).unwrap().join("missing-default");
+        let mut options = make_runtime_options("conv-missing-unbound-knowledge");
+        options.workspace = missing.to_str().unwrap().into();
+        options.workspace_binding_lease = Some(nomifun_knowledge::WorkspaceBindingLease::acquire_unbound(
+            &missing, "conv-missing-unbound-knowledge").unwrap());
+        options.extra = serde_json::json!({"knowledge_mounts":[{
+            "knowledge_base_id":"0190f5fe-7c00-7a00-8000-000000000099"
+        }]});
+        assert!(matches!(registry.get_or_create_runtime("conv-missing-unbound-knowledge", options).await,
+            Err(AppError::Conflict(message)) if message.contains("unbound workspace lease")));
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+        assert!(!registry.has_owned_runtime("conv-missing-unbound-knowledge"));
+        assert!(!missing.exists(), "unbound admission cannot materialize the missing default");
     }
 
     #[tokio::test]

@@ -236,8 +236,12 @@ const SendBox: React.FC<{
   const warmedConversationRef = useRef<ConversationId | undefined>(undefined);
   const warmupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => {
-    if (warmupTimerRef.current) clearTimeout(warmupTimerRef.current);
-  }, []);
+    if (warmupTimerRef.current) {
+      clearTimeout(warmupTimerRef.current);
+      warmupTimerRef.current = null;
+    }
+    warmedConversationRef.current = undefined;
+  }, [conversationContext?.conversation_id, skipChatWarmup]);
   const latestInputRef = useLatestRef(input);
   const setInputRef = useLatestRef(setInput);
   const messageList = useMessageList();
@@ -754,6 +758,7 @@ const SendBox: React.FC<{
     if (cid && !skipChatWarmup && warmedConversationRef.current !== cid) {
       if (warmupTimerRef.current) clearTimeout(warmupTimerRef.current);
       warmupTimerRef.current = setTimeout(() => {
+        warmupTimerRef.current = null;
         warmedConversationRef.current = cid;
         warmupConversation(cid).catch(() => {});
       }, 300);

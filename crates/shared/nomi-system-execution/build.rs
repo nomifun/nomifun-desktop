@@ -2,8 +2,8 @@ use sha2::{Digest, Sha256};
 use std::{env, path::PathBuf, process::Command};
 
 fn main() {
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
-    if !matches!(target_os.as_str(), "macos" | "linux") {
+    let platform = env::var("CARGO_CFG_TARGET_OS").unwrap();
+    if !matches!(platform.as_str(), "macos" | "windows" | "linux") {
         return;
     }
     let sources = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -50,6 +50,15 @@ fn main() {
     ] {
         hash_file(&root, &root.join(relative), &mut identity);
     }
+    // Installation and native admission are part of the component identity,
+    // along with the build logic that selects and fingerprints these inputs.
+    for relative in [
+        "apps/desktop/linux-system-execution/com.nomifun.system-execution.policy",
+        "apps/desktop/linux-system-execution/install.sh",
+        "crates/shared/nomi-system-execution/build.rs",
+    ] {
+        hash_file(&root, &root.join(relative), &mut identity);
+    }
     for relative in [
         "crates/shared/nomi-system-execution/src",
         "crates/shared/nomi-process-runtime/src",
@@ -58,13 +67,28 @@ fn main() {
     ] {
         hash_sources(&root, &root.join(relative), &mut identity);
     }
+    if platform == "windows" {
+        for relative in [
+            "apps/desktop/src/main.rs", "apps/web/src/main.rs",
+            "crates/backend/nomifun-app/src/main.rs", "crates/backend/nomifun-app/src/lib.rs",
+            "crates/backend/nomifun-app/src/windows_computer.rs",
+            "crates/backend/nomifun-app/src/router/agent_role_host.rs",
+            "crates/backend/nomifun-app/Cargo.toml",
+            "crates/agent/nomi-computer/Cargo.toml", "crates/agent/nomi-a11y/Cargo.toml",
+        ] {
+            hash_file(&root, &root.join(relative), &mut identity);
+        }
+        for relative in ["crates/agent/nomi-computer/src", "crates/agent/nomi-a11y/src"] {
+            hash_sources(&root, &root.join(relative), &mut identity);
+        }
+    }
     identity.update(env::var("TARGET").expect("build target"));
     identity.update(env!("CARGO_PKG_VERSION"));
     println!(
         "cargo:rustc-env=NOMIFUN_SYSTEM_EXECUTION_BUILD_ID={:x}",
         identity.finalize()
     );
-    if target_os == "linux" {
+    if platform != "macos" {
         return;
     }
     let arch = match env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str() {

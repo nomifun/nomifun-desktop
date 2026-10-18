@@ -6,6 +6,7 @@
 
 import type { AgentStreamErrorInfo } from '@/common/chat/chatLib';
 import { normalizeModelFailureDiagnostic } from '@/common/chat/providerDiagnostic';
+import { normalizeSystemExecutionFailure } from '@/common/chat/systemExecutionError';
 import type { ConversationContextValue } from '@/renderer/hooks/context/ConversationContext';
 import { Attention, Down } from '@icon-park/react';
 import React, { useId, useState, type ReactNode } from 'react';
@@ -43,6 +44,7 @@ const ConversationErrorNote: React.FC<ConversationErrorNoteProps> = ({
   const detailsLabel = t(detailsExpanded ? 'conversation.agentError.collapseDetails' : 'conversation.agentError.expandDetails');
   const code = error?.code;
   const diagnostic = normalizeModelFailureDiagnostic(error?.providerDiagnostic);
+  const systemError = normalizeSystemExecutionFailure(error?.systemExecutionError);
   const reason = code === 'NOMIFUN_TASK_INCOMPLETE' ? error?.taskIncompleteReason : undefined;
   const copyKey = diagnostic
     ? `conversation.agentError.providerReasons.${diagnostic.reason}`
@@ -74,6 +76,13 @@ const ConversationErrorNote: React.FC<ConversationErrorNoteProps> = ({
     ...(diagnostic && error?.modelName && diagnostic.modelName !== error.modelName
       ? [[t('conversation.agentError.details.sessionModel'), error.modelName] as const] : []),
     ...modelFailureDiagnosticRows(diagnostic, label => t(`conversation.agentError.details.${label}`)),
+    ...(systemError ? [
+      [t('conversation.agentError.details.nativeCode'), systemError.code],
+      [t('conversation.agentError.details.nativeKind'), systemError.kind ?? undefined],
+      [t('conversation.agentError.details.nativeOsError'), systemError.raw_os_error?.toString()],
+      [t('conversation.agentError.details.userCodeNotStarted'), systemError.user_code_not_started?.toString()],
+      [t('conversation.agentError.details.cleanupProven'), systemError.cleanup_proven?.toString()],
+    ] as DiagnosticMetadataRow[] : []),
     [t('conversation.agentError.details.timestamp'), date && Number.isFinite(date.getTime()) ? date.toISOString() : undefined],
     [t('conversation.agentError.details.turn'), turnId],
     [t('conversation.agentError.details.session'), sessionId],
@@ -81,7 +90,7 @@ const ConversationErrorNote: React.FC<ConversationErrorNoteProps> = ({
     ...(creationTaskId ? [[t('conversation.agentError.details.creationTask'), creationTaskId] as const] : []),
     [t('conversation.agentError.details.workspace'), error?.workspacePath],
   ];
-  const diagnosticDetail = diagnostic?.transportDetail || rawDetail;
+  const diagnosticDetail = systemError?.message || diagnostic?.transportDetail || rawDetail;
   const report = [title, body, code ? `code: ${code}` : '', diagnostic ? `reason: ${diagnostic.reason}` : '',
     ...metadata.map(([label, value]) => `${label}: ${value || t('conversation.agentError.details.unavailable')}`),
     diagnosticDetail ? `${t('conversation.agentError.details.rawDetail')}:\n${diagnosticDetail}` : '',

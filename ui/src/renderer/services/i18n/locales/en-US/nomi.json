@@ -576,6 +576,8 @@
     "add": "Add a robot",
     "addTitle": "Add a robot",
     "otaStep": "1. Open the robot's Wi-Fi setup page and set the OTA address under Advanced settings to one of these:",
+    "endpointLoading": "Loading robot connection information…",
+    "endpointLoadFailed": "Failed to load robot connection information. Please retry.",
     "otaNone": "No LAN address is available yet.",
     "codeStep": "2. On boot the robot shows and reads out a 6-digit activation code. Enter it here:",
     "codePlaceholder": "6 digits",

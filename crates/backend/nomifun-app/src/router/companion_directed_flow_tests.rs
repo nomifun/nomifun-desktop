@@ -12,6 +12,7 @@ const DESKTOP_FINAL_TOKEN: &str = "ORCHID-CANONICAL-73921";
 const ROBOT_FINAL: &str = "The desktop task is complete and its result is available.";
 const RECALL_PROBE: &str = "HISTORY_RECALL_PROBE";
 const DELEGATED_GOAL: &str = "Prepare the requested desktop report and return its verified conclusion.";
+const DELEGATE_AFTER_CANCEL_QUERY: &str = "DELEGATE_AFTER_CANCEL: Prepare a new desktop report after cancelling the previous task.";
 const WEATHER_QUERY: &str = "北京今天的天气怎么样";
 const SILENT_ACTION_QUERY: &str = "坐下";
 const SILENT_ACTION_PAIR_QUERY: &str = "先坐下，再站起来";
@@ -168,11 +169,15 @@ impl DirectedFlowModelServer {
                         } else {
                             tool_call("ToolSearch", "robot-find-natural-answer", json!({"query":"session.management/execution_answer_decision"}))
                         }
-                    } else if tool_result(&body, "robot-directed-delegate").is_some() {
+                    } else if tool_result(&body, if user.contains(DELEGATE_AFTER_CANCEL_QUERY) {
+                        "robot-directed-delegate-after-cancel"
+                    } else { "robot-directed-delegate" }).is_some() {
                         (json!({"role":"assistant","content":"I have handed the task to the desktop companion."}), "stop")
                     } else if tool_available(&body, "delegate_task") {
                         let goal = if user.contains(WEATHER_QUERY) { WEATHER_GOAL } else { DELEGATED_GOAL };
-                        tool_call("delegate_task", "robot-directed-delegate", json!({"strategy":"planned","target_role":"desktop","goal":goal}))
+                        let id = if user.contains(DELEGATE_AFTER_CANCEL_QUERY) { "robot-directed-delegate-after-cancel" }
+                            else { "robot-directed-delegate" };
+                        tool_call("delegate_task", id, json!({"strategy":"planned","target_role":"desktop","goal":goal}))
                     } else {
                         tool_call("ToolSearch", "robot-find-delegate", json!({"query":"agent/delegate"}))
                     }
@@ -955,6 +960,140 @@ async fn installed_robot_answers_a_played_desktop_question_from_its_real_natural
     assert!(!actual_answer_calls.is_empty());
     assert!(actual_answer_calls.iter().all(|call|call["function"]["arguments"].as_str() == Some("{}")),"the model supplies no replacement answer text or task identity");
     fixture.finish().await; playback_task.abort(); let _ = playback_task.await; server.close().await;
+}
+
+async fn start_held_desktop_turn(flow: &RobotFlowFixture, server: &DirectedFlowModelServer, key: &str)
+    -> (AgentSessionId,OperationId) {
+    // Use the real desktop Runtime without an AgentExecution receipt consumer;
+    // no independent scheduler cleanup may supply the signal under test.
+    let child = flow.desktop_id.clone();
+    let accepted = api(&flow.fixture._router,&format!("/api/agent-sessions/{}/turns",child.as_ref()),json!({
+        "idempotency_key":key,"input":{"content":"Prepare the desktop report."},
+    })).await;
+    let target = OperationId::from(accepted["operation_id"].as_str().unwrap());
+    tokio::time::timeout(Duration::from_secs(15),server.state.desktop_entered.notified()).await.unwrap();
+    (child,target)
+}
+
+#[tokio::test]
+async fn dropping_an_exact_stop_waiter_after_canonical_commit_keeps_the_native_cancellation_owned() {
+    let server = DirectedFlowModelServer::with_behavior(false,true,false).await;
+    let flow = RobotFlowFixture::new(&server,"companion-directed-stop-waiter-drop").await;
+    let (child,target) = start_held_desktop_turn(&flow,&server,"drop-stop-input").await;
+    let store = flow.fixture.owner.canonical().store();
+    let barrier = flow.fixture.owner.pause_next_cancellation_signal(&child);
+    let sessions = flow.fixture.owner.clone(); let owner = flow.owner.clone(); let session = child.clone();
+    let stop = tokio::spawn(async move {
+        nomifun_agent_execution::AgentExecutionSessionPort::cancel_turn_for_execution(sessions.as_ref(),
+            &owner,session.as_ref(),"dropped-stop-waiter",target.as_ref()).await
+    });
+    tokio::time::timeout(Duration::from_secs(10),barrier.entered.notified()).await.unwrap();
+    assert!(store.head(&child).await.unwrap().active_turn_id.is_none(),"the exact canonical cancellation has committed");
+    assert!(flow.fixture.services.agent_runtime_sessions.active_turn_generation(child.as_ref()).is_some(),
+        "the native signal is deliberately held after canonical commit");
+    stop.abort(); assert!(stop.await.unwrap_err().is_cancelled());
+    barrier.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(15),async { loop {
+        if flow.fixture.services.agent_runtime_sessions.active_turn_generation(child.as_ref()).is_none() { break; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }}).await.expect("dropping the scheduler waiter must retain the exact native cancellation owner");
+    server.state.desktop_release.notify_one();
+    flow.fixture.finish().await; server.close().await;
+}
+
+#[tokio::test]
+async fn execution_cleanup_retries_a_canonical_cancelled_turn_that_still_has_a_live_native_generation() {
+    let server = DirectedFlowModelServer::with_behavior(false,true,false).await;
+    let flow = RobotFlowFixture::new(&server,"companion-directed-closed-native-cleanup").await;
+    let (session,operation) = start_held_desktop_turn(&flow,&server,"closed-native-cleanup-input").await;
+    let store = flow.fixture.owner.canonical().store();
+    // An interrupted earlier stop committed canonical cancellation but never
+    // signalled this still-live native generation. No scheduler exists here to
+    // supply an independent cleanup attempt or race the assertions.
+    flow.fixture.owner.canonical().cancel_exact_turn(&PrincipalRef {
+        principal_kind:"user".into(),principal_id:flow.owner.clone(),
+    }, &session,"canonical-only-interrupted-stop",&operation).await.unwrap();
+    assert!(store.head(&session).await.unwrap().active_turn_id.is_none());
+    assert!(flow.fixture.services.agent_runtime_sessions.active_turn_generation(session.as_ref()).is_some());
+    tokio::time::timeout(Duration::from_secs(15),async { loop {
+        match nomifun_agent_execution::AgentExecutionSessionPort::cancel_for_execution(flow.fixture.owner.as_ref(),
+            &flow.owner,session.as_ref()).await {
+            Ok(()) => break,
+            Err(nomifun_common::AppError::Conflict(_)) => tokio::time::sleep(Duration::from_millis(10)).await,
+            Err(error) => panic!("exact native cleanup failed unexpectedly: {error}"),
+        }
+    }}).await.expect("cleanup must retry the closed exact Turn instead of acknowledging its empty canonical head");
+    assert!(flow.fixture.services.agent_runtime_sessions.active_turn_generation(session.as_ref()).is_none(),
+        "cleanup acknowledgement requires retirement of the original native generation");
+    assert_eq!(store.read_turn_receipt(&session,&operation).await.unwrap().status,nomifun_agent_session::TurnReceiptStatus::Cancelled);
+    server.state.desktop_release.notify_one();
+    flow.fixture.finish().await; server.close().await;
+}
+
+#[tokio::test]
+async fn cancelling_a_blocked_desktop_execution_stops_its_native_turn_and_allows_the_same_robot_to_delegate_again() {
+    let server = DirectedFlowModelServer::with_behavior(false,true,false).await;
+    let flow = RobotFlowFixture::new(&server,"companion-directed-execution-cancel").await;
+    let playback = SimulatedPlayback::start(&flow).await;
+    let store = flow.fixture.owner.canonical().store();
+    let request = flow.request("blocked-desktop-delegate","Prepare the desktop report and tell me when it is complete.");
+    let original = send_and_complete_robot_turn(&flow.fixture,&flow.owner,&request,"blocked-desktop-input").await;
+    tokio::time::timeout(Duration::from_secs(15),server.state.desktop_entered.notified()).await
+        .expect("the child must enter a real model request before cancellation");
+    let executions = flow.fixture.voice_execution.list(&flow.owner,Some(20),Some(0)).await.unwrap();
+    let execution = executions.iter().find(|execution|execution.lead_conversation_id.as_deref() == Some(flow.robot_id.as_ref())).unwrap();
+    let running = flow.fixture.voice_execution.get(&flow.owner,&execution.execution_id).await.unwrap();
+    assert_eq!(running.execution.status,nomifun_common::AgentExecutionStatus::Running);
+    assert_eq!(running.attempts.len(),1);
+    let child = AgentSessionId::from(running.attempts[0].conversation_id.clone().unwrap());
+    let child_operation = OperationId::from(store.head(&child).await.unwrap().active_turn_id.unwrap());
+    assert!(flow.fixture.services.agent_runtime_sessions.active_turn_generation(child.as_ref()).is_some());
+    assert_eq!(store.read_turn_receipt(&flow.robot_id,&original).await.unwrap().status,
+        nomifun_agent_session::TurnReceiptStatus::Completed,"the parent handoff has already ended independently");
+    let cancelled = tokio::time::timeout(Duration::from_secs(5),api(&flow.fixture._router,
+        &format!("/api/agent-executions/{}/cancel",execution.execution_id),json!({"expected_version":running.execution.version}))).await
+        .expect("the explicit execution control must return without waiting for the blocked provider");
+    assert_eq!(cancelled["execution"]["status"],"cancelled");
+    tokio::time::timeout(Duration::from_secs(15),async { loop {
+        let receipt = store.read_turn_receipt(&child,&child_operation).await.unwrap();
+        if receipt.status == nomifun_agent_session::TurnReceiptStatus::Cancelled
+            && flow.fixture.services.agent_runtime_sessions.active_turn_generation(child.as_ref()).is_none() { break; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }}).await.expect("execution cancellation must settle the exact native child without a provider response");
+    // Release the original HTTP handler only after native retirement. Its late
+    // bytes must never become a completion or a callback for the cancelled task.
+    server.state.desktop_release.notify_one();
+    let next = flow.request("desktop-delegate-after-cancel",DELEGATE_AFTER_CANCEL_QUERY);
+    let next_operation = send_and_complete_robot_turn(&flow.fixture,&flow.owner,&next,"desktop-after-cancel-input").await;
+    assert_ne!(next_operation,original);
+    tokio::time::timeout(Duration::from_secs(15),server.state.desktop_entered.notified()).await
+        .expect("the same Robot Session must dispatch a fresh native child after cancelling the old task");
+    let executions = flow.fixture.voice_execution.list(&flow.owner,Some(20),Some(0)).await.unwrap();
+    let fresh = executions.iter().find(|candidate|candidate.execution_id != execution.execution_id
+        && candidate.lead_conversation_id.as_deref() == Some(flow.robot_id.as_ref())).unwrap();
+    assert_eq!(fresh.status,nomifun_common::AgentExecutionStatus::Running);
+    server.state.desktop_release.notify_one();
+    let completed = tokio::time::timeout(Duration::from_secs(25),async { loop {
+        let detail = flow.fixture.voice_execution.get(&flow.owner,&fresh.execution_id).await.unwrap();
+        if detail.execution.status.is_terminal() { break detail; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }}).await.expect("the fresh delegated task must finish through the ordinary scheduler");
+    assert_eq!(completed.execution.status,nomifun_common::AgentExecutionStatus::Completed);
+    playback.wait_for(ROBOT_FINAL).await;
+    let first_receipt = store.read_turn_receipt(&child,&child_operation).await.unwrap();
+    assert_eq!(first_receipt.status,nomifun_agent_session::TurnReceiptStatus::Cancelled);
+    let first_output = store.turn_output_facts(&child,&child_operation).await.unwrap();
+    let first_delivery = nomifun_agent_execution::canonical_turn_delivery(&first_output,&first_receipt,true).unwrap();
+    assert_eq!(first_delivery.result_ok,Some(false)); assert!(first_delivery.result_text.is_none());
+    assert_eq!(flow.fixture.voice_execution.get(&flow.owner,&execution.execution_id).await.unwrap().execution.status,
+        nomifun_common::AgentExecutionStatus::Cancelled);
+    let source = store.chat_causality_facts(&flow.robot_id,&original).await.unwrap();
+    assert!(!source.events.iter().any(|event|event.kind.0 == "message/assistant-projected"
+        && source.event_payloads.get(event.event_id.as_ref()).is_some_and(|payload|
+            payload.pointer("/delegation_report/execution_id").and_then(Value::as_str) == Some(execution.execution_id.as_str()))),
+        "the explicitly cancelled task must not publish a late asynchronous result");
+    assert_eq!(playback.accepted_sources.lock().unwrap().len(),1,"only the fresh task produces a Robot result");
+    flow.fixture.finish().await; playback.stop().await; server.close().await;
 }
 
 #[tokio::test]

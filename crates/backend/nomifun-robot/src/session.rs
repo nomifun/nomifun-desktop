@@ -2575,14 +2575,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emoji_and_markers_are_filtered_before_synthesis() {
-        let (deps, link, tx, _written, _dir) = harness(true).await;
+    async fn emoji_faces_and_stickers_are_filtered_before_synthesis() {
+        let (deps, link, tx, written, _dir) = harness(true).await;
         let speech = deps.speech_mock();
         speech.push_transcript("天气如何");
         deps.dispatcher_mock().script_turn(vec![
-            // A reply with an emoji mid-sentence, then an emoji-only fragment.
-            TurnEvent::Text("北京现在是 🌤️ 挺舒服的天气呢~。".into()),
-            TurnEvent::Text("👍".into()),
+            // Faces and image syntax can cross arbitrary provider chunks. The
+            // splitter must keep them intact until the consumer guard runs.
+            TurnEvent::Text("北京现在是 🌤️ (•̀".into()),
+            TurnEvent::Text("ᴗ•́)و 挺舒服的天气呢~。".into()),
+            TurnEvent::Text("(^".into()),
+            TurnEvent::Text("_^)！\nQAQ!\n[笑哭]！\n👍。\n[表情包：开心]\n!".into()),
+            TurnEvent::Text("[smile](https://example.test/".into()),
+            TurnEvent::Text("sticker.png)\n1️⃣🏴\u{E0067}\u{E0062}\u{E007F}👍".into()),
             TurnEvent::Done,
         ]);
 
@@ -2603,7 +2608,7 @@ mod tests {
         ))
         .await
         .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        await_frame(&written, |frame| frame["type"] == "tts" && frame["state"] == "stop").await;
         drop(tx);
         task.await.unwrap();
 
@@ -2612,14 +2617,12 @@ mod tests {
             spoken.iter().any(|t| t.contains("挺舒服的天气")),
             "the words around the emoji are still spoken: {spoken:?}"
         );
-        assert!(
-            spoken.iter().all(|t| !t.contains('🌤') && !t.contains('👍')),
-            "no emoji ever reaches the TTS engine: {spoken:?}"
-        );
-        // The emoji-only fragment "👍" sanitizes to empty, so it produced no
-        // synthesis call at all (and thus no failure): exactly one sentence was
-        // spoken, the words one.
-        assert_eq!(spoken.len(), 1, "the emoji-only fragment is skipped, not synthesized: {spoken:?}");
+        assert_eq!(spoken, vec!["北京现在是 挺舒服的天气呢~。"],
+            "decoration-only fragments never invoke synthesis, while the natural reply survives");
+        let displayed: Vec<String> = texts(&written).into_iter()
+            .filter(|frame| frame["type"] == "tts" && frame["state"] == "sentence_start")
+            .filter_map(|frame| frame["text"].as_str().map(str::to_owned)).collect();
+        assert_eq!(displayed, spoken, "the device display uses the same plain reply");
     }
 
     #[tokio::test]

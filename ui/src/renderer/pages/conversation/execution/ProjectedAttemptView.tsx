@@ -22,8 +22,10 @@ import ReadOnlyConversationView from './ReadOnlyConversationView';
 import StepConfigBar from './StepConfigBar';
 import styles from './projectedAttemptView.module.css';
 import { refreshOnVersionConflict } from './refreshOnVersionConflict';
-import { canSteerExecutionAttempt } from './executionStatusMeta';
+import { canSteerExecutionAttempt, isTerminalExecutionStatus } from './executionStatusMeta';
 import { useExecutionLive } from './useExecutionLive';
+import ExecutionStopControl from './ExecutionStopControl';
+import { attemptRecoveryReview } from './attemptRecoveryReview';
 
 type ProjectedAttemptViewProps = { payload: OpenStepPayload };
 type StepConfigDraft = Pick<TConfigureExecutionStep, 'model' | 'preset_prompt'>;
@@ -66,6 +68,7 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
   );
   const attempts = detail?.attempts ?? (payload.attempt ? [payload.attempt] : []);
   const attempt = latestAttemptForStep(attempts, step.step_id) ?? payload.attempt;
+  const recoveryReview = attemptRecoveryReview(attempt?.runtime_state);
   const conversationId = detail ? attempt?.conversation_id : undefined;
   const participants = detail?.participants ?? payload.participants;
   const assignableParticipants = participants.filter(
@@ -284,7 +287,7 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
 
   const answerDecision = async () => {
     const answer = decisionAnswer.trim();
-    if (answering || !answer || !attempt || !detail?.execution) return;
+    if (answering || !answer || !attempt || !detail?.execution || recoveryReview) return;
     setAnswering(true);
     try {
       await ipcBridge.agentExecution.answerDecision.invoke({
@@ -381,6 +384,8 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
           <span className={styles.bannerTitle}>{step.title}</span>
         </div>
         <div className={styles.bannerActions}>
+          {detail && <ExecutionStopControl key={payload.executionId} executionId={payload.executionId}
+            executionVersion={detail.execution.version} status={detail.execution.status} refetch={refetch} />}
           {canConfigure && assignableParticipants.length > 1 && (
             <Dropdown trigger='click' position='br' droplist={participantMenu}>
               <div
@@ -463,7 +468,23 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
         </div>
       )}
 
-      {step.status === 'waiting_input' && attempt?.question?.trim() && (
+      {recoveryReview && (
+        <div className={styles.questionBanner} role='status'>
+          <span className={styles.questionIcon}><Help theme='filled' size='15' /></span>
+          <div className={styles.questionBody}>
+            <span className={styles.questionEyebrow}>{t('agentExecution.recovery.title')}</span>
+            <span className={styles.questionContent}>{t('agentExecution.recovery.description')}</span>
+            <span className={styles.questionHint}>{t(isTerminalExecutionStatus(detail?.execution.status)
+              ? 'agentExecution.recovery.settledHint' : 'agentExecution.recovery.hint')}</span>
+            {recoveryReview.reason && <details className={styles.recoveryDetails}>
+              <summary>{t('agentExecution.recovery.details')}</summary>
+              <p>{recoveryReview.reason}</p>
+            </details>}
+          </div>
+        </div>
+      )}
+
+      {!recoveryReview && step.status === 'waiting_input' && attempt?.question?.trim() && (
         <div className={styles.questionBanner} role='status'>
           <span className={styles.questionIcon}>
             <Help theme='filled' size='15' />

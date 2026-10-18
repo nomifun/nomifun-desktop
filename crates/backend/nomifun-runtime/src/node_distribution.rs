@@ -275,13 +275,16 @@ mod tests {
 
     #[test]
     fn a_complete_archive_cannot_publish_with_a_different_build_tree_identity() {
-        let (_fixture, archive, spec, asset, executable, _) = fixture(); let destination = tempfile::tempdir().unwrap();
+        #[cfg(not(windows))]
+        let (_fixture, archive, spec, asset, executable, _) = fixture();
+        #[cfg(windows)]
+        let (_fixture, archive, spec, asset, executable, _) = windows_fixture();
+        let destination = tempfile::tempdir().unwrap();
         assert!(matches!(publish(destination.path(), &archive, &spec, &asset, &executable, &"0".repeat(64), &CancellationToken::new()), Err(ToolError::InvalidAsset(_))));
         assert!(!destination.path().join(DIRECTORY).exists());
     }
 
-    #[test]
-    fn windows_zip_preserves_cmd_launchers_and_modules_beside_node() {
+    fn windows_fixture() -> (tempfile::TempDir, PathBuf, ComponentSpec, ComponentAsset, String, String) {
         let root = tempfile::tempdir().unwrap(); let archive = root.path().join("node.zip");
         let mut zip = zip::ZipWriter::new(File::create(&archive).unwrap());
         for (name, bytes) in [("node.exe", b"node windows fixture".as_slice()), ("npm.cmd", b"@node npm-cli.js %*".as_slice()), ("npx.cmd", b"@node npx-cli.js %*".as_slice()), ("node_modules/npm/bin/npm-cli.js", b"npm".as_slice()), ("node_modules/npm/bin/npx-cli.js", b"npx".as_slice())] {
@@ -289,8 +292,16 @@ mod tests {
         }
         zip.finish().unwrap();
         let spec = crate::managed::specification(ToolId::Node); let mut asset = spec.assets[0].clone(); asset.format = "zip".into(); asset.target = "x86_64-pc-windows-msvc".into(); asset.executable = "node.exe".into();
+        asset.sha256 = hex::encode(Sha256::digest(fs::read(&archive).unwrap()));
         let entries = distribution::decode(&archive, "zip", None, || false).unwrap(); let tree = distribution::identity(&entries).unwrap();
-        let executable = entries.iter().find(|entry| entry.path == "node.exe").unwrap().digest.clone(); let destination = tempfile::tempdir().unwrap();
+        let executable = entries.iter().find(|entry| entry.path == "node.exe").unwrap().digest.clone();
+        (root, archive, spec, asset, executable, tree)
+    }
+
+    #[test]
+    fn windows_zip_preserves_cmd_launchers_and_modules_beside_node() {
+        let (_fixture, archive, spec, asset, executable, tree) = windows_fixture();
+        let destination = tempfile::tempdir().unwrap();
         let path = publish(destination.path(), &archive, &spec, &asset, &executable, &tree, &CancellationToken::new()).unwrap();
         assert!(path.parent().unwrap().join("npm.cmd").is_file()); assert!(path.parent().unwrap().join("node_modules/npm/bin/npx-cli.js").is_file());
     }

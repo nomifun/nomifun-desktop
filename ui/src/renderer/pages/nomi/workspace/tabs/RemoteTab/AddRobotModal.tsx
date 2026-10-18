@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Input, Message } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
@@ -22,6 +22,11 @@ interface AddRobotModalProps {
   onClaimed: () => void;
 }
 
+type EndpointState =
+  | { status: 'loading' }
+  | { status: 'error' }
+  | { status: 'ready'; endpoints: IApiRobotEndpoints };
+
 /**
  * Pair a physical endpoint with its Companion; identity and Agent are inherited.
  *
@@ -38,38 +43,53 @@ const AddRobotModal: React.FC<AddRobotModalProps> = ({
   onClaimed,
 }) => {
   const { t } = useTranslation();
-  const [endpoints, setEndpoints] = useState<IApiRobotEndpoints | null>(null);
+  const [endpointState, setEndpointState] = useState<EndpointState>({ status: 'loading' });
+  const endpointRequest = useRef(0);
+  const dialogVersion = useRef(0);
   const [code, setCode] = useState('');
   const [claiming, setClaiming] = useState(false);
   const [enablingLan, setEnablingLan] = useState(false);
 
   const refreshEndpoints = useCallback(async () => {
+    const request = ++endpointRequest.current;
+    setEndpointState({ status: 'loading' });
     try {
-      setEndpoints(await ipcBridge.robot.endpoints.invoke());
+      const endpoints = await ipcBridge.robot.endpoints.invoke();
+      if (request === endpointRequest.current) setEndpointState({ status: 'ready', endpoints });
     } catch (error) {
+      if (request !== endpointRequest.current) return;
       console.error('[RobotConnect] Failed to read the robot endpoints:', error);
-      setEndpoints(null);
+      setEndpointState({ status: 'error' });
     }
   }, []);
 
   useEffect(() => {
     if (!visible) return;
+    ++dialogVersion.current;
     setCode('');
+    setEnablingLan(false);
     void refreshEndpoints();
+    return () => {
+      ++dialogVersion.current;
+      ++endpointRequest.current;
+    };
   }, [visible, refreshEndpoints]);
 
   const enableLan = useCallback(async () => {
+    const version = dialogVersion.current;
     setEnablingLan(true);
     try {
       const status = await webui.start.invoke();
+      if (version !== dialogVersion.current) return;
       if (status.error) throw new Error(status.error);
       Message.success(t('nomi.robot.lanEnabled'));
       await refreshEndpoints();
     } catch (error) {
+      if (version !== dialogVersion.current) return;
       console.error('[RobotConnect] Failed to enable LAN access:', error);
       Message.error(t('nomi.robot.lanEnableFailed'));
     } finally {
-      setEnablingLan(false);
+      if (version === dialogVersion.current) setEnablingLan(false);
     }
   }, [refreshEndpoints, t]);
 
@@ -95,6 +115,7 @@ const AddRobotModal: React.FC<AddRobotModalProps> = ({
     }
   }, [code, companionId, companionName, onClaimed, onCancel, t]);
 
+  const endpoints = endpointState.status === 'ready' ? endpointState.endpoints : null;
   const lanOff = endpoints != null && !endpoints.lan_enabled;
 
   return (
@@ -136,10 +157,19 @@ const AddRobotModal: React.FC<AddRobotModalProps> = ({
 
             <div className='flex flex-col gap-6px'>
               <span className='text-12px leading-18px text-t-secondary'>{t('nomi.robot.otaStep')}</span>
-              {endpoints == null || endpoints.ota_urls.length === 0 ? (
+              {endpointState.status === 'loading' ? (
+                <span role='status' className='text-12px text-t-tertiary'>{t('nomi.robot.endpointLoading')}</span>
+              ) : endpointState.status === 'error' ? (
+                <div role='alert' className='flex items-center gap-8px'>
+                  <span className='min-w-0 flex-1 text-12px text-t-secondary'>
+                    {t('nomi.robot.endpointLoadFailed')}
+                  </span>
+                  <Button size='mini' onClick={() => void refreshEndpoints()}>{t('common.retry')}</Button>
+                </div>
+              ) : endpointState.endpoints.ota_urls.length === 0 ? (
                 <span className='text-12px text-t-tertiary'>{t('nomi.robot.otaNone')}</span>
               ) : (
-                endpoints.ota_urls.map((url) => (
+                endpointState.endpoints.ota_urls.map((url) => (
                   <div
                     key={url}
                     className='flex min-w-0 items-center gap-8px rd-8px border border-solid border-[var(--color-border-2)] px-10px py-6px'

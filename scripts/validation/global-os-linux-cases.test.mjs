@@ -37,7 +37,7 @@ test('Linux fixture allocation stays separate from canonical effects and detects
   const scenario = createLinuxSystemScenario({ fixture, workspace: `${fixture}/workspace`, uid: process.getuid(), loopbackPort: 42819 });
   assert.equal(await scenario.cleanupNeeded(), false);
   assert.deepEqual(scenario.phases.map(phase => phase.role), ['system-install-config', 'system-service', 'system-network', 'system-finalize']);
-  assert(scenario.steps.some(step => step.name === 'exec_command' && step.args.command === '/usr/bin/systemd-run'));
+  assert(scenario.steps.some(step => step.name === 'start_process' && step.args.command === '/usr/bin/systemd-run'));
   assert(scenario.steps.some(step => step.name === 'start_process'));
   assert(scenario.steps.some(step => step.name === 'cancel_process'));
   assert(scenario.steps.some(step => step.name === 'poll_process' && step.allowCancelledObservation));

@@ -68,7 +68,7 @@ fn explicit_links_resolve_but_changed_aliases_and_descendant_instruction_links_a
     assert_eq!(scope.directories, BTreeSet::from([
         root.join("directory").to_str().unwrap().into(), root.join("directory/.hidden/deep").to_str().unwrap().into(),
     ]));
-    let explicit = acquire(NativeReadRequest::InstructionScope { path: root.join("directory/linked-directory").to_str().unwrap().into(), recursive: false }).unwrap();
+    let explicit = acquire(NativeReadRequest::InstructionScope { path: root.join("directory/linked-directory").to_str().unwrap().into(), recursive: false, path_semantics: Default::default() }).unwrap();
     let NativeReadAcquisition::InstructionScope { scope } = explicit else { panic!("typed scope result"); };
     assert_eq!(Path::new(&scope.canonical_path), root.join("outside"));
     fs::write(root.join("first"), b"first").unwrap(); fs::write(root.join("second"), b"second").unwrap();

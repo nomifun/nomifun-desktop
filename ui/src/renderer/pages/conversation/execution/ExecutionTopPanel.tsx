@@ -14,6 +14,7 @@ import type { OpenStepPayload } from './DagCanvas';
 import { isTerminalExecutionStatus } from './executionStatusMeta';
 import { useExecutionModelPool } from './useExecutionModelPool';
 import styles from './executionTopPanel.module.css';
+import { attemptRecoveryReview } from './attemptRecoveryReview';
 
 const DagCanvas = React.lazy(() => import('./DagCanvas'));
 const CANVAS_WIDTH_KEY = 'nomifun:execution-canvas-width';
@@ -216,8 +217,10 @@ const ExecutionTopPanel: React.FC = () => {
   const failedCount = steps.filter((step) => step.status === 'failed').length;
   const completionPercent = steps.length > 0 ? Math.round((completedCount / steps.length) * 100) : 0;
   const waitingSteps = steps.filter(
-    (step) => step.status === 'waiting_input' && Boolean(latestAttemptByStep.get(step.step_id)?.question?.trim()),
+    (step) => step.status === 'waiting_input' && Boolean(latestAttemptByStep.get(step.step_id)?.question?.trim()
+      || attemptRecoveryReview(latestAttemptByStep.get(step.step_id)?.runtime_state)),
   );
+  const resumeBlocked = steps.some(step => Boolean(attemptRecoveryReview(latestAttemptByStep.get(step.step_id)?.runtime_state)));
   const maxPanelWidth = getAvailableMaxWidth();
 
   return (
@@ -256,6 +259,7 @@ const ExecutionTopPanel: React.FC = () => {
               executionVersion={detail?.execution.version ?? 0}
               status={status}
               inFlightCount={runningCount}
+              resumeBlocked={resumeBlocked}
               refetch={refetch}
               onReplan={openReplan}
             />
@@ -297,7 +301,9 @@ const ExecutionTopPanel: React.FC = () => {
           </div>
 
           {waitingSteps.map((step) => {
-            const question = latestAttemptByStep.get(step.step_id)?.question;
+            const attempt = latestAttemptByStep.get(step.step_id);
+            const recoveryReview = attemptRecoveryReview(attempt?.runtime_state);
+            const question = recoveryReview ? t('agentExecution.recovery.description') : attempt?.question;
             return (
               <button
                 key={step.step_id}
@@ -321,7 +327,7 @@ const ExecutionTopPanel: React.FC = () => {
                   <Help theme='filled' size='14' />
                 </span>
                 <span className={styles.questionText}>
-                  {t('agentExecution.progress.question', {
+                  {t(recoveryReview ? 'agentExecution.recovery.task' : 'agentExecution.progress.question', {
                     defaultValue: '任务「{{title}}」需要你的决定',
                     title: step.title,
                   })}

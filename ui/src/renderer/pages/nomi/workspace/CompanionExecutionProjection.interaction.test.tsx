@@ -300,3 +300,71 @@ test('an older message projects and retries its own execution while the provider
   expect(unsubscribeChanged).toHaveBeenCalledTimes(1);
   expect(unsubscribeReconnect).toHaveBeenCalledTimes(1);
 });
+
+test('an interrupted older task can be stopped from its projection without answering or cancelling the newer task', async () => {
+  const step = makeStep(1, { status: 'waiting_input' });
+  const attempt = makeAttempt(step, { status: 'waiting_input', question: 'Raw recovery diagnostic', runtime_state: {
+    pending_conversation_effects: [], review_blocked: { kind: 'interrupted_turn', operation_id: 'exact-operation',
+      receipt_state: 'running', reason: 'The exact prior operation result is unknown.' },
+  } });
+  const older = makeDetail({ steps: [step], attempts: [attempt] });
+  older.execution = { ...older.execution, status: 'waiting_input', version: 23 };
+  const newerId = parseExecutionId('00000000-07d0-7000-8000-000000000290');
+  const newer = makeDetail({ execution: { ...older.execution, execution_id: newerId, version: 99 }, steps: [] });
+  const child: TChatConversation = { ...leadConversation, id: childConversationId,
+    execution_step_id: step.step_id, execution_attempt_id: attempt.attempt_id, linked_execution_id: undefined };
+  const refreshNewer = mock(async () => {});
+  const state = spyOn(executionState, 'useConversationExecution').mockReturnValue({
+    executionId: newerId, detail: newer, refetch: refreshNewer, loading: false,
+    leadThinking: { phase: null, reasoning: '', active: false, textHeartbeat: false },
+  });
+  let authoritative = older;
+  const getExecution = spyOn(ipcBridge.agentExecution.get, 'invoke').mockImplementation(async ({ execution_id }) => {
+    if (execution_id !== executionId) throw new Error('Read the unrelated newer execution');
+    return authoritative;
+  });
+  const getChild = spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue(child);
+  const transcript = spyOn(readonlyTranscript, 'default').mockImplementation(() => <section aria-label='Task record'>Interrupted record</section>);
+  const cancel = spyOn(ipcBridge.agentExecution.cancel, 'invoke').mockImplementation(async ({ execution_id }) => {
+    if (execution_id !== executionId) throw new Error('Cancelled the unrelated newer execution');
+    authoritative = { ...older, execution: { ...older.execution, status: 'cancelled', version: 24 },
+      steps: [{ ...step, status: 'cancelled' }], attempts: [{ ...attempt, status: 'cancelled' }] };
+    return authoritative;
+  });
+  const decision = spyOn(ipcBridge.agentExecution.answerDecision, 'invoke');
+  const changed = spyOn(ipcBridge.agentExecution.events.changed, 'on').mockReturnValue(() => {});
+  const reconnect = spyOn(ipcBridge.conversation.reconnected, 'on').mockReturnValue(() => {});
+  const success = mock(() => () => {}), error = mock(() => () => {});
+  const notices = spyOn(Message, 'useMessage').mockReturnValue([{ success, error }, <></>]);
+  for (const spy of [state, getExecution, getChild, transcript, cancel, decision, changed, reconnect, notices]) restores.push(() => spy.mockRestore());
+  const lifecycle: MountCounter = { mounted: 0, unmounted: 0 };
+  const view = render(<MemoryRouter><I18nextProvider i18n={i18n}>
+    <ExecutionProvider conversation={{ ...leadConversation, linked_execution_id: newerId }}>
+      <ExecutionContentSwitcher><CompanionMainConversation lifecycle={lifecycle} cardDetail={older} /></ExecutionContentSwitcher>
+    </ExecutionProvider>
+  </I18nextProvider></MemoryRouter>);
+  const input = view.getByRole('textbox', { name: 'Companion message draft' }) as HTMLTextAreaElement;
+  fireEvent.change(input, { target: { value: 'Preserve my next request' } });
+  // The main companion progress card exposes the same stop command.
+  expect(view.getByRole('button', { name: 'Stop collaboration' })).toBeTruthy();
+  expect(view.getByText(agentExecution.recovery.title)).toBeTruthy();
+  fireEvent.click(view.getByRole('button', { name: `View subtask: ${step.title}` }));
+  await view.findByRole('region', { name: 'Task record' });
+  expect(view.getByRole('status').textContent).toContain(agentExecution.recovery.title);
+  expect(view.queryByRole('button', { name: 'Submit decision' })).toBeNull();
+  expect(view.queryByRole('textbox')).toBeNull();
+  expect(view.getByText('The exact prior operation result is unknown.')).toBeTruthy();
+  fireEvent.click(view.getByRole('button', { name: 'Stop collaboration' }));
+  await waitFor(() => expect(view.queryByRole('button', { name: 'Stop collaboration' })).toBeNull());
+  expect(cancel.mock.calls[0][0]).toEqual({ execution_id: executionId, updates: { expected_version: 23 } });
+  expect(getExecution.mock.calls.map(call => call[0])).toEqual([{ execution_id: executionId }, { execution_id: executionId }]);
+  expect(refreshNewer).not.toHaveBeenCalled();
+  expect(decision).not.toHaveBeenCalled();
+  expect(error).not.toHaveBeenCalled();
+  expect(view.getByText(agentExecution.recovery.settledHint)).toBeTruthy();
+  expect(view.getByRole('region', { name: 'Task record' })).toBeTruthy();
+  fireEvent.click(view.getByRole('button', { name: 'Back to main conversation' }));
+  expect(view.getByRole('textbox', { name: 'Companion message draft' })).toBe(input);
+  expect(input.value).toBe('Preserve my next request');
+  expect(lifecycle).toEqual({ mounted: 1, unmounted: 0 });
+});

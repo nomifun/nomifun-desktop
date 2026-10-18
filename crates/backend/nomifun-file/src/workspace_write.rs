@@ -14,10 +14,15 @@ use crate::path_safety::{
 };
 
 pub(crate) fn validate_global_target(path: &Path) -> Result<PathBuf, AppError> {
+    #[cfg(windows)]
+    let normalized = nomi_native_files::windows::normalize_path(path)
+        .map_err(|error| crate::path_safety::native_io_error("resolving native Windows write path", error))?;
+    #[cfg(windows)]
+    let path = normalized.as_path();
     if path.as_os_str().is_empty() || path.to_string_lossy().contains('\0') || path.file_name().is_none() {
         return Err(AppError::BadRequest("invalid native write path".into()));
     }
-    let mut missing = Vec::new();
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
     let mut probe = path;
     let mut target = loop {
         match std::fs::symlink_metadata(probe) {
@@ -48,6 +53,10 @@ pub(crate) fn validate_global_target(path: &Path) -> Result<PathBuf, AppError> {
         }
     };
     for name in missing.into_iter().rev() {
+        #[cfg(windows)]
+        { target = nomi_native_files::windows::join_component(&target, &name)
+            .map_err(|error| crate::path_safety::native_io_error("joining native Windows write path", error))?; }
+        #[cfg(not(windows))]
         target.push(name);
     }
     Ok(target)
@@ -95,7 +104,32 @@ pub(crate) fn prepare_global_parent(path: &Path) -> Result<PreparedParent, AppEr
     prepare_target_parent(target, root)
 }
 
+#[cfg(windows)]
+pub(crate) fn prepare_global_rename_parent(path: &Path, directory: bool) -> Result<Dir, AppError> {
+    let target = validate_global_target(path)?;
+    let parent = target.parent().ok_or_else(|| AppError::BadRequest("rename path has no parent".into()))?;
+    // Native rename does not create a missing destination directory. Pin only
+    // this existing parent; write preparation's ancestor creation is separate.
+    let existing = std::fs::canonicalize(parent).map_err(|error| crate::path_safety::native_io_error("resolving native rename parent", error))?;
+    if !windows_parent_path_matches(&existing, parent) { return Err(AppError::Conflict("native rename parent changed identity before preparation".into())); }
+    let original = open_windows_root(&existing)?;
+    let original_identity = same_file::Handle::from_file(original.try_clone().map_err(parent_io_error)?.into_std_file()).map_err(parent_io_error)?;
+    let file = nomi_native_files::windows::open_rename_parent(&existing, directory).map_err(parent_io_error)?;
+    let acquired_identity = same_file::Handle::from_file(file.try_clone().map_err(parent_io_error)?).map_err(parent_io_error)?;
+    if original_identity != acquired_identity { return Err(AppError::Conflict("native rename parent was replaced before pinning".into())); }
+    let pinned = Dir::from_std_file(file); verify_windows_parent(&pinned, &existing)?; Ok(pinned)
+}
+
 fn prepare_target_parent(target: PathBuf, root: PathBuf) -> Result<PreparedParent, AppError> {
+    prepare_target_parent_from(target, root, None)
+}
+
+#[cfg(windows)]
+pub(crate) fn prepare_pinned_parent(target: PathBuf, root: PathBuf, directory: Dir) -> Result<PreparedParent, AppError> {
+    prepare_target_parent_from(target, root, Some(directory))
+}
+
+fn prepare_target_parent_from(target: PathBuf, root: PathBuf, retained: Option<Dir>) -> Result<PreparedParent, AppError> {
     let parent = target.parent().ok_or_else(|| AppError::BadRequest("write path has no parent".into()))?;
     let relative = parent.strip_prefix(&root)
         .map_err(|_| AppError::Conflict("native write parent no longer matches its prepared ancestor".into()))?;
@@ -105,13 +139,15 @@ fn prepare_target_parent(target: PathBuf, root: PathBuf) -> Result<PreparedParen
     #[cfg(unix)]
     let mut dir = crate::unix_directory::open_search(None, &root)
         .map_err(|error| crate::path_safety::native_io_error("opening native write parent", error))?;
+    #[cfg(not(windows))]
+    let _ = retained;
     #[cfg(unix)]
     let root_directory = dir.try_clone().map_err(|error| AppError::BadRequest(format!("cannot retain workspace root: {error}")))?;
     #[cfg(unix)]
     crate::unix_directory::verify_named(&root_directory, &root)
         .map_err(|_| AppError::Conflict("workspace root changed identity during write preparation".into()))?;
     #[cfg(windows)]
-    let mut dir = open_windows_root(&root)?;
+    let mut dir = match retained { Some(directory) => { verify_windows_parent(&directory, &root)?; directory }, None => open_windows_root(&root)? };
     #[cfg(windows)]
     let mut directories = vec![dir.try_clone().map_err(parent_io_error)?];
     #[cfg(windows)]
@@ -212,10 +248,28 @@ fn open_windows_child(directory: &Dir, name: &std::ffi::OsStr) -> std::io::Resul
 }
 
 #[cfg(windows)]
+pub(crate) fn windows_parent_path_matches(actual: &Path, expected: &Path) -> bool {
+    if actual == expected { return true; }
+    fn unc_root(path: &Path) -> Option<(&std::ffi::OsStr, &std::ffi::OsStr)> {
+        let Component::Prefix(prefix) = path.components().next()? else { return None; };
+        let std::path::Prefix::VerbatimUNC(server, share) = prefix.kind() else { return None; };
+        if server.is_empty() || share.is_empty() { return None; }
+        let mut root = prefix.as_os_str().to_owned();
+        if path.as_os_str() != root { root.push("\\"); if path.as_os_str() != root { return None; } }
+        Some((server, share))
+    }
+    // GetFinalPathName/std canonicalize omit a share root's trailing separator;
+    // Path::parent adds it, giving VerbatimUNC a distinct RootDir component.
+    // Accept only those two exact root spellings, never another host/share,
+    // child, traversal, case fold or general path alias. Object checks remain.
+    matches!((unc_root(actual), unc_root(expected)), (Some(left), Some(right)) if left == right)
+}
+
+#[cfg(windows)]
 fn verify_windows_parent(directory: &Dir, expected: &Path) -> Result<(), AppError> {
     let metadata = directory.dir_metadata().map_err(parent_io_error)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink()
-        || crate::windows_read::final_path(directory)? != expected
+        || !windows_parent_path_matches(&crate::windows_read::final_path(directory)?, expected)
     {
         return Err(AppError::Conflict("workspace write directory changed identity during preparation".into()));
     }
@@ -271,6 +325,26 @@ mod tests {
     use windows_sys::Win32::Storage::FileSystem::{FILE_ADD_FILE, FILE_FLAG_BACKUP_SEMANTICS,
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SHARE_DELETE,
         FILE_WRITE_ATTRIBUTES, SYNCHRONIZE};
+
+    #[test]
+    fn verbatim_unc_parent_matches_only_its_exact_share_root_separator_spelling() {
+        let root = Path::new(r"\\?\UNC\localhost\NomiFun_GlobalOS_fixture");
+        let target = root.join("sample.txt"); let expected = target.parent().unwrap();
+        assert_ne!(root, expected, "the real SMB failure has a distinct Rust RootDir component");
+        assert!(windows_parent_path_matches(root, expected));
+        assert!(windows_parent_path_matches(expected, root));
+        assert!(windows_parent_path_matches(root, root));
+        for other in [r"\\?\UNC\other-host\NomiFun_GlobalOS_fixture\", r"\\?\UNC\localhost\other-share\",
+            r"\\?\UNC\LOCALHOST\NomiFun_GlobalOS_fixture\", r"\\?\UNC\localhost\NOMIFUN_GlobalOS_fixture\",
+            r"\\?\UNC\localhost\NomiFun_GlobalOS_fixture\child", r"\\?\UNC\localhost\NomiFun_GlobalOS_fixture\.",
+            r"\\?\UNC\localhost\NomiFun_GlobalOS_fixture\..", r"\\?\UNC\localhost\NomiFun_GlobalOS_fixture\\"] {
+            assert!(!windows_parent_path_matches(root, Path::new(other)), "{other:?}");
+        }
+        assert!(!windows_parent_path_matches(Path::new(r"\\?\C:"), Path::new(r"\\?\C:\")));
+        assert!(!windows_parent_path_matches(Path::new(r"\\?\C:\"), root));
+        let child = root.join("child"); assert!(windows_parent_path_matches(&child, &child));
+        assert!(!windows_parent_path_matches(&child, &root.join("other-child")));
+    }
 
     // Unlike junction::create, this attempts to tag an existing directory.
     // Attribute-only access bypasses ordinary read/write sharing checks.
@@ -358,5 +432,21 @@ mod tests {
         assert!(pin_windows_directory(&directory, &canonical, FILE_ADD_FILE).is_err());
         assert_eq!(fs::read_dir(&parent).unwrap().count(), 0);
         assert_eq!(fs::read_dir(&moved).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn relative_rename_parent_reparse_is_rejected_without_an_external_entry() {
+        let fixture = tempfile::tempdir().unwrap(); let parent = fixture.path().join("parent"); let outside = fixture.path().join("outside");
+        fs::create_dir(&parent).unwrap(); fs::create_dir(&outside).unwrap();
+        let source = fixture.path().join("source.txt"); fs::write(&source, b"retained").unwrap();
+        let source_path = fs::canonicalize(&source).unwrap();
+        let source_file = crate::windows_directory::open_delete(None, &source_path).unwrap();
+        let pinned = prepare_global_rename_parent(&parent.join("target.txt"), false).unwrap();
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 0, "rename creates no temporary guard");
+        set_junction(&parent, &outside).unwrap();
+        let result = crate::windows_cleanup::rename_relative_no_replace(&source_file, &pinned, std::ffi::OsStr::new("target.txt"));
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(1921));
+        assert_eq!(fs::read(&source).unwrap(), b"retained"); assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+        drop(pinned); drop(source_file); junction::delete(&parent).unwrap();
     }
 }

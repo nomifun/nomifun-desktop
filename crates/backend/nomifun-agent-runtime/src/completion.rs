@@ -4214,16 +4214,20 @@ mod tests {
 
     #[tokio::test]
     async fn completion_context_exposes_stale_file_paths_without_rehabilitating_evidence() {
+        // Owner observations use the platform's native spelling, independently
+        // of the portable workspace_path field in a file receipt.
+        let receipt_path = std::path::Path::new("验收").join("回执.txt").to_str().unwrap().to_owned();
+        let other_path = std::path::Path::new("验收").join("其他.txt").to_str().unwrap().to_owned();
         let inputs = vec![crate::context_lifecycle::text_message(
             nomifun_chat_model_broker::ChatRole::User, "Create and verify the requested files".into())];
         let mut plan = AgentPlan::default();
         let mut tracker = CompletionTracker { observations: vec![
-            file_observation("receipt-old", "验收/回执.txt", 1),
-            file_observation("other-old", "验收/其他.txt", 0),
+            file_observation("receipt-old", &receipt_path, 1),
+            file_observation("other-old", &other_path, 0),
         ], ..Default::default() };
         let work = AgentWorkStatus { workspace_observation_epoch: 2, ..Default::default() };
         let edit = ChatToolCall { call_id: "other-write".into(), name: "write_file".into(),
-            arguments: StrictJsonValue(serde_json::json!({"path":"验收/其他.txt","content":"other"})), provider_metadata: None };
+            arguments: StrictJsonValue(serde_json::json!({"path":other_path,"content":"other"})), provider_metadata: None };
         tracker.observe(&work, &file_binding("workspace.files/write"), &edit,
             &AgentToolResult::text(edit.call_id.clone(), "written", false), true);
         let account = |tracker: &CompletionTracker, plan: &AgentPlan| {
@@ -4231,14 +4235,14 @@ mod tests {
             serde_json::Deserializer::from_str(text.split_once(": ").unwrap().1)
                 .into_iter::<serde_json::Value>().next().unwrap().unwrap()
         };
-        assert_eq!(account(&tracker, &plan)["stale_file_paths"], serde_json::json!(["验收/回执.txt"]));
+        assert_eq!(account(&tracker, &plan)["stale_file_paths"], serde_json::json!([receipt_path]));
         let report = ChatToolCall { call_id: "finish".into(), name: TOOL_NAME.into(), provider_metadata: None,
             arguments: StrictJsonValue(serde_json::json!({"summary":"Verified the receipt","criteria":[
-                {"disposition":"supported","evidence_paths":["验收/回执.txt"],"rationale":"Read the file"}
+                {"disposition":"supported","evidence_paths":[receipt_path],"rationale":"Read the file"}
             ]})) };
         assert!(tracker.submit_with_history(&report, &mut plan, &work, &inputs, false, None, &crate::NoopAgentEventSink,None).await.unwrap().is_error);
         let read = ChatToolCall { call_id: "receipt-current".into(), name: "read_file".into(),
-            arguments: StrictJsonValue(serde_json::json!({"path":"验收/回执.txt"})), provider_metadata: None };
+            arguments: StrictJsonValue(serde_json::json!({"path":receipt_path})), provider_metadata: None };
         let mut binding = file_binding("workspace.files/read");
         binding.effect_class = crate::AgentEffectClass::ReadOnly;
         tracker.observe(&work, &binding, &read, &AgentToolResult::text(read.call_id.clone(), "receipt", false), true);

@@ -1620,6 +1620,37 @@ mod history_display_tests {
     }
 
     #[tokio::test]
+    async fn typed_system_authentication_failure_survives_canonical_terminal_and_cold_api_history() {
+        for (code, facts) in [
+            ("SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED", json!({"raw_os_error":1223,"kind":"Uncategorized","user_code_not_started":true,"cleanup_proven":true})),
+            ("SYSTEM_READ_RESULT_UNKNOWN", json!({"user_code_not_started":false,"cleanup_proven":false})),
+        ] {
+            let (journal, pool) = test_fixture().await;
+            let diagnostic = nomifun_agent_contracts::SystemExecutionFailure::from_owner(code.into(), "original native readonly error".into(), &facts);
+            journal.append(json!({"event":"host_cleanup_proven"}).to_string(), None, EngineJournalWrite::Cleanup).await.unwrap();
+            let terminal = AgentEngineEvent::TurnFailed { model_steps:1, message:diagnostic.message.clone(),
+                failure:Some(nomifun_agent_runtime::AgentTurnFailure::SystemExecution { diagnostic:diagnostic.clone() }) };
+            journal.append(serde_json::to_string(&terminal).unwrap(), None, EngineJournalWrite::Terminal).await.unwrap();
+            // A fresh Store reconstructs the public error from the canonical
+            // terminal rather than the live Runtime or current selection.
+            let store = AgentSessionStore::from_pool(pool).await.unwrap();
+            assert_eq!(store.read_turn_receipt(&journal.0.session, &journal.0.operation).await.unwrap().status, TurnReceiptStatus::Failed);
+            let (history, _, _) = store.message_history_before(&journal.0.session, None, 50).await.unwrap();
+            let summary = history.iter().find(|row| row.presentation_intent == "turn_summary").unwrap();
+            assert_eq!(summary.projection["error"]["code"], code);
+            assert_eq!(summary.projection["error"]["systemExecutionError"], serde_json::to_value(&diagnostic).unwrap());
+            let api: nomifun_api_types::AgentStreamErrorData = serde_json::from_value(summary.projection["error"].clone()).unwrap();
+            assert_eq!(api.system_execution_error, Some(diagnostic));
+            assert_eq!(api.retryable, Some(false));
+            assert!(api.provider_diagnostic.is_none());
+            let facts = store.turn_output_facts(&journal.0.session, &journal.0.operation).await.unwrap();
+            assert!(facts.events.iter().filter(|event| event.kind.0 == "turn/failed").any(|event|
+                facts.event_payloads.get(event.event_id.as_ref()).is_some_and(|payload| payload["error"]["code"] == code)));
+            assert!(!facts.events.iter().any(|event| matches!(event.kind.0.as_str(), "turn/cancelled" | "effect/started")));
+        }
+    }
+
+    #[tokio::test]
     async fn internal_instruction_preflight_keeps_audit_events_out_of_message_history() {
         let (journal, pool) = test_fixture().await;
         for event in [

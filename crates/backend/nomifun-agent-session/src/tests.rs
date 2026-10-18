@@ -36,6 +36,9 @@ mod native_execution_tests;
 mod runtime_state_tests;
 #[path = "native_mutation_fence_tests.rs"]
 mod native_mutation_fence_tests;
+#[path = "effect_native_targets_tests.rs"]
+#[cfg(windows)]
+mod effect_native_targets_tests;
 #[path = "idmm_tests.rs"]
 mod idmm_tests;
 #[path = "storage_relocation_tests.rs"]

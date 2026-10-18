@@ -321,6 +321,8 @@ const NomiSendBox: React.FC<{
 
   useEffect(() => {
     if (!conversation_id || isCreating) return;
+    // This owner prepares normal chat through canonical passive readiness. The
+    // shared composer must not add another POST when its input auto-focuses.
     let cancelled = false;
     const initialPresentationKey = initialMessageRef.current?.conversation_id === conversation_id
       ? initialMessageRef.current.idempotency_key : undefined;
@@ -829,7 +831,7 @@ const NomiSendBox: React.FC<{
           ? !generation.ready || creation?.preparing
           : false}
         preserveDraftUntilAccepted
-        skipChatWarmup={isCreating || isBusy || Boolean(pauseNotice) || initialSubmissionPending || !initialDeliveryReady}
+        skipChatWarmup
         placeholder={
           compactProductComposer
             ? t('nomi.cohabit.composerPlaceholder', {

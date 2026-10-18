@@ -1,6 +1,7 @@
 import { normalizeAgentStreamError, type AgentStreamErrorInfo, type TMessage } from '@/common/chat/chatLib';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { conversationConfigurationErrorCode } from './conversationConfigurationError';
+import { normalizeSystemExecutionFailure } from '@/common/chat/systemExecutionError';
 
 const record = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -16,9 +17,11 @@ export function conversationRequestError(error: unknown, fallbackCode: string): 
   const code = typeof payload?.code === 'string' && !['CONFLICT', 'INTERNAL_ERROR', 'BAD_GATEWAY'].includes(payload.code)
     ? payload.code : fallbackCode;
   const configurationCode = conversationConfigurationErrorCode(payload);
+  const systemExecutionError = typed?.systemExecutionError ?? normalizeSystemExecutionFailure(details?.system_execution_error);
   return {
     ...(typed ?? { message, detail: message, code }),
     ...(configurationCode ? { code: configurationCode } : {}),
+    ...(systemExecutionError ? { systemExecutionError } : {}),
     ...(!typed?.workspacePath && typeof details?.workspace_path === 'string' ? { workspacePath: details.workspace_path } : {}),
     retryable: false,
   };

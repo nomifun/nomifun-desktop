@@ -1117,7 +1117,7 @@ pub(crate) fn validate_settings(root: &Path, settings: &AppSettings) -> Result<(
     for key in settings.environment.keys() {
         if key.is_empty() || key.contains(['=', '\0']) || matches!(key.to_uppercase().as_str(),
             "NOMIFUN_HOST_URL" | "NOMIFUN_LOCAL_TRUST" | "NOMIFUN_AGENT_BINDING_ID"
-            | "NOMIFUN_HOSTING_COMMAND" | "NOMIFUN_SELECTED_NODE" | "NOMIFUN_STATIC_ROOT" | "NOMIFUN_VERSION_COMMAND") {
+            | "NOMIFUN_HOSTING_COMMAND" | "NOMIFUN_SELECTED_NODE" | "NOMIFUN_STATIC_ROOT") {
             return Err(AppError::Invalid(format!("environment variable is reserved or invalid: {key}")));
         }
     }
